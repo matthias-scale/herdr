@@ -919,12 +919,12 @@ impl crate::app::state::AppState {
                         .unwrap_or_else(|| "agent".to_string());
                     let workspace_label = workspace.display_name_from_terminals(&self.terminals);
                     for (kind, item) in terminal
-                        .closing_gates
+                        .closing_gates()
                         .iter()
                         .map(|item| ("gate", item))
                         .chain(
                             terminal
-                                .closing_items
+                                .closing_items()
                                 .iter()
                                 .filter(|item| item.requires_human_input())
                                 .map(|item| ("item", item)),
@@ -1696,7 +1696,7 @@ mod tests {
 
         assert!(state.dock_home_projection().poll_rows.is_empty());
         assert_eq!(
-            state.terminals[&terminal_id].closing_items[0].text,
+            state.terminals[&terminal_id].closing_items()[0].text,
             "Run the smoke test"
         );
     }

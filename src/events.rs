@@ -15,6 +15,12 @@ pub struct ClosingBlockReport {
     pub items: Vec<crate::api::schema::ClosingBlockItem>,
     pub decisions: Vec<crate::api::schema::ClosingBlockDecision>,
     pub agents: Option<u32>,
+    pub completion: Option<crate::api::schema::ClosingCompletion>,
+    pub external_wait: Option<String>,
+    pub parse_status: Option<crate::api::schema::ClosingParseStatus>,
+    pub workers_unknown: Option<bool>,
+    pub dependencies_authoritative: bool,
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug)]

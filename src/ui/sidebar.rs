@@ -1362,8 +1362,6 @@ fn collect_agent_panel_entries_with_runtimes(
                         .tab_display_name_from(&app.terminals, detail.tab_idx)
                         .or_else(|| Some(DEFAULT_THREAD_TITLE.to_string()));
                     let active_subagents = detail.active_subagents.filter(|count| *count > 0);
-                    let has_closing_block_tokens =
-                        detail.tokens.keys().any(|key| key.starts_with("closing_"));
                     let completion_tier = derive_completion_tier(
                         detail.state,
                         detail.closing_contract.as_deref(),
@@ -1372,7 +1370,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         detail.open_blockers,
                         active_subagents,
                         detail.holds_shell,
-                        has_closing_block_tokens,
+                        detail.has_closing_report,
                     );
                     AgentPanelEntry {
                         ws_idx,

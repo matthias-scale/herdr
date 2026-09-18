@@ -81,6 +81,31 @@ def _validate_target(target: Path) -> None:
         raise BundleValidationError(f"install target is not a directory: {target}")
 
 
+def _replace_runtime_files(source: Path, target: Path) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    for name in RUNTIME_FILES:
+        os.replace(source / name, target / name)
+
+
+def _restore_runtime_files(backup: Path, target: Path) -> None:
+    restore = Path(tempfile.mkdtemp(prefix=f".{target.name}.restore-", dir=target.parent))
+    try:
+        for name in RUNTIME_FILES:
+            source = backup / name
+            destination = target / name
+            if not source.exists() and not source.is_symlink():
+                if destination.exists() or destination.is_symlink():
+                    destination.unlink()
+                continue
+            if source.is_symlink():
+                os.symlink(os.readlink(source), restore / name)
+            else:
+                shutil.copy2(source, restore / name)
+            os.replace(restore / name, destination)
+    finally:
+        shutil.rmtree(restore, ignore_errors=True)
+
+
 def install_bundle(source_dir: Path, target: Path, *, dry_run: bool) -> dict:
     source_dir = Path(source_dir).resolve()
     target = Path(target).expanduser().absolute()
@@ -98,7 +123,6 @@ def install_bundle(source_dir: Path, target: Path, *, dry_run: bool) -> dict:
 
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.stage-", dir=target.parent))
-    swapped = False
     try:
         if target.exists():
             shutil.copytree(target, stage, dirs_exist_ok=True, symlinks=True)
@@ -110,26 +134,23 @@ def install_bundle(source_dir: Path, target: Path, *, dry_run: bool) -> dict:
         _verify_bundle(stage, expected)
 
         if backup:
-            os.replace(target, backup)
+            shutil.copytree(target, backup, symlinks=True)
         try:
-            os.replace(stage, target)
-            swapped = True
+            _replace_runtime_files(stage, target)
         except OSError:
-            if backup and backup.exists() and not target.exists():
-                os.replace(backup, target)
+            if backup and backup.exists():
+                _restore_runtime_files(backup, target)
             raise
 
         try:
             _verify_bundle(target, expected)
         except (BundleValidationError, OSError):
-            failed = _backup_path(target.with_name(f"{target.name}.failed"))
-            os.replace(target, failed)
             if backup and backup.exists():
-                os.replace(backup, target)
+                _restore_runtime_files(backup, target)
             raise
         return result
     finally:
-        if not swapped and stage.exists():
+        if stage.exists():
             shutil.rmtree(stage)
 
 

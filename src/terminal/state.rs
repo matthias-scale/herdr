@@ -248,29 +248,174 @@ pub(crate) struct TerminalAgentHandoffState {
     hook_authority: Option<HookAuthorityHandoffState>,
     supervisor_stale: bool,
     metadata: Vec<super::metadata::AgentMetadataHandoffState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    closing_report: Option<ClosingReportHandoffState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     closing_items: Vec<crate::api::schema::ClosingBlockItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     closing_report_subagents: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     closing_idle: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     closing_contract: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     closing_contract_met: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     closing_contract_met_elapsed: Option<Duration>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     closing_completion: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     closing_wait: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     closing_parse: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     closing_workers_unknown: Option<String>,
     #[serde(default)]
     unreported_turn_started_elapsed: Option<Duration>,
+}
+
+const CLOSING_REPORT_MODEL_VERSION: u8 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ClosingReportScope {
+    source: Option<String>,
+    session_id: Option<String>,
+    turn_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosingReport {
+    version: u8,
+    scope: ClosingReportScope,
+    pub(crate) closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
+    pub(crate) closing_items: Vec<crate::api::schema::ClosingBlockItem>,
+    pub(crate) closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
+    closing_report_subagents: Option<u32>,
+    pub(crate) closing_idle: Option<bool>,
+    pub(crate) closing_contract: Option<String>,
+    pub(crate) closing_contract_met: Option<bool>,
+    pub(crate) closing_contract_met_at: Option<Instant>,
+    completion: Option<crate::api::schema::ClosingCompletion>,
+    external_wait: Option<String>,
+    parse_status: Option<crate::api::schema::ClosingParseStatus>,
+    workers_unknown: Option<bool>,
+}
+
+impl Default for ClosingReport {
+    fn default() -> Self {
+        Self {
+            version: CLOSING_REPORT_MODEL_VERSION,
+            scope: ClosingReportScope::default(),
+            closing_gates: Vec::new(),
+            closing_items: Vec::new(),
+            closing_decisions: Vec::new(),
+            closing_report_subagents: None,
+            closing_idle: None,
+            closing_contract: None,
+            closing_contract_met: None,
+            closing_contract_met_at: None,
+            completion: None,
+            external_wait: None,
+            parse_status: None,
+            workers_unknown: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for TerminalState {
+    type Target = ClosingReport;
+
+    fn deref(&self) -> &Self::Target {
+        self.closing_report
+            .as_ref()
+            .expect("test terminal always owns a closing report")
+    }
+}
+
+#[cfg(test)]
+impl std::ops::DerefMut for TerminalState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.closing_report
+            .as_mut()
+            .expect("test terminal always owns a closing report")
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClosingReportHandoffState {
+    version: u8,
+    scope_source: Option<String>,
+    scope_session_id: Option<String>,
+    scope_turn_seq: Option<u64>,
+    gates: Vec<crate::api::schema::ClosingBlockItem>,
+    items: Vec<crate::api::schema::ClosingBlockItem>,
+    decisions: Vec<crate::api::schema::ClosingBlockDecision>,
+    closing_report_subagents: Option<u32>,
+    idle: Option<bool>,
+    contract: Option<String>,
+    contract_met: Option<bool>,
+    contract_met_elapsed: Option<Duration>,
+    completion: Option<crate::api::schema::ClosingCompletion>,
+    external_wait: Option<String>,
+    parse_status: Option<crate::api::schema::ClosingParseStatus>,
+    workers_unknown: Option<bool>,
+}
+
+#[cfg(unix)]
+impl ClosingReportHandoffState {
+    fn capture(report: &ClosingReport, now: Instant) -> Self {
+        Self {
+            version: report.version,
+            scope_source: report.scope.source.clone(),
+            scope_session_id: report.scope.session_id.clone(),
+            scope_turn_seq: report.scope.turn_seq,
+            gates: report.closing_gates.clone(),
+            items: report.closing_items.clone(),
+            decisions: report.closing_decisions.clone(),
+            closing_report_subagents: report.closing_report_subagents,
+            idle: report.closing_idle,
+            contract: report.closing_contract.clone(),
+            contract_met: report.closing_contract_met,
+            contract_met_elapsed: report
+                .closing_contract_met_at
+                .map(|at| now.saturating_duration_since(at)),
+            completion: report.completion,
+            external_wait: report.external_wait.clone(),
+            parse_status: report.parse_status,
+            workers_unknown: report.workers_unknown,
+        }
+    }
+
+    fn restore(self, now: Instant) -> ClosingReport {
+        ClosingReport {
+            version: self.version,
+            scope: ClosingReportScope {
+                source: self.scope_source,
+                session_id: self.scope_session_id,
+                turn_seq: self.scope_turn_seq,
+            },
+            closing_gates: self.gates,
+            closing_items: self.items,
+            closing_decisions: self.decisions,
+            closing_report_subagents: self.closing_report_subagents,
+            closing_idle: self.idle,
+            closing_contract: self.contract,
+            closing_contract_met: self.contract_met,
+            closing_contract_met_at: self
+                .contract_met_elapsed
+                .and_then(|elapsed| now.checked_sub(elapsed)),
+            completion: self.completion,
+            external_wait: self.external_wait,
+            parse_status: self.parse_status,
+            workers_unknown: self.workers_unknown,
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -501,16 +646,7 @@ pub struct TerminalState {
     pub work_context: crate::work_context::PaneWorkContextState,
     work_title_initial_subject: Option<WorkTitleInitialSubject>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
-    pub closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
-    pub closing_items: Vec<crate::api::schema::ClosingBlockItem>,
-    pub closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
-    /// Subagents declared by the current closing report. `Some(0)` deliberately
-    /// overrides an older live transcript count.
-    closing_report_subagents: Option<u32>,
-    pub closing_idle: Option<bool>,
-    pub closing_contract: Option<String>,
-    pub closing_contract_met: Option<bool>,
-    pub closing_contract_met_at: Option<Instant>,
+    closing_report: Option<ClosingReport>,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     /// Runtime-only Claude JSONL source. Never persisted or exposed through the
     /// API; the accepted session id remains the resume identity.
@@ -596,14 +732,7 @@ impl TerminalState {
             work_context: crate::work_context::PaneWorkContextState::default(),
             work_title_initial_subject: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
-            closing_gates: Vec::new(),
-            closing_items: Vec::new(),
-            closing_decisions: Vec::new(),
-            closing_report_subagents: None,
-            closing_idle: None,
-            closing_contract: None,
-            closing_contract_met: None,
-            closing_contract_met_at: None,
+            closing_report: Some(ClosingReport::default()),
             persisted_agent_session: None,
             claude_transcript_session_id: None,
             claude_transcript_path: None,
@@ -691,48 +820,18 @@ impl TerminalState {
         items: Vec<crate::api::schema::ClosingBlockItem>,
         decisions: Vec<crate::api::schema::ClosingBlockDecision>,
     ) -> bool {
-        if self.closing_gates == gates
-            && self.closing_items == items
-            && self.closing_decisions == decisions
+        let report = self.closing_report.get_or_insert_default();
+        if report.closing_gates == gates
+            && report.closing_items == items
+            && report.closing_decisions == decisions
         {
             return false;
         }
-        self.closing_gates = gates;
-        self.closing_items = items;
-        self.closing_decisions = decisions;
+        report.closing_gates = gates;
+        report.closing_items = items;
+        report.closing_decisions = decisions;
         self.revision = self.revision.saturating_add(1);
         true
-    }
-
-    pub(crate) fn merge_closing_block_payload(
-        &mut self,
-        gates: Vec<crate::api::schema::ClosingBlockItem>,
-        items: Vec<crate::api::schema::ClosingBlockItem>,
-        decisions: Vec<crate::api::schema::ClosingBlockDecision>,
-    ) -> bool {
-        let mut changed = false;
-        for gate in gates {
-            if !self.closing_gates.contains(&gate) {
-                self.closing_gates.push(gate);
-                changed = true;
-            }
-        }
-        for item in items {
-            if !self.closing_items.contains(&item) {
-                self.closing_items.push(item);
-                changed = true;
-            }
-        }
-        for decision in decisions {
-            if !self.closing_decisions.contains(&decision) {
-                self.closing_decisions.push(decision);
-                changed = true;
-            }
-        }
-        if changed {
-            self.revision = self.revision.saturating_add(1);
-        }
-        changed
     }
 
     pub(crate) fn apply_closing_report_subagents_at(
@@ -740,14 +839,21 @@ impl TerminalState {
         agents: Option<u32>,
         now: Instant,
     ) -> Option<TerminalStateMutation> {
-        if self.closing_report_subagents == agents {
+        if self
+            .closing_report
+            .as_ref()
+            .and_then(|report| report.closing_report_subagents)
+            == agents
+        {
             return None;
         }
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
-        self.closing_report_subagents = agents;
+        self.closing_report
+            .get_or_insert_default()
+            .closing_report_subagents = agents;
         self.revision = self.revision.saturating_add(1);
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
@@ -763,51 +869,211 @@ impl TerminalState {
     }
 
     pub(crate) fn has_blocking_closing_items(&self) -> bool {
-        self.closing_items
+        self.closing_items()
             .iter()
             .any(crate::api::schema::ClosingBlockItem::requires_human_input)
     }
 
     pub(crate) fn has_pending_human_input(&self) -> bool {
-        !self.closing_gates.is_empty() || self.has_blocking_closing_items()
+        !self.closing_gates().is_empty() || self.has_blocking_closing_items()
     }
 
-    fn closing_task_reported(&self) -> bool {
-        self.metadata_tokens.get("closing_completion").is_some()
-            || self.metadata_tokens.get("closing_parse").is_some()
-            || self
-                .metadata_tokens
-                .get("closing_workers_unknown")
-                .is_some()
-            || self.metadata_tokens.get("closing_wait").is_some()
+    pub(crate) fn closing_gates(&self) -> &[crate::api::schema::ClosingBlockItem] {
+        self.closing_report
+            .as_ref()
+            .map_or(&[], |report| report.closing_gates.as_slice())
+    }
+
+    pub(crate) fn closing_items(&self) -> &[crate::api::schema::ClosingBlockItem] {
+        self.closing_report
+            .as_ref()
+            .map_or(&[], |report| report.closing_items.as_slice())
+    }
+
+    pub(crate) fn closing_decisions(&self) -> &[crate::api::schema::ClosingBlockDecision] {
+        self.closing_report
+            .as_ref()
+            .map_or(&[], |report| report.closing_decisions.as_slice())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn closing_gates_mut(&mut self) -> &mut Vec<crate::api::schema::ClosingBlockItem> {
+        &mut self.closing_report.get_or_insert_default().closing_gates
+    }
+
+    #[cfg(test)]
+    pub(crate) fn closing_items_mut(&mut self) -> &mut Vec<crate::api::schema::ClosingBlockItem> {
+        &mut self.closing_report.get_or_insert_default().closing_items
+    }
+
+    pub(crate) fn closing_idle(&self) -> Option<bool> {
+        self.closing_report
+            .as_ref()
+            .and_then(|report| report.closing_idle)
+    }
+
+    pub(crate) fn closing_contract(&self) -> Option<&str> {
+        self.closing_report
+            .as_ref()
+            .and_then(|report| report.closing_contract.as_deref())
+    }
+
+    pub(crate) fn closing_contract_met(&self) -> Option<bool> {
+        self.closing_report
+            .as_ref()
+            .and_then(|report| report.closing_contract_met)
+    }
+
+    pub(crate) fn closing_contract_met_at(&self) -> Option<Instant> {
+        self.closing_report
+            .as_ref()
+            .and_then(|report| report.closing_contract_met_at)
+    }
+
+    pub(crate) fn closing_external_wait(&self) -> Option<&str> {
+        self.closing_report
+            .as_ref()
+            .and_then(|report| report.external_wait.as_deref())
+    }
+
+    pub(crate) fn metadata_tokens_for_api(&self) -> HashMap<String, String> {
+        let mut tokens = self.metadata_tokens.values();
+        let Some(report) = self.closing_report.as_ref() else {
+            return tokens;
+        };
+        if let Some(completion) = report.completion {
+            tokens.insert(
+                "closing_completion".into(),
+                match completion {
+                    crate::api::schema::ClosingCompletion::Complete => "complete",
+                    crate::api::schema::ClosingCompletion::Incomplete => "incomplete",
+                    crate::api::schema::ClosingCompletion::Missing => "missing",
+                }
+                .into(),
+            );
+        }
+        if let Some(parse_status) = report.parse_status {
+            tokens.insert(
+                "closing_parse".into(),
+                match parse_status {
+                    crate::api::schema::ClosingParseStatus::Ok => "ok",
+                    crate::api::schema::ClosingParseStatus::Missing => "missing",
+                    crate::api::schema::ClosingParseStatus::Malformed => "malformed",
+                }
+                .into(),
+            );
+        }
+        if let Some(wait) = report.external_wait.as_ref() {
+            tokens.insert("closing_wait".into(), wait.clone());
+        }
+        if let Some(workers_unknown) = report.workers_unknown {
+            tokens.insert(
+                "closing_workers_unknown".into(),
+                if workers_unknown { "1" } else { "0" }.into(),
+            );
+        }
+        if let Some(agents) = report.closing_report_subagents {
+            tokens.insert("closing_agents".into(), agents.to_string());
+        }
+        if !report.closing_gates.is_empty() || !report.closing_items.is_empty() {
+            let blocking = report.closing_gates.len()
+                + report
+                    .closing_items
+                    .iter()
+                    .filter(|item| item.requires_human_input())
+                    .count();
+            tokens.insert("closing_blocking".into(), blocking.to_string());
+            let gates = report
+                .closing_gates
+                .iter()
+                .map(|gate| gate.text.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            if !gates.is_empty() {
+                tokens.insert("closing_gates".into(), gates.chars().take(200).collect());
+            }
+        }
+        if let Some(idle) = report.closing_idle {
+            tokens.insert("closing_idle".into(), if idle { "1" } else { "0" }.into());
+        }
+        if let (Some(contract), Some(met)) = (&report.closing_contract, report.closing_contract_met)
+        {
+            tokens.insert("closing_contract".into(), contract.clone());
+            tokens.insert(
+                "closing_contract_met".into(),
+                if met { "1" } else { "0" }.into(),
+            );
+        }
+        tokens
+    }
+
+    pub(crate) fn set_closing_report_scope(
+        &mut self,
+        source: String,
+        session_id: Option<String>,
+        turn_seq: Option<u64>,
+    ) {
+        let scope = &mut self.closing_report.get_or_insert_default().scope;
+        scope.source = Some(source);
+        scope.session_id = session_id;
+        scope.turn_seq = turn_seq;
+    }
+
+    pub(crate) fn closing_task_reported(&self) -> bool {
+        self.closing_report.as_ref().is_some_and(|report| {
+            report.completion.is_some()
+                || report.parse_status.is_some()
+                || report.workers_unknown.is_some()
+                || report.external_wait.is_some()
+        })
+    }
+
+    pub(crate) fn has_closing_report(&self) -> bool {
+        self.closing_report.as_ref().is_some_and(|report| {
+            !report.closing_gates.is_empty()
+                || !report.closing_items.is_empty()
+                || !report.closing_decisions.is_empty()
+                || report.closing_report_subagents.is_some()
+                || report.closing_idle.is_some()
+                || report.closing_contract.is_some()
+                || report.closing_contract_met.is_some()
+                || report.completion.is_some()
+                || report.external_wait.is_some()
+                || report.parse_status.is_some()
+                || report.workers_unknown.is_some()
+        })
     }
 
     fn closing_task_complete(&self) -> bool {
-        match self.metadata_tokens.get("closing_completion") {
-            Some("complete") => true,
-            Some("incomplete" | "missing") => false,
-            _ => self.closing_contract_met == Some(true),
-        }
+        self.closing_report.as_ref().is_some_and(|report| {
+            report.completion == Some(crate::api::schema::ClosingCompletion::Complete)
+                || report.closing_contract_met == Some(true)
+        })
     }
 
     fn closing_task_projection(&self, state: AgentState) -> (AgentState, &'static str) {
-        if self.metadata_tokens.get("closing_wait").is_some() {
+        if self.closing_external_wait().is_some() {
             (AgentState::Working, "closing_external_wait")
         } else if state != AgentState::Working && self.has_pending_human_input() {
             (AgentState::Blocked, "closing_human_input")
         } else if state == AgentState::Idle
             && (self.closing_task_reported() && !self.closing_task_complete()
                 || self.active_subagents.is_none()
-                    && (self.metadata_tokens.get("closing_workers_unknown") == Some("1")
-                        || self
-                            .metadata_tokens
-                            .get("closing_agents")
-                            .and_then(|count| count.parse::<u32>().ok())
-                            .is_some_and(|count| count > 0))
-                || matches!(
-                    self.metadata_tokens.get("closing_parse"),
-                    Some("missing" | "malformed")
-                ))
+                    && self.closing_report.as_ref().is_some_and(|report| {
+                        report.workers_unknown == Some(true)
+                            || report
+                                .closing_report_subagents
+                                .is_some_and(|count| count > 0)
+                    })
+                || self.closing_report.as_ref().is_some_and(|report| {
+                    matches!(
+                        report.parse_status,
+                        Some(
+                            crate::api::schema::ClosingParseStatus::Missing
+                                | crate::api::schema::ClosingParseStatus::Malformed
+                        )
+                    )
+                }))
         {
             (AgentState::Unknown, "closing_task_uncertain")
         } else {
@@ -821,7 +1087,7 @@ impl TerminalState {
         external_wait: Option<String>,
         parse_status: Option<crate::api::schema::ClosingParseStatus>,
         workers_unknown: Option<bool>,
-        now: Instant,
+        _now: Instant,
     ) -> bool {
         if completion.is_none()
             && external_wait.is_none()
@@ -837,16 +1103,6 @@ impl TerminalState {
                     | crate::api::schema::ClosingParseStatus::Malformed
             )
         );
-        let completion = completion.map(|completion| match completion {
-            crate::api::schema::ClosingCompletion::Complete => "complete",
-            crate::api::schema::ClosingCompletion::Incomplete => "incomplete",
-            crate::api::schema::ClosingCompletion::Missing => "missing",
-        });
-        let parse_status = parse_status.map(|status| match status {
-            crate::api::schema::ClosingParseStatus::Ok => "ok",
-            crate::api::schema::ClosingParseStatus::Missing => "missing",
-            crate::api::schema::ClosingParseStatus::Malformed => "malformed",
-        });
         let external_wait = external_wait.and_then(|wait| {
             let wait = wait
                 .trim()
@@ -856,18 +1112,16 @@ impl TerminalState {
                 .collect::<String>();
             (!wait.is_empty()).then_some(wait)
         });
-        let mut patch = HashMap::from([
-            ("closing_completion".into(), completion.map(str::to_string)),
-            ("closing_parse".into(), parse_status.map(str::to_string)),
-        ]);
+        let report = self.closing_report.get_or_insert_default();
+        let mut changed = report.completion != completion || report.parse_status != parse_status;
+        report.completion = completion;
+        report.parse_status = parse_status;
         if !preserve_dependencies {
-            patch.insert("closing_wait".into(), external_wait);
-            patch.insert(
-                "closing_workers_unknown".into(),
-                workers_unknown.map(|unknown| if unknown { "1" } else { "0" }.into()),
-            );
+            changed |=
+                report.external_wait != external_wait || report.workers_unknown != workers_unknown;
+            report.external_wait = external_wait;
+            report.workers_unknown = workers_unknown;
         }
-        let changed = self.metadata_tokens.patch(patch, None, now);
         if changed {
             self.revision = self.revision.saturating_add(1);
         }
@@ -875,32 +1129,14 @@ impl TerminalState {
     }
 
     fn clear_closing_task_report(&mut self, now: Instant) -> bool {
-        let structured_changed = self.closing_report_subagents.is_some()
-            || self.closing_idle.is_some()
-            || self.closing_contract.is_some()
-            || self.closing_contract_met.is_some()
-            || self.closing_contract_met_at.is_some();
-        self.closing_report_subagents = None;
-        self.closing_idle = None;
-        self.closing_contract = None;
-        self.closing_contract_met = None;
-        self.closing_contract_met_at = None;
-        let tokens_changed = self.metadata_tokens.patch(
-            HashMap::from([
-                ("closing_completion".into(), None),
-                ("closing_wait".into(), None),
-                ("closing_parse".into(), None),
-                ("closing_workers_unknown".into(), None),
-                ("closing_agents".into(), None),
-                ("closing_agent_names".into(), None),
-                ("closing_idle".into(), None),
-                ("closing_contract".into(), None),
-                ("closing_contract_met".into(), None),
-            ]),
-            None,
-            now,
-        );
-        structured_changed || tokens_changed
+        let _ = now;
+        let empty = ClosingReport::default();
+        let changed = self
+            .closing_report
+            .as_ref()
+            .is_some_and(|report| report != &empty);
+        self.closing_report = Some(empty);
+        changed
     }
 
     pub(crate) fn apply_closing_contract_tokens(
@@ -927,14 +1163,15 @@ impl TerminalState {
             _ => (None, None),
         };
         let closing_contract_met_at = closing_contract_met.is_some_and(|met| met).then_some(now);
-        let changed = self.closing_idle != closing_idle
-            || self.closing_contract != closing_contract
-            || self.closing_contract_met != closing_contract_met
-            || self.closing_contract_met_at != closing_contract_met_at;
-        self.closing_idle = closing_idle;
-        self.closing_contract = closing_contract;
-        self.closing_contract_met = closing_contract_met;
-        self.closing_contract_met_at = closing_contract_met_at;
+        let report = self.closing_report.get_or_insert_default();
+        let changed = report.closing_idle != closing_idle
+            || report.closing_contract != closing_contract
+            || report.closing_contract_met != closing_contract_met
+            || report.closing_contract_met_at != closing_contract_met_at;
+        report.closing_idle = closing_idle;
+        report.closing_contract = closing_contract;
+        report.closing_contract_met = closing_contract_met;
+        report.closing_contract_met_at = closing_contract_met_at;
         if changed {
             self.revision = self.revision.saturating_add(1);
         }
@@ -1134,11 +1371,6 @@ impl TerminalState {
             (AgentState::Working, seen)
         } else {
             let state = self.closing_task_projection(state).0;
-            let seen = if state == AgentState::Idle && self.closing_task_complete() {
-                false
-            } else {
-                seen
-            };
             (state, seen)
         }
     }
@@ -1719,9 +1951,6 @@ impl TerminalState {
         self.stale_resolution = None;
         self.unreported_turn_started_at = starts_turn.then_some(now);
         if closing_report_is_older {
-            self.closing_gates.clear();
-            self.closing_items.clear();
-            self.closing_decisions.clear();
             self.clear_closing_task_report(now);
         }
         self.revision = self.revision.wrapping_add(1);
@@ -1998,27 +2227,23 @@ impl TerminalState {
                 && self.hook_authority_is_effective(authority)
                 && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
         })?;
-        self.closing_report_subagents
+        self.closing_report
+            .as_ref()
+            .and_then(|report| report.closing_report_subagents)
     }
 
     pub(crate) fn verified_active_subagents(&self) -> Option<u32> {
-        self.current_direct_closing_report_subagents()
-            .or(self.active_subagents)
+        self.active_subagents
+            .or_else(|| self.current_direct_closing_report_subagents())
     }
 
     fn current_closing_report_subagents(&self) -> Option<u32> {
-        self.current_direct_closing_report_subagents()
-            .or_else(|| {
-                self.metadata_tokens
-                    .get("closing_agents")
-                    .and_then(|value| value.parse::<u32>().ok())
-            })
-            .or(self.active_subagents)
+        self.active_subagents
+            .or_else(|| self.current_direct_closing_report_subagents())
     }
 
     pub(crate) fn effective_active_subagents(&self) -> Option<u32> {
         self.current_closing_report_subagents()
-            .or(self.active_subagents)
     }
 
     pub(crate) fn declares_running_subagents(&self) -> bool {
@@ -2069,7 +2294,7 @@ impl TerminalState {
     ) -> Option<Instant> {
         if self.supervisor_stale
             || self.state == AgentState::Blocked
-            || self.metadata_tokens.get("closing_wait").is_some()
+            || self.closing_external_wait().is_some()
         {
             return None;
         }
@@ -2136,7 +2361,9 @@ impl TerminalState {
         let expired_subagent_wait = self.waiting_on_agents();
         self.supervisor_stale = true;
         if expired_subagent_wait {
-            self.closing_report_subagents = Some(0);
+            self.closing_report
+                .get_or_insert_default()
+                .closing_report_subagents = Some(0);
             self.revision = self.revision.wrapping_add(1);
         }
         Some(TerminalStateMutation {
@@ -3493,26 +3720,17 @@ impl TerminalState {
         now: Instant,
     ) -> Option<TerminalAgentHandoffState> {
         let metadata = self.agent_metadata_handoff_state(now);
+        let closing_report = self
+            .closing_report
+            .as_ref()
+            .filter(|report| *report != &ClosingReport::default());
         if self.state == AgentState::Unknown
             && self.detected_agent.is_none()
             && self.recent_agent_process_exit.is_none()
             && self.hook_authority.is_none()
             && !self.supervisor_stale
             && metadata.is_empty()
-            && self.closing_gates.is_empty()
-            && self.closing_items.is_empty()
-            && self.closing_decisions.is_empty()
-            && self.closing_report_subagents.is_none()
-            && self.closing_idle.is_none()
-            && self.closing_contract.is_none()
-            && self.closing_contract_met.is_none()
-            && self.metadata_tokens.get("closing_completion").is_none()
-            && self.metadata_tokens.get("closing_wait").is_none()
-            && self.metadata_tokens.get("closing_parse").is_none()
-            && self
-                .metadata_tokens
-                .get("closing_workers_unknown")
-                .is_none()
+            && closing_report.is_none()
         {
             return None;
         }
@@ -3534,29 +3752,20 @@ impl TerminalState {
                 .map(|authority| HookAuthorityHandoffState::capture(authority, now)),
             supervisor_stale: self.supervisor_stale,
             metadata,
-            closing_gates: self.closing_gates.clone(),
-            closing_items: self.closing_items.clone(),
-            closing_decisions: self.closing_decisions.clone(),
-            closing_report_subagents: self.closing_report_subagents,
-            closing_idle: self.closing_idle,
-            closing_contract: self.closing_contract.clone(),
-            closing_contract_met: self.closing_contract_met,
-            closing_contract_met_elapsed: self
-                .closing_contract_met_at
-                .map(|reported_at| now.saturating_duration_since(reported_at)),
-            closing_completion: self
-                .metadata_tokens
-                .get("closing_completion")
-                .map(str::to_string),
-            closing_wait: self.metadata_tokens.get("closing_wait").map(str::to_string),
-            closing_parse: self
-                .metadata_tokens
-                .get("closing_parse")
-                .map(str::to_string),
-            closing_workers_unknown: self
-                .metadata_tokens
-                .get("closing_workers_unknown")
-                .map(str::to_string),
+            closing_report: closing_report
+                .map(|report| ClosingReportHandoffState::capture(report, now)),
+            closing_gates: Vec::new(),
+            closing_items: Vec::new(),
+            closing_decisions: Vec::new(),
+            closing_report_subagents: None,
+            closing_idle: None,
+            closing_contract: None,
+            closing_contract_met: None,
+            closing_contract_met_elapsed: None,
+            closing_completion: None,
+            closing_wait: None,
+            closing_parse: None,
+            closing_workers_unknown: None,
             unreported_turn_started_elapsed: self
                 .unreported_turn_started_at
                 .map(|started_at| now.saturating_duration_since(started_at)),
@@ -3569,6 +3778,43 @@ impl TerminalState {
         handoff: TerminalAgentHandoffState,
         now: Instant,
     ) {
+        let closing_report = handoff
+            .closing_report
+            .map(|report| report.restore(now))
+            .unwrap_or_else(|| {
+                let completion = match handoff.closing_completion.as_deref() {
+                    Some("complete") => Some(crate::api::schema::ClosingCompletion::Complete),
+                    Some("incomplete") => Some(crate::api::schema::ClosingCompletion::Incomplete),
+                    Some("missing") => Some(crate::api::schema::ClosingCompletion::Missing),
+                    _ => None,
+                };
+                let parse_status = match handoff.closing_parse.as_deref() {
+                    Some("ok") => Some(crate::api::schema::ClosingParseStatus::Ok),
+                    Some("missing") => Some(crate::api::schema::ClosingParseStatus::Missing),
+                    Some("malformed") => Some(crate::api::schema::ClosingParseStatus::Malformed),
+                    _ => None,
+                };
+                ClosingReport {
+                    closing_gates: handoff.closing_gates,
+                    closing_items: handoff.closing_items,
+                    closing_decisions: handoff.closing_decisions,
+                    closing_report_subagents: handoff.closing_report_subagents,
+                    closing_idle: handoff.closing_idle,
+                    closing_contract: handoff.closing_contract,
+                    closing_contract_met: handoff.closing_contract_met,
+                    closing_contract_met_at: handoff
+                        .closing_contract_met_elapsed
+                        .and_then(|elapsed| now.checked_sub(elapsed)),
+                    completion,
+                    external_wait: handoff.closing_wait,
+                    parse_status,
+                    workers_unknown: handoff
+                        .closing_workers_unknown
+                        .as_deref()
+                        .and_then(parse_binary_token),
+                    ..ClosingReport::default()
+                }
+            });
         self.state = handoff.state.into();
         self.fallback_state = self.state;
         self.detected_agent = handoff
@@ -3588,29 +3834,7 @@ impl TerminalState {
             .map(|authority| authority.restore(now));
         self.supervisor_stale = handoff.supervisor_stale;
         self.restore_agent_metadata_handoff_state(handoff.metadata, now);
-        self.closing_gates = handoff.closing_gates;
-        self.closing_items = handoff.closing_items;
-        self.closing_decisions = handoff.closing_decisions;
-        self.closing_report_subagents = handoff.closing_report_subagents;
-        self.closing_idle = handoff.closing_idle;
-        self.closing_contract = handoff.closing_contract;
-        self.closing_contract_met = handoff.closing_contract_met;
-        self.closing_contract_met_at = handoff
-            .closing_contract_met_elapsed
-            .and_then(|elapsed| now.checked_sub(elapsed));
-        self.metadata_tokens.patch(
-            HashMap::from([
-                ("closing_completion".into(), handoff.closing_completion),
-                ("closing_wait".into(), handoff.closing_wait),
-                ("closing_parse".into(), handoff.closing_parse),
-                (
-                    "closing_workers_unknown".into(),
-                    handoff.closing_workers_unknown,
-                ),
-            ]),
-            None,
-            now,
-        );
+        self.closing_report = Some(closing_report);
         self.unreported_turn_started_at = handoff
             .unreported_turn_started_elapsed
             .and_then(|elapsed| now.checked_sub(elapsed));
@@ -4050,7 +4274,9 @@ impl TerminalState {
         self.fallback_working_observed_at = None;
         self.fallback_observed_at = None;
         self.replace_hook_authority(None);
-        self.closing_report_subagents = None;
+        self.closing_report
+            .get_or_insert_default()
+            .closing_report_subagents = None;
         self.persisted_agent_session = None;
         self.claude_transcript_session_id = None;
         self.claude_transcript_path = None;
@@ -4199,6 +4425,28 @@ pub(crate) fn stabilize_agent_detection(detection: crate::detect::AgentDetection
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_idle_report_stays_acknowledged_after_viewing() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
+        terminal.apply_closing_report_subagents_at(Some(0), now);
+
+        assert_eq!(
+            terminal.sidebar_projection(false),
+            (AgentState::Idle, false)
+        );
+        assert_eq!(terminal.sidebar_projection(true), (AgentState::Idle, true));
+        assert_eq!(terminal.sidebar_projection(true), (AgentState::Idle, true));
+    }
     use crate::{app::AppState, detect::AgentDetection, workspace::Workspace};
 
     #[test]
@@ -4234,8 +4482,8 @@ mod tests {
         }];
         assert!(terminal.has_blocking_closing_items());
 
-        terminal.closing_items[0].label = "What to test".into();
-        terminal.closing_items[0].blocking = true;
+        terminal.closing_items_mut()[0].label = "What to test".into();
+        terminal.closing_items_mut()[0].blocking = true;
         assert!(!terminal.has_blocking_closing_items());
         assert!(!terminal.has_pending_human_input());
     }
@@ -5008,16 +5256,31 @@ mod tests {
             .restore_terminal_agent_handoff_state(decoded, captured_at + Duration::from_secs(1));
 
         assert_eq!(
-            restored.metadata_tokens.get("closing_completion"),
+            restored
+                .metadata_tokens_for_api()
+                .get("closing_completion")
+                .map(String::as_str),
             Some("incomplete")
         );
         assert_eq!(
-            restored.metadata_tokens.get("closing_wait"),
+            restored
+                .metadata_tokens_for_api()
+                .get("closing_wait")
+                .map(String::as_str),
             Some("CI checks")
         );
-        assert_eq!(restored.metadata_tokens.get("closing_parse"), Some("ok"));
         assert_eq!(
-            restored.metadata_tokens.get("closing_workers_unknown"),
+            restored
+                .metadata_tokens_for_api()
+                .get("closing_parse")
+                .map(String::as_str),
+            Some("ok")
+        );
+        assert_eq!(
+            restored
+                .metadata_tokens_for_api()
+                .get("closing_workers_unknown")
+                .map(String::as_str),
             Some("1")
         );
         assert_eq!(
@@ -6371,7 +6634,11 @@ mod tests {
             (AgentState::Idle, true),
             "the resumed turn needs fresh closing evidence before it can be done"
         );
-        assert!(terminal.metadata_tokens.get("closing_completion").is_none());
+        assert!(terminal
+            .metadata_tokens_for_api()
+            .get("closing_completion")
+            .map(String::as_str)
+            .is_none());
     }
 
     #[test]
@@ -6622,7 +6889,11 @@ mod tests {
         );
         active.set_active_subagents(Some(1));
 
-        assert!(active.metadata_tokens.get("closing_agents").is_none());
+        assert!(active
+            .metadata_tokens_for_api()
+            .get("closing_agents")
+            .map(String::as_str)
+            .is_none());
         assert!(active.declares_running_subagents());
         assert_eq!(
             active.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
@@ -7923,7 +8194,7 @@ mod tests {
             terminal.sidebar_projection(true),
             (AgentState::Working, true)
         );
-        assert_eq!(terminal.closing_items.len(), 1);
+        assert_eq!(terminal.closing_items().len(), 1);
     }
 
     #[test]

@@ -522,7 +522,7 @@ fn pane_detail(
                 .get(&pane_id)
                 .is_some_and(|pane| pane.agent_projection(terminal).counts_as_blocked())
             {
-                for gate in &terminal.closing_gates {
+                for gate in terminal.closing_gates() {
                     parts.push(format!("gate: {}", gate.text));
                 }
             }
@@ -713,7 +713,7 @@ mod tests {
         let terminal = app.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
         terminal
-            .closing_gates
+            .closing_gates_mut()
             .push(crate::api::schema::ClosingBlockItem {
                 blocking: true,
                 n: 1,

@@ -260,7 +260,7 @@ mod tests {
         {
             let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
             terminal.set_raw_agent_state_for_test(AgentState::Blocked);
-            terminal.closing_items = vec![item.clone()];
+            *terminal.closing_items_mut() = vec![item.clone()];
         }
         assert_eq!(app.blocked_agents().len(), 1);
         assert_eq!(
@@ -282,7 +282,7 @@ mod tests {
         {
             let terminal = app.terminals.get_mut(&terminal_id).unwrap();
             terminal.set_raw_agent_state_for_test(AgentState::Idle);
-            terminal.closing_items.clear();
+            terminal.closing_items_mut().clear();
         }
         assert!(
             app.home_attention_agents().is_empty(),
@@ -292,7 +292,7 @@ mod tests {
         {
             let terminal = app.terminals.get_mut(&terminal_id).unwrap();
             terminal.set_raw_agent_state_for_test(AgentState::Blocked);
-            terminal.closing_items = vec![item];
+            *terminal.closing_items_mut() = vec![item];
         }
         app.workspaces[0].tabs[0]
             .panes
@@ -322,7 +322,7 @@ mod tests {
 
         {
             let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
-            terminal.closing_gates = vec![crate::api::schema::ClosingBlockItem {
+            *terminal.closing_gates_mut() = vec![crate::api::schema::ClosingBlockItem {
                 blocking: true,
                 n: 1,
                 label: "Gate".to_string(),
@@ -367,7 +367,7 @@ mod tests {
         {
             let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
             terminal.set_raw_agent_state_for_test(AgentState::Working);
-            terminal.closing_gates.clear();
+            terminal.closing_gates_mut().clear();
         }
 
         assert!(app.blocked_agents().is_empty());
@@ -424,17 +424,18 @@ mod tests {
                         let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
                         terminal.set_raw_agent_state_for_test(state);
                         if latched_gate {
-                            terminal.closing_gates = vec![crate::api::schema::ClosingBlockItem {
-                                blocking: true,
-                                n: 1,
-                                label: "Gate".to_string(),
-                                text: "decide".to_string(),
-                                pr: None,
-                                ticket: None,
-                                url: None,
-                                default: None,
-                                default_at: None,
-                            }];
+                            *terminal.closing_gates_mut() =
+                                vec![crate::api::schema::ClosingBlockItem {
+                                    blocking: true,
+                                    n: 1,
+                                    label: "Gate".to_string(),
+                                    text: "decide".to_string(),
+                                    pr: None,
+                                    ticket: None,
+                                    url: None,
+                                    default: None,
+                                    default_at: None,
+                                }];
                         }
                         terminal.usage_limited = usage_limited;
                     }

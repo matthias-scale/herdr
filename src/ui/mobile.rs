@@ -973,10 +973,7 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
                 entry.seen,
             ))
             .cloned()
-            .unwrap_or_else(|| match entry.state {
-                AgentState::Idle => "done".to_string(),
-                _ => super::status::state_label(entry.state, entry.seen).to_string(),
-            })
+            .unwrap_or_else(|| super::status::state_label(entry.state, entry.seen).to_string())
     };
     parts.push(status);
     if let Some(agent_label) = entry.agent_label.as_deref() {
@@ -2222,12 +2219,12 @@ mod tests {
     }
 
     #[test]
-    fn mobile_agent_detail_keeps_completed_idle_panes_done_after_viewing() {
+    fn mobile_agent_detail_acknowledges_completed_idle_panes_after_viewing() {
         let mut entry = agent_entry(None, Some("pi"));
         entry.seen = true;
         entry.state_labels.clear();
 
-        assert_eq!(mobile_agent_detail(&entry), "  done · pi");
+        assert_eq!(mobile_agent_detail(&entry), "  idle · pi");
     }
 
     #[test]

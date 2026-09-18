@@ -1459,7 +1459,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(tokens["closing_parse"], "ok")
         self.assertEqual(tokens["closing_workers_unknown"], "0")
 
-    def test_report_always_clears_absent_lifecycle_values(self):
+    def test_missing_report_omits_legacy_dependency_tokens(self):
         with mock.patch.object(herdr_status, "_rpc") as rpc, mock.patch.dict(
             herdr_status.os.environ,
             {"XDG_STATE_HOME": self._state_dir()},
@@ -1479,9 +1479,17 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertFalse(outcome["payload"]["workers_unknown"])
         tokens = rpc.call_args_list[-1].args[3]["tokens"]
         self.assertEqual(tokens["closing_completion"], "missing")
-        self.assertEqual(tokens["closing_wait"], "")
         self.assertEqual(tokens["closing_parse"], "missing")
-        self.assertEqual(tokens["closing_workers_unknown"], "0")
+        for key in (
+            "closing_blocking",
+            "closing_idle",
+            "closing_agents",
+            "closing_agent_names",
+            "closing_gates",
+            "closing_wait",
+            "closing_workers_unknown",
+        ):
+            self.assertNotIn(key, tokens)
 
     def test_short_reply_payload_cannot_clear_merge_base_dependencies(self):
         block = closing_block.parse("Progressing.")
@@ -1502,6 +1510,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
             )
 
         payload = outcome["payload"]
+        self.assertEqual(payload["state"], "unknown")
         self.assertEqual(payload["completion"], "missing")
         self.assertEqual(payload["parse_status"], "missing")
         for key in ("agents", "agent_names", "gates", "items", "decisions"):
@@ -1522,6 +1531,37 @@ class ClosingBlockV2Tests(unittest.TestCase):
                 "agents": report_params.get("agents"),
             }
         self.assertEqual(merge_base_state, {"gates": ["pending gate"], "agents": 2})
+
+    def test_malformed_payload_cannot_clear_old_server_dependencies(self):
+        with self._isolated(), mock.patch.object(herdr_status, "_rpc") as rpc:
+            outcome = herdr_status.report(
+                agent="codex",
+                blocking=1,
+                agents=0,
+                gates=[{"label": "Gate", "text": "partial"}],
+                completion="incomplete",
+                parse_status="malformed",
+                workers_unknown=False,
+                pane_id="w9:p18-malformed",
+                sock_path="/tmp/herdr-test.sock",
+            )
+
+        self.assertEqual(outcome["payload"]["state"], "unknown")
+        for key in ("agents", "agent_names", "gates", "items", "decisions"):
+            self.assertNotIn(key, outcome["payload"])
+        report_params = rpc.call_args_list[1].args[3]
+        for key in ("agents", "gates", "items", "decisions"):
+            self.assertNotIn(key, report_params)
+        tokens = rpc.call_args_list[2].args[3]["tokens"]
+        for key in (
+            "closing_blocking",
+            "closing_idle",
+            "closing_agents",
+            "closing_gates",
+            "closing_wait",
+            "closing_workers_unknown",
+        ):
+            self.assertNotIn(key, tokens)
 
     def test_report_does_not_honor_legacy_nonblocking_item_flags(self):
         with self._isolated():
@@ -1576,6 +1616,41 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(mirrored["external_wait"], "CI watcher")
         self.assertEqual(mirrored["completion"], "missing")
         self.assertEqual(mirrored["parse_status"], "missing")
+
+    def test_malformed_report_mirror_retains_prior_dependencies(self):
+        with self._isolated():
+            herdr_status.report(
+                agent="claude",
+                blocking=1,
+                agents=2,
+                gates=[{"label": "Gate", "text": "Gate A"}],
+                completion="incomplete",
+                parse_status="ok",
+                session_id="sess-1",
+                pane_id="w9:p21",
+                sock_path="/tmp/herdr-test.sock",
+            )
+            herdr_status.report(
+                agent="claude",
+                blocking=0,
+                agents=0,
+                gates=[],
+                items=[],
+                decisions=[],
+                completion="incomplete",
+                parse_status="malformed",
+                workers_unknown=False,
+                session_id="sess-1",
+                pane_id="w9:p21",
+                sock_path="/tmp/herdr-test.sock",
+            )
+            with open(herdr_status.mirror_path("w9:p21"), encoding="utf-8") as fh:
+                mirrored = herdr_status.json.load(fh)
+
+        self.assertEqual([gate["text"] for gate in mirrored["gates"]], ["Gate A"])
+        self.assertEqual(mirrored["agents"], 2)
+        self.assertFalse(mirrored["workers_unknown"])
+        self.assertEqual(mirrored["parse_status"], "malformed")
 
     def test_declared_wait_is_omitted_when_state_is_not_working(self):
         with self._isolated():
@@ -2193,6 +2268,77 @@ class CodexNotifyHookTests(unittest.TestCase):
 
         self.assertEqual(report.call_count, 2)
 
+    def test_rpc_error_and_timeout_do_not_persist_the_replay_key(self):
+        import json
+        import os
+        import socket
+        import tempfile
+        import time
+
+        hook = self._hook_module()
+        root = tempfile.mkdtemp(prefix="herdr-codex-rpc-retry-test-")
+
+        def serve(mode):
+            path = os.path.join(root, f"{mode}.sock")
+            ready = threading.Event()
+
+            def run():
+                server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    server.bind(path)
+                    server.listen(1)
+                    ready.set()
+                    connection, _ = server.accept()
+                    with connection:
+                        request = json.loads(connection.recv(4096).splitlines()[0])
+                        if mode == "error":
+                            connection.sendall(
+                                (
+                                    json.dumps(
+                                        {
+                                            "id": request["id"],
+                                            "error": {"code": "rejected"},
+                                        }
+                                    )
+                                    + "\n"
+                                ).encode()
+                            )
+                        else:
+                            time.sleep(0.75)
+                finally:
+                    server.close()
+
+            thread = threading.Thread(target=run)
+            thread.start()
+            self.assertTrue(ready.wait(2))
+            return path, thread
+
+        attempts = []
+        with mock.patch.dict(
+            hook.os.environ, {"XDG_STATE_HOME": root}, clear=False
+        ):
+            for mode in ("error", "timeout"):
+                path, thread = serve(mode)
+                outcome = hook.report_unreported_turn(
+                    "w1:p1",
+                    "thread-rpc",
+                    "turn-rpc",
+                    lambda path=path: {
+                        "socket": herdr_status._rpc(
+                            path, "herdr:codex-closing-block", "pane.report_agent", {}
+                        )
+                    },
+                )
+                thread.join(2)
+                self.assertFalse(thread.is_alive())
+                attempts.append(outcome)
+
+        self.assertEqual(len(attempts), 2)
+        self.assertTrue(all(outcome is not None for outcome in attempts))
+        self.assertEqual(
+            hook._read_reported_turns(hook.reported_turns_path("w1:p1")), []
+        )
+
     def test_duplicate_old_turn_cannot_restore_a_resolved_gate(self):
         import json
         import tempfile
@@ -2339,6 +2485,39 @@ class BundleInstallerTests(unittest.TestCase):
         backup = self.root / "share" / result["backup"]
         self.assertTrue(backup.is_dir())
         self.assertIn("STALE = True", (backup / "closing_block.py").read_text())
+
+    def test_install_never_removes_the_configured_directory(self):
+        installer = self._installer_module()
+        replacement_paused = threading.Event()
+        release_replacement = threading.Event()
+        original_replace = installer.os.replace
+        observations = []
+
+        def paused_replace(source, destination):
+            if (
+                installer.Path(destination).parent == self.target
+                and not replacement_paused.is_set()
+            ):
+                replacement_paused.set()
+                self.assertTrue(release_replacement.wait(2))
+            return original_replace(source, destination)
+
+        def read_during_install():
+            self.assertTrue(replacement_paused.wait(2))
+            observations.append(self.target.is_dir())
+            observations.append(
+                all((self.target / name).is_file() for name in self.RUNTIME_FILES)
+            )
+            release_replacement.set()
+
+        reader = threading.Thread(target=read_during_install)
+        reader.start()
+        with mock.patch.object(installer.os, "replace", side_effect=paused_replace):
+            installer.install_bundle(self.source, self.target, dry_run=False)
+        reader.join(2)
+
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(observations, [True, True])
 
     def test_dry_run_validates_without_writing_target_or_backup(self):
         installer = self._installer_module()
@@ -2521,6 +2700,45 @@ class QuestionGateHookTests(unittest.TestCase):
         self.assertEqual(reports[1]["parse_status"], "ok")
         self.assertTrue(all(report["agents"] == 0 for report in reports))
         self.assertTrue(all(report["workers_unknown"] is False for report in reports))
+
+    def test_malformed_report_cannot_drop_gate_or_worker_evidence(self):
+        herdr_status.report(
+            agent="claude",
+            blocking=1,
+            agents=2,
+            gates=[{"n": 7, "label": "Gate", "text": "Gate A"}],
+            completion="incomplete",
+            parse_status="ok",
+            session_id="sess-1",
+            pane_id=self.pane_id,
+            sock_path="/tmp/herdr-question-gate-test.sock",
+        )
+        herdr_status.report(
+            agent="claude",
+            blocking=0,
+            agents=0,
+            gates=[],
+            items=[],
+            decisions=[],
+            completion="incomplete",
+            parse_status="malformed",
+            workers_unknown=False,
+            session_id="sess-1",
+            pane_id=self.pane_id,
+            sock_path="/tmp/herdr-question-gate-test.sock",
+        )
+        self.rpc.reset_mock()
+
+        self._run(self._PRE)
+
+        reports = self._reports()
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(
+            [gate["text"] for gate in reports[0]["gates"]],
+            ["Gate A", "Which color do you prefer? — Red / Green"],
+        )
+        self.assertEqual(reports[0]["agents"], 2)
+        self.assertFalse(reports[0]["workers_unknown"])
 
     def test_new_session_question_ignores_old_session_status(self):
         herdr_status.report(

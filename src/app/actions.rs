@@ -3261,6 +3261,8 @@ impl AppState {
             })
         } else {
             let now = Instant::now();
+            let closing_scope_source = source.clone();
+            let closing_turn_seq = seq;
             self.update_terminal_state_at(pane_id, now, |terminal| {
                 let mutation = terminal.set_hook_authority_report_at(
                     source,
@@ -3281,14 +3283,33 @@ impl AppState {
                         .effective_state_change
                         .clone()
                         .unwrap_or_else(|| terminal.unchanged_effective_state_change_at(now));
-                    let payload_changed = terminal.apply_closing_block_payload(
-                        closing_block.gates,
-                        closing_block.items,
-                        closing_block.decisions,
+                    terminal.set_closing_report_scope(
+                        closing_scope_source,
+                        closing_block.session_id,
+                        closing_turn_seq,
                     );
-                    let agents_changed = terminal
-                        .apply_closing_report_subagents_at(closing_block.agents, now)
-                        .is_some();
+                    let task_changed = terminal.apply_closing_task_report(
+                        closing_block.completion,
+                        closing_block.external_wait,
+                        closing_block.parse_status,
+                        closing_block.workers_unknown,
+                        now,
+                    );
+                    let (payload_changed, agents_changed) =
+                        if closing_block.dependencies_authoritative {
+                            (
+                                terminal.apply_closing_block_payload(
+                                    closing_block.gates,
+                                    closing_block.items,
+                                    closing_block.decisions,
+                                ),
+                                terminal
+                                    .apply_closing_report_subagents_at(closing_block.agents, now)
+                                    .is_some(),
+                            )
+                        } else {
+                            (false, false)
+                        };
                     let after = terminal.unchanged_effective_state_change_at(now);
                     mutation.effective_state_change = Some(EffectiveStateChange {
                         previous_agent_label: before.previous_agent_label,
@@ -3300,7 +3321,8 @@ impl AppState {
                         state: after.state,
                         presentation: after.presentation,
                     });
-                    mutation.sidebar_projection_changed |= payload_changed || agents_changed;
+                    mutation.sidebar_projection_changed |=
+                        task_changed || payload_changed || agents_changed;
                 }
                 Some(mutation)
             })
@@ -6823,6 +6845,12 @@ mod tests {
                 items: Vec::new(),
                 decisions: Vec::new(),
                 agents: Some(3),
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
+                dependencies_authoritative: true,
+                session_id: None,
             }),
         });
         assert_eq!(started.len(), 1);
@@ -6846,6 +6874,12 @@ mod tests {
                 items: Vec::new(),
                 decisions: Vec::new(),
                 agents: Some(0),
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
+                dependencies_authoritative: true,
+                session_id: None,
             }),
         });
         assert_eq!(finished.len(), 1);

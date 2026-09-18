@@ -1661,6 +1661,12 @@ mod tests {
                 items: Vec::new(),
                 decisions: Vec::new(),
                 agents: Some(3),
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
+                dependencies_authoritative: true,
+                session_id: None,
             }),
         });
         state.workspaces[0].tabs[0]
@@ -1689,6 +1695,12 @@ mod tests {
                 items: Vec::new(),
                 decisions: Vec::new(),
                 agents: Some(0),
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
+                dependencies_authoritative: true,
+                session_id: None,
             }),
         });
         let settled_at = now + Duration::from_secs(1);

@@ -15,6 +15,7 @@ APP_SERVER_SOURCES = (
     *sorted((PROJECT_ROOT / "src" / "app").rglob("*.rs")),
     *sorted((PROJECT_ROOT / "src" / "server").rglob("*.rs")),
 )
+RUST_SOURCES = tuple(sorted((PROJECT_ROOT / "src").rglob("*.rs")))
 TEST_MODULE = re.compile(r"(?m)^#\[cfg\(test\)\]\s*\nmod\s+\w+\s*\{")
 INPUT_STATE_CALL = re.compile(r"(?:\.|::)input_state\b")
 KEYBOARD_STATE_ANSI_CALL = re.compile(
@@ -198,7 +199,60 @@ class UiHotPathArchitectureTests(unittest.TestCase):
 
         self.assertNotIn("has_pending_human_input", pane_projection)
         self.assertEqual(pane_projection.count(".closing_items"), 1)
+        pane_details = function_body(
+            (PROJECT_ROOT / "src" / "workspace" / "aggregate.rs").read_text(
+                encoding="utf-8"
+            ),
+            "fn pane_details",
+        )
+        self.assertNotIn("metadata_tokens_for_api", pane_details)
         self.assertNotIn("to_ascii_lowercase", item_classification)
+
+    def test_terminal_closing_report_is_the_only_runtime_fact_owner(self) -> None:
+        terminal_state = production_code(
+            (PROJECT_ROOT / "src" / "terminal" / "state.rs").read_text(
+                encoding="utf-8"
+            )
+        )
+        terminal_fields_start = terminal_state.index("pub struct TerminalState {")
+        terminal_fields = terminal_state[
+            terminal_fields_start : terminal_state.index(
+                "impl TerminalState", terminal_fields_start
+            )
+        ]
+        self.assertIn("closing_report: Option<ClosingReport>", terminal_fields)
+        for legacy_field in (
+            "closing_gates:",
+            "closing_items:",
+            "closing_decisions:",
+            "closing_report_subagents:",
+            "closing_idle:",
+            "closing_contract:",
+            "closing_contract_met:",
+            "closing_contract_met_at:",
+        ):
+            self.assertNotIn(legacy_field, terminal_fields)
+
+        violations = []
+        direct_read = re.compile(
+            r"\bterminal\.closing_(?:gates|items|decisions|idle|contract"
+            r"|contract_met|contract_met_at|report_subagents)\b(?!\s*\()"
+        )
+        legacy_token_read = re.compile(r"metadata_tokens\s*\.\s*get\s*\(\s*\"closing_")
+        for path in RUST_SOURCES:
+            code = production_code(path.read_text(encoding="utf-8"))
+            for pattern in (direct_read, legacy_token_read):
+                for match in pattern.finditer(code):
+                    violations.append(
+                        f"{path.relative_to(PROJECT_ROOT)}:"
+                        f"{code.count(chr(10), 0, match.start()) + 1}"
+                    )
+        self.assertEqual(
+            violations,
+            [],
+            "Closing facts must be read through TerminalState's ClosingReport accessors:\n"
+            + "\n".join(violations),
+        )
 
     def test_scanner_ignores_non_production_references(self) -> None:
         source = '''

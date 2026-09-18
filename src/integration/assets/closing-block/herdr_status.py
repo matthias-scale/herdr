@@ -32,7 +32,7 @@ from typing import Any
 VERSION = 2
 
 
-STATES = ("idle", "working", "blocked")
+STATES = ("idle", "working", "blocked", "unknown")
 
 
 def state_for(
@@ -190,11 +190,12 @@ def write_mirror(pane_id: str, payload: dict) -> str | None:
             ):
                 return None
             mirror_payload = dict(payload)
-            if (
-                payload.get("parse_status") == "missing"
-                and isinstance(prior, dict)
+            same_session = (
+                isinstance(prior, dict)
                 and prior.get("session_id") == payload.get("session_id")
-            ):
+            )
+            parse_status = payload.get("parse_status")
+            if same_session and parse_status in {"missing", "malformed"}:
                 for key in (
                     "blocking",
                     "agents",
@@ -216,7 +217,7 @@ def write_mirror(pane_id: str, payload: dict) -> str | None:
         return None
 
 
-def _rpc(sock_path: str, source: str, method: str, params: dict) -> None:
+def _rpc(sock_path: str, source: str, method: str, params: dict) -> bool:
     req = {
         "id": f"{source}:{int(time.time() * 1000)}:{random.randrange(10**6):06d}",
         "method": method,
@@ -227,10 +228,18 @@ def _rpc(sock_path: str, source: str, method: str, params: dict) -> None:
     try:
         client.connect(sock_path)
         client.sendall((json.dumps(req) + "\n").encode())
-        try:
-            client.recv(4096)
-        except OSError:
-            pass
+        raw = client.recv(4096)
+        if not raw:
+            return False
+        response = json.loads(raw.splitlines()[0])
+        return (
+            isinstance(response, dict)
+            and response.get("id") == req["id"]
+            and "result" in response
+            and "error" not in response
+        )
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
     finally:
         client.close()
 
@@ -263,7 +272,7 @@ def report(
     contract_met: bool | None = None,
     completion: str = "missing",
     external_wait: str | None = None,
-    parse_status: str = "missing",
+    parse_status: str = "ok",
     workers_unknown: bool = False,
     session_id: str | None = None,
     session_path: str | None = None,
@@ -310,14 +319,14 @@ def report(
     external_wait = external_wait.strip() if isinstance(external_wait, str) else None
     external_wait = external_wait or None
     workers_unknown = workers_unknown is True
-    dependencies_authoritative = (
-        parse_status != "missing"
-        or bool(gate_objects or item_objects or decision_objects)
-    )
+    dependencies_authoritative = parse_status == "ok"
     reported_agents = agents if dependencies_authoritative and not workers_unknown else None
+    requested_state = state
     state = resolve_state(
         blocking, agents, state, len(action_points), external_wait
     )
+    if not dependencies_authoritative and requested_state != "working":
+        state = "unknown"
     payload = {
         "v": VERSION,
         "agent": agent,
@@ -386,21 +395,26 @@ def report(
 
     gate_texts = [_item_text(gate) for gate in gate_objects]
     tokens = {
-        "closing_blocking": str(blocking),
-        "closing_idle": "1" if state == "idle" else "0",
-        "closing_agent_names": "; ".join(agent_names)[:200],
-        "closing_gates": "; ".join(gate_texts)[:200],
         "closing_completion": completion,
-        "closing_wait": (external_wait or "")[:200],
         "closing_parse": parse_status,
-        "closing_workers_unknown": "1" if workers_unknown else "0",
         "session_title": (title or "")[:120],
     }
-    if reported_agents is not None:
-        tokens["closing_agents"] = str(reported_agents)
-    if contract and isinstance(contract_met, bool):
-        tokens["closing_contract"] = contract[:200]
-        tokens["closing_contract_met"] = "1" if contract_met else "0"
+    if dependencies_authoritative:
+        tokens.update(
+            {
+                "closing_blocking": str(blocking),
+                "closing_idle": "1" if state == "idle" else "0",
+                "closing_agent_names": "; ".join(agent_names)[:200],
+                "closing_gates": "; ".join(gate_texts)[:200],
+                "closing_wait": (external_wait or "")[:200],
+                "closing_workers_unknown": "1" if workers_unknown else "0",
+            }
+        )
+        if reported_agents is not None:
+            tokens["closing_agents"] = str(reported_agents)
+        if contract and isinstance(contract_met, bool):
+            tokens["closing_contract"] = contract[:200]
+            tokens["closing_contract_met"] = "1" if contract_met else "0"
     meta_params = {
         "pane_id": pane_id,
         "source": source,
@@ -417,11 +431,12 @@ def report(
         agent_params["agent_session_id"] = session_id
         meta_params["agent_session_id"] = session_id
 
-    try:
-        _rpc(sock_path, source, "pane.report_agent_session", session_params)
-        _rpc(sock_path, source, "pane.report_agent", agent_params)
-        _rpc(sock_path, source, "pane.report_metadata", meta_params)
-        outcome["socket"] = True
-    except OSError:
-        pass
+    session_delivered = _rpc(
+        sock_path, source, "pane.report_agent_session", session_params
+    )
+    report_delivered = _rpc(sock_path, source, "pane.report_agent", agent_params)
+    metadata_delivered = _rpc(sock_path, source, "pane.report_metadata", meta_params)
+    outcome["socket"] = bool(
+        session_delivered and report_delivered and metadata_delivered
+    )
     return outcome
