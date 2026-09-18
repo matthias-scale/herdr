@@ -1135,12 +1135,13 @@ impl TerminalState {
     fn clear_closing_task_report(&mut self, now: Instant) -> bool {
         let _ = now;
         let empty = ClosingReport::default();
-        let changed = self
+        let report_changed = self
             .closing_report
             .as_ref()
             .is_some_and(|report| report != &empty);
         self.closing_report = Some(empty);
-        changed
+        let legacy_tokens_changed = self.metadata_tokens.remove_prefixed("closing_");
+        report_changed || legacy_tokens_changed
     }
 
     pub(crate) fn apply_closing_contract_tokens(
@@ -3488,6 +3489,14 @@ impl TerminalState {
         &mut self,
         observed_at: Instant,
     ) -> Option<TerminalStateMutation> {
+        self.retire_hook_authority_at(observed_at, true)
+    }
+
+    fn retire_hook_authority_at(
+        &mut self,
+        observed_at: Instant,
+        clear_report: bool,
+    ) -> Option<TerminalStateMutation> {
         let should_retire = self.hook_authority.as_ref().is_some_and(|authority| {
             authority.state != AgentState::Working
                 && authority.retired_at.is_none()
@@ -3517,7 +3526,8 @@ impl TerminalState {
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let authority = self.hook_authority.as_mut()?;
         authority.retired_at = Some(observed_at);
-        let task_report_cleared = retiring_closing_report && self.clear_closing_task_report(now);
+        let task_report_cleared =
+            clear_report && retiring_closing_report && self.clear_closing_task_report(now);
         if task_report_cleared {
             self.revision = self.revision.wrapping_add(1);
         }
@@ -3542,7 +3552,7 @@ impl TerminalState {
         &mut self,
         observed_at: Instant,
     ) -> Option<TerminalStateMutation> {
-        self.retire_output_inconsistent_hook_authority_at(observed_at)
+        self.retire_hook_authority_at(observed_at, false)
     }
 
     pub fn full_lifecycle_hook_authority_deadline(&self, timeout: Duration) -> Option<Instant> {
@@ -4781,7 +4791,7 @@ mod tests {
             now,
         );
 
-        assert_eq!(terminal.sidebar_projection(true), (AgentState::Idle, false));
+        assert_eq!(terminal.sidebar_projection(true), (AgentState::Idle, true));
     }
 
     #[test]
@@ -6619,7 +6629,7 @@ mod tests {
             Some(1000),
             now,
         );
-        assert_eq!(terminal.sidebar_projection(true), (AgentState::Idle, false));
+        assert_eq!(terminal.sidebar_projection(true), (AgentState::Idle, true));
 
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Claude),
@@ -7005,7 +7015,7 @@ mod tests {
         assert!(terminal.set_active_subagents(Some(0)));
         assert_eq!(
             terminal.sidebar_projection(true),
-            (AgentState::Idle, false),
+            (AgentState::Idle, true),
             "native zero and explicit completion settle the earlier unknown worker claim"
         );
     }
@@ -7112,7 +7122,7 @@ mod tests {
     }
 
     #[test]
-    fn an_omitted_agent_count_restores_the_legacy_metadata_fallback() {
+    fn an_omitted_agent_count_never_reads_the_legacy_metadata_mirror() {
         let now = Instant::now();
         let mut terminal = subagent_claim_terminal(now);
         terminal
@@ -7129,8 +7139,8 @@ mod tests {
             .apply_closing_report_subagents_at(None, now + Duration::from_secs(3))
             .expect("legacy report omits the direct count");
 
-        assert_eq!(terminal.effective_active_subagents(), Some(4));
-        assert!(terminal.waiting_on_agents());
+        assert_eq!(terminal.effective_active_subagents(), None);
+        assert!(!terminal.waiting_on_agents());
     }
 
     #[test]
@@ -7418,14 +7428,14 @@ mod tests {
     }
 
     #[test]
-    fn an_expired_wait_suppresses_an_old_live_subagent_count() {
+    fn an_expired_adapter_wait_never_suppresses_a_live_native_subagent_count() {
         let now = Instant::now();
         let mut terminal = subagent_claim_terminal(now);
         terminal.set_active_subagents(Some(3));
         terminal
             .mark_agent_status_stale_at(now + TEST_SUBAGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
             .expect("watchdog expires the subagent wait");
-        assert_eq!(terminal.effective_active_subagents(), Some(0));
+        assert_eq!(terminal.effective_active_subagents(), Some(3));
 
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Claude),

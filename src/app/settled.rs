@@ -1656,7 +1656,7 @@ mod tests {
             eta_s: None,
             reported_at: None,
             session_ref: None,
-            closing_block: Some(crate::events::ClosingBlockReport {
+            closing_block: Some(Box::new(crate::events::ClosingBlockReport {
                 gates: Vec::new(),
                 items: Vec::new(),
                 decisions: Vec::new(),
@@ -1667,7 +1667,7 @@ mod tests {
                 workers_unknown: None,
                 dependencies_authoritative: true,
                 session_id: None,
-            }),
+            })),
         });
         state.workspaces[0].tabs[0]
             .panes
@@ -1690,7 +1690,7 @@ mod tests {
             eta_s: None,
             reported_at: None,
             session_ref: None,
-            closing_block: Some(crate::events::ClosingBlockReport {
+            closing_block: Some(Box::new(crate::events::ClosingBlockReport {
                 gates: Vec::new(),
                 items: Vec::new(),
                 decisions: Vec::new(),
@@ -1701,7 +1701,7 @@ mod tests {
                 workers_unknown: None,
                 dependencies_authoritative: true,
                 session_id: None,
-            }),
+            })),
         });
         let settled_at = now + Duration::from_secs(1);
         assert_eq!(

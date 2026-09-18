@@ -3225,7 +3225,7 @@ impl AppState {
                     eta_s,
                     reported_at,
                     session_ref,
-                    closing_block,
+                    closing_block: closing_block.map(|report| *report),
                 });
                 (updates, Some(accepted))
             }
@@ -3476,7 +3476,7 @@ impl AppState {
                     eta_s,
                     reported_at,
                     session_ref,
-                    closing_block,
+                    closing_block: closing_block.map(|report| *report),
                 })
                 .0
             }
@@ -3580,7 +3580,11 @@ impl AppState {
                     pane_id,
                     suppress_completion,
                     |terminal| {
-                        terminal.retire_blocked_full_lifecycle_hook_authority_at(observed_at)
+                        if suppress_completion {
+                            terminal.retire_blocked_full_lifecycle_hook_authority_at(observed_at)
+                        } else {
+                            terminal.retire_output_inconsistent_hook_authority_at(observed_at)
+                        }
                     },
                 )
                 .into_iter()
@@ -6847,7 +6851,7 @@ mod tests {
             eta_s: None,
             reported_at: None,
             session_ref: None,
-            closing_block: Some(crate::events::ClosingBlockReport {
+            closing_block: Some(Box::new(crate::events::ClosingBlockReport {
                 gates: Vec::new(),
                 items: Vec::new(),
                 decisions: Vec::new(),
@@ -6858,7 +6862,7 @@ mod tests {
                 workers_unknown: None,
                 dependencies_authoritative: true,
                 session_id: None,
-            }),
+            })),
         });
         assert_eq!(started.len(), 1);
         assert!(!started[0].previous_waiting_on_agents);
@@ -6876,7 +6880,7 @@ mod tests {
             eta_s: None,
             reported_at: None,
             session_ref: None,
-            closing_block: Some(crate::events::ClosingBlockReport {
+            closing_block: Some(Box::new(crate::events::ClosingBlockReport {
                 gates: Vec::new(),
                 items: Vec::new(),
                 decisions: Vec::new(),
@@ -6887,7 +6891,7 @@ mod tests {
                 workers_unknown: None,
                 dependencies_authoritative: true,
                 session_id: None,
-            }),
+            })),
         });
         assert_eq!(finished.len(), 1);
         assert!(finished[0].previous_waiting_on_agents);

@@ -95,6 +95,12 @@ impl MetadataTokens {
             .collect()
     }
 
+    pub(crate) fn remove_prefixed(&mut self, prefix: &str) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|key, _| !key.starts_with(prefix));
+        self.entries.len() != before
+    }
+
     pub(crate) fn next_expiry(&self) -> Option<Instant> {
         self.entries
             .values()

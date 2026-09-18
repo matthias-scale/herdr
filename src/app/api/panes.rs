@@ -1626,7 +1626,7 @@ impl App {
                 let (gates, items, decisions) = arrays
                     .map(|((gates, items), decisions)| (gates, items, decisions))
                     .unwrap_or_default();
-                crate::events::ClosingBlockReport {
+                Box::new(crate::events::ClosingBlockReport {
                     gates,
                     items,
                     decisions,
@@ -1639,7 +1639,7 @@ impl App {
                     workers_unknown,
                     dependencies_authoritative,
                     session_id: params.agent_session_id.clone(),
-                }
+                })
             });
         let report_state = if report_wait.is_some() {
             crate::detect::AgentState::Working
@@ -6713,7 +6713,7 @@ mod tests {
                 .unwrap();
 
         let pane = app.pane_info(0, internal_pane_id).unwrap();
-        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Done);
+        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Idle);
         assert_eq!(pane.wait, None);
         assert!(!pane.tokens.contains_key("closing_wait"));
     }
@@ -7046,6 +7046,11 @@ mod tests {
             "claude",
             "session-current",
         );
+        app.state.active = None;
+        app.state.workspaces[0]
+            .pane_state_mut(internal_pane_id)
+            .expect("reported pane")
+            .seen = false;
 
         let requests = closing_block_text_adapter_requests(
             &pane_id,
