@@ -318,9 +318,7 @@ fn append_pending(pending: &mut PendingLinkBytes, mut bytes: &[u8]) {
                 .then_some((0, 1))
                 .or_else(|| open_sequence_terminator(kind, bytes));
             let Some((terminator, terminator_len)) = terminator else {
-                if kind == OpenSequenceKind::Osc && bytes.last() == Some(&b'\x1b') {
-                    pending.truncated_sequence = Some(OpenSequenceKind::OscEscape);
-                }
+                pending.truncated_sequence = Some(truncated_sequence_kind(kind, bytes));
                 return;
             };
             if kind == OpenSequenceKind::Url {
@@ -376,11 +374,7 @@ fn discard_overlong_terminal_sequence(pending: &mut PendingLinkBytes) {
         &mut pending.queued_osc8_urls,
         &mut extracted.links.osc8_urls,
     );
-    let kind = if kind == OpenSequenceKind::Osc && pending.bytes.last() == Some(&b'\x1b') {
-        OpenSequenceKind::OscEscape
-    } else {
-        kind
-    };
+    let kind = truncated_sequence_kind(kind, &pending.bytes);
     pending.bytes.clear();
     pending.truncated_sequence = Some(kind);
 }
@@ -406,9 +400,17 @@ fn pending_sequence_carry(bytes: &[u8]) -> (Vec<u8>, Option<OpenSequenceKind>) {
         let carry = (kind == OpenSequenceKind::Url)
             .then(|| bytes[start..end].to_vec())
             .unwrap_or_default();
-        return (carry, Some(kind));
+        return (carry, Some(truncated_sequence_kind(kind, bytes)));
     }
     (bytes[start..end].to_vec(), None)
+}
+
+fn truncated_sequence_kind(kind: OpenSequenceKind, bytes: &[u8]) -> OpenSequenceKind {
+    if kind == OpenSequenceKind::Osc && bytes.last() == Some(&b'\x1b') {
+        OpenSequenceKind::OscEscape
+    } else {
+        kind
+    }
 }
 
 fn open_sequence_terminator(kind: OpenSequenceKind, bytes: &[u8]) -> Option<(usize, usize)> {
@@ -1560,6 +1562,26 @@ mod tests {
 
         let links = gate.take_links().expect("link extraction after split ST");
         assert_eq!(links.output_urls, vec!["https://after.example/path"]);
+        assert!(links.osc8_urls.is_empty());
+    }
+
+    #[test]
+    fn pending_rollover_preserves_trailing_escape_for_split_st() {
+        let gate = LinkExtractionGate::default();
+        let mut chunk = b"\x1b]8;;https://too-long.example.test/".to_vec();
+        chunk.resize(MAX_PENDING_LINK_BYTES, b'a');
+        *chunk.last_mut().expect("non-empty pending buffer") = b'\x1b';
+        chunk.extend_from_slice(b"\\\nhttps://after-rollover.example/path\n");
+
+        gate.observe_chunk(&chunk);
+
+        let links = gate
+            .take_links()
+            .expect("link extraction after pending rollover");
+        assert_eq!(
+            links.output_urls,
+            vec!["https://after-rollover.example/path"]
+        );
         assert!(links.osc8_urls.is_empty());
     }
 
