@@ -951,13 +951,6 @@ impl App {
         self.runtime_tab_focus("tui.tab.focus", tab_id);
     }
 
-    pub(crate) fn focus_workspace_tab_via_api(&mut self, ws_idx: usize, tab_idx: usize) {
-        let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
-            return;
-        };
-        self.runtime_tab_focus("tui.sidebar.tab.focus", tab_id);
-    }
-
     /// Windows are Herdr tabs. Canonical workspace/vector/tab order is used so
     /// agent lifecycle or cwd changes cannot affect global navigation.
     fn focus_relative_window(&mut self, forward: bool) {

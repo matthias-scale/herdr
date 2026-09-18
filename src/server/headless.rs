@@ -4108,9 +4108,18 @@ impl HeadlessServer {
                 }
                 _ => false,
             });
+        let source_mode = if source_is_full_app
+            && self
+                .clients
+                .get(&client_id)
+                .is_some_and(|client| client.sidebar_presentation.context_menu.is_some())
+        {
+            crate::app::Mode::ContextMenu
+        } else {
+            self.app.state.mode
+        };
         let render_neutral_mouse_motion =
-            events_are_render_neutral_mouse_motion(&events, self.app.state.mode)
-                && !hover_motion_changes;
+            events_are_render_neutral_mouse_motion(&events, source_mode) && !hover_motion_changes;
         if let Some(client) = self.clients.get_mut(&client_id) {
             if host_surface_redraw {
                 client.request_repaint();
@@ -5840,6 +5849,9 @@ impl HeadlessServer {
         };
         if client.pomodoro_presentation.owns_input() {
             retained_fallback!("pomodoro_overlay");
+        }
+        if client.sidebar_presentation.context_menu.is_some() {
+            retained_fallback!("context_menu");
         }
         if client.deferred_render() != DeferredRender::None {
             retained_fallback!("render_pending");
@@ -14407,6 +14419,40 @@ next_tab = ""
         assert!(server.handle_server_event(motion()));
         assert_eq!(server.foreground_client_id, Some(2));
         assert!(!server.handle_server_event(motion()));
+    }
+
+    #[test]
+    fn attached_context_menu_keeps_mouse_motion_rendering_client_local_hover() {
+        let mut server = test_headless_server();
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.clients.insert(1, test_app_client(Some(true), 1));
+        server.clients.insert(2, test_app_client(Some(true), 2));
+        server
+            .clients
+            .get_mut(&2)
+            .expect("second client")
+            .sidebar_presentation
+            .context_menu = Some(crate::app::state::ContextMenuState {
+            kind: crate::app::state::ContextMenuKind::Workspace { ws_idx: 0 },
+            x: 4,
+            y: 3,
+            list: crate::app::state::MenuListState::new(0),
+        });
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        let motion = || ServerEvent::ClientInputEvents {
+            client_id: 2,
+            events: vec![crate::protocol::ClientInputEvent::Mouse {
+                kind: crate::protocol::ClientMouseKind::Moved,
+                column: 10,
+                row: 5,
+                modifiers: 0,
+            }],
+        };
+
+        assert!(server.handle_server_event(motion()));
+        assert_eq!(server.foreground_client_id, Some(2));
+        assert!(server.handle_server_event(motion()));
     }
 
     #[test]

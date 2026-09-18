@@ -1052,7 +1052,10 @@ impl AppState {
             })
     }
 
-    pub(super) fn collapsed_agent_detail_target_at(&self, row: u16) -> Option<(usize, usize)> {
+    pub(super) fn collapsed_agent_detail_target_at(
+        &self,
+        row: u16,
+    ) -> Option<(usize, crate::layout::PaneId)> {
         if !self.sidebar_collapsed {
             return None;
         }
@@ -1066,7 +1069,7 @@ impl AppState {
         crate::ui::sidebar_rows(self)
             .get(row_idx)
             .and_then(|entry| match entry {
-                crate::ui::SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
+                crate::ui::SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.pane_id)),
                 crate::ui::SidebarRow::Workspace { .. }
                 | crate::ui::SidebarRow::RemoteAgent { .. }
                 | crate::ui::SidebarRow::SectionHeader { .. }
@@ -1074,7 +1077,7 @@ impl AppState {
                 | crate::ui::SidebarRow::SymphonyJob { .. }
                 | crate::ui::SidebarRow::SymphonyEmpty
                 | crate::ui::SidebarRow::AgentRun { .. } => None,
-                crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
+                crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.pane_id)),
             })
     }
 
@@ -1287,6 +1290,11 @@ impl super::super::App {
             time_draft: Some(prefill),
             error: None,
         });
+        self.state.mode = if self.state.active.is_some() {
+            crate::app::Mode::Terminal
+        } else {
+            crate::app::Mode::Navigate
+        };
     }
 
     pub(crate) fn apply_sidebar_snooze_menu_action(&mut self, index: usize) {
@@ -3863,6 +3871,60 @@ mod tests {
             second_pane
         );
         assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn clicking_collapsed_snoozed_row_focuses_its_exact_pane() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("split");
+        let active_pane = workspace.tabs[0].root_pane;
+        let snoozed_pane = workspace.test_split(Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(active_pane);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        for pane_id in [active_pane, snoozed_pane] {
+            let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("terminal")
+                .detected_agent = Some(Agent::Pi);
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.sidebar_collapsed = true;
+        app.state.view.sidebar_rect = Rect::new(0, 0, 4, 20);
+        app.state.view.terminal_area = Rect::new(4, 0, 80, 20);
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.state.snooze_pane_at(0, snoozed_pane, deadline));
+        app.state.refresh_local_agent_panel_identities();
+        app.state.reconcile_sidebar_presentation();
+
+        let row = crate::ui::sidebar_rows(&app.state)
+            .iter()
+            .position(|entry| {
+                matches!(
+                    entry,
+                    crate::ui::SidebarRow::Agent { entry, .. }
+                        | crate::ui::SidebarRow::Tab { entry, .. }
+                        if entry.pane_id == snoozed_pane
+                )
+            })
+            .expect("snoozed pane row") as u16;
+        let (content, _, _) = crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            content.x,
+            content.y + row,
+        ));
+
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.focused(),
+            snoozed_pane
+        );
     }
 
     #[test]

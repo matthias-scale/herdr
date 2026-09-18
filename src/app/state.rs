@@ -1551,6 +1551,9 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) snooze: Option<SidebarSnoozeUiState>,
     pub(crate) settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) settled_menu_selected: usize,
+    /// Right-click menu owned by this attached client. Runtime pane state stays
+    /// shared; only the menu target and selection move with the presentation.
+    pub(crate) context_menu: Option<ContextMenuState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3341,6 +3344,7 @@ impl PaneMenuWorkLinkAction {
 }
 
 /// Right-click context menu state.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextMenuState {
     pub kind: ContextMenuKind,
     pub x: u16,
@@ -3351,10 +3355,14 @@ pub struct ContextMenuState {
 impl ContextMenuState {
     #[cfg(test)]
     pub fn items(&self) -> Vec<&'static str> {
-        self.items_for_snooze(false)
+        self.items_for_pane_state(false, true)
     }
 
-    pub(crate) fn items_for_snooze(&self, pane_snoozed: bool) -> Vec<&'static str> {
+    pub(crate) fn items_for_pane_state(
+        &self,
+        pane_snoozed: bool,
+        pane_settleable: bool,
+    ) -> Vec<&'static str> {
         match &self.kind {
             ContextMenuKind::Workspace { .. } => vec!["Rename", "Close"],
             ContextMenuKind::GitWorkspace {
@@ -3401,7 +3409,7 @@ impl ContextMenuState {
                         items.extend([SNOOZE_ITEM, SET_TIME_ITEM]);
                     }
                 }
-                if settle_pane_id.is_some() {
+                if settle_pane_id.is_some() && pane_settleable {
                     items.push(SETTLE_ITEM);
                 }
                 items.push("Close");
@@ -5208,6 +5216,17 @@ impl AppState {
             &mut self.sidebar_settled_menu_selected,
             &mut other.settled_menu_selected,
         );
+        let app_context_menu_mode = self.mode == Mode::ContextMenu;
+        std::mem::swap(&mut self.context_menu, &mut other.context_menu);
+        if self.context_menu.is_some() {
+            self.mode = Mode::ContextMenu;
+        } else if app_context_menu_mode {
+            self.mode = if self.active.is_some() {
+                Mode::Terminal
+            } else {
+                Mode::Navigate
+            };
+        }
     }
 
     /// Open `surface` as a tab and make it active. Already-open surfaces are
@@ -7345,6 +7364,56 @@ mod tests {
             Some((&target, (9, 3), 2, Some("14:30"), Some("example")))
         );
         assert!(app.sidebar_focused);
+    }
+
+    #[test]
+    fn context_menu_and_mode_are_isolated_between_sidebar_presentations() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("context-menu")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let mut first_client = SidebarPresentationState::default();
+        let mut second_client = SidebarPresentationState::default();
+
+        app.swap_sidebar_presentation(&mut first_client);
+        app.context_menu = Some(ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+                settle_pane_id: Some(pane_id),
+                snooze_target: Some(pane_id),
+                starred: false,
+                has_subgroup: false,
+            },
+            x: 7,
+            y: 3,
+            list: MenuListState::new(4),
+        });
+        app.mode = Mode::ContextMenu;
+        app.swap_sidebar_presentation(&mut first_client);
+
+        app.swap_sidebar_presentation(&mut second_client);
+        assert!(app.context_menu.is_none());
+        assert_eq!(app.mode, Mode::Terminal);
+        app.swap_sidebar_presentation(&mut second_client);
+
+        app.swap_sidebar_presentation(&mut first_client);
+        assert_eq!(app.mode, Mode::ContextMenu);
+        let menu = app.context_menu.as_ref().expect("first client's menu");
+        assert_eq!(
+            menu.kind,
+            ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+                settle_pane_id: Some(pane_id),
+                snooze_target: Some(pane_id),
+                starred: false,
+                has_subgroup: false,
+            }
+        );
+        assert_eq!(menu.list.highlighted, 4);
     }
 
     #[test]

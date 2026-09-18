@@ -940,7 +940,7 @@ fn selected_local_row_pane(
             .get(entry.ws_idx)
             .is_some_and(|workspace| workspace.active_tab_index() == entry.tab_idx)
     {
-        return app.workspaces[entry.ws_idx].focused_pane_id();
+        return Some(entry.pane_id);
     }
     app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id)
         .then_some(entry.pane_id)
@@ -6881,8 +6881,14 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                         buf[(x, y)].set_bg(p.active_row_bg);
                     }
                 }
-                if app.pane_is_settled(entry.ws_idx, entry.pane_id) {
-                    dim_settled_row(frame, Rect::new(ws_area.x, y, ws_area.width, 1), p.overlay0);
+                if app.pane_is_settled(entry.ws_idx, entry.pane_id)
+                    || app.pane_is_snoozed(entry.ws_idx, entry.pane_id)
+                {
+                    dim_inactive_pane_row(
+                        frame,
+                        Rect::new(ws_area.x, y, ws_area.width, 1),
+                        p.overlay0,
+                    );
                 }
             }
             SidebarRow::RemoteAgent { entry, .. } => {
@@ -6939,8 +6945,14 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                         buf[(x, y)].set_bg(p.active_row_bg);
                     }
                 }
-                if app.pane_is_settled(entry.ws_idx, entry.pane_id) {
-                    dim_settled_row(frame, Rect::new(ws_area.x, y, ws_area.width, 1), p.overlay0);
+                if app.pane_is_settled(entry.ws_idx, entry.pane_id)
+                    || app.pane_is_snoozed(entry.ws_idx, entry.pane_id)
+                {
+                    dim_inactive_pane_row(
+                        frame,
+                        Rect::new(ws_area.x, y, ws_area.width, 1),
+                        p.overlay0,
+                    );
                 }
             }
             SidebarRow::SectionHeader { title, .. } => {
@@ -8077,7 +8089,7 @@ fn render_tab_card(
     if app.pane_is_settled(entry.ws_idx, entry.pane_id)
         || app.pane_is_snoozed(entry.ws_idx, entry.pane_id)
     {
-        dim_settled_row(frame, card.rect, app.palette.overlay0);
+        dim_inactive_pane_row(frame, card.rect, app.palette.overlay0);
         let target = crate::app::state::PaneFocusTarget {
             workspace_id: app.workspaces[entry.ws_idx].id.clone(),
             pane_id: entry.pane_id,
@@ -8127,12 +8139,12 @@ fn render_agent_card(
     if app.pane_is_settled(detail.ws_idx, detail.pane_id)
         || app.pane_is_snoozed(detail.ws_idx, detail.pane_id)
     {
-        dim_settled_row(frame, rect, app.palette.overlay0);
+        dim_inactive_pane_row(frame, rect, app.palette.overlay0);
     }
 }
 
 /// Preserve the frozen row layout, then replace only its foreground styling.
-fn dim_settled_row(frame: &mut Frame, rect: Rect, color: ratatui::style::Color) {
+pub(super) fn dim_inactive_pane_row(frame: &mut Frame, rect: Rect, color: ratatui::style::Color) {
     let buffer = frame.buffer_mut();
     for y in rect.y..rect.bottom() {
         for x in rect.x..rect.right() {
@@ -16362,6 +16374,30 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn collapsed_sidebar_dims_snoozed_panes_like_expanded_rows() {
+        let (mut app, first_pane, _) = collapsed_agent_app();
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.snooze_pane_at(0, first_pane, deadline));
+        let row_position = sidebar_rows(&app)
+            .iter()
+            .filter(|row| matches!(row, SidebarRow::Agent { .. } | SidebarRow::Tab { .. }))
+            .position(|row| match row {
+                SidebarRow::Agent { entry, .. } | SidebarRow::Tab { entry, .. } => {
+                    entry.pane_id == first_pane
+                }
+                _ => false,
+            })
+            .expect("snoozed pane row");
+
+        let area = Rect::new(0, 0, 4, 14);
+        let rows = collapsed_agent_row_styles(&app, area, 3);
+        let styles = &rows[row_position];
+        assert!(styles.iter().all(|style| {
+            style.fg == Some(app.palette.overlay0) && style.add_modifier.contains(Modifier::DIM)
+        }));
+    }
+
+    #[test]
     fn collapsed_sidebar_does_not_highlight_agents_without_active_workspace() {
         let (mut app, _, _) = collapsed_agent_app();
         app.active = None;
@@ -21651,6 +21687,52 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 assert_ne!(icon.fg, app.palette.green, "width={width}");
             }
         }
+    }
+
+    #[test]
+    fn active_row_controls_keep_the_rows_pane_when_a_snoozed_sibling_has_focus() {
+        let mut app = app_with_agents(&["split"]);
+        let active_pane = app.workspaces[0].tabs[0].root_pane;
+        let snoozed_pane = app.workspaces[0].test_split(Direction::Horizontal);
+        app.ensure_test_terminals();
+        for pane_id in [active_pane, snoozed_pane] {
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).expect("terminal");
+            terminal.detected_agent = Some(Agent::Pi);
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
+        }
+        app.workspaces[0].tabs[0].layout.focus_pane(snoozed_pane);
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.snooze_pane_at(0, snoozed_pane, deadline));
+        app.refresh_local_agent_panel_identities();
+        app.reconcile_sidebar_presentation();
+
+        let (entry, depth, tab) = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Agent { entry, depth } if entry.pane_id == active_pane => {
+                    Some((entry, depth, false))
+                }
+                SidebarRow::Tab { entry, depth } if entry.pane_id == active_pane => {
+                    Some((entry, depth, true))
+                }
+                _ => None,
+            })
+            .expect("active pane row");
+        let rect = Rect::new(0, 0, 60, 1);
+        let actions = (rect.x..rect.right())
+            .filter_map(|column| selected_row_control_at(&app, &entry, rect, depth, tab, column))
+            .collect::<Vec<_>>();
+
+        assert!(!actions.is_empty());
+        assert!(actions.iter().all(|action| match action {
+            crate::app::state::SidebarHoverAction::Snooze { pane_id, .. }
+            | crate::app::state::SidebarHoverAction::Settle { pane_id, .. } => {
+                *pane_id == active_pane
+            }
+        }));
     }
 
     #[test]

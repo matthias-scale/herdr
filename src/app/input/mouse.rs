@@ -67,10 +67,6 @@ pub(super) enum MouseAction {
     FocusTab {
         tab_idx: usize,
     },
-    FocusSidebarTab {
-        ws_idx: usize,
-        tab_idx: usize,
-    },
     FocusPane {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
@@ -1619,11 +1615,11 @@ impl AppState {
                             return Some(MouseAction::FocusWorkspace { ws_idx: idx });
                         }
 
-                        if let Some((ws_idx, tab_idx)) =
+                        if let Some((ws_idx, pane_id)) =
                             self.collapsed_agent_detail_target_at(mouse.row)
                         {
                             self.mode = Mode::Terminal;
-                            return Some(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
+                            return Some(MouseAction::FocusPane { ws_idx, pane_id });
                         }
                         return None;
                     }
@@ -2491,9 +2487,13 @@ impl AppState {
                 self.close_workspace_picker();
                 return MobileMouseResult::Action(MouseAction::FocusTab { tab_idx });
             }
-            Some(crate::ui::MobileSwitcherTarget::SidebarTab { ws_idx, tab_idx }) => {
+            Some(crate::ui::MobileSwitcherTarget::SidebarTab {
+                ws_idx,
+                tab_idx: _,
+                pane_id,
+            }) => {
                 self.close_workspace_picker();
-                return MobileMouseResult::Action(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
+                return MobileMouseResult::Action(MouseAction::FocusPane { ws_idx, pane_id });
             }
             Some(crate::ui::MobileSwitcherTarget::Agent {
                 ws_idx,
@@ -2589,7 +2589,32 @@ impl AppState {
             _ => None,
         };
         let snoozed = target.is_some_and(|(ws_idx, pane_id)| self.pane_is_snoozed(ws_idx, pane_id));
-        menu.items_for_snooze(snoozed)
+        let settleable = match &menu.kind {
+            ContextMenuKind::Tab {
+                ws_idx,
+                settle_pane_id: Some(pane_id),
+                ..
+            } => self
+                .workspaces
+                .get(*ws_idx)
+                .and_then(|workspace| workspace.pane_state(*pane_id))
+                .is_some_and(|_| {
+                    !self.pane_is_settled(*ws_idx, *pane_id)
+                        && !self.pane_is_snoozed(*ws_idx, *pane_id)
+                }),
+            _ => true,
+        };
+        menu.items_for_pane_state(snoozed, settleable)
+    }
+
+    pub(crate) fn reconcile_context_menu_selection(&mut self) {
+        let item_count = self
+            .context_menu
+            .as_ref()
+            .map_or(0, |menu| self.context_menu_items(menu).len());
+        if let Some(menu) = self.context_menu.as_mut() {
+            menu.list.highlighted = menu.list.highlighted.min(item_count.saturating_sub(1));
+        }
     }
 
     pub(crate) fn context_menu_rect(&self) -> Option<Rect> {
@@ -8831,6 +8856,59 @@ mod tests {
         assert_eq!(
             app.state.workspaces[0].tabs[target_tab].layout.focused(),
             focused_pane
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
+    }
+
+    #[test]
+    fn mobile_snoozed_row_click_focuses_its_exact_pane() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("mobile-split");
+        let active_pane = workspace.tabs[0].root_pane;
+        let snoozed_pane = workspace.test_split(Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(active_pane);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.state.snooze_pane_at(0, snoozed_pane, deadline));
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
+        let switch = app.state.view.mobile_menu_hit_area;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            switch.x + 1,
+            switch.y + 1,
+        ));
+        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
+        let target = (viewport.y..viewport.bottom())
+            .find_map(|row| {
+                (viewport.x..viewport.right()).find_map(|column| {
+                    matches!(
+                        crate::ui::mobile_switcher_target_at(&app.state, column, row),
+                        Some(crate::ui::MobileSwitcherTarget::SidebarTab {
+                            pane_id,
+                            ..
+                        }) | Some(crate::ui::MobileSwitcherTarget::Agent {
+                            pane_id,
+                            ..
+                        }) if pane_id == snoozed_pane
+                    )
+                    .then_some((column, row))
+                })
+            })
+            .expect("snoozed pane row");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            target.0,
+            target.1,
+        ));
+
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].layout.focused(),
+            snoozed_pane
         );
         assert_eq!(app.state.mode, Mode::Terminal);
     }

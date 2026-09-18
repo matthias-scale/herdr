@@ -1180,8 +1180,10 @@ pub(crate) fn handle_context_menu_key(
             }
         }
         KeyCode::Enter => {
+            state.reconcile_context_menu_selection();
             if let Some(menu) = state.context_menu.take() {
                 let idx = menu.list.highlighted;
+                leave_modal(state);
                 apply_context_menu_action(state, terminal_runtimes, menu, idx);
             }
         }
@@ -1506,8 +1508,10 @@ impl App {
                 }
             }
             KeyCode::Enter => {
+                self.state.reconcile_context_menu_selection();
                 if let Some(menu) = self.state.context_menu.take() {
                     let idx = menu.list.highlighted;
+                    leave_modal(&mut self.state);
                     self.apply_context_menu_action_via_api(menu, idx);
                 }
             }
@@ -2009,7 +2013,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::layout::Rect;
+    use ratatui::layout::{Direction, Rect};
 
     use super::super::{capture_snapshot, state_with_workspaces};
     use super::*;
@@ -2041,6 +2045,28 @@ mod tests {
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
         app
+    }
+
+    fn pane_context_menu(pane_id: crate::layout::PaneId, highlighted: usize) -> ContextMenuState {
+        ContextMenuState {
+            kind: ContextMenuKind::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id,
+                source_pane_id: None,
+                has_manual_label: false,
+                right_click_passthrough: false,
+                linkable_work_link: None,
+                link: None,
+                path: None,
+                open_with: Vec::new(),
+                send_text: None,
+                has_agent_targets: false,
+            },
+            x: 4,
+            y: 2,
+            list: MenuListState::new(highlighted),
+        }
     }
 
     /// The Repo view groups a bound Space with the checkout Spaces of its
@@ -3331,7 +3357,7 @@ mod tests {
                 y: 0,
                 list: MenuListState::new(0),
             };
-            let items = tab.items_for_snooze(snoozed);
+            let items = tab.items_for_pane_state(snoozed, !snoozed);
             if snoozed {
                 assert!(items.contains(&crate::app::state::UNSNOOZE_ITEM));
                 assert!(items.contains(&crate::app::state::CHANGE_TIME_ITEM));
@@ -3362,11 +3388,66 @@ mod tests {
                 list: MenuListState::new(0),
             };
             assert_eq!(
-                pane.items_for_snooze(snoozed)
+                pane.items_for_pane_state(snoozed, !snoozed)
                     .contains(&crate::app::state::UNSNOOZE_ITEM),
                 snoozed
             );
         }
+    }
+
+    #[test]
+    fn live_snooze_removes_settle_and_clamps_context_menu_acceptance() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.workspaces[0].test_add_tab(Some("keep"));
+        app.state.ensure_test_terminals();
+        let mut menu = ContextMenuState {
+            kind: ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 0,
+                settle_pane_id: Some(pane_id),
+                snooze_target: Some(pane_id),
+                starred: false,
+                has_subgroup: false,
+            },
+            x: 3,
+            y: 2,
+            list: MenuListState::new(0),
+        };
+        menu.list.highlighted = app
+            .state
+            .context_menu_items(&menu)
+            .iter()
+            .position(|item| *item == crate::app::state::SETTLE_ITEM)
+            .expect("settle item before snooze");
+        app.state.context_menu = Some(menu);
+        app.state.mode = Mode::ContextMenu;
+
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.state.snooze_pane_at(0, pane_id, deadline));
+        let live_items = app
+            .state
+            .context_menu
+            .as_ref()
+            .map(|menu| app.state.context_menu_items(menu))
+            .expect("open menu");
+        assert!(!live_items.contains(&crate::app::state::SETTLE_ITEM));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let selected = app
+            .state
+            .context_menu
+            .as_ref()
+            .map(|menu| menu.list.highlighted)
+            .expect("open menu");
+        assert_eq!(live_items.get(selected), Some(&"Close"));
+
+        app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].custom_name.as_deref(),
+            Some("keep")
+        );
     }
 
     #[test]
@@ -3420,5 +3501,153 @@ mod tests {
             .expect("unsnooze item");
         app.apply_context_menu_action_via_api(menu, unsnooze);
         assert!(!app.state.pane_is_snoozed(0, pane_id));
+    }
+
+    #[test]
+    fn context_menu_state_and_snooze_actions_are_isolated_between_clients() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        let first_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let second_pane = app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        let mut client_a = crate::app::state::SidebarPresentationState::default();
+        let mut client_b = crate::app::state::SidebarPresentationState::default();
+
+        app.state.swap_sidebar_presentation(&mut client_a);
+        let snooze_idx = app
+            .state
+            .context_menu_items(&pane_context_menu(first_pane, 0))
+            .iter()
+            .position(|item| *item == crate::app::state::SNOOZE_ITEM)
+            .expect("snooze item");
+        app.state.context_menu = Some(pane_context_menu(first_pane, snooze_idx));
+        app.state.mode = Mode::ContextMenu;
+        app.state.swap_sidebar_presentation(&mut client_a);
+
+        app.state.swap_sidebar_presentation(&mut client_b);
+        assert!(app.state.context_menu.is_none());
+        assert_eq!(app.state.mode, Mode::Terminal);
+        app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
+        app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(!app.state.pane_is_snoozed(0, first_pane));
+        assert!(!app.state.pane_is_snoozed(0, second_pane));
+        app.state.swap_sidebar_presentation(&mut client_b);
+
+        app.state.swap_sidebar_presentation(&mut client_a);
+        app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        let target = app
+            .state
+            .sidebar_snooze
+            .as_ref()
+            .expect("client A snooze menu")
+            .target
+            .clone();
+        assert_eq!(target.pane_id, first_pane);
+        assert!(app
+            .handle_sidebar_snooze_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty(),)));
+        assert!(app.state.pane_is_snoozed(0, first_pane));
+        assert!(!app.state.pane_is_snoozed(0, second_pane));
+
+        let unsnooze_idx = app
+            .state
+            .context_menu_items(&pane_context_menu(first_pane, 0))
+            .iter()
+            .position(|item| *item == crate::app::state::UNSNOOZE_ITEM)
+            .expect("unsnooze item");
+        app.state.context_menu = Some(pane_context_menu(first_pane, unsnooze_idx));
+        app.state.mode = Mode::ContextMenu;
+        app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(!app.state.pane_is_snoozed(0, first_pane));
+        assert!(!app.state.pane_is_snoozed(0, second_pane));
+
+        let set_time_idx = app
+            .state
+            .context_menu_items(&pane_context_menu(first_pane, 0))
+            .iter()
+            .position(|item| *item == crate::app::state::SET_TIME_ITEM)
+            .expect("set time item");
+        app.state.context_menu = Some(pane_context_menu(first_pane, set_time_idx));
+        app.state.mode = Mode::ContextMenu;
+        app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(
+            app.state
+                .sidebar_snooze
+                .as_ref()
+                .map(|snooze| snooze.target.pane_id),
+            Some(first_pane)
+        );
+    }
+
+    #[tokio::test]
+    async fn context_menu_set_time_cancel_and_save_return_input_to_the_pane() {
+        let mut app = app_with_test_workspaces(&["main"]);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let (runtime, mut pane_input) =
+            crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 4);
+        app.state.workspaces[0].insert_test_runtime(pane_id, runtime);
+        let set_time_idx = app
+            .state
+            .context_menu_items(&pane_context_menu(pane_id, 0))
+            .iter()
+            .position(|item| *item == crate::app::state::SET_TIME_ITEM)
+            .expect("set time item");
+
+        app.state.context_menu = Some(pane_context_menu(pane_id, set_time_idx));
+        app.state.mode = Mode::ContextMenu;
+        app.route_client_events_from(
+            42,
+            vec![crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()),
+            )],
+            false,
+        );
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app
+            .state
+            .sidebar_snooze
+            .as_ref()
+            .is_some_and(|snooze| snooze.time_draft.is_some()));
+        app.route_client_events_from(
+            42,
+            vec![crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()),
+            )],
+            false,
+        );
+        app.route_client_events_from(
+            42,
+            vec![crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(KeyCode::Char('c'), KeyModifiers::empty()),
+            )],
+            false,
+        );
+        assert_eq!(
+            pane_input.try_recv().expect("input after cancel"),
+            bytes::Bytes::from_static(b"c")
+        );
+
+        app.state.context_menu = Some(pane_context_menu(pane_id, set_time_idx));
+        app.state.mode = Mode::ContextMenu;
+        app.route_client_events_from(
+            42,
+            vec![crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()),
+            )],
+            false,
+        );
+        let snooze = app.state.sidebar_snooze.clone().expect("set time editor");
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 600;
+        app.dispatch_snooze_time_deadline(snooze, deadline);
+        app.route_client_events_from(
+            42,
+            vec![crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(KeyCode::Char('s'), KeyModifiers::empty()),
+            )],
+            false,
+        );
+        assert_eq!(
+            pane_input.try_recv().expect("input after save"),
+            bytes::Bytes::from_static(b"s")
+        );
     }
 }

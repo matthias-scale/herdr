@@ -328,6 +328,7 @@ fn compute_view_internal(
 ) {
     app.view_observed_at = std::time::Instant::now();
     app.reconcile_sidebar_presentation();
+    app.reconcile_context_menu_selection();
     app.reconcile_dock_context_tabs();
     if !app.dock_collapsed {
         if let Some(object) = app.dock_object_preview.clone() {

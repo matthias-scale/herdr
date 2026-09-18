@@ -5223,10 +5223,6 @@ impl App {
                         self.state.clear_home();
                         self.focus_tab_idx_via_api(tab_idx)
                     }
-                    MouseAction::FocusSidebarTab { ws_idx, tab_idx } => {
-                        self.state.clear_home();
-                        self.focus_workspace_tab_via_api(ws_idx, tab_idx)
-                    }
                     MouseAction::FocusPane { ws_idx, pane_id } => {
                         self.state.clear_home();
                         self.focus_pane_internal_via_api(ws_idx, pane_id)
@@ -5286,6 +5282,7 @@ impl App {
                     MouseAction::ConfirmCloseAccept => self.confirm_close_accept_via_api(),
                     MouseAction::ContextMenu { menu, idx } => {
                         let menu = *menu;
+                        modal::leave_modal(&mut self.state);
                         self.apply_context_menu_action_via_api(menu, idx)
                     }
                 }
