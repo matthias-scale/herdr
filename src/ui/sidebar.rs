@@ -12516,7 +12516,7 @@ pub(crate) mod tests {
         entry.open_blockers = true;
         assert_ne!(compact_row_dot(&entry), "◌");
         assert_eq!(compact_row_color(&entry, &palette), palette.yellow);
-        assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
+        assert_eq!(agent_dot_tooltip(&entry), "Waiting on agents");
     }
 
     #[test]
