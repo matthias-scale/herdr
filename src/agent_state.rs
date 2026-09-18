@@ -397,9 +397,11 @@ fn pending_sequence_carry(bytes: &[u8]) -> (Vec<u8>, Option<OpenSequenceKind>) {
     };
     let end = (start + MAX_OPEN_SEQUENCE_BYTES).min(bytes.len());
     if end < bytes.len() {
-        let carry = (kind == OpenSequenceKind::Url)
-            .then(|| bytes[start..end].to_vec())
-            .unwrap_or_default();
+        let carry = if kind == OpenSequenceKind::Url {
+            bytes[start..end].to_vec()
+        } else {
+            Vec::new()
+        };
         return (carry, Some(truncated_sequence_kind(kind, bytes)));
     }
     (bytes[start..end].to_vec(), None)
