@@ -1773,6 +1773,7 @@ pub(crate) struct DockPresentationState {
     pub(crate) pr_focused: bool,
     pub(crate) pr_checkout_menu: Option<PrCheckoutChoice>,
     pub(crate) pr_action_menu: Option<PrActionMenuState>,
+    pub(crate) pr_action_confirmation: Option<PrActionConfirmation>,
     pub(crate) diff_ignore_whitespace: bool,
     pub(crate) diff_selected: usize,
     pub(crate) diff_collapsed: std::collections::HashSet<String>,
@@ -1840,6 +1841,7 @@ impl Default for DockPresentationState {
             pr_focused: false,
             pr_checkout_menu: None,
             pr_action_menu: None,
+            pr_action_confirmation: None,
             diff_ignore_whitespace: false,
             diff_selected: 0,
             diff_collapsed: std::collections::HashSet::new(),
@@ -4312,8 +4314,8 @@ pub struct AppState {
     /// A write staged by a button but not yet confirmed. Nothing leaves herdr
     /// until the user presses the confirm key with this set.
     pub(crate) dock_pending_write: Option<crate::work_index::WorkItemWrite>,
-    /// Shared modal gate for PR writes opened by the full view, dock, or sidebar.
-    /// This is client-local TUI state; pull-request facts stay in the work index.
+    /// Active slot for the client-local PR write gate. Swapped through
+    /// `DockPresentationState`; pull-request facts stay in the work index.
     pub(crate) pr_action_confirmation: Option<PrActionConfirmation>,
     /// The outcome of the last write, shown until the next one is staged.
     pub(crate) dock_write_notice: Option<String>,
@@ -5569,6 +5571,10 @@ impl AppState {
             .unwrap_or(self.server_interaction.mode)
     }
 
+    pub(crate) fn client_overlay_owns_input(&self) -> bool {
+        self.client_overlay != ClientOverlay::None
+    }
+
     pub(crate) fn open_client_overlay(&mut self, overlay: ClientOverlay) {
         self.client_overlay = overlay;
     }
@@ -6204,6 +6210,10 @@ impl AppState {
         std::mem::swap(&mut self.dock_pr_focused, &mut other.pr_focused);
         std::mem::swap(&mut self.dock_pr_checkout_menu, &mut other.pr_checkout_menu);
         std::mem::swap(&mut self.dock_pr_action_menu, &mut other.pr_action_menu);
+        std::mem::swap(
+            &mut self.pr_action_confirmation,
+            &mut other.pr_action_confirmation,
+        );
         std::mem::swap(
             &mut self.dock_diff_ignore_whitespace,
             &mut other.diff_ignore_whitespace,

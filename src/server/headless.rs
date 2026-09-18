@@ -6185,6 +6185,7 @@ impl HeadlessServer {
                     self.app.state.swap_symphony_detail(&mut symphony_detail);
                     self.app.state.swap_work_view(&mut work_view);
                     self.app.state.swap_usage_view(&mut usage_view);
+                    self.app.reconcile_client_interaction(is_foreground);
                     let render_started = crate::render_prof::timer();
                     let render_cell_size =
                         if self.app.state.kitty_graphics_enabled && cell_size.is_known() {
@@ -9130,6 +9131,7 @@ esac
                 pr_focused: false,
                 pr_checkout_menu: None,
                 pr_action_menu: None,
+                pr_action_confirmation: None,
                 diff_ignore_whitespace: false,
                 diff_selected: 0,
                 diff_collapsed: std::collections::HashSet::new(),
@@ -14764,14 +14766,18 @@ next_tab = ""
     }
 
     #[test]
-    fn attached_overlay_action_preserves_the_shared_full_screen_mode_and_draft() {
+    fn attached_focus_changing_pane_action_preserves_shared_mode_and_draft() {
         for server_mode in [
             crate::app::Mode::Settings,
             crate::app::Mode::GlobalMenu,
             crate::app::Mode::AddAction,
         ] {
             let mut server = test_headless_server();
-            server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("mode")];
+            let mut workspace = crate::workspace::Workspace::test_new("mode");
+            let source_pane_id = workspace.tabs[0].root_pane;
+            let pane_id = workspace.test_split(ratatui::layout::Direction::Horizontal);
+            workspace.tabs[0].layout.focus_pane(source_pane_id);
+            server.app.state.workspaces = vec![workspace];
             server.app.state.ensure_test_terminals();
             server.app.state.active = Some(0);
             server.app.state.selected = 0;
@@ -14783,7 +14789,6 @@ next_tab = ""
                 command: "cargo test".into(),
                 ..Default::default()
             });
-            let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
             let workspace_id = server.app.state.workspaces[0].id.clone();
             let tab_id = crate::workspace::public_tab_id_for_number(
                 &workspace_id,
@@ -14793,19 +14798,25 @@ next_tab = ""
             client_a.sidebar_presentation.overlay = crate::app::state::ClientOverlayState {
                 kind: crate::app::state::ClientOverlay::ContextMenu,
                 context_menu: Some(crate::app::state::ContextMenuState {
-                    kind: crate::app::state::ContextMenuKind::Tab {
+                    kind: crate::app::state::ContextMenuKind::Pane {
                         workspace_id,
                         tab_id,
                         ws_idx: 0,
                         tab_idx: 0,
-                        settle_pane_id: Some(pane_id),
-                        snooze_target: Some(pane_id),
-                        starred: false,
-                        has_subgroup: false,
+                        pane_id,
+                        source_pane_id: Some(source_pane_id),
+                        has_manual_label: false,
+                        right_click_passthrough: false,
+                        linkable_work_link: None,
+                        link: None,
+                        path: None,
+                        open_with: Vec::new(),
+                        send_text: None,
+                        has_agent_targets: false,
                     },
                     x: 2,
                     y: 2,
-                    selected: crate::app::state::ContextMenuAction::Settle,
+                    selected: crate::app::state::ContextMenuAction::Zoom,
                 }),
                 ..Default::default()
             };
@@ -14833,7 +14844,11 @@ next_tab = ""
                 .expect("add-action draft");
             assert_eq!(add_action.name, "keep action draft");
             assert_eq!(add_action.command, "cargo test");
-            assert!(server.app.state.pane_is_settled(0, pane_id));
+            assert_eq!(
+                server.app.state.workspaces[0].focused_pane_id(),
+                Some(pane_id)
+            );
+            assert!(server.app.state.workspaces[0].tabs[0].zoomed);
             assert_eq!(
                 server.clients[&1].sidebar_presentation.overlay.kind,
                 crate::app::state::ClientOverlay::None
@@ -14842,7 +14857,7 @@ next_tab = ""
     }
 
     #[test]
-    fn attached_rename_overlay_takes_keys_before_the_files_dock() {
+    fn attached_rename_overlay_takes_keys_before_an_open_dock_surface_menu() {
         let mut server = test_headless_server();
         server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("rename")];
         server.app.state.active = Some(0);
@@ -14866,6 +14881,8 @@ next_tab = ""
         client.dock_presentation.collapsed = false;
         client.dock_presentation.tab = Some(crate::app::DockSurface::Files);
         client.dock_presentation.files_focused = true;
+        client.dock_presentation.surface_menu =
+            Some(crate::app::state::DockSurfaceMenu { selected: 0 });
         server.clients.insert(1, client);
 
         assert!(server.handle_client_input_events(
@@ -14881,6 +14898,51 @@ next_tab = ""
             "x"
         );
         assert!(server.clients[&1].dock_presentation.files_filter.is_empty());
+        assert_eq!(
+            server.clients[&1].dock_presentation.surface_menu,
+            Some(crate::app::state::DockSurfaceMenu { selected: 0 })
+        );
+    }
+
+    #[test]
+    fn attached_client_cannot_confirm_another_clients_pr_action() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("pr")];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
+        let confirmation = crate::app::state::PrActionConfirmation {
+            key: crate::app::state::WorkItemKey {
+                repo: "owner/repo".into(),
+                pr_number: Some(42),
+                pr_url: Some("https://github.com/owner/repo/pull/42".into()),
+                ticket_id: None,
+            },
+            action: crate::ui::work_list_detail::PrActionKind::Merge(
+                crate::config::MergeMethodConfig::Rebase,
+            ),
+        };
+        let mut client_a = test_app_client(Some(true), 1);
+        client_a.dock_presentation.pr_action_confirmation = Some(confirmation.clone());
+        server.clients.insert(1, client_a);
+        server.clients.insert(2, test_app_client(Some(true), 2));
+        server.foreground_client_id = Some(2);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_client_input_events(
+            2,
+            vec![test_key(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::empty(),
+            )],
+        ));
+
+        assert!(server.app.state.request_pr_command.is_none());
+        assert_eq!(
+            server.clients[&1].dock_presentation.pr_action_confirmation,
+            Some(confirmation)
+        );
     }
 
     #[test]

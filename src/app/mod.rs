@@ -1815,6 +1815,19 @@ impl App {
         }
     }
 
+    /// Reconcile client-owned input state after runtime mutations and before
+    /// view computation. Rendering must not open or close input owners.
+    pub(crate) fn reconcile_client_interaction(&mut self, sync_input_source: bool) -> bool {
+        let previous_mode = self.state.effective_interaction_mode();
+        self.state.reconcile_client_modal_target();
+        self.state.reconcile_context_menu_selection();
+        let changed = self.state.effective_interaction_mode() != previous_mode;
+        if sync_input_source {
+            self.sync_prefix_input_source(previous_mode);
+        }
+        changed
+    }
+
     pub(crate) fn handle_internal_event_with_prefix_sync(
         &mut self,
         event: crate::events::AppEvent,
@@ -2034,6 +2047,7 @@ impl App {
             }
 
             if needs_render && self.can_render_now(now) {
+                self.reconcile_client_interaction(true);
                 self.sync_status_context_before_render();
                 let _ = self.render_dirty.take();
                 if self.window_title_configured() {
@@ -2590,6 +2604,11 @@ impl App {
                 self.state.pane_borders = config.ui.pane_borders;
                 self.state.pane_scrollbars = config.ui.pane_scrollbars;
                 self.state.show_pull_button = config.ui.show_pull_button;
+                // The button is the Git menu's only anchor and entry point.
+                // Close it at the config transition, never during view computation.
+                if self.state.server_mode() == Mode::GitMenu && !self.state.show_pull_button {
+                    self.state.set_server_mode(Mode::Terminal);
+                }
                 self.state.open_dock_on_work_link = config.ui.open_dock_on_work_link;
                 self.state.show_pane_toggle_buttons = config.ui.show_pane_toggle_buttons;
                 self.state.pane_gaps = config.ui.pane_gaps;
@@ -3125,97 +3144,61 @@ impl App {
                                 );
                                 continue;
                             }
-                            // Popup input is routed below by its terminal context.
-                            // Non-Home full-frame overlays keep input precedence;
-                            // otherwise the floating subgroup picker owns keys
-                            // before a stale notepad or sidebar focus can take them.
-                            if self.state.popup_pane.is_none()
-                                && !self.headless_overlay_precedes_subgroup_picker()
-                                && self
-                                    .state
-                                    .handle_sidebar_subgroup_picker_key(key.as_key_event())
-                            {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            if self.intercept_notepad_key_with_prompt_visibility(&key, false) {
-                                pomodoro_changed = true;
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            if self.handle_dock_surface_menu_key(&key) {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            // Home is a launch overlay, and `terminal_input_context`
-                            // reports no pane context while it is open. Settle home
-                            // first: a key it has no use for closes it and then
-                            // travels on as if home had never been there, rather
-                            // than being spent dismissing it.
-                            if self.state.home.is_some()
-                                && self.handle_home_key_headless(key.as_key_event())
-                            {
-                                continue;
-                            }
-                            if self.handle_dock_home_key_headless(&key) {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            if self.handle_dock_diff_key_headless(&key) {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            if self.handle_dock_files_key(&key) {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            if self.handle_dock_pr_key_headless(&key) {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            if self.handle_dock_linear_key_headless(&key) {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            if self.handle_dock_chooser_key_headless(&key) {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            if self.state.popup_pane.is_none()
-                                && self.state.dock_object_preview.is_some()
-                            {
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
+                            if !self.state.client_overlay_owns_input() {
+                                // Popup input is routed below by its terminal context.
+                                // Otherwise the floating subgroup picker owns keys
+                                // before a stale notepad or sidebar focus can take them.
+                                if self.state.popup_pane.is_none()
+                                    && !self.headless_overlay_precedes_subgroup_picker()
+                                    && self
+                                        .state
+                                        .handle_sidebar_subgroup_picker_key(key.as_key_event())
+                                {
+                                    self.input_leases.insert_consumed(
+                                        lease_key,
+                                        input::ConsumedInputLease::SuppressRepeats,
+                                    );
+                                    continue;
+                                }
+                                if self.intercept_notepad_key_with_prompt_visibility(&key, false) {
+                                    pomodoro_changed = true;
+                                    self.input_leases.insert_consumed(
+                                        lease_key,
+                                        input::ConsumedInputLease::SuppressRepeats,
+                                    );
+                                    continue;
+                                }
+                                if self.handle_dock_surface_menu_key(&key) {
+                                    self.input_leases.insert_consumed(
+                                        lease_key,
+                                        input::ConsumedInputLease::SuppressRepeats,
+                                    );
+                                    continue;
+                                }
+                                // Home is a launch overlay, and `terminal_input_context`
+                                // reports no pane context while it is open. Settle home
+                                // first: a key it has no use for closes it and then
+                                // travels on as if home had never been there.
+                                if self.state.home.is_some()
+                                    && self.handle_home_key_headless(key.as_key_event())
+                                {
+                                    continue;
+                                }
+                                if self.handle_dock_home_key_headless(&key)
+                                    || self.handle_dock_diff_key_headless(&key)
+                                    || self.handle_dock_files_key(&key)
+                                    || self.handle_dock_pr_key_headless(&key)
+                                    || self.handle_dock_linear_key_headless(&key)
+                                    || self.handle_dock_chooser_key_headless(&key)
+                                    || (self.state.popup_pane.is_none()
+                                        && self.state.dock_object_preview.is_some())
+                                {
+                                    self.input_leases.insert_consumed(
+                                        lease_key,
+                                        input::ConsumedInputLease::SuppressRepeats,
+                                    );
+                                    continue;
+                                }
                             }
                             let initial_context = self.terminal_input_context();
                             let proxy_input_gate_closed =
@@ -3566,7 +3549,7 @@ mod tests {
     use crate::terminal::TerminalRuntime;
     use crate::workspace::Workspace;
     use crossterm::event::{
-        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+        KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use std::cell::Cell;
     use std::rc::Rc;
@@ -4523,6 +4506,64 @@ mod tests {
         assert_eq!(drained_prefix_active(&mut app), vec![false]);
     }
 
+    #[test]
+    fn compute_view_does_not_reconcile_an_invalid_context_menu() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.context_menu = Some(state::ContextMenuState {
+            kind: state::ContextMenuKind::Workspace {
+                workspace_id: app.state.workspaces[0].id.clone(),
+                ws_idx: 0,
+            },
+            x: 2,
+            y: 2,
+            selected: state::ContextMenuAction::RenameWorkspace,
+        });
+        app.state
+            .open_client_overlay(state::ClientOverlay::ContextMenu);
+        app.state.workspaces.clear();
+        app.state.active = None;
+
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 80, 24));
+
+        assert!(app.state.context_menu.is_some());
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ContextMenu);
+    }
+
+    #[test]
+    fn stale_context_menu_reconciliation_restores_prefix_input_source() {
+        let mut app = test_app();
+        app.state.switch_ascii_input_source_in_prefix = true;
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.context_menu = Some(state::ContextMenuState {
+            kind: state::ContextMenuKind::Workspace {
+                workspace_id: app.state.workspaces[0].id.clone(),
+                ws_idx: 0,
+            },
+            x: 2,
+            y: 2,
+            selected: state::ContextMenuAction::RenameWorkspace,
+        });
+        app.state
+            .open_client_overlay(state::ClientOverlay::ContextMenu);
+        app.sync_prefix_input_source(Mode::Terminal);
+        assert_eq!(drained_prefix_active(&mut app), vec![true]);
+        app.state.workspaces.clear();
+        app.state.active = None;
+
+        assert!(app.reconcile_client_interaction(true));
+
+        assert!(app.state.context_menu.is_none());
+        assert_eq!(app.state.effective_interaction_mode(), Mode::Terminal);
+        assert_eq!(drained_prefix_active(&mut app), vec![false]);
+    }
+
     #[tokio::test]
     async fn local_rename_overlay_takes_keys_before_the_files_dock() {
         let mut app = test_app();
@@ -4533,8 +4574,7 @@ mod tests {
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(state::DockSurface::Files);
         app.state.dock_files_focused = true;
-        app.state
-            .open_client_overlay(state::ClientOverlay::RenameTab);
+        input::open_new_tab_dialog(&mut app.state);
         app.state.name_input.clear();
         app.state.name_input_replace_on_type = false;
 
@@ -4547,6 +4587,102 @@ mod tests {
 
         assert_eq!(app.state.name_input, "x");
         assert!(app.state.dock_files_filter.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_rename_overlay_takes_keys_before_an_open_dock_surface_menu() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.dock_surface_menu = Some(state::DockSurfaceMenu { selected: 0 });
+        input::open_new_tab_dialog(&mut app.state);
+        app.state.name_input.clear();
+        app.state.name_input_replace_on_type = false;
+
+        app.handle_raw_input_event(raw_key(
+            KeyCode::Char('x'),
+            KeyModifiers::empty(),
+            KeyEventKind::Press,
+        ))
+        .await;
+
+        assert_eq!(app.state.name_input, "x");
+        assert_eq!(
+            app.state.dock_surface_menu,
+            Some(state::DockSurfaceMenu { selected: 0 })
+        );
+    }
+
+    #[tokio::test]
+    async fn client_local_create_overlays_preserve_another_clients_settings_mode() {
+        let mut app = test_app();
+        app.state.default_shell = crate::app::api::test_support::exiting_test_command().into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
+        app.state.workspaces = vec![Workspace::test_new("existing")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.state.set_server_mode(Mode::Settings);
+        let mut client_a = state::SidebarPresentationState::default();
+        let mut client_b = state::SidebarPresentationState::default();
+
+        app.state.swap_sidebar_presentation(&mut client_a);
+        input::open_new_workspace_dialog(&mut app.state, std::env::temp_dir());
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        app.state.swap_sidebar_presentation(&mut client_a);
+        app.state.swap_sidebar_presentation(&mut client_b);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
+        app.state.swap_sidebar_presentation(&mut client_b);
+
+        app.state.swap_sidebar_presentation(&mut client_a);
+        input::open_new_tab_dialog(&mut app.state);
+        app.handle_rename_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        app.state.swap_sidebar_presentation(&mut client_a);
+        app.state.swap_sidebar_presentation(&mut client_b);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
+
+        crate::app::api::test_support::shutdown_test_runtimes(&mut app);
+    }
+
+    #[test]
+    fn client_overlay_mouse_precedes_another_clients_server_picker() {
+        let mut app = test_app();
+        app.state.workspaces = vec![Workspace::test_new("test")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let mut client_a = state::SidebarPresentationState::default();
+
+        app.state.swap_sidebar_presentation(&mut client_a);
+        input::open_new_tab_dialog(&mut app.state);
+        app.state.name_input = "client a draft".into();
+        app.state.name_input_replace_on_type = false;
+        app.state.set_server_mode(Mode::WorkLinkPicker);
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 100, 30));
+        let popup =
+            crate::ui::centered_popup_rect(app.state.screen_rect(), 56, 7).expect("rename modal");
+        let inner = ratatui::layout::Rect::new(
+            popup.x + 1,
+            popup.y + 1,
+            popup.width.saturating_sub(2),
+            popup.height.saturating_sub(2),
+        );
+        let (_, clear, _) = crate::ui::rename_button_rects(inner);
+
+        app.handle_mouse_from_input_source(
+            41,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: clear.x,
+                row: clear.y,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+
+        assert!(app.state.name_input.is_empty());
+        assert_eq!(app.state.server_mode(), Mode::WorkLinkPicker);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::RenameTab);
     }
 
     fn temp_config_path(name: &str) -> std::path::PathBuf {
@@ -5248,6 +5384,18 @@ mod tests {
             crate::config::HostAppearanceOverride::Dark
         );
         assert_eq!(app.state.theme_name, "github-dark-high-contrast");
+    }
+
+    #[test]
+    fn config_reload_closes_a_git_menu_when_its_button_is_hidden() {
+        let (mut config, mut app) = app_with_auto_switch_theme_config();
+        config.ui.show_pull_button = false;
+        app.state.show_pull_button = true;
+        app.state.set_server_mode(Mode::GitMenu);
+
+        app.apply_live_config(&config, &[], &[], false);
+
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]

@@ -5712,7 +5712,7 @@ mod tests {
         assert_eq!(app.state.workspaces[1].identity_cwd, cwd);
         assert!(app.state.workspaces[1].custom_name.is_none());
         assert!(app.state.pending_workspace_create_cwd.is_none());
-        assert_eq!(app.state.server_mode(), Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
         crate::app::api::test_support::shutdown_test_runtimes(&mut app);
         let _ = std::fs::remove_dir_all(&cwd);
     }

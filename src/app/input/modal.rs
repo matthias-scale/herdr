@@ -498,7 +498,7 @@ fn next_new_tab_default_name(state: &AppState) -> String {
         .unwrap_or_else(|| "1".to_string())
 }
 
-pub(super) fn open_new_tab_dialog(state: &mut AppState) {
+pub(crate) fn open_new_tab_dialog(state: &mut AppState) {
     state.creating_new_tab = true;
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
@@ -1355,6 +1355,9 @@ impl App {
     }
 
     fn save_rename_modal_via_api(&mut self) {
+        // A client-owned overlay may focus shared runtime state, but it cannot
+        // replace the server-owned full-screen interaction another client uses.
+        let server_mode = self.state.server_mode();
         let new_name = if self.state.name_input.trim().is_empty() {
             self.state.name_input.clone()
         } else {
@@ -1482,6 +1485,7 @@ impl App {
             _ => {}
         }
 
+        self.state.set_server_mode(server_mode);
         cancel_rename_modal(&mut self.state);
     }
 
@@ -3647,6 +3651,7 @@ mod tests {
             .map(|menu| app.state.context_menu_items(menu))
             .expect("open menu");
         assert!(!live_items.contains(&crate::app::state::SETTLE_ITEM));
+        assert!(app.reconcile_client_interaction(false));
         crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 100, 30));
         assert!(app.state.context_menu.is_none());
         assert_eq!(app.state.server_mode(), Mode::Terminal);

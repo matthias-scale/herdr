@@ -329,8 +329,6 @@ fn compute_view_internal(
     app.view_observed_at = std::time::Instant::now();
     app.view_observed_unix_s = crate::app::settled::unix_seconds(std::time::SystemTime::now());
     app.reconcile_sidebar_presentation();
-    app.reconcile_client_modal_target();
-    app.reconcile_context_menu_selection();
     app.reconcile_dock_context_tabs();
     if !app.dock_collapsed {
         if let Some(object) = app.dock_object_preview.clone() {
@@ -339,14 +337,6 @@ fn compute_view_internal(
             app.dock_pr_focused = surface == crate::app::DockSurface::Pr;
             app.dock_linear_focused = surface == crate::app::DockSurface::Linear;
         }
-    }
-    // The pull button is the git menu's only anchor and its only entry point.
-    // Turning it off while the menu is open, which a live config reload can do,
-    // would otherwise leave the popup stranded. Keyed on the setting rather than
-    // on the button's rect: the rect is this client's geometry, and a narrow
-    // background client must not close a menu another client is looking at.
-    if app.server_mode() == Mode::GitMenu && !app.show_pull_button {
-        app.set_server_mode(Mode::Terminal);
     }
     if uses_mobile_layout(app, area) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
@@ -2580,12 +2570,10 @@ mod tests {
         }
     }
 
-    /// Turning the pull button off while its menu is open, which a live config
-    /// reload can do, must close the menu rather than strand the popup. The
-    /// close is keyed on the setting, not on this client's geometry, and it
-    /// happens before the mobile layout takes its early return.
+    /// Rendering a hidden pull button must not repair its now-invalid menu.
+    /// Config application owns that transition before the next frame.
     #[test]
-    fn losing_the_pull_button_closes_an_open_git_menu() {
+    fn losing_the_pull_button_does_not_close_an_open_git_menu_during_render() {
         let mut app = crate::app::state::AppState::test_new();
         app.tab_bar_position = crate::config::TabBarPositionConfig::Top;
         app.mouse_capture = true;
@@ -2605,8 +2593,7 @@ mod tests {
         app.show_pull_button = false;
         compute_view(&mut app, Rect::new(0, 0, 120, 40));
 
-        assert_eq!(app.server_mode(), Mode::Terminal);
-        assert_eq!(app.view.git_menu_popup_rect, Rect::default());
+        assert_eq!(app.server_mode(), Mode::GitMenu);
     }
 
     /// A narrow client that cannot fit the button must not close a menu another
@@ -2634,7 +2621,7 @@ mod tests {
 
         app.show_pull_button = false;
         compute_view(&mut app, Rect::new(0, 0, 40, 20));
-        assert_eq!(app.server_mode(), Mode::Terminal);
+        assert_eq!(app.server_mode(), Mode::GitMenu);
     }
 
     /// Hiding the two controls must give their columns back to the tabs rather

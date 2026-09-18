@@ -199,10 +199,12 @@ impl AppState {
         ) {
             self.remote_agent_presses.remove(&source_id);
         }
-        if self.handle_notepad_mouse(&mouse) {
+        if !self.client_overlay_owns_input() && self.handle_notepad_mouse(&mouse) {
             return None;
         }
-        if rect_contains(self.view.pomodoro_hit_area, mouse.column, mouse.row) {
+        if !self.client_overlay_owns_input()
+            && rect_contains(self.view.pomodoro_hit_area, mouse.column, mouse.row)
+        {
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     self.toggle_pomodoro(std::time::Instant::now());
@@ -217,7 +219,8 @@ impl AppState {
                 _ => {}
             }
         }
-        if rect_contains(self.view.hyperspace_pause_hit_area, mouse.column, mouse.row)
+        if !self.client_overlay_owns_input()
+            && rect_contains(self.view.hyperspace_pause_hit_area, mouse.column, mouse.row)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             self.hyperspace.toggle_paused(std::time::Instant::now());
@@ -7943,9 +7946,9 @@ mod tests {
         assert!(app.state.request_submit_worktree_open);
 
         let mut app = app_for_mouse_test();
-        // The sidebar opens this dialog from navigation; closing a client
-        // overlay returns to that server mode rather than rewriting it.
-        app.state.set_server_mode(Mode::Navigate);
+        // Production queues this dialog from Navigate, then leaves Navigate
+        // before the deferred open path installs the client overlay.
+        app.state.set_server_mode(Mode::Terminal);
         app.state
             .open_client_overlay(crate::app::state::ClientOverlay::OpenExistingWorktree);
         app.state.worktree_open = Some(sample_worktree_open_state());
@@ -7964,7 +7967,7 @@ mod tests {
             app.state.client_overlay,
             crate::app::state::ClientOverlay::None
         );
-        assert_eq!(app.state.server_mode(), Mode::Navigate);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]

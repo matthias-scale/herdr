@@ -22835,6 +22835,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         });
         let area = Rect::new(0, 0, 60, 20);
 
+        app.reconcile_client_modal_target();
         crate::ui::compute_view(&mut app, area);
         assert!(app.sidebar_snooze.is_none());
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();

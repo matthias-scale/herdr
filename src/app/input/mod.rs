@@ -51,6 +51,8 @@ mod sidebar;
 mod terminal;
 
 #[cfg(test)]
+pub(crate) use self::modal::open_new_tab_dialog;
+#[cfg(test)]
 pub(crate) use self::navigate::{
     action_for_key_for_test, non_indexed_navigation_actions_for_test, BindingDispatch,
 };
@@ -197,6 +199,9 @@ impl App {
             return self.handle_terminal_key(key).await;
         }
         let key_event = key.as_key_event();
+        if self.handle_client_overlay_key(key_event) {
+            return None;
+        }
         // The subgroup picker floats above panes and is not sidebar-focus
         // gated: it opens from a right-click menu that never claims the
         // sidebar's bare-key focus.
@@ -366,6 +371,24 @@ impl App {
             },
         }
         None
+    }
+
+    fn handle_client_overlay_key(&mut self, key: KeyEvent) -> bool {
+        if !self.state.client_overlay_owns_input() {
+            return false;
+        }
+        match self.state.effective_interaction_mode() {
+            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+                self.handle_rename_key_via_api(key)
+            }
+            Mode::NewLinkedWorktree => self.handle_worktree_create_key(key),
+            Mode::OpenExistingWorktree => self.handle_worktree_open_key(key),
+            Mode::ConfirmRemoveWorktree => self.handle_worktree_remove_key(key),
+            Mode::ConfirmClose => self.handle_confirm_close_key_via_api(key),
+            Mode::ContextMenu => self.handle_context_menu_key_via_api(key),
+            _ => unreachable!("client overlay must resolve to a client-owned mode"),
+        }
+        true
     }
 
     /// Card shortcuts are written uppercase, so the shift that produces them is
@@ -3442,6 +3465,9 @@ impl App {
     }
 
     fn handle_pr_action_confirmation_key(&mut self, key: KeyEvent) -> bool {
+        if self.state.client_overlay_owns_input() {
+            return false;
+        }
         let Some(confirmation) = self.state.pr_action_confirmation.clone() else {
             return false;
         };
@@ -4434,11 +4460,13 @@ impl App {
             }
             return;
         }
-        if self.route_text_to_sidebar_subgroup_picker(text) {
-            return;
-        }
-        if self.try_route_text_to_home(text) {
-            return;
+        if !self.state.client_overlay_owns_input() {
+            if self.route_text_to_sidebar_subgroup_picker(text) {
+                return;
+            }
+            if self.try_route_text_to_home(text) {
+                return;
+            }
         }
         if self.state.effective_interaction_mode() != Mode::Terminal || self.state.notepad.focused {
             self.paste_into_active_text_input(text);
@@ -4511,11 +4539,13 @@ impl App {
             }
             return;
         }
-        if self.route_text_to_sidebar_subgroup_picker(&text) {
-            return;
-        }
-        if self.try_route_text_to_home(&text) {
-            return;
+        if !self.state.client_overlay_owns_input() {
+            if self.route_text_to_sidebar_subgroup_picker(&text) {
+                return;
+            }
+            if self.try_route_text_to_home(&text) {
+                return;
+            }
         }
         if self.state.effective_interaction_mode() != Mode::Terminal {
             self.paste_into_active_text_input(&text);
@@ -4576,11 +4606,13 @@ impl App {
             }
             return;
         }
-        if self.route_text_to_sidebar_subgroup_picker(&text) {
-            return;
-        }
-        if self.try_route_text_to_home(&text) {
-            return;
+        if !self.state.client_overlay_owns_input() {
+            if self.route_text_to_sidebar_subgroup_picker(&text) {
+                return;
+            }
+            if self.try_route_text_to_home(&text) {
+                return;
+            }
         }
         if self.state.effective_interaction_mode() != Mode::Terminal {
             self.paste_into_active_text_input(&text);
@@ -4831,6 +4863,7 @@ impl App {
             }
             return;
         }
+        let client_overlay_owns_input = self.state.client_overlay_owns_input();
         match mouse.kind {
             MouseEventKind::Drag(MouseButton::Left)
                 if self
@@ -4856,7 +4889,7 @@ impl App {
         } else {
             self.state.clear_hovered_control();
         }
-        if self.state.pr_action_confirmation.is_some() {
+        if !client_overlay_owns_input && self.state.pr_action_confirmation.is_some() {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if let Some((cancel, confirm)) = crate::ui::pr_actions::confirmation_button_rects(
                     &self.state,
@@ -4879,7 +4912,8 @@ impl App {
             }
             return;
         }
-        if self.state.config_diagnostic.is_some()
+        if !client_overlay_owns_input
+            && self.state.config_diagnostic.is_some()
             && self.state.point_in_rect(
                 self.state.view.config_diagnostic_hit_area,
                 mouse.column,
@@ -4898,7 +4932,7 @@ impl App {
             self.config_diagnostic_deadline = None;
             return;
         }
-        if self.state.usage_view.is_some() {
+        if !client_overlay_owns_input && self.state.usage_view.is_some() {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 let target = self
                     .state
@@ -4918,7 +4952,7 @@ impl App {
             }
             return;
         }
-        if self.state.work_view.is_some() {
+        if !client_overlay_owns_input && self.state.work_view.is_some() {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
                 && self.fold_work_view_section_at(mouse.column, mouse.row)
             {
@@ -4927,27 +4961,29 @@ impl App {
             self.handle_ticket_board_mouse(mouse);
             return;
         }
-        if self.state.symphony_detail.is_some() {
+        if !client_overlay_owns_input && self.state.symphony_detail.is_some() {
             return;
         }
-        match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                self.pending_url_click_sources.remove(&source_id);
+        if !client_overlay_owns_input {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.pending_url_click_sources.remove(&source_id);
+                }
+                MouseEventKind::Drag(MouseButton::Left)
+                    if self.pending_url_click_sources.contains(&source_id) =>
+                {
+                    return;
+                }
+                MouseEventKind::Up(MouseButton::Left)
+                    if self.pending_url_click_sources.remove(&source_id) =>
+                {
+                    return;
+                }
+                _ => {}
             }
-            MouseEventKind::Drag(MouseButton::Left)
-                if self.pending_url_click_sources.contains(&source_id) =>
-            {
-                return;
-            }
-            MouseEventKind::Up(MouseButton::Left)
-                if self.pending_url_click_sources.remove(&source_id) =>
-            {
-                return;
-            }
-            _ => {}
         }
 
-        if self.state.popup_pane.is_some() {
+        if !client_overlay_owns_input && self.state.popup_pane.is_some() {
             self.handle_popup_mouse(mouse);
             return;
         }
@@ -5107,7 +5143,8 @@ impl App {
             }
         }
 
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        if !client_overlay_owns_input
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self.state.on_sidebar_divider(mouse.column, mouse.row)
         {
             let now = std::time::Instant::now();
@@ -5127,11 +5164,12 @@ impl App {
             }
         }
 
-        if self.handle_modified_url_click(source_id, mouse) {
+        if !client_overlay_owns_input && self.handle_modified_url_click(source_id, mouse) {
             return;
         }
 
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        if !client_overlay_owns_input
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self.state.on_dock_divider(mouse.column, mouse.row)
         {
             let now = std::time::Instant::now();
@@ -5150,7 +5188,7 @@ impl App {
             return;
         }
 
-        if self.state.add_project_active() {
+        if !client_overlay_owns_input && self.state.add_project_active() {
             self.state
                 .handle_mouse(&mut self.terminal_runtimes, source_id, mouse);
             self.start_home_github_refresh_if_requested();
@@ -5161,8 +5199,10 @@ impl App {
             && self
                 .state
                 .point_in_rect(self.state.view.terminal_area, mouse.column, mouse.row);
-        let handled_pane_double_click = !editor_preview_hit && self.handle_pane_double_click(mouse);
-        if !handled_pane_double_click && !editor_preview_hit {
+        let handled_pane_double_click = !client_overlay_owns_input
+            && !editor_preview_hit
+            && self.handle_pane_double_click(mouse);
+        if !client_overlay_owns_input && !handled_pane_double_click && !editor_preview_hit {
             self.focus_pane_before_mouse_press(mouse);
         }
 
@@ -7544,6 +7584,39 @@ enabled = true
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn pr_action_confirmation_is_isolated_between_clients() {
+        let mut app = test_app();
+        let mut client_a = crate::app::state::DockPresentationState::default();
+        let mut client_b = crate::app::state::DockPresentationState::default();
+        let confirmation = crate::app::state::PrActionConfirmation {
+            key: crate::app::state::WorkItemKey {
+                repo: "owner/repo".into(),
+                pr_number: Some(42),
+                pr_url: Some("https://github.com/owner/repo/pull/42".into()),
+                ticket_id: None,
+            },
+            action: crate::ui::work_list_detail::PrActionKind::Merge(
+                crate::config::MergeMethodConfig::Rebase,
+            ),
+        };
+
+        app.state.swap_dock_presentation(&mut client_a);
+        app.state.pr_action_confirmation = Some(confirmation.clone());
+        app.state.swap_dock_presentation(&mut client_a);
+
+        app.state.swap_dock_presentation(&mut client_b);
+        assert!(!app.handle_pr_action_confirmation_key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::empty()
+        )));
+        assert!(app.state.request_pr_command.is_none());
+        app.state.swap_dock_presentation(&mut client_b);
+
+        app.state.swap_dock_presentation(&mut client_a);
+        assert_eq!(app.state.pr_action_confirmation, Some(confirmation));
     }
 
     #[test]
