@@ -233,6 +233,12 @@ class UiHotPathArchitectureTests(unittest.TestCase):
             )
         ]
         self.assertIn("closing_report: Option<ClosingReport>", terminal_fields)
+        closing_fields = re.findall(r"^\s*(closing_[a-z0-9_]+)\s*:", terminal_fields, re.M)
+        self.assertEqual(
+            closing_fields,
+            ["closing_report"],
+            "ClosingReport must own every terminal closing fact",
+        )
         for legacy_field in (
             "closing_gates:",
             "closing_items:",

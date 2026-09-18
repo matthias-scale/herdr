@@ -291,6 +291,7 @@ struct ClosingReportScope {
 pub struct ClosingReport {
     version: u8,
     scope: ClosingReportScope,
+    retired_pending_completion: bool,
     pub(crate) closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
     pub(crate) closing_items: Vec<crate::api::schema::ClosingBlockItem>,
     pub(crate) closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
@@ -310,6 +311,7 @@ impl Default for ClosingReport {
         Self {
             version: CLOSING_REPORT_MODEL_VERSION,
             scope: ClosingReportScope::default(),
+            retired_pending_completion: false,
             closing_gates: Vec::new(),
             closing_items: Vec::new(),
             closing_decisions: Vec::new(),
@@ -353,6 +355,8 @@ struct ClosingReportHandoffState {
     scope_source: Option<String>,
     scope_session_id: Option<String>,
     scope_turn_seq: Option<u64>,
+    #[serde(default)]
+    retired_pending_completion: bool,
     gates: Vec<crate::api::schema::ClosingBlockItem>,
     items: Vec<crate::api::schema::ClosingBlockItem>,
     decisions: Vec<crate::api::schema::ClosingBlockDecision>,
@@ -375,6 +379,7 @@ impl ClosingReportHandoffState {
             scope_source: report.scope.source.clone(),
             scope_session_id: report.scope.session_id.clone(),
             scope_turn_seq: report.scope.turn_seq,
+            retired_pending_completion: report.retired_pending_completion,
             gates: report.closing_gates.clone(),
             items: report.closing_items.clone(),
             decisions: report.closing_decisions.clone(),
@@ -400,6 +405,7 @@ impl ClosingReportHandoffState {
                 session_id: self.scope_session_id,
                 turn_seq: self.scope_turn_seq,
             },
+            retired_pending_completion: self.retired_pending_completion,
             closing_gates: self.gates,
             closing_items: self.items,
             closing_decisions: self.decisions,
@@ -647,7 +653,6 @@ pub struct TerminalState {
     work_title_initial_subject: Option<WorkTitleInitialSubject>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
     closing_report: Option<ClosingReport>,
-    closing_report_retired_pending_completion: bool,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     /// Runtime-only Claude JSONL source. Never persisted or exposed through the
     /// API; the accepted session id remains the resume identity.
@@ -737,7 +742,6 @@ impl TerminalState {
             work_title_initial_subject: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             closing_report: Some(ClosingReport::default()),
-            closing_report_retired_pending_completion: false,
             persisted_agent_session: None,
             claude_transcript_session_id: None,
             claude_transcript_path: None,
@@ -1118,10 +1122,15 @@ impl TerminalState {
     }
 
     pub(crate) fn take_retired_closing_report_completion(&mut self) -> bool {
-        let completed =
-            self.closing_report_retired_pending_completion && self.closing_task_complete();
+        let completed = self.closing_report.as_ref().is_some_and(|report| {
+            report.retired_pending_completion
+                && (report.completion == Some(crate::api::schema::ClosingCompletion::Complete)
+                    || report.closing_contract_met == Some(true))
+        });
         if completed {
-            self.closing_report_retired_pending_completion = false;
+            if let Some(report) = self.closing_report.as_mut() {
+                report.retired_pending_completion = false;
+            }
         }
         completed
     }
@@ -1209,7 +1218,6 @@ impl TerminalState {
 
     fn clear_closing_task_report(&mut self, now: Instant) -> bool {
         let _ = now;
-        self.closing_report_retired_pending_completion = false;
         let empty = ClosingReport::default();
         let report_changed = self
             .closing_report
@@ -1250,7 +1258,9 @@ impl TerminalState {
         }
         let changed = self.clear_closing_task_report(now);
         if changed {
-            self.closing_report_retired_pending_completion = true;
+            self.closing_report
+                .get_or_insert_default()
+                .retired_pending_completion = true;
             self.revision = self.revision.wrapping_add(1);
         }
         changed

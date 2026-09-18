@@ -1114,6 +1114,21 @@ fn live_handoff_preserves_latched_gate_and_done_label() {
     // the observed status instead of a fixed delay.
     wait_for_output(&api_socket, &done_pane_id, "codex");
     wait_for_agent_status_not_working(&api_socket, &done_pane_id, Duration::from_secs(60));
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:done:old-session",
+            "method": "pane.report_agent_session",
+            "params": {
+                "pane_id": done_pane_id,
+                "source": "herdr:codex",
+                "agent": "codex",
+                "seq": 1,
+                "agent_session_id": "handoff-old-session",
+                "session_start_source": "startup"
+            }
+        }),
+    ));
     let created = request(
         &api_socket,
         serde_json::json!({
@@ -1138,6 +1153,7 @@ fn live_handoff_preserves_latched_gate_and_done_label() {
                 "state": "working",
                 "seq": 1,
                 "v": 2,
+                "agent_session_id": "handoff-old-session",
                 "completion": "incomplete",
                 "parse_status": "ok",
                 "workers_unknown": false,
@@ -1159,6 +1175,7 @@ fn live_handoff_preserves_latched_gate_and_done_label() {
                 "state": "idle",
                 "seq": 2,
                 "v": 2,
+                "agent_session_id": "handoff-old-session",
                 "completion": "complete",
                 "parse_status": "ok",
                 "workers_unknown": false,
@@ -1208,6 +1225,43 @@ fn live_handoff_preserves_latched_gate_and_done_label() {
         "done",
         Duration::from_secs(15),
     );
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:done:next-turn",
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": done_pane_id,
+                "source": "herdr:codex-closing-block",
+                "agent": "codex",
+                "state": "working",
+                "seq": 3,
+                "v": 2,
+                "agent_session_id": "handoff-old-session",
+                "completion": "incomplete",
+                "parse_status": "ok",
+                "workers_unknown": false,
+                "gates": [],
+                "items": [],
+                "decisions": []
+            }
+        }),
+    ));
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:done:new-session",
+            "method": "pane.report_agent_session",
+            "params": {
+                "pane_id": done_pane_id,
+                "source": "herdr:codex",
+                "agent": "codex",
+                "seq": 2,
+                "agent_session_id": "handoff-new-session",
+                "session_start_source": "clear"
+            }
+        }),
+    ));
 
     assert_ok(request(
         &api_socket,
@@ -1232,6 +1286,28 @@ fn live_handoff_preserves_latched_gate_and_done_label() {
         after["result"]["pane"]["gates"].as_array().unwrap().len(),
         1
     );
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:done:after-handoff-completion",
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": done_pane_id,
+                "source": "herdr:codex-closing-block",
+                "agent": "codex",
+                "state": "idle",
+                "seq": 4,
+                "v": 2,
+                "agent_session_id": "handoff-new-session",
+                "completion": "complete",
+                "parse_status": "ok",
+                "workers_unknown": false,
+                "gates": [],
+                "items": [],
+                "decisions": []
+            }
+        }),
+    ));
     wait_for_pane_agent_status(
         &api_socket,
         "test:done:after",
