@@ -21996,11 +21996,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         entry.state = AgentState::Blocked;
         assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
 
-        // The tooltip describes the rendered attention tier, even while the
-        // lifecycle state is still working.
+        // Active work remains the visible lifecycle while an action point is
+        // retained for later.
         entry.state = AgentState::Working;
         entry.open_blockers = true;
-        assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
+        assert_eq!(agent_dot_tooltip(&entry), "Working");
         entry.state = AgentState::Idle;
         assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
 
