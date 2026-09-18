@@ -153,16 +153,17 @@ pub(crate) use self::{
         collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
         compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
         relative_agent_navigation_entry, remote_agent_panel_entries, remote_agent_row_at,
-        sidebar_agent_run_at, sidebar_dim_header_at, sidebar_filter_anchor_rect, sidebar_filter_menu_layout,
-        sidebar_filter_options, sidebar_group_menu_layout, sidebar_group_mode_anchor_rect,
-        sidebar_header_new_menu_rect, sidebar_header_new_thread_rect, sidebar_header_overflow_rect,
-        sidebar_header_search_rect, sidebar_header_star_filter_rect, sidebar_missive_copy_url,
-        sidebar_nested_header_at, sidebar_new_menu_layout, sidebar_new_thread_layout,
-        sidebar_new_thread_matches, sidebar_object_action_at, sidebar_object_at,
-        sidebar_object_menu_item_at, sidebar_object_menu_items, sidebar_project_anchor_rect,
-        sidebar_project_menu_layout, sidebar_project_menu_matches, sidebar_pull_request_actions,
-        sidebar_pull_request_key, sidebar_row_index_for_workspace, sidebar_row_scroll_for_target,
-        sidebar_rows, sidebar_separator_col, sidebar_settled_menu_layout, sidebar_show_more_at,
+        sidebar_agent_run_at, sidebar_dim_header_at, sidebar_filter_anchor_rect,
+        sidebar_filter_menu_layout, sidebar_filter_options, sidebar_group_menu_layout,
+        sidebar_group_mode_anchor_rect, sidebar_header_new_menu_rect,
+        sidebar_header_new_thread_rect, sidebar_header_overflow_rect, sidebar_header_search_rect,
+        sidebar_header_star_filter_rect, sidebar_missive_copy_url, sidebar_nested_header_at,
+        sidebar_new_menu_layout, sidebar_new_thread_layout, sidebar_new_thread_matches,
+        sidebar_object_action_at, sidebar_object_at, sidebar_object_menu_item_at,
+        sidebar_object_menu_items, sidebar_project_anchor_rect, sidebar_project_menu_layout,
+        sidebar_project_menu_matches, sidebar_pull_request_actions, sidebar_pull_request_key,
+        sidebar_row_index_for_workspace, sidebar_row_scroll_for_target, sidebar_rows,
+        sidebar_separator_col, sidebar_settled_menu_layout, sidebar_show_more_at,
         sidebar_show_more_key, sidebar_snooze_menu_layout, sidebar_symphony_job_at,
         sidebar_thread_entries, sidebar_ticket_action_entries, sidebar_ticket_target,
         sidebar_unassigned_spawn_at, sidebar_work_group_activation, workspace_agent_chevron_rect,
@@ -1274,41 +1275,51 @@ fn render_with_runtime_registry_inner(
         terminal_area
     };
 
-    match app.mode {
-        Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
-        Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
-        Mode::ProductAnnouncement => render_product_announcement_overlay(app, frame, frame.area()),
-        Mode::Navigate if app.view.layout == ViewLayout::Mobile => {
-            render_mobile_panel(app, terminal_runtimes, frame, frame.area())
+    if app
+        .sidebar_snooze
+        .as_ref()
+        .is_some_and(|snooze| snooze.time_draft.is_some())
+    {
+        render_rename_overlay(app, frame, frame.area());
+    } else {
+        match app.mode {
+            Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
+            Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
+            Mode::ProductAnnouncement => {
+                render_product_announcement_overlay(app, frame, frame.area())
+            }
+            Mode::Navigate if app.view.layout == ViewLayout::Mobile => {
+                render_mobile_panel(app, terminal_runtimes, frame, frame.area())
+            }
+            Mode::Navigate => render_navigate_overlay(app, frame, mode_bar_area),
+            Mode::Prefix => render_prefix_overlay(app, frame, mode_bar_area),
+            Mode::Copy => render_copy_mode_overlay(app, frame, mode_bar_area),
+            Mode::Resize => render_resize_overlay(app, frame, mode_bar_area),
+            Mode::ConfirmClose => {
+                render_confirm_close_overlay(app, terminal_runtimes, frame, terminal_area)
+            }
+            Mode::ContextMenu => {
+                render_context_menu(app, frame);
+            }
+            Mode::GitMenu => render_git_menu(app, frame),
+            Mode::AddAction => render_add_action_overlay(app, frame),
+            Mode::Settings => render_settings_overlay(app, frame, frame.area()),
+            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+                render_rename_overlay(app, frame, frame.area())
+            }
+            Mode::NewLinkedWorktree => render_new_linked_worktree_overlay(app, frame, frame.area()),
+            Mode::OpenExistingWorktree => {
+                render_open_existing_worktree_overlay(app, frame, frame.area())
+            }
+            Mode::ConfirmRemoveWorktree => render_remove_worktree_overlay(app, frame, frame.area()),
+            Mode::GlobalMenu => render_global_launcher_menu(app, frame),
+            Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
+            Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
+            Mode::CommandPalette => render_command_palette(app, frame),
+            Mode::WorkLinkPicker => render_work_link_picker(app, frame, frame.area()),
+            Mode::AgentPicker => render_agent_picker(app, frame, frame.area()),
+            Mode::Terminal => {}
         }
-        Mode::Navigate => render_navigate_overlay(app, frame, mode_bar_area),
-        Mode::Prefix => render_prefix_overlay(app, frame, mode_bar_area),
-        Mode::Copy => render_copy_mode_overlay(app, frame, mode_bar_area),
-        Mode::Resize => render_resize_overlay(app, frame, mode_bar_area),
-        Mode::ConfirmClose => {
-            render_confirm_close_overlay(app, terminal_runtimes, frame, terminal_area)
-        }
-        Mode::ContextMenu => {
-            render_context_menu(app, frame);
-        }
-        Mode::GitMenu => render_git_menu(app, frame),
-        Mode::AddAction => render_add_action_overlay(app, frame),
-        Mode::Settings => render_settings_overlay(app, frame, frame.area()),
-        Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::SetSnoozeTime => {
-            render_rename_overlay(app, frame, frame.area())
-        }
-        Mode::NewLinkedWorktree => render_new_linked_worktree_overlay(app, frame, frame.area()),
-        Mode::OpenExistingWorktree => {
-            render_open_existing_worktree_overlay(app, frame, frame.area())
-        }
-        Mode::ConfirmRemoveWorktree => render_remove_worktree_overlay(app, frame, frame.area()),
-        Mode::GlobalMenu => render_global_launcher_menu(app, frame),
-        Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
-        Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
-        Mode::CommandPalette => render_command_palette(app, frame),
-        Mode::WorkLinkPicker => render_work_link_picker(app, frame, frame.area()),
-        Mode::AgentPicker => render_agent_picker(app, frame, frame.area()),
-        Mode::Terminal => {}
     }
     if app
         .home

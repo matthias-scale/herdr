@@ -45,7 +45,7 @@ pub(crate) fn rename_button_rects(inner: Rect) -> (Rect, Rect, Rect) {
 /// IMEs draw their composition preview at the host terminal cursor. Without an
 /// explicit cursor the frame carries none, the client keeps the position last
 /// reported by the focused pane, and composition lands behind the dialog.
-fn render_name_input_field(app: &AppState, frame: &mut Frame, input_rect: Rect) {
+fn render_name_input_field(app: &AppState, frame: &mut Frame, input_rect: Rect, input: &str) {
     frame.render_widget(Clear, input_rect);
 
     // The text stops one column short of the field so the clamped caret always
@@ -56,7 +56,7 @@ fn render_name_input_field(app: &AppState, frame: &mut Frame, input_rect: Rect) 
         ..input_rect
     };
     frame.render_widget(
-        Paragraph::new(format!(" {}", app.name_input)).style(
+        Paragraph::new(format!(" {input}")).style(
             Style::default()
                 .fg(app.palette.text)
                 .bg(app.palette.surface0),
@@ -70,7 +70,7 @@ fn render_name_input_field(app: &AppState, frame: &mut Frame, input_rect: Rect) 
     let caret_x = input_rect
         .x
         .saturating_add(1)
-        .saturating_add(display_width_u16(&app.name_input))
+        .saturating_add(display_width_u16(input))
         .min(input_rect.right().saturating_sub(1));
     frame.set_cursor_position((caret_x, input_rect.y));
 }
@@ -78,13 +78,17 @@ fn render_name_input_field(app: &AppState, frame: &mut Frame, input_rect: Rect) 
 pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     super::dim_background(frame, area);
 
+    let snooze = app
+        .sidebar_snooze
+        .as_ref()
+        .filter(|snooze| snooze.time_draft.is_some());
     let title = match app.mode {
+        _ if snooze.is_some() => "set snooze time",
         Mode::RenameWorkspace if app.pending_workspace_create_cwd.is_some() => "new workspace",
         Mode::RenameWorkspace => "rename workspace",
         Mode::RenameTab if app.creating_new_tab => "new tab",
         Mode::RenameTab => "rename tab",
         Mode::RenamePane => "rename pane",
-        Mode::SetSnoozeTime => "set snooze time",
         _ => return,
     };
 
@@ -106,17 +110,12 @@ pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rec
 
     render_modal_header(frame, rows[0], title, &app.palette);
 
-    if app.mode == Mode::SetSnoozeTime {
-        let message = app
-            .snooze_time_input
-            .as_ref()
-            .and_then(|input| input.error.as_deref())
+    if let Some(snooze) = snooze {
+        let message = snooze
+            .error
+            .as_deref()
             .unwrap_or("Today, using 24-hour time (HH:MM)");
-        let color = if app
-            .snooze_time_input
-            .as_ref()
-            .is_some_and(|input| input.error.is_some())
-        {
+        let color = if snooze.error.is_some() {
             app.palette.red
         } else {
             app.palette.overlay0
@@ -128,7 +127,10 @@ pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rec
     }
 
     let input_rect = Rect::new(rows[2].x, rows[2].y, rows[2].width, 1);
-    render_name_input_field(app, frame, input_rect);
+    let input = snooze
+        .and_then(|snooze| snooze.time_draft.as_deref())
+        .unwrap_or(&app.name_input);
+    render_name_input_field(app, frame, input_rect, input);
 
     let (save_rect, clear_rect, cancel_rect) = rename_button_rects(inner);
 
@@ -316,7 +318,7 @@ pub(super) fn render_new_linked_worktree_overlay(app: &AppState, frame: &mut Fra
         rows[1],
     );
     let input_rect = Rect::new(rows[2].x, rows[2].y, rows[2].width, 1);
-    render_name_input_field(app, frame, input_rect);
+    render_name_input_field(app, frame, input_rect, &app.name_input);
 
     let checkout = create.checkout_path.display().to_string();
     frame.render_widget(
@@ -1087,12 +1089,7 @@ mod tests {
         let input = rename_input_rect(RENAME_AREA);
         let expected = Position::new(input.x + 3, input.y);
 
-        for mode in [
-            Mode::RenameWorkspace,
-            Mode::RenameTab,
-            Mode::RenamePane,
-            Mode::SetSnoozeTime,
-        ] {
+        for mode in [Mode::RenameWorkspace, Mode::RenameTab, Mode::RenamePane] {
             assert_eq!(
                 rename_overlay_caret_in(mode, "ab").0,
                 expected,
@@ -1104,12 +1101,14 @@ mod tests {
     #[test]
     fn snooze_time_error_is_visible_in_the_input_modal() {
         let mut app = AppState::test_new();
-        app.mode = Mode::SetSnoozeTime;
-        app.snooze_time_input = Some(crate::app::state::SnoozeTimeInputState {
+        app.sidebar_snooze = Some(crate::app::state::SidebarSnoozeUiState {
             target: crate::app::state::PaneFocusTarget {
                 workspace_id: "workspace".into(),
                 pane_id: crate::layout::PaneId::alloc(),
             },
+            anchor: (0, 0),
+            selected: 0,
+            time_draft: Some("12:30".into()),
             error: Some("Time must be later than now".into()),
         });
         let mut terminal = Terminal::new(TestBackend::new(RENAME_AREA.width, RENAME_AREA.height))

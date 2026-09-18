@@ -66,7 +66,9 @@ impl App {
         if self.state.handle_sidebar_subgroup_picker_key(key_event) {
             return None;
         }
-        if self.handle_sidebar_snooze_menu_key(key_event) {
+        if self.handle_sidebar_snooze_time_key(key_event)
+            || self.handle_sidebar_snooze_menu_key(key_event)
+        {
             return None;
         }
 

@@ -296,8 +296,8 @@ pub(super) fn render_context_menu(app: &AppState, frame: &mut Frame) {
         return;
     };
 
-    let items: Vec<ListItem> = menu
-        .items()
+    let items: Vec<ListItem> = app
+        .context_menu_items(menu)
         .iter()
         .map(|item| ListItem::new(Line::from(*item)))
         .collect();

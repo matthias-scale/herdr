@@ -616,20 +616,29 @@ impl AppState {
                 return None;
             }
         }
-        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_snooze_menu.is_some() {
+        if matches!(mouse.kind, MouseEventKind::Moved)
+            && self
+                .sidebar_snooze
+                .as_ref()
+                .is_some_and(|snooze| snooze.time_draft.is_none())
+        {
             if let Some(index) = self.sidebar_snooze_menu_item_at(mouse.column, mouse.row) {
-                if let Some(menu) = self.sidebar_snooze_menu.as_mut() {
-                    menu.selected = index;
+                if let Some(snooze) = self.sidebar_snooze.as_mut() {
+                    snooze.selected = index;
                 }
             }
             return None;
         }
-        if self.sidebar_snooze_menu.is_some() {
+        if self
+            .sidebar_snooze
+            .as_ref()
+            .is_some_and(|snooze| snooze.time_draft.is_none())
+        {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if let Some(index) = self.sidebar_snooze_menu_item_at(mouse.column, mouse.row) {
                     return Some(MouseAction::SnoozeMenu { index });
                 }
-                self.sidebar_snooze_menu = None;
+                self.sidebar_snooze = None;
             }
             return None;
         }
@@ -1199,13 +1208,15 @@ impl AppState {
                     return None;
                 }
 
-                if matches!(
-                    self.mode,
-                    Mode::RenameWorkspace
-                        | Mode::RenameTab
-                        | Mode::RenamePane
-                        | Mode::SetSnoozeTime
-                ) {
+                if self
+                    .sidebar_snooze
+                    .as_ref()
+                    .is_some_and(|snooze| snooze.time_draft.is_some())
+                    || matches!(
+                        self.mode,
+                        Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane
+                    )
+                {
                     let action = self
                         .rename_modal_inner()
                         .map(crate::ui::rename_button_rects)
@@ -1744,10 +1755,11 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, tab_idx)) = self.tab_target_at(mouse.row) {
+                    if let Some((ws_idx, _tab_idx, pane_id)) = self.sidebar_local_pane_at(mouse.row)
+                    {
                         self.selected = ws_idx;
                         self.mode = Mode::Terminal;
-                        return Some(MouseAction::FocusSidebarTab { ws_idx, tab_idx });
+                        return Some(MouseAction::FocusPane { ws_idx, pane_id });
                     }
 
                     if let Some((ws_idx, _tab_idx, pane_id)) =
@@ -2223,11 +2235,9 @@ impl AppState {
                         .sidebar_local_pane_at(mouse.row)
                         .map(|(_, _, pane_id)| pane_id)
                         .filter(|pane_id| !self.pane_is_settled(ws_idx, *pane_id));
-                    let snooze_target =
-                        settle_pane_id.map(|pane_id| crate::app::state::ContextMenuSnoozeTarget {
-                            pane_id,
-                            snoozed: self.pane_is_snoozed(ws_idx, pane_id),
-                        });
+                    let snooze_target = settle_pane_id;
+                    let settle_pane_id =
+                        settle_pane_id.filter(|pane_id| !self.pane_is_snoozed(ws_idx, *pane_id));
                     self.selected = ws_idx;
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Tab {
@@ -2395,7 +2405,6 @@ impl AppState {
                             ws_idx,
                             tab_idx,
                             pane_id: info.id,
-                            snoozed: self.pane_is_snoozed(ws_idx, info.id),
                             source_pane_id,
                             has_manual_label,
                             right_click_passthrough,
@@ -2567,17 +2576,33 @@ impl AppState {
             .is_some_and(|tab| tab.starred)
     }
 
+    pub(crate) fn context_menu_items(&self, menu: &ContextMenuState) -> Vec<&'static str> {
+        let target = match &menu.kind {
+            ContextMenuKind::Tab {
+                ws_idx,
+                snooze_target: Some(pane_id),
+                ..
+            }
+            | ContextMenuKind::Pane {
+                ws_idx, pane_id, ..
+            } => Some((*ws_idx, *pane_id)),
+            _ => None,
+        };
+        let snoozed = target.is_some_and(|(ws_idx, pane_id)| self.pane_is_snoozed(ws_idx, pane_id));
+        menu.items_for_snooze(snoozed)
+    }
+
     pub(crate) fn context_menu_rect(&self) -> Option<Rect> {
         let menu = self.context_menu.as_ref()?;
         let screen = self.screen_rect();
-        let max_item_w = menu
-            .items()
+        let items = self.context_menu_items(menu);
+        let max_item_w = items
             .iter()
             .map(|item| item.len() as u16)
             .max()
             .unwrap_or(0);
         let menu_w = (max_item_w + 4).max(14).min(screen.width.max(1));
-        let menu_h = (menu.items().len() as u16 + 2).min(screen.height.max(1));
+        let menu_h = (items.len() as u16 + 2).min(screen.height.max(1));
         let x = menu.x.min(screen.x + screen.width.saturating_sub(menu_w));
         let y = menu.y.min(screen.y + screen.height.saturating_sub(menu_h));
         Some(Rect::new(x, y, menu_w, menu_h))
@@ -2596,7 +2621,7 @@ impl AppState {
         let item_count = self
             .context_menu
             .as_ref()
-            .map(|menu| menu.items().len() as u16)
+            .map(|menu| self.context_menu_items(menu).len() as u16)
             .unwrap_or(0);
         if col >= inner_x
             && col < inner_x + inner_w
@@ -3923,6 +3948,15 @@ mod tests {
             "{}",
             toast.context
         );
+        let local_pane = app.state.workspaces[0].tabs[0].root_pane;
+        for key in ['z', 's'] {
+            assert!(!app.handle_sidebar_session_action_key(KeyEvent::new(
+                KeyCode::Char(key),
+                KeyModifiers::empty(),
+            )));
+        }
+        assert!(app.state.sidebar_snooze.is_none());
+        assert!(!app.state.pane_is_settled(0, local_pane));
     }
 
     #[test]
@@ -4058,7 +4092,7 @@ mod tests {
 
         let menu = app
             .state
-            .sidebar_snooze_menu
+            .sidebar_snooze
             .as_ref()
             .expect("snooze duration menu");
         let pane_id = menu.target.pane_id;
@@ -5082,7 +5116,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_compact_sidebar_tab_row_focuses_the_tab() {
+    fn clicking_a_compact_sidebar_tab_row_focuses_its_pane() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         app.state.ensure_test_terminals();
@@ -5109,10 +5143,10 @@ mod tests {
 
         assert!(matches!(
             action,
-            Some(MouseAction::FocusSidebarTab {
+            Some(MouseAction::FocusPane {
                 ws_idx: 1,
-                tab_idx: 0
-            })
+                pane_id
+            }) if pane_id == target.pane_id
         ));
     }
 
@@ -5155,10 +5189,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 settle_pane_id: Some(target.pane_id),
-                snooze_target: Some(crate::app::state::ContextMenuSnoozeTarget {
-                    pane_id: target.pane_id,
-                    snoozed: false,
-                }),
+                snooze_target: Some(target.pane_id),
             }
         );
         assert_eq!(app.state.mode, Mode::ContextMenu);
@@ -5169,6 +5200,88 @@ mod tests {
         );
         assert!(menu.items().contains(&"Rename"));
         assert!(menu.items().contains(&crate::app::state::SETTLE_ITEM));
+    }
+
+    #[test]
+    fn split_tab_rows_click_and_right_click_their_exact_panes() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("split");
+        let active_pane = workspace.tabs[0].root_pane;
+        let snoozed_pane = workspace.test_split(Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(active_pane);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.state.snooze_pane_at(0, snoozed_pane, deadline));
+        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.view.sidebar_rect = sidebar;
+
+        for pane_id in [active_pane, snoozed_pane] {
+            app.state.mode = Mode::Terminal;
+            app.state.context_menu = None;
+            let rect = crate::ui::compute_tab_card_areas(&app.state, sidebar)
+                .into_iter()
+                .find(|card| card.pane_id == pane_id)
+                .map(|card| card.rect)
+                .or_else(|| {
+                    crate::ui::compute_agent_card_areas(&app.state, sidebar)
+                        .into_iter()
+                        .find(|card| card.pane_id == pane_id)
+                        .map(|card| card.rect)
+                })
+                .expect("pane row");
+            assert_eq!(
+                app.state
+                    .sidebar_local_pane_at(rect.y)
+                    .map(|(_, _, pane_id)| pane_id),
+                Some(pane_id)
+            );
+            let action = app.state.handle_mouse(
+                &mut app.terminal_runtimes,
+                crate::app::LOCAL_INPUT_SOURCE,
+                mouse(MouseEventKind::Down(MouseButton::Left), rect.x + 2, rect.y),
+            );
+            assert!(matches!(
+                action,
+                Some(MouseAction::FocusPane {
+                    ws_idx: 0,
+                    pane_id: target,
+                }) if target == pane_id
+            ));
+
+            app.state.mode = Mode::Terminal;
+            app.state.context_menu = None;
+            app.state.handle_mouse(
+                &mut app.terminal_runtimes,
+                crate::app::LOCAL_INPUT_SOURCE,
+                mouse(MouseEventKind::Down(MouseButton::Right), rect.x + 2, rect.y),
+            );
+            let ContextMenuKind::Tab {
+                snooze_target,
+                settle_pane_id,
+                ..
+            } = &app
+                .state
+                .context_menu
+                .as_ref()
+                .expect("row context menu")
+                .kind
+            else {
+                panic!("row opened a non-tab menu");
+            };
+            assert_eq!(*snooze_target, Some(pane_id));
+            assert_eq!(*settle_pane_id, (pane_id == active_pane).then_some(pane_id));
+            let menu = app.state.context_menu.as_ref().expect("row context menu");
+            let items = app.state.context_menu_items(menu);
+            assert_eq!(
+                items.contains(&crate::app::state::SETTLE_ITEM),
+                pane_id == active_pane,
+                "snoozed rows must not offer Settle"
+            );
+        }
     }
 
     #[test]
@@ -7802,7 +7915,6 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id,
-                snoozed: false,
                 source_pane_id: None,
                 has_manual_label: false,
                 right_click_passthrough: false,

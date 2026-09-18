@@ -203,7 +203,9 @@ impl App {
         if self.state.handle_sidebar_subgroup_picker_key(key_event) {
             return None;
         }
-        if self.handle_sidebar_snooze_menu_key(key_event) {
+        if self.handle_sidebar_snooze_time_key(key_event)
+            || self.handle_sidebar_snooze_menu_key(key_event)
+        {
             return None;
         }
         if self.intercept_notepad_key_with_prompt_visibility(&key, false) {
@@ -337,10 +339,9 @@ impl App {
                 Mode::ReleaseNotes => self.handle_release_notes_key(key_event),
                 Mode::ProductAnnouncement => self.handle_product_announcement_key(key_event),
                 Mode::Prefix | Mode::Navigate | Mode::Copy => unreachable!(),
-                Mode::RenameWorkspace
-                | Mode::RenameTab
-                | Mode::RenamePane
-                | Mode::SetSnoozeTime => self.handle_rename_key_via_api(key_event),
+                Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+                    self.handle_rename_key_via_api(key_event)
+                }
                 Mode::NewLinkedWorktree => self.handle_worktree_create_key(key_event),
                 Mode::OpenExistingWorktree => self.handle_worktree_open_key(key_event),
                 Mode::ConfirmRemoveWorktree => self.handle_worktree_remove_key(key_event),
@@ -4646,11 +4647,15 @@ impl App {
                 .insert_text(text, std::time::Instant::now());
             return true;
         }
+        if let Some(snooze) = self.state.sidebar_snooze.as_mut() {
+            if let Some(draft) = snooze.time_draft.as_mut() {
+                snooze.error = None;
+                draft.extend(text.chars().filter(|character| !character.is_control()));
+                return true;
+            }
+        }
         match self.state.mode {
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::SetSnoozeTime => {
-                if let Some(input) = self.state.snooze_time_input.as_mut() {
-                    input.error = None;
-                }
+            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                 insert_rename_input_text(&mut self.state, text);
                 true
             }
@@ -5730,12 +5735,17 @@ pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
     if state.notepad.focused {
         return true;
     }
+    if state
+        .sidebar_snooze
+        .as_ref()
+        .is_some_and(|snooze| snooze.time_draft.is_some())
+    {
+        return true;
+    }
     match state.mode {
-        Mode::RenameWorkspace
-        | Mode::RenameTab
-        | Mode::RenamePane
-        | Mode::SetSnoozeTime
-        | Mode::NewLinkedWorktree => true,
+        Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::NewLinkedWorktree => {
+            true
+        }
         Mode::OpenExistingWorktree => state
             .worktree_open
             .as_ref()

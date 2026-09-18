@@ -1515,6 +1515,7 @@ impl SidebarSortMode {
 /// app keeps its own instance directly.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SidebarPresentationState {
+    pub(crate) focused: bool,
     pub(crate) expanded_workspace_ids: std::collections::HashSet<String>,
     pub(crate) known_workspace_ids: std::collections::HashSet<String>,
     /// Workspace this attach last scrolled into view. Focus changes routed
@@ -1547,22 +1548,17 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) group_sorts: std::collections::HashMap<String, SidebarSortMode>,
     pub(crate) unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
     pub(crate) selected_settled: Option<PaneFocusTarget>,
-    pub(crate) snooze_menu: Option<SidebarSnoozeMenuState>,
+    pub(crate) snooze: Option<SidebarSnoozeUiState>,
     pub(crate) settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) settled_menu_selected: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SidebarSnoozeMenuState {
+pub(crate) struct SidebarSnoozeUiState {
     pub(crate) target: PaneFocusTarget,
     pub(crate) anchor: (u16, u16),
     pub(crate) selected: usize,
-    pub(crate) snoozed: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SnoozeTimeInputState {
-    pub(crate) target: PaneFocusTarget,
+    pub(crate) time_draft: Option<String>,
     pub(crate) error: Option<String>,
 }
 
@@ -2487,7 +2483,6 @@ pub enum Mode {
     RenameWorkspace,
     RenameTab,
     RenamePane,
-    SetSnoozeTime,
     NewLinkedWorktree,
     OpenExistingWorktree,
     ConfirmRemoveWorktree,
@@ -3052,8 +3047,8 @@ pub enum ContextMenuKind {
         /// Exact local pane represented by the sidebar row. Top tab chrome
         /// leaves this empty because it represents the whole tab.
         settle_pane_id: Option<PaneId>,
-        /// Exact local pane and its snooze state at menu-open time.
-        snooze_target: Option<ContextMenuSnoozeTarget>,
+        /// Exact local pane represented by the sidebar row.
+        snooze_target: Option<PaneId>,
         /// Snapshot of the tab's star at open time, so the entry can read
         /// "Star" or "Unstar" without the menu reaching back into state.
         starred: bool,
@@ -3065,7 +3060,6 @@ pub enum ContextMenuKind {
         ws_idx: usize,
         tab_idx: usize,
         pane_id: PaneId,
-        snoozed: bool,
         source_pane_id: Option<PaneId>,
         has_manual_label: bool,
         right_click_passthrough: bool,
@@ -3087,12 +3081,6 @@ pub enum ContextMenuKind {
         /// offers a picker that would have something to pick.
         has_agent_targets: bool,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ContextMenuSnoozeTarget {
-    pub pane_id: PaneId,
-    pub snoozed: bool,
 }
 
 /// Label of the pane menu entry that opens the clicked link in a browser.
@@ -3361,7 +3349,12 @@ pub struct ContextMenuState {
 }
 
 impl ContextMenuState {
+    #[cfg(test)]
     pub fn items(&self) -> Vec<&'static str> {
+        self.items_for_snooze(false)
+    }
+
+    pub(crate) fn items_for_snooze(&self, pane_snoozed: bool) -> Vec<&'static str> {
         match &self.kind {
             ContextMenuKind::Workspace { .. } => vec!["Rename", "Close"],
             ContextMenuKind::GitWorkspace {
@@ -3401,8 +3394,8 @@ impl ContextMenuState {
                 if *has_subgroup {
                     items.push(REMOVE_FROM_SUBGROUP_ITEM);
                 }
-                if let Some(target) = snooze_target {
-                    if target.snoozed {
+                if snooze_target.is_some() {
+                    if pane_snoozed {
                         items.extend([UNSNOOZE_ITEM, CHANGE_TIME_ITEM]);
                     } else {
                         items.extend([SNOOZE_ITEM, SET_TIME_ITEM]);
@@ -3415,7 +3408,6 @@ impl ContextMenuState {
                 items
             }
             ContextMenuKind::Pane {
-                snoozed,
                 source_pane_id,
                 has_manual_label,
                 right_click_passthrough,
@@ -3428,7 +3420,7 @@ impl ContextMenuState {
                 ..
             } => {
                 let mut items = vec!["Rename pane"];
-                if *snoozed {
+                if pane_snoozed {
                     items.extend([UNSNOOZE_ITEM, CHANGE_TIME_ITEM]);
                 } else {
                     items.extend([SNOOZE_ITEM, SET_TIME_ITEM]);
@@ -3784,7 +3776,6 @@ pub struct AppState {
     pub requested_new_tab_name: Option<String>,
     pub pending_workspace_create_cwd: Option<std::path::PathBuf>,
     pub rename_pane_target: Option<PaneId>,
-    pub(crate) snooze_time_input: Option<SnoozeTimeInputState>,
     pub worktree_create: Option<WorktreeCreateState>,
     pub worktree_open: Option<WorktreeOpenState>,
     pub worktree_remove: Option<WorktreeRemoveState>,
@@ -3848,7 +3839,7 @@ pub struct AppState {
     /// Attach-local TUI state; provider objects remain shared work-index facts.
     pub(crate) sidebar_unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
     pub(crate) sidebar_selected_settled: Option<PaneFocusTarget>,
-    pub(crate) sidebar_snooze_menu: Option<SidebarSnoozeMenuState>,
+    pub(crate) sidebar_snooze: Option<SidebarSnoozeUiState>,
     pub(crate) sidebar_settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) sidebar_settled_menu_selected: usize,
     /// The settled menu's delete row has been pressed once and is waiting for
@@ -5137,6 +5128,7 @@ impl AppState {
     }
 
     pub(crate) fn swap_sidebar_presentation(&mut self, other: &mut SidebarPresentationState) {
+        std::mem::swap(&mut self.sidebar_focused, &mut other.focused);
         std::mem::swap(
             &mut self.sidebar_presentation.expanded_workspace_ids,
             &mut other.expanded_workspace_ids,
@@ -5207,7 +5199,7 @@ impl AppState {
             &mut self.sidebar_selected_settled,
             &mut other.selected_settled,
         );
-        std::mem::swap(&mut self.sidebar_snooze_menu, &mut other.snooze_menu);
+        std::mem::swap(&mut self.sidebar_snooze, &mut other.snooze);
         std::mem::swap(
             &mut self.sidebar_settled_menu_target,
             &mut other.settled_menu_target,
@@ -6309,7 +6301,6 @@ impl AppState {
             requested_new_tab_name: None,
             pending_workspace_create_cwd: None,
             rename_pane_target: None,
-            snooze_time_input: None,
             worktree_create: None,
             worktree_open: None,
             worktree_remove: None,
@@ -6338,7 +6329,7 @@ impl AppState {
             sidebar_group_sorts: std::collections::HashMap::new(),
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
-            sidebar_snooze_menu: None,
+            sidebar_snooze: None,
             sidebar_settled_menu_target: None,
             sidebar_settled_menu_selected: 0,
             sidebar_settled_menu_delete_armed: false,
@@ -6981,15 +6972,15 @@ impl AppState {
         for press in self.tab_presses.values() {
             assert_tab_index(press.ws_idx, press.tab_idx, "tab press");
         }
-        if let Some(menu) = &self.sidebar_snooze_menu {
+        if let Some(snooze) = &self.sidebar_snooze {
             let workspace = self
                 .workspaces
                 .iter()
-                .find(|workspace| workspace.id == menu.target.workspace_id)
-                .expect("snooze menu workspace must exist");
+                .find(|workspace| workspace.id == snooze.target.workspace_id)
+                .expect("snooze UI workspace must exist");
             assert!(
-                workspace.pane_state(menu.target.pane_id).is_some(),
-                "snooze menu pane must exist in its workspace"
+                workspace.pane_state(snooze.target.pane_id).is_some(),
+                "snooze UI pane must exist in its workspace"
             );
         }
         if let Some(menu) = &self.context_menu {
@@ -7327,25 +7318,33 @@ mod tests {
         let mut second_client = SidebarPresentationState::default();
 
         app.swap_sidebar_presentation(&mut first_client);
-        app.sidebar_snooze_menu = Some(SidebarSnoozeMenuState {
+        app.sidebar_focused = true;
+        app.sidebar_snooze = Some(SidebarSnoozeUiState {
             target: target.clone(),
             anchor: (9, 3),
             selected: 2,
-            snoozed: false,
+            time_draft: Some("14:30".to_string()),
+            error: Some("example".to_string()),
         });
         app.swap_sidebar_presentation(&mut first_client);
 
         app.swap_sidebar_presentation(&mut second_client);
-        assert!(app.sidebar_snooze_menu.is_none());
+        assert!(!app.sidebar_focused);
+        assert!(app.sidebar_snooze.is_none());
         app.swap_sidebar_presentation(&mut second_client);
 
         app.swap_sidebar_presentation(&mut first_client);
         assert_eq!(
-            app.sidebar_snooze_menu
-                .as_ref()
-                .map(|menu| (&menu.target, menu.anchor, menu.selected)),
-            Some((&target, (9, 3), 2))
+            app.sidebar_snooze.as_ref().map(|snooze| (
+                &snooze.target,
+                snooze.anchor,
+                snooze.selected,
+                snooze.time_draft.as_deref(),
+                snooze.error.as_deref(),
+            )),
+            Some((&target, (9, 3), 2, Some("14:30"), Some("example")))
         );
+        assert!(app.sidebar_focused);
     }
 
     #[test]
@@ -7759,7 +7758,6 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id: crate::layout::PaneId::alloc(),
-                snoozed: false,
                 source_pane_id: None,
                 has_manual_label: false,
                 right_click_passthrough: false,

@@ -852,9 +852,10 @@ fn render_compact_agent_row_with_prefix(
     );
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
-    let controls_width = selected_row_controls_width(app, entry, tab, title_width, rect.width);
-    let snoozed = row_control_pane(app, entry, tab)
-        .is_some_and(|(pane_id, _)| app.pane_is_snoozed(entry.ws_idx, pane_id));
+    let control_pane = row_control_pane(app, entry, tab);
+    let controls_width = selected_row_controls_width(control_pane, title_width, rect.width);
+    let snoozed =
+        control_pane.is_some_and(|(pane_id, _)| app.pane_is_snoozed(entry.ws_idx, pane_id));
     // The star sits inside the title field, right after the name, so it reads as
     // part of the session's label rather than as another right-hand column.
     let star_suffix = (entry.starred
@@ -964,13 +965,11 @@ fn row_control_pane(
 }
 
 fn selected_row_controls_width(
-    app: &AppState,
-    entry: &AgentPanelEntry,
-    tab: bool,
+    control_pane: Option<(crate::layout::PaneId, bool)>,
     title_width: usize,
     row_width: u16,
 ) -> usize {
-    row_control_pane(app, entry, tab)
+    control_pane
         .filter(|_| row_width >= SIDEBAR_MIN_CONTROLS_ROW_WIDTH)
         .filter(|(_, show_settle)| {
             let controls_width = SIDEBAR_SNOOZE_CONTROL_WIDTH
@@ -1001,7 +1000,8 @@ pub(crate) fn selected_row_control_at(
     let widths = compact_row_widths(title, &provider, usize::from(rect.width), requested_prefix);
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
-    let controls_width = selected_row_controls_width(app, entry, tab, title_width, rect.width);
+    let control_pane = row_control_pane(app, entry, tab);
+    let controls_width = selected_row_controls_width(control_pane, title_width, rect.width);
     if controls_width == 0 {
         return None;
     }
@@ -1011,7 +1011,7 @@ pub(crate) fn selected_row_control_at(
     if column < start || column >= start.saturating_add(controls_width as u16) {
         return None;
     }
-    let (pane_id, show_settle) = row_control_pane(app, entry, tab)?;
+    let (pane_id, show_settle) = control_pane?;
     if column < start.saturating_add(SIDEBAR_SNOOZE_CONTROL_WIDTH as u16) {
         Some(crate::app::state::SidebarHoverAction::Snooze {
             ws_idx: entry.ws_idx,
@@ -3329,11 +3329,16 @@ fn ordered_tab_entries_preferring(
     let mut representatives = std::collections::HashMap::new();
     for entry in entries {
         let key = (entry.ws_idx, entry.tab_idx);
+        let focused_pane = app
+            .workspaces
+            .get(entry.ws_idx)
+            .and_then(|workspace| workspace.tabs.get(entry.tab_idx))
+            .map(|tab| tab.layout.focused());
         let rank = (
             usize::from(preferred_panes.is_some_and(|panes| {
                 !panes.contains(&(entry.ws_idx, entry.tab_idx, entry.pane_id))
             })),
-            usize::from(!app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id)),
+            usize::from(focused_pane != Some(entry.pane_id)),
         );
         representatives
             .entry(key)
@@ -5989,10 +5994,11 @@ pub(crate) fn compute_sidebar_hover_targets(
                 let fixed_width =
                     widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
                 let title_width = usize::from(body.width).saturating_sub(fixed_width);
+                let control_pane = row_control_pane(app, entry, tab);
                 let controls_width =
-                    selected_row_controls_width(app, entry, tab, title_width, body.width);
+                    selected_row_controls_width(control_pane, title_width, body.width);
                 if controls_width > 0 {
-                    let Some((pane_id, show_settle)) = row_control_pane(app, entry, tab) else {
+                    let Some((pane_id, show_settle)) = control_pane else {
                         continue;
                     };
                     let start = prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - controls_width;
@@ -8090,7 +8096,9 @@ fn tab_card_entry<'a>(
 ) -> Option<(&'a AgentPanelEntry, u16)> {
     rows.iter().find_map(|row| match row {
         SidebarRow::Tab { entry, depth }
-            if entry.ws_idx == card.ws_idx && entry.tab_idx == card.tab_idx =>
+            if entry.ws_idx == card.ws_idx
+                && entry.tab_idx == card.tab_idx
+                && entry.pane_id == card.pane_id =>
         {
             Some((entry.as_ref(), *depth))
         }
@@ -9074,7 +9082,10 @@ pub(crate) fn sidebar_snooze_menu_layout(
     app: &AppState,
     area: Rect,
 ) -> Option<super::dropdown::DropdownLayout> {
-    let menu = app.sidebar_snooze_menu.as_ref()?;
+    let menu = app.sidebar_snooze.as_ref()?;
+    if menu.time_draft.is_some() {
+        return None;
+    }
     let ws_idx = app
         .workspaces
         .iter()
@@ -9090,13 +9101,14 @@ pub(crate) fn sidebar_snooze_menu_layout(
                 .map(|card| card.rect)
         })
         .unwrap_or_else(|| Rect::new(menu.anchor.0, menu.anchor.1, 1, 1));
+    let snoozed = app.pane_is_snoozed(ws_idx, menu.target.pane_id);
     super::dropdown::layout_dropdown(
         &super::dropdown::DropdownSpec {
             anchor,
-            item_count: crate::app::state::sidebar_snooze_menu_items(menu.snoozed).len(),
+            item_count: crate::app::state::sidebar_snooze_menu_items(snoozed).len(),
             selected: menu.selected,
             has_filter: false,
-            max_rows: crate::app::state::sidebar_snooze_menu_items(menu.snoozed).len(),
+            max_rows: crate::app::state::sidebar_snooze_menu_items(snoozed).len(),
             min_width: 34,
         },
         area,
@@ -9104,14 +9116,25 @@ pub(crate) fn sidebar_snooze_menu_layout(
 }
 
 pub(super) fn render_sidebar_snooze_menu(app: &AppState, frame: &mut Frame) {
-    let Some(menu) = app.sidebar_snooze_menu.as_ref() else {
+    let Some(menu) = app.sidebar_snooze.as_ref() else {
         return;
     };
+    if menu.time_draft.is_some() {
+        return;
+    }
     let Some(layout) = sidebar_snooze_menu_layout(app, frame.area()) else {
         return;
     };
     frame.render_widget(ratatui::widgets::Clear, layout.rect);
-    let lines = crate::app::state::sidebar_snooze_menu_items(menu.snoozed)
+    let Some(ws_idx) = app
+        .workspaces
+        .iter()
+        .position(|workspace| workspace.id == menu.target.workspace_id)
+    else {
+        return;
+    };
+    let snoozed = app.pane_is_snoozed(ws_idx, menu.target.pane_id);
+    let lines = crate::app::state::sidebar_snooze_menu_items(snoozed)
         .iter()
         .enumerate()
         .skip(layout.first_visible)
@@ -9129,7 +9152,10 @@ pub(super) fn render_sidebar_snooze_menu(app: &AppState, frame: &mut Frame) {
                     .bg(app.palette.panel_bg)
             };
             Line::from(Span::styled(
-                format!("{} {label}", if selected { "▸" } else { " " }),
+                super::dropdown::pad_menu_row(
+                    &format!("{} {label}", if selected { "▸" } else { " " }),
+                    layout.list_rect.width,
+                ),
                 style,
             ))
         })
@@ -11183,7 +11209,8 @@ pub(crate) mod tests {
                 working_at,
             );
         app.reconcile_sidebar_presentation();
-        assert!(app.snooze_pane_at(0, snoozed_pane, 1_725_000_060));
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.snooze_pane_at(0, snoozed_pane, deadline));
 
         let rows = sidebar_rows(&app);
         let snoozed_section = rows
@@ -11217,6 +11244,37 @@ pub(crate) mod tests {
             .expect("snoozed pane row");
         assert_eq!(snoozed_entry.pane_id, snoozed_pane);
         assert_eq!(snoozed_entry.state, AgentState::Working);
+
+        app.sidebar_width = 40;
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
+        let area = app.view.sidebar_rect;
+        let tab_cards = compute_tab_card_areas(&app, area);
+        let agent_cards = compute_agent_card_areas(&app, area);
+        for pane_id in [active_pane, snoozed_pane] {
+            let rendered_entry =
+                if let Some(card) = tab_cards.iter().find(|card| card.pane_id == pane_id) {
+                    tab_card_entry(&rows, card)
+                        .map(|(entry, _)| entry)
+                        .expect("tab render entry")
+                } else {
+                    let card = agent_cards
+                        .iter()
+                        .find(|card| card.pane_id == pane_id)
+                        .unwrap_or_else(|| {
+                            panic!(
+                            "pane {pane_id:?} card missing from {tab_cards:?} and {agent_cards:?}"
+                        )
+                        });
+                    match &rows[card.row_idx] {
+                        SidebarRow::Agent { entry, .. } => entry,
+                        _ => panic!("agent card resolved to a non-agent row"),
+                    }
+                };
+            assert_eq!(
+                rendered_entry.pane_id, pane_id,
+                "render must resolve split rows by pane id"
+            );
+        }
 
         assert!(app.unsnooze_pane_at(
             0,
@@ -22277,5 +22335,37 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ],
             "the current choice is marked and the cursor starts on it"
         );
+    }
+
+    #[test]
+    fn snooze_menu_selected_row_fills_the_dropdown_width() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("snooze menu")];
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        app.sidebar_snooze = Some(crate::app::state::SidebarSnoozeUiState {
+            target: crate::app::state::PaneFocusTarget {
+                workspace_id: app.workspaces[0].id.clone(),
+                pane_id,
+            },
+            anchor: (10, 3),
+            selected: 0,
+            time_draft: None,
+            error: None,
+        });
+        let area = Rect::new(0, 0, 80, 24);
+        let layout = sidebar_snooze_menu_layout(&app, area).expect("snooze dropdown");
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar_snooze_menu(&app, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for x in layout.list_rect.x..layout.list_rect.right() {
+            assert_eq!(
+                buffer[(x, layout.list_rect.y)].bg,
+                app.palette.surface1,
+                "selected menu row must cover column {x}"
+            );
+        }
     }
 }

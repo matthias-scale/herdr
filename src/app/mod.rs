@@ -853,7 +853,7 @@ impl App {
             sidebar_group_sorts,
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
-            sidebar_snooze_menu: None,
+            sidebar_snooze: None,
             sidebar_settled_menu_target: None,
             sidebar_settled_menu_selected: 0,
             sidebar_settled_menu_delete_armed: false,
@@ -975,7 +975,6 @@ impl App {
             requested_new_tab_name: None,
             pending_workspace_create_cwd: None,
             rename_pane_target: None,
-            snooze_time_input: None,
             worktree_create: None,
             worktree_open: None,
             worktree_remove: None,
@@ -3327,7 +3326,14 @@ impl App {
                         || self.route_text_to_sidebar_subgroup_picker(&text)
                         || self.try_route_text_to_home(&text)
                     {
-                    } else if self.state.mode != Mode::Terminal || self.state.notepad.focused {
+                    } else if self.state.mode != Mode::Terminal
+                        || self.state.notepad.focused
+                        || self
+                            .state
+                            .sidebar_snooze
+                            .as_ref()
+                            .is_some_and(|snooze| snooze.time_draft.is_some())
+                    {
                         self.paste_into_active_text_input(&text);
                     } else {
                         if let Some(ws_idx) = self.state.active {
@@ -3469,7 +3475,7 @@ impl App {
             Mode::Copy => {
                 self.handle_copy_mode_key(key);
             }
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::SetSnoozeTime => {
+            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                 self.handle_rename_key_via_api(key_event);
             }
             Mode::NewLinkedWorktree => {
