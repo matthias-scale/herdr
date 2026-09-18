@@ -9265,7 +9265,7 @@ last_pane = "prefix+tab"
     }
 
     #[tokio::test]
-    async fn headless_full_frame_overlays_take_keys_before_subgroup_picker() {
+    async fn headless_subgroup_picker_takes_keys_before_full_frame_surfaces() {
         for overlay in [
             "Symphony",
             "Loop History",
@@ -9307,15 +9307,13 @@ last_pane = "prefix+tab"
                 _ => unreachable!(),
             }
 
-            let key = if matches!(overlay, "Loop History" | "Inbox") {
-                KeyCode::Esc
-            } else {
-                KeyCode::Char('7')
-            };
-
             app.route_client_events_from(
                 42,
-                vec![raw_key(key, KeyModifiers::empty(), KeyEventKind::Press)],
+                vec![raw_key(
+                    KeyCode::Char('7'),
+                    KeyModifiers::empty(),
+                    KeyEventKind::Press,
+                )],
                 false,
             );
 
@@ -9324,25 +9322,13 @@ last_pane = "prefix+tab"
                     .sidebar_subgroup_picker
                     .as_ref()
                     .map(|picker| picker.filter.query.as_str()),
-                Some(""),
-                "{overlay} must retain input precedence over the subgroup picker"
+                Some("7"),
+                "the client subgroup picker must retain input precedence over {overlay}"
             );
             assert!(
                 pane_input.try_recv().is_err(),
-                "{overlay} must not leak keys into the focused pane"
+                "the subgroup picker must not leak keys into the focused pane behind {overlay}"
             );
-            if overlay == "Usage" {
-                assert_eq!(
-                    app.state.usage_view.as_ref().map(|view| view.range),
-                    Some(state::UsageRange::Days7)
-                );
-            }
-            if overlay == "Loop History" {
-                assert!(app.state.loop_run_history_detail.is_none());
-            }
-            if overlay == "Inbox" {
-                assert!(app.state.inbox.is_none());
-            }
         }
     }
 
