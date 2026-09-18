@@ -376,6 +376,11 @@ fn discard_overlong_terminal_sequence(pending: &mut PendingLinkBytes) {
         &mut pending.queued_osc8_urls,
         &mut extracted.links.osc8_urls,
     );
+    let kind = if kind == OpenSequenceKind::Osc && pending.bytes.last() == Some(&b'\x1b') {
+        OpenSequenceKind::OscEscape
+    } else {
+        kind
+    };
     pending.bytes.clear();
     pending.truncated_sequence = Some(kind);
 }
@@ -1539,6 +1544,22 @@ mod tests {
                 "https://before-osc.example.test/path",
             ]
         );
+        assert!(links.osc8_urls.is_empty());
+    }
+
+    #[test]
+    fn overlong_osc_discard_preserves_trailing_escape_for_split_st() {
+        let gate = LinkExtractionGate::default();
+        let mut control = b"\x1b]8;;https://too-long.example.test/".to_vec();
+        control.resize(MAX_OPEN_SEQUENCE_BYTES, b'a');
+        control.push(b'\x1b');
+        gate.observe_chunk(&control);
+
+        assert!(gate.take_links().is_none());
+        gate.observe_chunk(b"\\\nhttps://after.example/path\n");
+
+        let links = gate.take_links().expect("link extraction after split ST");
+        assert_eq!(links.output_urls, vec!["https://after.example/path"]);
         assert!(links.osc8_urls.is_empty());
     }
 
