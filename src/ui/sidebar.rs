@@ -10397,6 +10397,7 @@ pub(crate) mod tests {
         let mut attention = working.clone();
         attention.attention_tier = Some(AttentionTier::Attention);
         let mut blocked = working.clone();
+        blocked.state = AgentState::Blocked;
         blocked.attention_tier = Some(AttentionTier::Blocked);
         let mut idle = working;
         idle.state = AgentState::Idle;
