@@ -4324,6 +4324,9 @@ pub(crate) fn sidebar_work_groups(
     }
     for entry in ordered_tab_entries(app, entries) {
         let context = entry_work_context(app, &entry).cloned();
+        let remote_ignores_label_query =
+            matches!(&entry.identity, AgentPanelIdentity::Remote(_));
+        let has_label_query = sidebar_query_has_labels(&app.sidebar_work_filter.query);
         match mode {
             SidebarGroupMode::RepoPr => {
                 let urls = preferred_pr_urls(app, &entry);
@@ -4387,7 +4390,7 @@ pub(crate) fn sidebar_work_groups(
                 // listed under every ticket header it belongs to.
                 let ticket_ids = preferred_ticket_ids(app, &entry);
                 if ticket_ids.is_empty() {
-                    if !sidebar_query_has_labels(&app.sidebar_work_filter.query) {
+                    if remote_ignores_label_query || !has_label_query {
                         push_linear_unlinked_entry(&mut groups, entry);
                     }
                     continue;
@@ -4396,7 +4399,7 @@ pub(crate) fn sidebar_work_groups(
                     let key = format!("linear:{ticket_id}");
                     let index = match work_group_index(&groups, &key) {
                         Some(index) => index,
-                        None if !sidebar_query_has_labels(&app.sidebar_work_filter.query) => {
+                        None if remote_ignores_label_query || !has_label_query => {
                             groups.push(SidebarWorkGroup {
                                 key,
                                 title: work_group_header_title(
@@ -4427,7 +4430,7 @@ pub(crate) fn sidebar_work_groups(
                     .map(|context| context.missive_urls.as_slice())
                     .unwrap_or_default();
                 if urls.is_empty() {
-                    if !sidebar_query_has_labels(&app.sidebar_work_filter.query) {
+                    if remote_ignores_label_query || !has_label_query {
                         push_unlinked_entry(app, &mut groups, entry);
                     }
                     continue;
@@ -4436,12 +4439,14 @@ pub(crate) fn sidebar_work_groups(
                 // of them.
                 for url in urls {
                     let conversation = indexed_missive_conversation(app, url);
-                    if !conversation.is_some_and(|conversation| {
-                        labels_match_sidebar_query(
-                            &conversation.labels,
-                            &app.sidebar_work_filter.query,
-                        )
-                    }) && sidebar_query_has_labels(&app.sidebar_work_filter.query)
+                    if !remote_ignores_label_query
+                        && has_label_query
+                        && !conversation.is_some_and(|conversation| {
+                            labels_match_sidebar_query(
+                                &conversation.labels,
+                                &app.sidebar_work_filter.query,
+                            )
+                        })
                     {
                         continue;
                     }
@@ -21308,6 +21313,30 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             "{rendered}"
         );
         assert!(!rendered.contains("Spaces (0)agents"), "{rendered}");
+    }
+
+    #[test]
+    fn sidebar_label_query_keeps_remote_rows_in_object_views() {
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot(
+                "remote",
+                false,
+                vec![remote_fleet_agent("remote", "remote worker")],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+        let mut app = AppState::test_new();
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app.sidebar_work_filter.query = "label:not-on-remote".into();
+
+        for mode in [SidebarGroupMode::LinearTeam, SidebarGroupMode::Missive] {
+            app.sidebar_group_mode = mode;
+            let remote_rows = sidebar_rows(&app)
+                .into_iter()
+                .filter(|row| matches!(row, SidebarRow::RemoteAgent { .. }))
+                .count();
+            assert_eq!(remote_rows, 1, "view {mode:?}");
+        }
     }
 
     #[test]
