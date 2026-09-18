@@ -4101,25 +4101,23 @@ impl HeadlessServer {
                     row,
                     ..
                 }) => {
-                    self.clients
-                        .get(&client_id)
-                        .is_some_and(|client| client.dock_presentation.hovered_control.is_some())
-                        || crate::ui::hovered_control_at(&self.app.state, *column, *row).is_some()
+                    self.clients.get(&client_id).is_some_and(|client| {
+                        client.dock_presentation.hovered_control.is_some()
+                            || client
+                                .sidebar_presentation
+                                .overlay
+                                .snooze
+                                .as_ref()
+                                .is_some_and(|snooze| snooze.time_draft.is_none())
+                    }) || crate::ui::hovered_control_at(&self.app.state, *column, *row).is_some()
                 }
                 _ => false,
             });
         let source_mode = source_is_full_app
             .then(|| {
-                self.clients.get(&client_id).and_then(|client| {
-                    client.sidebar_presentation.modal.mode.or_else(|| {
-                        client
-                            .sidebar_presentation
-                            .modal
-                            .context_menu
-                            .as_ref()
-                            .map(|_| crate::app::Mode::ContextMenu)
-                    })
-                })
+                self.clients
+                    .get(&client_id)
+                    .and_then(|client| client.sidebar_presentation.overlay.kind.mode())
             })
             .flatten()
             .unwrap_or(self.app.state.mode);
@@ -5855,8 +5853,8 @@ impl HeadlessServer {
         if client.pomodoro_presentation.owns_input() {
             retained_fallback!("pomodoro_overlay");
         }
-        if client.sidebar_presentation.modal.is_active() {
-            retained_fallback!("client_modal");
+        if client.sidebar_presentation.overlay.is_active() {
+            retained_fallback!("client_overlay");
         }
         if client.deferred_render() != DeferredRender::None {
             retained_fallback!("render_pending");
@@ -14440,16 +14438,19 @@ next_tab = ""
             .get_mut(&2)
             .expect("second client")
             .sidebar_presentation
-            .modal
-            .context_menu = Some(crate::app::state::ContextMenuState {
-            kind: crate::app::state::ContextMenuKind::Workspace {
-                workspace_id: server.app.state.workspaces[0].id.clone(),
-                ws_idx: 0,
-            },
-            x: 4,
-            y: 3,
-            selected: crate::app::state::ContextMenuAction::RenameWorkspace,
-        });
+            .overlay = crate::app::state::ClientOverlayState {
+            kind: crate::app::state::ClientOverlay::ContextMenu,
+            context_menu: Some(crate::app::state::ContextMenuState {
+                kind: crate::app::state::ContextMenuKind::Workspace {
+                    workspace_id: server.app.state.workspaces[0].id.clone(),
+                    ws_idx: 0,
+                },
+                x: 4,
+                y: 3,
+                selected: crate::app::state::ContextMenuAction::RenameWorkspace,
+            }),
+            ..Default::default()
+        };
         server.foreground_client_id = Some(1);
         server.sync_foreground_client_state();
         let motion = || ServerEvent::ClientInputEvents {
@@ -14458,6 +14459,49 @@ next_tab = ""
                 kind: crate::protocol::ClientMouseKind::Moved,
                 column: 10,
                 row: 5,
+                modifiers: 0,
+            }],
+        };
+
+        assert!(server.handle_server_event(motion()));
+        assert_eq!(server.foreground_client_id, Some(2));
+        assert!(server.handle_server_event(motion()));
+    }
+
+    #[test]
+    fn attached_snooze_dropdown_hover_requests_an_immediate_redraw() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("snooze")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        let target = crate::app::state::PaneFocusTarget {
+            workspace_id: server.app.state.workspaces[0].id.clone(),
+            pane_id: server.app.state.workspaces[0].tabs[0].root_pane,
+        };
+        server.clients.insert(1, test_app_client(Some(true), 1));
+        server.clients.insert(2, test_app_client(Some(true), 2));
+        server
+            .clients
+            .get_mut(&2)
+            .expect("second client")
+            .sidebar_presentation
+            .overlay
+            .snooze = Some(crate::app::state::SidebarSnoozeUiState {
+            target,
+            anchor: (4, 3),
+            selected: crate::app::state::SidebarSnoozeMenuAction::SetTime,
+            time_draft: None,
+            error: None,
+        });
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        let motion = || ServerEvent::ClientInputEvents {
+            client_id: 2,
+            events: vec![crate::protocol::ClientInputEvent::Mouse {
+                kind: crate::protocol::ClientMouseKind::Moved,
+                column: 5,
+                row: 4,
                 modifiers: 0,
             }],
         };
