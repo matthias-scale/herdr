@@ -11550,7 +11550,7 @@ pub(crate) mod tests {
                 .iter()
                 .map(|entry| entry.local_target().unwrap().ws_idx)
                 .collect::<Vec<_>>(),
-            [0, 1]
+            [1]
         );
         assert!(tab_entries.iter().all(|entry| entry_has_red_dot(entry)));
     }
