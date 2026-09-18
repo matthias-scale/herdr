@@ -218,6 +218,7 @@ class UiHotPathArchitectureTests(unittest.TestCase):
             "fn pane_details",
         )
         self.assertNotIn("metadata_tokens_for_api", pane_details)
+        self.assertIn("terminal.has_closing_report()", pane_details)
         self.assertNotIn("to_ascii_lowercase", item_classification)
 
     def test_terminal_closing_report_is_the_only_runtime_fact_owner(self) -> None:
@@ -271,6 +272,15 @@ class UiHotPathArchitectureTests(unittest.TestCase):
             "closing_contract_met_at:",
         ):
             self.assertNotIn(legacy_field, terminal_fields)
+
+        sidebar = function_body(
+            (PROJECT_ROOT / "src" / "ui" / "sidebar.rs").read_text(encoding="utf-8"),
+            "fn collect_agent_panel_entries_with_runtimes",
+        )
+        self.assertIn("detail.has_closing_report", sidebar)
+        self.assertIn("detail.active_subagents", sidebar)
+        self.assertNotIn('get("closing_agents")', sidebar)
+        self.assertNotIn('starts_with("closing_")', sidebar)
 
         violations = []
         direct_read = re.compile(

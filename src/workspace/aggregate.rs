@@ -46,6 +46,9 @@ pub struct PaneDetail {
     pub closing_idle: Option<bool>,
     pub closing_contract: Option<String>,
     pub closing_contract_met: Option<bool>,
+    /// Whether the terminal's ClosingReport contains any projected closing
+    /// fact. Sidebar completion must not infer this from metadata tokens.
+    pub has_closing_report: bool,
     /// The pane's agent is refusing to work because its plan usage/rate limit
     /// is exhausted. Live screen state, never latched.
     pub usage_limited: bool,
@@ -152,6 +155,7 @@ impl Tab {
                     closing_idle: terminal.closing_idle(),
                     closing_contract: terminal.closing_contract().map(str::to_string),
                     closing_contract_met: terminal.closing_contract_met(),
+                    has_closing_report: terminal.has_closing_report(),
                     usage_limited: projection.usage_limited,
                     holds_shell: terminal.holds_shell,
                     active_subagents: terminal.verified_active_subagents(),

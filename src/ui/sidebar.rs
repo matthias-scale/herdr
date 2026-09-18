@@ -115,9 +115,9 @@ pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
 
 /// Runtime severity shared by dots and the sidebar filter.
 ///
-/// `entry_is_blocked` narrows this for navigation and the inbox, where a
-/// working pane is not yet a stop. The sidebar filter instead follows the dot
-/// exactly, so a latched Gate remains visible while work resumes.
+/// `entry_is_blocked` narrows this for navigation and the inbox: a retained
+/// gate does not block a working pane. Once work stops, that same gate makes
+/// the pane blocked without requiring a new report.
 pub(crate) fn entry_attention_tier(entry: &AgentPanelEntry) -> AttentionTier {
     #[cfg(test)]
     ENTRY_ATTENTION_TIER_VISITS.with(|visits| visits.set(visits.get() + 1));
@@ -1540,19 +1540,7 @@ fn collect_agent_panel_entries_with_runtimes(
                     let thread_title = ws
                         .tab_display_name_from(&app.terminals, detail.tab_idx)
                         .or_else(|| Some(DEFAULT_THREAD_TITLE.to_string()));
-                    // Prefer the live count; fall back to the reported token so
-                    // panes without a live source keep a count.
-                    let active_subagents = detail
-                        .active_subagents
-                        .or_else(|| {
-                            detail
-                                .tokens
-                                .get("closing_agents")
-                                .and_then(|value| value.parse::<u32>().ok())
-                        })
-                        .filter(|count| *count > 0);
-                    let has_closing_block_tokens =
-                        detail.tokens.keys().any(|key| key.starts_with("closing_"));
+                    let active_subagents = detail.active_subagents.filter(|count| *count > 0);
                     let completion_tier = derive_completion_tier(
                         detail.state,
                         detail.closing_contract.as_deref(),
@@ -1561,7 +1549,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         detail.open_blockers,
                         active_subagents,
                         detail.holds_shell,
-                        has_closing_block_tokens,
+                        detail.has_closing_report,
                     );
                     AgentPanelEntry::new(
                         AgentPanelIdentity::Local(AgentPanelLocalTarget {
@@ -12347,6 +12335,87 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn accepted_resumed_turn_with_pending_cap_renders_blue_and_remains_open() {
+        let mut app = app_with_agents(&["one"]);
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_raw_agent_state_for_test(AgentState::Working);
+        terminal.apply_closing_block_payload(
+            Vec::new(),
+            vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
+                n: 2,
+                label: "Answer".into(),
+                text: "Choose the independent release lane".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+        );
+        app.reconcile_sidebar_presentation();
+
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .find(|entry| {
+                entry
+                    .local_target()
+                    .is_some_and(|target| target.pane_id == pane)
+            })
+            .expect("pane entry");
+        assert_eq!(entry.state, AgentState::Working);
+        assert!(entry.open_blockers);
+        assert!(!entry_is_blocked(&entry));
+        assert_eq!(entry.completion_tier, None);
+        assert_eq!(
+            tab_row_layout(
+                &entry,
+                app.view_observed_at,
+                60,
+                4,
+                &app.palette,
+                app.status_indicators
+            )
+            .dot,
+            "●"
+        );
+        assert!(!sidebar_rows(&app).iter().any(|row| {
+            matches!(row, SidebarRow::SectionHeader { title, .. } if *title == BLOCKED_SECTION_TITLE)
+        }));
+    }
+
+    #[test]
+    fn sidebar_completion_uses_closing_report_projection_not_metadata_tokens() {
+        let mut app = app_with_agents(&["one"]);
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_raw_agent_state_for_test(AgentState::Idle);
+        terminal.metadata_tokens.patch(
+            std::collections::HashMap::from([("closing_ghost".into(), Some("1".into()))]),
+            None,
+            std::time::Instant::now(),
+        );
+        app.reconcile_sidebar_presentation();
+
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .find(|entry| {
+                entry
+                    .local_target()
+                    .is_some_and(|target| target.pane_id == pane)
+            })
+            .expect("pane entry");
+        assert_eq!(
+            entry.completion_tier,
+            Some(CompletionTier::StoppedUndeclared)
+        );
+    }
+
     fn set_closing_agents_token(app: &mut AppState, ws_idx: usize, value: Option<&str>) {
         let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
         let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
@@ -12367,21 +12436,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn sidebar_entry_parses_only_positive_closing_agent_counts() {
-        for (value, expected) in [
-            (None, None),
-            (Some(""), None),
-            (Some("0"), None),
-            (Some("invalid"), None),
-            (Some("4294967296"), None),
-            (Some("3"), Some(3)),
-        ] {
+    fn sidebar_entry_ignores_raw_closing_agent_tokens() {
+        for value in ["", "0", "invalid", "4294967296", "3"] {
             let mut app = app_with_agents(&["one"]);
-            if value.is_some() {
-                set_closing_agents_token(&mut app, 0, value);
-            }
+            set_closing_agents_token(&mut app, 0, Some(value));
             let entry = all_agent_panel_entries(&app).remove(0);
-            assert_eq!(entry.active_subagents, expected, "value {value:?}");
+            assert_eq!(entry.active_subagents, None, "value {value:?}");
         }
     }
     fn configure_real_sidebar_agent(
