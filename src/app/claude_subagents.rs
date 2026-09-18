@@ -255,7 +255,7 @@ impl TranscriptCursor {
     }
 
     fn apply_task_tool_calls(&mut self, value: &Value) -> bool {
-        let mut changed = false;
+        let mut observed = false;
         let Some(content) = value
             .get("message")
             .and_then(|message| message.get("content"))
@@ -283,6 +283,7 @@ impl TranscriptCursor {
                     else {
                         continue;
                     };
+                    observed = true;
                     let id = format!("{PENDING_TASK_ID_PREFIX}{tool_use_id}");
                     if self.tasks.iter().any(|task| task.id == id) {
                         continue;
@@ -294,7 +295,6 @@ impl TranscriptCursor {
                             status: AgentTaskStatus::Pending,
                         },
                     });
-                    changed = true;
                 }
                 "TaskUpdate" => {
                     let Some(task_id) = input.get("taskId").and_then(Value::as_str) else {
@@ -303,6 +303,7 @@ impl TranscriptCursor {
                     let Some(task) = self.tasks.iter_mut().find(|task| task.id == task_id) else {
                         continue;
                     };
+                    observed = true;
                     if let Some(text) = input
                         .get("subject")
                         .and_then(Value::as_str)
@@ -311,7 +312,6 @@ impl TranscriptCursor {
                     {
                         if task.task.text != text {
                             task.task.text = text.to_string();
-                            changed = true;
                         }
                     }
                     if let Some(status) = input
@@ -321,14 +321,13 @@ impl TranscriptCursor {
                     {
                         if task.task.status != status {
                             task.task.status = status;
-                            changed = true;
                         }
                     }
                 }
                 _ => {}
             }
         }
-        changed
+        observed
     }
 
     fn apply_todo_write(&mut self, value: &Value) -> bool {
@@ -1492,6 +1491,114 @@ mod tests {
         assert_eq!(
             cursor.last_row_at,
             crate::agent_state::parse_rfc3339(unrelated_at)
+        );
+    }
+
+    #[test]
+    fn transcript_task_timestamp_tracks_latest_unchanged_task_tool_call() {
+        let created_at = "2026-08-14T06:18:40.100Z";
+        let repeated_at = "2026-08-14T06:18:43.100Z";
+        let mut cursor = TranscriptCursor::new();
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "assistant",
+                "timestamp": created_at,
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "name": "TaskCreate",
+                    "id": "toolu_task_create",
+                    "input": {"subject": "keep precedence current"}
+                }]}
+            })),
+            false,
+        );
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "assistant",
+                "timestamp": repeated_at,
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "name": "TaskUpdate",
+                    "input": {
+                        "taskId": "tool-use:toolu_task_create",
+                        "subject": "keep precedence current",
+                        "status": "pending"
+                    }
+                }]}
+            })),
+            true,
+        );
+
+        assert_eq!(
+            cursor.last_tasks_at,
+            crate::agent_state::parse_rfc3339(repeated_at)
+        );
+    }
+
+    #[test]
+    fn transcript_task_timestamp_tracks_latest_unchanged_todo_write() {
+        let first_at = "2026-08-14T06:18:40.100Z";
+        let repeated_at = "2026-08-14T06:18:44.100Z";
+        let todo_row = |timestamp| {
+            line(serde_json::json!({
+                "type": "assistant",
+                "timestamp": timestamp,
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "name": "TodoWrite",
+                    "input": {"todos": [{
+                        "content": "keep precedence current",
+                        "status": "in_progress"
+                    }]}
+                }]}
+            }))
+        };
+        let mut cursor = TranscriptCursor::new();
+        cursor.ingest(&todo_row(first_at), false);
+        cursor.ingest(&todo_row(repeated_at), true);
+
+        assert_eq!(
+            cursor.last_tasks_at,
+            crate::agent_state::parse_rfc3339(repeated_at)
+        );
+    }
+
+    #[test]
+    fn empty_todo_write_clears_transcript_tasks_at_its_timestamp() {
+        let cleared_at = "2026-08-14T06:18:45.100Z";
+        let mut cursor = TranscriptCursor::new();
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-08-14T06:18:40.100Z",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "name": "TodoWrite",
+                    "input": {"todos": [{
+                        "content": "remove me",
+                        "status": "pending"
+                    }]}
+                }]}
+            })),
+            false,
+        );
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "assistant",
+                "timestamp": cleared_at,
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "name": "TodoWrite",
+                    "input": {"todos": []}
+                }]}
+            })),
+            true,
+        );
+
+        assert_eq!(cursor.tasks(), Some(Vec::new()));
+        assert_eq!(
+            cursor.last_tasks_at,
+            crate::agent_state::parse_rfc3339(cleared_at)
         );
     }
 

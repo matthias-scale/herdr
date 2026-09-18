@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::sync::Mutex;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -12,37 +12,37 @@ use crate::layout::PaneId;
 
 pub(crate) const MAX_LINKS: usize = 200;
 
-const MAX_SCHEME_PREFIX_BYTES: usize = 64;
 const LINK_LOOKBEHIND_BYTES: usize = 256;
 const MAX_PENDING_LINK_BYTES: usize = 2 * 1024 * 1024;
+const LINK_QUIET_PERIOD: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Default)]
 pub(crate) struct LinkExtractionGate {
     pending: Mutex<PendingLinkBytes>,
+    active: AtomicBool,
+    marker_tail: AtomicU64,
     extractions: AtomicU64,
+    #[cfg(test)]
+    lock_acquisitions: AtomicU64,
 }
 
 #[derive(Debug)]
 struct PendingLinkBytes {
     bytes: Vec<u8>,
-    marker_prefix: [u8; MAX_SCHEME_PREFIX_BYTES],
-    marker_prefix_len: usize,
-    lookbehind: [u8; LINK_LOOKBEHIND_BYTES],
-    lookbehind_start: usize,
-    lookbehind_len: usize,
     dirty: bool,
+    last_observed_at: Option<Instant>,
+    queued_output_urls: Vec<String>,
+    queued_osc8_urls: Vec<String>,
 }
 
 impl Default for PendingLinkBytes {
     fn default() -> Self {
         Self {
             bytes: Vec::new(),
-            marker_prefix: [0; MAX_SCHEME_PREFIX_BYTES],
-            marker_prefix_len: 0,
-            lookbehind: [0; LINK_LOOKBEHIND_BYTES],
-            lookbehind_start: 0,
-            lookbehind_len: 0,
             dirty: false,
+            last_observed_at: None,
+            queued_output_urls: Vec::new(),
+            queued_osc8_urls: Vec::new(),
         }
     }
 }
@@ -55,109 +55,196 @@ pub(crate) struct ExtractedAgentLinks {
 
 impl LinkExtractionGate {
     pub(crate) fn observe_chunk(&self, bytes: &[u8]) {
+        self.observe_chunk_at(bytes, Instant::now());
+    }
+
+    fn observe_chunk_at(&self, bytes: &[u8], observed_at: Instant) {
+        let marker_tail = self.marker_tail.load(Ordering::Acquire);
+        let colon = memchr::memchr(b':', bytes);
+        if !self.active.load(Ordering::Acquire)
+            && colon.is_none()
+            && !marker_tail_can_continue(marker_tail)
+        {
+            self.marker_tail
+                .store(append_marker_tail(marker_tail, bytes), Ordering::Release);
+            return;
+        }
+        #[cfg(test)]
+        self.lock_acquisitions.fetch_add(1, Ordering::Relaxed);
         let Ok(mut pending) = self.pending.lock() else {
             return;
         };
         if pending.dirty {
-            append_bounded(&mut pending.bytes, bytes);
+            append_pending(&mut pending, bytes);
+            pending.last_observed_at = Some(observed_at);
+            return;
         }
-        for (index, byte) in bytes.iter().copied().enumerate() {
-            let marker_complete = marker_prefix_accepts(&pending, byte);
-            if marker_complete && !pending.dirty {
-                pending.dirty = true;
-                append_lookbehind(&mut pending);
-                append_bounded(&mut pending.bytes, &bytes[index..]);
-            }
-            advance_marker_prefix(&mut pending, byte);
-            push_lookbehind(&mut pending, byte);
+
+        let (tail, tail_len) = unpack_marker_tail(marker_tail);
+        let mut candidate = Vec::with_capacity(tail_len + bytes.len());
+        candidate.extend_from_slice(&tail[..tail_len]);
+        candidate.extend_from_slice(bytes);
+        if let Some(marker_start) = find_scheme_start(&candidate) {
+            pending.dirty = true;
+            pending.last_observed_at = Some(observed_at);
+            append_pending(&mut pending, &candidate[marker_start..]);
+            self.active.store(true, Ordering::Release);
+            self.marker_tail.store(0, Ordering::Release);
+        } else {
+            self.marker_tail.store(
+                pack_marker_tail(&candidate[candidate.len().saturating_sub(7)..]),
+                Ordering::Release,
+            );
         }
     }
 
     #[cfg(test)]
     pub(crate) fn take_dirty(&self) -> bool {
-        self.take_links().is_some()
+        self.take_links_at(Instant::now() + LINK_QUIET_PERIOD)
+            .is_some()
     }
 
     pub(crate) fn take_links(&self) -> Option<ExtractedAgentLinks> {
+        self.take_links_at(Instant::now())
+    }
+
+    fn take_links_at(&self, now: Instant) -> Option<ExtractedAgentLinks> {
+        if !self.active.load(Ordering::Acquire) {
+            return None;
+        }
         let mut pending = self.pending.lock().ok()?;
         if !pending.dirty {
             return None;
         }
+        let quiet = pending.last_observed_at.is_some_and(|observed_at| {
+            now.saturating_duration_since(observed_at) >= LINK_QUIET_PERIOD
+        });
+        let mut extracted = extract_agent_links(&pending.bytes, quiet);
+        if extracted.unterminated_url {
+            return None;
+        }
+        extracted
+            .links
+            .output_urls
+            .append(&mut pending.queued_output_urls);
+        extracted
+            .links
+            .osc8_urls
+            .append(&mut pending.queued_osc8_urls);
+        extracted.links.output_urls.sort_unstable();
+        extracted.links.output_urls.dedup();
+        extracted.links.osc8_urls.sort_unstable();
+        extracted.links.osc8_urls.dedup();
         pending.dirty = false;
-        let bytes = std::mem::take(&mut pending.bytes);
-        let prefix = pending.marker_prefix;
-        let prefix_len = pending.marker_prefix_len;
-        pending.lookbehind_start = 0;
-        pending.lookbehind_len = prefix_len;
-        pending.lookbehind[..prefix_len].copy_from_slice(&prefix[..prefix_len]);
+        self.active.store(false, Ordering::Release);
+        pending.bytes.clear();
+        pending.last_observed_at = None;
         drop(pending);
         self.extractions.fetch_add(1, Ordering::Relaxed);
-        Some(extract_agent_links(&bytes))
+        Some(extracted.links)
     }
 
     #[cfg(test)]
     pub(crate) fn extraction_count(&self) -> u64 {
         self.extractions.load(Ordering::Relaxed)
     }
-}
 
-fn append_bounded(destination: &mut Vec<u8>, bytes: &[u8]) {
-    let remaining = MAX_PENDING_LINK_BYTES.saturating_sub(destination.len());
-    destination.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
-}
-
-fn append_lookbehind(pending: &mut PendingLinkBytes) {
-    let lookbehind = pending.lookbehind;
-    let first_len = pending
-        .lookbehind_len
-        .min(LINK_LOOKBEHIND_BYTES - pending.lookbehind_start);
-    let second_len = pending.lookbehind_len - first_len;
-    append_bounded(
-        &mut pending.bytes,
-        &lookbehind[pending.lookbehind_start..pending.lookbehind_start + first_len],
-    );
-    append_bounded(&mut pending.bytes, &lookbehind[..second_len]);
-}
-
-fn push_lookbehind(pending: &mut PendingLinkBytes, byte: u8) {
-    if pending.lookbehind_len < LINK_LOOKBEHIND_BYTES {
-        let index = (pending.lookbehind_start + pending.lookbehind_len) % LINK_LOOKBEHIND_BYTES;
-        pending.lookbehind[index] = byte;
-        pending.lookbehind_len += 1;
-    } else {
-        pending.lookbehind[pending.lookbehind_start] = byte;
-        pending.lookbehind_start = (pending.lookbehind_start + 1) % LINK_LOOKBEHIND_BYTES;
+    #[cfg(test)]
+    fn lock_acquisition_count(&self) -> u64 {
+        self.lock_acquisitions.load(Ordering::Relaxed)
     }
 }
 
-fn marker_prefix_accepts(pending: &PendingLinkBytes, byte: u8) -> bool {
-    pending.marker_prefix_len >= 2
-        && pending.marker_prefix[pending.marker_prefix_len - 2..pending.marker_prefix_len] == *b":/"
-        && byte == b'/'
+fn append_pending(pending: &mut PendingLinkBytes, mut bytes: &[u8]) {
+    while !bytes.is_empty() {
+        let remaining = MAX_PENDING_LINK_BYTES.saturating_sub(pending.bytes.len());
+        let appended = bytes.len().min(remaining);
+        pending.bytes.extend_from_slice(&bytes[..appended]);
+        bytes = &bytes[appended..];
+        if bytes.is_empty() {
+            break;
+        }
+
+        let mut extracted = extract_agent_links(&pending.bytes, false);
+        queue_links(
+            &mut pending.queued_output_urls,
+            &mut extracted.links.output_urls,
+        );
+        queue_links(
+            &mut pending.queued_osc8_urls,
+            &mut extracted.links.osc8_urls,
+        );
+        let tail_start = pending.bytes.len().saturating_sub(LINK_LOOKBEHIND_BYTES);
+        pending.bytes.drain(..tail_start);
+    }
 }
 
-fn advance_marker_prefix(pending: &mut PendingLinkBytes, byte: u8) {
-    let prefix = &pending.marker_prefix[..pending.marker_prefix_len];
-    let in_scheme = !prefix.contains(&b':');
-    let accepted = if pending.marker_prefix_len == 0 {
-        byte.is_ascii_alphabetic()
-    } else if in_scheme {
-        byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'.' | b'-' | b':')
-    } else if prefix.ends_with(b":") {
-        byte == b'/'
-    } else {
-        false
-    };
-    if accepted && pending.marker_prefix_len < MAX_SCHEME_PREFIX_BYTES {
-        pending.marker_prefix[pending.marker_prefix_len] = byte;
-        pending.marker_prefix_len += 1;
-        return;
+fn queue_links(queue: &mut Vec<String>, links: &mut Vec<String>) {
+    queue.append(links);
+    queue.sort_unstable();
+    queue.dedup();
+    if queue.len() > MAX_LINKS {
+        queue.drain(..queue.len() - MAX_LINKS);
     }
-    pending.marker_prefix_len = 0;
-    if byte.is_ascii_alphabetic() {
-        pending.marker_prefix[0] = byte;
-        pending.marker_prefix_len = 1;
+}
+
+fn pack_marker_tail(bytes: &[u8]) -> u64 {
+    let bytes = &bytes[bytes.len().saturating_sub(7)..];
+    let mut packed = (bytes.len() as u64) << 56;
+    for (index, byte) in bytes.iter().enumerate() {
+        packed |= u64::from(*byte) << (index * 8);
     }
+    packed
+}
+
+fn unpack_marker_tail(packed: u64) -> ([u8; 7], usize) {
+    let len = ((packed >> 56) as usize).min(7);
+    let mut bytes = [0; 7];
+    for (index, byte) in bytes[..len].iter_mut().enumerate() {
+        *byte = ((packed >> (index * 8)) & 0xff) as u8;
+    }
+    (bytes, len)
+}
+
+fn append_marker_tail(packed: u64, bytes: &[u8]) -> u64 {
+    if bytes.len() >= 7 {
+        return pack_marker_tail(&bytes[bytes.len() - 7..]);
+    }
+    let (previous, previous_len) = unpack_marker_tail(packed);
+    let keep_previous = 7_usize.saturating_sub(bytes.len());
+    let previous_start = previous_len.saturating_sub(keep_previous);
+    let kept = previous_len - previous_start;
+    let mut tail = [0; 7];
+    tail[..kept].copy_from_slice(&previous[previous_start..previous_len]);
+    tail[kept..kept + bytes.len()].copy_from_slice(bytes);
+    pack_marker_tail(&tail[..kept + bytes.len()])
+}
+
+fn marker_tail_can_continue(packed: u64) -> bool {
+    let (tail, len) = unpack_marker_tail(packed);
+    tail[..len].ends_with(b":") || tail[..len].ends_with(b":/")
+}
+
+fn find_scheme_start(bytes: &[u8]) -> Option<usize> {
+    memchr::memchr_iter(b':', bytes).find_map(|colon| {
+        if bytes.get(colon + 1..colon + 3) != Some(b"//") {
+            return None;
+        }
+        let start = bytes[..colon]
+            .iter()
+            .rposition(|byte| !byte.is_ascii_alphanumeric() && !matches!(byte, b'+' | b'.' | b'-'))
+            .map_or(0, |index| index + 1);
+        let scheme_start = bytes
+            .get(start)
+            .is_some_and(u8::is_ascii_alphabetic)
+            .then_some(start)?;
+        Some(
+            bytes[..scheme_start]
+                .windows(4)
+                .rposition(|window| window == b"\x1b]8;")
+                .unwrap_or(scheme_start),
+        )
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -229,7 +316,7 @@ pub struct AgentReportPayload {
     #[serde(default)]
     pub goal: Option<String>,
     #[serde(default)]
-    pub tasks: Vec<AgentTask>,
+    pub tasks: Option<Vec<AgentTask>>,
     #[serde(default)]
     pub subagents: Vec<AgentSubagent>,
 }
@@ -295,8 +382,8 @@ impl AgentStateStore {
         pane.status_text = payload.status_text;
         pane.goal = payload.goal;
         pane.last_report_at = Some(observed_at);
-        if !payload.tasks.is_empty() {
-            pane.reported_tasks = payload.tasks;
+        if let Some(tasks) = payload.tasks {
+            pane.reported_tasks = tasks;
             pane.reported_tasks_at = Some(observed_at);
         }
         pane.reported_subagents = payload
@@ -416,6 +503,8 @@ impl AgentStateStore {
 fn validate_report(payload: &AgentReportPayload) -> Result<(), String> {
     if payload
         .tasks
+        .as_deref()
+        .unwrap_or_default()
         .iter()
         .any(|task| task.text.trim().is_empty() || task.text.chars().any(char::is_control))
     {
@@ -545,51 +634,89 @@ fn trim_url_suffix(mut url: &str) -> &str {
     }
 }
 
-fn extract_agent_links(bytes: &[u8]) -> ExtractedAgentLinks {
-    let mut visible_bytes = Vec::with_capacity(bytes.len());
-    let mut osc8_urls = Vec::new();
-    let mut offset = 0;
-    while offset < bytes.len() {
-        if bytes[offset..].starts_with(b"\x1b]8;") {
-            let command_start = offset + 4;
-            let Some(parameter_end) = bytes[command_start..]
-                .iter()
-                .position(|byte| *byte == b';')
-                .map(|relative| command_start + relative)
-            else {
-                visible_bytes.extend_from_slice(&bytes[offset..]);
-                break;
-            };
-            let uri_start = parameter_end + 1;
-            let Some((uri_end, command_end)) =
-                osc_terminator(&bytes[uri_start..]).map(|(relative_end, terminator_len)| {
-                    (
-                        uri_start + relative_end,
-                        uri_start + relative_end + terminator_len,
-                    )
-                })
-            else {
-                visible_bytes.extend_from_slice(&bytes[offset..]);
-                break;
-            };
-            osc8_urls.extend(extract_urls(&String::from_utf8_lossy(
-                &bytes[uri_start..uri_end],
-            )));
-            offset = command_end;
-            continue;
-        }
-        visible_bytes.push(bytes[offset]);
-        offset += 1;
-    }
-    let mut output_urls = extract_urls(&String::from_utf8_lossy(&visible_bytes));
+struct AgentLinkExtraction {
+    links: ExtractedAgentLinks,
+    unterminated_url: bool,
+}
+
+fn extract_agent_links(bytes: &[u8], finalize_tail: bool) -> AgentLinkExtraction {
+    let (visible_bytes, mut osc8_urls) = strip_terminal_sequences(bytes);
+    let visible = String::from_utf8_lossy(&visible_bytes);
+    let mut unterminated_url = false;
+    let mut output_urls = URL_RE
+        .find_iter(&visible)
+        .filter_map(|matched| {
+            if matched.end() == visible.len() && !finalize_tail {
+                unterminated_url = true;
+                return None;
+            }
+            let url = trim_url_suffix(matched.as_str()).to_string();
+            url_domain(&url).is_some().then_some(url)
+        })
+        .collect::<Vec<_>>();
     output_urls.sort_unstable();
     output_urls.dedup();
     osc8_urls.sort_unstable();
     osc8_urls.dedup();
-    ExtractedAgentLinks {
-        output_urls,
-        osc8_urls,
+    AgentLinkExtraction {
+        links: ExtractedAgentLinks {
+            output_urls,
+            osc8_urls,
+        },
+        unterminated_url,
     }
+}
+
+fn strip_terminal_sequences(bytes: &[u8]) -> (Vec<u8>, Vec<String>) {
+    let mut visible_bytes = Vec::with_capacity(bytes.len());
+    let mut osc8_urls = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes[offset] != b'\x1b' {
+            visible_bytes.push(bytes[offset]);
+            offset += 1;
+            continue;
+        }
+
+        match bytes.get(offset + 1).copied() {
+            Some(b'[') => {
+                let Some(end) = bytes[offset + 2..]
+                    .iter()
+                    .position(|byte| (0x40..=0x7e).contains(byte))
+                    .map(|relative| offset + 2 + relative + 1)
+                else {
+                    break;
+                };
+                offset = end;
+            }
+            Some(b']') => {
+                let content_start = offset + 2;
+                let Some((relative_end, terminator_len)) = osc_terminator(&bytes[content_start..])
+                else {
+                    break;
+                };
+                let content_end = content_start + relative_end;
+                let content = &bytes[content_start..content_end];
+                if let Some(osc8) = content.strip_prefix(b"8;") {
+                    if let Some(parameter_end) = osc8.iter().position(|byte| *byte == b';') {
+                        osc8_urls.extend(extract_urls(&String::from_utf8_lossy(
+                            &osc8[parameter_end + 1..],
+                        )));
+                    }
+                }
+                offset = content_end + terminator_len;
+            }
+            Some(b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/') => {
+                if offset + 2 >= bytes.len() {
+                    break;
+                }
+                offset += 3;
+            }
+            Some(_) => offset += 2,
+            None => break,
+        }
+    }
+    (visible_bytes, osc8_urls)
 }
 
 fn osc_terminator(bytes: &[u8]) -> Option<(usize, usize)> {
@@ -631,10 +758,10 @@ mod tests {
                 AgentReportPayload {
                     status_text: Some("checking tests".into()),
                     goal: Some("ship MAT-160".into()),
-                    tasks: vec![AgentTask {
+                    tasks: Some(vec![AgentTask {
                         text: "run focused tests".into(),
                         status: AgentTaskStatus::InProgress,
-                    }],
+                    }]),
                     subagents: vec![AgentSubagent {
                         name: "reviewer".into(),
                         status: AgentStatus::Working,
@@ -696,6 +823,18 @@ mod tests {
     }
 
     #[test]
+    fn marker_free_chunk_does_not_take_pending_lock() {
+        let gate = LinkExtractionGate::default();
+        gate.observe_chunk(b"ordinary terminal output without a marker");
+        assert_eq!(gate.lock_acquisition_count(), 0);
+
+        gate.observe_chunk(b"visit https://example.test");
+        assert_eq!(gate.lock_acquisition_count(), 1);
+        gate.observe_chunk(b"/continued\n");
+        assert_eq!(gate.lock_acquisition_count(), 2);
+    }
+
+    #[test]
     fn scheme_marker_split_across_chunks_triggers_link_extraction() {
         let gate = LinkExtractionGate::default();
         gate.observe_chunk(b"https:");
@@ -715,6 +854,69 @@ mod tests {
 
         let links = gate.take_links().expect("link extraction");
         assert_eq!(links.output_urls, vec!["https://split.example.test/path"]);
+    }
+
+    #[test]
+    fn unfinished_url_waits_for_terminator_before_extraction() {
+        let gate = LinkExtractionGate::default();
+        gate.observe_chunk(b"https://split.example.test");
+        assert!(gate.take_links().is_none());
+
+        gate.observe_chunk(b"/path\n");
+        let links = gate.take_links().expect("terminated link extraction");
+        assert_eq!(links.output_urls, vec!["https://split.example.test/path"]);
+    }
+
+    #[test]
+    fn quiet_period_finalizes_an_unterminated_url_tail() {
+        let gate = LinkExtractionGate::default();
+        let started = Instant::now();
+        gate.observe_chunk_at(b"https://quiet.example.test/path", started);
+
+        assert!(gate
+            .take_links_at(started + LINK_QUIET_PERIOD - Duration::from_millis(1))
+            .is_none());
+        let links = gate
+            .take_links_at(started + LINK_QUIET_PERIOD)
+            .expect("quiet link extraction");
+        assert_eq!(links.output_urls, vec!["https://quiet.example.test/path"]);
+    }
+
+    #[test]
+    fn styled_url_ignores_csi_osc_and_charset_select_sequences() {
+        let gate = LinkExtractionGate::default();
+        gate.observe_chunk(
+            concat!(
+                "https://sty",
+                "\x1b[31m",
+                "led.",
+                "\x1b]0;terminal title\x07",
+                "example.test",
+                "\x1b(B",
+                "/path\n"
+            )
+            .as_bytes(),
+        );
+
+        let links = gate.take_links().expect("styled link extraction");
+        assert_eq!(links.output_urls, vec!["https://styled.example.test/path"]);
+    }
+
+    #[test]
+    fn pending_buffer_cap_extracts_then_keeps_scanning_later_output() {
+        let gate = LinkExtractionGate::default();
+        gate.observe_chunk(b"https://before-cap.example.test/path\n");
+        gate.observe_chunk(&vec![b'x'; MAX_PENDING_LINK_BYTES]);
+        gate.observe_chunk(b"\nhttps://after-cap.example.test/path\n");
+
+        let links = gate.take_links().expect("bounded link extraction");
+        assert_eq!(
+            links.output_urls,
+            vec![
+                "https://after-cap.example.test/path",
+                "https://before-cap.example.test/path",
+            ]
+        );
     }
 
     #[test]
@@ -844,7 +1046,7 @@ mod tests {
             .report(
                 pane_id,
                 AgentReportPayload {
-                    tasks: vec![reported_task.clone()],
+                    tasks: Some(vec![reported_task.clone()]),
                     ..AgentReportPayload::default()
                 },
                 base + std::time::Duration::from_secs(1),
@@ -874,7 +1076,7 @@ mod tests {
             .report(
                 pane_id,
                 AgentReportPayload {
-                    tasks: vec![reported_task],
+                    tasks: Some(vec![reported_task]),
                     ..AgentReportPayload::default()
                 },
                 base,
@@ -893,6 +1095,55 @@ mod tests {
             store.snapshot(pane_id, AgentStatus::Working).tasks,
             vec![transcript_task]
         );
+    }
+
+    #[test]
+    fn explicit_empty_report_and_newer_empty_transcript_clear_tasks() {
+        let pane_id = PaneId::from_raw(15);
+        let base = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
+        let mut store = AgentStateStore::default();
+        store
+            .report(
+                pane_id,
+                serde_json::from_str(
+                    r#"{"tasks":[{"text":"reported task","status":"in_progress"}]}"#,
+                )
+                .expect("report payload"),
+                base,
+            )
+            .expect("valid report");
+        store
+            .report(
+                pane_id,
+                serde_json::from_str(r#"{"tasks":[]}"#).expect("empty report payload"),
+                base + std::time::Duration::from_secs(1),
+            )
+            .expect("valid empty report");
+        assert!(store
+            .snapshot(pane_id, AgentStatus::Working)
+            .tasks
+            .is_empty());
+
+        store
+            .report(
+                pane_id,
+                serde_json::from_str(r#"{"tasks":[{"text":"new report","status":"pending"}]}"#)
+                    .expect("replacement report payload"),
+                base + std::time::Duration::from_secs(2),
+            )
+            .expect("valid replacement report");
+        store.observe_transcript(
+            pane_id,
+            Some(base + std::time::Duration::from_secs(3)),
+            Some(Vec::new()),
+            Some(base + std::time::Duration::from_secs(3)),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(store
+            .snapshot(pane_id, AgentStatus::Working)
+            .tasks
+            .is_empty());
     }
 
     #[test]

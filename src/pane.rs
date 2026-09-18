@@ -4535,7 +4535,7 @@ mod tests {
         let _runtime =
             PaneRuntime::test_with_scrollback_bytes(80, 24, 64 * 1024, screen.as_bytes());
         let gate = crate::agent_state::LinkExtractionGate::default();
-        gate.observe_chunk(uri.as_bytes());
+        gate.observe_chunk(format!("{uri}\n").as_bytes());
         let (tx, mut rx) = mpsc::channel(1);
 
         publish_agent_links_if_dirty(PaneId::from_raw(72), &gate, &tx).await;
@@ -4560,12 +4560,12 @@ mod tests {
         );
         let gate = crate::agent_state::LinkExtractionGate::default();
         let (tx, mut rx) = mpsc::channel(2);
-        gate.observe_chunk(first_uri.as_bytes());
+        gate.observe_chunk(format!("{first_uri}\n").as_bytes());
         publish_agent_links_if_dirty(pane_id, &gate, &tx).await;
         let first_event = rx.recv().await.expect("first link event");
 
         runtime.test_process_pty_bytes(format!("{second_uri}\r\n").as_bytes());
-        gate.observe_chunk(second_uri.as_bytes());
+        gate.observe_chunk(format!("{second_uri}\n").as_bytes());
         publish_agent_links_if_dirty(pane_id, &gate, &tx).await;
         let second_event = rx.recv().await.expect("second link event");
 
