@@ -3843,13 +3843,17 @@ impl AppState {
         {
             self.mark_session_dirty();
         }
+        let retired_scoped_closing_report =
+            mutation.session_replaced && mutation.sidebar_projection_changed;
         if mutation.session_replaced {
             if let Some(tab_idx) = self.workspaces[ws_idx].find_tab_index_for_pane(pane_id) {
                 self.workspaces[ws_idx].tabs[tab_idx].expire_agent_scoped_name();
             }
-            if let Some(pane) = self.workspaces[ws_idx].pane_state_mut(pane_id) {
-                pane.seen = true;
-                pane.done_since = None;
+            if retired_scoped_closing_report {
+                if let Some(pane) = self.workspaces[ws_idx].pane_state_mut(pane_id) {
+                    pane.seen = true;
+                    pane.done_since = None;
+                }
             }
         }
         let agent_released = mutation.agent_released;
@@ -3869,7 +3873,7 @@ impl AppState {
         }
         let suppress_completion = change.state == AgentState::Idle
             && (suppress_completion
-                || mutation.session_replaced
+                || retired_scoped_closing_report
                 || managed_launch_pending
                 || suppress_acquisition_completion);
         if change.previous_state != change.state {
