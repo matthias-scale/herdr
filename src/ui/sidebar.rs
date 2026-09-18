@@ -9553,7 +9553,7 @@ pub(crate) mod tests {
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
-            ["pane/2", "pane/4", "ra-windowless"]
+            ["pane/2", "pane/4"]
         );
     }
 
