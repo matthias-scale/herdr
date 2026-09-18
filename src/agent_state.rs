@@ -26,25 +26,13 @@ pub(crate) struct LinkExtractionGate {
     lock_acquisitions: AtomicU64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct PendingLinkBytes {
     bytes: Vec<u8>,
     dirty: bool,
     last_observed_at: Option<Instant>,
     queued_output_urls: Vec<String>,
     queued_osc8_urls: Vec<String>,
-}
-
-impl Default for PendingLinkBytes {
-    fn default() -> Self {
-        Self {
-            bytes: Vec::new(),
-            dirty: false,
-            last_observed_at: None,
-            queued_output_urls: Vec::new(),
-            queued_osc8_urls: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
