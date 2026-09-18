@@ -435,7 +435,11 @@ impl AppState {
         // press that focuses a pane revokes it again when the resulting action
         // runs `release_dock_focus_to_pane`.
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            self.sidebar_focused = self.sidebar_claims_pointer(mouse.column, mouse.row);
+            if self.sidebar_claims_pointer(mouse.column, mouse.row) {
+                self.focus_client_on_sidebar();
+            } else {
+                self.sidebar_focused = false;
+            }
         }
         let group_menu_enabled = self.view.layout != ViewLayout::Mobile
             && !self.sidebar_collapsed
@@ -5255,6 +5259,7 @@ mod tests {
             app.handle_mouse(mouse(kind, search.x, search.y));
         }
         assert!(app.state.sidebar_search_active);
+        assert_eq!(app.state.input_owner(), InputOwner::Sidebar);
 
         app.handle_key(TerminalKey::new(
             crossterm::event::KeyCode::Char('a'),

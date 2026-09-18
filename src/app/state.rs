@@ -5712,6 +5712,12 @@ impl AppState {
         self.release_surface_focus_to_pane();
     }
 
+    pub(crate) fn focus_client_on_sidebar(&mut self) {
+        self.client_focus_intent = ClientFocusIntent::FollowShared;
+        self.release_dock_focus_to_pane();
+        self.sidebar_focused = true;
+    }
+
     pub(crate) fn input_owner(&self) -> InputOwner {
         if self.sidebar_settled_menu_delete_armed {
             return InputOwner::Client(ClientInputOwner::SettledDeleteConfirm);
