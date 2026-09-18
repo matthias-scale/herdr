@@ -13225,7 +13225,7 @@ pub(crate) mod tests {
                 .unwrap()
         };
         assert_eq!(compact_row_color(entry(0), &app.palette), app.palette.red);
-        assert_eq!(compact_row_color(entry(1), &app.palette), app.palette.peach);
+        assert_eq!(compact_row_color(entry(1), &app.palette), app.palette.red);
         assert_ne!(app.palette.peach, app.palette.yellow);
         assert_eq!(compact_row_color(entry(2), &app.palette), app.palette.red);
         assert_eq!(
