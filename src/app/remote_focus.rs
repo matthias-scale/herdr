@@ -371,12 +371,30 @@ impl RemoteFocusOperations {
             .and_then(|operation| operation.proxy.clone())
     }
 
-    pub(crate) fn proxy_pane_for_agent(&self, agent_ref: &AgentRef) -> Option<PaneId> {
-        self.operations.values().find_map(|operation| {
-            (operation.agent_ref == *agent_ref)
-                .then(|| operation.proxy.as_ref().map(|(pane_id, _)| *pane_id))
-                .flatten()
-        })
+    pub(crate) fn proxy_pane_for_agent(
+        &self,
+        agent_ref: &AgentRef,
+        pane_exists: impl Fn(PaneId) -> bool,
+    ) -> Option<PaneId> {
+        self.operations
+            .iter()
+            .filter(|(_, operation)| {
+                operation.agent_ref == *agent_ref
+                    && matches!(
+                        operation.state,
+                        RemoteFocusState::Connecting | RemoteFocusState::Active
+                    )
+            })
+            .filter_map(|(operation_id, operation)| {
+                let pane_id = operation.proxy.as_ref().map(|(pane_id, _)| *pane_id)?;
+                pane_exists(pane_id).then_some((operation_id, operation, pane_id))
+            })
+            .max_by(|(left_id, left, _), (right_id, right, _)| {
+                left.created_at
+                    .cmp(&right.created_at)
+                    .then_with(|| left_id.cmp(right_id))
+            })
+            .map(|(_, _, pane_id)| pane_id)
     }
 
     fn proxy_by_terminal_id(&self, terminal_id: &TerminalId) -> Option<PaneId> {
@@ -1858,6 +1876,55 @@ mod tests {
                 .as_ref()
                 .map(|error| error.code.as_str()),
             Some("host_unreachable")
+        );
+    }
+
+    #[test]
+    fn proxy_reuse_prefers_the_retained_live_operation_with_an_existing_pane() {
+        let now = Instant::now();
+        let source = agent_ref();
+        let mut operations = RemoteFocusOperations::default();
+
+        let closed = operations
+            .begin(source.clone(), now)
+            .expect("closed operation starts");
+        let closed_pane = PaneId::from_raw(101);
+        operations.attach_proxy(
+            &closed.operation_id,
+            closed_pane,
+            TerminalId::alloc(),
+            "closed-proxy".into(),
+        );
+        operations.transition(
+            &closed.operation_id,
+            RemoteFocusTransition::Closed,
+            now,
+        );
+
+        let live = operations
+            .begin(source.clone(), now + Duration::from_secs(1))
+            .expect("live operation starts");
+        let live_pane = PaneId::from_raw(102);
+        operations.attach_proxy(
+            &live.operation_id,
+            live_pane,
+            TerminalId::alloc(),
+            "live-proxy".into(),
+        );
+
+        let missing = operations
+            .begin(source.clone(), now + Duration::from_secs(2))
+            .expect("operation with removed pane starts");
+        operations.attach_proxy(
+            &missing.operation_id,
+            PaneId::from_raw(103),
+            TerminalId::alloc(),
+            "missing-proxy".into(),
+        );
+
+        assert_eq!(
+            operations.proxy_pane_for_agent(&source, |pane_id| pane_id == live_pane),
+            Some(live_pane)
         );
     }
 
