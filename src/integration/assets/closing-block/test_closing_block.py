@@ -2597,20 +2597,28 @@ class BundleInstallerTests(unittest.TestCase):
         self.assertEqual((self.target / "closing_block.py").read_bytes(), before)
         self.assertEqual(list(self.target.parent.glob("herdr-closing-block.backup-*")), [])
 
-    def test_failed_first_install_preserves_a_concurrent_target_file(self):
+    def test_failed_first_install_preserves_a_concurrent_bundle(self):
         installer = self._installer_module()
         installer.shutil.rmtree(self.target)
         original_replace = installer.os.replace
         replacements = 0
-        sentinel = self.target / "concurrent-sentinel"
+        concurrent_source = self.root / "concurrent-source"
+        concurrent_source.mkdir()
+        concurrent_contents = {}
+        for name in self.RUNTIME_FILES:
+            content = f"concurrent installer owns {name}\n".encode()
+            (concurrent_source / name).write_bytes(content)
+            concurrent_contents[name] = content
 
         def fail_second_replacement(source, destination):
             nonlocal replacements
             if installer.Path(destination).parent == self.target:
                 replacements += 1
                 if replacements == 2:
-                    sentinel.write_text("owned by another installer\n", encoding="utf-8")
+                    for name in self.RUNTIME_FILES:
+                        original_replace(concurrent_source / name, self.target / name)
                     raise OSError("injected replacement failure")
+                return original_replace(source, destination)
             return original_replace(source, destination)
 
         with mock.patch.object(
@@ -2620,10 +2628,8 @@ class BundleInstallerTests(unittest.TestCase):
                 installer.install_bundle(self.source, self.target, dry_run=False)
 
         self.assertTrue(self.target.is_dir())
-        self.assertEqual(
-            sentinel.read_text(encoding="utf-8"), "owned by another installer\n"
-        )
-        self.assertFalse(any((self.target / name).exists() for name in self.RUNTIME_FILES))
+        for name in self.RUNTIME_FILES:
+            self.assertEqual((self.target / name).read_bytes(), concurrent_contents[name])
         self.assertEqual(list(self.target.parent.glob("herdr-closing-block.backup-*")), [])
         self.assertEqual(list(self.target.parent.glob(".herdr-closing-block.stage-*")), [])
 

@@ -82,12 +82,19 @@ def _validate_target(target: Path) -> None:
         raise BundleValidationError(f"install target is not a directory: {target}")
 
 
-def _replace_runtime_files(source: Path, target: Path, written: list[Path]) -> None:
+def _written_file_identity(path: Path) -> tuple[int, int, bytes]:
+    stat = path.stat()
+    return stat.st_dev, stat.st_ino, path.read_bytes()
+
+
+def _replace_runtime_files(
+    source: Path, target: Path, written: list[tuple[Path, tuple[int, int, bytes]]]
+) -> None:
     target.mkdir(parents=True, exist_ok=True)
     for name in RUNTIME_FILES:
         destination = target / name
         os.replace(source / name, destination)
-        written.append(destination)
+        written.append((destination, _written_file_identity(destination)))
 
 
 def _restore_runtime_files(backup: Path, target: Path) -> None:
@@ -110,14 +117,17 @@ def _restore_runtime_files(backup: Path, target: Path) -> None:
 
 
 def _rollback_runtime_files(
-    backup: Path | None, target: Path, written: list[Path]
+    backup: Path | None,
+    target: Path,
+    written: list[tuple[Path, tuple[int, int, bytes]]],
 ) -> None:
     if backup and backup.exists():
         _restore_runtime_files(backup, target)
         return
-    for path in written:
+    for path, identity in written:
         try:
-            path.unlink()
+            if _written_file_identity(path) == identity:
+                path.unlink()
         except FileNotFoundError:
             pass
     try:
@@ -158,7 +168,7 @@ def install_bundle(source_dir: Path, target: Path, *, dry_run: bool) -> dict:
 
         if backup:
             shutil.copytree(target, backup, symlinks=True)
-        written: list[Path] = []
+        written: list[tuple[Path, tuple[int, int, bytes]]] = []
         try:
             _replace_runtime_files(stage, target, written)
         except OSError:
