@@ -265,8 +265,14 @@ impl super::App {
         if next.dir != self.state.notepad.dir || next.enabled != self.state.notepad.enabled {
             self.write_notepad_now();
             let focused = self.state.notepad.focused && next.enabled;
+            // The agent tab is a view choice, not note content: a config
+            // reload keeps it and its folded sections.
+            let agent_tab = self.state.notepad.agent_tab && next.enabled;
+            let agent_collapsed = self.state.notepad.agent_collapsed;
             self.state.notepad = next;
             self.state.notepad.focused = focused;
+            self.state.notepad.agent_tab = agent_tab;
+            self.state.notepad.agent_collapsed = agent_collapsed;
             self.notepad_watcher = None;
             self.notepad_watched_dir = None;
         } else {
