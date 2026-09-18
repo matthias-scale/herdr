@@ -5701,7 +5701,7 @@ impl AppState {
     pub(crate) fn effective_interaction_mode(&self) -> Mode {
         self.client_overlay
             .mode()
-            .unwrap_or_else(|| match self.client_focus_intent {
+            .unwrap_or(match self.client_focus_intent {
                 ClientFocusIntent::FollowShared => self.server_interaction.mode,
                 ClientFocusIntent::Pane => Mode::Terminal,
             })
