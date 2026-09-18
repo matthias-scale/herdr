@@ -1823,6 +1823,54 @@ mod tests {
     }
 
     #[test]
+    fn refresh_sampled_before_a_hookless_native_turn_cannot_clear_its_worker() {
+        let dir = TestDir::new("stale-hookless-turn-result");
+        let path = dir.transcript();
+        let (mut app, terminal_id) = app_with_claude_target(path.clone());
+        let sampled_zero = completed_observation(terminal_id.clone(), path.clone(), 7, AGENT_A);
+        let observed_at = Instant::now();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            observed_at,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            observed_at + std::time::Duration::from_secs(1),
+        );
+        terminal.set_active_subagents(Some(1));
+
+        app.claude_subagent_trackers.insert(
+            terminal_id.clone(),
+            TranscriptTracker::new(SESSION_ID.into(), path, 7),
+        );
+        app.last_claude_subagent_refresh_generation = 1;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 1,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+
+        assert!(!app.handle_claude_subagents_refreshed(
+            1,
+            vec![sampled_zero],
+            BatchStats::default(),
+        ));
+        assert_eq!(app.state.terminals[&terminal_id].active_subagents, Some(1));
+    }
+
+    #[test]
     fn refresh_result_after_worker_deadline_is_ignored() {
         let dir = TestDir::new("expired-result");
         let path = dir.transcript();

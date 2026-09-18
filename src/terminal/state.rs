@@ -1844,6 +1844,13 @@ impl TerminalState {
                         .fallback_observed_at
                         .is_some_and(|observed_at| observed_at > authority.reported_at)
             });
+        let previous_native_screen_settled =
+            matches!(self.fallback_state, AgentState::Idle | AgentState::Blocked)
+                && self.fallback_observed_at.is_some()
+                && self
+                    .hook_authority
+                    .as_ref()
+                    .is_none_or(|authority| !self.hook_authority_is_effective(authority));
         let visible_working_signal = visible_working && fallback_state == AgentState::Working;
         self.fallback_visible_working = visible_working_signal;
         self.fallback_visible_working_observed_at = visible_working_signal.then_some(now);
@@ -1852,6 +1859,7 @@ impl TerminalState {
             fallback_state,
             visible_working_signal,
             previous_screen_settled_after_report,
+            previous_native_screen_settled,
             now,
         );
         let newer_custom_authority = process_exited
@@ -2149,6 +2157,7 @@ impl TerminalState {
         fallback_state: AgentState,
         visible_working: bool,
         previous_screen_settled_after_report: bool,
+        previous_native_screen_settled: bool,
         now: Instant,
     ) -> bool {
         let closing_report_is_older = self.hook_authority.as_ref().is_some_and(|authority| {
@@ -2156,7 +2165,7 @@ impl TerminalState {
                 && self.hook_authority_is_effective(authority)
                 && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
         });
-        let starts_turn = visible_working
+        let starts_reported_turn = visible_working
             && closing_report_is_older
             && previous_screen_settled_after_report
             && self.hook_authority.as_ref().is_some_and(|authority| {
@@ -2165,6 +2174,8 @@ impl TerminalState {
                     .checked_add(crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH)
                     .is_some_and(|stable_at| now >= stable_at)
             });
+        let starts_turn =
+            starts_reported_turn || (visible_working && previous_native_screen_settled);
         let resolves_stale = self.supervisor_stale
             && matches!(fallback_state, AgentState::Idle | AgentState::Blocked)
             && self
