@@ -1356,12 +1356,17 @@ impl App {
     fn agent_entry_target(&self, idx: usize) -> Option<(usize, crate::layout::PaneId)> {
         let entries = crate::ui::agent_panel_entries(&self.state);
         let target = entries.get(idx)?;
-        Some((target.ws_idx, target.pane_id))
+        target
+            .local_target()
+            .map(|target| (target.ws_idx, target.pane_id))
     }
 
     fn relative_agent_entry(&self, forward: bool) -> Option<(usize, usize, crate::layout::PaneId)> {
-        crate::ui::relative_agent_navigation_entry(&self.state, forward)
-            .map(|(idx, target)| (idx, target.ws_idx, target.pane_id))
+        crate::ui::relative_agent_navigation_entry(&self.state, forward).and_then(|(idx, entry)| {
+            entry
+                .local_target()
+                .map(|target| (idx, target.ws_idx, target.pane_id))
+        })
     }
 
     fn pass_through_key_to_focused_pane(&mut self, key: TerminalKey) -> bool {
@@ -2070,7 +2075,9 @@ pub(crate) fn window_cycle_order(state: &AppState) -> Vec<(usize, usize)> {
     let mut order = crate::ui::sidebar_rows(state)
         .into_iter()
         .filter_map(|row| match row {
-            crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
+            crate::ui::SidebarRow::Tab { entry, .. } => entry
+                .local_target()
+                .map(|target| (target.ws_idx, target.tab_idx)),
             _ => None,
         })
         .filter(|window| seen.insert(*window))
@@ -2109,20 +2116,25 @@ enum BlockedPaneTarget {
 fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
     let visible_local = crate::ui::sidebar::sidebar_navigation_agent_entries(state)
         .into_iter()
-        .map(|entry| (entry.ws_idx, entry.pane_id))
+        .filter_map(|entry| {
+            entry
+                .local_target()
+                .map(|target| (target.ws_idx, target.pane_id))
+        })
         .collect::<std::collections::HashSet<_>>();
     let mut local = crate::ui::all_agent_panel_entries(state)
         .into_iter()
-        .map(|entry| {
+        .filter_map(|entry| {
+            let target = entry.local_target()?;
             let needs_attention = crate::ui::sidebar::entry_needs_human_attention(&entry);
-            (
+            Some((
                 BlockedPaneTarget::Local {
-                    ws_idx: entry.ws_idx,
-                    tab_idx: entry.tab_idx,
-                    pane_id: entry.pane_id,
+                    ws_idx: target.ws_idx,
+                    tab_idx: target.tab_idx,
+                    pane_id: target.pane_id,
                 },
                 needs_attention,
-            )
+            ))
         })
         .collect::<Vec<_>>();
     let mut remote = state
@@ -2139,12 +2151,16 @@ fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
     for row in crate::ui::sidebar_rows(state) {
         match row {
             crate::ui::SidebarRow::Tab { entry, .. } => {
+                let Some(entry_target) = entry.local_target() else {
+                    continue;
+                };
                 let mut index = 0;
                 while index < local.len() {
                     let same_tab = matches!(
                         local[index].0,
                         BlockedPaneTarget::Local { ws_idx, tab_idx, pane_id }
-                            if (ws_idx, tab_idx) == (entry.ws_idx, entry.tab_idx)
+                            if (ws_idx, tab_idx)
+                                == (entry_target.ws_idx, entry_target.tab_idx)
                                 && visible_local.contains(&(ws_idx, pane_id))
                     );
                     if same_tab {
@@ -2155,11 +2171,15 @@ fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
                 }
             }
             crate::ui::SidebarRow::Agent { entry, .. } => {
+                let Some(entry_target) = entry.local_target() else {
+                    continue;
+                };
                 if let Some(index) = local.iter().position(|(target, _)| {
                     matches!(
                         target,
                         BlockedPaneTarget::Local { ws_idx, pane_id, .. }
-                            if (*ws_idx, *pane_id) == (entry.ws_idx, entry.pane_id)
+                            if (*ws_idx, *pane_id)
+                                == (entry_target.ws_idx, entry_target.pane_id)
                     )
                 }) {
                     panes.push(local.remove(index));
@@ -5454,7 +5474,9 @@ mod tests {
                 matches!(
                     row,
                     crate::ui::SidebarRow::Tab { entry, .. }
-                        if entry.ws_idx == 1 && entry.tab_idx == 0
+                        if entry.local_target().is_some_and(|target| {
+                            target.ws_idx == 1 && target.tab_idx == 0
+                        })
                 )
             })
             .unwrap();

@@ -732,36 +732,29 @@ fn render_remote_compact_agent_row_with_prefix(
     }
 
     let p = &app.palette;
+    let (render_age, _) = compact_age(&remote.entry, app.view_observed_at);
     let requested_prefix = prefix_override.unwrap_or_else(|| usize::from(depth) * 3 + 1);
-    let title = compact_row_title_for_width(
-        &remote.render_title,
-        &remote.render_provider,
-        usize::from(rect.width),
-        requested_prefix,
+    let total_width = usize::from(rect.width);
+    // Host identity is the last-resort discriminator, so reserve it before
+    // indentation, provider, and age consume any cells.
+    let max_host_width = total_width.saturating_sub(
+        SIDEBAR_DOT_FIELD_WIDTH + SIDEBAR_HOST_TOKEN_MIN_TITLE_WIDTH + display_width(" · "),
     );
-    let widths = compact_row_widths(
-        title,
-        &remote.render_provider,
-        usize::from(rect.width),
-        requested_prefix,
-    );
-    let max_host_width = usize::from(rect.width).saturating_sub(
-        widths.prefix
-            + SIDEBAR_DOT_FIELD_WIDTH
-            + SIDEBAR_HOST_TOKEN_MIN_TITLE_WIDTH
-            + display_width(" · "),
-    );
-    // Only an ambiguous title spends cells on host identity. Otherwise the row
-    // keeps those cells for the provider and age tokens.
     let host_suffix = show_host_identity
         .then(|| remote.host_suffix_for_width(max_host_width))
         .flatten();
-    let provider_width = host_suffix.map_or(widths.provider, |_| 0);
-    let age_width = host_suffix.map_or(widths.age, |_| 0);
+    let row_width = total_width.saturating_sub(host_suffix.map_or(0, |(_, width)| width));
+    let title = compact_row_title_for_width(
+        &remote.render_title,
+        &remote.render_provider,
+        row_width,
+        requested_prefix,
+    );
+    let widths = compact_row_widths(title, &remote.render_provider, row_width, requested_prefix);
+    let provider_width = widths.provider;
+    let age_width = widths.age;
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + provider_width + age_width;
-    let title_width = usize::from(rect.width)
-        .saturating_sub(fixed_width)
-        .saturating_sub(host_suffix.map_or(0, |(_, width)| width));
+    let title_width = row_width.saturating_sub(fixed_width);
     let selected = app
         .sidebar_selected_remote_agent
         .as_ref()
@@ -816,7 +809,7 @@ fn render_remote_compact_agent_row_with_prefix(
     if age_width > 0 {
         frame.render_widget(
             Paragraph::new(Span::styled(
-                remote.render_age.as_str(),
+                render_age.as_str(),
                 working_row_style(app, fade, age_style, bg),
             ))
             .alignment(Alignment::Right),
@@ -853,6 +846,9 @@ fn render_compact_agent_row_with_prefix(
     if rect.width == 0 || rect.height == 0 {
         return;
     }
+    let Some(target) = entry.local_target() else {
+        return;
+    };
     let p = &app.palette;
     let requested_prefix_width = prefix_override.unwrap_or_else(|| usize::from(depth) * 3 + 1);
     let provider = compact_provider(entry);
@@ -879,7 +875,7 @@ fn render_compact_agent_row_with_prefix(
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
     let settle_width =
-        usize::from(title_width >= 2 && !app.pane_is_settled(entry.ws_idx, entry.pane_id)) * 2;
+        usize::from(title_width >= 2 && !app.pane_is_settled(target.ws_idx, target.pane_id)) * 2;
     // The star sits inside the title field, right after the name, so it reads as
     // part of the session's label rather than as another right-hand column.
     let star_suffix = (entry.starred
@@ -897,19 +893,19 @@ fn render_compact_agent_row_with_prefix(
         .as_deref()
         .map_or_else(String::new, |age| pad_left(age, widths.age));
     let is_active = tab
-        && app.active == Some(entry.ws_idx)
+        && app.active == Some(target.ws_idx)
         && app
             .workspaces
-            .get(entry.ws_idx)
-            .is_some_and(|ws| ws.active_tab_index() == entry.tab_idx);
-    let title_style = if is_active || app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id)
-    {
-        Style::default()
-            .fg(active_sidebar_title_color(p))
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(p.subtext0)
-    };
+            .get(target.ws_idx)
+            .is_some_and(|ws| ws.active_tab_index() == target.tab_idx);
+    let title_style =
+        if is_active || app.is_active_pane(target.ws_idx, target.tab_idx, target.pane_id) {
+            Style::default()
+                .fg(active_sidebar_title_color(p))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.subtext0)
+        };
     let dot_color = compact_row_color(entry, p);
     let fade = blue_working_row(entry, p, dot_color);
     let dot_style = Style::default().fg(dot_color);
@@ -1016,6 +1012,19 @@ pub(crate) enum AgentPanelIdentity {
 #[allow(dead_code)]
 pub(crate) struct AgentPanelEntry {
     pub(crate) identity: AgentPanelIdentity,
+    data: std::sync::Arc<AgentPanelEntryData>,
+    /// Cached fleet row backing this entry. Local panes leave this empty;
+    /// remote entries carry the refresh-time projection through the same
+    /// grouping pipeline without acquiring local pane identity.
+    pub(crate) remote_entry: Option<std::sync::Arc<RemoteAgentPanelEntry>>,
+    /// Per-projection ambiguity against both local and remote titles. This is
+    /// a scalar overlay; the cached remote entry remains shared through `Arc`.
+    pub(crate) remote_show_host_identity: bool,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct AgentPanelEntryData {
     pub primary_label: String,
     /// Server-owned Space label. Grouping views render this in the existing
     /// trailing tag cell instead of deriving a label from the pane title.
@@ -1080,17 +1089,19 @@ pub(crate) struct AgentPanelEntry {
     /// Fleet host this pane is attached to over ssh. The pane lives in the
     /// local list, so the row names the machine next to the provider.
     pub remote_host: Option<String>,
-    /// Cached fleet row backing this entry. Local panes leave this empty;
-    /// remote entries carry the refresh-time projection through the same
-    /// grouping pipeline without acquiring local pane identity.
-    pub(crate) remote_entry: Option<std::sync::Arc<RemoteAgentPanelEntry>>,
-    /// Per-projection ambiguity against both local and remote titles. This is
-    /// a scalar overlay; the cached remote entry remains shared through `Arc`.
-    pub(crate) remote_show_host_identity: bool,
 }
 
 impl AgentPanelEntry {
-    fn local_target(&self) -> Option<AgentPanelLocalTarget> {
+    pub(crate) fn new(identity: AgentPanelIdentity, data: AgentPanelEntryData) -> Self {
+        Self {
+            identity,
+            data: std::sync::Arc::new(data),
+            remote_entry: None,
+            remote_show_host_identity: false,
+        }
+    }
+
+    pub(crate) fn local_target(&self) -> Option<AgentPanelLocalTarget> {
         match self.identity {
             AgentPanelIdentity::Local(target) => Some(target),
             AgentPanelIdentity::Remote(_) => None,
@@ -1099,28 +1110,16 @@ impl AgentPanelEntry {
 }
 
 impl std::ops::Deref for AgentPanelEntry {
-    type Target = AgentPanelLocalTarget;
+    type Target = AgentPanelEntryData;
 
-    #[track_caller]
     fn deref(&self) -> &Self::Target {
-        match &self.identity {
-            AgentPanelIdentity::Local(target) => target,
-            AgentPanelIdentity::Remote(agent_ref) => {
-                panic!("remote sidebar entry {agent_ref} has no local target")
-            }
-        }
+        &self.data
     }
 }
 
 impl std::ops::DerefMut for AgentPanelEntry {
-    #[track_caller]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        match &mut self.identity {
-            AgentPanelIdentity::Local(target) => target,
-            AgentPanelIdentity::Remote(agent_ref) => {
-                panic!("remote sidebar entry {agent_ref} has no local target")
-            }
-        }
+        std::sync::Arc::make_mut(&mut self.data)
     }
 }
 
@@ -1131,7 +1130,6 @@ pub(crate) struct RemoteAgentPanelEntry {
     render_dot: &'static str,
     render_title: String,
     render_provider: String,
-    render_age: String,
     host_suffix: String,
     host_suffix_width: usize,
     narrow_host_suffix: String,
@@ -1140,7 +1138,7 @@ pub(crate) struct RemoteAgentPanelEntry {
     work_context: crate::work_context::PaneWorkContext,
     workspace_id: String,
     settled: bool,
-    snoozed: bool,
+    pub(crate) snoozed_until: Option<u64>,
     show_host_identity: bool,
 }
 
@@ -1157,7 +1155,7 @@ impl RemoteAgentPanelEntry {
             crate::work_context::PaneWorkContext::default(),
             String::new(),
             false,
-            false,
+            None,
         )
     }
 
@@ -1168,13 +1166,12 @@ impl RemoteAgentPanelEntry {
         work_context: crate::work_context::PaneWorkContext,
         workspace_id: String,
         settled: bool,
-        snoozed: bool,
+        snoozed_until: Option<u64>,
     ) -> Self {
         let host = agent_ref.host.as_str();
         let render_dot = compact_row_dot(&entry);
         let render_title = compact_row_title(&entry, false).to_string();
         let render_provider = compact_provider(&entry);
-        let (render_age, _) = compact_age(&entry, std::time::Instant::now());
         let host_suffix = format!(" · {host}");
         let narrow_host_suffix = format!(" · {narrow_host}");
         let search_key_lowercase = format!(
@@ -1191,7 +1188,6 @@ impl RemoteAgentPanelEntry {
             render_dot,
             render_title,
             render_provider,
-            render_age,
             host_suffix_width: display_width(&host_suffix),
             narrow_host_suffix_width: display_width(&narrow_host_suffix),
             host_suffix,
@@ -1200,7 +1196,7 @@ impl RemoteAgentPanelEntry {
             work_context,
             workspace_id,
             settled,
-            snoozed,
+            snoozed_until,
             show_host_identity: false,
             entry,
         }
@@ -1438,7 +1434,11 @@ pub(crate) fn relative_agent_navigation_entry(
             .map(|pane_id| (ws_idx, pane_id))
     });
     let current_idx = entries.iter().position(|entry| {
-        focused.is_some_and(|(ws_idx, pane_id)| entry.ws_idx == ws_idx && entry.pane_id == pane_id)
+        focused.is_some_and(|(ws_idx, pane_id)| {
+            entry
+                .local_target()
+                .is_some_and(|target| target.ws_idx == ws_idx && target.pane_id == pane_id)
+        })
     });
     let next_idx = match (current_idx, forward) {
         (Some(idx), true) => (idx + 1) % entries.len(),
@@ -1537,55 +1537,55 @@ fn collect_agent_panel_entries_with_runtimes(
                         detail.holds_shell,
                         has_closing_block_tokens,
                     );
-                    AgentPanelEntry {
-                        identity: AgentPanelIdentity::Local(AgentPanelLocalTarget {
+                    AgentPanelEntry::new(
+                        AgentPanelIdentity::Local(AgentPanelLocalTarget {
                             ws_idx,
                             tab_idx: detail.tab_idx,
                             pane_id: detail.pane_id,
                         }),
-                        primary_label: workspace_label.clone(),
-                        space_label: space_label.clone(),
-                        space_label_redundant: false,
-                        primary_tab_label: crate::workspace::session_title(
-                            projection.as_ref(),
-                            thread_title,
-                        ),
-                        tab_has_custom_name,
-                        tab_label_leads_with_agent,
-                        pane_label: detail.pane_label,
-                        pane_label_is_agent_identity: detail.pane_label_is_agent_identity,
-                        terminal_title: detail.terminal_title,
-                        terminal_title_stripped: detail.terminal_title_stripped,
-                        agent_label: Some(detail.agent_label),
-                        agent_kind_label: detail.agent_kind_label,
-                        agent: detail.agent,
-                        foreground_process_name: detail.foreground_process_name,
-                        agent_context: detail.agent_context,
-                        has_agent: detail.has_agent,
-                        prio,
-                        starred,
-                        state: detail.state,
-                        attention_tier: Some(detail.attention_tier),
-                        open_blockers: detail.open_blockers,
-                        completion_tier,
-                        usage_limited: detail.usage_limited,
-                        active_subagents,
-                        waiting_on_agents: detail.waiting_on_agents,
-                        seen: detail.seen,
-                        done_since: detail.done_since,
-                        stale: detail.stale,
-                        reported_at: detail.reported_at,
-                        last_agent_state_change_seq: detail.last_agent_state_change_seq,
-                        activity_at: detail.activity_at,
-                        state_labels: detail.state_labels,
-                        tokens: detail.tokens,
-                        holds_shell: detail.holds_shell,
-                        gate_count: detail.gate_count,
-                        tab_first_pane: false,
-                        remote_host,
-                        remote_entry: None,
-                        remote_show_host_identity: false,
-                    }
+                        AgentPanelEntryData {
+                            primary_label: workspace_label.clone(),
+                            space_label: space_label.clone(),
+                            space_label_redundant: false,
+                            primary_tab_label: crate::workspace::session_title(
+                                projection.as_ref(),
+                                thread_title,
+                            ),
+                            tab_has_custom_name,
+                            tab_label_leads_with_agent,
+                            pane_label: detail.pane_label,
+                            pane_label_is_agent_identity: detail.pane_label_is_agent_identity,
+                            terminal_title: detail.terminal_title,
+                            terminal_title_stripped: detail.terminal_title_stripped,
+                            agent_label: Some(detail.agent_label),
+                            agent_kind_label: detail.agent_kind_label,
+                            agent: detail.agent,
+                            foreground_process_name: detail.foreground_process_name,
+                            agent_context: detail.agent_context,
+                            has_agent: detail.has_agent,
+                            prio,
+                            starred,
+                            state: detail.state,
+                            attention_tier: Some(detail.attention_tier),
+                            open_blockers: detail.open_blockers,
+                            completion_tier,
+                            usage_limited: detail.usage_limited,
+                            active_subagents,
+                            waiting_on_agents: detail.waiting_on_agents,
+                            seen: detail.seen,
+                            done_since: detail.done_since,
+                            stale: detail.stale,
+                            reported_at: detail.reported_at,
+                            last_agent_state_change_seq: detail.last_agent_state_change_seq,
+                            activity_at: detail.activity_at,
+                            state_labels: detail.state_labels,
+                            tokens: detail.tokens,
+                            holds_shell: detail.holds_shell,
+                            gate_count: detail.gate_count,
+                            tab_first_pane: false,
+                            remote_host,
+                        },
+                    )
                 })
         })
         .collect()
@@ -1602,7 +1602,7 @@ pub(crate) fn remote_agent_panel_entries(
     remote_agent_panel_entries_at(snapshot, now_unix_s)
 }
 
-fn remote_agent_panel_entries_at(
+pub(crate) fn remote_agent_panel_entries_at(
     snapshot: &crate::fleet::Snapshot,
     now_unix_s: u64,
 ) -> Vec<std::sync::Arc<RemoteAgentPanelEntry>> {
@@ -1679,7 +1679,7 @@ fn remote_agent_panel_entries_at(
                 .agent
                 .as_deref()
                 .and_then(crate::detect::parse_agent_label);
-            let reported_at = row.age_s.and_then(|age| {
+            let reported_at = row.age_seconds_at(now_unix_s).and_then(|age| {
                 std::time::Instant::now().checked_sub(std::time::Duration::from_secs(age))
             });
             let narrow_host = narrow_host_tokens
@@ -1691,53 +1691,53 @@ fn remote_agent_panel_entries_at(
             Some(std::sync::Arc::new(
                 RemoteAgentPanelEntry::new_with_narrow_host(
                     row.agent_ref.clone(),
-                    AgentPanelEntry {
-                        identity: AgentPanelIdentity::Remote(row.agent_ref.clone()),
-                        primary_label: row.agent_ref.host.clone(),
-                        space_label: workspace_id.clone(),
-                        space_label_redundant: false,
-                        primary_tab_label: Some(title),
-                        tab_has_custom_name,
-                        tab_label_leads_with_agent: false,
-                        pane_label,
-                        pane_label_is_agent_identity: true,
-                        terminal_title,
-                        terminal_title_stripped,
-                        agent_label,
-                        agent_kind_label: row.agent.clone(),
-                        agent,
-                        foreground_process_name: None,
-                        agent_context: agent,
-                        has_agent: true,
-                        prio: false,
-                        starred: false,
-                        state: lifecycle.state,
-                        attention_tier: lifecycle.attention_tier,
-                        open_blockers: lifecycle.open_blockers,
-                        completion_tier: None,
-                        usage_limited: lifecycle.usage_limited,
-                        active_subagents: None,
-                        waiting_on_agents: lifecycle.waiting_on_agents,
-                        holds_shell: false,
-                        gate_count,
-                        seen: lifecycle.seen,
-                        done_since: None,
-                        stale: lifecycle.stale,
-                        reported_at,
-                        last_agent_state_change_seq: state_change_seq,
-                        activity_at: reported_at,
-                        state_labels,
-                        tokens,
-                        tab_first_pane: false,
-                        remote_host: None,
-                        remote_entry: None,
-                        remote_show_host_identity: false,
-                    },
+                    AgentPanelEntry::new(
+                        AgentPanelIdentity::Remote(row.agent_ref.clone()),
+                        AgentPanelEntryData {
+                            primary_label: row.agent_ref.host.clone(),
+                            space_label: workspace_id.clone(),
+                            space_label_redundant: false,
+                            primary_tab_label: Some(title),
+                            tab_has_custom_name,
+                            tab_label_leads_with_agent: false,
+                            pane_label,
+                            pane_label_is_agent_identity: true,
+                            terminal_title,
+                            terminal_title_stripped,
+                            agent_label,
+                            agent_kind_label: row.agent.clone(),
+                            agent,
+                            foreground_process_name: None,
+                            agent_context: agent,
+                            has_agent: true,
+                            prio: false,
+                            starred: false,
+                            state: lifecycle.state,
+                            attention_tier: lifecycle.attention_tier,
+                            open_blockers: lifecycle.open_blockers,
+                            completion_tier: None,
+                            usage_limited: lifecycle.usage_limited,
+                            active_subagents: None,
+                            waiting_on_agents: lifecycle.waiting_on_agents,
+                            holds_shell: false,
+                            gate_count,
+                            seen: lifecycle.seen,
+                            done_since: None,
+                            stale: lifecycle.stale,
+                            reported_at,
+                            last_agent_state_change_seq: state_change_seq,
+                            activity_at: reported_at,
+                            state_labels,
+                            tokens,
+                            tab_first_pane: false,
+                            remote_host: None,
+                        },
+                    ),
                     narrow_host,
                     work_context,
                     workspace_id,
                     lifecycle.settled,
-                    lifecycle.snoozed_until.is_some(),
+                    lifecycle.snoozed_until,
                 ),
             ))
         })
@@ -1769,7 +1769,10 @@ fn collect_sidebar_thread_entries_with_runtimes(
     let mut entries = collect_agent_panel_entries_with_runtimes(app, terminal_runtimes);
     let mut previous_tab = None;
     for entry in &mut entries {
-        let tab = (entry.ws_idx, entry.tab_idx);
+        let Some(target) = entry.local_target() else {
+            continue;
+        };
+        let tab = (target.ws_idx, target.tab_idx);
         entry.tab_first_pane = previous_tab != Some(tab);
         previous_tab = Some(tab);
     }
@@ -1938,6 +1941,9 @@ fn aggregate_tab_entries(
         .into_iter()
         .map(
             |(key, (mut entry, mixed_agents, has_agent, has_current_agent, _, usage_label))| {
+                if matches!(key, SidebarEntryKey::Remote(_)) {
+                    return (key, entry);
+                }
                 let agent_context = (!mixed_agents).then_some(entry.agent_context).flatten();
                 entry.agent = (has_current_agent && !mixed_agents)
                     .then_some(agent_context)
@@ -2363,9 +2369,9 @@ fn sidebar_project_scope(app: &AppState) -> Option<ProjectScope<'_>> {
 
 impl ProjectScope<'_> {
     fn holds(&self, app: &AppState, entry: &AgentPanelEntry) -> bool {
-        if let Some(cwd) = app
-            .workspaces
-            .get(entry.ws_idx)
+        if let Some(cwd) = entry
+            .local_target()
+            .and_then(|target| app.workspaces.get(target.ws_idx))
             .map(|workspace| workspace.identity_cwd.as_path())
         {
             if self.paths.iter().any(|path| cwd.starts_with(path)) {
@@ -2389,7 +2395,9 @@ fn sidebar_entry_matches_query(app: &AppState, entry: &AgentPanelEntry) -> bool 
     if terms.is_empty() {
         return true;
     }
-    let workspace = app.workspaces.get(entry.ws_idx);
+    let workspace = entry
+        .local_target()
+        .and_then(|target| app.workspaces.get(target.ws_idx));
     let context = entry_work_context(app, entry);
     let haystack = format!(
         "{} {} {} {} {} {} {} {} {} {} {}",
@@ -2500,21 +2508,31 @@ fn compact_sidebar_rows_inner(
         None => sidebar_thread_entries(app),
     };
     entries.retain(|entry| {
-        !app.remote_focus_proxy_agents.contains_key(&entry.pane_id)
-            && app
-                .workspaces
-                .get(entry.ws_idx)
-                .and_then(|workspace| workspace.pane_state(entry.pane_id))
-                .is_none_or(|pane| pane.snoozed_until().is_none())
+        entry.local_target().is_some_and(|target| {
+            !app.remote_focus_proxy_panes.contains(&target.pane_id)
+                && app
+                    .workspaces
+                    .get(target.ws_idx)
+                    .and_then(|workspace| workspace.pane_state(target.pane_id))
+                    .is_none_or(|pane| pane.snoozed_until().is_none())
+        })
     });
     if sidebar_rows_are_filtered(app) {
         let scope = sidebar_project_scope(app);
         let visible_tabs = entries
             .iter()
             .filter(|entry| sidebar_entry_matches_filters(app, scope.as_ref(), entry))
-            .map(|entry| (entry.ws_idx, entry.tab_idx))
+            .filter_map(|entry| {
+                entry
+                    .local_target()
+                    .map(|target| (target.ws_idx, target.tab_idx))
+            })
             .collect::<std::collections::HashSet<_>>();
-        entries.retain(|entry| visible_tabs.contains(&(entry.ws_idx, entry.tab_idx)));
+        entries.retain(|entry| {
+            entry
+                .local_target()
+                .is_some_and(|target| visible_tabs.contains(&(target.ws_idx, target.tab_idx)))
+        });
     }
     let remote_terms = sidebar_query_parts(&app.sidebar_work_filter.query).0;
     let mut remote_entries = app
@@ -2522,7 +2540,9 @@ fn compact_sidebar_rows_inner(
         .iter()
         .filter(|remote| {
             include_remote
-                && !remote.snoozed
+                && remote
+                    .snoozed_until
+                    .is_none_or(|deadline| deadline <= app.view_observed_unix_s)
                 && remote_sidebar_entry_matches_query(remote, &remote_terms)
                 && (!app.blocked_filter || entry_has_red_dot(remote))
         })
@@ -2535,19 +2555,6 @@ fn compact_sidebar_rows_inner(
         })
         .collect::<Vec<_>>();
     entries.append(&mut remote_entries);
-    let mut title_counts = std::collections::HashMap::<String, usize>::new();
-    for entry in &entries {
-        *title_counts
-            .entry(compact_row_title(entry, false).to_ascii_lowercase())
-            .or_default() += 1;
-    }
-    for entry in &mut entries {
-        if matches!(entry.identity, AgentPanelIdentity::Remote(_)) {
-            entry.remote_show_host_identity = title_counts
-                .get(&compact_row_title(entry, false).to_ascii_lowercase())
-                .is_some_and(|count| *count > 1);
-        }
-    }
     let has_one_space_label = entries.first().is_some_and(|first| {
         entries
             .iter()
@@ -2605,6 +2612,7 @@ fn compact_sidebar_rows_inner(
             terminal_runtimes,
         );
         append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
+        mark_ambiguous_remote_titles(app, &mut rows);
         return rows;
     }
     match app.sidebar_group_mode {
@@ -2618,7 +2626,58 @@ fn compact_sidebar_rows_inner(
         }
     }
     append_tail_sections(app, &mut rows, settled_entries, expand_worktrees);
+    mark_ambiguous_remote_titles(app, &mut rows);
     rows
+}
+
+fn mark_ambiguous_remote_titles(app: &AppState, rows: &mut [SidebarRow]) {
+    let width = usize::from(if app.view.sidebar_rect.width == 0 {
+        app.sidebar_width
+    } else {
+        app.view.sidebar_rect.width
+    });
+    let rendered_title = |row: &SidebarRow| -> Option<String> {
+        let (title, provider, depth) = match row {
+            SidebarRow::Agent { entry, depth } => (
+                compact_row_title(entry, false),
+                compact_provider(entry),
+                *depth,
+            ),
+            SidebarRow::Tab { entry, depth } => (
+                compact_row_title(entry, true),
+                compact_provider(entry),
+                *depth,
+            ),
+            SidebarRow::RemoteAgent { entry, depth, .. } => (
+                entry.render_title.as_str(),
+                entry.render_provider.clone(),
+                *depth,
+            ),
+            _ => return None,
+        };
+        let requested_prefix = usize::from(depth) * 3 + 1;
+        let title = compact_row_title_for_width(title, &provider, width, requested_prefix);
+        let widths = compact_row_widths(title, &provider, width, requested_prefix);
+        let fixed = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+        Some(truncate_end(title, width.saturating_sub(fixed)).to_ascii_lowercase())
+    };
+    let mut counts = std::collections::HashMap::<String, usize>::new();
+    for row in rows.iter() {
+        if let Some(title) = rendered_title(row) {
+            *counts.entry(title).or_default() += 1;
+        }
+    }
+    for row in rows {
+        let ambiguous = rendered_title(row)
+            .and_then(|title| counts.get(&title).copied())
+            .is_some_and(|count| count > 1);
+        if let SidebarRow::RemoteAgent {
+            show_host_identity, ..
+        } = row
+        {
+            *show_host_identity = ambiguous;
+        }
+    }
 }
 
 fn remote_sidebar_entry_matches_query(entry: &RemoteAgentPanelEntry, terms: &[&str]) -> bool {
@@ -2690,10 +2749,12 @@ fn append_legacy_space_rows(
                 None => remote_spaces.push((host, workspace_id, vec![entry])),
             }
         } else {
-            entries_by_workspace
-                .entry(entry.ws_idx)
-                .or_default()
-                .push(entry);
+            if let Some(target) = entry.local_target() {
+                entries_by_workspace
+                    .entry(target.ws_idx)
+                    .or_default()
+                    .push(entry);
+            }
         }
     }
     rows.push(SidebarRow::SectionHeader {
@@ -5150,7 +5211,12 @@ fn workspace_list_entries_inner(
             sidebar_work_groups(app, &sidebar_thread_entries(app), mode)
                 .into_iter()
                 .map(|group| WorkspaceListEntry::NestedHeader {
-                    parent_ws_idx: group.entries.first().map(|entry| entry.ws_idx).unwrap_or(0),
+                    parent_ws_idx: group
+                        .entries
+                        .first()
+                        .and_then(AgentPanelEntry::local_target)
+                        .map(|target| target.ws_idx)
+                        .unwrap_or(0),
                     key: group.key,
                     title: group.title,
                 })
@@ -5173,7 +5239,11 @@ fn workspace_list_entries_inner(
                 let member_indices = sidebar_space_member_indices(app, ws_idx);
                 let members = thread_entries
                     .iter()
-                    .filter(|entry| member_indices.contains(&entry.ws_idx))
+                    .filter(|entry| {
+                        entry
+                            .local_target()
+                            .is_some_and(|target| member_indices.contains(&target.ws_idx))
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
                 for group in sidebar_tab_groups(app, &members, mode) {
@@ -5483,8 +5553,9 @@ pub(crate) fn sidebar_row_index_for_workspace(app: &AppState, ws_idx: usize) -> 
 pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) -> bool {
     match row {
         SidebarRow::Workspace { ws_idx: row_ws, .. } => *row_ws == ws_idx,
-        SidebarRow::Agent { entry, .. } => entry.ws_idx == ws_idx,
-        SidebarRow::Tab { entry, .. } => entry.ws_idx == ws_idx,
+        SidebarRow::Agent { entry, .. } | SidebarRow::Tab { entry, .. } => entry
+            .local_target()
+            .is_some_and(|target| target.ws_idx == ws_idx),
         SidebarRow::RemoteAgent { .. } => false,
         // Headers belong to a state, not a workspace, so scrolling to a
         // workspace must never land on one.
@@ -5611,14 +5682,17 @@ pub(crate) fn compute_sidebar_row_areas(
                 });
             }
             SidebarRow::Agent { entry, depth } => {
+                let Some(target) = entry.local_target() else {
+                    continue;
+                };
                 let row_height = agent_entry_height_in_body_at(app, entry, body.height, *depth);
                 if row_y.saturating_add(row_height) > body_bottom {
                     break;
                 }
                 agent_cards.push(crate::app::state::AgentCardArea {
-                    ws_idx: entry.ws_idx,
-                    tab_idx: entry.tab_idx,
-                    pane_id: entry.pane_id,
+                    ws_idx: target.ws_idx,
+                    tab_idx: target.tab_idx,
+                    pane_id: target.pane_id,
                     rect: Rect::new(body.x, row_y, body.width, row_height),
                     row_idx: entry_idx,
                 });
@@ -5674,10 +5748,13 @@ pub(crate) fn compute_tab_card_areas(
             break;
         }
         if let SidebarRow::Tab { entry, depth } = row {
+            let Some(target) = entry.local_target() else {
+                continue;
+            };
             out.push(crate::app::state::TabCardArea {
-                ws_idx: entry.ws_idx,
-                tab_idx: entry.tab_idx,
-                pane_id: entry.pane_id,
+                ws_idx: target.ws_idx,
+                tab_idx: target.tab_idx,
+                pane_id: target.pane_id,
                 depth: *depth,
                 rect: Rect::new(body.x, y, body.width, height),
             });
@@ -5925,6 +6002,9 @@ pub(crate) fn compute_sidebar_hover_targets(
     for (row, row_y) in visible {
         match row {
             SidebarRow::Agent { entry, depth } | SidebarRow::Tab { entry, depth } => {
+                let Some(target) = entry.local_target() else {
+                    continue;
+                };
                 let tab = matches!(row, SidebarRow::Tab { .. });
                 let requested_prefix = narrow_prefix.unwrap_or_else(|| usize::from(*depth) * 3 + 1);
                 let provider = compact_provider(entry);
@@ -5949,7 +6029,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                 let fixed_width =
                     widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
                 let title_width = usize::from(body.width).saturating_sub(fixed_width);
-                if title_width >= 2 && !app.pane_is_settled(entry.ws_idx, entry.pane_id) {
+                if title_width >= 2 && !app.pane_is_settled(target.ws_idx, target.pane_id) {
                     if let Some(rect) = clamp_row_cells(
                         body,
                         row_y,
@@ -5960,8 +6040,8 @@ pub(crate) fn compute_sidebar_hover_targets(
                             rect,
                             label: "Settle".into(),
                             action: Some(crate::app::state::SidebarHoverAction::Settle {
-                                ws_idx: entry.ws_idx,
-                                pane_id: entry.pane_id,
+                                ws_idx: target.ws_idx,
+                                pane_id: target.pane_id,
                             }),
                         });
                     }
@@ -6534,8 +6614,11 @@ pub(crate) fn agent_counts_by_workspace(
     let mut counts = std::collections::HashMap::new();
     let mut counted_tabs = std::collections::HashSet::new();
     for entry in entries {
-        if counted_tabs.insert((entry.ws_idx, entry.tab_idx)) {
-            *counts.entry(entry.ws_idx).or_default() += 1;
+        let Some(target) = entry.local_target() else {
+            continue;
+        };
+        if counted_tabs.insert((target.ws_idx, target.tab_idx)) {
+            *counts.entry(target.ws_idx).or_default() += 1;
         }
     }
     counts
@@ -6772,9 +6855,12 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 }
             }
             SidebarRow::Agent { entry, depth } => {
+                let Some(target) = entry.local_target() else {
+                    continue;
+                };
                 let icon = compact_row_dot(entry);
                 let dot_color = compact_row_color(entry, p);
-                let is_active = app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id);
+                let is_active = app.is_active_pane(target.ws_idx, target.tab_idx, target.pane_id);
                 let icon_style = working_row_style(
                     app,
                     blue_working_row(entry, p, dot_color),
@@ -6815,7 +6901,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                         buf[(x, y)].set_bg(p.active_row_bg);
                     }
                 }
-                if app.pane_is_settled(entry.ws_idx, entry.pane_id) {
+                if app.pane_is_settled(target.ws_idx, target.pane_id) {
                     dim_settled_row(frame, Rect::new(ws_area.x, y, ws_area.width, 1), p.overlay0);
                 }
             }
@@ -6845,9 +6931,12 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                 }
             }
             SidebarRow::Tab { entry, .. } => {
+                let Some(target) = entry.local_target() else {
+                    continue;
+                };
                 let icon = compact_row_dot(entry);
                 let dot_color = compact_row_color(entry, p);
-                let is_active = app.is_active_pane(entry.ws_idx, entry.tab_idx, entry.pane_id);
+                let is_active = app.is_active_pane(target.ws_idx, target.tab_idx, target.pane_id);
                 let icon_style = working_row_style(
                     app,
                     blue_working_row(entry, p, dot_color),
@@ -6878,7 +6967,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                         buf[(x, y)].set_bg(p.active_row_bg);
                     }
                 }
-                if app.pane_is_settled(entry.ws_idx, entry.pane_id) {
+                if app.pane_is_settled(target.ws_idx, target.pane_id) {
                     dim_settled_row(frame, Rect::new(ws_area.x, y, ws_area.width, 1), p.overlay0);
                 }
             }
@@ -7787,7 +7876,12 @@ fn render_workspace_list(
             .sum::<usize>();
         let agent_count = sidebar_thread_entries_from(app, terminal_runtimes)
             .into_iter()
-            .filter(|entry| member_indices.contains(&entry.ws_idx) && entry.has_agent)
+            .filter(|entry| {
+                entry.has_agent
+                    && entry
+                        .local_target()
+                        .is_some_and(|target| member_indices.contains(&target.ws_idx))
+            })
             .count();
         let count_label = header.and_then(|(_, count, ..)| *count).map_or_else(
             || format!(" ({agent_count}/{window_count})"),
@@ -8018,11 +8112,14 @@ fn render_tab_card(
         None,
         narrow_prefix,
     );
-    if app.pane_is_settled(entry.ws_idx, entry.pane_id) {
+    let Some(target) = entry.local_target() else {
+        return;
+    };
+    if app.pane_is_settled(target.ws_idx, target.pane_id) {
         dim_settled_row(frame, card.rect, app.palette.overlay0);
         let target = crate::app::state::PaneFocusTarget {
-            workspace_id: app.workspaces[entry.ws_idx].id.clone(),
-            pane_id: entry.pane_id,
+            workspace_id: app.workspaces[target.ws_idx].id.clone(),
+            pane_id: target.pane_id,
         };
         if app.sidebar_selected_settled.as_ref() == Some(&target) {
             frame
@@ -8038,7 +8135,9 @@ fn tab_card_entry<'a>(
 ) -> Option<(&'a AgentPanelEntry, u16)> {
     rows.iter().find_map(|row| match row {
         SidebarRow::Tab { entry, depth }
-            if entry.ws_idx == card.ws_idx && entry.tab_idx == card.tab_idx =>
+            if entry.local_target().is_some_and(|target| {
+                target.ws_idx == card.ws_idx && target.tab_idx == card.tab_idx
+            }) =>
         {
             Some((entry.as_ref(), *depth))
         }
@@ -8064,7 +8163,10 @@ fn render_agent_card(
         None,
         narrow_prefix,
     );
-    if app.pane_is_settled(detail.ws_idx, detail.pane_id) {
+    if detail
+        .local_target()
+        .is_some_and(|target| app.pane_is_settled(target.ws_idx, target.pane_id))
+    {
         dim_settled_row(frame, rect, app.palette.overlay0);
     }
 }
@@ -8093,7 +8195,9 @@ pub(crate) fn visible_tab_activity_instants_from(
         .filter_map(|card| {
             let (entry, depth) = rows.iter().find_map(|row| match row {
                 SidebarRow::Tab { entry, depth }
-                    if entry.ws_idx == card.ws_idx && entry.tab_idx == card.tab_idx =>
+                    if entry.local_target().is_some_and(|target| {
+                        target.ws_idx == card.ws_idx && target.tab_idx == card.tab_idx
+                    }) =>
                 {
                     Some((entry.as_ref(), *depth))
                 }
@@ -8863,7 +8967,11 @@ pub(crate) fn sidebar_subgroup_suggestions(
     let entries = sidebar_thread_entries(app);
     let target_group = entries
         .iter()
-        .find(|entry| entry.ws_idx == ws_idx && entry.tab_idx == tab_idx)
+        .find(|entry| {
+            entry
+                .local_target()
+                .is_some_and(|target| target.ws_idx == ws_idx && target.tab_idx == tab_idx)
+        })
         .and_then(|entry| entry_repo_group(app, entry))
         .map(|(key, _)| key);
     let mut names = Vec::<String>::new();
@@ -8886,10 +8994,13 @@ pub(crate) fn sidebar_subgroup_suggestions(
         if !in_group {
             continue;
         }
+        let Some(target) = entry.local_target() else {
+            continue;
+        };
         let Some(name) = app
             .workspaces
-            .get(entry.ws_idx)
-            .and_then(|workspace| workspace.tabs.get(entry.tab_idx))
+            .get(target.ws_idx)
+            .and_then(|workspace| workspace.tabs.get(target.tab_idx))
             .and_then(crate::workspace::Tab::subgroup)
         else {
             continue;
@@ -9430,7 +9541,7 @@ pub(crate) mod tests {
             .next()
             .expect("local row");
         let local_title = compact_row_title(&local, false).to_string();
-        let local_agent = app.local_agent_panel_identities[&local.pane_id]
+        let local_agent = app.local_agent_panel_identities[&local.local_target().unwrap().pane_id]
             .agent_ref
             .agent
             .clone();
@@ -9474,8 +9585,7 @@ pub(crate) mod tests {
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let source =
             crate::api::schema::AgentRef::new("remote", "pane/1").expect("valid remote source");
-        app.remote_focus_proxy_agents
-            .insert(pane_id, source.clone());
+        app.remote_focus_proxy_panes.insert(pane_id);
         let snapshot = crate::fleet::Snapshot {
             hosts: vec![fleet_host_snapshot(
                 "remote",
@@ -9505,7 +9615,7 @@ pub(crate) mod tests {
         assert!(!rows.iter().any(|row| matches!(
             row,
             SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
-                if entry.pane_id == pane_id
+                if entry.local_target().is_some_and(|target| target.pane_id == pane_id)
         )));
     }
 
@@ -9545,6 +9655,7 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
         app.remote_agent_panel_entries = remote_agent_panel_entries_at(&snapshot, 1_725_000_899);
+        app.view_observed_unix_s = 1_725_000_899;
 
         let rows = sidebar_rows(&app);
         let settled_at = rows
@@ -9562,7 +9673,7 @@ pub(crate) mod tests {
         assert!(!rows.iter().any(|row| matches!(
             row,
             SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
-                if entry.pane_id == snoozed_pane
+                if entry.local_target().is_some_and(|target| target.pane_id == snoozed_pane)
         )));
         assert!(!rows.iter().any(|row| matches!(
             row,
@@ -9571,7 +9682,7 @@ pub(crate) mod tests {
         assert!(rows[settled_at + 1..].iter().any(|row| matches!(
             row,
             SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
-                if entry.pane_id == settled_pane
+                if entry.local_target().is_some_and(|target| target.pane_id == settled_pane)
         )));
         assert!(rows[settled_at + 1..].iter().any(|row| matches!(
             row,
@@ -9658,7 +9769,11 @@ pub(crate) mod tests {
 
         // A tab that mixes the attached pane with a local one names no machine.
         let mut local = entry.clone();
-        local.pane_id = crate::layout::PaneId::from_raw(entry.pane_id.raw() + 1);
+        let target = entry.local_target().unwrap();
+        local.identity = AgentPanelIdentity::Local(AgentPanelLocalTarget {
+            pane_id: crate::layout::PaneId::from_raw(target.pane_id.raw() + 1),
+            ..target
+        });
         local.remote_host = None;
         let same = aggregate_tab_entries(&[entry.clone(), entry.clone()]);
         assert_eq!(
@@ -9788,6 +9903,125 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn narrow_nested_remote_rows_reserve_three_cell_host_tokens() {
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![
+                fleet_host_snapshot(
+                    "alpha-machine",
+                    false,
+                    vec![crate::fleet::FleetRow::test_agent_info_row(
+                        "alpha-machine",
+                        remote_agent_info(
+                            "pane/1",
+                            "x",
+                            crate::api::schema::AgentStatus::Working,
+                            false,
+                            false,
+                        ),
+                    )],
+                ),
+                fleet_host_snapshot(
+                    "beta-machine",
+                    false,
+                    vec![crate::fleet::FleetRow::test_agent_info_row(
+                        "beta-machine",
+                        remote_agent_info(
+                            "pane/2",
+                            "x",
+                            crate::api::schema::AgentStatus::Working,
+                            false,
+                            false,
+                        ),
+                    )],
+                ),
+            ],
+            ..crate::fleet::Snapshot::default()
+        };
+        let entries = remote_agent_panel_entries(&snapshot);
+        let app = AppState::test_new();
+        for entry in &entries {
+            assert_eq!(display_width(&entry.narrow_host_suffix), 6);
+            let mut terminal = Terminal::new(TestBackend::new(18, 1)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_remote_compact_agent_row_with_identity(
+                        &app,
+                        frame,
+                        entry,
+                        Rect::new(0, 0, 18, 1),
+                        1,
+                        None,
+                        true,
+                    )
+                })
+                .unwrap();
+            let rendered = row_text(terminal.backend().buffer(), 0, 18);
+            assert!(rendered.contains('x'), "{rendered:?}");
+            assert!(
+                rendered.contains(entry.narrow_host_suffix.trim()),
+                "{rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_ambiguity_uses_the_truncated_rendered_title() {
+        let shared = "a-title-prefix-that-fills-the-narrow-row";
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![
+                fleet_host_snapshot(
+                    "alpha-machine",
+                    false,
+                    vec![crate::fleet::FleetRow::test_agent_info_row(
+                        "alpha-machine",
+                        remote_agent_info(
+                            "pane/1",
+                            &format!("{shared}-one"),
+                            crate::api::schema::AgentStatus::Working,
+                            false,
+                            false,
+                        ),
+                    )],
+                ),
+                fleet_host_snapshot(
+                    "beta-machine",
+                    false,
+                    vec![crate::fleet::FleetRow::test_agent_info_row(
+                        "beta-machine",
+                        remote_agent_info(
+                            "pane/2",
+                            &format!("{shared}-two"),
+                            crate::api::schema::AgentStatus::Working,
+                            false,
+                            false,
+                        ),
+                    )],
+                ),
+            ],
+            ..crate::fleet::Snapshot::default()
+        };
+        let mut app = AppState::test_new();
+        app.sidebar_width = 18;
+        app.view.sidebar_rect = Rect::new(0, 0, 18, 20);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+
+        let remote_rows = sidebar_rows(&app)
+            .into_iter()
+            .filter_map(|row| match row {
+                SidebarRow::RemoteAgent {
+                    entry,
+                    show_host_identity,
+                    ..
+                } => Some((entry, show_host_identity)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(remote_rows.len(), 2);
+        assert_ne!(remote_rows[0].0.render_title, remote_rows[1].0.render_title);
+        assert!(remote_rows.iter().all(|(_, show_host)| *show_host));
+    }
+
+    #[test]
     fn remote_projection_preserves_config_order_and_blocked_semantics() {
         let snapshot = crate::fleet::Snapshot {
             polled: true,
@@ -9855,6 +10089,19 @@ pub(crate) mod tests {
         };
 
         let entries = remote_agent_panel_entries(&snapshot);
+        let cloned_entry = entries[0].entry.clone();
+        assert!(std::sync::Arc::ptr_eq(
+            &entries[0].entry.data,
+            &cloned_entry.data
+        ));
+        let aggregated = aggregate_tab_entries(std::slice::from_ref(&entries[0].entry));
+        let aggregated_entry = aggregated
+            .get(&SidebarEntryKey::Remote(entries[0].agent_ref.clone()))
+            .expect("remote projection survives row aggregation");
+        assert!(std::sync::Arc::ptr_eq(
+            &entries[0].entry.data,
+            &aggregated_entry.data
+        ));
         assert_eq!(
             entries
                 .iter()
@@ -9958,10 +10205,10 @@ pub(crate) mod tests {
         assert_eq!(future[0].attention_tier, Some(AttentionTier::None));
         assert!(!future[0].open_blockers);
         assert!(!future[0].usage_limited);
-        assert!(future[0].snoozed);
+        assert_eq!(future[0].snoozed_until, Some(200));
 
         let expired = remote_agent_panel_entries_at(&snapshot, 200);
-        assert!(!expired[0].snoozed);
+        assert_eq!(expired[0].snoozed_until, None);
         let mut app = AppState::test_new();
         app.remote_agent_panel_entries = expired;
         assert!(sidebar_rows(&app)
@@ -11091,7 +11338,7 @@ pub(crate) mod tests {
         assert_eq!(
             tab_entries
                 .iter()
-                .map(|entry| entry.ws_idx)
+                .map(|entry| entry.local_target().unwrap().ws_idx)
                 .collect::<Vec<_>>(),
             [0, 1]
         );
@@ -11146,11 +11393,13 @@ pub(crate) mod tests {
         )));
         assert!(rows[settled + 1..].iter().any(|row| matches!(
             row,
-            SidebarRow::Tab { entry, .. } if entry.pane_id == pane_id
+            SidebarRow::Tab { entry, .. }
+                if entry.local_target().is_some_and(|target| target.pane_id == pane_id)
         )));
         assert!(!rows[..settled].iter().any(|row| matches!(
             row,
-            SidebarRow::Tab { entry, .. } if entry.pane_id == pane_id
+            SidebarRow::Tab { entry, .. }
+                if entry.local_target().is_some_and(|target| target.pane_id == pane_id)
         )));
 
         let area = Rect::new(0, 0, 106, 40);
@@ -11273,7 +11522,8 @@ pub(crate) mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(tab_entries.len(), 1, "mixed tab duplicated in {mode:?}");
             assert_eq!(
-                tab_entries[0].pane_id, active_split,
+                tab_entries[0].local_target().unwrap().pane_id,
+                active_split,
                 "the active pane must represent a mixed tab in {mode:?}"
             );
             assert!(
@@ -11356,7 +11606,8 @@ pub(crate) mod tests {
                     "filtered mixed tab duplicated for {filter} in {mode:?}"
                 );
                 assert_eq!(
-                    tab_entries[0].pane_id, active_split,
+                    tab_entries[0].local_target().unwrap().pane_id,
+                    active_split,
                     "the active pane must represent {filter} in {mode:?}"
                 );
                 assert!(
@@ -12082,52 +12333,52 @@ pub(crate) mod tests {
             agent_panel_status_key(state, seen).to_string(),
             state_label.to_string(),
         );
-        AgentPanelEntry {
-            usage_limited: false,
-            identity: AgentPanelIdentity::Local(AgentPanelLocalTarget {
+        AgentPanelEntry::new(
+            AgentPanelIdentity::Local(AgentPanelLocalTarget {
                 ws_idx: 0,
                 tab_idx: 0,
                 pane_id: crate::layout::PaneId::alloc(),
             }),
-            primary_label: "workspace".into(),
-            space_label: String::new(),
-            space_label_redundant: false,
-            primary_tab_label: Some("tab".into()),
-            tab_has_custom_name: false,
-            tab_label_leads_with_agent: false,
-            pane_label: None,
-            pane_label_is_agent_identity: false,
-            terminal_title: None,
-            terminal_title_stripped: None,
-            agent_label: None,
-            agent_kind_label: None,
-            agent: None,
-            foreground_process_name: foreground_process_name.map(str::to_string),
-            agent_context: None,
-            has_agent: true,
-            prio: true,
-            starred: false,
-            state,
-            attention_tier: None,
-            open_blockers: false,
-            completion_tier: None,
-            active_subagents: None,
-            waiting_on_agents: false,
-            holds_shell: false,
-            gate_count: 0,
-            seen,
-            done_since: None,
-            stale: false,
-            reported_at: None,
-            last_agent_state_change_seq: None,
-            activity_at: None,
-            state_labels,
-            tokens: std::collections::HashMap::new(),
-            tab_first_pane: false,
-            remote_host: None,
-            remote_entry: None,
-            remote_show_host_identity: false,
-        }
+            AgentPanelEntryData {
+                usage_limited: false,
+                primary_label: "workspace".into(),
+                space_label: String::new(),
+                space_label_redundant: false,
+                primary_tab_label: Some("tab".into()),
+                tab_has_custom_name: false,
+                tab_label_leads_with_agent: false,
+                pane_label: None,
+                pane_label_is_agent_identity: false,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                agent_label: None,
+                agent_kind_label: None,
+                agent: None,
+                foreground_process_name: foreground_process_name.map(str::to_string),
+                agent_context: None,
+                has_agent: true,
+                prio: true,
+                starred: false,
+                state,
+                attention_tier: None,
+                open_blockers: false,
+                completion_tier: None,
+                active_subagents: None,
+                waiting_on_agents: false,
+                holds_shell: false,
+                gate_count: 0,
+                seen,
+                done_since: None,
+                stale: false,
+                reported_at: None,
+                last_agent_state_change_seq: None,
+                activity_at: None,
+                state_labels,
+                tokens: std::collections::HashMap::new(),
+                tab_first_pane: false,
+                remote_host: None,
+            },
+        )
     }
 
     fn row_kinds(app: &AppState) -> Vec<(char, usize)> {
@@ -12135,8 +12386,8 @@ pub(crate) mod tests {
             .into_iter()
             .map(|row| match row {
                 SidebarRow::Workspace { ws_idx, .. } => ('w', ws_idx),
-                SidebarRow::Tab { entry, .. } => ('t', entry.ws_idx),
-                SidebarRow::Agent { entry, .. } => ('a', entry.ws_idx),
+                SidebarRow::Tab { entry, .. } => ('t', entry.local_target().unwrap().ws_idx),
+                SidebarRow::Agent { entry, .. } => ('a', entry.local_target().unwrap().ws_idx),
                 SidebarRow::RemoteAgent { .. } => ('r', 0),
                 SidebarRow::SectionHeader { .. } => ('h', 0),
                 SidebarRow::NestedHeader { .. } => ('h', 0),
@@ -12453,7 +12704,9 @@ pub(crate) mod tests {
             .into_iter()
             .find_map(|row| match row {
                 SidebarRow::Tab { entry, .. }
-                    if entry.ws_idx == card.ws_idx && entry.tab_idx == card.tab_idx =>
+                    if entry.local_target().is_some_and(|target| {
+                        target.ws_idx == card.ws_idx && target.tab_idx == card.tab_idx
+                    }) =>
                 {
                     Some(entry)
                 }
@@ -12546,11 +12799,11 @@ pub(crate) mod tests {
         let entries = sidebar_thread_entries(&app);
         let linked = entries
             .iter()
-            .find(|entry| entry.ws_idx == 0)
+            .find(|entry| entry.local_target().unwrap().ws_idx == 0)
             .expect("linked entry");
         let unlinked = entries
             .iter()
-            .find(|entry| entry.ws_idx == 1)
+            .find(|entry| entry.local_target().unwrap().ws_idx == 1)
             .expect("unlinked entry");
 
         let linked_layout = tab_row_layout(
@@ -12683,7 +12936,7 @@ pub(crate) mod tests {
 
         let entry = sidebar_thread_entries(&app)
             .into_iter()
-            .find(|entry| entry.pane_id == pane)
+            .find(|entry| entry.local_target().unwrap().pane_id == pane)
             .expect("pane entry");
         assert!(entry.open_blockers);
         assert_eq!(entry.state, AgentState::Working);
@@ -12729,7 +12982,7 @@ pub(crate) mod tests {
         terminal.apply_closing_block_payload(Vec::new(), Vec::new(), Vec::new());
         let entry = sidebar_thread_entries(&app)
             .into_iter()
-            .find(|entry| entry.pane_id == pane)
+            .find(|entry| entry.local_target().unwrap().pane_id == pane)
             .expect("pane entry");
         assert!(!entry.open_blockers);
     }
@@ -12767,7 +13020,12 @@ pub(crate) mod tests {
         }
 
         let entries = sidebar_thread_entries(&app);
-        let entry = |ws_idx| entries.iter().find(|entry| entry.ws_idx == ws_idx).unwrap();
+        let entry = |ws_idx| {
+            entries
+                .iter()
+                .find(|entry| entry.local_target().unwrap().ws_idx == ws_idx)
+                .unwrap()
+        };
         assert_eq!(compact_row_color(entry(0), &app.palette), app.palette.red);
         assert_eq!(compact_row_color(entry(1), &app.palette), app.palette.peach);
         assert_ne!(app.palette.peach, app.palette.yellow);
@@ -12864,7 +13122,7 @@ pub(crate) mod tests {
 
         let entry = sidebar_thread_entries(&app)
             .into_iter()
-            .find(|entry| entry.pane_id == pane)
+            .find(|entry| entry.local_target().unwrap().pane_id == pane)
             .expect("pane entry");
         assert!(entry.open_blockers);
         assert_eq!(entry.state, AgentState::Working);
@@ -12896,7 +13154,7 @@ pub(crate) mod tests {
         app.reconcile_sidebar_presentation();
         let entry = sidebar_thread_entries(&app)
             .into_iter()
-            .find(|entry| entry.pane_id == pane)
+            .find(|entry| entry.local_target().unwrap().pane_id == pane)
             .expect("pane entry");
         assert!(entry.open_blockers, "the gate stays latched");
         assert_eq!(entry.state, AgentState::Idle);
@@ -12931,7 +13189,7 @@ pub(crate) mod tests {
 
         let mut entry = sidebar_thread_entries(&app)
             .into_iter()
-            .find(|entry| entry.pane_id == pane)
+            .find(|entry| entry.local_target().unwrap().pane_id == pane)
             .expect("pane entry");
         assert!(entry.open_blockers);
         assert_eq!(entry.state, AgentState::Working);
@@ -12998,7 +13256,7 @@ pub(crate) mod tests {
         let pane = app.workspaces[0].tabs[0].root_pane;
         let mut entry = sidebar_thread_entries(&app)
             .into_iter()
-            .find(|entry| entry.pane_id == pane)
+            .find(|entry| entry.local_target().unwrap().pane_id == pane)
             .expect("pane entry");
         entry.state = AgentState::Blocked;
         entry.usage_limited = true;
@@ -13171,7 +13429,10 @@ pub(crate) mod tests {
         terminal.set_raw_agent_state_for_test(AgentState::Blocked);
 
         let entries = all_agent_panel_entries(&app);
-        let review = entries.iter().find(|entry| entry.tab_idx == 1).unwrap();
+        let review = entries
+            .iter()
+            .find(|entry| entry.local_target().unwrap().tab_idx == 1)
+            .unwrap();
         assert_eq!(review.primary_label, "one");
         assert_eq!(review.primary_tab_label.as_deref(), Some("review"));
         assert_eq!(review.pane_label.as_deref(), Some("right pane"));
@@ -13205,7 +13466,10 @@ pub(crate) mod tests {
         assert_eq!(
             all_agent_panel_entries(&app)
                 .iter()
-                .map(|entry| (entry.ws_idx, entry.tab_idx, entry.pane_id))
+                .map(|entry| {
+                    let target = entry.local_target().unwrap();
+                    (target.ws_idx, target.tab_idx, target.pane_id)
+                })
                 .collect::<Vec<_>>(),
             vec![
                 (0, 0, app.workspaces[0].tabs[0].root_pane),
@@ -13227,14 +13491,16 @@ pub(crate) mod tests {
         );
         let empty_threads = sidebar_thread_entries(&app)
             .into_iter()
-            .filter(|entry| entry.ws_idx == 0)
+            .filter(|entry| entry.local_target().unwrap().ws_idx == 0)
             .collect::<Vec<_>>();
         assert_eq!(empty_threads.len(), 1);
         assert_eq!(empty_threads[0].primary_tab_label.as_deref(), Some("1"));
         assert_eq!(empty_threads[0].agent, None);
-        assert!(all_agent_panel_entries(&app)
-            .iter()
-            .any(|entry| entry.ws_idx == 0));
+        assert!(all_agent_panel_entries(&app).iter().any(|entry| entry
+            .local_target()
+            .unwrap()
+            .ws_idx
+            == 0));
     }
 
     #[test]
@@ -13409,7 +13675,10 @@ pub(crate) mod tests {
         let disclosure = app.sidebar_presentation.expanded_workspace_ids.clone();
         let canonical = all_agent_panel_entries(&app)
             .iter()
-            .map(|entry| (entry.ws_idx, entry.pane_id))
+            .map(|entry| {
+                let target = entry.local_target().unwrap();
+                (target.ws_idx, target.pane_id)
+            })
             .collect::<Vec<_>>();
 
         app.agent_panel_sort = AgentPanelSort::Priority;
@@ -13421,7 +13690,10 @@ pub(crate) mod tests {
         assert_eq!(
             all_agent_panel_entries(&app)
                 .iter()
-                .map(|entry| (entry.ws_idx, entry.pane_id))
+                .map(|entry| {
+                    let target = entry.local_target().unwrap();
+                    (target.ws_idx, target.pane_id)
+                })
                 .collect::<Vec<_>>(),
             canonical
         );
@@ -13477,7 +13749,9 @@ pub(crate) mod tests {
                 matches!(
                     row,
                     SidebarRow::Tab { entry, .. }
-                        if entry.ws_idx == focused && entry.tab_idx == target_tab
+                        if entry.local_target().is_some_and(|target| {
+                            target.ws_idx == focused && target.tab_idx == target_tab
+                        })
                 )
             })
             .unwrap();
@@ -13496,8 +13770,8 @@ pub(crate) mod tests {
                 .iter()
                 .map(|row| match row {
                     SidebarRow::Workspace { ws_idx, .. } => ('w', *ws_idx),
-                    SidebarRow::Tab { entry, .. } => ('t', entry.ws_idx),
-                    SidebarRow::Agent { entry, .. } => ('a', entry.ws_idx),
+                    SidebarRow::Tab { entry, .. } => ('t', entry.local_target().unwrap().ws_idx),
+                    SidebarRow::Agent { entry, .. } => ('a', entry.local_target().unwrap().ws_idx),
                     SidebarRow::RemoteAgent { .. } => ('r', 0),
                     SidebarRow::SectionHeader { .. } => ('h', 0),
                     SidebarRow::NestedHeader { .. } => ('h', 0),
@@ -13536,7 +13810,9 @@ pub(crate) mod tests {
         let tabs = rows
             .iter()
             .filter_map(|row| match row {
-                SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
+                SidebarRow::Tab { entry, .. } => entry
+                    .local_target()
+                    .map(|target| (target.ws_idx, target.tab_idx)),
                 SidebarRow::Workspace { .. }
                 | SidebarRow::Agent { .. }
                 | SidebarRow::RemoteAgent { .. }
@@ -13561,13 +13837,13 @@ pub(crate) mod tests {
         assert!(rows.iter().any(|row| {
             matches!(
                 row,
-                SidebarRow::Tab { entry, .. } if entry.ws_idx == 1 && entry.tab_idx == 1 && entry.agent.is_none()
+                SidebarRow::Tab { entry, .. } if entry.local_target().is_some_and(|target| target.ws_idx == 1 && target.tab_idx == 1) && entry.agent.is_none()
             )
         }));
         assert!(rows.iter().any(|row| {
             matches!(
                 row,
-                SidebarRow::Tab { entry, .. } if entry.ws_idx == 2 && entry.state == AgentState::Idle && !entry.seen
+                SidebarRow::Tab { entry, .. } if entry.local_target().is_some_and(|target| target.ws_idx == 2) && entry.state == AgentState::Idle && !entry.seen
             )
         }));
         let row_identities = |rows: Vec<SidebarRow>| {
@@ -13575,14 +13851,18 @@ pub(crate) mod tests {
                 .map(|row| match row {
                     SidebarRow::Workspace { ws_idx, .. } => ("workspace", ws_idx, None, None),
                     SidebarRow::Tab { entry, .. } => {
-                        ("tab", entry.ws_idx, Some(entry.tab_idx), None)
+                        let target = entry.local_target().unwrap();
+                        ("tab", target.ws_idx, Some(target.tab_idx), None)
                     }
-                    SidebarRow::Agent { entry, .. } => (
-                        "pane",
-                        entry.ws_idx,
-                        Some(entry.tab_idx),
-                        Some(entry.pane_id),
-                    ),
+                    SidebarRow::Agent { entry, .. } => {
+                        let target = entry.local_target().unwrap();
+                        (
+                            "pane",
+                            target.ws_idx,
+                            Some(target.tab_idx),
+                            Some(target.pane_id),
+                        )
+                    }
                     SidebarRow::RemoteAgent { .. } => ("remote", 0, None, None),
                     SidebarRow::SectionHeader { .. } => ("section", 0, None, None),
                     SidebarRow::NestedHeader { .. } => ("section", 0, None, None),
@@ -14516,6 +14796,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
                 .next()
                 .expect("sidebar tab entry")
                 .primary_tab_label
+                .clone()
         };
         let tab_bar_label = |app: &AppState| {
             crate::ui::tabs::tab_chrome_label(&app.workspaces[0], &app.terminals, 0, usize::MAX)
@@ -15133,7 +15414,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
         let card = compute_tab_card_areas(&app, area)
             .into_iter()
-            .find(|card| card.ws_idx == blocked.ws_idx && card.pane_id == blocked.pane_id)
+            .find(|card| {
+                let target = blocked.local_target().unwrap();
+                card.ws_idx == target.ws_idx && card.pane_id == target.pane_id
+            })
             .expect("blocked space row should have geometry");
         assert_eq!(card.rect.height, 1);
     }
@@ -15372,7 +15656,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         }
         let branch_entry = sidebar_tab_entries(&branched)
             .into_iter()
-            .find(|entry| entry.ws_idx == 0)
+            .find(|entry| entry.local_target().unwrap().ws_idx == 0)
             .expect("main branch entry");
         assert!(branch_entry.space_label_redundant);
 
@@ -15386,7 +15670,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .settled_at = Some(1_725_000_000);
         let settled_entry = sidebar_tab_entries(&settled)
             .into_iter()
-            .find(|entry| entry.pane_id == settled_pane)
+            .find(|entry| entry.local_target().unwrap().pane_id == settled_pane)
             .expect("settled entry");
         assert!(settled_entry.space_label_redundant);
     }
@@ -15677,7 +15961,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let labels: Vec<String> = agent_panel_entries(&app)
             .into_iter()
-            .map(|entry| entry.primary_label)
+            .map(|entry| entry.primary_label.clone())
             .collect();
 
         assert_eq!(labels, ["four", "two", "one", "three"]);
@@ -15873,8 +16157,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let visible: Vec<_> = sidebar_rows(&app)
             .into_iter()
             .filter_map(|row| match row {
-                SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.starred)),
-                SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.starred)),
+                SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. } => {
+                    Some((entry.local_target().unwrap().ws_idx, entry.starred))
+                }
                 _ => None,
             })
             .collect();
@@ -16430,7 +16715,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .seen = false;
 
         assert_eq!(app.workspaces[1].public_pane_number(urgent_pane), Some(2));
-        assert_eq!(all_agent_panel_entries(&app)[0].pane_id, first_pane);
+        assert_eq!(
+            all_agent_panel_entries(&app)[0]
+                .local_target()
+                .unwrap()
+                .pane_id,
+            first_pane
+        );
 
         let area = Rect::new(0, 0, 4, 16);
         let (_, _, detail_area) = collapsed_sidebar_sections(area);
@@ -16821,7 +17112,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             let actual = sidebar_rows(&app)
                 .into_iter()
                 .filter_map(|row| match row {
-                    SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
+                    SidebarRow::Tab { entry, .. } => entry
+                        .local_target()
+                        .map(|target| (target.ws_idx, target.tab_idx)),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
@@ -18464,7 +18757,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
         assert!(matches!(
             rows.last(),
-            Some(SidebarRow::Tab { entry, .. }) if entry.ws_idx == 0 && entry.tab_idx == 2
+            Some(SidebarRow::Tab { entry, .. })
+                if entry.local_target().is_some_and(|target| {
+                    target.ws_idx == 0 && target.tab_idx == 2
+                })
         ));
     }
 
@@ -18935,7 +19231,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             let mut tabs = rows
                 .iter()
                 .filter_map(|row| match row {
-                    SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
+                    SidebarRow::Tab { entry, .. } => entry
+                        .local_target()
+                        .map(|target| (target.ws_idx, target.tab_idx)),
                     _ => None,
                 })
                 .collect::<Vec<_>>();
@@ -19025,7 +19323,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             let entry = sidebar_rows(&app)
                 .into_iter()
                 .find_map(|row| match row {
-                    SidebarRow::Tab { entry, .. } if entry.ws_idx == 0 && entry.tab_idx == 0 => {
+                    SidebarRow::Tab { entry, .. }
+                        if entry
+                            .local_target()
+                            .is_some_and(|target| target.ws_idx == 0 && target.tab_idx == 0) =>
+                    {
                         Some(entry)
                     }
                     _ => None,
@@ -19213,7 +19515,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .map(|row| match row {
                     SidebarRow::Workspace { ws_idx, .. } => format!("space:{ws_idx}"),
                     SidebarRow::Tab { entry, .. } => {
-                        format!("window:{}:{}", entry.ws_idx, entry.tab_idx)
+                        let target = entry.local_target().unwrap();
+                        format!("window:{}:{}", target.ws_idx, target.tab_idx)
                     }
                     SidebarRow::Agent { .. } => "agent".to_string(),
                     SidebarRow::RemoteAgent { entry, .. } => {
@@ -20776,9 +21079,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         sidebar_rows(app)
             .into_iter()
             .filter_map(|row| match row {
-                SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. } => {
-                    Some((entry.ws_idx, entry.pane_id))
-                }
+                SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. } => entry
+                    .local_target()
+                    .map(|target| (target.ws_idx, target.pane_id)),
                 _ => None,
             })
             .collect()
@@ -21677,7 +21980,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         sidebar_rows(app)
             .into_iter()
             .filter_map(|row| match row {
-                SidebarRow::Tab { entry, .. } => Some(entry.tab_idx),
+                SidebarRow::Tab { entry, .. } => entry.local_target().map(|target| target.tab_idx),
                 _ => None,
             })
             .collect()
@@ -21688,10 +21991,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .into_iter()
             .map(|row| match row {
                 SidebarRow::Workspace { title, .. } => format!("workspace:{title}"),
-                SidebarRow::Tab { entry, depth } => format!("tab:{}:{depth}", entry.tab_idx),
+                SidebarRow::Tab { entry, depth } => {
+                    format!("tab:{}:{depth}", entry.local_target().unwrap().tab_idx)
+                }
                 SidebarRow::NestedHeader { key, title, .. } => format!("group:{key}:{title}"),
                 SidebarRow::SectionHeader { title, .. } => format!("section:{title}"),
-                SidebarRow::Agent { entry, .. } => format!("pane:{}", entry.pane_id.raw()),
+                SidebarRow::Agent { entry, .. } => {
+                    format!("pane:{}", entry.local_target().unwrap().pane_id.raw())
+                }
                 SidebarRow::RemoteAgent { entry, .. } => format!("remote:{}", entry.agent_ref),
                 SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
                 SidebarRow::SymphonyEmpty => "symphony:empty".to_string(),
@@ -22018,7 +22325,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         };
         assert!(entries.is_empty(), "the split drains the entry Vec");
         assert_eq!(
-            plain.iter().map(|entry| entry.tab_idx).collect::<Vec<_>>(),
+            plain
+                .iter()
+                .map(|entry| entry.local_target().unwrap().tab_idx)
+                .collect::<Vec<_>>(),
             vec![0]
         );
         assert_eq!(subgroups.len(), 1);
@@ -22027,7 +22337,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             subgroups[0]
                 .1
                 .iter()
-                .map(|entry| entry.tab_idx)
+                .map(|entry| entry.local_target().unwrap().tab_idx)
                 .collect::<Vec<_>>(),
             vec![1]
         );

@@ -340,10 +340,8 @@ impl App {
             focus_agent.and_then(|agent| crate::api::schema::AgentRef::new(name, agent).ok())
         {
             let proxy_pane = self
-                .state
-                .remote_focus_proxy_agents
-                .iter()
-                .find_map(|(pane_id, candidate)| (candidate == &agent_ref).then_some(*pane_id));
+                .remote_focus_operations
+                .proxy_pane_for_agent(&agent_ref);
             if let Some(pane_id) = proxy_pane {
                 if let Some((ws_idx, _)) = self.find_pane(pane_id) {
                     self.state.mode = Mode::Terminal;

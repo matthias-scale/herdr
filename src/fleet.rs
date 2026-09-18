@@ -327,6 +327,17 @@ impl Snapshot {
     /// be polled. The fresh host state/error remains authoritative; only row
     /// identity and display metadata are retained for an honest unknown view.
     pub(crate) fn retain_unreachable_inventory_from(&mut self, previous: &Self) {
+        let observed_at_unix_s = self
+            .refreshed_at_unix_ms
+            .map(|milliseconds| milliseconds / 1_000)
+            .or_else(|| {
+                self.refreshed_at.and_then(|refreshed_at| {
+                    refreshed_at
+                        .duration_since(UNIX_EPOCH)
+                        .ok()
+                        .map(|duration| duration.as_secs())
+                })
+            });
         for host in &mut self.hosts {
             if host.local || host.state != HostState::Unreachable {
                 continue;
@@ -346,6 +357,11 @@ impl Snapshot {
                 .filter(|row| row.source != EvidenceSource::Host && row.error.is_none())
                 .cloned()
                 .collect::<Vec<_>>();
+            if let Some(observed_at_unix_s) = observed_at_unix_s {
+                for row in &mut retained {
+                    row.age_s = row.age_seconds_at(observed_at_unix_s);
+                }
+            }
             retained.extend(std::mem::take(&mut host.entries));
             host.entries = retained;
             host.remote_identity = None;
@@ -1348,6 +1364,14 @@ pub(crate) struct EffectiveRemoteLifecycle<'a> {
 }
 
 impl FleetRow {
+    pub(crate) fn age_seconds_at(&self, now_unix_s: u64) -> Option<u64> {
+        self.reported_at
+            .as_deref()
+            .and_then(parse_utc_timestamp)
+            .and_then(|reported_at| now_unix_s.checked_sub(reported_at))
+            .or(self.age_s)
+    }
+
     pub(crate) fn counts_as_live_agent(&self, host_state: HostState, now_unix_s: u64) -> bool {
         self.source != EvidenceSource::Host
             && self
@@ -2298,6 +2322,54 @@ mod tests {
             "revision": 1
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn retained_unreachable_inventory_advances_age_from_last_observation() {
+        let mut row = FleetRow::test_agent_row("remote", "worker");
+        row.reported_at = Some("1970-01-01T00:01:40Z".into());
+        row.age_s = Some(1);
+        let previous = Snapshot {
+            hosts: vec![HostSnapshot {
+                name: "remote".into(),
+                target: "remote".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                remote_identity: None,
+                entries: vec![row],
+            }],
+            ..Snapshot::default()
+        };
+        let unreachable = |refreshed_at_unix_ms| Snapshot {
+            refreshed_at_unix_ms: Some(refreshed_at_unix_ms),
+            hosts: vec![HostSnapshot {
+                name: "remote".into(),
+                target: "remote".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: HostState::Unreachable,
+                version: None,
+                protocol: None,
+                error: Some("offline".into()),
+                remote_identity: None,
+                entries: Vec::new(),
+            }],
+            ..Snapshot::default()
+        };
+
+        let mut first = unreachable(130_000);
+        first.retain_unreachable_inventory_from(&previous);
+        assert_eq!(first.hosts[0].entries[0].age_s, Some(30));
+
+        let mut second = unreachable(160_000);
+        second.retain_unreachable_inventory_from(&first);
+        assert_eq!(second.hosts[0].entries[0].age_s, Some(60));
     }
 
     #[test]

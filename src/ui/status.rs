@@ -2329,8 +2329,8 @@ mod tests {
             &crate::terminal::TerminalRuntimeRegistry::new(),
         )
         .into_iter()
-        .find(|entry| entry.ws_idx == 0)
-        .and_then(|entry| entry.primary_tab_label)
+        .find(|entry| entry.local_target().unwrap().ws_idx == 0)
+        .and_then(|entry| entry.primary_tab_label.clone())
         .expect("the sidebar names this session");
 
         assert_eq!(

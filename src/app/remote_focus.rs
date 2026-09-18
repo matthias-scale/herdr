@@ -371,6 +371,14 @@ impl RemoteFocusOperations {
             .and_then(|operation| operation.proxy.clone())
     }
 
+    pub(crate) fn proxy_pane_for_agent(&self, agent_ref: &AgentRef) -> Option<PaneId> {
+        self.operations.values().find_map(|operation| {
+            (operation.agent_ref == *agent_ref)
+                .then(|| operation.proxy.as_ref().map(|(pane_id, _)| *pane_id))
+                .flatten()
+        })
+    }
+
     fn proxy_by_terminal_id(&self, terminal_id: &TerminalId) -> Option<PaneId> {
         self.proxy_by_terminal
             .get(terminal_id)
@@ -719,9 +727,7 @@ impl crate::app::App {
                     terminal_id,
                     public_pane_id,
                 );
-                self.state
-                    .remote_focus_proxy_agents
-                    .insert(pane_id, agent_ref.clone());
+                self.state.remote_focus_proxy_panes.insert(pane_id);
                 channels
             }
             Err(error) => {
@@ -935,7 +941,7 @@ impl crate::app::App {
         else {
             return;
         };
-        self.state.remote_focus_proxy_agents.remove(&pane_id);
+        self.state.remote_focus_proxy_panes.remove(&pane_id);
         let Some((ws_idx, _)) = self.find_pane(pane_id) else {
             return;
         };
@@ -963,7 +969,7 @@ impl crate::app::App {
             .remote_focus_operations
             .proxy_by_terminal_id(terminal_id)
         {
-            self.state.remote_focus_proxy_agents.remove(&pane_id);
+            self.state.remote_focus_proxy_panes.remove(&pane_id);
         }
         let Some(operation_id) = self
             .remote_focus_operations
@@ -1166,10 +1172,9 @@ mod tests {
                 protocol: None,
                 error: None,
                 remote_identity: None,
-                entries: vec![crate::fleet::FleetRow::test_run_row(
+                entries: vec![crate::fleet::FleetRow::test_agent_row(
                     &source.host,
                     &source.agent,
-                    false,
                 )],
             }],
             ..crate::fleet::Snapshot::default()
@@ -1184,10 +1189,11 @@ mod tests {
             .proxy_location(&started.operation_id)
             .expect("connecting proxy location");
         assert_eq!(
-            app.state.remote_focus_proxy_agents.get(&proxy_pane),
+            app.remote_focus_operations.agent_ref(&started.operation_id),
             Some(&source),
             "dedup identity starts with the proxy, before ControlReady"
         );
+        assert!(app.state.remote_focus_proxy_panes.contains(&proxy_pane));
         let rows = crate::ui::sidebar_rows(&app.state);
         assert_eq!(
             rows.iter()
@@ -1199,7 +1205,9 @@ mod tests {
             row,
             crate::ui::SidebarRow::Tab { entry, .. }
                 | crate::ui::SidebarRow::Agent { entry, .. }
-                if entry.pane_id == proxy_pane
+                if entry
+                    .local_target()
+                    .is_some_and(|target| target.pane_id == proxy_pane)
         )));
 
         let original = app.state.workspaces[0].tabs[0].root_pane;

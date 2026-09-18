@@ -152,10 +152,10 @@ pub(crate) use self::{
         collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
         collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
         compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
-        relative_agent_navigation_entry, remote_agent_panel_entries, remote_agent_row_at,
-        sidebar_agent_run_at, sidebar_dim_header_at, sidebar_filter_anchor_rect,
-        sidebar_filter_menu_layout, sidebar_filter_options, sidebar_group_menu_layout,
-        sidebar_group_mode_anchor_rect, sidebar_header_new_menu_rect,
+        relative_agent_navigation_entry, remote_agent_panel_entries, remote_agent_panel_entries_at,
+        remote_agent_row_at, sidebar_agent_run_at, sidebar_dim_header_at,
+        sidebar_filter_anchor_rect, sidebar_filter_menu_layout, sidebar_filter_options,
+        sidebar_group_menu_layout, sidebar_group_mode_anchor_rect, sidebar_header_new_menu_rect,
         sidebar_header_new_thread_rect, sidebar_header_overflow_rect, sidebar_header_search_rect,
         sidebar_header_star_filter_rect, sidebar_missive_copy_url, sidebar_nested_header_at,
         sidebar_new_menu_layout, sidebar_new_thread_layout, sidebar_new_thread_matches,
@@ -326,6 +326,7 @@ fn compute_view_internal(
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
     app.view_observed_at = std::time::Instant::now();
+    app.view_observed_unix_s = crate::app::settled::unix_seconds(std::time::SystemTime::now());
     app.reconcile_sidebar_presentation();
     app.reconcile_dock_context_tabs();
     if !app.dock_collapsed {

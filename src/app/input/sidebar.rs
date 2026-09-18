@@ -1037,7 +1037,9 @@ impl AppState {
         crate::ui::sidebar_rows(self)
             .get(row_idx)
             .and_then(|entry| match entry {
-                crate::ui::SidebarRow::Agent { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
+                crate::ui::SidebarRow::Agent { entry, .. } => entry
+                    .local_target()
+                    .map(|target| (target.ws_idx, target.tab_idx)),
                 crate::ui::SidebarRow::Workspace { .. }
                 | crate::ui::SidebarRow::RemoteAgent { .. }
                 | crate::ui::SidebarRow::SectionHeader { .. }
@@ -1045,7 +1047,9 @@ impl AppState {
                 | crate::ui::SidebarRow::SymphonyJob { .. }
                 | crate::ui::SidebarRow::SymphonyEmpty
                 | crate::ui::SidebarRow::AgentRun { .. } => None,
-                crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
+                crate::ui::SidebarRow::Tab { entry, .. } => entry
+                    .local_target()
+                    .map(|target| (target.ws_idx, target.tab_idx)),
             })
     }
 
@@ -1741,14 +1745,16 @@ mod tests {
                     format!("workspace:{ws_idx}:{indented}")
                 }
                 crate::ui::SidebarRow::Tab { entry, .. } => {
-                    format!("tab:{}:{}", entry.ws_idx, entry.tab_idx)
+                    let target = entry.local_target().unwrap();
+                    format!("tab:{}:{}", target.ws_idx, target.tab_idx)
                 }
                 crate::ui::SidebarRow::Agent { entry, .. } => {
+                    let target = entry.local_target().unwrap();
                     format!(
                         "pane:{}:{}:{}",
-                        entry.ws_idx,
-                        entry.tab_idx,
-                        entry.pane_id.raw()
+                        target.ws_idx,
+                        target.tab_idx,
+                        target.pane_id.raw()
                     )
                 }
                 crate::ui::SidebarRow::RemoteAgent { entry, .. } => {
@@ -3385,7 +3391,7 @@ mod tests {
                 matches!(
                     entry,
                     crate::ui::SidebarRow::Tab { entry, .. }
-                        if entry.tab_idx == second_tab
+                        if entry.local_target().is_some_and(|target| target.tab_idx == second_tab)
                 )
             })
             .unwrap() as u16;
