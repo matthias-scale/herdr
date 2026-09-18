@@ -112,6 +112,11 @@ pub(super) enum MouseAction {
     OpenSymphonyWorkflow {
         index: usize,
     },
+    /// Open the derived out.log for a fleet run in a terminal tab.
+    OpenAgentRunLog {
+        host: String,
+        run_id: String,
+    },
     /// Open a configured fleet host in a normal local tab.
     OpenFleetHost {
         name: String,
@@ -1701,6 +1706,9 @@ impl AppState {
                     if let Some(index) = crate::ui::sidebar_symphony_job_at(self, mouse.row) {
                         return Some(MouseAction::OpenSymphonyWorkflow { index });
                     }
+                    if let Some((host, run_id)) = crate::ui::sidebar_agent_run_at(self, mouse.row) {
+                        return Some(MouseAction::OpenAgentRunLog { host, run_id });
+                    }
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_presses.insert(
                             source_id,
@@ -2509,6 +2517,9 @@ impl AppState {
                     name: agent_ref.host,
                     focus_agent: Some(agent_ref.agent),
                 });
+            }
+            Some(crate::ui::MobileSwitcherTarget::AgentRun { host, run_id }) => {
+                return MobileMouseResult::Action(MouseAction::OpenAgentRunLog { host, run_id });
             }
             Some(crate::ui::MobileSwitcherTarget::Menu(action_idx)) => {
                 let actions = global_menu_actions(self);

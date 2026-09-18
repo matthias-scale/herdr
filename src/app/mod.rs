@@ -1365,9 +1365,9 @@ impl App {
                 }
             });
         }
-        crate::symphony::start_poller(event_tx.clone());
         let fleet_poller_config =
             crate::fleet::start_poller(config.remote.fleet.clone(), event_tx.clone());
+        crate::symphony::start_poller(fleet_poller_config.clone(), event_tx.clone());
 
         let last_focus = state.active.and_then(|idx| {
             state

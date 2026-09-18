@@ -310,6 +310,26 @@ impl App {
         self.open_fleet_host_focused(name, None);
     }
 
+    pub(crate) fn open_agent_run_log(&mut self, host_name: &str, run_id: &str) {
+        let Some(host) = self.fleet_poller_config.host(host_name) else {
+            self.show_fleet_launch_error("run host is no longer configured".to_string());
+            return;
+        };
+        let argv = match crate::agent_runs::log_argv(&host, run_id) {
+            Ok(argv) => argv,
+            Err(error) => {
+                self.show_fleet_launch_error(error);
+                return;
+            }
+        };
+        if self.focus_attached_fleet_host_pane(&argv) {
+            return;
+        }
+        if let Err(error) = self.create_fleet_host_tab(&argv) {
+            self.show_fleet_launch_error(error.to_string());
+        }
+    }
+
     /// Attach to a fleet host, or to one agent on it.
     ///
     /// With an agent the pane streams that agent's remote terminal directly.

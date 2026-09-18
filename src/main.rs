@@ -56,6 +56,7 @@ fn set_host_color_scheme_reports(enabled: bool) -> io::Result<()> {
 
 mod activity_age;
 mod agent_resume;
+mod agent_runs;
 mod api;
 mod app;
 mod build_info;
@@ -306,6 +307,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # toggle_blocked_filter = "prefix+f"
 # toggle_info_panel = "prefix+i"
 # symphony = "prefix+shift+s"
+# runs = "prefix+alt+r"
 # work = "prefix+ctrl+w"         # work projection view: PRs / tickets / agents / review
 # usage = "prefix+ctrl+y"        # historical Claude Code and Codex usage
 # tickets = "prefix+ctrl+t"      # Linear tickets view
@@ -611,6 +613,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # refresh_interval_ms = 15000
 # timeout_ms = 5000
 # heartbeat_stale_ms = 1800000
+# symphony_host = "server" # optional fleet host running Temporal; default is local
 # [[remote.fleet.hosts]]
 # name = "local"
 # local = true

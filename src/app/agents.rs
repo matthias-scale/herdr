@@ -11,12 +11,21 @@ pub(crate) const AGENT_START_SETTLE_DELAY: Duration = Duration::from_secs(3);
 const INVALID_AGENT_TIMEOUT_MESSAGE: &str =
     "agent start timeout must be greater than 3000ms and at most 300000ms";
 const INVALID_AGENT_NAME_MESSAGE: &str = "agent name must start with a lowercase letter and contain only lowercase letters, digits, '-' or '_' (1-32 characters)";
+const INVALID_AGENT_RENAME_NAME_MESSAGE: &str = "agent name must be either a 1-32 character lowercase alias or a multiword display name of at most 80 characters";
 
 fn valid_agent_name(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some('a'..='z'))
         && name.len() <= 32
         && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
+}
+
+fn normalize_agent_rename_name(name: String) -> Option<String> {
+    let trimmed = name.trim();
+    if valid_agent_name(trimmed) {
+        return Some(trimmed.to_string());
+    }
+    crate::work_title::normalize_session_name_for_write(trimmed)
 }
 
 impl App {
@@ -131,8 +140,9 @@ impl App {
             .resolve_agent_target(target)
             .map_err(AgentRenameError::Target)?;
         let normalized_name = match name {
-            Some(name) if valid_agent_name(&name) => Some(name),
-            Some(_) => return Err(AgentRenameError::InvalidName),
+            Some(name) => {
+                Some(normalize_agent_rename_name(name).ok_or(AgentRenameError::InvalidName)?)
+            }
             None => None,
         };
 
@@ -162,9 +172,20 @@ impl App {
         if terminal.effective_agent_label().is_none() {
             return Err(AgentRenameError::NotAgent);
         }
+        let session_name_write_target = terminal.session_name_write_target().cloned();
+        let session_name = normalized_name.clone();
         match normalized_name {
             Some(name) => terminal.set_agent_name(name),
             None => terminal.clear_agent_name(),
+        }
+        if let (Some(target), Some(name)) = (session_name_write_target, session_name.as_deref()) {
+            if let Err(error) = crate::work_title::append_session_name(&target, name) {
+                tracing::warn!(
+                    %error,
+                    terminal_id = %resolved.terminal_id,
+                    "failed to write agent name to agent session"
+                );
+            }
         }
         self.state.mark_session_dirty();
         self.schedule_session_save();
@@ -361,7 +382,7 @@ impl App {
             AgentRenameError::Target(err) => self.agent_target_error_body(err),
             AgentRenameError::InvalidName => crate::api::schema::ErrorBody {
                 code: "invalid_agent_name".into(),
-                message: INVALID_AGENT_NAME_MESSAGE.into(),
+                message: INVALID_AGENT_RENAME_NAME_MESSAGE.into(),
             },
             AgentRenameError::NotAgent => crate::api::schema::ErrorBody {
                 code: "agent_not_found".into(),
@@ -556,7 +577,7 @@ pub(super) enum AgentRenameError {
 
 #[cfg(test)]
 mod tests {
-    use super::{runtime_hosts_agent, valid_agent_name};
+    use super::{normalize_agent_rename_name, runtime_hosts_agent, valid_agent_name};
 
     #[test]
     fn agent_names_use_a_small_cli_safe_grammar() {
@@ -575,6 +596,21 @@ mod tests {
         ] {
             assert!(!valid_agent_name(name), "expected {name:?} to be invalid");
         }
+    }
+
+    #[test]
+    fn agent_rename_accepts_trimmed_session_display_names_and_local_aliases() {
+        assert_eq!(
+            normalize_agent_rename_name("  Review billing retries  ".into()).as_deref(),
+            Some("Review billing retries")
+        );
+        assert_eq!(
+            normalize_agent_rename_name("reviewer-one".into()).as_deref(),
+            Some("reviewer-one")
+        );
+        assert!(normalize_agent_rename_name("Reviewer".into()).is_none());
+        assert!(normalize_agent_rename_name(format!("Review {}", "x".repeat(80))).is_none());
+        assert!(normalize_agent_rename_name("Review\nretries".into()).is_none());
     }
 
     #[cfg(unix)]

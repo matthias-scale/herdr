@@ -65,6 +65,10 @@ pub(crate) enum MobileSwitcherTarget {
     },
     NestedHeader(String),
     RemoteAgent(crate::api::schema::AgentRef),
+    AgentRun {
+        host: String,
+        run_id: String,
+    },
     Menu(usize),
 }
 
@@ -189,9 +193,17 @@ fn mobile_switcher_target_for_row(
             MobileSwitcherTarget::RemoteAgent(entry.agent_ref.clone())
         }
         SidebarRow::NestedHeader { key, .. } => MobileSwitcherTarget::NestedHeader(key.clone()),
+        SidebarRow::AgentRun {
+            host,
+            summary: Some(summary),
+        } => MobileSwitcherTarget::AgentRun {
+            host: host.clone(),
+            run_id: summary.run_id.clone(),
+        },
         SidebarRow::SectionHeader { .. }
         | SidebarRow::SymphonyJob { .. }
-        | SidebarRow::SymphonyEmpty => return None,
+        | SidebarRow::SymphonyEmpty
+        | SidebarRow::AgentRun { summary: None, .. } => return None,
     })
 }
 
@@ -215,7 +227,8 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
         | SidebarRow::Agent { .. }
-        | SidebarRow::RemoteAgent { .. } => 1,
+        | SidebarRow::RemoteAgent { .. }
+        | SidebarRow::AgentRun { .. } => 1,
     }
 }
 
@@ -883,6 +896,29 @@ fn render_mobile_switcher_content(
                     p.panel_bg,
                     Line::from(Span::styled(
                         format!("   {name} {phase}"),
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
+            SidebarRow::AgentRun { summary, .. } => {
+                let label = summary.as_ref().map_or("no recent runs", |summary| {
+                    if !summary.label.trim().is_empty() {
+                        summary.label.as_str()
+                    } else if !summary.task.trim().is_empty() {
+                        summary.task.as_str()
+                    } else {
+                        summary.run_id.as_str()
+                    }
+                });
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!("     {label}"),
                         Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
                     )),
                 );

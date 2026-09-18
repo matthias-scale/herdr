@@ -448,7 +448,7 @@ fn agent_command() -> Command {
                 .about("Rename an agent")
                 .override_usage("herdr agent rename <TARGET> <NAME>|--clear")
                 .arg(required("target", "TARGET"))
-                .arg(Arg::new("name").value_name("NAME"))
+                .arg(Arg::new("name").value_name("NAME").num_args(1..))
                 .arg(flag("clear"))
                 .group(
                     ArgGroup::new("rename")
@@ -1396,6 +1396,9 @@ mod tests {
     fn agent_rename_requires_exactly_one_name_or_clear() {
         for valid in [
             &["herdr", "agent", "rename", "reviewer", "worker"][..],
+            &[
+                "herdr", "agent", "rename", "reviewer", "Review", "billing", "retries",
+            ][..],
             &["herdr", "agent", "rename", "reviewer", "--clear"][..],
         ] {
             assert!(super::command().try_get_matches_from(valid).is_ok());

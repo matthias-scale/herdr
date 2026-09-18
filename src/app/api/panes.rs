@@ -1355,9 +1355,20 @@ impl App {
         let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
             return pane_not_found(id, &params.pane_id);
         };
-        match params.label.map(|label| label.trim().to_string()) {
+        let normalized_label = params.label.map(|label| label.trim().to_string());
+        match normalized_label.clone() {
             Some(label) if !label.is_empty() => terminal.set_manual_label(label),
             _ => terminal.clear_manual_label(),
+        }
+        let write_target = terminal.session_name_write_target().cloned();
+        if let (Some(target), Some(label)) = (write_target, normalized_label.as_deref()) {
+            if let Err(error) = crate::work_title::append_session_name(&target, label) {
+                tracing::warn!(
+                    %error,
+                    terminal_id = %terminal_id,
+                    "failed to write pane name to agent session"
+                );
+            }
         }
         self.state.mark_session_dirty();
         let pane = self.pane_info(ws_idx, pane_id).unwrap();
@@ -1592,7 +1603,7 @@ impl App {
         id: String,
         params: PaneReportAgentSessionParams,
     ) -> String {
-        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
@@ -1610,10 +1621,79 @@ impl App {
             session_ref.as_ref(),
             params.agent_session_path.as_deref(),
         );
+        let session_name_provider = match (params.source.as_str(), agent_label.as_str()) {
+            ("herdr:claude", "claude") => Some(crate::work_title::WorkTitleProvider::Claude),
+            ("herdr:codex", "codex") => Some(crate::work_title::WorkTitleProvider::Codex),
+            _ => None,
+        };
+        let existing_write_target = self.state.workspaces[ws_idx]
+            .pane_state(pane_id)
+            .and_then(|pane| self.state.terminals.get(&pane.attached_terminal_id))
+            .and_then(|terminal| terminal.session_name_write_target())
+            .cloned();
+        let session_name_write_target = match (session_name_provider, session_ref.as_ref()) {
+            (Some(provider), Some(session_ref))
+                if session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id =>
+            {
+                if provider == crate::work_title::WorkTitleProvider::Codex
+                    && params.agent_session_path.is_none()
+                    && existing_write_target.as_ref().is_some_and(|target| {
+                        target.matches_provider_session(provider, &session_ref.value)
+                    })
+                {
+                    existing_write_target.clone()
+                } else {
+                    let candidate_path = match provider {
+                        crate::work_title::WorkTitleProvider::Claude => {
+                            claude_transcript_path.clone()
+                        }
+                        crate::work_title::WorkTitleProvider::Codex => params
+                            .agent_session_path
+                            .as_deref()
+                            .map(std::path::PathBuf::from),
+                    };
+                    candidate_path.and_then(|path| {
+                        if existing_write_target.as_ref().is_some_and(|target| {
+                            target.matches_binding(provider, &session_ref.value, &path)
+                        }) {
+                            return existing_write_target.clone();
+                        }
+                        let path = match provider {
+                            crate::work_title::WorkTitleProvider::Claude => Some(path),
+                            crate::work_title::WorkTitleProvider::Codex => {
+                                crate::work_title::validated_codex_session_index_path(
+                                    path.to_str(),
+                                    &session_ref.value,
+                                )
+                            }
+                        }?;
+                        Some(crate::work_title::SessionNameWriteTarget::new(
+                            provider,
+                            session_ref.value.clone(),
+                            path,
+                        ))
+                    })
+                }
+            }
+            _ => None,
+        };
+        let session_name_target_evaluated = match session_name_provider {
+            Some(crate::work_title::WorkTitleProvider::Claude) => {
+                params.agent_session_path.is_some()
+            }
+            Some(crate::work_title::WorkTitleProvider::Codex) => {
+                session_ref.as_ref().is_some_and(|session| {
+                    session.kind == crate::agent_resume::AgentSessionRefKind::Id
+                })
+            }
+            None => false,
+        };
         self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
             pane_id,
             session_ref,
             claude_transcript_path,
+            session_name_write_target,
+            session_name_target_evaluated,
             source: params.source,
             agent_label,
             seq: params.seq,
@@ -1714,7 +1794,9 @@ impl App {
                 && context.session_name.is_none()
                 && context.work_title == requested_work_title;
             let valid_session_name_context = session_name_request
-                && context.session_name.is_some()
+                && context.session_name.as_deref().is_some_and(|name| {
+                    crate::work_title::normalize_session_name_for_write(name).is_some()
+                })
                 && context.work_title.is_none()
                 && context.branch.is_none()
                 && context.repo.is_none()
@@ -2558,6 +2640,19 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
         (app, public_pane_id)
+    }
+
+    fn session_name_temp_dir(label: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+
+        let path = std::env::temp_dir().join(format!(
+            "herdr-session-name-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
     }
 
     fn quiet_settle_test_app() -> (App, String, PaneId, crate::terminal::TerminalId) {
@@ -6983,15 +7078,26 @@ mod tests {
 
         // A rename aimed at a session this pane is not running is rejected.
         let stale = guarded_session_name_params(
-            pane_id,
+            pane_id.clone(),
             "claude",
             "herdr:claude",
             "session-other",
-            "Sneaky",
+            "Sneaky session",
             3,
         );
         let response = app.handle_pane_report_metadata("stale".into(), stale);
         assert_eq!(metadata_error_code(&response), "agent_session_mismatch");
+
+        let single_token = guarded_session_name_params(
+            pane_id,
+            "claude",
+            "herdr:claude",
+            "session-1",
+            "random-id",
+            4,
+        );
+        let response = app.handle_pane_report_metadata("single-token".into(), single_token);
+        assert_eq!(metadata_error_code(&response), "invalid_work_context");
     }
 
     #[test]
@@ -7760,6 +7866,344 @@ mod tests {
             .claude_transcript_session_id
             .is_none());
         assert_eq!(app.state.terminals[&terminal_id].active_subagents, None);
+    }
+
+    #[test]
+    fn pane_rename_writes_claude_name_once_and_inbound_reread_does_not_loop() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        let root = session_name_temp_dir("claude-pane-rename");
+        let transcript_dir = root.join("projects/-tmp-repro");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let session_id = "claude-session";
+        let transcript = transcript_dir.join(format!("{session_id}.jsonl"));
+        std::fs::write(&transcript, b"{\"type\":\"user\"}\n").unwrap();
+        let session_response = app.handle_pane_report_agent_session(
+            "bind".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                seq: Some(1),
+                agent_session_id: Some(session_id.into()),
+                agent_session_path: Some(transcript.display().to_string()),
+                session_start_source: Some("startup".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&session_response).unwrap();
+
+        let rename_response = app.handle_pane_rename(
+            "rename".into(),
+            PaneRenameParams {
+                pane_id: pane_id.clone(),
+                label: Some("Review billing retries".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&rename_response).unwrap();
+        let written = std::fs::read_to_string(&transcript).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(written.lines().last().unwrap()).unwrap();
+        assert_eq!(record["type"], "custom-title");
+        assert_eq!(record["customTitle"], "Review billing retries");
+        assert_eq!(record["sessionId"], session_id);
+
+        let inbound = crate::work_title::request_from_session_name(
+            crate::work_title::WorkTitleProvider::Claude,
+            Some(&pane_id),
+            &format!(r#"{{"hook_event_name":"Stop","session_id":"{session_id}"}}"#),
+            &written,
+            2,
+        )
+        .unwrap();
+        let inbound_response = app.handle_pane_report_metadata("inbound".into(), inbound);
+        let _: SuccessResponse = serde_json::from_str(&inbound_response).unwrap();
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), written);
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .effective_work_context()
+                .session_name
+                .as_deref(),
+            Some("Review billing retries")
+        );
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                session_ref: crate::agent_resume::AgentSessionRef::id("replacement-session")
+                    .unwrap(),
+            });
+        assert!(app.state.terminals[&terminal_id]
+            .session_name_write_target()
+            .is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_codex_path_rebinds_a_pathless_session_and_drives_rename() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Codex), AgentState::Idle);
+
+        let root = session_name_temp_dir("codex-profile-pane-rename");
+        let pane_codex_home = root.join("pane-profile");
+        let server_codex_home = root.join("server-profile");
+        std::fs::create_dir_all(&pane_codex_home).unwrap();
+        std::fs::create_dir_all(&server_codex_home).unwrap();
+        let index = pane_codex_home.join("session_index.jsonl");
+        let server_index = server_codex_home.join("session_index.jsonl");
+        let session_id = "codex-thread";
+        std::fs::write(
+            &index,
+            format!(r#"{{"id":"{session_id}","thread_name":"Original thread"}}"#) + "\n",
+        )
+        .unwrap();
+        let server_index_contents =
+            format!(r#"{{"id":"{session_id}","thread_name":"Wrong profile"}}"#) + "\n";
+        std::fs::write(&server_index, &server_index_contents).unwrap();
+        let pathless_response = app.handle_pane_report_agent_session(
+            "pathless-bind".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                seq: Some(1),
+                agent_session_id: Some(session_id.into()),
+                agent_session_path: None,
+                session_start_source: Some("startup".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&pathless_response).unwrap();
+        assert!(app.state.terminals[&terminal_id]
+            .session_name_write_target()
+            .is_none());
+
+        let profile_path_response = app.handle_pane_report_agent_session(
+            "profile-path".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                seq: Some(2),
+                agent_session_id: Some(session_id.into()),
+                agent_session_path: Some(index.display().to_string()),
+                session_start_source: None,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&profile_path_response).unwrap();
+
+        let rename_response = app.handle_pane_rename(
+            "rename".into(),
+            PaneRenameParams {
+                pane_id: pane_id.clone(),
+                label: Some("Audit session naming".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&rename_response).unwrap();
+        let index_contents = std::fs::read_to_string(&index).unwrap();
+        let record: serde_json::Value =
+            serde_json::from_str(index_contents.lines().last().unwrap()).unwrap();
+        assert_eq!(record["id"], session_id);
+        assert_eq!(record["thread_name"], "Audit session naming");
+        assert!(record["updated_at"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(
+            std::fs::read_to_string(&server_index).unwrap(),
+            server_index_contents,
+            "the server must not resolve a Codex index from its own profile"
+        );
+
+        let invalid_contents = "{\"id\":\"other-thread\",\"thread_name\":\"Other name\"}\n";
+        std::fs::write(&index, invalid_contents).unwrap();
+        let repeated_response = app.handle_pane_report_agent_session(
+            "repeat-bind".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                seq: Some(3),
+                agent_session_id: Some(session_id.into()),
+                agent_session_path: None,
+                session_start_source: None,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&repeated_response).unwrap();
+        assert!(app.state.terminals[&terminal_id]
+            .session_name_write_target()
+            .is_some());
+        let failed_write_response = app.handle_pane_rename(
+            "failed-write".into(),
+            PaneRenameParams {
+                pane_id,
+                label: Some("Local name after invalid index".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&failed_write_response).unwrap();
+        assert_eq!(std::fs::read_to_string(&index).unwrap(), invalid_contents);
+        assert_eq!(
+            app.state.terminals[&terminal_id].manual_label.as_deref(),
+            Some("Local name after invalid index")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_reported_path_clears_the_previous_write_target() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Codex), AgentState::Idle);
+
+        let root = session_name_temp_dir("codex-target-rebind");
+        let valid_index = root.join("session_index.jsonl");
+        let invalid_dir = root.join("replacement");
+        std::fs::create_dir_all(&invalid_dir).unwrap();
+        let invalid_index = invalid_dir.join("session_index.jsonl");
+        std::fs::write(
+            &valid_index,
+            b"{\"id\":\"codex-thread\",\"thread_name\":\"Original thread\"}\n",
+        )
+        .unwrap();
+        std::fs::write(&invalid_index, b"{\"id\":\"other-thread\"}\n").unwrap();
+
+        for (seq, path) in [(1, Some(valid_index.display().to_string())), (2, None)] {
+            let response = app.handle_pane_report_agent_session(
+                format!("bind-{seq}"),
+                PaneReportAgentSessionParams {
+                    pane_id: pane_id.clone(),
+                    source: "herdr:codex".into(),
+                    agent: "codex".into(),
+                    seq: Some(seq),
+                    agent_session_id: Some("codex-thread".into()),
+                    agent_session_path: path,
+                    session_start_source: None,
+                },
+            );
+            let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        }
+        assert!(app.state.terminals[&terminal_id]
+            .session_name_write_target()
+            .is_some());
+
+        let invalid_response = app.handle_pane_report_agent_session(
+            "invalid-rebind".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:codex".into(),
+                agent: "codex".into(),
+                seq: Some(3),
+                agent_session_id: Some("codex-thread".into()),
+                agent_session_path: Some(invalid_index.display().to_string()),
+                session_start_source: None,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&invalid_response).unwrap();
+        assert!(app.state.terminals[&terminal_id]
+            .session_name_write_target()
+            .is_none());
+
+        let before = std::fs::read_to_string(&valid_index).unwrap();
+        let rename_response = app.handle_pane_rename(
+            "rename".into(),
+            PaneRenameParams {
+                pane_id,
+                label: Some("Do not write stale target".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&rename_response).unwrap();
+        assert_eq!(std::fs::read_to_string(&valid_index).unwrap(), before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pane_rename_survives_write_failure_and_single_token_names_do_not_write() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        let root = session_name_temp_dir("rename-failure");
+        let transcript_dir = root.join("projects/-tmp-repro");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let transcript = transcript_dir.join("claude-session.jsonl");
+        std::fs::write(&transcript, b"{\"type\":\"user\"}\n").unwrap();
+        let session_response = app.handle_pane_report_agent_session(
+            "bind".into(),
+            PaneReportAgentSessionParams {
+                pane_id: pane_id.clone(),
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                seq: Some(1),
+                agent_session_id: Some("claude-session".into()),
+                agent_session_path: Some(transcript.display().to_string()),
+                session_start_source: Some("startup".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&session_response).unwrap();
+
+        let before = std::fs::read_to_string(&transcript).unwrap();
+        let token_response = app.handle_pane_rename(
+            "token".into(),
+            PaneRenameParams {
+                pane_id: pane_id.clone(),
+                label: Some("random-id".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&token_response).unwrap();
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), before);
+
+        std::fs::remove_file(&transcript).unwrap();
+        let failure_response = app.handle_pane_rename(
+            "failure".into(),
+            PaneRenameParams {
+                pane_id,
+                label: Some("Local rename survives".into()),
+            },
+        );
+        let response: SuccessResponse = serde_json::from_str(&failure_response).unwrap();
+        assert!(matches!(response.result, ResponseResult::PaneInfo { .. }));
+        assert_eq!(
+            app.state.terminals[&terminal_id].manual_label.as_deref(),
+            Some("Local rename survives")
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

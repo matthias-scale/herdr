@@ -790,7 +790,8 @@ fn agent_start_and_rename_reject_invalid_names() {
         .as_str()
         .unwrap()
         .to_string();
-    let expected_message = "agent name must start with a lowercase letter and contain only lowercase letters, digits, '-' or '_' (1-32 characters)";
+    let expected_start_message = "agent name must start with a lowercase letter and contain only lowercase letters, digits, '-' or '_' (1-32 characters)";
+    let expected_rename_message = "agent name must be either a 1-32 character lowercase alias or a multiword display name of at most 80 characters";
 
     let started = run_cli(
         &socket_path,
@@ -807,7 +808,7 @@ fn agent_start_and_rename_reject_invalid_names() {
     assert_eq!(started.status.code(), Some(1));
     let error: serde_json::Value = serde_json::from_slice(&started.stderr).unwrap();
     assert_eq!(error["error"]["code"], "invalid_agent_name");
-    assert_eq!(error["error"]["message"], expected_message);
+    assert_eq!(error["error"]["message"], expected_start_message);
 
     assert!(run_cli(
         &socket_path,
@@ -825,11 +826,11 @@ fn agent_start_and_rename_reject_invalid_names() {
     )
     .status
     .success());
-    let renamed = run_cli(&socket_path, &["agent", "rename", &pane_id, "reviewer one"]);
+    let renamed = run_cli(&socket_path, &["agent", "rename", &pane_id, "Reviewer"]);
     assert_eq!(renamed.status.code(), Some(1));
     let error: serde_json::Value = serde_json::from_slice(&renamed.stderr).unwrap();
     assert_eq!(error["error"]["code"], "invalid_agent_name");
-    assert_eq!(error["error"]["message"], expected_message);
+    assert_eq!(error["error"]["message"], expected_rename_message);
 
     cleanup_spawned_herdr(herdr, base);
 }

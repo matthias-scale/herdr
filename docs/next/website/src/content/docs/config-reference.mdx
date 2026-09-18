@@ -33,6 +33,8 @@ and `repos`; see [Projects](/docs/configuration/#projects).
 Fleet polling uses `remote.fleet.refresh_interval_ms` for its background refresh
 period and `remote.fleet.timeout_ms` as the deadline for each configured host.
 Set `remote.fleet.hosts[].session` to open that host's named Herdr session.
+Set `remote.fleet.symphony_host` to a configured host name when Temporal runs on
+another machine. When unset, Symphony keeps polling localhost.
 
 <ConfigReference />
 

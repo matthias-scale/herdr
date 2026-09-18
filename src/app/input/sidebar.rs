@@ -1050,7 +1050,8 @@ impl AppState {
                 | crate::ui::SidebarRow::SectionHeader { .. }
                 | crate::ui::SidebarRow::NestedHeader { .. }
                 | crate::ui::SidebarRow::SymphonyJob { .. }
-                | crate::ui::SidebarRow::SymphonyEmpty => None,
+                | crate::ui::SidebarRow::SymphonyEmpty
+                | crate::ui::SidebarRow::AgentRun { .. } => None,
             })
     }
 
@@ -1074,7 +1075,8 @@ impl AppState {
                 | crate::ui::SidebarRow::SectionHeader { .. }
                 | crate::ui::SidebarRow::NestedHeader { .. }
                 | crate::ui::SidebarRow::SymphonyJob { .. }
-                | crate::ui::SidebarRow::SymphonyEmpty => None,
+                | crate::ui::SidebarRow::SymphonyEmpty
+                | crate::ui::SidebarRow::AgentRun { .. } => None,
                 crate::ui::SidebarRow::Tab { entry, .. } => Some((entry.ws_idx, entry.tab_idx)),
             })
     }
@@ -1943,6 +1945,10 @@ mod tests {
                 crate::ui::SidebarRow::NestedHeader { key, .. } => format!("group:{key}"),
                 crate::ui::SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
                 crate::ui::SidebarRow::SymphonyEmpty => "symphony:empty".to_string(),
+                crate::ui::SidebarRow::AgentRun { host, summary } => summary.map_or_else(
+                    || format!("run:{host}:empty"),
+                    |summary| format!("run:{host}:{}", summary.run_id),
+                ),
             })
             .collect()
     }

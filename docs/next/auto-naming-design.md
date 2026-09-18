@@ -194,11 +194,16 @@ That fact is now carried end to end:
 - `PaneWorkContext.session_name` is the wire field. It is additive and
   optional, so the protocol version is unchanged.
 - `herdr agent session-name --provider claude` reads the transcript the hook
-  payload points at, takes the last `ai-title`, and reports it under
-  `herdr:session-name` with the same agent/session guards the work title uses.
-- The Claude hook runs that command on `UserPromptSubmit` **and** `Stop`. A
-  rename lands between turns, so binding it to turn start alone is what made
-  the name go stale.
+  payload points at. The latest `ai-title` or `custom-title` record wins.
+- `herdr agent session-name --provider codex` reads `session_index.jsonl`
+  under the pane's `CODEX_HOME` and takes the latest matching thread name.
+- The Claude and Codex hooks run that command on `UserPromptSubmit` **and**
+  `Stop`. A rename lands between turns, so binding it to turn start alone is
+  what made the name go stale.
+- The hook also binds the transcript or Codex index to the reported session.
+  Renaming the pane, or giving the agent a multiword display name, appends the
+  provider's native rename record. One-token aliases stay local. Write errors
+  are logged and never roll back the Herdr rename.
 - The server treats a session-name report as a patch of the hook tier, not a
   replacement, so a rename cannot erase the ticket and link evidence the last
   turn established.
@@ -207,6 +212,3 @@ That fact is now carried end to end:
   `Tab.custom_name`. The terminal title is whatever the agent last painted —
   frequently the checkout directory before a session has been named — so it
   must never outrank an explicit name.
-
-Codex has no equivalent channel today; `request_from_session_name` rejects it
-rather than inventing one.

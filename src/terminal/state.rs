@@ -512,6 +512,9 @@ pub struct TerminalState {
     /// API; the accepted session id remains the resume identity.
     pub(crate) claude_transcript_session_id: Option<String>,
     pub(crate) claude_transcript_path: Option<PathBuf>,
+    /// Runtime-only file target reported by the current Claude or Codex hook.
+    /// It is rebound by hooks after restore rather than persisted as session identity.
+    session_name_write_target: Option<crate::work_title::SessionNameWriteTarget>,
     pub terminal_title: Option<String>,
     pub manual_label: Option<String>,
     /// Label Herdr applied before suspending this terminal, if still owned by settlement.
@@ -606,6 +609,7 @@ impl TerminalState {
             persisted_agent_session: None,
             claude_transcript_session_id: None,
             claude_transcript_path: None,
+            session_name_write_target: None,
             terminal_title: None,
             manual_label: None,
             settled_auto_label: None,
@@ -1007,6 +1011,23 @@ impl TerminalState {
         self.claude_transcript_path = path;
     }
 
+    pub(crate) fn set_session_name_write_target(
+        &mut self,
+        target: Option<crate::work_title::SessionNameWriteTarget>,
+    ) {
+        self.session_name_write_target = target;
+    }
+
+    pub(crate) fn session_name_write_target(
+        &self,
+    ) -> Option<&crate::work_title::SessionNameWriteTarget> {
+        let target = self.session_name_write_target.as_ref()?;
+        let (source, agent, kind, value) = self.current_session_identity_for_persistence()?;
+        target
+            .matches_session(&source, &agent, kind, &value)
+            .then_some(target)
+    }
+
     pub(crate) fn set_foreground_process(
         &mut self,
         name: Option<String>,
@@ -1296,6 +1317,7 @@ impl TerminalState {
         if process_exited {
             self.claude_transcript_session_id = None;
             self.claude_transcript_path = None;
+            self.session_name_write_target = None;
             self.set_active_subagents(None);
             let mut reset_sources = Vec::new();
             let mut stale_sessions = Vec::new();
@@ -3782,6 +3804,7 @@ impl TerminalState {
         self.persisted_agent_session = None;
         self.claude_transcript_session_id = None;
         self.claude_transcript_path = None;
+        self.session_name_write_target = None;
         self.set_active_subagents(None);
         self.agent_metadata.clear();
         self.metadata_report_agents.clear();

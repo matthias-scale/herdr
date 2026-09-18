@@ -1,3 +1,6 @@
+use std::fs::OpenOptions;
+use std::io::{self, Read, Seek, Write};
+use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -34,6 +37,53 @@ pub(crate) enum WorkTitleProvider {
     Codex,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionNameWriteTarget {
+    provider: WorkTitleProvider,
+    session_id: String,
+    path: PathBuf,
+}
+
+impl SessionNameWriteTarget {
+    pub(crate) fn new(provider: WorkTitleProvider, session_id: String, path: PathBuf) -> Self {
+        Self {
+            provider,
+            session_id,
+            path,
+        }
+    }
+
+    pub(crate) fn matches_session(
+        &self,
+        source: &str,
+        agent: &str,
+        kind: crate::agent_resume::AgentSessionRefKind,
+        value: &str,
+    ) -> bool {
+        kind == crate::agent_resume::AgentSessionRefKind::Id
+            && source == self.provider.lifecycle_source()
+            && agent == self.provider.agent()
+            && value == self.session_id
+    }
+
+    pub(crate) fn matches_binding(
+        &self,
+        provider: WorkTitleProvider,
+        session_id: &str,
+        path: &Path,
+    ) -> bool {
+        self.matches_provider_session(provider, session_id) && self.path == path
+    }
+
+    pub(crate) fn matches_provider_session(
+        &self,
+        provider: WorkTitleProvider,
+        session_id: &str,
+    ) -> bool {
+        self.provider == provider && self.session_id == session_id
+    }
+}
+
 impl WorkTitleProvider {
     pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
@@ -43,19 +93,39 @@ impl WorkTitleProvider {
         }
     }
 
-    fn agent(self) -> &'static str {
+    pub(crate) fn agent(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
         }
     }
 
-    fn lifecycle_source(self) -> &'static str {
+    pub(crate) fn lifecycle_source(self) -> &'static str {
         match self {
             Self::Claude => "herdr:claude",
             Self::Codex => "herdr:codex",
         }
     }
+}
+
+pub(crate) fn session_id_from_hook_input(
+    provider: WorkTitleProvider,
+    input: &str,
+) -> Option<String> {
+    let input: TurnStartHookInput = serde_json::from_str(input).ok()?;
+    input.hook_event_name.as_deref()?;
+    if provider == WorkTitleProvider::Claude
+        && input
+            .agent_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return None;
+    }
+    input
+        .session_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 pub(crate) fn request_from_turn_start(
@@ -401,11 +471,13 @@ fn secret_regex() -> &'static Regex {
 /// last entry for the reported session is therefore the current name.
 pub(crate) fn latest_session_name(transcript: &str, session_id: &str) -> Option<String> {
     #[derive(Deserialize)]
-    struct AiTitleRecord {
+    struct TitleRecord {
         #[serde(rename = "type")]
         record_type: Option<String>,
         #[serde(rename = "aiTitle")]
         ai_title: Option<String>,
+        #[serde(rename = "customTitle")]
+        custom_title: Option<String>,
         #[serde(rename = "sessionId")]
         session_id: Option<String>,
     }
@@ -413,15 +485,20 @@ pub(crate) fn latest_session_name(transcript: &str, session_id: &str) -> Option<
     let mut latest = None;
     for line in transcript.lines() {
         let line = line.trim();
-        if line.is_empty() || !line.contains("ai-title") {
+        if line.is_empty() || !line.contains("-title") {
             continue;
         }
-        let Ok(record) = serde_json::from_str::<AiTitleRecord>(line) else {
+        let Ok(record) = serde_json::from_str::<TitleRecord>(line) else {
             continue;
         };
-        if record.record_type.as_deref() != Some("ai-title") {
+        let name = match record.record_type.as_deref() {
+            Some("ai-title") => record.ai_title.as_deref(),
+            Some("custom-title") => record.custom_title.as_deref(),
+            _ => None,
+        };
+        let Some(name) = name else {
             continue;
-        }
+        };
         // Transcript files are per session, but a resumed session can carry
         // entries for the session it forked from. Only the reported session
         // may rename this pane.
@@ -432,10 +509,8 @@ pub(crate) fn latest_session_name(transcript: &str, session_id: &str) -> Option<
         {
             continue;
         }
-        if let Some(title) = record.ai_title.as_deref().map(sanitize_session_name) {
-            if !title.is_empty() {
-                latest = Some(title);
-            }
+        if let Some(title) = normalize_session_name_for_read(name) {
+            latest = Some(title);
         }
     }
     latest
@@ -465,19 +540,31 @@ pub(crate) fn latest_codex_thread_name(index: &str, thread_id: &str) -> Option<S
         if record.id.as_deref().map(str::trim) != Some(thread_id) {
             continue;
         }
-        if let Some(name) = record.thread_name.as_deref().map(sanitize_session_name) {
-            if !name.is_empty() {
-                latest = Some(name);
-            }
+        if let Some(name) = record
+            .thread_name
+            .as_deref()
+            .and_then(normalize_session_name_for_read)
+        {
+            latest = Some(name);
         }
     }
     latest
 }
 
-fn sanitize_session_name(name: &str) -> String {
-    let sanitized = sanitize_prompt(name);
+fn normalize_session_name_for_read(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().any(char::is_control)
+        || trimmed.split_whitespace().count() < 2
+    {
+        return None;
+    }
+    if trimmed.chars().count() <= SESSION_NAME_MAX_CHARS {
+        return Some(trimmed.to_string());
+    }
+
     let mut collapsed = String::new();
-    for word in sanitized.split_whitespace() {
+    for word in trimmed.split_whitespace() {
         if collapsed.chars().count() + 1 + word.chars().count() > SESSION_NAME_MAX_CHARS {
             break;
         }
@@ -486,7 +573,145 @@ fn sanitize_session_name(name: &str) -> String {
         }
         collapsed.push_str(word);
     }
-    collapsed
+    (collapsed.split_whitespace().count() >= 2).then_some(collapsed)
+}
+
+pub(crate) fn normalize_session_name_for_write(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > SESSION_NAME_MAX_CHARS
+        || trimmed.chars().any(char::is_control)
+        || trimmed.split_whitespace().count() < 2
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+pub(crate) fn validated_codex_session_index_path(
+    raw_path: Option<&str>,
+    thread_id: &str,
+) -> Option<PathBuf> {
+    let raw_path = raw_path?;
+    if raw_path.is_empty() || raw_path.len() > 4096 || raw_path.chars().any(char::is_control) {
+        return None;
+    }
+    let path = Path::new(raw_path);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        || path.file_name()?.to_str()? != "session_index.jsonl"
+    {
+        return None;
+    }
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+    let index = std::fs::read_to_string(path).ok()?;
+    codex_index_contains_thread(&index, thread_id).then(|| path.to_path_buf())
+}
+
+fn codex_index_contains_thread(index: &str, thread_id: &str) -> bool {
+    #[derive(Deserialize)]
+    struct ThreadRecord {
+        id: Option<String>,
+    }
+
+    index.lines().any(|line| {
+        serde_json::from_str::<ThreadRecord>(line.trim())
+            .ok()
+            .and_then(|record| record.id)
+            .is_some_and(|id| id.trim() == thread_id)
+    })
+}
+
+fn write_target_path_matches(target: &SessionNameWriteTarget) -> bool {
+    match target.provider {
+        WorkTitleProvider::Claude => {
+            let expected_file = format!("{}.jsonl", target.session_id);
+            let mut components = target.path.components().rev();
+            let Some(file_component) = components.next() else {
+                return false;
+            };
+            let file = file_component.as_os_str();
+            let Some(project_slug) = components.next() else {
+                return false;
+            };
+            let Some(projects_component) = components.next() else {
+                return false;
+            };
+            let projects = projects_component.as_os_str();
+            file == expected_file.as_str()
+                && projects == "projects"
+                && matches!(project_slug, Component::Normal(value) if !value.is_empty())
+        }
+        WorkTitleProvider::Codex => {
+            target.path.file_name().and_then(|name| name.to_str()) == Some("session_index.jsonl")
+        }
+    }
+}
+
+pub(crate) fn append_session_name(target: &SessionNameWriteTarget, name: &str) -> io::Result<bool> {
+    let Some(name) = normalize_session_name_for_write(name) else {
+        return Ok(false);
+    };
+    if !write_target_path_matches(target) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "session name target does not match the bound provider and session",
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(&target.path)?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "session name target must be an existing non-symlink regular file",
+        ));
+    }
+    if target.provider == WorkTitleProvider::Codex {
+        let index = std::fs::read_to_string(&target.path)?;
+        if !codex_index_contains_thread(&index, &target.session_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Codex session index does not contain the bound thread",
+            ));
+        }
+    }
+    let record = match target.provider {
+        WorkTitleProvider::Claude => serde_json::json!({
+            "type": "custom-title",
+            "customTitle": name,
+            "sessionId": target.session_id,
+        }),
+        WorkTitleProvider::Codex => serde_json::json!({
+            "id": target.session_id,
+            "thread_name": name,
+            "updated_at": time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(io::Error::other)?,
+        }),
+    };
+    let mut file = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(&target.path)?;
+    let needs_separator = if file.metadata()?.len() == 0 {
+        false
+    } else {
+        file.seek(io::SeekFrom::End(-1))?;
+        let mut last = [0_u8; 1];
+        file.read_exact(&mut last)?;
+        last[0] != b'\n'
+    };
+    let mut line = serde_json::to_vec(&record).map_err(io::Error::other)?;
+    line.push(b'\n');
+    if needs_separator {
+        line.insert(0, b'\n');
+    }
+    file.write_all(&line)?;
+    Ok(true)
 }
 
 /// Build the rename report for a hook payload and the name source it points at
@@ -502,23 +727,9 @@ pub(crate) fn request_from_session_name(
     seq: u64,
 ) -> Option<PaneReportMetadataParams> {
     let pane_id = pane_id.map(str::trim).filter(|value| !value.is_empty())?;
-    let input: TurnStartHookInput = serde_json::from_str(input).ok()?;
-    input.hook_event_name.as_deref()?;
-    // A native subagent shares the parent pane and must never rename it. Claude
-    // reports subagent identity explicitly; a Codex subagent runs as its own
-    // thread, so its id simply never matches the one the pane is bound to.
-    if provider == WorkTitleProvider::Claude
-        && input
-            .agent_id
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-    {
-        return None;
-    }
-    let session_id = input
-        .session_id
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())?;
+    // A native Claude subagent shares its parent pane and must never rename or
+    // bind a write target for it. A Codex subagent has its own thread id.
+    let session_id = session_id_from_hook_input(provider, input)?;
     let session_name = match provider {
         WorkTitleProvider::Claude => latest_session_name(name_source, &session_id),
         WorkTitleProvider::Codex => latest_codex_thread_name(name_source, &session_id),
@@ -558,6 +769,18 @@ pub(crate) fn transcript_path_from_hook_input(input: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let path = std::env::temp_dir().join(format!(
+            "herdr-work-title-{label}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn calculates_concrete_titles_for_representative_turns() {
@@ -858,9 +1081,25 @@ mod tests {
     }
 
     #[test]
+    fn latest_session_name_orders_ai_and_custom_titles_together() {
+        let transcript = concat!(
+            r#"{"type":"ai-title","aiTitle":"First generated name","sessionId":"s1"}"#,
+            "\n",
+            r#"{"type":"custom-title","customTitle":"Human chosen name","sessionId":"s1"}"#,
+            "\n",
+            r#"{"type":"ai-title","aiTitle":"Latest generated name","sessionId":"s1"}"#,
+            "\n",
+        );
+        assert_eq!(
+            latest_session_name(transcript, "s1").as_deref(),
+            Some("Latest generated name")
+        );
+    }
+
+    #[test]
     fn latest_session_name_ignores_other_sessions_and_blank_names() {
         let transcript = concat!(
-            r#"{"type":"ai-title","aiTitle":"Mine","sessionId":"s1"}"#,
+            r#"{"type":"ai-title","aiTitle":"My name","sessionId":"s1"}"#,
             "\n",
             r#"{"type":"ai-title","aiTitle":"Someone else","sessionId":"s2"}"#,
             "\n",
@@ -871,7 +1110,7 @@ mod tests {
         );
         assert_eq!(
             latest_session_name(transcript, "s1").as_deref(),
-            Some("Mine")
+            Some("My name")
         );
         assert_eq!(latest_session_name("", "s1"), None);
     }
@@ -883,6 +1122,35 @@ mod tests {
         let name = latest_session_name(&transcript, "s1").expect("session name");
         assert!(name.chars().count() <= SESSION_NAME_MAX_CHARS, "{name:?}");
         assert!(!name.contains("  "), "{name:?}");
+    }
+
+    #[test]
+    fn inbound_session_names_reject_single_tokens() {
+        let claude = r#"{"type":"custom-title","customTitle":"random-id","sessionId":"s1"}"#;
+        let codex = r#"{"id":"t1","thread_name":"random-id"}"#;
+        assert_eq!(latest_session_name(claude, "s1"), None);
+        assert_eq!(latest_codex_thread_name(codex, "t1"), None);
+    }
+
+    #[test]
+    fn inbound_session_names_preserve_written_paths_emails_and_handles() {
+        let name = "Review /tmp/report for dev@example.com with @ops";
+        let claude = serde_json::json!({
+            "type": "custom-title",
+            "customTitle": name,
+            "sessionId": "s1",
+        })
+        .to_string();
+        let codex = serde_json::json!({
+            "id": "t1",
+            "thread_name": name,
+        })
+        .to_string();
+        assert_eq!(latest_session_name(&claude, "s1").as_deref(), Some(name));
+        assert_eq!(
+            latest_codex_thread_name(&codex, "t1").as_deref(),
+            Some(name)
+        );
     }
 
     #[test]
@@ -975,7 +1243,7 @@ mod tests {
     #[test]
     fn latest_codex_thread_name_ignores_other_threads_and_blank_names() {
         let index = concat!(
-            r#"{"id":"t1","thread_name":"Mine"}"#,
+            r#"{"id":"t1","thread_name":"My thread"}"#,
             "\n",
             r#"{"id":"t2","thread_name":"Someone else"}"#,
             "\n",
@@ -986,7 +1254,7 @@ mod tests {
         );
         assert_eq!(
             latest_codex_thread_name(index, "t1").as_deref(),
-            Some("Mine")
+            Some("My thread")
         );
         assert_eq!(latest_codex_thread_name("", "t1"), None);
     }
@@ -1042,5 +1310,127 @@ mod tests {
             9
         )
         .is_none());
+    }
+
+    #[test]
+    fn appends_provider_records_and_rejects_single_token_names() {
+        let root = temp_dir("append");
+        let claude_dir = root.join("projects/-tmp-repro");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let transcript = claude_dir.join("claude-session.jsonl");
+        std::fs::write(&transcript, b"{\"type\":\"user\"}").unwrap();
+        let claude = SessionNameWriteTarget::new(
+            WorkTitleProvider::Claude,
+            "claude-session".into(),
+            transcript.clone(),
+        );
+        assert!(append_session_name(&claude, "Review billing retries").unwrap());
+        let claude_line = std::fs::read_to_string(&transcript)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .to_string();
+        let claude_record: serde_json::Value = serde_json::from_str(&claude_line).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&transcript)
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        assert_eq!(claude_record["type"], "custom-title");
+        assert_eq!(claude_record["customTitle"], "Review billing retries");
+        assert_eq!(claude_record["sessionId"], "claude-session");
+
+        let exact_name = "Review /tmp/report for dev@example.com with @ops";
+        assert!(append_session_name(&claude, &format!("  {exact_name}  ")).unwrap());
+        let claude_contents = std::fs::read_to_string(&transcript).unwrap();
+        let exact_line = std::fs::read_to_string(&transcript)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .to_string();
+        let exact_record: serde_json::Value = serde_json::from_str(&exact_line).unwrap();
+        assert_eq!(exact_record["customTitle"], exact_name);
+        assert_eq!(
+            latest_session_name(&claude_contents, "claude-session").as_deref(),
+            Some(exact_name)
+        );
+
+        let index = root.join("session_index.jsonl");
+        std::fs::write(
+            &index,
+            b"{\"id\":\"codex-thread\",\"thread_name\":\"Original thread\"}",
+        )
+        .unwrap();
+        assert_eq!(
+            validated_codex_session_index_path(index.to_str(), "codex-thread"),
+            Some(index.clone())
+        );
+        let codex = SessionNameWriteTarget::new(
+            WorkTitleProvider::Codex,
+            "codex-thread".into(),
+            index.clone(),
+        );
+        assert!(append_session_name(&codex, "Audit session naming").unwrap());
+        let codex_line = std::fs::read_to_string(&index)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .to_string();
+        let codex_record: serde_json::Value = serde_json::from_str(&codex_line).unwrap();
+        assert_eq!(std::fs::read_to_string(&index).unwrap().lines().count(), 2);
+        assert_eq!(codex_record["id"], "codex-thread");
+        assert_eq!(codex_record["thread_name"], "Audit session naming");
+        let timestamp = codex_record["updated_at"].as_str().unwrap();
+        assert!(timestamp.contains('T') && timestamp.ends_with('Z'));
+
+        assert!(append_session_name(&codex, exact_name).unwrap());
+        let codex_contents = std::fs::read_to_string(&index).unwrap();
+        assert_eq!(
+            latest_codex_thread_name(&codex_contents, "codex-thread").as_deref(),
+            Some(exact_name)
+        );
+
+        let before = std::fs::read(&index).unwrap();
+        assert!(!append_session_name(&codex, "random-id").unwrap());
+        assert_eq!(std::fs::read(&index).unwrap(), before);
+        assert!(!append_session_name(&codex, &format!("Review {}", "x".repeat(80))).unwrap());
+        assert_eq!(std::fs::read(&index).unwrap(), before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn write_back_requires_the_bound_existing_regular_file() {
+        let root = temp_dir("invalid-target");
+        let missing = root.join("projects/-tmp/missing.jsonl");
+        let target =
+            SessionNameWriteTarget::new(WorkTitleProvider::Claude, "missing".into(), missing);
+        assert!(append_session_name(&target, "Valid session name").is_err());
+
+        let wrong_index = root.join("session_index.jsonl");
+        std::fs::write(&wrong_index, b"{\"id\":\"other-thread\"}\n").unwrap();
+        assert!(validated_codex_session_index_path(wrong_index.to_str(), "bound-thread").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_back_rejects_symlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("symlink-target");
+        let claude_dir = root.join("projects/-tmp");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let real = root.join("real.jsonl");
+        std::fs::write(&real, b"\n").unwrap();
+        let link = claude_dir.join("session.jsonl");
+        symlink(&real, &link).unwrap();
+        let target = SessionNameWriteTarget::new(WorkTitleProvider::Claude, "session".into(), link);
+        assert!(append_session_name(&target, "Valid session name").is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
