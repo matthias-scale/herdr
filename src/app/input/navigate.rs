@@ -2199,10 +2199,10 @@ fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
             _ => {}
         }
     }
-    // Collapsed or filtered rows remain keyboard-reachable after the visible
-    // worklist, preserving the cycle's existing reachability contract.
+    // Collapsed or filtered local rows remain keyboard-reachable after the
+    // visible worklist. Remote rows have no local pane fallback, so only rows
+    // present in the current projection are valid navigation targets.
     panes.extend(local);
-    panes.extend(remote);
     panes
 }
 
@@ -4172,6 +4172,68 @@ mod tests {
             &mut state,
             NavigateAction::NextBlockedWindow,
             &[(1, 0), (0, 0)],
+        );
+    }
+
+    #[test]
+    fn next_blocked_window_excludes_future_snoozed_remote_rows() {
+        let remote_info = |pane_id: &str, snoozed_until: Option<u64>| {
+            let mut value = serde_json::json!({
+                "terminal_id": format!("terminal-{pane_id}"),
+                "name": pane_id,
+                "agent": "codex",
+                "agent_status": "blocked",
+                "workspace_id": "workspace",
+                "tab_id": "tab",
+                "pane_id": pane_id,
+                "focused": false,
+                "revision": 1
+            });
+            if let Some(deadline) = snoozed_until {
+                value["snoozed_until"] = serde_json::json!(deadline);
+            }
+            serde_json::from_value(value).expect("valid remote agent fixture")
+        };
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![crate::fleet::HostSnapshot {
+                name: "remote".into(),
+                target: "remote".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: crate::fleet::HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                remote_identity: None,
+                entries: vec![
+                    crate::fleet::FleetRow::test_agent_info_row(
+                        "remote",
+                        remote_info("visible", None),
+                    ),
+                    crate::fleet::FleetRow::test_agent_info_row(
+                        "remote",
+                        remote_info("snoozed", Some(200)),
+                    ),
+                ],
+            }],
+            ..crate::fleet::Snapshot::default()
+        };
+        let mut state = AppState::test_new();
+        state.remote_agent_panel_entries =
+            crate::ui::remote_agent_panel_entries_at(&snapshot, 100);
+        state.view_observed_unix_s = 100;
+
+        let targets = blocked_pane_cycle(&state)
+            .into_iter()
+            .filter_map(|(target, needs_attention)| needs_attention.then_some(target))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            targets,
+            vec![BlockedPaneTarget::Remote(
+                crate::api::schema::AgentRef::new("remote", "visible")
+                    .expect("valid visible remote reference")
+            )]
         );
     }
 
