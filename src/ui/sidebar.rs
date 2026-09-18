@@ -10431,7 +10431,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn remote_answer_only_entry_uses_the_yellow_attention_tier() {
+    fn remote_answer_only_entry_uses_the_blocked_attention_tier() {
         let mut info = remote_agent_info(
             "pane/attention",
             "remote question",
@@ -10466,11 +10466,11 @@ pub(crate) mod tests {
 
         let entries = remote_agent_panel_entries(&snapshot);
         let entry = &entries[0].entry;
-        assert_eq!(entry.attention_tier, Some(AttentionTier::Attention));
+        assert_eq!(entry.attention_tier, Some(AttentionTier::Blocked));
         assert!(entry_needs_human_attention(entry));
-        assert!(!entry_is_blocked(entry));
+        assert!(entry_is_blocked(entry));
         let palette = Palette::catppuccin();
-        assert_eq!(compact_row_color(entry, &palette), palette.peach);
+        assert_eq!(compact_row_color(entry, &palette), palette.red);
 
         info.settled_at = Some(1_725_000_023);
         let settled_snapshot = crate::fleet::Snapshot {
