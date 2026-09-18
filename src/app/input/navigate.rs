@@ -4220,8 +4220,7 @@ mod tests {
             ..crate::fleet::Snapshot::default()
         };
         let mut state = AppState::test_new();
-        state.remote_agent_panel_entries =
-            crate::ui::remote_agent_panel_entries_at(&snapshot, 100);
+        state.remote_agent_panel_entries = crate::ui::remote_agent_panel_entries_at(&snapshot, 100);
         state.view_observed_unix_s = 100;
 
         let targets = blocked_pane_cycle(&state)

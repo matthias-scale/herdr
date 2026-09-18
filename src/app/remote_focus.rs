@@ -1895,11 +1895,7 @@ mod tests {
             TerminalId::alloc(),
             "closed-proxy".into(),
         );
-        operations.transition(
-            &closed.operation_id,
-            RemoteFocusTransition::Closed,
-            now,
-        );
+        operations.transition(&closed.operation_id, RemoteFocusTransition::Closed, now);
 
         let live = operations
             .begin(source.clone(), now + Duration::from_secs(1))
