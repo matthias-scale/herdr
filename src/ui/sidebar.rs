@@ -13284,8 +13284,8 @@ pub(crate) mod tests {
         );
 
         let entry = sidebar_thread_entries(&app).remove(0);
-        assert_eq!(compact_row_color(&entry, &app.palette), app.palette.peach);
-        assert_eq!(agent_dot_tooltip(&entry), "Needs attention");
+        assert_eq!(compact_row_color(&entry, &app.palette), app.palette.red);
+        assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
 
         assert!(app.settle_pane_at(0, pane, 1_725_000_000));
         assert_eq!(
