@@ -6,7 +6,9 @@ use crate::api::schema::{
     EventData, EventEnvelope, EventKind, LayoutApplyParams, LayoutDescription, LayoutExportParams,
     LayoutNode, LayoutPane, LayoutSetSplitRatioParams, ResponseResult, SplitDirection,
 };
-use crate::app::{App, Mode};
+use crate::app::App;
+#[cfg(test)]
+use crate::app::Mode;
 use crate::layout::{Node, PaneId};
 use crate::workspace::NewPane;
 
@@ -190,7 +192,7 @@ impl App {
 
         if params.focus || replace_was_active {
             self.state.switch_workspace_tab(ws_idx, new_tab_idx);
-            self.state.set_server_mode(Mode::Terminal);
+            self.focus_client_on_pane();
         }
         self.schedule_session_save();
         if let Some(tab) = self.tab_info(ws_idx, new_tab_idx) {
@@ -734,6 +736,7 @@ mod tests {
     async fn layout_apply_replaces_tab_with_requested_tree() {
         let mut app = app_with_workspace();
         let original_tab_id = app.public_tab_id(0, 0).unwrap();
+        app.state.set_server_mode(Mode::Prefix);
 
         let response = app.handle_layout_apply(
             "req".into(),
@@ -806,6 +809,8 @@ mod tests {
                 if layout.tab_id == app.public_tab_id(0, 0).unwrap()
                     && layout.panes.len() == 2
         ));
+        assert_eq!(app.state.server_mode(), Mode::Prefix);
+        assert!(app.take_pending_client_pane_focus());
         shutdown_test_runtimes(&mut app);
     }
 

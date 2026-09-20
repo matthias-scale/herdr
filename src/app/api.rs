@@ -19,7 +19,9 @@ mod worktrees;
 
 pub(crate) use panes::PaneSendError;
 
-use super::{api_helpers::pane_agent_status_with_stale, App, Mode, OverlayPaneState, ToastKind};
+#[cfg(test)]
+use super::Mode;
+use super::{api_helpers::pane_agent_status_with_stale, App, OverlayPaneState, ToastKind};
 use crate::events::AppEvent;
 
 const API_NOTIFICATION_RATE_LIMIT: Duration = Duration::from_secs(1);
@@ -1029,7 +1031,7 @@ impl App {
         tab.zoomed = overlay.previous_zoomed;
 
         if was_overlay_active && self.state.active == Some(overlay.ws_idx) {
-            self.state.set_server_mode(Mode::Terminal);
+            self.focus_client_on_pane();
         }
     }
 
@@ -3520,6 +3522,7 @@ mod tests {
         let overlay_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
         workspace.tabs[0].zoomed = true;
         let mut app = app_with_overlay(workspace, overlay_pane, previous_focus, false);
+        app.state.set_server_mode(Mode::Prefix);
 
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: overlay_pane,
@@ -3530,6 +3533,8 @@ mod tests {
         assert_eq!(tab.layout.focused(), previous_focus);
         assert!(!tab.zoomed);
         assert!(app.overlay_panes.is_empty());
+        assert_eq!(app.state.server_mode(), Mode::Prefix);
+        assert!(app.take_pending_client_pane_focus());
     }
 
     #[tokio::test]

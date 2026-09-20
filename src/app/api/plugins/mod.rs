@@ -1698,7 +1698,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PL
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.set_server_mode(crate::app::Mode::Terminal);
+        app.state.set_server_mode(crate::app::Mode::Prefix);
 
         let root = unique_temp_path("plugin-pane-tab-events");
         write_manifest_content(
@@ -1758,6 +1758,8 @@ command = ["sh", "-c", "sleep 1"]
             .expect("layout.updated should be emitted");
         assert!(tab_created < pane_created);
         assert!(pane_created < layout_updated);
+        assert_eq!(app.state.server_mode(), crate::app::Mode::Prefix);
+        assert!(app.take_pending_client_pane_focus());
 
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
@@ -1781,7 +1783,7 @@ command = ["sh", "-c", "sleep 1"]
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.set_server_mode(crate::app::Mode::Terminal);
+        app.state.set_server_mode(crate::app::Mode::Prefix);
 
         let root = unique_temp_path("plugin-pane-split-layout-event");
         write_manifest_content(
@@ -1814,7 +1816,7 @@ command = ["sh", "-c", "sleep 1"]
                 target_pane_id: None,
                 direction: Some(crate::api::schema::SplitDirection::Right),
                 cwd: None,
-                focus: true,
+                focus: false,
                 env: std::collections::HashMap::new(),
             }),
         });
@@ -1837,6 +1839,8 @@ command = ["sh", "-c", "sleep 1"]
             crate::api::schema::EventData::LayoutUpdated { layout }
                 if layout.zoomed && layout.panes.len() == 2
         ));
+        assert_eq!(app.state.server_mode(), crate::app::Mode::Prefix);
+        assert!(app.take_pending_client_pane_focus());
 
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();

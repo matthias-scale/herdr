@@ -115,6 +115,24 @@ pub(crate) struct OverlayPaneState {
     temp_files: Vec<std::path::PathBuf>,
 }
 
+#[cfg(test)]
+impl OverlayPaneState {
+    pub(crate) fn test(
+        ws_idx: usize,
+        tab_idx: usize,
+        previous_focus: crate::layout::PaneId,
+        previous_zoomed: bool,
+    ) -> Self {
+        Self {
+            ws_idx,
+            tab_idx,
+            previous_focus,
+            previous_zoomed,
+            temp_files: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PaneClickState {
     pane_id: crate::layout::PaneId,

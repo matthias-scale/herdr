@@ -3672,6 +3672,7 @@ impl HeadlessServer {
                         );
                     }
                 }
+                let _ = self.finish_pending_client_pane_focus();
 
                 true
             }
@@ -13901,6 +13902,46 @@ next_tab = ""
                 control_rx
                     .recv_timeout(Duration::from_millis(100))
                     .expect("absolute input-source state after API focus"),
+            ),
+            ServerMessage::PrefixInputSource { active: false }
+        ));
+    }
+
+    #[test]
+    fn active_overlay_pane_death_sends_absolute_input_source_state_from_prefix() {
+        let mut server = test_headless_server();
+        server.app.state.switch_ascii_input_source_in_prefix = true;
+        let mut workspace = crate::workspace::Workspace::test_new("overlay-exit");
+        let previous_focus = workspace.tabs[0].root_pane;
+        let overlay_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        workspace.tabs[0].zoomed = true;
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.set_server_mode(crate::app::Mode::Prefix);
+        server.app.overlay_panes.insert(
+            overlay_pane,
+            crate::app::OverlayPaneState::test(0, 0, previous_focus, false),
+        );
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        let mut client = test_app_client(Some(true), 1);
+        client.writer = Some(writer);
+        server.clients.insert(1, client);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(
+            server.handle_internal_event_with_forwarding(AppEvent::PaneDied {
+                pane_id: overlay_pane,
+            })
+        );
+
+        assert!(matches!(
+            read_server_message(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("absolute input-source state after active overlay exit"),
             ),
             ServerMessage::PrefixInputSource { active: false }
         ));
