@@ -1753,16 +1753,6 @@ pub(crate) struct ClientOverlayState {
     pub(crate) agent_picker: Option<AgentPickerState>,
 }
 
-impl ClientOverlayState {
-    pub(crate) fn is_active(&self) -> bool {
-        self.kind != ClientOverlay::None
-            || self.snooze.is_some()
-            || self.settled_menu_target.is_some()
-            || self.settled_menu_delete_armed
-            || self.agent_picker.is_some()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SidebarSnoozeUiState {
     pub(crate) target: PaneFocusTarget,
@@ -4671,6 +4661,139 @@ pub struct AppState {
     pub(crate) terminal_runtime_shutdowns: Vec<crate::terminal::TerminalId>,
 }
 
+#[derive(Clone, Copy)]
+struct ClientInputOwnerState {
+    settled_delete_armed: bool,
+    settled_menu_open: bool,
+    snooze_time_open: bool,
+    snooze_menu_open: bool,
+    overlay: ClientOverlay,
+    agent_picker_open: bool,
+    subgroup_picker_open: bool,
+    sort_menu_open: bool,
+    object_menu_open: bool,
+    project_menu_open: bool,
+    new_thread_open: bool,
+    new_menu_open: bool,
+    filter_menu_open: bool,
+    group_menu_open: bool,
+    pr_confirmation_open: bool,
+    dock_surface_menu_open: bool,
+}
+
+impl ClientInputOwnerState {
+    fn from_app(app: &AppState) -> Self {
+        Self {
+            settled_delete_armed: app.sidebar_settled_menu_delete_armed,
+            settled_menu_open: app.sidebar_settled_menu_target.is_some(),
+            snooze_time_open: app
+                .sidebar_snooze
+                .as_ref()
+                .is_some_and(|snooze| snooze.time_draft.is_some()),
+            snooze_menu_open: app.sidebar_snooze.is_some(),
+            overlay: app.client_overlay,
+            agent_picker_open: app.agent_picker.is_some(),
+            subgroup_picker_open: app.sidebar_subgroup_picker.is_some(),
+            sort_menu_open: app.sidebar_sort_menu.is_some(),
+            object_menu_open: app.sidebar_object_menu.is_some(),
+            project_menu_open: app.sidebar_project_menu.is_some(),
+            new_thread_open: app.sidebar_new_thread.is_some(),
+            new_menu_open: app.sidebar_new_menu.is_some(),
+            filter_menu_open: app.sidebar_filter_menu_open,
+            group_menu_open: app.sidebar_group_menu_open,
+            pr_confirmation_open: app.pr_action_confirmation.is_some(),
+            dock_surface_menu_open: app.dock_surface_menu.is_some(),
+        }
+    }
+
+    fn from_presentations(
+        sidebar: &SidebarPresentationState,
+        dock: &DockPresentationState,
+    ) -> Self {
+        Self {
+            settled_delete_armed: sidebar.overlay.settled_menu_delete_armed,
+            settled_menu_open: sidebar.overlay.settled_menu_target.is_some(),
+            snooze_time_open: sidebar
+                .overlay
+                .snooze
+                .as_ref()
+                .is_some_and(|snooze| snooze.time_draft.is_some()),
+            snooze_menu_open: sidebar.overlay.snooze.is_some(),
+            overlay: sidebar.overlay.kind,
+            agent_picker_open: sidebar.overlay.agent_picker.is_some(),
+            subgroup_picker_open: sidebar.subgroup_picker.is_some(),
+            sort_menu_open: sidebar.sort_menu.is_some(),
+            object_menu_open: sidebar.object_menu.is_some(),
+            project_menu_open: sidebar.project_menu.is_some(),
+            new_thread_open: sidebar.new_thread.is_some(),
+            new_menu_open: sidebar.new_menu.is_some(),
+            filter_menu_open: sidebar.filter_menu_open,
+            group_menu_open: sidebar.group_menu_open,
+            pr_confirmation_open: dock.pr_action_confirmation.is_some(),
+            dock_surface_menu_open: dock.surface_menu.is_some(),
+        }
+    }
+
+    fn resolve(self) -> Option<ClientInputOwner> {
+        if self.settled_delete_armed {
+            return Some(ClientInputOwner::SettledDeleteConfirm);
+        }
+        if self.settled_menu_open {
+            return Some(ClientInputOwner::SettledMenu);
+        }
+        if self.snooze_time_open {
+            return Some(ClientInputOwner::SnoozeTime);
+        }
+        if self.snooze_menu_open {
+            return Some(ClientInputOwner::SnoozeMenu);
+        }
+        if self.overlay != ClientOverlay::None {
+            return Some(ClientInputOwner::Overlay(self.overlay));
+        }
+        if self.agent_picker_open {
+            return Some(ClientInputOwner::AgentPicker);
+        }
+        if self.subgroup_picker_open {
+            return Some(ClientInputOwner::SidebarSubgroupPicker);
+        }
+        if self.sort_menu_open {
+            return Some(ClientInputOwner::SidebarSortMenu);
+        }
+        if self.object_menu_open {
+            return Some(ClientInputOwner::SidebarObjectMenu);
+        }
+        if self.project_menu_open {
+            return Some(ClientInputOwner::SidebarProjectMenu);
+        }
+        if self.new_thread_open {
+            return Some(ClientInputOwner::SidebarNewThread);
+        }
+        if self.new_menu_open {
+            return Some(ClientInputOwner::SidebarNewMenu);
+        }
+        if self.filter_menu_open {
+            return Some(ClientInputOwner::SidebarFilterMenu);
+        }
+        if self.group_menu_open {
+            return Some(ClientInputOwner::SidebarGroupMenu);
+        }
+        if self.pr_confirmation_open {
+            return Some(ClientInputOwner::PrActionConfirmation);
+        }
+        if self.dock_surface_menu_open {
+            return Some(ClientInputOwner::DockSurfaceMenu);
+        }
+        None
+    }
+}
+
+pub(crate) fn client_input_owner_from_presentations(
+    sidebar: &SidebarPresentationState,
+    dock: &DockPresentationState,
+) -> Option<ClientInputOwner> {
+    ClientInputOwnerState::from_presentations(sidebar, dock).resolve()
+}
+
 impl AppState {
     /// Theme reported to child terminals. Real host answers take precedence;
     /// missing defaults follow the palette currently painted by Herdr.
@@ -5740,57 +5863,8 @@ impl AppState {
     }
 
     pub(crate) fn input_owner(&self) -> InputOwner {
-        if self.sidebar_settled_menu_delete_armed {
-            return InputOwner::Client(ClientInputOwner::SettledDeleteConfirm);
-        }
-        if self.sidebar_settled_menu_target.is_some() {
-            return InputOwner::Client(ClientInputOwner::SettledMenu);
-        }
-        if self
-            .sidebar_snooze
-            .as_ref()
-            .is_some_and(|snooze| snooze.time_draft.is_some())
-        {
-            return InputOwner::Client(ClientInputOwner::SnoozeTime);
-        }
-        if self.sidebar_snooze.is_some() {
-            return InputOwner::Client(ClientInputOwner::SnoozeMenu);
-        }
-        if self.client_overlay != ClientOverlay::None {
-            return InputOwner::Client(ClientInputOwner::Overlay(self.client_overlay));
-        }
-        if self.agent_picker.is_some() {
-            return InputOwner::Client(ClientInputOwner::AgentPicker);
-        }
-        if self.sidebar_subgroup_picker.is_some() {
-            return InputOwner::Client(ClientInputOwner::SidebarSubgroupPicker);
-        }
-        if self.sidebar_sort_menu.is_some() {
-            return InputOwner::Client(ClientInputOwner::SidebarSortMenu);
-        }
-        if self.sidebar_object_menu.is_some() {
-            return InputOwner::Client(ClientInputOwner::SidebarObjectMenu);
-        }
-        if self.sidebar_project_menu.is_some() {
-            return InputOwner::Client(ClientInputOwner::SidebarProjectMenu);
-        }
-        if self.sidebar_new_thread.is_some() {
-            return InputOwner::Client(ClientInputOwner::SidebarNewThread);
-        }
-        if self.sidebar_new_menu.is_some() {
-            return InputOwner::Client(ClientInputOwner::SidebarNewMenu);
-        }
-        if self.sidebar_filter_menu_open {
-            return InputOwner::Client(ClientInputOwner::SidebarFilterMenu);
-        }
-        if self.sidebar_group_menu_open {
-            return InputOwner::Client(ClientInputOwner::SidebarGroupMenu);
-        }
-        if self.pr_action_confirmation.is_some() {
-            return InputOwner::Client(ClientInputOwner::PrActionConfirmation);
-        }
-        if self.dock_surface_menu.is_some() {
-            return InputOwner::Client(ClientInputOwner::DockSurfaceMenu);
+        if let Some(owner) = ClientInputOwnerState::from_app(self).resolve() {
+            return InputOwner::Client(owner);
         }
         // The notepad is a visible client editor. Once focused it owns input
         // and the host cursor ahead of shared modes and underlying surfaces.
@@ -8032,6 +8106,18 @@ mod tests {
                     "{client_owner:?} must win {competitor}"
                 );
             }
+
+            let mut state = AppState::test_new();
+            install_client_input_owner(&mut state, client_owner);
+            let mut sidebar = SidebarPresentationState::default();
+            let mut dock = DockPresentationState::default();
+            state.swap_sidebar_presentation(&mut sidebar);
+            state.swap_dock_presentation(&mut dock);
+            assert_eq!(
+                client_input_owner_from_presentations(&sidebar, &dock),
+                Some(client_owner),
+                "saved presentation must preserve {client_owner:?}"
+            );
         }
     }
 

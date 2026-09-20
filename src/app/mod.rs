@@ -1805,9 +1805,13 @@ impl App {
         // the foreground (client, or this app in monolithic mode) applies the switch. Keyed on the
         // realm so multi-level prefix commands stay ASCII. The switch is flag-gated but the restore
         // always fires on exit, so a mid-interaction flag toggle can't strand the host on ASCII.
+        self.sync_prefix_input_source_modes(previous_mode, self.state.effective_interaction_mode());
+    }
+
+    pub(crate) fn sync_prefix_input_source_modes(&mut self, previous_mode: Mode, next_mode: Mode) {
         let active = match (
             previous_mode.wants_ascii_input(),
-            self.state.effective_interaction_mode().wants_ascii_input(),
+            next_mode.wants_ascii_input(),
         ) {
             (false, true) if self.state.switch_ascii_input_source_in_prefix => true,
             (true, false) => false,
@@ -3012,6 +3016,7 @@ impl App {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn route_client_pixel_mouse_with_presentation(
         &mut self,
         source_id: InputSourceId,

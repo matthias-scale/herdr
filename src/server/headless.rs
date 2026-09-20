@@ -1995,6 +1995,37 @@ impl HeadlessServer {
     }
 
     fn promote_client_to_foreground(&mut self, client_id: u64) -> bool {
+        let next_mode = self.client_input_mode(client_id);
+        self.promote_client_to_foreground_with_mode(client_id, next_mode)
+    }
+
+    fn client_input_mode(&self, client_id: u64) -> crate::app::state::Mode {
+        self.clients
+            .get(&client_id)
+            .map(|client| {
+                client.sidebar_presentation.overlay.kind.mode().unwrap_or(
+                    match client.sidebar_presentation.focus_intent {
+                        crate::app::state::ClientFocusIntent::FollowShared => {
+                            self.app.state.server_mode()
+                        }
+                        crate::app::state::ClientFocusIntent::Pane => {
+                            crate::app::state::Mode::Terminal
+                        }
+                    },
+                )
+            })
+            .unwrap_or_else(|| self.app.state.server_mode())
+    }
+
+    fn promote_client_to_foreground_with_mode(
+        &mut self,
+        client_id: u64,
+        next_mode: crate::app::state::Mode,
+    ) -> bool {
+        let previous_mode = self
+            .foreground_client_id
+            .map(|foreground| self.client_input_mode(foreground))
+            .unwrap_or_else(|| self.app.state.server_mode());
         let stamp = self.allocate_activity_stamp();
         let Some(client) = self.clients.get_mut(&client_id) else {
             return false;
@@ -2004,6 +2035,10 @@ impl HeadlessServer {
         let changed = self.foreground_client_id != Some(client_id);
         self.foreground_client_id = Some(client_id);
         self.sync_foreground_client_state();
+        if changed {
+            self.app
+                .sync_prefix_input_source_modes(previous_mode, next_mode);
+        }
         changed
     }
 
@@ -2586,17 +2621,9 @@ impl HeadlessServer {
             return true;
         }
 
-        let foreground_changed = self.promote_client_to_foreground(client_id);
-        if foreground_changed {
-            self.resize_shared_runtime_to_effective_size_before_input();
-        }
-        if let Some(client) = self.clients.get_mut(&client_id) {
-            client.request_semantic_redraw_after_input();
-        }
-        self.route_full_app_human_events(
+        self.handle_client_input_events(
             client_id,
             vec![crate::raw_input::RawInputEvent::Paste(path)],
-            self.foreground_client_id == Some(client_id),
         );
         true
     }
@@ -4196,14 +4223,11 @@ impl HeadlessServer {
                 }
                 _ => false,
             });
-        let source_mode = source_is_full_app
-            .then(|| {
-                self.clients
-                    .get(&client_id)
-                    .and_then(|client| client.sidebar_presentation.overlay.kind.mode())
-            })
-            .flatten()
-            .unwrap_or(self.app.state.server_mode());
+        let source_mode = if source_is_full_app {
+            self.client_input_mode(client_id)
+        } else {
+            self.app.state.server_mode()
+        };
         let render_neutral_mouse_motion =
             events_are_render_neutral_mouse_motion(&events, source_mode) && !hover_motion_changes;
         if let Some(client) = self.clients.get_mut(&client_id) {
@@ -4289,7 +4313,7 @@ impl HeadlessServer {
         // Promotion and reconciliation are input transitions. They must see
         // this client's presentation, never whichever client rendered last.
         let foreground_changed = if interaction {
-            self.promote_client_to_foreground(client_id)
+            self.promote_client_to_foreground_with_mode(client_id, source_mode)
         } else {
             false
         };
@@ -4604,22 +4628,27 @@ impl HeadlessServer {
                 if !valid || self.handoff_in_progress || !self.focused_pane_graphics_demand() {
                     return false;
                 }
-                let foreground_changed = self.promote_client_to_foreground(client_id);
-                if foreground_changed {
-                    self.resize_shared_runtime_to_effective_size_before_input();
+                let Some((x, y)) = crate::input::mouse::parse_report(&data) else {
+                    return false;
+                };
+                let Some((column, row)) = geometry.cell(x, y) else {
+                    return false;
+                };
+                let Some(cell_report) = crate::input::mouse::report_at_cell(&data, column, row)
+                else {
+                    return false;
+                };
+                let events = crate::raw_input::parse_raw_input_bytes_sync(&cell_report);
+                if events.len() != 1
+                    || !matches!(events[0], crate::raw_input::RawInputEvent::Mouse(_))
+                {
+                    return false;
                 }
-                let mut pomodoro_presentation =
-                    self.pomodoro_input_presentation_for_input(client_id);
-                let changed = self.app.route_client_pixel_mouse_with_presentation(
-                    client_id,
-                    &data,
-                    geometry,
-                    &mut pomodoro_presentation,
-                );
-                if let Some(client) = self.clients.get_mut(&client_id) {
-                    client.pomodoro_presentation = pomodoro_presentation;
-                }
-                changed || foreground_changed
+                self.app.state.host_mouse_pixels =
+                    Some(crate::input::mouse::HostPixels { x, y, geometry });
+                let changed = self.handle_client_input_events(client_id, events);
+                self.app.state.host_mouse_pixels = None;
+                changed
             }
             ServerEvent::ClientInput { client_id, data } => {
                 if !self.clients.contains_key(&client_id) {
@@ -5942,14 +5971,14 @@ impl HeadlessServer {
             }
             retained_fallback!("no_target");
         };
+        if self.client_input_owner(client_id).is_some() {
+            retained_fallback!("client_overlay");
+        }
         let Some(client) = self.clients.get(&client_id) else {
             retained_fallback!("client_missing");
         };
         if client.pomodoro_presentation.owns_input() {
             retained_fallback!("pomodoro_overlay");
-        }
-        if client.sidebar_presentation.overlay.is_active() {
-            retained_fallback!("client_overlay");
         }
         if client.deferred_render() != DeferredRender::None {
             retained_fallback!("render_pending");
@@ -6051,6 +6080,14 @@ impl HeadlessServer {
             retained_success!("sent");
         }
         retained_fallback!("send_failed");
+    }
+
+    fn client_input_owner(&self, client_id: u64) -> Option<crate::app::state::ClientInputOwner> {
+        let client = self.clients.get(&client_id)?;
+        crate::app::state::client_input_owner_from_presentations(
+            &client.sidebar_presentation,
+            &client.dock_presentation,
+        )
     }
 
     fn retained_pty_update_allowed_by_app_state(&self) -> bool {
@@ -13684,6 +13721,26 @@ next_tab = ""
     }
 
     #[test]
+    fn foreground_promotion_syncs_context_menu_input_source() {
+        let mut server = test_headless_server();
+        server.app.state.switch_ascii_input_source_in_prefix = true;
+        server.clients.insert(1, test_app_client(Some(true), 1));
+        let mut context_owner = test_app_client(Some(true), 2);
+        context_owner.sidebar_presentation.overlay.kind =
+            crate::app::state::ClientOverlay::ContextMenu;
+        server.clients.insert(2, context_owner);
+
+        assert!(server.promote_client_to_foreground(1));
+        while server.app.event_rx.try_recv().is_ok() {}
+        assert!(server.promote_client_to_foreground(2));
+
+        assert!(matches!(
+            server.app.event_rx.try_recv(),
+            Ok(crate::events::AppEvent::PrefixInputSource { active: true })
+        ));
+    }
+
+    #[test]
     fn foreground_client_appearance_controls_auto_theme() {
         let mut server = test_headless_server();
         server.app.state.theme_runtime.auto_switch = true;
@@ -14803,6 +14860,73 @@ next_tab = ""
         crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(code, modifiers))
     }
 
+    #[tokio::test]
+    async fn clipboard_image_with_client_overlay_never_reaches_pane() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"");
+        let mut client = test_app_client(Some(true), 1);
+        client.sidebar_presentation.overlay.kind = crate::app::state::ClientOverlay::ConfirmClose;
+        client
+            .sidebar_presentation
+            .overlay
+            .confirm_close_workspace_id = Some(server.app.state.workspaces[0].id.clone());
+        server.clients.insert(1, client);
+
+        assert!(
+            server.handle_server_event(ServerEvent::ClientClipboardImage {
+                client_id: 1,
+                extension: "png".into(),
+                data: b"not-a-real-image".to_vec(),
+            })
+        );
+
+        assert!(input_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn pixel_mouse_with_client_overlay_never_reaches_pane() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[?1000h\x1b[?1016h");
+        let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+        server.app.pane_graphics.slots.insert(
+            (pane_id, "test".into()),
+            crate::app::pane_graphics::Slot::test(
+                1,
+                Some(crate::app::pane_graphics::Layer {
+                    format: crate::api::schema::PaneGraphicsFormat::Rgba,
+                    image_width: 1,
+                    image_height: 1,
+                    backing: crate::app::pane_graphics::Backing::Inline(vec![0; 4]),
+                    data_fingerprint: 0,
+                    render: crate::api::schema::PaneGraphicsPlacementParams::default(),
+                    z_index: 0,
+                }),
+            ),
+        );
+        let mut client = test_app_client(Some(true), 1);
+        client.cell_size = crate::kitty_graphics::HostCellSize {
+            width_px: 10,
+            height_px: 20,
+        };
+        client.host_sgr_pixels_active = Some(true);
+        client.sidebar_presentation.overlay.kind = crate::app::state::ClientOverlay::ConfirmClose;
+        client
+            .sidebar_presentation
+            .overlay
+            .confirm_close_workspace_id = Some(server.app.state.workspaces[0].id.clone());
+        server.clients.insert(1, client);
+        let geometry =
+            crate::input::mouse::HostGeometry::new(80, 24, 800, 480).expect("host geometry");
+
+        assert!(server.handle_server_event(ServerEvent::ClientInputPixels {
+            client_id: 1,
+            data: b"\x1b[<0;10;10M".to_vec(),
+            geometry,
+        }));
+
+        assert!(input_rx.try_recv().is_err());
+    }
+
     #[test]
     fn attached_focus_changing_pane_action_preserves_shared_mode_and_draft() {
         for server_mode in [
@@ -15064,11 +15188,34 @@ next_tab = ""
             .agent_picker
             .is_none());
 
+        let picker_len = server.clients[&1]
+            .sidebar_presentation
+            .overlay
+            .agent_picker
+            .as_ref()
+            .expect("client A picker")
+            .candidates
+            .len();
+        let popup = crate::ui::centered_popup_rect(
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            78,
+            (picker_len as u16).saturating_add(6),
+        )
+        .expect("picker popup");
+        let inner =
+            ratatui::layout::Rect::new(popup.x + 1, popup.y + 1, popup.width - 2, popup.height - 2);
+        let content = crate::ui::modal_stack_areas(inner, 1, 1, 0, 1).content;
         assert!(server.handle_client_input_events(
             1,
-            vec![test_key(
-                crossterm::event::KeyCode::Char('1'),
-                crossterm::event::KeyModifiers::empty(),
+            vec![crate::raw_input::RawInputEvent::Mouse(
+                crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Down(
+                        crossterm::event::MouseButton::Left,
+                    ),
+                    column: content.x,
+                    row: content.y + 1,
+                    modifiers: crossterm::event::KeyModifiers::empty(),
+                },
             )],
         ));
         assert_eq!(server.app.state.server_mode(), crate::app::Mode::Settings);
@@ -17784,6 +17931,41 @@ next_tab = ""
                 .expect("full popup fallback frame"),
         );
         assert!(frame_text(&updated).contains("Zopup-aaaa"));
+    }
+
+    #[tokio::test]
+    async fn retained_pty_update_declines_for_dock_owned_confirmation() {
+        let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+        server.render_and_stream();
+        let _ = client_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("initial frame");
+        acknowledge_latest_test_render(&mut server, 1);
+        server
+            .clients
+            .get_mut(&1)
+            .expect("client")
+            .dock_presentation
+            .pr_action_confirmation = Some(crate::app::state::PrActionConfirmation {
+            key: crate::app::state::WorkItemKey {
+                repo: "owner/repo".into(),
+                pr_number: Some(42),
+                pr_url: Some("https://github.com/owner/repo/pull/42".into()),
+                ticket_id: None,
+            },
+            action: crate::ui::work_list_detail::PrActionKind::Merge(
+                crate::config::MergeMethodConfig::Rebase,
+            ),
+        });
+        server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime")
+            .test_process_pty_bytes(b"\rZ");
+
+        assert!(!server.render_retained_pty_update_and_stream());
+        assert!(client_rx.recv_timeout(Duration::from_millis(50)).is_err());
     }
 
     #[tokio::test]
