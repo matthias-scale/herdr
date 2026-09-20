@@ -4901,7 +4901,10 @@ impl App {
             }
             return;
         }
-        let client_overlay_owns_input = matches!(owner, InputOwner::Client(_));
+        if let InputOwner::Client(owner) = owner {
+            self.handle_client_mouse_for_input_owner(source_id, mouse, owner);
+            return;
+        }
         match mouse.kind {
             MouseEventKind::Drag(MouseButton::Left)
                 if self
@@ -4927,31 +4930,7 @@ impl App {
         } else {
             self.state.clear_hovered_control();
         }
-        if owner == InputOwner::Client(ClientInputOwner::PrActionConfirmation) {
-            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                if let Some((cancel, confirm)) = crate::ui::pr_actions::confirmation_button_rects(
-                    &self.state,
-                    self.state.screen_rect(),
-                ) {
-                    let hit = |rect: ratatui::layout::Rect| {
-                        mouse.column >= rect.x
-                            && mouse.column < rect.right()
-                            && mouse.row >= rect.y
-                            && mouse.row < rect.bottom()
-                    };
-                    if hit(confirm) {
-                        if let Some(confirmation) = self.state.pr_action_confirmation.take() {
-                            self.execute_pr_action_confirmation(confirmation);
-                        }
-                    } else if hit(cancel) {
-                        self.state.pr_action_confirmation = None;
-                    }
-                }
-            }
-            return;
-        }
-        if !client_overlay_owns_input
-            && self.state.config_diagnostic.is_some()
+        if self.state.config_diagnostic.is_some()
             && self.state.point_in_rect(
                 self.state.view.config_diagnostic_hit_area,
                 mouse.column,
@@ -5002,23 +4981,21 @@ impl App {
         if owner == InputOwner::Surface(SurfaceInputOwner::Symphony) {
             return;
         }
-        if !client_overlay_owns_input {
-            match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    self.pending_url_click_sources.remove(&source_id);
-                }
-                MouseEventKind::Drag(MouseButton::Left)
-                    if self.pending_url_click_sources.contains(&source_id) =>
-                {
-                    return;
-                }
-                MouseEventKind::Up(MouseButton::Left)
-                    if self.pending_url_click_sources.remove(&source_id) =>
-                {
-                    return;
-                }
-                _ => {}
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.pending_url_click_sources.remove(&source_id);
             }
+            MouseEventKind::Drag(MouseButton::Left)
+                if self.pending_url_click_sources.contains(&source_id) =>
+            {
+                return;
+            }
+            MouseEventKind::Up(MouseButton::Left)
+                if self.pending_url_click_sources.remove(&source_id) =>
+            {
+                return;
+            }
+            _ => {}
         }
 
         if owner == InputOwner::Popup {
@@ -5029,12 +5006,10 @@ impl App {
             return;
         }
 
-        if !client_overlay_owns_input
-            && matches!(
-                self.state.effective_interaction_mode(),
-                Mode::Terminal | Mode::Navigate
-            )
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        if matches!(
+            self.state.effective_interaction_mode(),
+            Mode::Terminal | Mode::Navigate
+        ) && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             let notifications = self.state.view.notification_hit_area;
             if self
@@ -5183,8 +5158,7 @@ impl App {
             }
         }
 
-        if !client_overlay_owns_input
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self.state.on_sidebar_divider(mouse.column, mouse.row)
         {
             let now = std::time::Instant::now();
@@ -5204,12 +5178,11 @@ impl App {
             }
         }
 
-        if !client_overlay_owns_input && self.handle_modified_url_click(source_id, mouse) {
+        if self.handle_modified_url_click(source_id, mouse) {
             return;
         }
 
-        if !client_overlay_owns_input
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self.state.on_dock_divider(mouse.column, mouse.row)
         {
             let now = std::time::Instant::now();
@@ -5239,9 +5212,7 @@ impl App {
             && self
                 .state
                 .point_in_rect(self.state.view.terminal_area, mouse.column, mouse.row);
-        let handled_pane_double_click = !client_overlay_owns_input
-            && !editor_preview_hit
-            && self.handle_pane_double_click(mouse);
+        let handled_pane_double_click = !editor_preview_hit && self.handle_pane_double_click(mouse);
         if owner == InputOwner::Pane && !handled_pane_double_click && !editor_preview_hit {
             self.focus_pane_before_mouse_press(mouse);
         }
@@ -5272,6 +5243,16 @@ impl App {
                     }
                     MouseAction::SnoozeMenu { action } => {
                         self.apply_sidebar_snooze_menu_action(action)
+                    }
+                    MouseAction::AgentPickerSelect(index) => {
+                        if let Ok(digit) = u8::try_from(index.saturating_add(1)) {
+                            if let Some(digit) = b'0'.checked_add(digit).map(char::from) {
+                                self.handle_agent_picker_key(KeyEvent::new(
+                                    KeyCode::Char(digit),
+                                    KeyModifiers::empty(),
+                                ));
+                            }
+                        }
                     }
                     MouseAction::FocusLiveSettledPane(target) => self.focus_settled_pane(target),
                     MouseAction::OpenSnoozeMenu {
@@ -5383,6 +5364,118 @@ impl App {
                 self.selection_highlight_clear_deadline = None;
             }
         }
+        self.finish_mouse_handling(previous_agent_panel_sort, previous_settings_section);
+    }
+
+    fn handle_client_mouse_for_input_owner(
+        &mut self,
+        source_id: super::InputSourceId,
+        mouse: MouseEvent,
+        owner: ClientInputOwner,
+    ) {
+        let previous_agent_panel_sort = self.state.agent_panel_sort;
+        let previous_settings_section = self.state.settings.section;
+        let action = match owner {
+            ClientInputOwner::PrActionConfirmation => {
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    if let Some((cancel, confirm)) =
+                        crate::ui::pr_actions::confirmation_button_rects(
+                            &self.state,
+                            self.state.screen_rect(),
+                        )
+                    {
+                        let hit = |rect: ratatui::layout::Rect| {
+                            mouse.column >= rect.x
+                                && mouse.column < rect.right()
+                                && mouse.row >= rect.y
+                                && mouse.row < rect.bottom()
+                        };
+                        if hit(confirm) {
+                            if let Some(confirmation) = self.state.pr_action_confirmation.take() {
+                                self.execute_pr_action_confirmation(confirmation);
+                            }
+                        } else if hit(cancel) {
+                            self.state.pr_action_confirmation = None;
+                        }
+                    }
+                }
+                return;
+            }
+            ClientInputOwner::SnoozeTime => self.state.handle_mouse_for_owner(
+                &mut self.terminal_runtimes,
+                source_id,
+                mouse,
+                InputOwner::Client(ClientInputOwner::SnoozeTime),
+            ),
+            ClientInputOwner::Overlay(overlay) => self.state.handle_mouse_for_owner(
+                &mut self.terminal_runtimes,
+                source_id,
+                mouse,
+                InputOwner::Client(ClientInputOwner::Overlay(overlay)),
+            ),
+            ClientInputOwner::SnoozeMenu
+            | ClientInputOwner::SettledMenu
+            | ClientInputOwner::SettledDeleteConfirm
+            | ClientInputOwner::AgentPicker
+            | ClientInputOwner::SidebarGroupMenu
+            | ClientInputOwner::SidebarFilterMenu
+            | ClientInputOwner::SidebarNewMenu
+            | ClientInputOwner::SidebarNewThread
+            | ClientInputOwner::SidebarProjectMenu
+            | ClientInputOwner::SidebarObjectMenu
+            | ClientInputOwner::SidebarSortMenu
+            | ClientInputOwner::SidebarSubgroupPicker
+            | ClientInputOwner::DockSurfaceMenu => self.state.handle_mouse_for_owner(
+                &mut self.terminal_runtimes,
+                source_id,
+                mouse,
+                InputOwner::Client(owner),
+            ),
+        };
+        self.start_home_ref_refresh_if_requested();
+        self.start_home_github_refresh_if_requested();
+        if let Some(action) = action {
+            match action {
+                MouseAction::SidebarObjectMenu { index } => {
+                    self.apply_sidebar_object_menu_action(index)
+                }
+                MouseAction::SettledMenu { index } => self.apply_sidebar_settled_menu_action(index),
+                MouseAction::SnoozeMenu { action } => self.apply_sidebar_snooze_menu_action(action),
+                MouseAction::AgentPickerSelect(index) => {
+                    if let Ok(digit) = u8::try_from(index.saturating_add(1)) {
+                        if let Some(digit) = b'0'.checked_add(digit).map(char::from) {
+                            self.handle_agent_picker_key(KeyEvent::new(
+                                KeyCode::Char(digit),
+                                KeyModifiers::empty(),
+                            ));
+                        }
+                    }
+                }
+                MouseAction::SidebarNewMenu { action } => {
+                    if action == crate::app::state::SidebarNewMenuAction::NewSpace {
+                        self.begin_tui_workspace_create("tui.mouse.workspace.create");
+                    } else {
+                        self.state.dispatch_sidebar_new_menu_action(action);
+                    }
+                }
+                MouseAction::RenameModal(action) => self.apply_rename_mouse_action_via_api(action),
+                MouseAction::ConfirmCloseAccept => self.confirm_close_accept_via_api(),
+                MouseAction::ContextMenu { menu, action } => {
+                    let menu = *menu;
+                    self.state.close_client_overlay();
+                    self.apply_context_menu_action_via_api(menu, action);
+                }
+                _ => unreachable!("client input owner returned a generic mouse action"),
+            }
+        }
+        self.finish_mouse_handling(previous_agent_panel_sort, previous_settings_section);
+    }
+
+    fn finish_mouse_handling(
+        &mut self,
+        previous_agent_panel_sort: crate::app::state::AgentPanelSort,
+        previous_settings_section: crate::app::state::SettingsSection,
+    ) {
         if previous_settings_section != crate::app::state::SettingsSection::Integrations
             && self.state.settings.section == crate::app::state::SettingsSection::Integrations
         {
@@ -5392,11 +5485,7 @@ impl App {
         if self.state.agent_panel_sort != previous_agent_panel_sort {
             self.save_agent_panel_sort(self.state.agent_panel_sort);
         }
-
         self.dispatch_pending_clipboard_write();
-
-        // Sync autoscroll deadline with state (mouse handler may have
-        // set or cleared selection_autoscroll during handle_mouse).
         if self.state.selection_autoscroll.is_none() {
             self.selection_autoscroll_deadline = None;
         } else if self.selection_autoscroll_deadline.is_none() {

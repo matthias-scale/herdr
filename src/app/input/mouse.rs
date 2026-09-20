@@ -5,9 +5,9 @@ use tracing::warn;
 
 use crate::{
     app::state::{
-        AddActionState, AppState, ClientOverlay, ContextMenuAction, ContextMenuKind,
-        ContextMenuState, DragState, DragTarget, HomeHitTarget, InputOwner, MenuListState, Mode,
-        PaneMenuWorkLink, PaneMenuWorkLinkAction, RemoteAgentPressState,
+        AddActionState, AppState, ClientInputOwner, ClientOverlay, ContextMenuAction,
+        ContextMenuKind, ContextMenuState, DragState, DragTarget, HomeHitTarget, InputOwner,
+        MenuListState, Mode, PaneMenuWorkLink, PaneMenuWorkLinkAction, RemoteAgentPressState,
         RightClickPassthroughGesture, ServerInputOwner, SurfaceInputOwner, TabPressState,
         ViewLayout, WorkspacePressState,
     },
@@ -45,6 +45,7 @@ pub(super) enum MouseAction {
     SnoozeMenu {
         action: crate::app::state::SidebarSnoozeMenuAction,
     },
+    AgentPickerSelect(usize),
     FocusLiveSettledPane(crate::app::state::PaneFocusTarget),
     OpenSnoozeMenu {
         ws_idx: usize,
@@ -203,6 +204,9 @@ impl AppState {
         owner: InputOwner,
     ) -> Option<MouseAction> {
         self.forwarded_pane_input = None;
+        if let InputOwner::Client(owner) = owner {
+            return self.handle_client_mouse_for_owner(mouse, owner);
+        }
         if matches!(
             mouse.kind,
             MouseEventKind::ScrollUp
@@ -472,50 +476,6 @@ impl AppState {
             && !filter_anchor_hit
             && !project_anchor_hit
             && self.point_in_rect(group_anchor, mouse.column, mouse.row);
-        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_new_menu.is_some() {
-            if let Some(index) = self.sidebar_new_menu_item_at(mouse.column, mouse.row) {
-                if let Some(menu) = self.sidebar_new_menu.as_mut() {
-                    menu.selected = index;
-                }
-            }
-            return None;
-        }
-        if self.sidebar_new_menu.is_some()
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-        {
-            if new_menu_hit {
-                self.sidebar_new_menu = None;
-            } else if let Some(index) = self.sidebar_new_menu_item_at(mouse.column, mouse.row) {
-                let action = crate::app::state::SidebarNewMenuAction::ALL
-                    .get(index)
-                    .copied();
-                self.sidebar_new_menu = None;
-                return action.map(|action| MouseAction::SidebarNewMenu { action });
-            } else {
-                self.sidebar_new_menu = None;
-            }
-            return None;
-        }
-        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_new_thread.is_some() {
-            if let Some(index) = self.sidebar_new_thread_item_at(mouse.column, mouse.row) {
-                if let Some(picker) = self.sidebar_new_thread.as_mut() {
-                    picker.filter.selected = index;
-                }
-            }
-            return None;
-        }
-        if self.sidebar_new_thread.is_some()
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-        {
-            if new_thread_hit {
-                self.sidebar_new_thread = None;
-            } else if let Some(index) = self.sidebar_new_thread_item_at(mouse.column, mouse.row) {
-                self.accept_sidebar_new_thread(index);
-            } else {
-                self.sidebar_new_thread = None;
-            }
-            return None;
-        }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && new_thread_hit {
             self.open_sidebar_new_thread();
             return None;
@@ -533,74 +493,6 @@ impl AppState {
             self.sidebar_filter_menu_open = false;
             self.sidebar_object_menu = None;
             self.sidebar_search_active = true;
-            return None;
-        }
-        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_object_menu.is_some() {
-            if let Some(index) = crate::ui::sidebar_object_menu_item_at(
-                self,
-                self.screen_rect(),
-                mouse.column,
-                mouse.row,
-            ) {
-                if let Some(menu) = self.sidebar_object_menu.as_mut() {
-                    menu.selected = index;
-                }
-            }
-            return None;
-        }
-        if self.sidebar_object_menu.is_some() {
-            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                if let Some(index) = crate::ui::sidebar_object_menu_item_at(
-                    self,
-                    self.screen_rect(),
-                    mouse.column,
-                    mouse.row,
-                ) {
-                    return Some(MouseAction::SidebarObjectMenu { index });
-                }
-                if self.sidebar_object_menu.as_ref().is_some_and(|menu| {
-                    menu.page == crate::app::state::SidebarObjectMenuPage::Confirmation
-                }) {
-                    self.dock_pending_write = None;
-                }
-                self.sidebar_object_menu = None;
-            }
-            return None;
-        }
-        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_subgroup_picker.is_some() {
-            if let Some(index) = self.sidebar_subgroup_picker_item_at(mouse.column, mouse.row) {
-                if let Some(picker) = self.sidebar_subgroup_picker.as_mut() {
-                    picker.filter.selected = index;
-                }
-            }
-            return None;
-        }
-        if self.sidebar_subgroup_picker.is_some() {
-            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                if let Some(index) = self.sidebar_subgroup_picker_item_at(mouse.column, mouse.row) {
-                    self.accept_sidebar_subgroup_picker(index);
-                } else {
-                    self.sidebar_subgroup_picker = None;
-                }
-            }
-            return None;
-        }
-        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_sort_menu.is_some() {
-            if let Some(index) = self.sidebar_sort_menu_item_at(mouse.column, mouse.row) {
-                if let Some(menu) = self.sidebar_sort_menu.as_mut() {
-                    menu.selected = index;
-                }
-            }
-            return None;
-        }
-        if self.sidebar_sort_menu.is_some() {
-            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                if let Some(index) = self.sidebar_sort_menu_item_at(mouse.column, mouse.row) {
-                    self.apply_sidebar_sort_menu_selection(index);
-                } else {
-                    self.sidebar_sort_menu = None;
-                }
-            }
             return None;
         }
         if group_menu_enabled && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -637,153 +529,16 @@ impl AppState {
                 return None;
             }
         }
-        if matches!(mouse.kind, MouseEventKind::Moved)
-            && self
-                .sidebar_snooze
-                .as_ref()
-                .is_some_and(|snooze| snooze.time_draft.is_none())
-        {
-            if let Some(index) = self.sidebar_snooze_menu_item_at(mouse.column, mouse.row) {
-                let action = self.sidebar_snooze.as_ref().and_then(|snooze| {
-                    let ws_idx = self
-                        .workspaces
-                        .iter()
-                        .position(|workspace| workspace.id == snooze.target.workspace_id)?;
-                    crate::app::state::sidebar_snooze_menu_items(
-                        self.pane_is_snoozed(ws_idx, snooze.target.pane_id),
-                    )
-                    .get(index)
-                    .map(|(_, action)| *action)
-                });
-                if let (Some(snooze), Some(action)) = (self.sidebar_snooze.as_mut(), action) {
-                    snooze.selected = action;
-                }
-            }
-            return None;
-        }
-        if self
-            .sidebar_snooze
-            .as_ref()
-            .is_some_and(|snooze| snooze.time_draft.is_none())
-        {
-            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                if let Some(index) = self.sidebar_snooze_menu_item_at(mouse.column, mouse.row) {
-                    let action = self.sidebar_snooze.as_ref().and_then(|snooze| {
-                        let ws_idx = self
-                            .workspaces
-                            .iter()
-                            .position(|workspace| workspace.id == snooze.target.workspace_id)?;
-                        crate::app::state::sidebar_snooze_menu_items(
-                            self.pane_is_snoozed(ws_idx, snooze.target.pane_id),
-                        )
-                        .get(index)
-                        .map(|(_, action)| *action)
-                    });
-                    if let Some(action) = action {
-                        return Some(MouseAction::SnoozeMenu { action });
-                    }
-                }
-                self.sidebar_snooze = None;
-            }
-            return None;
-        }
-        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_settled_menu_target.is_some()
-        {
-            if let Some(index) = self.sidebar_settled_menu_item_at(mouse.column, mouse.row) {
-                if index != self.sidebar_settled_menu_selected {
-                    self.sidebar_settled_menu_delete_armed = false;
-                }
-                self.sidebar_settled_menu_selected = index;
-            }
-            return None;
-        }
-        if self.sidebar_settled_menu_target.is_some() {
-            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                if let Some(index) = self.sidebar_settled_menu_item_at(mouse.column, mouse.row) {
-                    return Some(MouseAction::SettledMenu { index });
-                }
-                self.sidebar_settled_menu_target = None;
-                self.sidebar_settled_menu_delete_armed = false;
-            }
-            return None;
-        }
-        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_project_menu.is_some() {
-            if let Some(index) = self.sidebar_project_menu_item_at(mouse.column, mouse.row) {
-                if let Some(menu) = self.sidebar_project_menu.as_mut() {
-                    menu.filter.selected = index;
-                }
-            }
-            return None;
-        }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && project_anchor_hit {
-            if self.sidebar_project_menu.is_some() {
-                self.sidebar_project_menu = None;
-            } else {
-                self.open_sidebar_project_menu();
-            }
-            return None;
-        }
-        if self.sidebar_project_menu.is_some() {
-            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                match self.sidebar_project_menu_item_at(mouse.column, mouse.row) {
-                    Some(index) => {
-                        self.accept_sidebar_project_menu(index);
-                    }
-                    None => self.sidebar_project_menu = None,
-                }
-            }
-            return None;
-        }
-        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_filter_menu_open {
-            if let Some(index) = self.sidebar_filter_menu_item_at(mouse.column, mouse.row) {
-                self.sidebar_filter_menu_selected = index;
-            }
+            self.open_sidebar_project_menu();
             return None;
         }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && filter_anchor_hit {
-            if self.sidebar_filter_menu_open {
-                self.sidebar_filter_menu_open = false;
-            } else {
-                self.open_sidebar_filter_menu();
-            }
-            return None;
-        }
-        if self.sidebar_filter_menu_open {
-            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                match self.sidebar_filter_menu_item_at(mouse.column, mouse.row) {
-                    Some(index) => self.select_sidebar_filter_option(index),
-                    None => self.sidebar_filter_menu_open = false,
-                }
-            }
-            return None;
-        }
-        if matches!(mouse.kind, MouseEventKind::Moved) && self.sidebar_group_menu_open {
-            if let Some(index) = self.sidebar_group_menu_item_at(mouse.column, mouse.row) {
-                self.sidebar_group_menu_selected = index;
-            }
+            self.open_sidebar_filter_menu();
             return None;
         }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) && group_anchor_hit {
-            if self.sidebar_group_menu_open {
-                self.sidebar_group_menu_open = false;
-            } else {
-                self.open_sidebar_group_menu();
-            }
-            return None;
-        }
-        if self.sidebar_group_menu_open {
-            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                if let Some(index) = self.sidebar_group_menu_item_at(mouse.column, mouse.row) {
-                    if let Some(mode) = crate::app::state::SidebarGroupMode::VIEWS
-                        .get(index)
-                        .copied()
-                    {
-                        self.set_sidebar_group_mode(mode);
-                    }
-                } else {
-                    self.sidebar_group_menu_open = false;
-                }
-            }
+            self.open_sidebar_group_menu();
             return None;
         }
 
@@ -995,32 +750,6 @@ impl AppState {
             }
         }
 
-        if self.effective_interaction_mode() == Mode::OpenExistingWorktree {
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    if let Some(open) = &mut self.worktree_open {
-                        open.select_previous_filtered();
-                    }
-                    return None;
-                }
-                MouseEventKind::ScrollDown => {
-                    if let Some(open) = &mut self.worktree_open {
-                        open.select_next_filtered();
-                    }
-                    return None;
-                }
-                _ => {}
-            }
-        }
-
-        if matches!(
-            self.effective_interaction_mode(),
-            Mode::NewLinkedWorktree | Mode::OpenExistingWorktree | Mode::ConfirmRemoveWorktree
-        ) && !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-        {
-            return None;
-        }
-
         if self.dock_editor_preview.is_some()
             && self.point_in_rect(self.view.terminal_area, mouse.column, mouse.row)
         {
@@ -1105,210 +834,6 @@ impl AppState {
                 self.selection_autoscroll = None;
                 self.clear_chrome_press(source_id);
 
-                if self.effective_interaction_mode() == Mode::ConfirmClose {
-                    let popup = self.confirm_close_rect();
-                    let inner = Rect::new(
-                        popup.x + 1,
-                        popup.y + 1,
-                        popup.width.saturating_sub(2),
-                        popup.height.saturating_sub(2),
-                    );
-                    let (confirm, cancel) = crate::ui::confirm_close_button_rects(inner);
-                    match modal_action_from_buttons(
-                        mouse.column,
-                        mouse.row,
-                        &[
-                            (confirm, ModalAction::Confirm),
-                            (cancel, ModalAction::Cancel),
-                        ],
-                    ) {
-                        Some(ModalAction::Confirm) => {
-                            return Some(MouseAction::ConfirmCloseAccept);
-                        }
-                        Some(ModalAction::Cancel) | None => confirm_close_cancel(self),
-                        _ => {}
-                    }
-                    return None;
-                }
-
-                if self.effective_interaction_mode() == Mode::NewLinkedWorktree {
-                    if let Some(inner) =
-                        crate::ui::new_linked_worktree_inner_rect(self.screen_rect())
-                    {
-                        let (create, cancel) = crate::ui::new_linked_worktree_button_rects(inner);
-                        match modal_action_from_buttons(
-                            mouse.column,
-                            mouse.row,
-                            &[
-                                (create, ModalAction::Confirm),
-                                (cancel, ModalAction::Cancel),
-                            ],
-                        ) {
-                            Some(ModalAction::Confirm) => {
-                                self.request_submit_worktree_create = true;
-                            }
-                            Some(ModalAction::Cancel)
-                                if !self
-                                    .worktree_create
-                                    .as_ref()
-                                    .is_some_and(|create| create.creating) =>
-                            {
-                                self.worktree_create = None;
-                                self.name_input.clear();
-                                self.name_input_replace_on_type = false;
-                                leave_modal(self);
-                            }
-                            _ => {}
-                        }
-                    }
-                    return None;
-                }
-
-                if self.effective_interaction_mode() == Mode::OpenExistingWorktree {
-                    if let Some(open) = self.worktree_open.as_ref() {
-                        if let Some(inner) = crate::ui::open_existing_worktree_inner_rect(
-                            self.screen_rect(),
-                            open.entries.len(),
-                        ) {
-                            let filtered = open.filtered_indices();
-                            let max_rows =
-                                crate::ui::open_existing_worktree_max_visible_rows(inner);
-                            let start =
-                                crate::ui::open_existing_worktree_visible_start(open, max_rows);
-                            if mouse.row == inner.y.saturating_add(1)
-                                && mouse.column >= inner.x
-                                && mouse.column < inner.x.saturating_add(inner.width)
-                            {
-                                if let Some(open) = &mut self.worktree_open {
-                                    open.search_focused = true;
-                                }
-                                return None;
-                            }
-                            let row_idx = if rect_contains(inner, mouse.column, mouse.row) {
-                                mouse
-                                    .row
-                                    .checked_sub(inner.y.saturating_add(3))
-                                    .map(usize::from)
-                                    .map(|row| row / 2)
-                                    .filter(|row| *row < max_rows)
-                                    .and_then(|row| filtered.get(start + row).copied())
-                            } else {
-                                None
-                            };
-                            if let Some(entry_idx) = row_idx {
-                                if let Some(open) = &mut self.worktree_open {
-                                    open.selected = entry_idx;
-                                }
-                                self.request_submit_worktree_open = true;
-                                return None;
-                            }
-
-                            let (open_button, cancel) =
-                                crate::ui::open_existing_worktree_button_rects(inner);
-                            match modal_action_from_buttons(
-                                mouse.column,
-                                mouse.row,
-                                &[
-                                    (open_button, ModalAction::Confirm),
-                                    (cancel, ModalAction::Cancel),
-                                ],
-                            ) {
-                                Some(ModalAction::Confirm) => {
-                                    self.request_submit_worktree_open = true;
-                                }
-                                Some(ModalAction::Cancel) => {
-                                    self.worktree_open = None;
-                                    leave_modal(self);
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    return None;
-                }
-
-                if self.effective_interaction_mode() == Mode::ConfirmRemoveWorktree {
-                    if let Some(popup) = crate::ui::remove_worktree_popup_rect(self.screen_rect()) {
-                        let inner = Rect::new(
-                            popup.x + 1,
-                            popup.y + 1,
-                            popup.width.saturating_sub(2),
-                            popup.height.saturating_sub(2),
-                        );
-                        let force_confirmation = self
-                            .worktree_remove
-                            .as_ref()
-                            .is_some_and(|remove| remove.force_confirmation);
-                        let (remove, cancel) =
-                            crate::ui::remove_worktree_button_rects(inner, force_confirmation);
-                        match modal_action_from_buttons(
-                            mouse.column,
-                            mouse.row,
-                            &[
-                                (remove, ModalAction::Confirm),
-                                (cancel, ModalAction::Cancel),
-                            ],
-                        ) {
-                            Some(ModalAction::Confirm) => {
-                                self.request_submit_worktree_remove = true;
-                            }
-                            Some(ModalAction::Cancel)
-                                if !self
-                                    .worktree_remove
-                                    .as_ref()
-                                    .is_some_and(|remove| remove.removing) =>
-                            {
-                                self.worktree_remove = None;
-                                leave_modal(self);
-                            }
-                            _ => {}
-                        }
-                    }
-                    return None;
-                }
-
-                if self
-                    .sidebar_snooze
-                    .as_ref()
-                    .is_some_and(|snooze| snooze.time_draft.is_some())
-                    || matches!(
-                        self.effective_interaction_mode(),
-                        Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane
-                    )
-                {
-                    let action = self
-                        .rename_modal_inner()
-                        .map(crate::ui::rename_button_rects)
-                        .and_then(|(save, clear, cancel)| {
-                            modal_action_from_buttons(
-                                mouse.column,
-                                mouse.row,
-                                &[
-                                    (save, ModalAction::Save),
-                                    (clear, ModalAction::Clear),
-                                    (cancel, ModalAction::Cancel),
-                                ],
-                            )
-                        })
-                        .unwrap_or(ModalAction::Cancel);
-                    return Some(MouseAction::RenameModal(action));
-                }
-
-                if self.effective_interaction_mode() == Mode::ContextMenu {
-                    let action = self.context_menu_action_at(mouse.column, mouse.row);
-                    if let Some(menu) = self.context_menu.take() {
-                        if let Some(action) = action {
-                            return Some(MouseAction::ContextMenu {
-                                menu: Box::new(menu),
-                                action,
-                            });
-                        } else {
-                            leave_modal(self);
-                        }
-                    }
-                    return None;
-                }
-
                 if self.on_dock_divider(mouse.column, mouse.row) {
                     self.drag = Some(DragState {
                         target: DragTarget::DockDivider,
@@ -1334,21 +859,6 @@ impl AppState {
                         && self.dock_tab == Some(crate::app::DockSurface::Linear);
                     self.mark_session_dirty();
                     return None;
-                }
-                // The open chooser owns every click while it is up: a row
-                // selects, anything else dismisses it before the click can
-                // reach the strip underneath.
-                if self.dock_surface_menu.is_some() {
-                    if let Some(entry) = self.dock_surface_menu_entry_at(mouse.column, mouse.row) {
-                        if self.activate_dock_chooser_entry(entry) {
-                            self.dock_surface_menu = None;
-                        }
-                        return None;
-                    }
-                    self.dock_surface_menu = None;
-                    if self.on_dock_plus(mouse.column, mouse.row) {
-                        return None;
-                    }
                 }
                 if self.on_dock_auto_open(mouse.column, mouse.row) {
                     // The strip toggle writes the same `ui.open_dock_on_work_link`
@@ -2272,15 +1782,6 @@ impl AppState {
                 }
             }
 
-            MouseEventKind::Moved if self.effective_interaction_mode() == Mode::ContextMenu => {
-                let hovered = self.context_menu_item_at(mouse.column, mouse.row);
-                if let Some(menu) = &mut self.context_menu {
-                    if let Some(action) = hovered {
-                        menu.selected = action;
-                    }
-                }
-            }
-
             MouseEventKind::Moved
                 if self.effective_interaction_mode() == Mode::Terminal
                     && !in_sidebar
@@ -2527,6 +2028,487 @@ impl AppState {
         }
 
         None
+    }
+
+    /// Client presentation owns the whole event. Keep this exhaustive so a new
+    /// client overlay cannot inherit whichever generic mouse branch happens to
+    /// run first.
+    fn handle_client_mouse_for_owner(
+        &mut self,
+        mouse: MouseEvent,
+        owner: ClientInputOwner,
+    ) -> Option<MouseAction> {
+        match owner {
+            ClientInputOwner::Overlay(overlay) => self.handle_client_overlay_mouse(mouse, overlay),
+            ClientInputOwner::SnoozeMenu => self.handle_snooze_menu_mouse(mouse),
+            ClientInputOwner::SnoozeTime => self.handle_rename_modal_mouse(mouse),
+            ClientInputOwner::SettledMenu | ClientInputOwner::SettledDeleteConfirm => {
+                self.handle_settled_menu_mouse(mouse)
+            }
+            ClientInputOwner::AgentPicker => {
+                if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    return None;
+                }
+                match crate::ui::agent_picker::candidate_at(
+                    self,
+                    self.screen_rect(),
+                    mouse.column,
+                    mouse.row,
+                ) {
+                    Some(index) => Some(MouseAction::AgentPickerSelect(index)),
+                    None => {
+                        self.agent_picker = None;
+                        None
+                    }
+                }
+            }
+            ClientInputOwner::SidebarGroupMenu => {
+                if matches!(mouse.kind, MouseEventKind::Moved) {
+                    if let Some(index) = self.sidebar_group_menu_item_at(mouse.column, mouse.row) {
+                        self.sidebar_group_menu_selected = index;
+                    }
+                } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    if let Some(index) = self.sidebar_group_menu_item_at(mouse.column, mouse.row) {
+                        if let Some(mode) = crate::app::state::SidebarGroupMode::VIEWS
+                            .get(index)
+                            .copied()
+                        {
+                            self.set_sidebar_group_mode(mode);
+                        }
+                    } else {
+                        self.sidebar_group_menu_open = false;
+                    }
+                }
+                None
+            }
+            ClientInputOwner::SidebarFilterMenu => {
+                if matches!(mouse.kind, MouseEventKind::Moved) {
+                    if let Some(index) = self.sidebar_filter_menu_item_at(mouse.column, mouse.row) {
+                        self.sidebar_filter_menu_selected = index;
+                    }
+                } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    match self.sidebar_filter_menu_item_at(mouse.column, mouse.row) {
+                        Some(index) => self.select_sidebar_filter_option(index),
+                        None => self.sidebar_filter_menu_open = false,
+                    }
+                }
+                None
+            }
+            ClientInputOwner::SidebarNewMenu => {
+                if matches!(mouse.kind, MouseEventKind::Moved) {
+                    if let Some(index) = self.sidebar_new_menu_item_at(mouse.column, mouse.row) {
+                        if let Some(menu) = self.sidebar_new_menu.as_mut() {
+                            menu.selected = index;
+                        }
+                    }
+                    return None;
+                }
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    let action = self
+                        .sidebar_new_menu_item_at(mouse.column, mouse.row)
+                        .and_then(|index| {
+                            crate::app::state::SidebarNewMenuAction::ALL
+                                .get(index)
+                                .copied()
+                        });
+                    self.sidebar_new_menu = None;
+                    return action.map(|action| MouseAction::SidebarNewMenu { action });
+                }
+                None
+            }
+            ClientInputOwner::SidebarNewThread => {
+                if matches!(mouse.kind, MouseEventKind::Moved) {
+                    if let Some(index) = self.sidebar_new_thread_item_at(mouse.column, mouse.row) {
+                        if let Some(picker) = self.sidebar_new_thread.as_mut() {
+                            picker.filter.selected = index;
+                        }
+                    }
+                } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    if let Some(index) = self.sidebar_new_thread_item_at(mouse.column, mouse.row) {
+                        self.accept_sidebar_new_thread(index);
+                    } else {
+                        self.sidebar_new_thread = None;
+                    }
+                }
+                None
+            }
+            ClientInputOwner::SidebarProjectMenu => {
+                if matches!(mouse.kind, MouseEventKind::Moved) {
+                    if let Some(index) = self.sidebar_project_menu_item_at(mouse.column, mouse.row)
+                    {
+                        if let Some(menu) = self.sidebar_project_menu.as_mut() {
+                            menu.filter.selected = index;
+                        }
+                    }
+                } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    match self.sidebar_project_menu_item_at(mouse.column, mouse.row) {
+                        Some(index) => {
+                            self.accept_sidebar_project_menu(index);
+                        }
+                        None => self.sidebar_project_menu = None,
+                    }
+                }
+                None
+            }
+            ClientInputOwner::SidebarObjectMenu => {
+                if matches!(mouse.kind, MouseEventKind::Moved) {
+                    if let Some(index) = crate::ui::sidebar_object_menu_item_at(
+                        self,
+                        self.screen_rect(),
+                        mouse.column,
+                        mouse.row,
+                    ) {
+                        if let Some(menu) = self.sidebar_object_menu.as_mut() {
+                            menu.selected = index;
+                        }
+                    }
+                    return None;
+                }
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    if let Some(index) = crate::ui::sidebar_object_menu_item_at(
+                        self,
+                        self.screen_rect(),
+                        mouse.column,
+                        mouse.row,
+                    ) {
+                        return Some(MouseAction::SidebarObjectMenu { index });
+                    }
+                    if self.sidebar_object_menu.as_ref().is_some_and(|menu| {
+                        menu.page == crate::app::state::SidebarObjectMenuPage::Confirmation
+                    }) {
+                        self.dock_pending_write = None;
+                    }
+                    self.sidebar_object_menu = None;
+                }
+                None
+            }
+            ClientInputOwner::SidebarSortMenu => {
+                if matches!(mouse.kind, MouseEventKind::Moved) {
+                    if let Some(index) = self.sidebar_sort_menu_item_at(mouse.column, mouse.row) {
+                        if let Some(menu) = self.sidebar_sort_menu.as_mut() {
+                            menu.selected = index;
+                        }
+                    }
+                } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    if let Some(index) = self.sidebar_sort_menu_item_at(mouse.column, mouse.row) {
+                        self.apply_sidebar_sort_menu_selection(index);
+                    } else {
+                        self.sidebar_sort_menu = None;
+                    }
+                }
+                None
+            }
+            ClientInputOwner::SidebarSubgroupPicker => {
+                if matches!(mouse.kind, MouseEventKind::Moved) {
+                    if let Some(index) =
+                        self.sidebar_subgroup_picker_item_at(mouse.column, mouse.row)
+                    {
+                        if let Some(picker) = self.sidebar_subgroup_picker.as_mut() {
+                            picker.filter.selected = index;
+                        }
+                    }
+                } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    if let Some(index) =
+                        self.sidebar_subgroup_picker_item_at(mouse.column, mouse.row)
+                    {
+                        self.accept_sidebar_subgroup_picker(index);
+                    } else {
+                        self.sidebar_subgroup_picker = None;
+                    }
+                }
+                None
+            }
+            ClientInputOwner::PrActionConfirmation => None,
+            ClientInputOwner::DockSurfaceMenu => {
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    if let Some(entry) = self.dock_surface_menu_entry_at(mouse.column, mouse.row) {
+                        if self.activate_dock_chooser_entry(entry) {
+                            self.dock_surface_menu = None;
+                        }
+                    } else {
+                        self.dock_surface_menu = None;
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    fn handle_snooze_menu_mouse(&mut self, mouse: MouseEvent) -> Option<MouseAction> {
+        if matches!(mouse.kind, MouseEventKind::Moved) {
+            if let Some(index) = self.sidebar_snooze_menu_item_at(mouse.column, mouse.row) {
+                let action = self.sidebar_snooze.as_ref().and_then(|snooze| {
+                    let ws_idx = self
+                        .workspaces
+                        .iter()
+                        .position(|workspace| workspace.id == snooze.target.workspace_id)?;
+                    crate::app::state::sidebar_snooze_menu_items(
+                        self.pane_is_snoozed(ws_idx, snooze.target.pane_id),
+                    )
+                    .get(index)
+                    .map(|(_, action)| *action)
+                });
+                if let (Some(snooze), Some(action)) = (self.sidebar_snooze.as_mut(), action) {
+                    snooze.selected = action;
+                }
+            }
+            return None;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            let action = self
+                .sidebar_snooze_menu_item_at(mouse.column, mouse.row)
+                .and_then(|index| {
+                    let snooze = self.sidebar_snooze.as_ref()?;
+                    let ws_idx = self
+                        .workspaces
+                        .iter()
+                        .position(|workspace| workspace.id == snooze.target.workspace_id)?;
+                    crate::app::state::sidebar_snooze_menu_items(
+                        self.pane_is_snoozed(ws_idx, snooze.target.pane_id),
+                    )
+                    .get(index)
+                    .map(|(_, action)| *action)
+                });
+            if action.is_none() {
+                self.sidebar_snooze = None;
+            }
+            return action.map(|action| MouseAction::SnoozeMenu { action });
+        }
+        None
+    }
+
+    fn handle_settled_menu_mouse(&mut self, mouse: MouseEvent) -> Option<MouseAction> {
+        if matches!(mouse.kind, MouseEventKind::Moved) {
+            if let Some(index) = self.sidebar_settled_menu_item_at(mouse.column, mouse.row) {
+                if index != self.sidebar_settled_menu_selected {
+                    self.sidebar_settled_menu_delete_armed = false;
+                }
+                self.sidebar_settled_menu_selected = index;
+            }
+        } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if let Some(index) = self.sidebar_settled_menu_item_at(mouse.column, mouse.row) {
+                return Some(MouseAction::SettledMenu { index });
+            }
+            self.sidebar_settled_menu_target = None;
+            self.sidebar_settled_menu_delete_armed = false;
+        }
+        None
+    }
+
+    fn handle_rename_modal_mouse(&mut self, mouse: MouseEvent) -> Option<MouseAction> {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return None;
+        }
+        let action = self
+            .rename_modal_inner()
+            .map(crate::ui::rename_button_rects)
+            .and_then(|(save, clear, cancel)| {
+                modal_action_from_buttons(
+                    mouse.column,
+                    mouse.row,
+                    &[
+                        (save, ModalAction::Save),
+                        (clear, ModalAction::Clear),
+                        (cancel, ModalAction::Cancel),
+                    ],
+                )
+            })
+            .unwrap_or(ModalAction::Cancel);
+        Some(MouseAction::RenameModal(action))
+    }
+
+    fn handle_client_overlay_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        overlay: ClientOverlay,
+    ) -> Option<MouseAction> {
+        if overlay == ClientOverlay::OpenExistingWorktree {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    if let Some(open) = &mut self.worktree_open {
+                        open.select_previous_filtered();
+                    }
+                    return None;
+                }
+                MouseEventKind::ScrollDown => {
+                    if let Some(open) = &mut self.worktree_open {
+                        open.select_next_filtered();
+                    }
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if overlay == ClientOverlay::ContextMenu && matches!(mouse.kind, MouseEventKind::Moved)
+            {
+                let hovered = self.context_menu_item_at(mouse.column, mouse.row);
+                if let (Some(menu), Some(action)) = (&mut self.context_menu, hovered) {
+                    menu.selected = action;
+                }
+            }
+            return None;
+        }
+        match overlay {
+            ClientOverlay::None => None,
+            ClientOverlay::RenameWorkspace
+            | ClientOverlay::RenameTab
+            | ClientOverlay::RenamePane => self.handle_rename_modal_mouse(mouse),
+            ClientOverlay::ConfirmClose => {
+                let popup = self.confirm_close_rect();
+                let inner = Rect::new(
+                    popup.x + 1,
+                    popup.y + 1,
+                    popup.width.saturating_sub(2),
+                    popup.height.saturating_sub(2),
+                );
+                let (confirm, cancel) = crate::ui::confirm_close_button_rects(inner);
+                match modal_action_from_buttons(
+                    mouse.column,
+                    mouse.row,
+                    &[
+                        (confirm, ModalAction::Confirm),
+                        (cancel, ModalAction::Cancel),
+                    ],
+                ) {
+                    Some(ModalAction::Confirm) => Some(MouseAction::ConfirmCloseAccept),
+                    Some(ModalAction::Cancel) | None => {
+                        confirm_close_cancel(self);
+                        None
+                    }
+                    _ => None,
+                }
+            }
+            ClientOverlay::ContextMenu => {
+                let action = self.context_menu_action_at(mouse.column, mouse.row);
+                if let Some(menu) = self.context_menu.take() {
+                    if let Some(action) = action {
+                        return Some(MouseAction::ContextMenu {
+                            menu: Box::new(menu),
+                            action,
+                        });
+                    }
+                    leave_modal(self);
+                }
+                None
+            }
+            ClientOverlay::NewLinkedWorktree => {
+                if let Some(inner) = crate::ui::new_linked_worktree_inner_rect(self.screen_rect()) {
+                    let (create, cancel) = crate::ui::new_linked_worktree_button_rects(inner);
+                    match modal_action_from_buttons(
+                        mouse.column,
+                        mouse.row,
+                        &[
+                            (create, ModalAction::Confirm),
+                            (cancel, ModalAction::Cancel),
+                        ],
+                    ) {
+                        Some(ModalAction::Confirm) => self.request_submit_worktree_create = true,
+                        Some(ModalAction::Cancel)
+                            if !self
+                                .worktree_create
+                                .as_ref()
+                                .is_some_and(|create| create.creating) =>
+                        {
+                            self.worktree_create = None;
+                            self.name_input.clear();
+                            self.name_input_replace_on_type = false;
+                            leave_modal(self);
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            ClientOverlay::OpenExistingWorktree => {
+                if let Some(open) = self.worktree_open.as_ref() {
+                    let inner = crate::ui::open_existing_worktree_inner_rect(
+                        self.screen_rect(),
+                        open.entries.len(),
+                    )?;
+                    let filtered = open.filtered_indices();
+                    let max_rows = crate::ui::open_existing_worktree_max_visible_rows(inner);
+                    let start = crate::ui::open_existing_worktree_visible_start(open, max_rows);
+                    if mouse.row == inner.y.saturating_add(1)
+                        && mouse.column >= inner.x
+                        && mouse.column < inner.x.saturating_add(inner.width)
+                    {
+                        if let Some(open) = &mut self.worktree_open {
+                            open.search_focused = true;
+                        }
+                        return None;
+                    }
+                    let row_idx = if rect_contains(inner, mouse.column, mouse.row) {
+                        mouse
+                            .row
+                            .checked_sub(inner.y.saturating_add(3))
+                            .map(usize::from)
+                            .map(|row| row / 2)
+                            .filter(|row| *row < max_rows)
+                            .and_then(|row| filtered.get(start + row).copied())
+                    } else {
+                        None
+                    };
+                    if let Some(entry_idx) = row_idx {
+                        if let Some(open) = &mut self.worktree_open {
+                            open.selected = entry_idx;
+                        }
+                        self.request_submit_worktree_open = true;
+                        return None;
+                    }
+                    let (open, cancel) = crate::ui::open_existing_worktree_button_rects(inner);
+                    match modal_action_from_buttons(
+                        mouse.column,
+                        mouse.row,
+                        &[(open, ModalAction::Confirm), (cancel, ModalAction::Cancel)],
+                    ) {
+                        Some(ModalAction::Confirm) => self.request_submit_worktree_open = true,
+                        Some(ModalAction::Cancel) => {
+                            self.worktree_open = None;
+                            leave_modal(self);
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            ClientOverlay::ConfirmRemoveWorktree => {
+                if let Some(popup) = crate::ui::remove_worktree_popup_rect(self.screen_rect()) {
+                    let inner = Rect::new(
+                        popup.x + 1,
+                        popup.y + 1,
+                        popup.width.saturating_sub(2),
+                        popup.height.saturating_sub(2),
+                    );
+                    let force = self
+                        .worktree_remove
+                        .as_ref()
+                        .is_some_and(|remove| remove.force_confirmation);
+                    let (remove, cancel) = crate::ui::remove_worktree_button_rects(inner, force);
+                    match modal_action_from_buttons(
+                        mouse.column,
+                        mouse.row,
+                        &[
+                            (remove, ModalAction::Confirm),
+                            (cancel, ModalAction::Cancel),
+                        ],
+                    ) {
+                        Some(ModalAction::Confirm) => self.request_submit_worktree_remove = true,
+                        Some(ModalAction::Cancel)
+                            if !self
+                                .worktree_remove
+                                .as_ref()
+                                .is_some_and(|remove| remove.removing) =>
+                        {
+                            self.worktree_remove = None;
+                            leave_modal(self);
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+        }
     }
 
     fn handle_mobile_mouse(&mut self, mouse: MouseEvent) -> MobileMouseResult {
@@ -10224,6 +10206,84 @@ mod tests {
             let panes = app.state.workspaces[0].tabs[0].layout.pane_ids();
             assert_eq!(panes, vec![root], "{direction:?} should close {sibling:?}");
             assert!(app.state.request_pane_toggle.is_none());
+        }
+    }
+
+    #[test]
+    fn snooze_menu_click_cannot_open_sidebar_new_thread() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("snooze")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.sidebar_snooze = Some(crate::app::state::SidebarSnoozeUiState {
+            target: crate::app::state::PaneFocusTarget {
+                workspace_id: app.state.workspaces[0].id.clone(),
+                pane_id,
+            },
+            anchor: (1, 1),
+            selected: crate::app::state::sidebar_snooze_menu_items(false)[0].1,
+            time_draft: None,
+            error: None,
+        });
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let menu = crate::ui::sidebar_snooze_menu_layout(&app.state, app.state.screen_rect())
+            .expect("snooze menu");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.list_rect.x,
+            menu.list_rect.y,
+        ));
+
+        assert!(app.state.sidebar_new_thread.is_none());
+    }
+
+    #[test]
+    fn rename_clear_click_wins_over_both_dock_previews() {
+        for object_preview in [false, true] {
+            let mut app = app_for_mouse_test();
+            app.state.workspaces = vec![Workspace::test_new("old")];
+            app.state.ensure_test_terminals();
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            crate::app::input::modal::open_rename_workspace(
+                &mut app.state,
+                &app.terminal_runtimes,
+                0,
+            );
+            app.state.name_input = "rename me".into();
+            if object_preview {
+                app.state.dock_object_preview = Some(crate::app::state::DockObjectRef {
+                    surface: crate::app::DockSurface::Pr,
+                    key: "owner/repo#42".into(),
+                });
+            } else {
+                app.state.dock_editor_preview = Some(crate::app::state::DockEditorPreview {
+                    path: "/tmp/preview.rs".into(),
+                    content: "preview".into(),
+                    notice: None,
+                });
+            }
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+            let inner = app.state.rename_modal_inner().expect("rename modal");
+            let (_, clear, _) = crate::ui::rename_button_rects(inner);
+
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                clear.x,
+                clear.y,
+            ));
+
+            assert!(
+                app.state.name_input.is_empty(),
+                "object preview: {object_preview}"
+            );
+            assert_eq!(
+                app.state.client_overlay,
+                crate::app::state::ClientOverlay::RenameWorkspace
+            );
         }
     }
 }
