@@ -172,7 +172,6 @@ pub(crate) fn paint_local_pane_graphics(
             app,
             graphics,
             terminal_runtimes,
-            app.view.tab_surface(),
             cell_size,
             None,
             &mut cache,
@@ -194,7 +193,6 @@ pub(crate) fn paint_local_pane_graphics(
             app,
             graphics,
             terminal_runtimes,
-            app.view.tab_surface(),
             cell_size,
             None,
             &mut cache,
@@ -220,7 +218,6 @@ pub(crate) fn encode_local_pane_graphics(
     app: &AppState,
     graphics: &crate::app::pane_graphics::Runtime,
     terminal_runtimes: &TerminalRuntimeRegistry,
-    surface: crate::ui::TabSurfaceView<'_>,
     cell_size: HostCellSize,
     transaction_budget: Option<usize>,
     cache: &mut HostGraphicsCache,
@@ -229,8 +226,7 @@ pub(crate) fn encode_local_pane_graphics(
         app,
         graphics,
         terminal_runtimes,
-        surface,
-        app.client_input_policy(),
+        app.client_presentation_policy(),
         cell_size,
         transaction_budget,
         cache,
@@ -241,21 +237,15 @@ pub(crate) fn encode_local_pane_graphics_for_client(
     app: &AppState,
     graphics: &crate::app::pane_graphics::Runtime,
     terminal_runtimes: &TerminalRuntimeRegistry,
-    surface: crate::ui::TabSurfaceView<'_>,
-    input_policy: crate::app::state::ClientInputPolicy,
+    presentation_policy: crate::app::state::ClientPresentationPolicy<'_>,
     cell_size: HostCellSize,
     transaction_budget: Option<usize>,
     cache: &mut HostGraphicsCache,
 ) -> EncodedGraphics {
-    // A full-terminal overlay covers the panes, but the graphics plane sits above
-    // the text and is not repainted by ratatui. Leaving placements up while home
-    // or the inbox is open lets a pane's image fight the overlay's text every
-    // frame, which reads as flicker.
-    let overlay_open = app.home.is_some() || app.inbox.is_some();
-    let visible = input_policy.pane_graphics_visible() && !overlay_open && cell_size.is_known();
+    let surface = presentation_policy.tab_surface();
+    let visible = presentation_policy.pane_graphics_visible() && cell_size.is_known();
     tracing::debug!(
         visible,
-        overlay_open,
         cell_width_px = cell_size.width_px,
         cell_height_px = cell_size.height_px,
         active = ?app.active,
@@ -1336,14 +1326,14 @@ pub(crate) struct DirectFileCommand {
 }
 
 pub(crate) fn prepare_direct_file(
-    app: &AppState,
     graphics: &crate::app::pane_graphics::Runtime,
-    surface: crate::ui::TabSurfaceView<'_>,
+    presentation_policy: crate::app::state::ClientPresentationPolicy<'_>,
     cell_size: HostCellSize,
     allow_placement: bool,
     cache: &HostGraphicsCache,
     key: &crate::app::pane_graphics::Key,
 ) -> Option<DirectFileCommand> {
+    let surface = presentation_policy.tab_surface();
     let slot = graphics.slots.get(key)?;
     let layer = slot.layer.as_ref()?;
     layer.direct_lease()?;
@@ -1351,11 +1341,7 @@ pub(crate) fn prepare_direct_file(
     let info = allow_placement
         .then(|| surface.pane_infos.iter().find(|info| info.id == key.0))
         .flatten()
-        .filter(|_| {
-            app.effective_interaction_mode() == Mode::Terminal
-                && cell_size.is_known()
-                && app.active.is_some()
-        });
+        .filter(|_| presentation_policy.pane_graphics_visible() && cell_size.is_known());
     if let Some(command) = info
         .map(|info| {
             pane_graphics_host_placement(
@@ -3154,7 +3140,6 @@ mod tests {
             &app,
             &crate::app::pane_graphics::Runtime::default(),
             &TerminalRuntimeRegistry::new(),
-            app.view.tab_surface(),
             HostCellSize {
                 width_px: 10,
                 height_px: 20,

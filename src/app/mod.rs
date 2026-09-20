@@ -1805,7 +1805,8 @@ impl App {
         // the foreground (client, or this app in monolithic mode) applies the switch. Keyed on the
         // realm so multi-level prefix commands stay ASCII. The switch is flag-gated but the restore
         // always fires on exit, so a mid-interaction flag toggle can't strand the host on ASCII.
-        self.sync_prefix_input_source_modes(previous_mode, self.state.effective_interaction_mode());
+        let next_mode = self.state.client_presentation_policy().mode();
+        self.sync_prefix_input_source_modes(previous_mode, next_mode);
     }
 
     pub(crate) fn sync_prefix_input_source_modes(&mut self, previous_mode: Mode, next_mode: Mode) {

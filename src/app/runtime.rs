@@ -393,7 +393,10 @@ impl App {
                     owner,
                 );
                 !matches!(mouse.kind, crossterm::event::MouseEventKind::Moved)
-                    || self.state.client_input_policy().mouse_motion_changes_view()
+                    || self
+                        .state
+                        .client_presentation_policy()
+                        .mouse_motion_changes_view()
                     || self.state.hovered_control != previous_hover
             }
             crate::raw_input::RawInputEvent::OuterFocusGained => {

@@ -89,9 +89,8 @@ impl HeadlessServer {
                 {
                     let command = self.clients.get(&client_id).and_then(|client| {
                         crate::kitty_graphics::prepare_direct_file(
-                            &self.app.state,
                             &self.app.pane_graphics,
-                            self.app.state.view.tab_surface(),
+                            client.presentation_policy(&self.app.state),
                             client.cell_size,
                             !internal_changed,
                             &client.graphics_cache,
@@ -487,7 +486,7 @@ impl HeadlessServer {
             if !matches!(mode, ClientConnectionMode::App) {
                 continue;
             }
-            let Some(input_policy) = self.client_input_policy(client_id) else {
+            let Some(presentation_policy) = self.client_presentation_policy(client_id) else {
                 crate::render_prof::event("retained_graphics_fallback.client_policy_missing");
                 return RetainedGraphicsOutcome::Fallback;
             };
@@ -522,8 +521,7 @@ impl HeadlessServer {
                 &self.app.state,
                 &self.app.pane_graphics,
                 &self.app.terminal_runtimes,
-                self.app.state.view.tab_surface(),
-                input_policy,
+                presentation_policy,
                 cell_size,
                 Some(crate::kitty_graphics::HEADLESS_GRAPHICS_TRANSACTION_BUDGET),
                 &mut next_graphics_cache,

@@ -1496,16 +1496,22 @@ impl HeadlessServer {
         if self.app.active_overlay_client_id.is_some() {
             return false;
         }
-        let mut changed = false;
-        for client in self.clients.values_mut() {
-            if !client.is_full_app_client() {
-                continue;
+        let client_ids = self
+            .clients
+            .iter()
+            .filter_map(|(client_id, client)| client.is_full_app_client().then_some(*client_id))
+            .collect::<Vec<_>>();
+        for client_id in &client_ids {
+            if let Some(client) = self.clients.get_mut(client_id) {
+                client.sidebar_presentation.focus_intent =
+                    crate::app::state::ClientFocusIntent::Pane;
+                client.request_repaint();
             }
-            client.sidebar_presentation.focus_intent = crate::app::state::ClientFocusIntent::Pane;
-            client.request_repaint();
-            changed = true;
+            if let Some(policy) = self.client_presentation_policy(*client_id) {
+                self.sync_client_input_source(*client_id, &policy);
+            }
         }
-        changed
+        !client_ids.is_empty()
     }
 
     #[cfg(unix)]
@@ -1995,25 +2001,26 @@ impl HeadlessServer {
     }
 
     fn promote_client_to_foreground(&mut self, client_id: u64) -> bool {
-        let next_mode = self.client_input_mode(client_id);
-        self.promote_client_to_foreground_with_mode(client_id, next_mode)
+        let Some(policy) = self.client_presentation_policy(client_id) else {
+            return false;
+        };
+        self.promote_client_to_foreground_with_policy(client_id, &policy)
     }
 
-    fn client_input_mode(&self, client_id: u64) -> crate::app::state::Mode {
-        self.client_input_policy(client_id)
-            .map(crate::app::state::ClientInputPolicy::mode)
-            .unwrap_or_else(|| self.app.state.server_mode())
-    }
-
-    fn sync_client_input_source(&mut self, client_id: u64, mode: crate::app::state::Mode) {
-        let active = self.app.state.switch_ascii_input_source_in_prefix && mode.wants_ascii_input();
+    fn sync_client_input_source(
+        &mut self,
+        client_id: u64,
+        policy: &crate::app::state::ClientPresentationPolicy<'_>,
+    ) {
+        let active =
+            self.app.state.switch_ascii_input_source_in_prefix && policy.mode().wants_ascii_input();
         self.send_to_client(client_id, ServerMessage::PrefixInputSource { active });
     }
 
-    fn promote_client_to_foreground_with_mode(
+    fn promote_client_to_foreground_with_policy(
         &mut self,
         client_id: u64,
-        next_mode: crate::app::state::Mode,
+        policy: &crate::app::state::ClientPresentationPolicy<'_>,
     ) -> bool {
         let stamp = self.allocate_activity_stamp();
         let Some(client) = self.clients.get_mut(&client_id) else {
@@ -2025,7 +2032,7 @@ impl HeadlessServer {
         self.foreground_client_id = Some(client_id);
         self.sync_foreground_client_state();
         if changed {
-            self.sync_client_input_source(client_id, next_mode);
+            self.sync_client_input_source(client_id, policy);
         }
         changed
     }
@@ -2033,11 +2040,12 @@ impl HeadlessServer {
     fn promote_latest_remaining_client(&mut self) -> bool {
         let next_foreground = latest_app_client(&self.clients);
         let changed = next_foreground != self.foreground_client_id;
-        let next_mode = next_foreground.map(|client_id| self.client_input_mode(client_id));
+        let next_policy =
+            next_foreground.and_then(|client_id| self.client_presentation_policy(client_id));
         self.foreground_client_id = next_foreground;
         self.sync_foreground_client_state();
-        if let (true, Some(client_id), Some(mode)) = (changed, next_foreground, next_mode) {
-            self.sync_client_input_source(client_id, mode);
+        if let (true, Some(client_id), Some(policy)) = (changed, next_foreground, next_policy) {
+            self.sync_client_input_source(client_id, &policy);
         }
         changed
     }
@@ -4200,9 +4208,7 @@ impl HeadlessServer {
             .clients
             .get(&client_id)
             .is_some_and(ClientConnection::is_full_app_client);
-        let source_policy = source_is_full_app
-            .then(|| self.client_input_policy(client_id))
-            .flatten();
+        let source_policy = self.client_presentation_policy(client_id);
         let host_surface_redraw = crate::raw_input::events_require_host_surface_redraw(
             &events,
             self.app.state.redraw_on_focus_gained,
@@ -4215,7 +4221,9 @@ impl HeadlessServer {
                     row,
                     ..
                 }) => {
-                    source_policy.is_some_and(|policy| policy.mouse_motion_changes_view())
+                    source_policy
+                        .as_ref()
+                        .is_some_and(|policy| policy.mouse_motion_changes_view())
                         || self.clients.get(&client_id).is_some_and(|client| {
                             client.dock_presentation.hovered_control.is_some()
                         })
@@ -4224,7 +4232,10 @@ impl HeadlessServer {
                 _ => false,
             });
         let source_mode = if source_is_full_app {
-            self.client_input_mode(client_id)
+            source_policy
+                .as_ref()
+                .map(|policy| policy.mode())
+                .unwrap_or_else(|| self.app.state.server_mode())
         } else {
             self.app.state.server_mode()
         };
@@ -4314,7 +4325,9 @@ impl HeadlessServer {
         // Promotion and reconciliation are input transitions. They must see
         // this client's presentation, never whichever client rendered last.
         let foreground_changed = if interaction {
-            self.promote_client_to_foreground_with_mode(client_id, source_mode)
+            source_policy.as_ref().is_some_and(|policy| {
+                self.promote_client_to_foreground_with_policy(client_id, policy)
+            })
         } else {
             false
         };
@@ -4560,7 +4573,9 @@ impl HeadlessServer {
                 }
                 self.sync_foreground_client_state();
                 if foreground_changed {
-                    self.sync_client_input_source(client_id, self.client_input_mode(client_id));
+                    if let Some(policy) = self.client_presentation_policy(client_id) {
+                        self.sync_client_input_source(client_id, &policy);
+                    }
                 }
                 self.resize_shared_runtime_to_effective_size();
                 self.nudge_handoff_panes_on_first_client_attach();
@@ -5847,7 +5862,9 @@ impl HeadlessServer {
         self.clients.values().any(|client| {
             client.writer.is_some()
                 && client.is_full_app_client()
-                && !client.tab_surface_replaced(&self.app.state)
+                && client
+                    .presentation_policy(&self.app.state)
+                    .tab_surface_visible()
         })
     }
 
@@ -5962,7 +5979,10 @@ impl HeadlessServer {
             let Some(client) = self.clients.get(client_id) else {
                 retained_fallback!("client_missing");
             };
-            if client.tab_surface_replaced(&self.app.state) {
+            if !client
+                .presentation_policy(&self.app.state)
+                .tab_surface_visible()
+            {
                 continue;
             }
             if retained_target.is_some() {
@@ -5977,17 +5997,14 @@ impl HeadlessServer {
             retained_fallback!("no_target");
         };
         if self
-            .client_input_policy(client_id)
-            .is_some_and(crate::app::state::ClientInputPolicy::owns_input)
+            .client_presentation_policy(client_id)
+            .is_some_and(|policy| policy.owns_input())
         {
             retained_fallback!("client_overlay");
         }
         let Some(client) = self.clients.get(&client_id) else {
             retained_fallback!("client_missing");
         };
-        if client.pomodoro_presentation.owns_input() {
-            retained_fallback!("pomodoro_overlay");
-        }
         if client.deferred_render() != DeferredRender::None {
             retained_fallback!("render_pending");
         }
@@ -6004,7 +6021,7 @@ impl HeadlessServer {
                 &self.app.pane_graphics,
                 &self.app.terminal_runtimes,
                 crate::ui::TabSurfaceView {
-                    pane_infos: &client.retained_pane_infos,
+                    pane_infos: client.retained_pane_infos.as_slice(),
                     split_borders: &[],
                 },
                 cell_size,
@@ -6030,7 +6047,7 @@ impl HeadlessServer {
         }
 
         let mut touched = false;
-        for info in &pane_infos {
+        for info in pane_infos.iter() {
             if !rect_fits_frame(info.inner_rect, &frame) {
                 retained_fallback!("pane_rect_outside_frame");
             }
@@ -6090,13 +6107,12 @@ impl HeadlessServer {
         retained_fallback!("send_failed");
     }
 
-    fn client_input_policy(&self, client_id: u64) -> Option<crate::app::state::ClientInputPolicy> {
+    fn client_presentation_policy(
+        &self,
+        client_id: u64,
+    ) -> Option<crate::app::state::ClientPresentationPolicy<'static>> {
         let client = self.clients.get(&client_id)?;
-        Some(crate::app::state::ClientInputPolicy::from_presentations(
-            self.app.state.server_mode(),
-            &client.sidebar_presentation,
-            &client.dock_presentation,
-        ))
+        Some(client.presentation_policy(&self.app.state))
     }
 
     fn retained_pty_update_allowed_by_app_state(&self) -> bool {
@@ -6222,9 +6238,6 @@ impl HeadlessServer {
         for (client_id, (cols, rows), cell_size, is_foreground, mode) in render_targets {
             let area = Rect::new(0, 0, cols, rows);
             let is_app_client = matches!(mode, ClientConnectionMode::App);
-            let client_input_policy = is_app_client
-                .then(|| self.client_input_policy(client_id))
-                .flatten();
             let mut frame = match mode {
                 ClientConnectionMode::App => {
                     let mut sidebar_presentation = self
@@ -6349,8 +6362,7 @@ impl HeadlessServer {
                     self.app.state.swap_work_view(&mut work_view);
                     self.app.state.swap_usage_view(&mut usage_view);
                     if let Some(client) = self.clients.get_mut(&client_id) {
-                        client
-                            .retained_pane_infos
+                        std::sync::Arc::make_mut(&mut client.retained_pane_infos)
                             .clone_from(&self.app.state.view.pane_infos);
                         client.retained_pane_cursor = retained_pane_cursor;
                         client.sidebar_presentation = sidebar_presentation;
@@ -6400,9 +6412,6 @@ impl HeadlessServer {
                 }
             };
 
-            let Some(client) = self.clients.get_mut(&client_id) else {
-                continue;
-            };
             let pomodoro_presentation = is_app_client.then(|| {
                 crate::ui::pomodoro::input_presentation_at(
                     &self.app.state,
@@ -6410,6 +6419,20 @@ impl HeadlessServer {
                     self.app.state.view_observed_at,
                 )
             });
+            let client_presentation_policy = is_app_client
+                .then(|| {
+                    self.clients.get(&client_id).map(|client| {
+                        client.presentation_policy_with_pomodoro(
+                            &self.app.state,
+                            pomodoro_presentation
+                                .is_some_and(crate::ui::pomodoro::InputPresentation::owns_input),
+                        )
+                    })
+                })
+                .flatten();
+            let Some(client) = self.clients.get_mut(&client_id) else {
+                continue;
+            };
             let mut next_graphics_cache = client.graphics_cache.clone();
             let mut reset_graphics = Vec::new();
             let mut encoded = if is_app_client
@@ -6428,8 +6451,7 @@ impl HeadlessServer {
                     &self.app.state,
                     &self.app.pane_graphics,
                     &self.app.terminal_runtimes,
-                    self.app.state.view.tab_surface(),
-                    client_input_policy.expect("app render target has input policy"),
+                    client_presentation_policy.expect("app render target has presentation policy"),
                     cell_size,
                     Some(crate::kitty_graphics::HEADLESS_GRAPHICS_TRANSACTION_BUDGET),
                     &mut next_graphics_cache,
@@ -9014,7 +9036,9 @@ esac
                 .expect("initial tab frame");
             setup(&mut server, 1, &client_rx);
             assert!(
-                server.clients[&1].tab_surface_replaced(&server.app.state),
+                !server.clients[&1]
+                    .presentation_policy(&server.app.state)
+                    .tab_surface_visible(),
                 "{name}"
             );
             server.render_and_stream();
@@ -13825,6 +13849,58 @@ next_tab = ""
                 control_b
                     .recv_timeout(Duration::from_millis(100))
                     .expect("absolute input-source state for promoted client"),
+            ),
+            ServerMessage::PrefixInputSource { active: false }
+        ));
+    }
+
+    #[test]
+    fn external_api_pane_focus_sends_absolute_input_source_state_from_prefix() {
+        let mut server = test_headless_server();
+        server.app.state.switch_ascii_input_source_in_prefix = true;
+        server.app.state.set_server_mode(crate::app::Mode::Prefix);
+        let workspace = crate::workspace::Workspace::test_new("api-focus");
+        let pane_id = workspace.tabs[0].root_pane;
+        let pane_number = workspace.public_pane_number(pane_id).expect("pane number");
+        let public_pane_id =
+            crate::workspace::public_pane_id_for_number(&workspace.id, pane_number);
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        let (writer, control_rx, _render_rx) = test_client_writer();
+        let mut client = test_app_client(Some(true), 1);
+        client.writer = Some(writer);
+        server.clients.insert(1, client);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+
+        assert!(
+            server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "focus-from-prefix".into(),
+                    method: api::schema::Method::PaneFocus(api::schema::PaneTarget {
+                        pane_id: public_pane_id,
+                    }),
+                },
+                respond_to,
+                response_write_complete: None,
+                stream_active: None,
+            })
+        );
+        let response = response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("pane focus response");
+        assert!(
+            serde_json::from_str::<api::schema::SuccessResponse>(&response).is_ok(),
+            "{response}"
+        );
+        assert!(matches!(
+            read_server_message(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("absolute input-source state after API focus"),
             ),
             ServerMessage::PrefixInputSource { active: false }
         ));

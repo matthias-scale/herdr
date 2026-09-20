@@ -1609,20 +1609,41 @@ pub(crate) enum ClientInputOwner {
     DockSurfaceMenu,
 }
 
-/// The input rules resolved from one client's complete presentation.
-/// Consumers use this snapshot after the presentation has been swapped out of
-/// `AppState`, so rendering and host side effects stay bound to that client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ClientInputPolicy {
-    owner: Option<ClientInputOwner>,
-    mode: Mode,
+/// The input and graphics rules resolved from one client's complete presentation.
+/// Headless clients share retained geometry while the local renderer borrows its
+/// current view, so consumers stay client-bound without allocating per frame.
+#[derive(Clone)]
+enum ClientPresentationGeometry<'a> {
+    Borrowed(&'a [crate::layout::PaneInfo]),
+    Shared(std::sync::Arc<Vec<crate::layout::PaneInfo>>),
 }
 
-impl ClientInputPolicy {
+impl ClientPresentationGeometry<'_> {
+    fn pane_infos(&self) -> &[crate::layout::PaneInfo] {
+        match self {
+            Self::Borrowed(pane_infos) => pane_infos,
+            Self::Shared(pane_infos) => pane_infos.as_slice(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ClientPresentationPolicy<'a> {
+    owner: Option<ClientInputOwner>,
+    mode: Mode,
+    pomodoro_owns_input: bool,
+    tab_surface_visible: bool,
+    geometry: ClientPresentationGeometry<'a>,
+}
+
+impl ClientPresentationPolicy<'static> {
     pub(crate) fn from_presentations(
         server_mode: Mode,
         sidebar: &SidebarPresentationState,
         dock: &DockPresentationState,
+        pomodoro_owns_input: bool,
+        tab_surface_visible: bool,
+        retained_pane_infos: std::sync::Arc<Vec<crate::layout::PaneInfo>>,
     ) -> Self {
         let owner = ClientInputOwnerState::from_presentations(sidebar, dock).resolve();
         let mode = sidebar
@@ -1633,30 +1654,52 @@ impl ClientInputPolicy {
                 ClientFocusIntent::FollowShared => server_mode,
                 ClientFocusIntent::Pane => Mode::Terminal,
             });
-        Self { owner, mode }
+        Self {
+            owner,
+            mode,
+            pomodoro_owns_input,
+            tab_surface_visible,
+            geometry: ClientPresentationGeometry::Shared(retained_pane_infos),
+        }
     }
+}
 
-    fn from_app(app: &AppState) -> Self {
+impl<'a> ClientPresentationPolicy<'a> {
+    fn from_app(app: &'a AppState) -> Self {
         Self {
             owner: ClientInputOwnerState::from_app(app).resolve(),
             mode: app.effective_interaction_mode(),
+            pomodoro_owns_input: app.pomodoro.prompt.is_some() || app.pomodoro.send_off.is_some(),
+            tab_surface_visible: !app.tab_surface_replaced(),
+            geometry: ClientPresentationGeometry::Borrowed(&app.view.pane_infos),
         }
     }
 
-    pub(crate) fn mode(self) -> Mode {
+    pub(crate) fn mode(&self) -> Mode {
         self.mode
     }
 
-    pub(crate) fn owns_input(self) -> bool {
-        self.owner.is_some()
+    pub(crate) fn owns_input(&self) -> bool {
+        self.pomodoro_owns_input || self.owner.is_some()
     }
 
-    pub(crate) fn mouse_motion_changes_view(self) -> bool {
+    pub(crate) fn mouse_motion_changes_view(&self) -> bool {
         self.owner.is_some() || self.mode.mouse_motion_changes_view()
     }
 
-    pub(crate) fn pane_graphics_visible(self) -> bool {
-        self.owner.is_none() && self.mode == Mode::Terminal
+    pub(crate) fn pane_graphics_visible(&self) -> bool {
+        !self.owns_input() && self.mode == Mode::Terminal && self.tab_surface_visible
+    }
+
+    pub(crate) fn tab_surface_visible(&self) -> bool {
+        self.tab_surface_visible
+    }
+
+    pub(crate) fn tab_surface(&self) -> crate::ui::TabSurfaceView<'_> {
+        crate::ui::TabSurfaceView {
+            pane_infos: self.geometry.pane_infos(),
+            split_borders: &[],
+        }
     }
 }
 
@@ -4839,8 +4882,8 @@ impl ClientInputOwnerState {
 }
 
 impl AppState {
-    pub(crate) fn client_input_policy(&self) -> ClientInputPolicy {
-        ClientInputPolicy::from_app(self)
+    pub(crate) fn client_presentation_policy(&self) -> ClientPresentationPolicy<'_> {
+        ClientPresentationPolicy::from_app(self)
     }
 
     /// Theme reported to child terminals. Real host answers take precedence;
@@ -8161,7 +8204,14 @@ mod tests {
             let mut dock = DockPresentationState::default();
             state.swap_sidebar_presentation(&mut sidebar);
             state.swap_dock_presentation(&mut dock);
-            let policy = ClientInputPolicy::from_presentations(Mode::Terminal, &sidebar, &dock);
+            let policy = ClientPresentationPolicy::from_presentations(
+                Mode::Terminal,
+                &sidebar,
+                &dock,
+                false,
+                true,
+                std::sync::Arc::new(Vec::new()),
+            );
             assert_eq!(
                 policy.owner,
                 Some(client_owner),
@@ -8176,6 +8226,24 @@ mod tests {
                 "{client_owner:?} must cover pane graphics"
             );
         }
+    }
+
+    #[test]
+    fn local_presentation_policy_borrows_rendered_pane_geometry() {
+        let mut state = AppState::test_new();
+        state.view.pane_infos.push(crate::layout::PaneInfo {
+            id: crate::layout::PaneId::from_raw(7),
+            rect: Rect::new(1, 2, 30, 10),
+            inner_rect: Rect::new(2, 3, 28, 8),
+            scrollbar_rect: None,
+            borders: ratatui::widgets::Borders::ALL,
+            is_focused: true,
+        });
+        let expected = state.view.pane_infos.as_ptr();
+
+        let policy = state.client_presentation_policy();
+
+        assert_eq!(policy.tab_surface().pane_infos.as_ptr(), expected);
     }
 
     #[test]
