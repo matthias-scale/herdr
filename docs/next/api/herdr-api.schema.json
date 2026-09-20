@@ -2452,6 +2452,22 @@
           ],
           "type": "object"
         },
+        "ClosingCompletion": {
+          "enum": [
+            "complete",
+            "incomplete",
+            "missing"
+          ],
+          "type": "string"
+        },
+        "ClosingParseStatus": {
+          "enum": [
+            "ok",
+            "missing",
+            "malformed"
+          ],
+          "type": "string"
+        },
         "EmptyParams": {
           "type": "object"
         },
@@ -3596,6 +3612,17 @@
                 "null"
               ]
             },
+            "completion": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/ClosingCompletion"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Explicit task completion from the authoritative final report."
+            },
             "decisions": {
               "items": {
                 "$ref": "#/schemas/request/$defs/ClosingBlockDecision"
@@ -3610,6 +3637,13 @@
               "minimum": 0,
               "type": [
                 "integer",
+                "null"
+              ]
+            },
+            "external_wait": {
+              "description": "Registered external dependency with a wake mechanism.",
+              "type": [
+                "string",
                 "null"
               ]
             },
@@ -3639,6 +3673,17 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "parse_status": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/ClosingParseStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether the adapter parsed an authoritative closing report."
             },
             "reported_at": {
               "type": [
@@ -3672,6 +3717,13 @@
             "wait": {
               "type": [
                 "string",
+                "null"
+              ]
+            },
+            "workers_unknown": {
+              "description": "A previously reported worker disappeared without terminal evidence.",
+              "type": [
+                "boolean",
                 "null"
               ]
             }

@@ -98,6 +98,7 @@ pub(crate) struct TargetIdentity {
     pub(crate) session_id: String,
     pub(crate) path: PathBuf,
     pub(crate) target_generation: u64,
+    pub(crate) turn_generation: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -481,6 +482,7 @@ impl crate::app::App {
                     "herdr:claude".to_string(),
                     terminal.claude_transcript_session_id.clone()?,
                     terminal.claude_transcript_path.clone()?,
+                    terminal.agent_turn_generation(),
                 ))
             })
             .collect::<Vec<_>>();
@@ -498,7 +500,7 @@ impl crate::app::App {
             .retain(|terminal_id, _| current_ids.contains(terminal_id));
 
         let mut work = Vec::with_capacity(raw_targets.len());
-        for (terminal_id, source, session_id, path) in raw_targets {
+        for (terminal_id, source, session_id, path, turn_generation) in raw_targets {
             let replace = self
                 .claude_subagent_trackers
                 .get(&terminal_id)
@@ -523,6 +525,7 @@ impl crate::app::App {
                     session_id,
                     path,
                     target_generation: tracker.target_generation,
+                    turn_generation,
                 },
                 tracker,
             });
@@ -594,6 +597,7 @@ impl crate::app::App {
                             == Some(observation.target.session_id.as_str())
                         && terminal.claude_transcript_path.as_ref()
                             == Some(&observation.target.path)
+                        && terminal.agent_turn_generation() == observation.target.turn_generation
                         && self
                             .claude_subagent_trackers
                             .get(&observation.target.terminal_id)
@@ -638,6 +642,8 @@ impl crate::app::App {
         let mut counts_changed = 0_u64;
         let mut observations_changed = 0_u64;
         let mut changed_panes = Vec::new();
+        let mut pane_updates = Vec::new();
+        let previous_toast = self.state.toast.clone();
         for terminal_id in updated_terminal_ids {
             let count = self
                 .claude_subagent_trackers
@@ -647,17 +653,39 @@ impl crate::app::App {
                 .claude_subagent_trackers
                 .get(&terminal_id)
                 .and_then(TranscriptTracker::observations);
-            let (count_changed, observation_changed) = self
-                .state
-                .terminals
-                .get_mut(&terminal_id)
-                .map(|terminal| {
-                    (
-                        terminal.set_active_subagents(count),
-                        terminal.set_claude_subagent_observations(observations),
-                    )
-                })
-                .unwrap_or_default();
+            let location =
+                self.state
+                    .workspaces
+                    .iter()
+                    .enumerate()
+                    .find_map(|(ws_idx, workspace)| {
+                        workspace.tabs.iter().find_map(|tab| {
+                            tab.panes.iter().find_map(|(pane_id, pane)| {
+                                (pane.attached_terminal_id == terminal_id)
+                                    .then_some((ws_idx, *pane_id, pane.seen))
+                            })
+                        })
+                    });
+            let mut count_changed = false;
+            let mut observation_changed = false;
+            let state_update = if let Some((_, pane_id, seen)) = location {
+                let now = Instant::now();
+                self.state
+                    .update_terminal_state_at(pane_id, now, |terminal| {
+                        let (changed, mutation) =
+                            terminal.set_active_subagents_with_projection_at(count, seen, now);
+                        count_changed = changed;
+                        observation_changed =
+                            terminal.set_claude_subagent_observations(observations);
+                        mutation
+                    })
+            } else {
+                if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+                    count_changed = terminal.set_active_subagents(count);
+                    observation_changed = terminal.set_claude_subagent_observations(observations);
+                }
+                None
+            };
             if count_changed {
                 counts_changed = counts_changed.saturating_add(1);
             }
@@ -667,25 +695,21 @@ impl crate::app::App {
             if !count_changed && !observation_changed {
                 continue;
             }
-            if let Some(location) =
-                self.state
-                    .workspaces
-                    .iter()
-                    .enumerate()
-                    .find_map(|(ws_idx, workspace)| {
-                        workspace.tabs.iter().find_map(|tab| {
-                            tab.panes.iter().find_map(|(pane_id, pane)| {
-                                (pane.attached_terminal_id == terminal_id)
-                                    .then_some((ws_idx, *pane_id))
-                            })
-                        })
-                    })
-            {
-                changed_panes.push(location);
+            if let Some((ws_idx, pane_id, _)) = location {
+                changed_panes.push((ws_idx, pane_id));
+            }
+            if let Some(update) = state_update {
+                self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
+                self.emit_pane_state_update(&update);
+                pane_updates.push(update);
             }
         }
         for (ws_idx, pane_id) in changed_panes {
             self.emit_pane_updated(ws_idx, pane_id);
+        }
+        if !pane_updates.is_empty() {
+            self.emit_terminal_or_system_agent_notifications(&pane_updates);
+            self.sync_toast_deadline(previous_toast);
         }
         let active_subagents_total = self
             .claude_subagent_trackers
@@ -1304,6 +1328,7 @@ mod tests {
                         session_id: SESSION_ID.into(),
                         path: path.clone(),
                         target_generation: 1,
+                        turn_generation: 0,
                     },
                     tracker: TranscriptTracker::new(SESSION_ID.into(), path, 1),
                 }
@@ -1336,6 +1361,7 @@ mod tests {
                         session_id: SESSION_ID.into(),
                         path: path.clone(),
                         target_generation: 1,
+                        turn_generation: 0,
                     },
                     tracker: TranscriptTracker::new(SESSION_ID.into(), path, 1),
                 }
@@ -1373,6 +1399,7 @@ mod tests {
                         session_id: SESSION_ID.into(),
                         path: path.clone(),
                         target_generation: index,
+                        turn_generation: 0,
                     },
                     tracker: TranscriptTracker::new(SESSION_ID.into(), path, index),
                 }
@@ -1473,6 +1500,7 @@ mod tests {
                 session_id: SESSION_ID.into(),
                 path,
                 target_generation,
+                turn_generation: 0,
             },
             count: tracker.count(),
             observations: tracker.observations(),
@@ -1498,12 +1526,92 @@ mod tests {
                 session_id: SESSION_ID.into(),
                 path,
                 target_generation,
+                turn_generation: 0,
             },
             count: tracker.count(),
             observations: tracker.observations(),
             tracker,
             stats: ScanStats::default(),
         }
+    }
+
+    #[test]
+    fn completed_task_becomes_unread_done_when_native_worker_count_drains() {
+        let dir = TestDir::new("done-after-native-worker");
+        let path = dir.transcript();
+        let (mut app, terminal_id) = app_with_claude_target(path.clone());
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.active = None;
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(crate::detect::Agent::Claude), AgentState::Idle);
+
+        app.claude_subagent_trackers.insert(
+            terminal_id.clone(),
+            TranscriptTracker::new(SESSION_ID.into(), path.clone(), 7),
+        );
+        app.last_claude_subagent_refresh_generation = 1;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 1,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+        assert!(app.handle_claude_subagents_refreshed(
+            1,
+            vec![observation(terminal_id.clone(), path.clone(), 7, AGENT_A,)],
+            BatchStats::default(),
+        ));
+
+        app.handle_internal_event_with_pane_updates(crate::events::AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:claude-closing-block".into(),
+            agent_label: "claude".into(),
+            state: AgentState::Idle,
+            message: None,
+            seq: Some(1),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            session_ref: None,
+            closing_block: Some(Box::new(crate::events::ClosingBlockReport {
+                gates: Vec::new(),
+                items: Vec::new(),
+                decisions: Vec::new(),
+                agents: None,
+                completion: Some(crate::api::schema::ClosingCompletion::Complete),
+                external_wait: None,
+                parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
+                workers_unknown: Some(false),
+                dependencies_authoritative: true,
+                session_id: Some(SESSION_ID.into()),
+            })),
+        });
+        let pane = app.state.workspaces[0].pane_state(pane_id).unwrap();
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(
+            pane.agent_projection(terminal).status_key(),
+            "waiting_on_agents"
+        );
+        assert!(pane.seen);
+        assert!(pane.done_since.is_none());
+
+        app.last_claude_subagent_refresh_generation = 2;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 2,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+        assert!(app.handle_claude_subagents_refreshed(
+            2,
+            vec![completed_observation(terminal_id.clone(), path, 7, AGENT_A)],
+            BatchStats::default(),
+        ));
+
+        let pane = app.state.workspaces[0].pane_state(pane_id).unwrap();
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(pane.agent_projection(terminal).status_key(), "done");
+        assert!(!pane.seen);
+        assert!(pane.done_since.is_some());
     }
 
     #[test]
@@ -1654,6 +1762,171 @@ mod tests {
             BatchStats::default(),
         ));
         assert_eq!(app.state.terminals[&terminal_id].active_subagents, None);
+    }
+
+    #[test]
+    fn refresh_sampled_before_a_new_turn_cannot_clear_its_worker() {
+        let dir = TestDir::new("stale-turn-result");
+        let path = dir.transcript();
+        let (mut app, terminal_id) = app_with_claude_target(path.clone());
+        let sampled_zero = completed_observation(terminal_id.clone(), path.clone(), 7, AGENT_A);
+        let reported_at = Instant::now();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(crate::detect::Agent::Claude), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1),
+            reported_at,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            reported_at + std::time::Duration::from_secs(1),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            reported_at + std::time::Duration::from_secs(2),
+        );
+        terminal.set_active_subagents(Some(1));
+
+        app.claude_subagent_trackers.insert(
+            terminal_id.clone(),
+            TranscriptTracker::new(SESSION_ID.into(), path, 7),
+        );
+        app.last_claude_subagent_refresh_generation = 1;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 1,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+
+        assert!(!app.handle_claude_subagents_refreshed(
+            1,
+            vec![sampled_zero],
+            BatchStats::default(),
+        ));
+        assert_eq!(app.state.terminals[&terminal_id].active_subagents, Some(1));
+    }
+
+    #[test]
+    fn refresh_sampled_before_a_hookless_native_turn_cannot_clear_its_worker() {
+        let dir = TestDir::new("stale-hookless-turn-result");
+        let path = dir.transcript();
+        let (mut app, terminal_id) = app_with_claude_target(path.clone());
+        let sampled_zero = completed_observation(terminal_id.clone(), path.clone(), 7, AGENT_A);
+        let observed_at = Instant::now();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            observed_at,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            observed_at + std::time::Duration::from_secs(1),
+        );
+        terminal.set_active_subagents(Some(1));
+
+        app.claude_subagent_trackers.insert(
+            terminal_id.clone(),
+            TranscriptTracker::new(SESSION_ID.into(), path, 7),
+        );
+        app.last_claude_subagent_refresh_generation = 1;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 1,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+
+        assert!(!app.handle_claude_subagents_refreshed(
+            1,
+            vec![sampled_zero],
+            BatchStats::default(),
+        ));
+        assert_eq!(app.state.terminals[&terminal_id].active_subagents, Some(1));
+    }
+
+    #[test]
+    fn refresh_sampled_before_a_user_prompt_hook_turn_cannot_clear_its_worker() {
+        let dir = TestDir::new("stale-user-prompt-turn-result");
+        let path = dir.transcript();
+        let (mut app, terminal_id) = app_with_claude_target(path.clone());
+        let sampled_zero = completed_observation(terminal_id.clone(), path.clone(), 7, AGENT_A);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_hook_authority(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            Some(1),
+        );
+        let sampled_generation = terminal.agent_turn_generation();
+
+        app.handle_internal_event(crate::events::AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:claude-closing-block".into(),
+            agent_label: "claude".into(),
+            state: AgentState::Working,
+            message: None,
+            seq: Some(2),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            session_ref: None,
+            closing_block: None,
+        });
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_active_subagents(Some(1));
+        assert_eq!(
+            app.state.terminals[&terminal_id].agent_turn_generation(),
+            sampled_generation.wrapping_add(1),
+            "the accepted UserPromptSubmit hook starts a new turn"
+        );
+
+        app.claude_subagent_trackers.insert(
+            terminal_id.clone(),
+            TranscriptTracker::new(SESSION_ID.into(), path, 7),
+        );
+        app.last_claude_subagent_refresh_generation = 1;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 1,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+
+        assert!(!app.handle_claude_subagents_refreshed(
+            1,
+            vec![sampled_zero],
+            BatchStats::default(),
+        ));
+        assert_eq!(app.state.terminals[&terminal_id].active_subagents, Some(1));
     }
 
     #[test]

@@ -919,14 +919,14 @@ impl crate::app::state::AppState {
                         .unwrap_or_else(|| "agent".to_string());
                     let workspace_label = workspace.display_name_from_terminals(&self.terminals);
                     for (kind, item) in terminal
-                        .closing_gates
+                        .closing_gates()
                         .iter()
                         .map(|item| ("gate", item))
                         .chain(
                             terminal
-                                .closing_items
+                                .closing_items()
                                 .iter()
-                                .filter(|item| item.blocking)
+                                .filter(|item| item.requires_human_input())
                                 .map(|item| ("item", item)),
                         )
                     {
@@ -1639,14 +1639,14 @@ mod tests {
     }
 
     #[test]
-    fn answer_only_pane_contributes_a_yellow_poll() {
+    fn answer_only_pane_contributes_a_blocking_poll() {
         let mut state = state_with_gates(&[("question", Vec::new())]);
         let pane_id = state.workspaces[0].tabs[0].root_pane;
         let terminal_id = state.workspaces[0].terminal_id(pane_id).unwrap().clone();
         let terminal = state.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
         terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
-            blocking: true,
+            blocking: false,
             n: 1,
             label: "Answer".into(),
             text: "Choose a lane".into(),
@@ -1661,7 +1661,7 @@ mod tests {
         assert_eq!(projection.poll_rows.len(), 1);
         assert_eq!(
             projection.poll_rows[0].attention_tier,
-            crate::terminal::state::AttentionTier::Attention
+            crate::terminal::state::AttentionTier::Blocked
         );
 
         state.workspaces[0].tabs[0]
@@ -1676,7 +1676,7 @@ mod tests {
     }
 
     #[test]
-    fn nonblocking_closing_items_do_not_create_poll_rows() {
+    fn informational_closing_items_do_not_create_poll_rows() {
         let mut state = state_with_gates(&[("optional", Vec::new())]);
         let pane_id = state.workspaces[0].tabs[0].root_pane;
         let terminal_id = state.workspaces[0].terminal_id(pane_id).unwrap().clone();
@@ -1684,8 +1684,8 @@ mod tests {
         terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Idle);
         terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
             n: 1,
-            label: "Answer".into(),
-            text: "Optional preference".into(),
+            label: "What to test".into(),
+            text: "Run the smoke test".into(),
             blocking: false,
             pr: None,
             ticket: None,
@@ -1696,8 +1696,8 @@ mod tests {
 
         assert!(state.dock_home_projection().poll_rows.is_empty());
         assert_eq!(
-            state.terminals[&terminal_id].closing_items[0].text,
-            "Optional preference"
+            state.terminals[&terminal_id].closing_items()[0].text,
+            "Run the smoke test"
         );
     }
 

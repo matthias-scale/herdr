@@ -367,15 +367,20 @@ impl AgentInfo {
             AgentStatus::Stale => (crate::detect::AgentState::Unknown, true, true),
             AgentStatus::Unknown => (crate::detect::AgentState::Unknown, true, false),
         };
-        let open_blockers = !self.gates.is_empty();
+        let blocking_items = self
+            .items
+            .iter()
+            .filter(|item| item.requires_human_input())
+            .count();
+        let open_blockers = !self.gates.is_empty() || blocking_items > 0;
         AgentInfoProjection {
             state,
             seen,
             stale,
             attention_tier: crate::terminal::state::attention_tier(
                 state,
-                open_blockers,
-                self.items.iter().any(|item| item.blocking),
+                !self.gates.is_empty(),
+                blocking_items > 0,
                 self.usage_limited,
             ),
             open_blockers,

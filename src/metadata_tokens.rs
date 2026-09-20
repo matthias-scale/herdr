@@ -83,6 +83,7 @@ impl MetadataTokens {
 
     /// Read one token without materialising the whole map. Pane-scaled callers
     /// such as the status watchdog run this per sweep and only need one value.
+    #[cfg(test)]
     pub(crate) fn get(&self, key: &str) -> Option<&str> {
         self.entries.get(key).map(|token| token.value.as_str())
     }
@@ -92,6 +93,12 @@ impl MetadataTokens {
             .iter()
             .map(|(key, token)| (key.clone(), token.value.clone()))
             .collect()
+    }
+
+    pub(crate) fn remove_prefixed(&mut self, prefix: &str) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|key, _| !key.starts_with(prefix));
+        self.entries.len() != before
     }
 
     pub(crate) fn next_expiry(&self) -> Option<Instant> {

@@ -2395,7 +2395,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_attention_projection_excludes_questions_and_settled_panes_from_blocked() {
+    fn agent_attention_projection_blocks_action_points_but_not_settled_panes() {
         let mut answer = agent(AgentStatus::Blocked, serde_json::json!([]));
         answer.items = vec![crate::api::schema::ClosingBlockItem {
             blocking: true,
@@ -2410,11 +2410,11 @@ mod tests {
         }];
         let answer_row =
             FleetRow::from_agent("ub1", false, answer, 1_777_000_000).expect("valid attention row");
-        assert!(!answer_row.blocked);
-        assert_eq!(answer_row.state, "attention");
+        assert!(answer_row.blocked);
+        assert_eq!(answer_row.state, "blocked");
 
-        let mut optional = agent(AgentStatus::Idle, serde_json::json!([]));
-        optional.items = vec![crate::api::schema::ClosingBlockItem {
+        let mut verify = agent(AgentStatus::Idle, serde_json::json!([]));
+        verify.items = vec![crate::api::schema::ClosingBlockItem {
             n: 1,
             label: "Verify".into(),
             text: "Optional check".into(),
@@ -2425,10 +2425,27 @@ mod tests {
             default: None,
             default_at: None,
         }];
-        let optional_row = FleetRow::from_agent("ub1", false, optional, 1_777_000_000)
-            .expect("valid nonblocking row");
-        assert!(!optional_row.blocked);
-        assert_eq!(optional_row.state, "idle");
+        let verify_row =
+            FleetRow::from_agent("ub1", false, verify, 1_777_000_000).expect("valid verify row");
+        assert!(verify_row.blocked);
+        assert_eq!(verify_row.state, "blocked");
+
+        let mut informational = agent(AgentStatus::Done, serde_json::json!([]));
+        informational.items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "What to test".into(),
+            text: "Run the smoke test".into(),
+            blocking: true,
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        let informational_row = FleetRow::from_agent("ub1", false, informational, 1_777_000_000)
+            .expect("valid informational row");
+        assert!(!informational_row.blocked);
+        assert_eq!(informational_row.state, "done");
 
         let mut settled = agent(
             AgentStatus::Blocked,

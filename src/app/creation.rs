@@ -4,10 +4,7 @@ use crate::api::schema::{EventData, EventEnvelope, EventKind};
 #[cfg(test)]
 use tracing::error;
 
-use super::{
-    api_helpers::{pane_agent_status, pane_agent_status_with_stale, tab_attention_priority},
-    App, Mode,
-};
+use super::{api_helpers::pane_agent_status_with_stale, App, Mode};
 use crate::{config::NewTerminalCwdConfig, workspace::Workspace};
 
 pub(crate) fn resolve_new_terminal_cwd(
@@ -689,17 +686,7 @@ impl App {
     ) -> Option<crate::api::schema::TabInfo> {
         let ws = self.state.workspaces.get(ws_idx)?;
         let tab = ws.tabs.get(tab_idx)?;
-        let (agg_state, seen) = tab
-            .panes
-            .values()
-            .filter_map(|pane| {
-                self.state
-                    .terminals
-                    .get(&pane.attached_terminal_id)
-                    .map(|terminal| (terminal.raw_agent_state(), pane.seen))
-            })
-            .max_by_key(|(state, seen)| tab_attention_priority(*state, *seen))
-            .unwrap_or((crate::detect::AgentState::Unknown, true));
+        let (agg_state, seen, _) = tab.aggregate_state_and_attention(&self.state.terminals);
         Some(crate::api::schema::TabInfo {
             tab_id: self.public_tab_id(ws_idx, tab_idx)?,
             workspace_id: self.public_workspace_id(ws_idx),
@@ -816,6 +803,7 @@ impl App {
                 .focused_pane_id()
                 .is_some_and(|focused| focused == pane_id);
         let presentation = terminal.effective_presentation();
+        let projection = pane.agent_projection(terminal);
         Some(crate::api::schema::PaneInfo {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
             terminal_id: terminal.id.to_string(),
@@ -838,9 +826,9 @@ impl App {
             terminal_title_stripped: terminal.terminal_title_stripped(),
             display_agent: presentation.display_agent,
             agent_status: pane_agent_status_with_stale(
-                terminal.raw_agent_state(),
-                pane.seen,
-                terminal.supervisor_stale,
+                projection.state,
+                projection.seen,
+                projection.stale,
             ),
             waiting_on_agents: pane.settled_at.is_none() && terminal.waiting_on_agents(),
             wait: terminal
@@ -856,10 +844,10 @@ impl App {
                 .as_ref()
                 .and_then(|report| report.reported_at_wire.clone()),
             state_labels: presentation.state_labels,
-            tokens: terminal.metadata_tokens.values(),
-            gates: terminal.closing_gates.clone(),
-            items: terminal.closing_items.clone(),
-            decisions: terminal.closing_decisions.clone(),
+            tokens: terminal.metadata_tokens_for_api(),
+            gates: terminal.closing_gates().to_vec(),
+            items: terminal.closing_items().to_vec(),
+            decisions: terminal.closing_decisions().to_vec(),
             agent_session: terminal_agent_session_info(terminal),
             scroll,
             revision: terminal.revision,
@@ -907,11 +895,7 @@ impl App {
             active_tab_id: self.public_tab_id(index, ws.active_tab).unwrap_or_else(|| {
                 crate::workspace::public_tab_id_for_number(&ws.id, ws.active_tab + 1)
             }),
-            agent_status: if stale {
-                crate::api::schema::AgentStatus::Stale
-            } else {
-                pane_agent_status(agg_state, seen)
-            },
+            agent_status: pane_agent_status_with_stale(agg_state, seen, stale),
             tokens: ws.metadata_tokens.values(),
             worktree: ws
                 .worktree_space()
@@ -1499,6 +1483,43 @@ mod tests {
         assert_eq!(
             app.tab_info(0, 0).unwrap().label,
             "Add Subabe management token to Doppler"
+        );
+    }
+
+    #[test]
+    fn api_aggregates_keep_a_stale_human_blocker_blocked() {
+        let (mut app, terminal_id) = title_test_app();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Codex),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose the release path".into(),
+            blocking: true,
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        terminal.supervisor_stale = true;
+        terminal.stale_resolution = Some((crate::detect::AgentState::Unknown, true));
+
+        assert_eq!(
+            app.pane_info(0, pane_id).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Blocked
+        );
+        assert_eq!(
+            app.tab_info(0, 0).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Blocked
+        );
+        assert_eq!(
+            app.workspace_info(0).agent_status,
+            crate::api::schema::AgentStatus::Blocked
         );
     }
 
