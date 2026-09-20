@@ -596,10 +596,10 @@ mod tests {
                 pane_id,
                 crate::agent_state::AgentReportPayload {
                     goal: Some("ship MAT-160".into()),
-                    tasks: vec![crate::agent_state::AgentTask {
+                    tasks: Some(vec![crate::agent_state::AgentTask {
                         text: "read transcript".into(),
                         status: crate::agent_state::AgentTaskStatus::Completed,
-                    }],
+                    }]),
                     subagents: vec![
                         crate::agent_state::AgentSubagent {
                             name: "native worker".into(),

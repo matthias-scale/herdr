@@ -547,7 +547,7 @@ mod tests {
                 AgentReportPayload {
                     status_text: Some("checking tests".into()),
                     goal: Some("ship MAT-160".into()),
-                    tasks: vec![
+                    tasks: Some(vec![
                         AgentTask {
                             text: "read transcript".into(),
                             status: AgentTaskStatus::Completed,
@@ -556,7 +556,7 @@ mod tests {
                             text: "build link cache".into(),
                             status: AgentTaskStatus::InProgress,
                         },
-                    ],
+                    ]),
                     subagents: vec![
                         AgentSubagent {
                             name: "native worker".into(),
