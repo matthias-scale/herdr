@@ -537,6 +537,67 @@ async fn retained_update_sends_only_graphics_message() {
 }
 
 #[tokio::test]
+async fn full_render_hides_uploaded_graphics_behind_client_rename_overlay() {
+    let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+    set_graphics_layer(&mut server, pane_id, vec![1, 2, 3]);
+    let initial = enable_graphics_and_render(&mut server, &client_rx);
+    assert!(String::from_utf8_lossy(&initial.graphics).contains("a=p"));
+    let workspace_id = server.app.state.workspaces[0].id.clone();
+    let tab_id = crate::workspace::public_tab_id_for_number(
+        &workspace_id,
+        server.app.state.workspaces[0].tabs[0].number,
+    );
+    server
+        .clients
+        .get_mut(&1)
+        .unwrap()
+        .sidebar_presentation
+        .overlay = crate::app::state::ClientOverlayState {
+        kind: crate::app::state::ClientOverlay::RenameTab,
+        rename_target: Some(crate::app::state::RenameTarget::Tab {
+            workspace_id,
+            tab_id,
+        }),
+        ..Default::default()
+    };
+
+    server.render_and_stream();
+
+    let frame = read_server_frame(receive_render(&client_rx, Duration::from_millis(100)));
+    let graphics = String::from_utf8_lossy(&frame.graphics);
+    assert!(!graphics.contains("a=p"));
+    assert!(graphics.contains("a=d"), "{graphics:?}");
+}
+
+#[tokio::test]
+async fn retained_render_hides_uploaded_graphics_behind_client_context_menu() {
+    let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+    set_graphics_layer(&mut server, pane_id, vec![1, 2, 3]);
+    let initial = enable_graphics_and_render(&mut server, &client_rx);
+    assert!(String::from_utf8_lossy(&initial.graphics).contains("a=p"));
+    server
+        .clients
+        .get_mut(&1)
+        .unwrap()
+        .sidebar_presentation
+        .overlay
+        .kind = crate::app::state::ClientOverlay::ContextMenu;
+
+    assert_eq!(
+        server.render_retained_graphics_update_and_stream(),
+        RetainedGraphicsOutcome::Sent
+    );
+
+    let message = read_server_message(receive_render(&client_rx, Duration::from_millis(100)));
+    let ServerMessage::Graphics { bytes } = message else {
+        panic!("expected graphics-only cleanup, got {message:?}");
+    };
+    let graphics = String::from_utf8_lossy(&bytes);
+    assert!(!graphics.contains("a=p"));
+    assert!(graphics.contains("a=d"), "{graphics:?}");
+}
+
+#[tokio::test]
 async fn retained_graphics_stays_ordered_after_an_older_render() {
     let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
     let _ = enable_graphics_and_render(&mut server, &client_rx);

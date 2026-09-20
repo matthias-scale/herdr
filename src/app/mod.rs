@@ -1819,7 +1819,10 @@ impl App {
         };
         if let Err(err) = self
             .event_tx
-            .try_send(crate::events::AppEvent::PrefixInputSource { active })
+            .try_send(crate::events::AppEvent::PrefixInputSource {
+                client_id: self.active_overlay_client_id,
+                active,
+            })
         {
             tracing::warn!(active, %err, "failed to queue prefix input-source change");
         }
@@ -4318,7 +4321,7 @@ mod tests {
     fn drained_prefix_active(app: &mut App) -> Vec<bool> {
         let mut out = Vec::new();
         while let Ok(ev) = app.event_rx.try_recv() {
-            if let crate::events::AppEvent::PrefixInputSource { active } = ev {
+            if let crate::events::AppEvent::PrefixInputSource { active, .. } = ev {
                 out.push(active);
             }
         }
@@ -4444,11 +4447,17 @@ mod tests {
         let restore_calls = fake.restore_calls.clone();
         app.set_prefix_input_source(Box::new(fake));
 
-        app.handle_internal_event(crate::events::AppEvent::PrefixInputSource { active: true });
+        app.handle_internal_event(crate::events::AppEvent::PrefixInputSource {
+            client_id: None,
+            active: true,
+        });
         assert_eq!(switch_calls.get(), 1);
         assert_eq!(restore_calls.get(), 0);
 
-        app.handle_internal_event(crate::events::AppEvent::PrefixInputSource { active: false });
+        app.handle_internal_event(crate::events::AppEvent::PrefixInputSource {
+            client_id: None,
+            active: false,
+        });
         assert_eq!(restore_calls.get(), 1);
     }
 
@@ -4461,8 +4470,14 @@ mod tests {
         let restore_calls = fake.restore_calls.clone();
         app.set_prefix_input_source(Box::new(fake));
 
-        app.handle_internal_event(crate::events::AppEvent::PrefixInputSource { active: true });
-        app.handle_internal_event(crate::events::AppEvent::PrefixInputSource { active: false });
+        app.handle_internal_event(crate::events::AppEvent::PrefixInputSource {
+            client_id: None,
+            active: true,
+        });
+        app.handle_internal_event(crate::events::AppEvent::PrefixInputSource {
+            client_id: None,
+            active: false,
+        });
         assert_eq!(switch_calls.get(), 1);
         assert_eq!(restore_calls.get(), 0);
     }

@@ -425,7 +425,7 @@ impl App {
             return None;
         }
 
-        if let AppEvent::PrefixInputSource { active } = ev {
+        if let AppEvent::PrefixInputSource { active, .. } = ev {
             // Monolithic path applies the switch here. Server mode forwards it to the foreground
             // client instead (see HeadlessServer::handle_internal_event_with_forwarding); should an
             // App-internal drain consume the event before the forwarding drain, the flag keeps the

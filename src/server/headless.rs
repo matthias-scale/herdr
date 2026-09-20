@@ -2000,21 +2000,14 @@ impl HeadlessServer {
     }
 
     fn client_input_mode(&self, client_id: u64) -> crate::app::state::Mode {
-        self.clients
-            .get(&client_id)
-            .map(|client| {
-                client.sidebar_presentation.overlay.kind.mode().unwrap_or(
-                    match client.sidebar_presentation.focus_intent {
-                        crate::app::state::ClientFocusIntent::FollowShared => {
-                            self.app.state.server_mode()
-                        }
-                        crate::app::state::ClientFocusIntent::Pane => {
-                            crate::app::state::Mode::Terminal
-                        }
-                    },
-                )
-            })
+        self.client_input_policy(client_id)
+            .map(crate::app::state::ClientInputPolicy::mode)
             .unwrap_or_else(|| self.app.state.server_mode())
+    }
+
+    fn sync_client_input_source(&mut self, client_id: u64, mode: crate::app::state::Mode) {
+        let active = self.app.state.switch_ascii_input_source_in_prefix && mode.wants_ascii_input();
+        self.send_to_client(client_id, ServerMessage::PrefixInputSource { active });
     }
 
     fn promote_client_to_foreground_with_mode(
@@ -2022,10 +2015,6 @@ impl HeadlessServer {
         client_id: u64,
         next_mode: crate::app::state::Mode,
     ) -> bool {
-        let previous_mode = self
-            .foreground_client_id
-            .map(|foreground| self.client_input_mode(foreground))
-            .unwrap_or_else(|| self.app.state.server_mode());
         let stamp = self.allocate_activity_stamp();
         let Some(client) = self.clients.get_mut(&client_id) else {
             return false;
@@ -2036,8 +2025,7 @@ impl HeadlessServer {
         self.foreground_client_id = Some(client_id);
         self.sync_foreground_client_state();
         if changed {
-            self.app
-                .sync_prefix_input_source_modes(previous_mode, next_mode);
+            self.sync_client_input_source(client_id, next_mode);
         }
         changed
     }
@@ -2045,8 +2033,12 @@ impl HeadlessServer {
     fn promote_latest_remaining_client(&mut self) -> bool {
         let next_foreground = latest_app_client(&self.clients);
         let changed = next_foreground != self.foreground_client_id;
+        let next_mode = next_foreground.map(|client_id| self.client_input_mode(client_id));
         self.foreground_client_id = next_foreground;
         self.sync_foreground_client_state();
+        if let (true, Some(client_id), Some(mode)) = (changed, next_foreground, next_mode) {
+            self.sync_client_input_source(client_id, mode);
+        }
         changed
     }
 
@@ -3395,12 +3387,19 @@ impl HeadlessServer {
                 }
                 true
             }
-            AppEvent::PrefixInputSource { active } => {
-                // Input-source switching is a client-local host side effect; forward it to the
-                // foreground client (which owns the real TIS switch + run-loop pump), like clipboard.
-                self.send_to_foreground_client(ServerMessage::PrefixInputSource {
-                    active: *active,
-                });
+            AppEvent::PrefixInputSource { client_id, active } => {
+                // A queued transition stays with the client whose presentation produced it.
+                // Monolithic-origin events have no client id and retain the foreground fallback.
+                if let Some(client_id) = client_id {
+                    self.send_to_client(
+                        *client_id,
+                        ServerMessage::PrefixInputSource { active: *active },
+                    );
+                } else {
+                    self.send_to_foreground_client(ServerMessage::PrefixInputSource {
+                        active: *active,
+                    });
+                }
                 true
             }
             AppEvent::StateChanged { pane_id, agent, .. } => {
@@ -3722,7 +3721,9 @@ impl HeadlessServer {
         };
         self.app.state.swap_sidebar_presentation(&mut presentation);
         self.app.active_overlay_client_id = Some(client_id);
+        let previous_mode = self.app.state.effective_interaction_mode();
         let changed = self.app.handle_internal_event_with_render_impact(ev);
+        self.app.sync_prefix_input_source(previous_mode);
         self.app.take_pending_client_pane_focus();
         self.app.active_overlay_client_id = None;
         self.app.state.swap_sidebar_presentation(&mut presentation);
@@ -4199,6 +4200,9 @@ impl HeadlessServer {
             .clients
             .get(&client_id)
             .is_some_and(ClientConnection::is_full_app_client);
+        let source_policy = source_is_full_app
+            .then(|| self.client_input_policy(client_id))
+            .flatten();
         let host_surface_redraw = crate::raw_input::events_require_host_surface_redraw(
             &events,
             self.app.state.redraw_on_focus_gained,
@@ -4211,15 +4215,11 @@ impl HeadlessServer {
                     row,
                     ..
                 }) => {
-                    self.clients.get(&client_id).is_some_and(|client| {
-                        client.dock_presentation.hovered_control.is_some()
-                            || client
-                                .sidebar_presentation
-                                .overlay
-                                .snooze
-                                .as_ref()
-                                .is_some_and(|snooze| snooze.time_draft.is_none())
-                    }) || crate::ui::hovered_control_at(&self.app.state, *column, *row).is_some()
+                    source_policy.is_some_and(|policy| policy.mouse_motion_changes_view())
+                        || self.clients.get(&client_id).is_some_and(|client| {
+                            client.dock_presentation.hovered_control.is_some()
+                        })
+                        || crate::ui::hovered_control_at(&self.app.state, *column, *row).is_some()
                 }
                 _ => false,
             });
@@ -4310,6 +4310,7 @@ impl HeadlessServer {
         if let Some(view) = &mut usage_view {
             self.app.state.swap_usage_view(view);
         }
+        self.app.active_overlay_client_id = source_is_full_app.then_some(client_id);
         // Promotion and reconciliation are input transitions. They must see
         // this client's presentation, never whichever client rendered last.
         let foreground_changed = if interaction {
@@ -4323,7 +4324,6 @@ impl HeadlessServer {
         let interaction_reconciled = self
             .app
             .reconcile_client_interaction(interaction && source_is_full_app);
-        self.app.active_overlay_client_id = source_is_full_app.then_some(client_id);
         pomodoro_changed |= self.route_full_app_human_events(client_id, events, false);
         self.app.take_pending_client_pane_focus();
         if source_is_full_app {
@@ -4542,6 +4542,8 @@ impl HeadlessServer {
                     client.sidebar_presentation.group_sorts =
                         crate::client::presentation::load_sidebar_group_sorts();
                 }
+                let foreground_changed =
+                    !direct_attach_requested && self.foreground_client_id != Some(client_id);
                 if !direct_attach_requested {
                     self.send_to_client(
                         client_id,
@@ -4557,6 +4559,9 @@ impl HeadlessServer {
                     self.app.next_work_index_refresh = Instant::now();
                 }
                 self.sync_foreground_client_state();
+                if foreground_changed {
+                    self.sync_client_input_source(client_id, self.client_input_mode(client_id));
+                }
                 self.resize_shared_runtime_to_effective_size();
                 self.nudge_handoff_panes_on_first_client_attach();
                 true
@@ -5971,7 +5976,10 @@ impl HeadlessServer {
             }
             retained_fallback!("no_target");
         };
-        if self.client_input_owner(client_id).is_some() {
+        if self
+            .client_input_policy(client_id)
+            .is_some_and(crate::app::state::ClientInputPolicy::owns_input)
+        {
             retained_fallback!("client_overlay");
         }
         let Some(client) = self.clients.get(&client_id) else {
@@ -6082,12 +6090,13 @@ impl HeadlessServer {
         retained_fallback!("send_failed");
     }
 
-    fn client_input_owner(&self, client_id: u64) -> Option<crate::app::state::ClientInputOwner> {
+    fn client_input_policy(&self, client_id: u64) -> Option<crate::app::state::ClientInputPolicy> {
         let client = self.clients.get(&client_id)?;
-        crate::app::state::client_input_owner_from_presentations(
+        Some(crate::app::state::ClientInputPolicy::from_presentations(
+            self.app.state.server_mode(),
             &client.sidebar_presentation,
             &client.dock_presentation,
-        )
+        ))
     }
 
     fn retained_pty_update_allowed_by_app_state(&self) -> bool {
@@ -6213,6 +6222,9 @@ impl HeadlessServer {
         for (client_id, (cols, rows), cell_size, is_foreground, mode) in render_targets {
             let area = Rect::new(0, 0, cols, rows);
             let is_app_client = matches!(mode, ClientConnectionMode::App);
+            let client_input_policy = is_app_client
+                .then(|| self.client_input_policy(client_id))
+                .flatten();
             let mut frame = match mode {
                 ClientConnectionMode::App => {
                     let mut sidebar_presentation = self
@@ -6412,11 +6424,12 @@ impl HeadlessServer {
                     }
                 }
                 let graphics_started = crate::render_prof::timer();
-                let encoded = crate::kitty_graphics::encode_local_pane_graphics(
+                let encoded = crate::kitty_graphics::encode_local_pane_graphics_for_client(
                     &self.app.state,
                     &self.app.pane_graphics,
                     &self.app.terminal_runtimes,
                     self.app.state.view.tab_surface(),
+                    client_input_policy.expect("app render target has input policy"),
                     cell_size,
                     Some(crate::kitty_graphics::HEADLESS_GRAPHICS_TRANSACTION_BUDGET),
                     &mut next_graphics_cache,
@@ -11208,6 +11221,48 @@ next_tab = ""
     }
 
     #[test]
+    fn terminal_observe_and_attach_promote_remaining_client_input_source() {
+        for observe in [true, false] {
+            with_terminal_session_test_server(|server, _terminal_id, terminal_id_string, _| {
+                server.app.state.switch_ascii_input_source_in_prefix = true;
+                connect_pending_terminal_client(server, 1);
+                let (writer, control_rx, _render_rx) = test_client_writer();
+                let mut context_owner = test_app_client(Some(true), 2);
+                context_owner.writer = Some(writer);
+                context_owner.sidebar_presentation.overlay.kind =
+                    crate::app::state::ClientOverlay::ContextMenu;
+                server.clients.insert(2, context_owner);
+                server.foreground_client_id = Some(1);
+                server.sync_foreground_client_state();
+
+                let changed = if observe {
+                    server.handle_server_event(ServerEvent::ClientObserveTerminal {
+                        client_id: 1,
+                        target: terminal_id_string,
+                    })
+                } else {
+                    server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                        client_id: 1,
+                        terminal_id: terminal_id_string,
+                        takeover: false,
+                    })
+                };
+
+                assert!(changed);
+                assert_eq!(server.foreground_client_id, Some(2));
+                assert!(matches!(
+                    read_server_message(
+                        control_rx
+                            .recv_timeout(Duration::from_millis(100))
+                            .expect("remaining client input-source state"),
+                    ),
+                    ServerMessage::PrefixInputSource { active: true }
+                ));
+            });
+        }
+    }
+
+    #[test]
     fn terminal_observe_resolves_public_pane_id() {
         with_terminal_session_test_server(|server, terminal_id, _, public_pane_id| {
             connect_pending_terminal_client(server, 7);
@@ -13724,20 +13779,264 @@ next_tab = ""
     fn foreground_promotion_syncs_context_menu_input_source() {
         let mut server = test_headless_server();
         server.app.state.switch_ascii_input_source_in_prefix = true;
-        server.clients.insert(1, test_app_client(Some(true), 1));
+        let (writer_a, _control_a, _render_a) = test_client_writer();
+        let (writer_b, control_b, _render_b) = test_client_writer();
+        let mut client_a = test_app_client(Some(true), 1);
+        client_a.writer = Some(writer_a);
+        server.clients.insert(1, client_a);
         let mut context_owner = test_app_client(Some(true), 2);
+        context_owner.writer = Some(writer_b);
         context_owner.sidebar_presentation.overlay.kind =
             crate::app::state::ClientOverlay::ContextMenu;
         server.clients.insert(2, context_owner);
 
         assert!(server.promote_client_to_foreground(1));
-        while server.app.event_rx.try_recv().is_ok() {}
         assert!(server.promote_client_to_foreground(2));
 
         assert!(matches!(
-            server.app.event_rx.try_recv(),
-            Ok(crate::events::AppEvent::PrefixInputSource { active: true })
+            read_server_message(
+                control_b
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("absolute input-source state for context-menu owner"),
+            ),
+            ServerMessage::PrefixInputSource { active: true }
         ));
+    }
+
+    #[test]
+    fn same_mode_foreground_promotion_sends_absolute_input_source_state() {
+        let mut server = test_headless_server();
+        server.app.state.switch_ascii_input_source_in_prefix = true;
+        let (writer_a, _control_a, _render_a) = test_client_writer();
+        let (writer_b, control_b, _render_b) = test_client_writer();
+        let mut client_a = test_app_client(Some(true), 1);
+        client_a.writer = Some(writer_a);
+        let mut client_b = test_app_client(Some(true), 2);
+        client_b.writer = Some(writer_b);
+        server.clients.insert(1, client_a);
+        server.clients.insert(2, client_b);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.promote_client_to_foreground(2));
+
+        assert!(matches!(
+            read_server_message(
+                control_b
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("absolute input-source state for promoted client"),
+            ),
+            ServerMessage::PrefixInputSource { active: false }
+        ));
+    }
+
+    #[test]
+    fn disconnect_promotes_context_menu_owner_and_syncs_its_input_source() {
+        let mut server = test_headless_server();
+        server.app.state.switch_ascii_input_source_in_prefix = true;
+        let (writer_a, _control_a, _render_a) = test_client_writer();
+        let (writer_b, control_b, _render_b) = test_client_writer();
+        let mut client_a = test_app_client(Some(true), 1);
+        client_a.writer = Some(writer_a);
+        let mut client_b = test_app_client(Some(true), 2);
+        client_b.writer = Some(writer_b);
+        client_b.sidebar_presentation.overlay.kind = crate::app::state::ClientOverlay::ContextMenu;
+        server.clients.insert(1, client_a);
+        server.clients.insert(2, client_b);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.remove_client(1));
+        assert_eq!(server.foreground_client_id, Some(2));
+        assert!(matches!(
+            read_server_message(
+                control_b
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("absolute input-source state for promoted menu owner"),
+            ),
+            ServerMessage::PrefixInputSource { active: true }
+        ));
+    }
+
+    #[test]
+    fn queued_input_source_transition_stays_with_its_client_after_repromotion() {
+        let mut server = test_headless_server();
+        server.app.state.switch_ascii_input_source_in_prefix = true;
+        let (writer_a, control_a, _render_a) = test_client_writer();
+        let (writer_b, control_b, _render_b) = test_client_writer();
+        let mut client_a = test_app_client(Some(true), 1);
+        client_a.writer = Some(writer_a);
+        client_a.sidebar_presentation.overlay.kind = crate::app::state::ClientOverlay::ContextMenu;
+        let mut client_b = test_app_client(Some(true), 2);
+        client_b.writer = Some(writer_b);
+        server.clients.insert(1, client_a);
+        server.clients.insert(2, client_b);
+        server.foreground_client_id = Some(2);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_client_input_events(
+            1,
+            vec![test_key(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::empty(),
+            )],
+        ));
+        assert!(matches!(
+            read_server_message(
+                control_a
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("absolute state when original client is promoted"),
+            ),
+            ServerMessage::PrefixInputSource { active: true }
+        ));
+        assert!(server.promote_client_to_foreground(2));
+        assert!(matches!(
+            read_server_message(
+                control_b
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("absolute state when replacement client is promoted"),
+            ),
+            ServerMessage::PrefixInputSource { active: false }
+        ));
+
+        let queued = server
+            .app
+            .event_rx
+            .try_recv()
+            .expect("queued transition from original client");
+        assert!(matches!(
+            &queued,
+            AppEvent::PrefixInputSource {
+                client_id: Some(1),
+                active: false,
+            }
+        ));
+        server.handle_internal_event_with_forwarding(queued);
+        assert!(matches!(
+            read_server_message(
+                control_a
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("queued transition reaches its original client"),
+            ),
+            ServerMessage::PrefixInputSource { active: false }
+        ));
+        assert!(control_b.recv_timeout(Duration::from_millis(50)).is_err());
+    }
+
+    #[test]
+    fn worktree_remove_completion_syncs_owning_clients_input_source() {
+        let mut server = test_headless_server();
+        server.app.state.switch_ascii_input_source_in_prefix = true;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
+        let checkout = std::path::PathBuf::from("/repo/herdr-issue");
+        let mut workspace = crate::workspace::Workspace::test_new("issue");
+        workspace.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
+            key: "repo-key".into(),
+            label: "herdr".into(),
+            repo_root: "/repo/herdr".into(),
+            checkout_path: checkout.clone(),
+            is_linked_worktree: true,
+        });
+        let workspace_id = workspace.id.clone();
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        let checkout_key = crate::worktree::canonical_or_original(&checkout);
+        server
+            .app
+            .pending_api_worktree_removes
+            .insert(workspace_id.clone(), 7);
+        server
+            .app
+            .pending_api_worktree_remove_paths
+            .insert(checkout_key.clone(), 7);
+
+        let (writer_a, control_a, _render_a) = test_client_writer();
+        let (writer_b, control_b, _render_b) = test_client_writer();
+        let mut client_a = test_app_client(Some(true), 1);
+        client_a.writer = Some(writer_a);
+        client_a.sidebar_presentation.overlay.kind =
+            crate::app::state::ClientOverlay::ConfirmRemoveWorktree;
+        client_a.sidebar_presentation.overlay.worktree_remove =
+            Some(crate::app::state::WorktreeRemoveState {
+                workspace_id: workspace_id.clone(),
+                repo_root: "/repo/herdr".into(),
+                path: checkout.clone(),
+                error: None,
+                removing: true,
+                force_confirmation: false,
+            });
+        let mut client_b = test_app_client(Some(true), 2);
+        client_b.writer = Some(writer_b);
+        server.clients.insert(1, client_a);
+        server.clients.insert(2, client_b);
+        server.foreground_client_id = Some(2);
+        server.sync_foreground_client_state();
+        let (respond_to, _response_rx) = std::sync::mpsc::channel();
+
+        assert!(
+            server.handle_internal_event_with_forwarding(AppEvent::WorktreeRemoveFinished(
+                Box::new(crate::events::WorktreeRemoveResult {
+                    workspace_id: workspace_id.clone(),
+                    path: checkout.clone(),
+                    workspace: Some(Box::new(crate::api::schema::WorkspaceInfo {
+                        workspace_id: workspace_id.clone(),
+                        number: 1,
+                        label: "issue".into(),
+                        focused: true,
+                        pane_count: 1,
+                        tab_count: 1,
+                        active_tab_id: format!("{workspace_id}:t1"),
+                        agent_status: crate::api::schema::AgentStatus::Unknown,
+                        tokens: Default::default(),
+                        worktree: None,
+                        repo_binding: None,
+                    })),
+                    worktree: Some(Box::new(crate::api::schema::WorktreeInfo {
+                        path: checkout.display().to_string(),
+                        branch: Some("issue".into()),
+                        is_bare: false,
+                        is_detached: false,
+                        is_prunable: false,
+                        is_linked_worktree: true,
+                        open_workspace_id: Some(workspace_id),
+                        label: "issue".into(),
+                    })),
+                    forced: false,
+                    api_request: Some(crate::events::ApiWorktreeRemoveRequest {
+                        client_id: Some(1),
+                        id: "remove".into(),
+                        operation_id: 7,
+                        checkout_key,
+                        respond_to,
+                    }),
+                    result: Ok(()),
+                })
+            ),)
+        );
+
+        let queued = server
+            .app
+            .event_rx
+            .try_recv()
+            .expect("worktree completion input-source sync");
+        assert!(matches!(
+            &queued,
+            AppEvent::PrefixInputSource {
+                client_id: Some(1),
+                active: false,
+            }
+        ));
+        server.handle_internal_event_with_forwarding(queued);
+        assert!(matches!(
+            read_server_message(
+                control_a
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("worktree owner receives input-source restore"),
+            ),
+            ServerMessage::PrefixInputSource { active: false }
+        ));
+        assert!(control_b.recv_timeout(Duration::from_millis(50)).is_err());
     }
 
     #[test]
@@ -14796,6 +15095,31 @@ next_tab = ""
     }
 
     #[test]
+    fn attached_group_menu_hover_requests_an_immediate_redraw() {
+        let mut server = test_headless_server();
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
+        server.clients.insert(1, test_app_client(Some(true), 1));
+        let mut menu_client = test_app_client(Some(true), 2);
+        menu_client.sidebar_presentation.group_menu_open = true;
+        server.clients.insert(2, menu_client);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        let motion = || ServerEvent::ClientInputEvents {
+            client_id: 2,
+            events: vec![crate::protocol::ClientInputEvent::Mouse {
+                kind: crate::protocol::ClientMouseKind::Moved,
+                column: 10,
+                row: 5,
+                modifiers: 0,
+            }],
+        };
+
+        assert!(server.handle_server_event(motion()));
+        assert_eq!(server.foreground_client_id, Some(2));
+        assert!(server.handle_server_event(motion()));
+    }
+
+    #[test]
     fn mouse_motion_in_hover_modes_requires_render() {
         let events = [crate::raw_input::RawInputEvent::Mouse(
             crossterm::event::MouseEvent {
@@ -15484,7 +15808,7 @@ next_tab = ""
         while let Ok(event) = server.app.event_rx.try_recv() {
             if matches!(
                 event,
-                crate::events::AppEvent::PrefixInputSource { active: false }
+                crate::events::AppEvent::PrefixInputSource { active: false, .. }
             ) {
                 restored = true;
             }
@@ -18763,6 +19087,14 @@ next_tab = ""
                 sound_enabled: false
             }
         ));
+        assert!(matches!(
+            read_server_message(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("absolute input-source state on initial attach")
+            ),
+            ServerMessage::PrefixInputSource { active: false }
+        ));
 
         assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
             client_id: 1,
@@ -18810,6 +19142,14 @@ next_tab = ""
         let ServerMessage::NotificationConfig { sound_enabled } = reconnect_config else {
             panic!("expected reconnect notification config, got {reconnect_config:?}");
         };
+        assert!(matches!(
+            read_server_message(
+                control_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .expect("absolute input-source state on reconnect")
+            ),
+            ServerMessage::PrefixInputSource { active: false }
+        ));
         env.set(crate::config::CONFIG_PATH_ENV_VAR, &client_path);
         let mut client_sound = crate::config::SoundConfig::default();
         let mut client_backend = crate::config::TerminalNotificationBackend::Auto;
@@ -19138,8 +19478,10 @@ next_tab = ""
             .is_ok()
         {}
 
-        let changed = server
-            .handle_internal_event_with_forwarding(AppEvent::PrefixInputSource { active: true });
+        let changed = server.handle_internal_event_with_forwarding(AppEvent::PrefixInputSource {
+            client_id: None,
+            active: true,
+        });
 
         assert!(changed);
         match read_server_message(
@@ -19183,10 +19525,16 @@ next_tab = ""
 
         server
             .app
-            .handle_internal_event(AppEvent::PrefixInputSource { active: true });
+            .handle_internal_event(AppEvent::PrefixInputSource {
+                client_id: None,
+                active: true,
+            });
         server
             .app
-            .handle_internal_event(AppEvent::PrefixInputSource { active: false });
+            .handle_internal_event(AppEvent::PrefixInputSource {
+                client_id: None,
+                active: false,
+            });
         assert_eq!(
             calls.get(),
             0,
@@ -19197,7 +19545,10 @@ next_tab = ""
         server.app.local_input_source_switch = true;
         server
             .app
-            .handle_internal_event(AppEvent::PrefixInputSource { active: true });
+            .handle_internal_event(AppEvent::PrefixInputSource {
+                client_id: None,
+                active: true,
+            });
         assert_eq!(calls.get(), 1);
     }
 

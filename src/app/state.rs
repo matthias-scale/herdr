@@ -1609,6 +1609,57 @@ pub(crate) enum ClientInputOwner {
     DockSurfaceMenu,
 }
 
+/// The input rules resolved from one client's complete presentation.
+/// Consumers use this snapshot after the presentation has been swapped out of
+/// `AppState`, so rendering and host side effects stay bound to that client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClientInputPolicy {
+    owner: Option<ClientInputOwner>,
+    mode: Mode,
+}
+
+impl ClientInputPolicy {
+    pub(crate) fn from_presentations(
+        server_mode: Mode,
+        sidebar: &SidebarPresentationState,
+        dock: &DockPresentationState,
+    ) -> Self {
+        let owner = ClientInputOwnerState::from_presentations(sidebar, dock).resolve();
+        let mode = sidebar
+            .overlay
+            .kind
+            .mode()
+            .unwrap_or(match sidebar.focus_intent {
+                ClientFocusIntent::FollowShared => server_mode,
+                ClientFocusIntent::Pane => Mode::Terminal,
+            });
+        Self { owner, mode }
+    }
+
+    fn from_app(app: &AppState) -> Self {
+        Self {
+            owner: ClientInputOwnerState::from_app(app).resolve(),
+            mode: app.effective_interaction_mode(),
+        }
+    }
+
+    pub(crate) fn mode(self) -> Mode {
+        self.mode
+    }
+
+    pub(crate) fn owns_input(self) -> bool {
+        self.owner.is_some()
+    }
+
+    pub(crate) fn mouse_motion_changes_view(self) -> bool {
+        self.owner.is_some() || self.mode.mouse_motion_changes_view()
+    }
+
+    pub(crate) fn pane_graphics_visible(self) -> bool {
+        self.owner.is_none() && self.mode == Mode::Terminal
+    }
+}
+
 /// Client-local choice between the shared interaction surface and the focused
 /// pane. Focus completions set this instead of rewriting the server-owned mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -4787,14 +4838,11 @@ impl ClientInputOwnerState {
     }
 }
 
-pub(crate) fn client_input_owner_from_presentations(
-    sidebar: &SidebarPresentationState,
-    dock: &DockPresentationState,
-) -> Option<ClientInputOwner> {
-    ClientInputOwnerState::from_presentations(sidebar, dock).resolve()
-}
-
 impl AppState {
+    pub(crate) fn client_input_policy(&self) -> ClientInputPolicy {
+        ClientInputPolicy::from_app(self)
+    }
+
     /// Theme reported to child terminals. Real host answers take precedence;
     /// missing defaults follow the palette currently painted by Herdr.
     pub(crate) fn pane_terminal_theme(&self) -> TerminalTheme {
@@ -8113,10 +8161,19 @@ mod tests {
             let mut dock = DockPresentationState::default();
             state.swap_sidebar_presentation(&mut sidebar);
             state.swap_dock_presentation(&mut dock);
+            let policy = ClientInputPolicy::from_presentations(Mode::Terminal, &sidebar, &dock);
             assert_eq!(
-                client_input_owner_from_presentations(&sidebar, &dock),
+                policy.owner,
                 Some(client_owner),
                 "saved presentation must preserve {client_owner:?}"
+            );
+            assert!(
+                policy.mouse_motion_changes_view(),
+                "{client_owner:?} hover must repaint"
+            );
+            assert!(
+                !policy.pane_graphics_visible(),
+                "{client_owner:?} must cover pane graphics"
             );
         }
     }

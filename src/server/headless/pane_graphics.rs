@@ -487,6 +487,10 @@ impl HeadlessServer {
             if !matches!(mode, ClientConnectionMode::App) {
                 continue;
             }
+            let Some(input_policy) = self.client_input_policy(client_id) else {
+                crate::render_prof::event("retained_graphics_fallback.client_policy_missing");
+                return RetainedGraphicsOutcome::Fallback;
+            };
             let Some(client) = self.clients.get_mut(&client_id) else {
                 crate::render_prof::event("retained_graphics_fallback.client_missing");
                 return RetainedGraphicsOutcome::Fallback;
@@ -514,11 +518,12 @@ impl HeadlessServer {
 
             let mut next_graphics_cache = client.graphics_cache.clone();
             let encode_started = crate::render_prof::timer();
-            let encoded = crate::kitty_graphics::encode_local_pane_graphics(
+            let encoded = crate::kitty_graphics::encode_local_pane_graphics_for_client(
                 &self.app.state,
                 &self.app.pane_graphics,
                 &self.app.terminal_runtimes,
                 self.app.state.view.tab_surface(),
+                input_policy,
                 cell_size,
                 Some(crate::kitty_graphics::HEADLESS_GRAPHICS_TRANSACTION_BUDGET),
                 &mut next_graphics_cache,
