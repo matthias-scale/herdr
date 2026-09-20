@@ -154,6 +154,7 @@ struct PendingLinkBytes {
     bytes: Vec<u8>,
     unprocessed: Vec<u8>,
     overflow_tail: VecDeque<u8>,
+    overflow_transition: OverflowTransition,
     staging_truncated: bool,
     open_url_scan_at: usize,
     dirty: bool,
@@ -169,6 +170,56 @@ enum OpenSequenceKind {
     Osc,
     OscEscape,
     Escape,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverflowTerminalState {
+    Visible,
+    Csi,
+    Osc,
+    OscEscape,
+    Escape,
+}
+
+impl OverflowTerminalState {
+    const ALL: [Self; 5] = [
+        Self::Visible,
+        Self::Csi,
+        Self::Osc,
+        Self::OscEscape,
+        Self::Escape,
+    ];
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Debug)]
+struct OverflowTransition {
+    states: [OverflowTerminalState; 5],
+}
+
+impl Default for OverflowTransition {
+    fn default() -> Self {
+        Self {
+            states: OverflowTerminalState::ALL,
+        }
+    }
+}
+
+impl OverflowTransition {
+    fn record_dropped<'a>(&mut self, bytes: impl IntoIterator<Item = &'a u8>) {
+        for byte in bytes {
+            for state in &mut self.states {
+                *state = advance_overflow_terminal_state(*state, *byte);
+            }
+        }
+    }
+
+    fn apply(&self, state: OverflowTerminalState) -> OverflowTerminalState {
+        self.states[state.index()]
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -276,7 +327,22 @@ impl LinkExtractionGate {
         let overflow_tail = std::mem::take(&mut pending.overflow_tail)
             .into_iter()
             .collect::<Vec<_>>();
+        let overflow_transition = std::mem::take(&mut pending.overflow_transition);
         let staging_truncated = std::mem::take(&mut pending.staging_truncated);
+        let overflow_start_state = if staging_truncated {
+            let initial = match pending.truncated_sequence {
+                Some(OpenSequenceKind::Csi) => OverflowTerminalState::Csi,
+                Some(OpenSequenceKind::Osc) => OverflowTerminalState::Osc,
+                Some(OpenSequenceKind::OscEscape) => OverflowTerminalState::OscEscape,
+                Some(OpenSequenceKind::Escape) => OverflowTerminalState::Escape,
+                Some(OpenSequenceKind::Url) | None => OverflowTerminalState::Visible,
+            };
+            let after_pending = overflow_terminal_state_after(initial, &pending.bytes);
+            let after_prefix = overflow_terminal_state_after(after_pending, &unprocessed);
+            overflow_transition.apply(after_prefix)
+        } else {
+            OverflowTerminalState::Visible
+        };
         if !staging_truncated
             && pending.truncated_sequence.is_none()
             && pending.bytes.len().saturating_add(unprocessed.len()) <= MAX_PENDING_LINK_BYTES
@@ -290,11 +356,7 @@ impl LinkExtractionGate {
             // prefix may therefore end inside a URL or terminal sequence; discard that
             // open sequence rather than ever publishing a truncated prefix.
             pending.open_url_scan_at = 0;
-            if let Some(safe_start) = overflow_tail
-                .iter()
-                .position(|byte| byte.is_ascii_whitespace())
-                .map(|index| index + 1)
-            {
+            if let Some(safe_start) = overflow_suffix_start(&overflow_tail, overflow_start_state) {
                 let mut tail_extracted = extract_agent_links(&overflow_tail[safe_start..]);
                 queue_links(
                     &mut pending.queued_output_urls,
@@ -499,7 +561,7 @@ impl LinkExtractionGate {
 
 fn stage_unprocessed(pending: &mut PendingLinkBytes, bytes: &[u8]) {
     if pending.staging_truncated {
-        append_overflow_tail(&mut pending.overflow_tail, bytes);
+        append_overflow_tail(pending, bytes);
         return;
     }
     let remaining = MAX_PENDING_LINK_BYTES.saturating_sub(pending.unprocessed.len());
@@ -512,24 +574,100 @@ fn stage_unprocessed(pending: &mut PendingLinkBytes, bytes: &[u8]) {
     pending.staging_truncated = true;
     let displaced = pending.unprocessed.split_off(STAGING_WINDOW_BYTES);
     pending.overflow_tail.extend(displaced);
-    append_overflow_tail(&mut pending.overflow_tail, &bytes[appended..]);
+    append_overflow_tail(pending, &bytes[appended..]);
 }
 
-fn append_overflow_tail(tail: &mut VecDeque<u8>, bytes: &[u8]) {
+fn append_overflow_tail(pending: &mut PendingLinkBytes, bytes: &[u8]) {
     let capacity = STAGING_WINDOW_BYTES;
+    let PendingLinkBytes {
+        overflow_tail,
+        overflow_transition,
+        ..
+    } = pending;
     if bytes.len() >= capacity {
-        tail.clear();
-        tail.extend(&bytes[bytes.len() - capacity..]);
+        overflow_transition.record_dropped(overflow_tail.iter());
+        overflow_transition.record_dropped(&bytes[..bytes.len() - capacity]);
+        overflow_tail.clear();
+        overflow_tail.extend(&bytes[bytes.len() - capacity..]);
         return;
     }
-    let overflow = tail
+    let overflow = overflow_tail
         .len()
         .saturating_add(bytes.len())
         .saturating_sub(capacity);
     if overflow > 0 {
-        tail.drain(..overflow);
+        overflow_transition.record_dropped(overflow_tail.iter().take(overflow));
+        overflow_tail.drain(..overflow);
     }
-    tail.extend(bytes);
+    overflow_tail.extend(bytes);
+}
+
+fn advance_overflow_terminal_state(
+    state: OverflowTerminalState,
+    byte: u8,
+) -> OverflowTerminalState {
+    match state {
+        OverflowTerminalState::Visible => {
+            if byte == b'\x1b' {
+                OverflowTerminalState::Escape
+            } else {
+                OverflowTerminalState::Visible
+            }
+        }
+        OverflowTerminalState::Csi => {
+            if (0x40..=0x7e).contains(&byte) {
+                OverflowTerminalState::Visible
+            } else {
+                OverflowTerminalState::Csi
+            }
+        }
+        OverflowTerminalState::Osc => match byte {
+            b'\x07' => OverflowTerminalState::Visible,
+            b'\x1b' => OverflowTerminalState::OscEscape,
+            _ => OverflowTerminalState::Osc,
+        },
+        OverflowTerminalState::OscEscape => match byte {
+            b'\\' | b'\x07' => OverflowTerminalState::Visible,
+            b'\x1b' => OverflowTerminalState::OscEscape,
+            _ => OverflowTerminalState::Osc,
+        },
+        OverflowTerminalState::Escape => match byte {
+            b'[' => OverflowTerminalState::Csi,
+            b']' => OverflowTerminalState::Osc,
+            _ => OverflowTerminalState::Visible,
+        },
+    }
+}
+
+fn overflow_terminal_state_after(
+    mut state: OverflowTerminalState,
+    bytes: &[u8],
+) -> OverflowTerminalState {
+    for byte in bytes {
+        state = advance_overflow_terminal_state(state, *byte);
+    }
+    state
+}
+
+fn overflow_suffix_start(bytes: &[u8], mut state: OverflowTerminalState) -> Option<usize> {
+    let started_in_sequence = state != OverflowTerminalState::Visible;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        let previous = state;
+        state = advance_overflow_terminal_state(state, byte);
+        if started_in_sequence
+            && previous != OverflowTerminalState::Visible
+            && state == OverflowTerminalState::Visible
+        {
+            return Some(index + 1);
+        }
+        if !started_in_sequence
+            && previous == OverflowTerminalState::Visible
+            && byte.is_ascii_whitespace()
+        {
+            return Some(index + 1);
+        }
+    }
+    None
 }
 
 struct ExtractionClaim<'a>(&'a AtomicBool);
@@ -1936,6 +2074,40 @@ mod tests {
             gate.take_links().expect("post-overflow URL").output_urls,
             vec!["https://after-overflow.example/path"]
         );
+    }
+
+    #[test]
+    fn overflow_suffix_resumes_after_open_osc_terminator() {
+        for split_st in [false, true] {
+            let gate = LinkExtractionGate::default();
+            let first = b"https://before-overflow.example/path\n";
+            gate.observe_chunk(first);
+
+            let osc = b"\x1b]0;title";
+            let mut overflow = vec![b'x'; STAGING_WINDOW_BYTES - first.len() - osc.len()];
+            overflow.extend_from_slice(osc);
+            overflow.resize(MAX_PENDING_LINK_BYTES + 256, b'y');
+            overflow.extend_from_slice(b" hidden https://hidden.example/path ");
+            if split_st {
+                overflow.push(b'\x1b');
+                gate.observe_chunk(&overflow);
+                gate.observe_chunk(b"\\https://visible.example/path\n");
+            } else {
+                overflow.extend_from_slice(b"\x07https://visible.example/path\n");
+                gate.observe_chunk(&overflow);
+            }
+
+            assert_eq!(gate.staged_byte_count(), MAX_PENDING_LINK_BYTES);
+            let links = gate.take_links().expect("visible URL after open OSC");
+            assert_eq!(
+                links.output_urls,
+                vec![
+                    "https://before-overflow.example/path",
+                    "https://visible.example/path",
+                ],
+                "split ST: {split_st}"
+            );
+        }
     }
 
     #[test]
