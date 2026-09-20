@@ -3153,6 +3153,62 @@ mod tests {
     }
 
     #[test]
+    fn pomodoro_prompt_graphics_policy_follows_rendered_geometry() {
+        fn prompted_app(area: Rect) -> crate::app::state::AppState {
+            let mut app = crate::app::state::AppState::test_new();
+            let workspace = crate::workspace::Workspace::test_new("prompt-graphics");
+            app.workspaces = vec![workspace];
+            app.active = Some(0);
+            app.selected = 0;
+            app.set_server_mode(Mode::Terminal);
+            app.pomodoro.prompt = Some(crate::pomodoro::PomodoroPrompt {
+                ended: crate::pomodoro::PomodoroPhase::Work,
+                next: crate::pomodoro::PomodoroPhase::ShortBreak,
+                raised_at: std::time::Instant::now(),
+                input: String::new(),
+                error: None,
+            });
+            crate::ui::compute_view(&mut app, area);
+            app
+        }
+
+        let runtime = crate::app::pane_graphics::Runtime::default();
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        let cell_size = HostCellSize {
+            width_px: 10,
+            height_px: 20,
+        };
+
+        let renderable = prompted_app(Rect::new(0, 0, 8, 24));
+        let mut renderable_cache = HostGraphicsCache::default();
+        renderable_cache.test_mark_non_empty();
+        let renderable_encoded = encode_local_pane_graphics(
+            &renderable,
+            &runtime,
+            &terminal_runtimes,
+            cell_size,
+            None,
+            &mut renderable_cache,
+        );
+        assert!(!renderable_encoded.bytes.is_empty());
+        assert_eq!(renderable_cache.test_image_count(), 0);
+
+        let hidden = prompted_app(Rect::new(0, 0, 7, 24));
+        let mut hidden_cache = HostGraphicsCache::default();
+        hidden_cache.test_mark_non_empty();
+        let hidden_encoded = encode_local_pane_graphics(
+            &hidden,
+            &runtime,
+            &terminal_runtimes,
+            cell_size,
+            None,
+            &mut hidden_cache,
+        );
+        assert!(hidden_encoded.bytes.is_empty());
+        assert_eq!(hidden_cache.test_image_count(), 1);
+    }
+
+    #[test]
     fn terminal_image_data_requests_deduplicate_and_reconsider_changed_signatures() {
         let pane_id = PaneId::from_raw(1);
         let descriptor = KittyImageDescriptor {

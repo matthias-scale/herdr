@@ -1666,10 +1666,16 @@ impl ClientPresentationPolicy<'static> {
 
 impl<'a> ClientPresentationPolicy<'a> {
     fn from_app(app: &'a AppState) -> Self {
+        let pomodoro_owns_input = crate::ui::pomodoro::input_presentation_at(
+            app,
+            app.screen_rect(),
+            app.view_observed_at,
+        )
+        .owns_input();
         Self {
             owner: ClientInputOwnerState::from_app(app).resolve(),
             mode: app.effective_interaction_mode(),
-            pomodoro_owns_input: app.pomodoro.prompt.is_some() || app.pomodoro.send_off.is_some(),
+            pomodoro_owns_input,
             tab_surface_visible: !app.tab_surface_replaced(),
             geometry: ClientPresentationGeometry::Borrowed(&app.view.pane_infos),
         }
