@@ -950,6 +950,10 @@ impl crate::app::App {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let transcript_session_id = self
+                .claude_subagent_trackers
+                .get(&terminal_id)
+                .map(|tracker| tracker.session_id.clone());
             let (count_changed, observation_changed) = self
                 .state
                 .terminals
@@ -1000,14 +1004,20 @@ impl crate::app::App {
                         source: crate::agent_state::AgentSubagentSource::Observed,
                     })
                     .collect();
-                self.state.agent_states.observe_transcript(
+                let session_changed = transcript_session_id.as_deref().is_some_and(|session_id| {
+                    self.state
+                        .agent_states
+                        .observe_transcript_session(pane_id, session_id)
+                });
+                let observation_changed = self.state.agent_states.observe_transcript(
                     pane_id,
                     transcript_last_row_at,
                     transcript_tasks.clone(),
                     transcript_last_tasks_at,
                     subagents,
                     transcript_links.clone(),
-                )
+                );
+                session_changed || observation_changed
             });
             if !count_changed && !observation_changed && !transcript_changed {
                 continue;
@@ -2468,6 +2478,71 @@ mod tests {
             BatchStats::default(),
         ));
         assert_eq!(app.state.terminals[&terminal_id].active_subagents, None);
+    }
+
+    #[test]
+    fn new_transcript_session_without_tasks_clears_previous_session_tasks() {
+        let dir = TestDir::new("new-session-clears-tasks");
+        let path = dir.transcript();
+        let (mut app, terminal_id) = app_with_claude_target(path.clone());
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let old_task_at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
+        app.state.agent_states.observe_transcript(
+            pane_id,
+            Some(old_task_at),
+            Some(vec![AgentTask {
+                text: "old session task".into(),
+                status: AgentTaskStatus::InProgress,
+            }]),
+            Some(old_task_at),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let new_session = "e6f47cd4-0e58-4de7-8ce3-8a704654573a";
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_claude_transcript_target(Some(new_session.into()), Some(path.clone()));
+        let mut tracker = TranscriptTracker::new(new_session.into(), path.clone(), 8);
+        tracker.cursor.ingest(
+            &line(serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-08-14T06:18:45.100Z",
+                "message": {"content": "new session without todo calls"}
+            })),
+            true,
+        );
+        assert_eq!(tracker.tasks(), Some(Vec::new()));
+        assert_eq!(tracker.last_tasks_at(), None);
+        let refresh = RefreshObservation {
+            target: TargetIdentity {
+                terminal_id: terminal_id.clone(),
+                source: "herdr:claude".into(),
+                session_id: new_session.into(),
+                path: path.clone(),
+                target_generation: 8,
+            },
+            count: tracker.count(),
+            observations: tracker.observations(),
+            tracker: tracker.clone(),
+            stats: ScanStats::default(),
+        };
+        app.claude_subagent_trackers.insert(terminal_id, tracker);
+        app.last_claude_subagent_refresh_generation = 1;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 1,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+
+        assert!(app.handle_claude_subagents_refreshed(1, vec![refresh], BatchStats::default(),));
+        assert!(app
+            .state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Working)
+            .tasks
+            .is_empty());
     }
 
     #[test]

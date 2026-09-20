@@ -28,11 +28,16 @@ const MARKER_TAIL_WORDS: usize = MAX_MARKER_TAIL_BYTES.div_ceil(8);
 pub(crate) struct LinkExtractionGate {
     processing: Mutex<()>,
     pending: Mutex<PendingLinkBytes>,
+    extracting: AtomicBool,
     active: AtomicBool,
     marker_tail: AtomicMarkerTail,
     extractions: AtomicU64,
     #[cfg(test)]
     lock_acquisitions: AtomicU64,
+    #[cfg(test)]
+    parse_passes: AtomicU64,
+    #[cfg(test)]
+    parses_outside_processing: AtomicU64,
 }
 
 impl Default for LinkExtractionGate {
@@ -40,11 +45,16 @@ impl Default for LinkExtractionGate {
         Self {
             processing: Mutex::new(()),
             pending: Mutex::default(),
+            extracting: AtomicBool::new(false),
             active: AtomicBool::new(false),
             marker_tail: AtomicMarkerTail::default(),
             extractions: AtomicU64::new(0),
             #[cfg(test)]
             lock_acquisitions: AtomicU64::new(0),
+            #[cfg(test)]
+            parse_passes: AtomicU64::new(0),
+            #[cfg(test)]
+            parses_outside_processing: AtomicU64::new(0),
         }
     }
 }
@@ -127,6 +137,7 @@ impl AtomicMarkerTail {
 #[derive(Debug, Default)]
 struct PendingLinkBytes {
     bytes: Vec<u8>,
+    unprocessed: Vec<u8>,
     dirty: bool,
     queued_output_urls: Vec<String>,
     queued_osc8_urls: Vec<String>,
@@ -166,24 +177,18 @@ impl LinkExtractionGate {
             return;
         }
 
-        let Ok(_processing) = self.processing.lock() else {
-            return;
-        };
-
         if self.active.load(Ordering::Acquire) {
             #[cfg(test)]
             self.lock_acquisitions.fetch_add(1, Ordering::Relaxed);
-            let mut pending = {
-                let Ok(mut stored) = self.pending.lock() else {
-                    return;
-                };
-                std::mem::take(&mut *stored)
+            let Ok(_processing) = self.processing.lock() else {
+                return;
             };
-            append_pending(&mut pending, bytes);
+            let Ok(mut pending) = self.pending.lock() else {
+                return;
+            };
+            pending.unprocessed.extend_from_slice(bytes);
             pending.dirty = true;
-            if let Ok(mut stored) = self.pending.lock() {
-                *stored = pending;
-            }
+            self.active.store(true, Ordering::Release);
             return;
         }
 
@@ -201,17 +206,18 @@ impl LinkExtractionGate {
             return;
         };
 
-        let mut pending = PendingLinkBytes {
-            dirty: true,
-            ..PendingLinkBytes::default()
-        };
-        append_pending(&mut pending, &candidate[marker_start..]);
         #[cfg(test)]
         self.lock_acquisitions.fetch_add(1, Ordering::Relaxed);
-        let Ok(mut stored) = self.pending.lock() else {
+        let Ok(_processing) = self.processing.lock() else {
             return;
         };
-        *stored = pending;
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
+        pending
+            .unprocessed
+            .extend_from_slice(&candidate[marker_start..]);
+        pending.dirty = true;
         self.active.store(true, Ordering::Release);
         self.marker_tail.store(&[]);
     }
@@ -225,15 +231,31 @@ impl LinkExtractionGate {
         if !self.active.load(Ordering::Acquire) {
             return None;
         }
-        let _processing = self.processing.lock().ok()?;
-        let mut pending = {
-            let mut stored = self.pending.lock().ok()?;
-            std::mem::take(&mut *stored)
-        };
-        if !pending.dirty {
-            *self.pending.lock().ok()? = pending;
+        if self
+            .extracting
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return None;
         }
+        let _claim = ExtractionClaim(&self.extracting);
+        let mut pending = {
+            let _processing = self.processing.lock().ok()?;
+            let mut stored = self.pending.lock().ok()?;
+            if !stored.dirty {
+                return None;
+            }
+            std::mem::take(&mut *stored)
+        };
+        let unprocessed = std::mem::take(&mut pending.unprocessed);
+        if pending.truncated_sequence.is_none()
+            && pending.bytes.len().saturating_add(unprocessed.len()) <= MAX_PENDING_LINK_BYTES
+        {
+            pending.bytes.extend_from_slice(&unprocessed);
+        } else {
+            append_pending(&mut pending, &unprocessed);
+        }
+        self.record_parse_pass();
         let mut extracted = extract_agent_links(&pending.bytes);
         extracted
             .links
@@ -248,6 +270,7 @@ impl LinkExtractionGate {
         extracted.links.osc8_urls.sort_unstable();
         extracted.links.osc8_urls.dedup();
         pending.dirty = false;
+        let (tail, tail_len) = marker_tail_suffix(&pending.bytes);
         if pending.truncated_sequence.is_none()
             && (extracted.unterminated_url || extracted.incomplete_terminal_sequence)
         {
@@ -255,14 +278,43 @@ impl LinkExtractionGate {
             pending.bytes = carry;
             pending.truncated_sequence = truncated_sequence;
         } else if pending.truncated_sequence.is_none() {
-            let (tail, tail_len) = marker_tail_suffix(&pending.bytes);
-            self.marker_tail.store(&tail[..tail_len]);
-            self.active.store(false, Ordering::Release);
             pending.bytes.clear();
         }
         let found_links =
             !extracted.links.output_urls.is_empty() || !extracted.links.osc8_urls.is_empty();
-        *self.pending.lock().ok()? = pending;
+        {
+            let _processing = self.processing.lock().ok()?;
+            let mut stored = self.pending.lock().ok()?;
+            let received_while_parsing = !stored.unprocessed.is_empty();
+            if received_while_parsing && pending.bytes.is_empty() {
+                pending.bytes.extend_from_slice(&tail[..tail_len]);
+            }
+            debug_assert!(stored.bytes.is_empty());
+            debug_assert!(stored.truncated_sequence.is_none());
+            stored.bytes = pending.bytes;
+            stored.truncated_sequence = pending.truncated_sequence;
+            queue_links(
+                &mut stored.queued_output_urls,
+                &mut pending.queued_output_urls,
+            );
+            queue_links(&mut stored.queued_osc8_urls, &mut pending.queued_osc8_urls);
+            if received_while_parsing {
+                stored.dirty = true;
+                self.active.store(true, Ordering::Release);
+            } else {
+                stored.dirty = false;
+                let has_carry = !stored.bytes.is_empty()
+                    || stored.truncated_sequence.is_some()
+                    || !stored.queued_output_urls.is_empty()
+                    || !stored.queued_osc8_urls.is_empty();
+                if has_carry {
+                    self.active.store(true, Ordering::Release);
+                } else {
+                    self.marker_tail.store(&tail[..tail_len]);
+                    self.active.store(false, Ordering::Release);
+                }
+            }
+        }
         if !found_links {
             return None;
         }
@@ -278,6 +330,25 @@ impl LinkExtractionGate {
     #[cfg(test)]
     fn lock_acquisition_count(&self) -> u64 {
         self.lock_acquisitions.load(Ordering::Relaxed)
+    }
+
+    fn record_parse_pass(&self) {
+        #[cfg(test)]
+        {
+            self.parse_passes.fetch_add(1, Ordering::Relaxed);
+            if self.processing.try_lock().is_ok() {
+                self.parses_outside_processing
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+struct ExtractionClaim<'a>(&'a AtomicBool);
+
+impl Drop for ExtractionClaim<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -415,7 +486,8 @@ fn open_osc8_target_within_bounds(bytes: &[u8]) -> bool {
     let Some(parameter_end) = osc8.iter().position(|byte| *byte == b';') else {
         return true;
     };
-    osc8.len().saturating_sub(parameter_end + 1) <= MAX_URL_BYTES
+    let target = &osc8[parameter_end + 1..];
+    target.strip_suffix(b"\x1b").unwrap_or(target).len() <= MAX_URL_BYTES
 }
 
 fn unterminated_output_url_start(
@@ -484,6 +556,14 @@ fn append_marker_tail(previous: &[u8], bytes: &[u8]) -> ([u8; MAX_MARKER_TAIL_BY
 }
 
 fn marker_tail_suffix(bytes: &[u8]) -> ([u8; MAX_MARKER_TAIL_BYTES], usize) {
+    const OSC8_INTRODUCER: &[u8] = b"\x1b]8;";
+    for len in (1..OSC8_INTRODUCER.len()).rev() {
+        if bytes.ends_with(&OSC8_INTRODUCER[..len]) {
+            let mut tail = [0; MAX_MARKER_TAIL_BYTES];
+            tail[..len].copy_from_slice(&OSC8_INTRODUCER[..len]);
+            return (tail, len);
+        }
+    }
     let earliest = bytes.len().saturating_sub(MAX_MARKER_TAIL_BYTES);
     for start in earliest..bytes.len() {
         if start > 0 && is_scheme_byte(bytes[start - 1]) {
@@ -518,7 +598,9 @@ fn is_scheme_byte(byte: u8) -> bool {
 }
 
 fn marker_tail_can_continue(tail: &[u8]) -> bool {
-    tail.ends_with(b":") || tail.ends_with(b":/")
+    tail.ends_with(b":")
+        || tail.ends_with(b":/")
+        || (!tail.is_empty() && b"\x1b]8;".starts_with(tail))
 }
 
 fn find_scheme_start(bytes: &[u8]) -> Option<usize> {
@@ -647,6 +729,7 @@ struct PaneAgentState {
     last_transcript_at: Option<SystemTime>,
     reported_tasks: Vec<AgentTask>,
     reported_tasks_at: Option<SystemTime>,
+    transcript_session_id: Option<String>,
     transcript_tasks: Option<Vec<AgentTask>>,
     transcript_tasks_at: Option<SystemTime>,
     reported_subagents: Vec<AgentSubagent>,
@@ -785,6 +868,17 @@ impl AgentStateStore {
             || previous_tasks_at != pane.transcript_tasks_at
             || previous_subagents != pane.observed_subagents
             || links_changed
+    }
+
+    pub(crate) fn observe_transcript_session(&mut self, pane_id: PaneId, session_id: &str) -> bool {
+        let pane = self.panes.entry(pane_id).or_default();
+        if pane.transcript_session_id.as_deref() == Some(session_id) {
+            return false;
+        }
+        pane.transcript_session_id = Some(session_id.to_owned());
+        pane.transcript_tasks = Some(Vec::new());
+        pane.transcript_tasks_at = None;
+        true
     }
 
     pub(crate) fn observe_links(
@@ -1189,6 +1283,25 @@ mod tests {
     }
 
     #[test]
+    fn pty_callback_only_queues_bytes_and_parser_runs_once_outside_processing_lock() {
+        let gate = LinkExtractionGate::default();
+        gate.observe_chunk(b"https://outside-lock.example");
+
+        assert_eq!(gate.parse_passes.load(Ordering::Relaxed), 0);
+        assert!(gate.take_links().is_none());
+        assert_eq!(gate.parse_passes.load(Ordering::Relaxed), 1);
+        assert_eq!(gate.parses_outside_processing.load(Ordering::Relaxed), 1);
+
+        gate.observe_chunk(b"/path\n");
+
+        assert_eq!(gate.parse_passes.load(Ordering::Relaxed), 1);
+        let links = gate.take_links().expect("completed link");
+        assert_eq!(links.output_urls, vec!["https://outside-lock.example/path"]);
+        assert_eq!(gate.parse_passes.load(Ordering::Relaxed), 2);
+        assert_eq!(gate.parses_outside_processing.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
     fn scheme_marker_split_across_chunks_triggers_link_extraction() {
         let gate = LinkExtractionGate::default();
         gate.observe_chunk(b"https:");
@@ -1291,17 +1404,61 @@ mod tests {
     }
 
     #[test]
-    fn osc8_target_accepts_exactly_eight_kibibytes() {
-        let prefix = "https://osc.example/";
-        let uri = format!("{prefix}{}", "a".repeat(MAX_URL_BYTES - prefix.len()));
-        let gate = LinkExtractionGate::default();
-        gate.observe_chunk(format!("\x1b]8;;{uri}").as_bytes());
-        assert!(gate.take_links().is_none());
-        gate.observe_chunk(b"\x1b\\label\x1b]8;;\x1b\\\n");
+    fn partial_osc8_introducer_carries_across_chunks() {
+        for (first, second) in [
+            (
+                b"\x1b]8".as_slice(),
+                b";;https://osc.example.test/from-eight\x1b\\label\n".as_slice(),
+            ),
+            (
+                b"\x1b]8;".as_slice(),
+                b";https://osc.example.test/from-semicolon\x1b\\label\n".as_slice(),
+            ),
+        ] {
+            let gate = LinkExtractionGate::default();
+            gate.observe_chunk(first);
+            assert!(gate.take_links().is_none());
+            gate.observe_chunk(second);
 
-        let links = gate.take_links().expect("maximum-length OSC 8 target");
-        assert!(links.output_urls.is_empty());
-        assert_eq!(links.osc8_urls, vec![uri]);
+            let links = gate.take_links().expect("split OSC 8 link");
+            assert!(links.output_urls.is_empty());
+            assert_eq!(links.osc8_urls.len(), 1);
+            assert!(links.osc8_urls[0].starts_with("https://osc.example.test/"));
+        }
+    }
+
+    #[test]
+    fn osc8_target_bound_excludes_split_and_unsplit_st_bytes() {
+        let prefix = "https://osc.example/";
+        for split_st in [false, true] {
+            for extra_bytes in [0, 1] {
+                let uri = format!(
+                    "{prefix}{}",
+                    "a".repeat(MAX_URL_BYTES + extra_bytes - prefix.len())
+                );
+                let gate = LinkExtractionGate::default();
+                if split_st {
+                    gate.observe_chunk(format!("\x1b]8;;{uri}\x1b").as_bytes());
+                    assert!(gate.take_links().is_none());
+                    gate.observe_chunk(b"\\label\x1b]8;;\x1b\\\n");
+                } else {
+                    gate.observe_chunk(
+                        format!("\x1b]8;;{uri}\x1b\\label\x1b]8;;\x1b\\\n").as_bytes(),
+                    );
+                }
+
+                let links = gate.take_links();
+                if extra_bytes == 0 {
+                    let links = links.unwrap_or_else(|| {
+                        panic!("maximum-length OSC 8 target, split ST: {split_st}")
+                    });
+                    assert!(links.output_urls.is_empty());
+                    assert_eq!(links.osc8_urls, vec![uri], "split ST: {split_st}");
+                } else {
+                    assert!(links.is_none(), "split ST: {split_st}");
+                }
+            }
+        }
     }
 
     #[test]
