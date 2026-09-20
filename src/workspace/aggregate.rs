@@ -46,6 +46,9 @@ pub struct PaneDetail {
     pub closing_idle: Option<bool>,
     pub closing_contract: Option<String>,
     pub closing_contract_met: Option<bool>,
+    /// Whether the terminal's ClosingReport contains any projected closing
+    /// fact. Sidebar completion must not infer this from metadata tokens.
+    pub has_closing_report: bool,
     /// The pane's agent is refusing to work because its plan usage/rate limit
     /// is exhausted. Live screen state, never latched.
     pub usage_limited: bool,
@@ -73,7 +76,14 @@ impl Tab {
             record_aggregate_pane_visit();
             terminals.get(&pane.attached_terminal_id).map(|terminal| {
                 let projection = pane.agent_projection(terminal);
-                (projection.state, projection.seen, projection.attention_tier)
+                let attention_tier = if projection.counts_as_blocked() {
+                    AttentionTier::Blocked
+                } else if projection.attention_tier == AttentionTier::Attention {
+                    AttentionTier::Attention
+                } else {
+                    AttentionTier::None
+                };
+                (projection.state, projection.seen, attention_tier)
             })
         }))
     }
@@ -142,12 +152,13 @@ impl Tab {
                     attention_tier: projection.attention_tier,
                     open_blockers: projection.open_blockers,
                     gate_count: projection.gate_count,
-                    closing_idle: terminal.closing_idle,
-                    closing_contract: terminal.closing_contract.clone(),
-                    closing_contract_met: terminal.closing_contract_met,
+                    closing_idle: terminal.closing_idle(),
+                    closing_contract: terminal.closing_contract().map(str::to_string),
+                    closing_contract_met: terminal.closing_contract_met(),
+                    has_closing_report: terminal.has_closing_report(),
                     usage_limited: projection.usage_limited,
                     holds_shell: terminal.holds_shell,
-                    active_subagents: terminal.effective_active_subagents(),
+                    active_subagents: terminal.verified_active_subagents(),
                     waiting_on_agents: projection.waiting_on_agents,
                     foreground_process_name: terminal.foreground_process_name.clone(),
                     seen,
@@ -464,7 +475,7 @@ mod tests {
 
         assert_eq!(
             ws.pane_details(&terminals)[0].attention_tier,
-            AttentionTier::Attention
+            AttentionTier::Blocked
         );
 
         ws.tabs[0].panes.get_mut(&pane).unwrap().settled_at = Some(1);

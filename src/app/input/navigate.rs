@@ -3878,7 +3878,7 @@ mod tests {
     }
 
     #[test]
-    fn next_blocked_window_places_query_hidden_sibling_after_visible_targets() {
+    fn next_blocked_window_places_action_point_sibling_before_later_workspace() {
         let mut app = app_with_test_workspaces(&["mixed", "later"]);
         let visible = app.state.workspaces[0].tabs[0].root_pane;
         let hidden = app.state.workspaces[0].test_split(Direction::Horizontal);
@@ -3933,14 +3933,14 @@ mod tests {
                     pane_id: visible,
                 },
                 BlockedPaneTarget::Local {
-                    ws_idx: 1,
-                    tab_idx: 0,
-                    pane_id: later,
-                },
-                BlockedPaneTarget::Local {
                     ws_idx: 0,
                     tab_idx: 0,
                     pane_id: hidden,
+                },
+                BlockedPaneTarget::Local {
+                    ws_idx: 1,
+                    tab_idx: 0,
+                    pane_id: later,
                 },
             ]
         );

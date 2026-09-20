@@ -15,6 +15,12 @@ pub struct ClosingBlockReport {
     pub items: Vec<crate::api::schema::ClosingBlockItem>,
     pub decisions: Vec<crate::api::schema::ClosingBlockDecision>,
     pub agents: Option<u32>,
+    pub completion: Option<crate::api::schema::ClosingCompletion>,
+    pub external_wait: Option<String>,
+    pub parse_status: Option<crate::api::schema::ClosingParseStatus>,
+    pub workers_unknown: Option<bool>,
+    pub dependencies_authoritative: bool,
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -174,7 +180,7 @@ pub enum AppEvent {
         eta_s: Option<u64>,
         reported_at: Option<String>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
-        closing_block: Option<ClosingBlockReport>,
+        closing_block: Option<Box<ClosingBlockReport>>,
     },
     /// Agent session identity was reported without state authority.
     AgentSessionReported {
