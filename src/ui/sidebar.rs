@@ -2756,6 +2756,14 @@ fn compact_sidebar_rows_inner(
     let active_entries =
         ordered_tab_entries_preferring(app, &active_panes, Some(&active_pane_targets));
     let snoozed_entries = ordered_tab_entries(app, &snoozed_panes);
+    let snoozed_entries = if app.blocked_filter {
+        snoozed_entries
+            .into_iter()
+            .filter(entry_has_red_dot)
+            .collect()
+    } else {
+        snoozed_entries
+    };
     let settled_entries = ordered_tab_entries(app, &settled_panes);
     let visible_entries = if app.blocked_filter {
         active_entries
@@ -11873,7 +11881,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn blocked_filter_keeps_spaces_and_only_red_rows() {
+    fn blocked_filter_keeps_spaces_and_only_red_rows_including_snoozed_entries() {
         let mut app = AppState::test_new();
         app.workspaces = vec![
             Workspace::test_new("working"),
@@ -11921,6 +11929,8 @@ pub(crate) mod tests {
                 Vec::new(),
             );
         app.reconcile_sidebar_presentation();
+        let idle_pane = app.workspaces[2].tabs[0].root_pane;
+        assert!(app.snooze_pane_at(2, idle_pane, app.view_observed_unix_s + 60));
         app.blocked_filter = true;
 
         let rows = sidebar_rows(&app);
@@ -11947,6 +11957,13 @@ pub(crate) mod tests {
             [1]
         );
         assert!(tab_entries.iter().all(|entry| entry_has_red_dot(entry)));
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: SNOOZED_SECTION_TITLE,
+                ..
+            }
+        )));
     }
 
     #[test]
