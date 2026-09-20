@@ -87,20 +87,16 @@ pub(crate) enum AttentionTier {
 
 /// Derive human-attention severity from the lifecycle and closing-block facts.
 ///
-/// Gates and usage limits are blockers. Answer and Verify items are the lower
-/// attention tier once the agent has stopped. A plain blocked lifecycle still
-/// means blocked when no structured closing-block detail accompanied it.
+/// Every retained Gate, Answer, or Verify item is a human obligation. Active
+/// independent work may still keep the lifecycle working. A plain blocked
+/// lifecycle remains blocked without structured closing-block detail.
 pub(crate) fn attention_tier(
     state: AgentState,
     has_closing_gates: bool,
-    has_blocking_closing_items: bool,
+    has_closing_items: bool,
     usage_limited: bool,
 ) -> AttentionTier {
-    if usage_limited || has_closing_gates {
-        AttentionTier::Blocked
-    } else if has_blocking_closing_items && state != AgentState::Working {
-        AttentionTier::Attention
-    } else if state == AgentState::Blocked {
+    if usage_limited || has_closing_gates || has_closing_items || state == AgentState::Blocked {
         AttentionTier::Blocked
     } else {
         AttentionTier::None
@@ -252,21 +248,200 @@ pub(crate) struct TerminalAgentHandoffState {
     hook_authority: Option<HookAuthorityHandoffState>,
     supervisor_stale: bool,
     metadata: Vec<super::metadata::AgentMetadataHandoffState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    closing_report: Option<ClosingReportHandoffState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     closing_items: Vec<crate::api::schema::ClosingBlockItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     closing_report_subagents: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     closing_idle: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     closing_contract: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     closing_contract_met: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     closing_contract_met_elapsed: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    closing_completion: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    closing_wait: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    closing_parse: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    closing_workers_unknown: Option<String>,
     #[serde(default)]
     unreported_turn_started_elapsed: Option<Duration>,
+}
+
+const CLOSING_REPORT_MODEL_VERSION: u8 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ClosingReportScope {
+    source: Option<String>,
+    session_id: Option<String>,
+    turn_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct LegacyClosingReportGuard {
+    source: String,
+    agent_label: String,
+    session_id: String,
+    report_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosingReport {
+    version: u8,
+    scope: ClosingReportScope,
+    retired_pending_completion: bool,
+    requires_legacy_session_guard: bool,
+    legacy_session_guard: Option<LegacyClosingReportGuard>,
+    pub(crate) closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
+    pub(crate) closing_items: Vec<crate::api::schema::ClosingBlockItem>,
+    pub(crate) closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
+    closing_report_subagents: Option<u32>,
+    pub(crate) closing_idle: Option<bool>,
+    pub(crate) closing_contract: Option<String>,
+    pub(crate) closing_contract_met: Option<bool>,
+    pub(crate) closing_contract_met_at: Option<Instant>,
+    completion: Option<crate::api::schema::ClosingCompletion>,
+    external_wait: Option<String>,
+    parse_status: Option<crate::api::schema::ClosingParseStatus>,
+    workers_unknown: Option<bool>,
+}
+
+impl Default for ClosingReport {
+    fn default() -> Self {
+        Self {
+            version: CLOSING_REPORT_MODEL_VERSION,
+            scope: ClosingReportScope::default(),
+            retired_pending_completion: false,
+            requires_legacy_session_guard: false,
+            legacy_session_guard: None,
+            closing_gates: Vec::new(),
+            closing_items: Vec::new(),
+            closing_decisions: Vec::new(),
+            closing_report_subagents: None,
+            closing_idle: None,
+            closing_contract: None,
+            closing_contract_met: None,
+            closing_contract_met_at: None,
+            completion: None,
+            external_wait: None,
+            parse_status: None,
+            workers_unknown: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for TerminalState {
+    type Target = ClosingReport;
+
+    fn deref(&self) -> &Self::Target {
+        self.closing_report
+            .as_ref()
+            .expect("test terminal always owns a closing report")
+    }
+}
+
+#[cfg(test)]
+impl std::ops::DerefMut for TerminalState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.closing_report
+            .as_mut()
+            .expect("test terminal always owns a closing report")
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClosingReportHandoffState {
+    version: u8,
+    scope_source: Option<String>,
+    scope_session_id: Option<String>,
+    scope_turn_seq: Option<u64>,
+    #[serde(default)]
+    retired_pending_completion: bool,
+    #[serde(default)]
+    requires_legacy_session_guard: bool,
+    #[serde(default)]
+    legacy_session_guard: Option<LegacyClosingReportGuard>,
+    gates: Vec<crate::api::schema::ClosingBlockItem>,
+    items: Vec<crate::api::schema::ClosingBlockItem>,
+    decisions: Vec<crate::api::schema::ClosingBlockDecision>,
+    closing_report_subagents: Option<u32>,
+    idle: Option<bool>,
+    contract: Option<String>,
+    contract_met: Option<bool>,
+    contract_met_elapsed: Option<Duration>,
+    completion: Option<crate::api::schema::ClosingCompletion>,
+    external_wait: Option<String>,
+    parse_status: Option<crate::api::schema::ClosingParseStatus>,
+    workers_unknown: Option<bool>,
+}
+
+#[cfg(unix)]
+impl ClosingReportHandoffState {
+    fn capture(report: &ClosingReport, now: Instant) -> Self {
+        Self {
+            version: report.version,
+            scope_source: report.scope.source.clone(),
+            scope_session_id: report.scope.session_id.clone(),
+            scope_turn_seq: report.scope.turn_seq,
+            retired_pending_completion: report.retired_pending_completion,
+            requires_legacy_session_guard: report.requires_legacy_session_guard,
+            legacy_session_guard: report.legacy_session_guard.clone(),
+            gates: report.closing_gates.clone(),
+            items: report.closing_items.clone(),
+            decisions: report.closing_decisions.clone(),
+            closing_report_subagents: report.closing_report_subagents,
+            idle: report.closing_idle,
+            contract: report.closing_contract.clone(),
+            contract_met: report.closing_contract_met,
+            contract_met_elapsed: report
+                .closing_contract_met_at
+                .map(|at| now.saturating_duration_since(at)),
+            completion: report.completion,
+            external_wait: report.external_wait.clone(),
+            parse_status: report.parse_status,
+            workers_unknown: report.workers_unknown,
+        }
+    }
+
+    fn restore(self, now: Instant) -> ClosingReport {
+        ClosingReport {
+            version: self.version,
+            scope: ClosingReportScope {
+                source: self.scope_source,
+                session_id: self.scope_session_id,
+                turn_seq: self.scope_turn_seq,
+            },
+            retired_pending_completion: self.retired_pending_completion,
+            requires_legacy_session_guard: self.requires_legacy_session_guard,
+            legacy_session_guard: self.legacy_session_guard,
+            closing_gates: self.gates,
+            closing_items: self.items,
+            closing_decisions: self.decisions,
+            closing_report_subagents: self.closing_report_subagents,
+            closing_idle: self.idle,
+            closing_contract: self.contract,
+            closing_contract_met: self.contract_met,
+            closing_contract_met_at: self
+                .contract_met_elapsed
+                .and_then(|elapsed| now.checked_sub(elapsed)),
+            completion: self.completion,
+            external_wait: self.external_wait,
+            parse_status: self.parse_status,
+            workers_unknown: self.workers_unknown,
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -497,16 +672,7 @@ pub struct TerminalState {
     pub work_context: crate::work_context::PaneWorkContextState,
     work_title_initial_subject: Option<WorkTitleInitialSubject>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
-    pub closing_gates: Vec<crate::api::schema::ClosingBlockItem>,
-    pub closing_items: Vec<crate::api::schema::ClosingBlockItem>,
-    pub closing_decisions: Vec<crate::api::schema::ClosingBlockDecision>,
-    /// Subagents declared by the current closing report. `Some(0)` deliberately
-    /// overrides an older live transcript count.
-    closing_report_subagents: Option<u32>,
-    pub closing_idle: Option<bool>,
-    pub closing_contract: Option<String>,
-    pub closing_contract_met: Option<bool>,
-    pub closing_contract_met_at: Option<Instant>,
+    closing_report: Option<ClosingReport>,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     /// Runtime-only Claude JSONL source. Never persisted or exposed through the
     /// API; the accepted session id remains the resume identity.
@@ -517,12 +683,15 @@ pub struct TerminalState {
     session_name_write_target: Option<crate::work_title::SessionNameWriteTarget>,
     pub terminal_title: Option<String>,
     pub manual_label: Option<String>,
+    /// Configured host for a remote-focus proxy. Proxy terminals are excluded
+    /// from persistence, so this is runtime metadata only.
+    pub(crate) remote_proxy_host: Option<String>,
     /// Label Herdr applied before suspending this terminal, if still owned by settlement.
     pub(crate) settled_auto_label: Option<String>,
     pub agent_name: Option<String>,
     agent_name_owner: Option<AgentNameOwner>,
     managed_agent: Option<ManagedAgent>,
-    hook_report_sequences: HashMap<String, u64>,
+    pub(super) hook_report_sequences: HashMap<String, u64>,
     suppressed_full_lifecycle_hook_reports: HashMap<String, SuppressedFullLifecycleHookReport>,
     stale_full_lifecycle_hook_sessions: HashMap<String, Vec<StaleFullLifecycleHookSession>>,
     pub(super) metadata_report_sequences: HashMap<String, u64>,
@@ -550,6 +719,8 @@ pub struct TerminalState {
     /// Visible work can start a turn before the next lifecycle hook fires.
     /// This timestamp owns that gap and its watchdog budget.
     unreported_turn_started_at: Option<Instant>,
+    /// Runtime identity for background observations sampled during one agent turn.
+    agent_turn_generation: u64,
     agent_active_since: Option<Instant>,
     agent_last_active_at: Option<Instant>,
     agent_activity_owner: Option<AgentActivityOwner>,
@@ -573,10 +744,7 @@ fn normalize_declared_wait(
     if state != AgentState::Working || wait.is_none() {
         return (None, None);
     }
-    let Some(eta_s) = eta_s.filter(|eta_s| *eta_s <= MAX_DECLARED_WAIT_S) else {
-        return (None, None);
-    };
-    (wait, Some(eta_s))
+    (wait, eta_s.filter(|eta_s| *eta_s <= MAX_DECLARED_WAIT_S))
 }
 
 impl TerminalState {
@@ -598,20 +766,14 @@ impl TerminalState {
             work_context: crate::work_context::PaneWorkContextState::default(),
             work_title_initial_subject: None,
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
-            closing_gates: Vec::new(),
-            closing_items: Vec::new(),
-            closing_decisions: Vec::new(),
-            closing_report_subagents: None,
-            closing_idle: None,
-            closing_contract: None,
-            closing_contract_met: None,
-            closing_contract_met_at: None,
+            closing_report: Some(ClosingReport::default()),
             persisted_agent_session: None,
             claude_transcript_session_id: None,
             claude_transcript_path: None,
             session_name_write_target: None,
             terminal_title: None,
             manual_label: None,
+            remote_proxy_host: None,
             settled_auto_label: None,
             agent_name: None,
             agent_name_owner: None,
@@ -632,6 +794,7 @@ impl TerminalState {
             last_agent_state_change_seq: None,
             blocked_since: None,
             unreported_turn_started_at: None,
+            agent_turn_generation: 0,
             agent_active_since: None,
             agent_last_active_at: None,
             agent_activity_owner: None,
@@ -660,12 +823,20 @@ impl TerminalState {
         agent: Agent,
         now: Instant,
     ) -> TerminalStateMutation {
-        let starts_acquisition = !self
-            .should_ignore_detected_state_under_full_lifecycle_hook(Some(agent), false)
+        let finished_report_matches_agent = self.finished_closing_report()
+            && self.hook_authority.as_ref().is_some_and(|authority| {
+                crate::detect::parse_agent_label(&authority.agent_label) == Some(agent)
+            });
+        let starts_acquisition = !finished_report_matches_agent
+            && !self.should_ignore_detected_state_under_full_lifecycle_hook(Some(agent), false)
             && !self.detected_state_observed_before_release_suppression(Some(agent), now);
         let mutation = self.set_detected_state_with_screen_signals_at(
             Some(agent),
-            AgentState::Unknown,
+            if finished_report_matches_agent {
+                AgentState::Idle
+            } else {
+                AgentState::Unknown
+            },
             false,
             false,
             false,
@@ -681,7 +852,9 @@ impl TerminalState {
 
     pub(crate) fn finish_agent_process_acquisition(&mut self) -> bool {
         let reached_idle = self.agent_process_acquisition_pending && self.state == AgentState::Idle;
-        let suppress_completion = reached_idle && self.recent_agent_process_exit.is_none();
+        let suppress_completion = reached_idle
+            && self.recent_agent_process_exit.is_none()
+            && !self.closing_task_complete();
         if reached_idle {
             self.agent_process_acquisition_pending = false;
         }
@@ -694,17 +867,68 @@ impl TerminalState {
         items: Vec<crate::api::schema::ClosingBlockItem>,
         decisions: Vec<crate::api::schema::ClosingBlockDecision>,
     ) -> bool {
-        if self.closing_gates == gates
-            && self.closing_items == items
-            && self.closing_decisions == decisions
+        let report = self.closing_report.get_or_insert_default();
+        if report.closing_gates == gates
+            && report.closing_items == items
+            && report.closing_decisions == decisions
         {
             return false;
         }
-        self.closing_gates = gates;
-        self.closing_items = items;
-        self.closing_decisions = decisions;
+        report.closing_gates = gates;
+        report.closing_items = items;
+        report.closing_decisions = decisions;
         self.revision = self.revision.saturating_add(1);
         true
+    }
+
+    pub(crate) fn merge_closing_blockers(
+        &mut self,
+        gates: Vec<crate::api::schema::ClosingBlockItem>,
+        items: Vec<crate::api::schema::ClosingBlockItem>,
+    ) -> bool {
+        fn same_identity(
+            left: &crate::api::schema::ClosingBlockItem,
+            right: &crate::api::schema::ClosingBlockItem,
+        ) -> bool {
+            left.label.trim().eq_ignore_ascii_case(right.label.trim())
+                && left.text.trim() == right.text.trim()
+                && left.pr == right.pr
+                && left.ticket == right.ticket
+                && left.url == right.url
+        }
+
+        let report = self.closing_report.get_or_insert_default();
+        let mut changed = false;
+        for gate in gates
+            .into_iter()
+            .filter(crate::api::schema::ClosingBlockItem::requires_human_input)
+        {
+            if !report
+                .closing_gates
+                .iter()
+                .any(|existing| same_identity(existing, &gate))
+            {
+                report.closing_gates.push(gate);
+                changed = true;
+            }
+        }
+        for item in items
+            .into_iter()
+            .filter(crate::api::schema::ClosingBlockItem::requires_human_input)
+        {
+            if !report
+                .closing_items
+                .iter()
+                .any(|existing| same_identity(existing, &item))
+            {
+                report.closing_items.push(item);
+                changed = true;
+            }
+        }
+        if changed {
+            self.revision = self.revision.saturating_add(1);
+        }
+        changed
     }
 
     pub(crate) fn apply_closing_report_subagents_at(
@@ -712,14 +936,21 @@ impl TerminalState {
         agents: Option<u32>,
         now: Instant,
     ) -> Option<TerminalStateMutation> {
-        if self.closing_report_subagents == agents {
+        if self
+            .closing_report
+            .as_ref()
+            .and_then(|report| report.closing_report_subagents)
+            == agents
+        {
             return None;
         }
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
         let previous_state = self.state;
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
-        self.closing_report_subagents = agents;
+        self.closing_report
+            .get_or_insert_default()
+            .closing_report_subagents = agents;
         self.revision = self.revision.saturating_add(1);
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
@@ -735,7 +966,351 @@ impl TerminalState {
     }
 
     pub(crate) fn has_blocking_closing_items(&self) -> bool {
-        self.closing_items.iter().any(|item| item.blocking)
+        self.closing_items()
+            .iter()
+            .any(crate::api::schema::ClosingBlockItem::requires_human_input)
+    }
+
+    pub(crate) fn has_pending_human_input(&self) -> bool {
+        !self.closing_gates().is_empty() || self.has_blocking_closing_items()
+    }
+
+    pub(crate) fn closing_gates(&self) -> &[crate::api::schema::ClosingBlockItem] {
+        self.closing_report
+            .as_ref()
+            .map_or(&[], |report| report.closing_gates.as_slice())
+    }
+
+    pub(crate) fn closing_items(&self) -> &[crate::api::schema::ClosingBlockItem] {
+        self.closing_report
+            .as_ref()
+            .map_or(&[], |report| report.closing_items.as_slice())
+    }
+
+    pub(crate) fn closing_decisions(&self) -> &[crate::api::schema::ClosingBlockDecision] {
+        self.closing_report
+            .as_ref()
+            .map_or(&[], |report| report.closing_decisions.as_slice())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn closing_gates_mut(&mut self) -> &mut Vec<crate::api::schema::ClosingBlockItem> {
+        &mut self.closing_report.get_or_insert_default().closing_gates
+    }
+
+    #[cfg(test)]
+    pub(crate) fn closing_items_mut(&mut self) -> &mut Vec<crate::api::schema::ClosingBlockItem> {
+        &mut self.closing_report.get_or_insert_default().closing_items
+    }
+
+    pub(crate) fn closing_idle(&self) -> Option<bool> {
+        self.closing_report
+            .as_ref()
+            .and_then(|report| report.closing_idle)
+    }
+
+    pub(crate) fn closing_contract(&self) -> Option<&str> {
+        self.closing_report
+            .as_ref()
+            .and_then(|report| report.closing_contract.as_deref())
+    }
+
+    pub(crate) fn closing_contract_met(&self) -> Option<bool> {
+        self.closing_report
+            .as_ref()
+            .and_then(|report| report.closing_contract_met)
+    }
+
+    pub(crate) fn closing_contract_met_at(&self) -> Option<Instant> {
+        self.closing_report
+            .as_ref()
+            .and_then(|report| report.closing_contract_met_at)
+    }
+
+    pub(crate) fn closing_external_wait(&self) -> Option<&str> {
+        self.closing_report
+            .as_ref()
+            .and_then(|report| report.external_wait.as_deref())
+    }
+
+    pub(crate) fn metadata_tokens_for_api(&self) -> HashMap<String, String> {
+        let mut tokens = self.metadata_tokens.values();
+        let Some(report) = self.closing_report.as_ref() else {
+            return tokens;
+        };
+        if let Some(completion) = report.completion {
+            tokens.insert(
+                "closing_completion".into(),
+                match completion {
+                    crate::api::schema::ClosingCompletion::Complete => "complete",
+                    crate::api::schema::ClosingCompletion::Incomplete => "incomplete",
+                    crate::api::schema::ClosingCompletion::Missing => "missing",
+                }
+                .into(),
+            );
+        }
+        if let Some(parse_status) = report.parse_status {
+            tokens.insert(
+                "closing_parse".into(),
+                match parse_status {
+                    crate::api::schema::ClosingParseStatus::Ok => "ok",
+                    crate::api::schema::ClosingParseStatus::Missing => "missing",
+                    crate::api::schema::ClosingParseStatus::Malformed => "malformed",
+                }
+                .into(),
+            );
+        }
+        if let Some(wait) = report.external_wait.as_ref() {
+            tokens.insert("closing_wait".into(), wait.clone());
+        }
+        if let Some(workers_unknown) = report.workers_unknown {
+            tokens.insert(
+                "closing_workers_unknown".into(),
+                if workers_unknown { "1" } else { "0" }.into(),
+            );
+        }
+        if let Some(agents) = report.closing_report_subagents {
+            tokens.insert("closing_agents".into(), agents.to_string());
+        }
+        if !report.closing_gates.is_empty() || !report.closing_items.is_empty() {
+            let blocking = report.closing_gates.len()
+                + report
+                    .closing_items
+                    .iter()
+                    .filter(|item| item.requires_human_input())
+                    .count();
+            tokens.insert("closing_blocking".into(), blocking.to_string());
+            let gates = report
+                .closing_gates
+                .iter()
+                .map(|gate| gate.text.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            if !gates.is_empty() {
+                tokens.insert("closing_gates".into(), gates.chars().take(200).collect());
+            }
+        }
+        if let Some(idle) = report.closing_idle {
+            tokens.insert("closing_idle".into(), if idle { "1" } else { "0" }.into());
+        }
+        if let (Some(contract), Some(met)) = (&report.closing_contract, report.closing_contract_met)
+        {
+            tokens.insert("closing_contract".into(), contract.clone());
+            tokens.insert(
+                "closing_contract_met".into(),
+                if met { "1" } else { "0" }.into(),
+            );
+        }
+        tokens
+    }
+
+    pub(crate) fn set_closing_report_scope(
+        &mut self,
+        source: String,
+        session_id: Option<String>,
+        turn_seq: Option<u64>,
+    ) {
+        let scope = &mut self.closing_report.get_or_insert_default().scope;
+        scope.source = Some(source);
+        scope.session_id = session_id;
+        scope.turn_seq = turn_seq;
+    }
+
+    pub(crate) fn closing_task_reported(&self) -> bool {
+        self.closing_report.as_ref().is_some_and(|report| {
+            report.completion.is_some()
+                || report.parse_status.is_some()
+                || report.workers_unknown.is_some()
+                || report.external_wait.is_some()
+        })
+    }
+
+    pub(crate) fn has_closing_report(&self) -> bool {
+        self.closing_report.as_ref().is_some_and(|report| {
+            !report.closing_gates.is_empty()
+                || !report.closing_items.is_empty()
+                || !report.closing_decisions.is_empty()
+                || report.closing_report_subagents.is_some()
+                || report.closing_idle.is_some()
+                || report.closing_contract.is_some()
+                || report.closing_contract_met.is_some()
+                || report.completion.is_some()
+                || report.external_wait.is_some()
+                || report.parse_status.is_some()
+                || report.workers_unknown.is_some()
+        })
+    }
+
+    pub(crate) fn closing_task_complete(&self) -> bool {
+        self.closing_report.as_ref().is_some_and(|report| {
+            report.completion == Some(crate::api::schema::ClosingCompletion::Complete)
+                || report.closing_contract_met == Some(true)
+        })
+    }
+
+    pub(crate) fn take_retired_closing_report_completion(&mut self) -> bool {
+        let completed = self.closing_report.as_ref().is_some_and(|report| {
+            report.retired_pending_completion
+                && (report.completion == Some(crate::api::schema::ClosingCompletion::Complete)
+                    || report.closing_contract_met == Some(true))
+        });
+        if completed {
+            if let Some(report) = self.closing_report.as_mut() {
+                report.retired_pending_completion = false;
+            }
+        }
+        completed
+    }
+
+    fn closing_task_projection(
+        &self,
+        state: AgentState,
+        has_pending_human_input: bool,
+    ) -> (AgentState, &'static str) {
+        if self.closing_external_wait().is_some() {
+            (AgentState::Working, "closing_external_wait")
+        } else if state != AgentState::Working && has_pending_human_input {
+            (AgentState::Blocked, "closing_human_input")
+        } else if state == AgentState::Idle
+            && (self.closing_task_reported() && !self.closing_task_complete()
+                || self.active_subagents.is_none()
+                    && self.closing_report.as_ref().is_some_and(|report| {
+                        report.workers_unknown == Some(true)
+                            || report
+                                .closing_report_subagents
+                                .is_some_and(|count| count > 0)
+                    })
+                || self.closing_report.as_ref().is_some_and(|report| {
+                    matches!(
+                        report.parse_status,
+                        Some(
+                            crate::api::schema::ClosingParseStatus::Missing
+                                | crate::api::schema::ClosingParseStatus::Malformed
+                        )
+                    )
+                }))
+        {
+            (AgentState::Unknown, "closing_task_uncertain")
+        } else {
+            (state, "lifecycle")
+        }
+    }
+
+    pub(crate) fn apply_closing_task_report(
+        &mut self,
+        completion: Option<crate::api::schema::ClosingCompletion>,
+        external_wait: Option<String>,
+        parse_status: Option<crate::api::schema::ClosingParseStatus>,
+        workers_unknown: Option<bool>,
+        _now: Instant,
+    ) -> bool {
+        if completion.is_none()
+            && external_wait.is_none()
+            && parse_status.is_none()
+            && workers_unknown.is_none()
+        {
+            return false;
+        }
+        let preserve_dependencies = matches!(
+            parse_status,
+            Some(
+                crate::api::schema::ClosingParseStatus::Missing
+                    | crate::api::schema::ClosingParseStatus::Malformed
+            )
+        );
+        let external_wait = external_wait.and_then(|wait| {
+            let wait = wait
+                .trim()
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(80)
+                .collect::<String>();
+            (!wait.is_empty()).then_some(wait)
+        });
+        let report = self.closing_report.get_or_insert_default();
+        let mut changed = report.completion != completion || report.parse_status != parse_status;
+        report.completion = completion;
+        report.parse_status = parse_status;
+        if !preserve_dependencies {
+            changed |=
+                report.external_wait != external_wait || report.workers_unknown != workers_unknown;
+            report.external_wait = external_wait;
+            report.workers_unknown = workers_unknown;
+        }
+        if changed {
+            self.revision = self.revision.saturating_add(1);
+        }
+        changed
+    }
+
+    fn clear_closing_task_report(&mut self, now: Instant) -> bool {
+        let _ = now;
+        let (requires_legacy_session_guard, legacy_session_guard) = self
+            .closing_report
+            .as_ref()
+            .map(|report| {
+                (
+                    report.requires_legacy_session_guard,
+                    report.legacy_session_guard.clone(),
+                )
+            })
+            .unwrap_or_default();
+        let empty = ClosingReport {
+            requires_legacy_session_guard,
+            legacy_session_guard,
+            ..ClosingReport::default()
+        };
+        let report_changed = self
+            .closing_report
+            .as_ref()
+            .is_some_and(|report| report != &empty);
+        self.closing_report = Some(empty);
+        let legacy_tokens_changed = self.metadata_tokens.remove_prefixed("closing_");
+        report_changed || legacy_tokens_changed
+    }
+
+    fn retire_closing_report_outside_current_session(
+        &mut self,
+        session_changed: bool,
+        session_replaced: bool,
+        now: Instant,
+    ) -> bool {
+        if session_replaced {
+            let report = self.closing_report.get_or_insert_default();
+            report.requires_legacy_session_guard = true;
+            report.legacy_session_guard = None;
+        }
+        if !session_changed || !self.has_closing_report() {
+            return false;
+        }
+        let current_session_id = self
+            .current_session_identity_for_persistence()
+            .map(|(_, _, _, value)| value);
+        let report_matches_current_session = self
+            .closing_report
+            .as_ref()
+            .and_then(|report| report.scope.session_id.as_deref())
+            .zip(current_session_id.as_deref())
+            .is_some_and(|(report_session_id, current_session_id)| {
+                report_session_id == current_session_id
+            });
+        if report_matches_current_session {
+            return false;
+        }
+        if let Some(authority) = self.hook_authority.as_mut().filter(|authority| {
+            authority.retired_at.is_none()
+                && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
+        }) {
+            authority.retired_at = Some(now);
+        }
+        let changed = self.clear_closing_task_report(now);
+        if changed {
+            self.closing_report
+                .get_or_insert_default()
+                .retired_pending_completion = true;
+            self.revision = self.revision.wrapping_add(1);
+        }
+        changed
     }
 
     pub(crate) fn apply_closing_contract_tokens(
@@ -762,14 +1337,15 @@ impl TerminalState {
             _ => (None, None),
         };
         let closing_contract_met_at = closing_contract_met.is_some_and(|met| met).then_some(now);
-        let changed = self.closing_idle != closing_idle
-            || self.closing_contract != closing_contract
-            || self.closing_contract_met != closing_contract_met
-            || self.closing_contract_met_at != closing_contract_met_at;
-        self.closing_idle = closing_idle;
-        self.closing_contract = closing_contract;
-        self.closing_contract_met = closing_contract_met;
-        self.closing_contract_met_at = closing_contract_met_at;
+        let report = self.closing_report.get_or_insert_default();
+        let changed = report.closing_idle != closing_idle
+            || report.closing_contract != closing_contract
+            || report.closing_contract_met != closing_contract_met
+            || report.closing_contract_met_at != closing_contract_met_at;
+        report.closing_idle = closing_idle;
+        report.closing_contract = closing_contract;
+        report.closing_contract_met = closing_contract_met;
+        report.closing_contract_met_at = closing_contract_met_at;
         if changed {
             self.revision = self.revision.saturating_add(1);
         }
@@ -957,10 +1533,29 @@ impl TerminalState {
     }
 
     pub(crate) fn sidebar_projection(&self, seen: bool) -> (AgentState, bool) {
-        if self.supervisor_stale {
+        self.sidebar_projection_with_pending_human_input(seen, self.has_pending_human_input())
+    }
+
+    pub(crate) fn sidebar_projection_with_pending_human_input(
+        &self,
+        seen: bool,
+        has_pending_human_input: bool,
+    ) -> (AgentState, bool) {
+        let active_subagents = self.verified_active_subagents();
+        let (state, seen) = if self.supervisor_stale {
             self.stale_resolution.unwrap_or((self.state, seen))
+        } else if active_subagents == Some(0) && self.closing_task_complete() {
+            (self.lifecycle_state_and_arbitration().0, seen)
         } else {
             (self.state, seen)
+        };
+        if active_subagents.is_some_and(|count| count > 0) {
+            (AgentState::Working, seen)
+        } else {
+            let state = self
+                .closing_task_projection(state, has_pending_human_input)
+                .0;
+            (state, seen)
         }
     }
 
@@ -976,6 +1571,12 @@ impl TerminalState {
 
     pub(crate) fn set_active_subagents(&mut self, count: Option<u32>) -> bool {
         if self.active_subagents == count {
+            if count.is_some() && self.supervisor_stale {
+                self.supervisor_stale = false;
+                self.stale_resolution = None;
+                self.revision = self.revision.wrapping_add(1);
+                return true;
+            }
             if count.is_none() && self.claude_subagent_observations.take().is_some() {
                 self.revision = self.revision.wrapping_add(1);
                 return true;
@@ -985,9 +1586,55 @@ impl TerminalState {
         self.active_subagents = count;
         if count.is_none() {
             self.claude_subagent_observations = None;
+        } else {
+            self.supervisor_stale = false;
+            self.stale_resolution = None;
         }
         self.revision = self.revision.wrapping_add(1);
         true
+    }
+
+    pub(crate) fn set_active_subagents_with_projection_at(
+        &mut self,
+        count: Option<u32>,
+        seen: bool,
+        now: Instant,
+    ) -> (bool, Option<TerminalStateMutation>) {
+        let completion_waiting_on_worker = self
+            .verified_active_subagents()
+            .is_some_and(|count| count > 0)
+            && self.closing_task_complete();
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.sidebar_projection(seen).0;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
+        let changed = self.set_active_subagents(count);
+        if !changed {
+            return (false, None);
+        }
+        let state = self.sidebar_projection(seen).0;
+        let completed_after_last_worker = completion_waiting_on_worker
+            && self.verified_active_subagents() == Some(0)
+            && previous_state == AgentState::Working
+            && state == AgentState::Idle;
+        let effective_state_change = completed_after_last_worker.then(|| EffectiveStateChange {
+            previous_agent_label,
+            previous_known_agent,
+            previous_state,
+            previous_presentation,
+            agent_label: self.effective_agent_label().map(str::to_string),
+            known_agent: self.effective_known_agent(),
+            state,
+            presentation: self.effective_presentation_for_state_at(state, now),
+        });
+        (
+            true,
+            Some(TerminalStateMutation {
+                effective_state_change,
+                sidebar_projection_changed: true,
+                ..TerminalStateMutation::default()
+            }),
+        )
     }
 
     pub(crate) fn set_claude_subagent_observations(
@@ -1211,6 +1858,13 @@ impl TerminalState {
                         .fallback_observed_at
                         .is_some_and(|observed_at| observed_at > authority.reported_at)
             });
+        let previous_native_screen_settled =
+            matches!(self.fallback_state, AgentState::Idle | AgentState::Blocked)
+                && self.fallback_observed_at.is_some()
+                && self
+                    .hook_authority
+                    .as_ref()
+                    .is_none_or(|authority| !self.hook_authority_is_effective(authority));
         let visible_working_signal = visible_working && fallback_state == AgentState::Working;
         self.fallback_visible_working = visible_working_signal;
         self.fallback_visible_working_observed_at = visible_working_signal.then_some(now);
@@ -1219,6 +1873,7 @@ impl TerminalState {
             fallback_state,
             visible_working_signal,
             previous_screen_settled_after_report,
+            previous_native_screen_settled,
             now,
         );
         let newer_custom_authority = process_exited
@@ -1516,6 +2171,7 @@ impl TerminalState {
         fallback_state: AgentState,
         visible_working: bool,
         previous_screen_settled_after_report: bool,
+        previous_native_screen_settled: bool,
         now: Instant,
     ) -> bool {
         let closing_report_is_older = self.hook_authority.as_ref().is_some_and(|authority| {
@@ -1523,7 +2179,7 @@ impl TerminalState {
                 && self.hook_authority_is_effective(authority)
                 && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
         });
-        let starts_turn = visible_working
+        let starts_reported_turn = visible_working
             && closing_report_is_older
             && previous_screen_settled_after_report
             && self.hook_authority.as_ref().is_some_and(|authority| {
@@ -1532,6 +2188,8 @@ impl TerminalState {
                     .checked_add(crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH)
                     .is_some_and(|stable_at| now >= stable_at)
             });
+        let starts_turn =
+            starts_reported_turn || (visible_working && previous_native_screen_settled);
         let resolves_stale = self.supervisor_stale
             && matches!(fallback_state, AgentState::Idle | AgentState::Blocked)
             && self
@@ -1548,12 +2206,11 @@ impl TerminalState {
         self.supervisor_stale = false;
         self.stale_resolution = None;
         self.unreported_turn_started_at = starts_turn.then_some(now);
+        if starts_turn {
+            self.agent_turn_generation = self.agent_turn_generation.wrapping_add(1);
+        }
         if closing_report_is_older {
-            self.closing_gates.clear();
-            self.closing_items.clear();
-            self.closing_decisions.clear();
-            self.closing_report_subagents = Some(0);
-            self.closing_idle = None;
+            self.clear_closing_task_report(now);
         }
         self.revision = self.revision.wrapping_add(1);
         true
@@ -1712,6 +2369,15 @@ impl TerminalState {
         if !self.accept_hook_report(&source, seq) {
             return None;
         }
+        let starts_hook_turn = state == AgentState::Working
+            && self.unreported_turn_started_at.is_none()
+            && self.hook_authority.as_ref().is_none_or(|authority| {
+                authority.retired_at.is_some()
+                    || authority.state != AgentState::Working
+                    || authority.source != source
+                    || authority.agent_label != agent_label
+                    || (session_ref.is_some() && authority.session_ref != session_ref)
+            });
         let closing_report = crate::detect::is_closing_block_source(&source, &agent_label);
 
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
@@ -1736,13 +2402,18 @@ impl TerminalState {
                 }
             }
         }
-        self.persisted_agent_session = None;
+        if !crate::detect::is_closing_block_source(&source, &agent_label) {
+            self.persisted_agent_session = None;
+        }
         let (wait, eta_s) = normalize_declared_wait(state, wait, eta_s);
         if closing_report {
             // The preceding screen sample belongs to the turn that just ended.
             // A forced post-report rescan establishes the baseline from which
             // a later visible Working signal can prove a new turn.
             self.fallback_observed_at = None;
+        }
+        if starts_hook_turn {
+            self.agent_turn_generation = self.agent_turn_generation.wrapping_add(1);
         }
         self.replace_hook_authority(Some(HookAuthority {
             source,
@@ -1758,11 +2429,17 @@ impl TerminalState {
         }));
         let current_session = self.current_session_identity_for_persistence();
         let session_ref_changed = previous_session != current_session;
+        let session_replaced = previous_session.is_some() && session_ref_changed;
         let hook_work_context_changed = if previous_session != current_session {
             self.clear_hook_work_context()
         } else {
             false
         };
+        let closing_report_retired = self.retire_closing_report_outside_current_session(
+            session_ref_changed,
+            session_replaced,
+            now,
+        );
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -1772,10 +2449,10 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed,
-            session_replaced: previous_session.is_some() && session_ref_changed,
+            session_replaced,
             hook_work_context_changed,
             agent_released: false,
-            sidebar_projection_changed: false,
+            sidebar_projection_changed: closing_report_retired,
         })
     }
 
@@ -1797,6 +2474,10 @@ impl TerminalState {
                 .as_ref()
                 .map(|authority| authority.reported_at)
         })
+    }
+
+    pub(crate) fn agent_turn_generation(&self) -> u64 {
+        self.agent_turn_generation
     }
 
     /// True while the pane only reads as working because sub-process evidence
@@ -1821,24 +2502,29 @@ impl TerminalState {
     /// written without a TTL, and transcript rows simply stop arriving when the
     /// parent stalls. So a parent that said "3 agents running" keeps reading busy
     /// forever unless the watchdog ages the claim out.
-    fn current_closing_report_subagents(&self) -> Option<u32> {
+    fn current_direct_closing_report_subagents(&self) -> Option<u32> {
         self.hook_authority.as_ref().filter(|authority| {
             authority.retired_at.is_none()
                 && self.hook_authority_is_effective(authority)
                 && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
         })?;
-        self.closing_report_subagents
-            .or_else(|| {
-                self.metadata_tokens
-                    .get("closing_agents")
-                    .and_then(|value| value.parse::<u32>().ok())
-            })
-            .or(self.active_subagents)
+        self.closing_report
+            .as_ref()
+            .and_then(|report| report.closing_report_subagents)
+    }
+
+    pub(crate) fn verified_active_subagents(&self) -> Option<u32> {
+        self.active_subagents
+            .or_else(|| self.current_direct_closing_report_subagents())
+    }
+
+    fn current_closing_report_subagents(&self) -> Option<u32> {
+        self.active_subagents
+            .or_else(|| self.current_direct_closing_report_subagents())
     }
 
     pub(crate) fn effective_active_subagents(&self) -> Option<u32> {
         self.current_closing_report_subagents()
-            .or(self.active_subagents)
     }
 
     pub(crate) fn declares_running_subagents(&self) -> bool {
@@ -1887,7 +2573,10 @@ impl TerminalState {
         subagent_stale_after: Duration,
         pane_activity_at: Option<Instant>,
     ) -> Option<Instant> {
-        if self.supervisor_stale || self.state == AgentState::Blocked {
+        if self.supervisor_stale
+            || self.state == AgentState::Blocked
+            || self.closing_external_wait().is_some()
+        {
             return None;
         }
         if let Some(turn_started_at) = self.unreported_turn_started_at {
@@ -1953,7 +2642,9 @@ impl TerminalState {
         let expired_subagent_wait = self.waiting_on_agents();
         self.supervisor_stale = true;
         if expired_subagent_wait {
-            self.closing_report_subagents = Some(0);
+            self.closing_report
+                .get_or_insert_default()
+                .closing_report_subagents = Some(0);
             self.revision = self.revision.wrapping_add(1);
         }
         Some(TerminalStateMutation {
@@ -2553,6 +3244,107 @@ impl TerminalState {
         )
     }
 
+    pub(crate) fn agent_session_id_matches_current_agent(
+        &self,
+        agent_label: &str,
+        session_id: &str,
+    ) -> bool {
+        self.current_session_identity_for_persistence().is_some_and(
+            |(_, current_agent, current_kind, current_value)| {
+                current_agent == agent_label
+                    && current_kind == crate::agent_resume::AgentSessionRefKind::Id
+                    && current_value == session_id
+            },
+        )
+    }
+
+    pub(crate) fn record_legacy_closing_report_precursor(
+        &mut self,
+        source: String,
+        agent_label: String,
+        session_id: Option<String>,
+        precursor_seq: Option<u64>,
+    ) {
+        if !crate::detect::is_closing_block_source(&source, &agent_label) {
+            return;
+        }
+        let Some((session_id, report_seq)) = session_id
+            .zip(precursor_seq.and_then(|seq| seq.checked_add(1)))
+            .filter(|(session_id, _)| {
+                self.agent_session_id_matches_current_agent(&agent_label, session_id)
+            })
+        else {
+            return;
+        };
+        self.closing_report
+            .get_or_insert_default()
+            .legacy_session_guard = Some(LegacyClosingReportGuard {
+            source,
+            agent_label,
+            session_id,
+            report_seq,
+        });
+    }
+
+    pub(crate) fn correlate_legacy_closing_report(
+        &self,
+        source: &str,
+        agent_label: &str,
+        seq: Option<u64>,
+    ) -> Result<Option<String>, ()> {
+        let Some(report) = self.closing_report.as_ref() else {
+            return Ok(None);
+        };
+        if let Some(session_id) = report
+            .legacy_session_guard
+            .as_ref()
+            .filter(|guard| {
+                guard.source == source
+                    && guard.agent_label == agent_label
+                    && Some(guard.report_seq) == seq
+                    && self.agent_session_id_matches_current_agent(agent_label, &guard.session_id)
+            })
+            .map(|guard| guard.session_id.clone())
+        {
+            return Ok(Some(session_id));
+        }
+        if report.requires_legacy_session_guard {
+            Err(())
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn legacy_closing_report_requires_guard(&self) -> bool {
+        self.closing_report
+            .as_ref()
+            .is_some_and(|report| report.requires_legacy_session_guard)
+    }
+
+    pub(crate) fn accepts_legacy_closing_metadata(
+        &self,
+        source: &str,
+        agent_label: &str,
+        seq: Option<u64>,
+    ) -> bool {
+        let Some(report) = self.closing_report.as_ref() else {
+            return true;
+        };
+        if !report.requires_legacy_session_guard {
+            return true;
+        }
+        report.scope.source.as_deref() == Some(source)
+            && report.scope.turn_seq == seq
+            && report
+                .scope
+                .session_id
+                .as_deref()
+                .is_some_and(|session_id| {
+                    self.agent_session_id_matches_current_agent(agent_label, session_id)
+                })
+    }
+
     fn current_session_owner_conflicts(&self, source: &str, agent_label: &str) -> bool {
         self.current_session_identity_for_persistence().is_some_and(
             |(current_source, current_agent, _, _)| {
@@ -2786,11 +3578,18 @@ impl TerminalState {
             if process_present {
                 self.clear_full_lifecycle_hook_suppression_for_detected_agent(None, known_agent);
                 let current_session = self.current_session_identity_for_persistence();
-                let hook_work_context_changed = if previous_session != current_session {
+                let session_ref_changed = previous_session != current_session;
+                let session_replaced = previous_session.is_some() && session_ref_changed;
+                let hook_work_context_changed = if session_ref_changed {
                     self.clear_hook_work_context()
                 } else {
                     false
                 };
+                let closing_report_retired = self.retire_closing_report_outside_current_session(
+                    session_ref_changed,
+                    session_replaced,
+                    now,
+                );
                 return Some(TerminalStateMutation {
                     effective_state_change: self.recompute_effective_state(
                         previous_agent_label,
@@ -2799,12 +3598,11 @@ impl TerminalState {
                         previous_presentation,
                         now,
                     ),
-                    session_ref_changed: previous_session != current_session,
-                    session_replaced: previous_session.is_some()
-                        && previous_session != current_session,
+                    session_ref_changed,
+                    session_replaced,
                     hook_work_context_changed,
                     agent_released: false,
-                    sidebar_projection_changed: false,
+                    sidebar_projection_changed: closing_report_retired,
                 });
             }
             return None;
@@ -2896,11 +3694,17 @@ impl TerminalState {
         });
         let current_session = self.current_session_identity_for_persistence();
         let session_ref_changed = previous_session != current_session;
+        let session_replaced = previous_session.is_some() && session_ref_changed;
         let hook_work_context_changed = if previous_session != current_session {
             self.clear_hook_work_context()
         } else {
             false
         };
+        let closing_report_retired = self.retire_closing_report_outside_current_session(
+            session_ref_changed,
+            session_replaced,
+            now,
+        );
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
                 previous_agent_label,
@@ -2910,10 +3714,10 @@ impl TerminalState {
                 now,
             ),
             session_ref_changed,
-            session_replaced: previous_session.is_some() && session_ref_changed,
+            session_replaced,
             hook_work_context_changed,
             agent_released: false,
-            sidebar_projection_changed: false,
+            sidebar_projection_changed: closing_report_retired,
         })
     }
 
@@ -3042,6 +3846,14 @@ impl TerminalState {
         &mut self,
         observed_at: Instant,
     ) -> Option<TerminalStateMutation> {
+        self.retire_hook_authority_at(observed_at, true)
+    }
+
+    fn retire_hook_authority_at(
+        &mut self,
+        observed_at: Instant,
+        clear_report: bool,
+    ) -> Option<TerminalStateMutation> {
         let should_retire = self.hook_authority.as_ref().is_some_and(|authority| {
             authority.state != AgentState::Working
                 && authority.retired_at.is_none()
@@ -3060,6 +3872,10 @@ impl TerminalState {
             return None;
         }
 
+        let retiring_closing_report = self.hook_authority.as_ref().is_some_and(|authority| {
+            crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
+        });
+
         let now = Instant::now();
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
@@ -3067,6 +3883,11 @@ impl TerminalState {
         let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
         let authority = self.hook_authority.as_mut()?;
         authority.retired_at = Some(observed_at);
+        let task_report_cleared =
+            clear_report && retiring_closing_report && self.clear_closing_task_report(now);
+        if task_report_cleared {
+            self.revision = self.revision.wrapping_add(1);
+        }
 
         Some(TerminalStateMutation {
             effective_state_change: self.recompute_effective_state(
@@ -3080,7 +3901,7 @@ impl TerminalState {
             session_replaced: false,
             hook_work_context_changed: false,
             agent_released: false,
-            sidebar_projection_changed: false,
+            sidebar_projection_changed: task_report_cleared,
         })
     }
 
@@ -3088,7 +3909,7 @@ impl TerminalState {
         &mut self,
         observed_at: Instant,
     ) -> Option<TerminalStateMutation> {
-        self.retire_output_inconsistent_hook_authority_at(observed_at)
+        self.retire_hook_authority_at(observed_at, false)
     }
 
     pub fn full_lifecycle_hook_authority_deadline(&self, timeout: Duration) -> Option<Instant> {
@@ -3288,19 +4109,17 @@ impl TerminalState {
         now: Instant,
     ) -> Option<TerminalAgentHandoffState> {
         let metadata = self.agent_metadata_handoff_state(now);
+        let closing_report = self
+            .closing_report
+            .as_ref()
+            .filter(|report| *report != &ClosingReport::default());
         if self.state == AgentState::Unknown
             && self.detected_agent.is_none()
             && self.recent_agent_process_exit.is_none()
             && self.hook_authority.is_none()
             && !self.supervisor_stale
             && metadata.is_empty()
-            && self.closing_gates.is_empty()
-            && self.closing_items.is_empty()
-            && self.closing_decisions.is_empty()
-            && self.closing_report_subagents.is_none()
-            && self.closing_idle.is_none()
-            && self.closing_contract.is_none()
-            && self.closing_contract_met.is_none()
+            && closing_report.is_none()
         {
             return None;
         }
@@ -3322,16 +4141,20 @@ impl TerminalState {
                 .map(|authority| HookAuthorityHandoffState::capture(authority, now)),
             supervisor_stale: self.supervisor_stale,
             metadata,
-            closing_gates: self.closing_gates.clone(),
-            closing_items: self.closing_items.clone(),
-            closing_decisions: self.closing_decisions.clone(),
-            closing_report_subagents: self.closing_report_subagents,
-            closing_idle: self.closing_idle,
-            closing_contract: self.closing_contract.clone(),
-            closing_contract_met: self.closing_contract_met,
-            closing_contract_met_elapsed: self
-                .closing_contract_met_at
-                .map(|reported_at| now.saturating_duration_since(reported_at)),
+            closing_report: closing_report
+                .map(|report| ClosingReportHandoffState::capture(report, now)),
+            closing_gates: Vec::new(),
+            closing_items: Vec::new(),
+            closing_decisions: Vec::new(),
+            closing_report_subagents: None,
+            closing_idle: None,
+            closing_contract: None,
+            closing_contract_met: None,
+            closing_contract_met_elapsed: None,
+            closing_completion: None,
+            closing_wait: None,
+            closing_parse: None,
+            closing_workers_unknown: None,
             unreported_turn_started_elapsed: self
                 .unreported_turn_started_at
                 .map(|started_at| now.saturating_duration_since(started_at)),
@@ -3344,6 +4167,43 @@ impl TerminalState {
         handoff: TerminalAgentHandoffState,
         now: Instant,
     ) {
+        let closing_report = handoff
+            .closing_report
+            .map(|report| report.restore(now))
+            .unwrap_or_else(|| {
+                let completion = match handoff.closing_completion.as_deref() {
+                    Some("complete") => Some(crate::api::schema::ClosingCompletion::Complete),
+                    Some("incomplete") => Some(crate::api::schema::ClosingCompletion::Incomplete),
+                    Some("missing") => Some(crate::api::schema::ClosingCompletion::Missing),
+                    _ => None,
+                };
+                let parse_status = match handoff.closing_parse.as_deref() {
+                    Some("ok") => Some(crate::api::schema::ClosingParseStatus::Ok),
+                    Some("missing") => Some(crate::api::schema::ClosingParseStatus::Missing),
+                    Some("malformed") => Some(crate::api::schema::ClosingParseStatus::Malformed),
+                    _ => None,
+                };
+                ClosingReport {
+                    closing_gates: handoff.closing_gates,
+                    closing_items: handoff.closing_items,
+                    closing_decisions: handoff.closing_decisions,
+                    closing_report_subagents: handoff.closing_report_subagents,
+                    closing_idle: handoff.closing_idle,
+                    closing_contract: handoff.closing_contract,
+                    closing_contract_met: handoff.closing_contract_met,
+                    closing_contract_met_at: handoff
+                        .closing_contract_met_elapsed
+                        .and_then(|elapsed| now.checked_sub(elapsed)),
+                    completion,
+                    external_wait: handoff.closing_wait,
+                    parse_status,
+                    workers_unknown: handoff
+                        .closing_workers_unknown
+                        .as_deref()
+                        .and_then(parse_binary_token),
+                    ..ClosingReport::default()
+                }
+            });
         self.state = handoff.state.into();
         self.fallback_state = self.state;
         self.detected_agent = handoff
@@ -3363,16 +4223,7 @@ impl TerminalState {
             .map(|authority| authority.restore(now));
         self.supervisor_stale = handoff.supervisor_stale;
         self.restore_agent_metadata_handoff_state(handoff.metadata, now);
-        self.closing_gates = handoff.closing_gates;
-        self.closing_items = handoff.closing_items;
-        self.closing_decisions = handoff.closing_decisions;
-        self.closing_report_subagents = handoff.closing_report_subagents;
-        self.closing_idle = handoff.closing_idle;
-        self.closing_contract = handoff.closing_contract;
-        self.closing_contract_met = handoff.closing_contract_met;
-        self.closing_contract_met_at = handoff
-            .closing_contract_met_elapsed
-            .and_then(|elapsed| now.checked_sub(elapsed));
+        self.closing_report = Some(closing_report);
         self.unreported_turn_started_at = handoff
             .unreported_turn_started_elapsed
             .and_then(|elapsed| now.checked_sub(elapsed));
@@ -3410,6 +4261,21 @@ impl TerminalState {
             state,
             presentation,
         }
+    }
+
+    pub(crate) fn recompute_effective_state_from_current_at(
+        &mut self,
+        now: Instant,
+    ) -> EffectiveStateChange {
+        let current = self.unchanged_effective_state_change_at(now);
+        self.recompute_effective_state(
+            current.agent_label.clone(),
+            current.known_agent,
+            current.state,
+            current.presentation.clone(),
+            now,
+        )
+        .unwrap_or(current)
     }
 
     pub fn full_lifecycle_hook_authority_active(&self) -> bool {
@@ -3485,10 +4351,23 @@ impl TerminalState {
     }
 
     fn effective_state_and_arbitration(&self) -> (AgentState, &'static str) {
+        let (state, arbitration) = self.lifecycle_state_and_arbitration();
+        let (projected, task_arbitration) =
+            self.closing_task_projection(state, self.has_pending_human_input());
+        if projected == state {
+            (state, arbitration)
+        } else {
+            (projected, task_arbitration)
+        }
+    }
+
+    fn lifecycle_state_and_arbitration(&self) -> (AgentState, &'static str) {
         let (detected_state, arbitration) = self.detected_state_and_arbitration();
         if detected_state == AgentState::Idle
             && self.effective_agent_label().is_some()
             && self.foreground_process_active
+            && !(self.detected_agent == Some(Agent::Codex)
+                && self.fallback_state == AgentState::Idle)
             && !self.finished_closing_report()
         {
             (AgentState::Working, "foreground_process")
@@ -3800,7 +4679,9 @@ impl TerminalState {
         self.fallback_working_observed_at = None;
         self.fallback_observed_at = None;
         self.replace_hook_authority(None);
-        self.closing_report_subagents = None;
+        self.closing_report
+            .get_or_insert_default()
+            .closing_report_subagents = None;
         self.persisted_agent_session = None;
         self.claude_transcript_session_id = None;
         self.claude_transcript_path = None;
@@ -3950,17 +4831,39 @@ pub(crate) fn stabilize_agent_detection(detection: crate::detect::AgentDetection
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_idle_report_stays_acknowledged_after_viewing() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
+        terminal.apply_closing_report_subagents_at(Some(0), now);
+
+        assert_eq!(
+            terminal.sidebar_projection(false),
+            (AgentState::Idle, false)
+        );
+        assert_eq!(terminal.sidebar_projection(true), (AgentState::Idle, true));
+        assert_eq!(terminal.sidebar_projection(true), (AgentState::Idle, true));
+    }
     use crate::{app::AppState, detect::AgentDetection, workspace::Workspace};
 
     #[test]
-    fn closing_block_attention_tier_distinguishes_gates_from_other_items() {
+    fn action_point_labels_require_human_attention_regardless_of_legacy_flag() {
         assert_eq!(
             attention_tier(AgentState::Blocked, true, false, false),
             AttentionTier::Blocked
         );
         assert_eq!(
             attention_tier(AgentState::Blocked, false, true, false),
-            AttentionTier::Attention
+            AttentionTier::Blocked
         );
         assert_eq!(
             attention_tier(AgentState::Blocked, true, true, false),
@@ -3968,8 +4871,27 @@ mod tests {
         );
         assert_eq!(
             attention_tier(AgentState::Working, false, true, false),
-            AttentionTier::None
+            AttentionTier::Blocked
         );
+
+        let mut terminal = test_terminal();
+        terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose one".into(),
+            blocking: false,
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        assert!(terminal.has_blocking_closing_items());
+
+        terminal.closing_items_mut()[0].label = "What to test".into();
+        terminal.closing_items_mut()[0].blocking = true;
+        assert!(!terminal.has_blocking_closing_items());
+        assert!(!terminal.has_pending_human_input());
     }
 
     const TEST_AGENT_STALE_AFTER: Duration = Duration::from_secs(5 * 60);
@@ -4189,6 +5111,88 @@ mod tests {
         assert!(terminal.closing_idle.is_none());
         assert!(terminal.closing_contract.is_none());
         assert!(terminal.closing_contract_met.is_none());
+    }
+
+    #[test]
+    fn incomplete_task_report_cannot_project_as_done() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Incomplete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
+
+        assert_eq!(
+            terminal.sidebar_projection(false),
+            (AgentState::Unknown, false)
+        );
+    }
+
+    #[test]
+    fn task_report_without_completion_cannot_project_as_done() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.apply_closing_task_report(
+            None,
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
+
+        assert_eq!(
+            terminal.sidebar_projection(false),
+            (AgentState::Unknown, false)
+        );
+    }
+
+    #[test]
+    fn explicit_completion_projects_an_idle_task_as_done() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
+
+        assert_eq!(terminal.sidebar_projection(true), (AgentState::Idle, true));
+    }
+
+    #[test]
+    fn idle_closing_report_without_completion_is_not_done() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.apply_closing_task_report(
+            None,
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1),
+            now,
+        );
+
+        assert_eq!(
+            terminal.sidebar_projection(false),
+            (AgentState::Unknown, false)
+        );
     }
 
     #[test]
@@ -4630,6 +5634,136 @@ mod tests {
         );
         assert_eq!(restored.state, AgentState::Unknown);
         assert!(restored.hook_authority.is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn handoff_preserves_legacy_guard_for_v2_report_and_done_projection() {
+        let captured_at = Instant::now();
+        let mut source = test_terminal();
+        let session_id = "claude-session";
+        source.set_hook_authority_with_session_ref(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            Some(crate::agent_resume::AgentSessionRef::id(session_id).unwrap()),
+            Some(10),
+        );
+        source.apply_closing_block_payload(
+            vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
+                n: 1,
+                label: "Gate".into(),
+                text: "Approve the release".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        source.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            captured_at,
+        );
+        source.record_legacy_closing_report_precursor(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            Some(session_id.into()),
+            Some(10),
+        );
+        source
+            .closing_report
+            .as_mut()
+            .expect("closing report")
+            .requires_legacy_session_guard = true;
+
+        let encoded = serde_json::to_string(
+            &source
+                .terminal_agent_handoff_state(captured_at)
+                .expect("guarded report should create handoff state"),
+        )
+        .unwrap();
+        let decoded: TerminalAgentHandoffState = serde_json::from_str(&encoded).unwrap();
+        let mut restored = test_terminal();
+        restored
+            .restore_terminal_agent_handoff_state(decoded, captured_at + Duration::from_secs(1));
+
+        assert_eq!(restored.closing_gates.len(), 1);
+        assert!(restored.closing_task_complete());
+        assert_eq!(
+            restored.correlate_legacy_closing_report(
+                "herdr:claude-closing-block",
+                "claude",
+                Some(11),
+            ),
+            Ok(Some(session_id.into()))
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn handoff_preserves_task_lifecycle_tokens_and_wait_projection() {
+        let captured_at = Instant::now();
+        let mut source = test_terminal();
+        source.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        source.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Incomplete),
+            Some("CI checks".into()),
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(true),
+            captured_at,
+        );
+
+        let encoded = serde_json::to_string(
+            &source
+                .terminal_agent_handoff_state(captured_at)
+                .expect("task lifecycle tokens should create handoff state"),
+        )
+        .unwrap();
+        let decoded: TerminalAgentHandoffState = serde_json::from_str(&encoded).unwrap();
+        let mut restored = test_terminal();
+        restored
+            .restore_terminal_agent_handoff_state(decoded, captured_at + Duration::from_secs(1));
+
+        assert_eq!(
+            restored
+                .metadata_tokens_for_api()
+                .get("closing_completion")
+                .map(String::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            restored
+                .metadata_tokens_for_api()
+                .get("closing_wait")
+                .map(String::as_str),
+            Some("CI checks")
+        );
+        assert_eq!(
+            restored
+                .metadata_tokens_for_api()
+                .get("closing_parse")
+                .map(String::as_str),
+            Some("ok")
+        );
+        assert_eq!(
+            restored
+                .metadata_tokens_for_api()
+                .get("closing_workers_unknown")
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            restored.sidebar_projection(false),
+            (AgentState::Working, false)
+        );
     }
 
     #[test]
@@ -5823,6 +6957,13 @@ mod tests {
             Some(999),
             Some("startup".into()),
         );
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
@@ -5847,6 +6988,18 @@ mod tests {
             AgentState::Idle,
             "the reported idle stands once the sub-process tree is quiet"
         );
+    }
+
+    #[test]
+    fn codex_idle_screen_outranks_a_persistent_helper_process() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_foreground_process(Some("sh".into()), true, now);
+
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.effective_state_arbitration(), "screen");
     }
 
     #[test]
@@ -5897,6 +7050,144 @@ mod tests {
             terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
             turn_started.checked_add(AGENT_BUSY_STALE_SILENCE)
         );
+    }
+
+    #[test]
+    fn resumed_turn_cannot_inherit_completion_from_the_previous_turn() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        assert_eq!(terminal.sidebar_projection(true), (AgentState::Idle, true));
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            now + Duration::from_secs(1),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            now + Duration::from_secs(2),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            now + Duration::from_secs(3),
+        );
+
+        assert_eq!(
+            terminal.sidebar_projection(true),
+            (AgentState::Idle, true),
+            "the resumed turn needs fresh closing evidence before it can be done"
+        );
+        assert!(terminal
+            .metadata_tokens_for_api()
+            .get("closing_completion")
+            .map(String::as_str)
+            .is_none());
+    }
+
+    #[test]
+    fn resumed_turn_retires_legacy_completion_and_worker_evidence() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let legacy_tokens = HashMap::from([
+            ("closing_idle".into(), Some("1".into())),
+            ("closing_contract".into(), Some("finish the repair".into())),
+            ("closing_contract_met".into(), Some("1".into())),
+            ("closing_agents".into(), Some("2".into())),
+        ]);
+        assert!(terminal.apply_closing_contract_tokens(&legacy_tokens, now,));
+        assert!(terminal.metadata_tokens.patch(legacy_tokens, None, now));
+        terminal
+            .apply_closing_report_subagents_at(Some(2), now)
+            .expect("legacy direct worker evidence should be present");
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            now + Duration::from_secs(1),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            now + Duration::from_secs(2),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            now + Duration::from_secs(3),
+        );
+
+        assert!(terminal.closing_contract_met.is_none());
+        assert!(terminal.closing_report_subagents.is_none());
+        for key in [
+            "closing_idle",
+            "closing_contract",
+            "closing_contract_met",
+            "closing_agents",
+        ] {
+            assert!(terminal.metadata_tokens.get(key).is_none(), "stale {key}");
+        }
+        assert!(!terminal.closing_task_complete());
+        assert!(!terminal.declares_running_subagents());
+        assert_eq!(terminal.sidebar_projection(true), (AgentState::Idle, true));
     }
 
     #[test]
@@ -5959,6 +7250,13 @@ mod tests {
 
         let mut quiet = test_terminal();
         quiet.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        quiet.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
         quiet.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
@@ -6068,7 +7366,11 @@ mod tests {
         );
         active.set_active_subagents(Some(1));
 
-        assert!(active.metadata_tokens.get("closing_agents").is_none());
+        assert!(active
+            .metadata_tokens_for_api()
+            .get("closing_agents")
+            .map(String::as_str)
+            .is_none());
         assert!(active.declares_running_subagents());
         assert_eq!(
             active.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
@@ -6109,6 +7411,60 @@ mod tests {
     }
 
     #[test]
+    fn live_active_subagent_keeps_an_idle_parent_in_progress() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_active_subagents(Some(1));
+
+        assert_eq!(
+            terminal.sidebar_projection(true),
+            (AgentState::Working, true)
+        );
+    }
+
+    #[test]
+    fn last_verified_worker_completion_recomputes_the_parent_status() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(true),
+            now,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1),
+            now,
+        );
+        terminal.set_active_subagents(Some(1));
+        assert_eq!(
+            terminal.sidebar_projection(true),
+            (AgentState::Working, true)
+        );
+
+        terminal.supervisor_stale = true;
+        terminal.stale_resolution = Some((AgentState::Unknown, true));
+        assert!(terminal.set_active_subagents(Some(1)));
+        assert!(
+            !terminal.supervisor_stale,
+            "a live scan reconciles stale state"
+        );
+        assert!(terminal.set_active_subagents(Some(0)));
+        assert_eq!(
+            terminal.sidebar_projection(true),
+            (AgentState::Idle, true),
+            "native zero and explicit completion settle the earlier unknown worker claim"
+        );
+    }
+
+    #[test]
     fn a_subagent_claim_goes_stale_when_the_silence_runs_out() {
         let now = Instant::now();
         let mut terminal = subagent_claim_terminal(now);
@@ -6123,6 +7479,46 @@ mod tests {
             .mark_agent_status_stale_at(now + TEST_SUBAGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
             .is_some());
         assert!(terminal.supervisor_stale);
+    }
+
+    #[test]
+    fn unreconciled_reported_worker_claim_is_unknown_not_working() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::id("claude-unverified-worker-claim"),
+            Some(999),
+            Some("startup".into()),
+        );
+        assert!(terminal.metadata_tokens.patch(
+            HashMap::from([("closing_agents".into(), Some("3".into()))]),
+            None,
+            now,
+        ));
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Incomplete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(true),
+            now,
+        );
+
+        assert_eq!(
+            terminal.sidebar_projection(false),
+            (AgentState::Unknown, false)
+        );
     }
 
     #[test]
@@ -6170,7 +7566,7 @@ mod tests {
     }
 
     #[test]
-    fn an_omitted_agent_count_restores_the_legacy_metadata_fallback() {
+    fn an_omitted_agent_count_never_reads_the_legacy_metadata_mirror() {
         let now = Instant::now();
         let mut terminal = subagent_claim_terminal(now);
         terminal
@@ -6187,8 +7583,8 @@ mod tests {
             .apply_closing_report_subagents_at(None, now + Duration::from_secs(3))
             .expect("legacy report omits the direct count");
 
-        assert_eq!(terminal.effective_active_subagents(), Some(4));
-        assert!(terminal.waiting_on_agents());
+        assert_eq!(terminal.effective_active_subagents(), None);
+        assert!(!terminal.waiting_on_agents());
     }
 
     #[test]
@@ -6196,6 +7592,13 @@ mod tests {
         let now = Instant::now();
         let mut terminal = subagent_claim_terminal(now);
         assert!(terminal.waiting_on_agents());
+        terminal.apply_closing_task_report(
+            None,
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now + Duration::from_secs(1),
+        );
 
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
@@ -6211,7 +7614,7 @@ mod tests {
             .expect("later closing report declares no agents");
 
         assert!(!terminal.waiting_on_agents());
-        assert_eq!(terminal.state, AgentState::Idle);
+        assert_eq!(terminal.state, AgentState::Unknown);
         assert!(terminal
             .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
             .is_none());
@@ -6469,14 +7872,14 @@ mod tests {
     }
 
     #[test]
-    fn an_expired_wait_suppresses_an_old_live_subagent_count() {
+    fn an_expired_adapter_wait_never_suppresses_a_live_native_subagent_count() {
         let now = Instant::now();
         let mut terminal = subagent_claim_terminal(now);
         terminal.set_active_subagents(Some(3));
         terminal
             .mark_agent_status_stale_at(now + TEST_SUBAGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
             .expect("watchdog expires the subagent wait");
-        assert_eq!(terminal.effective_active_subagents(), Some(0));
+        assert_eq!(terminal.effective_active_subagents(), Some(3));
 
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Claude),
@@ -7216,6 +8619,62 @@ mod tests {
     }
 
     #[test]
+    fn accepted_resumed_turn_is_immediately_working_with_an_unrelated_cap_pending() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.apply_closing_block_payload(
+            Vec::new(),
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 2,
+                label: "Answer".into(),
+                text: "Choose the independent release lane".into(),
+                blocking: true,
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(7),
+            observed,
+        );
+
+        terminal
+            .retire_blocked_full_lifecycle_hook_authority_at(observed + Duration::from_millis(1))
+            .expect("submitted input retires the old blocked report");
+        assert_eq!(
+            terminal.sidebar_projection(true),
+            (AgentState::Blocked, true),
+            "queued input is not an accepted resumed turn"
+        );
+
+        terminal.set_hook_authority_at(
+            "herdr:codex-closing-block".into(),
+            "codex".into(),
+            AgentState::Working,
+            None,
+            None,
+            Some(8),
+            observed + Duration::from_millis(2),
+        );
+
+        assert_eq!(
+            terminal.sidebar_projection(true),
+            (AgentState::Working, true)
+        );
+        assert_eq!(terminal.closing_items().len(), 1);
+    }
+
+    #[test]
     fn a_blocked_closing_block_report_survives_unavailable_screen_detection() {
         // Turn end on a claude pane: the prompt box matches no detection rule,
         // so the screen scan yields no agent while a stale spinner title still
@@ -7281,6 +8740,13 @@ mod tests {
         assert_eq!(terminal.state, AgentState::Blocked);
         assert_eq!(terminal.detected_agent, None);
 
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Complete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            observed + std::time::Duration::from_secs(30),
+        );
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
@@ -10263,6 +11729,13 @@ mod tests {
         let reported_at = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.apply_closing_task_report(
+            None,
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            reported_at,
+        );
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
@@ -10284,8 +11757,8 @@ mod tests {
         );
         assert_eq!(
             terminal.state,
-            AgentState::Idle,
-            "non-blocked closing report yields to newer screen"
+            AgentState::Unknown,
+            "a closing report without completion remains missing evidence"
         );
 
         terminal.set_hook_authority_at(

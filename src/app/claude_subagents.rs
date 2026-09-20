@@ -59,6 +59,7 @@ pub(crate) struct TranscriptCursor {
     pub(crate) tasks: Vec<TrackedTask>,
     pub(crate) links: Vec<TranscriptLink>,
     pub(crate) last_row_at: Option<SystemTime>,
+    pub(crate) last_tasks_at: Option<SystemTime>,
     pub(crate) caught_up_once: bool,
     pub(crate) trustworthy: bool,
 }
@@ -120,6 +121,7 @@ pub(crate) struct TargetIdentity {
     pub(crate) session_id: String,
     pub(crate) path: PathBuf,
     pub(crate) target_generation: u64,
+    pub(crate) turn_generation: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -190,13 +192,14 @@ impl TranscriptCursor {
             .then(|| self.tasks.iter().map(|task| task.task.clone()).collect())
     }
 
-    fn apply_task_result(&mut self, value: &Value) {
+    fn apply_task_result(&mut self, value: &Value) -> bool {
+        let mut changed = false;
         if let Some(task) = value
             .get("toolUseResult")
             .and_then(|result| result.get("task"))
         {
             let Some(id) = task.get("id").and_then(Value::as_str) else {
-                return;
+                return false;
             };
             let Some(text) = task
                 .get("subject")
@@ -204,16 +207,20 @@ impl TranscriptCursor {
                 .map(str::trim)
                 .filter(|text| !text.is_empty())
             else {
-                return;
+                return false;
             };
             if let Some(existing) = self.tasks.iter_mut().find(|task| task.id == id) {
-                existing.task.text = text.to_string();
+                if existing.task.text != text {
+                    existing.task.text = text.to_string();
+                    changed = true;
+                }
             } else if let Some(pending) = self
                 .tasks
                 .iter_mut()
                 .find(|task| task.id.starts_with(PENDING_TASK_ID_PREFIX) && task.task.text == text)
             {
                 pending.id = id.to_string();
+                changed = true;
             } else {
                 self.tasks.push(TrackedTask {
                     id: id.to_string(),
@@ -222,13 +229,14 @@ impl TranscriptCursor {
                         status: AgentTaskStatus::Pending,
                     },
                 });
+                changed = true;
             }
         }
         let Some(result) = value.get("toolUseResult") else {
-            return;
+            return changed;
         };
         let Some(id) = result.get("taskId").and_then(Value::as_str) else {
-            return;
+            return changed;
         };
         let Some(status) = result
             .get("statusChange")
@@ -236,20 +244,25 @@ impl TranscriptCursor {
             .and_then(Value::as_str)
             .and_then(parse_task_status)
         else {
-            return;
+            return changed;
         };
         if let Some(existing) = self.tasks.iter_mut().find(|task| task.id == id) {
-            existing.task.status = status;
+            if existing.task.status != status {
+                existing.task.status = status;
+                changed = true;
+            }
         }
+        changed
     }
 
-    fn apply_task_tool_calls(&mut self, value: &Value) {
+    fn apply_task_tool_calls(&mut self, value: &Value) -> bool {
+        let mut observed = false;
         let Some(content) = value
             .get("message")
             .and_then(|message| message.get("content"))
             .and_then(Value::as_array)
         else {
-            return;
+            return false;
         };
         for item in content {
             let Some(name) = item.get("name").and_then(Value::as_str) else {
@@ -271,6 +284,7 @@ impl TranscriptCursor {
                     else {
                         continue;
                     };
+                    observed = true;
                     let id = format!("{PENDING_TASK_ID_PREFIX}{tool_use_id}");
                     if self.tasks.iter().any(|task| task.id == id) {
                         continue;
@@ -290,34 +304,40 @@ impl TranscriptCursor {
                     let Some(task) = self.tasks.iter_mut().find(|task| task.id == task_id) else {
                         continue;
                     };
+                    observed = true;
                     if let Some(text) = input
                         .get("subject")
                         .and_then(Value::as_str)
                         .map(str::trim)
                         .filter(|text| !text.is_empty())
                     {
-                        task.task.text = text.to_string();
+                        if task.task.text != text {
+                            task.task.text = text.to_string();
+                        }
                     }
                     if let Some(status) = input
                         .get("status")
                         .and_then(Value::as_str)
                         .and_then(parse_task_status)
                     {
-                        task.task.status = status;
+                        if task.task.status != status {
+                            task.task.status = status;
+                        }
                     }
                 }
                 _ => {}
             }
         }
+        observed
     }
 
-    fn apply_todo_write(&mut self, value: &Value) {
+    fn apply_todo_write(&mut self, value: &Value) -> bool {
         let Some(content) = value
             .get("message")
             .and_then(|message| message.get("content"))
             .and_then(Value::as_array)
         else {
-            return;
+            return false;
         };
         for item in content.iter().rev() {
             if item.get("name").and_then(Value::as_str) != Some("TodoWrite") {
@@ -352,8 +372,9 @@ impl TranscriptCursor {
                     })
                 })
                 .collect();
-            break;
+            return true;
         }
+        false
     }
 
     fn observe_row_links(&mut self, value: &Value, observed_at: Option<SystemTime>) {
@@ -458,9 +479,18 @@ impl TranscriptCursor {
                                             current.max(observed_at)
                                         }));
                                 }
-                                self.apply_todo_write(&value);
-                                self.apply_task_tool_calls(&value);
+                                let task_tool_call_observed = self.apply_todo_write(&value)
+                                    | self.apply_task_tool_calls(&value);
                                 self.apply_task_result(&value);
+                                if task_tool_call_observed {
+                                    if let Some(observed_at) = observed_at {
+                                        self.last_tasks_at = Some(
+                                            self.last_tasks_at.map_or(observed_at, |current| {
+                                                current.max(observed_at)
+                                            }),
+                                        );
+                                    }
+                                }
                                 self.observe_row_links(&value, observed_at);
                                 stats.lines_parsed = stats.lines_parsed.saturating_add(1);
                             }
@@ -528,6 +558,12 @@ impl TranscriptTracker {
     pub(crate) fn last_row_at(&self) -> Option<SystemTime> {
         (self.cursor.caught_up_once && self.cursor.trustworthy)
             .then_some(self.cursor.last_row_at)
+            .flatten()
+    }
+
+    pub(crate) fn last_tasks_at(&self) -> Option<SystemTime> {
+        (self.cursor.caught_up_once && self.cursor.trustworthy)
+            .then_some(self.cursor.last_tasks_at)
             .flatten()
     }
 
@@ -722,6 +758,7 @@ impl crate::app::App {
                     "herdr:claude".to_string(),
                     terminal.claude_transcript_session_id.clone()?,
                     terminal.claude_transcript_path.clone()?,
+                    terminal.agent_turn_generation(),
                 ))
             })
             .collect::<Vec<_>>();
@@ -739,7 +776,7 @@ impl crate::app::App {
             .retain(|terminal_id, _| current_ids.contains(terminal_id));
 
         let mut work = Vec::with_capacity(raw_targets.len());
-        for (terminal_id, source, session_id, path) in raw_targets {
+        for (terminal_id, source, session_id, path, turn_generation) in raw_targets {
             let replace = self
                 .claude_subagent_trackers
                 .get(&terminal_id)
@@ -764,6 +801,7 @@ impl crate::app::App {
                     session_id,
                     path,
                     target_generation: tracker.target_generation,
+                    turn_generation,
                 },
                 tracker,
             });
@@ -835,6 +873,7 @@ impl crate::app::App {
                             == Some(observation.target.session_id.as_str())
                         && terminal.claude_transcript_path.as_ref()
                             == Some(&observation.target.path)
+                        && terminal.agent_turn_generation() == observation.target.turn_generation
                         && self
                             .claude_subagent_trackers
                             .get(&observation.target.terminal_id)
@@ -879,6 +918,8 @@ impl crate::app::App {
         let mut counts_changed = 0_u64;
         let mut observations_changed = 0_u64;
         let mut changed_panes = Vec::new();
+        let mut pane_updates = Vec::new();
+        let previous_toast = self.state.toast.clone();
         for terminal_id in updated_terminal_ids {
             let count = self
                 .claude_subagent_trackers
@@ -896,6 +937,10 @@ impl crate::app::App {
                 .claude_subagent_trackers
                 .get(&terminal_id)
                 .and_then(TranscriptTracker::last_row_at);
+            let transcript_last_tasks_at = self
+                .claude_subagent_trackers
+                .get(&terminal_id)
+                .and_then(TranscriptTracker::last_tasks_at);
             let transcript_links = self
                 .claude_subagent_trackers
                 .get(&terminal_id)
@@ -911,23 +956,10 @@ impl crate::app::App {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let (count_changed, observation_changed) = self
-                .state
-                .terminals
-                .get_mut(&terminal_id)
-                .map(|terminal| {
-                    (
-                        terminal.set_active_subagents(count),
-                        terminal.set_claude_subagent_observations(observations.clone()),
-                    )
-                })
-                .unwrap_or_default();
-            if count_changed {
-                counts_changed = counts_changed.saturating_add(1);
-            }
-            if observation_changed {
-                observations_changed = observations_changed.saturating_add(1);
-            }
+            let transcript_session_id = self
+                .claude_subagent_trackers
+                .get(&terminal_id)
+                .map(|tracker| tracker.session_id.clone());
             let location =
                 self.state
                     .workspaces
@@ -937,11 +969,38 @@ impl crate::app::App {
                         workspace.tabs.iter().find_map(|tab| {
                             tab.panes.iter().find_map(|(pane_id, pane)| {
                                 (pane.attached_terminal_id == terminal_id)
-                                    .then_some((ws_idx, *pane_id))
+                                    .then_some((ws_idx, *pane_id, pane.seen))
                             })
                         })
                     });
-            let transcript_changed = location.is_some_and(|(_, pane_id)| {
+            let mut count_changed = false;
+            let mut observation_changed = false;
+            let state_update = if let Some((_, pane_id, seen)) = location {
+                let now = Instant::now();
+                self.state
+                    .update_terminal_state_at(pane_id, now, |terminal| {
+                        let (changed, mutation) =
+                            terminal.set_active_subagents_with_projection_at(count, seen, now);
+                        count_changed = changed;
+                        observation_changed =
+                            terminal.set_claude_subagent_observations(observations.clone());
+                        mutation
+                    })
+            } else {
+                if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+                    count_changed = terminal.set_active_subagents(count);
+                    observation_changed =
+                        terminal.set_claude_subagent_observations(observations.clone());
+                }
+                None
+            };
+            if count_changed {
+                counts_changed = counts_changed.saturating_add(1);
+            }
+            if observation_changed {
+                observations_changed = observations_changed.saturating_add(1);
+            }
+            let transcript_changed = location.is_some_and(|(_, pane_id, _)| {
                 let subagents = observations
                     .clone()
                     .unwrap_or_default()
@@ -961,23 +1020,39 @@ impl crate::app::App {
                         source: crate::agent_state::AgentSubagentSource::Observed,
                     })
                     .collect();
-                self.state.agent_states.observe_transcript(
+                let session_changed = transcript_session_id.as_deref().is_some_and(|session_id| {
+                    self.state
+                        .agent_states
+                        .observe_transcript_session(pane_id, session_id)
+                });
+                let observation_changed = self.state.agent_states.observe_transcript(
                     pane_id,
                     transcript_last_row_at,
                     transcript_tasks.clone(),
+                    transcript_last_tasks_at,
                     subagents,
                     transcript_links.clone(),
-                )
+                );
+                session_changed || observation_changed
             });
             if !count_changed && !observation_changed && !transcript_changed {
                 continue;
             }
-            if let Some(location) = location {
-                changed_panes.push(location);
+            if let Some((ws_idx, pane_id, _)) = location {
+                changed_panes.push((ws_idx, pane_id));
+            }
+            if let Some(update) = state_update {
+                self.refresh_new_herdr_toast_context_for_update(&update, &previous_toast);
+                self.emit_pane_state_update(&update);
+                pane_updates.push(update);
             }
         }
         for (ws_idx, pane_id) in changed_panes {
             self.emit_pane_updated(ws_idx, pane_id);
+        }
+        if !pane_updates.is_empty() {
+            self.emit_terminal_or_system_agent_notifications(&pane_updates);
+            self.sync_toast_deadline(previous_toast);
         }
         let active_subagents_total = self
             .claude_subagent_trackers
@@ -1420,6 +1495,223 @@ mod tests {
     }
 
     #[test]
+    fn transcript_task_timestamp_ignores_later_unrelated_rows() {
+        let task_at = "2026-08-14T06:18:40.100Z";
+        let unrelated_at = "2026-08-14T06:18:41.100Z";
+        let mut bytes = line(serde_json::json!({
+            "type": "assistant",
+            "timestamp": task_at,
+            "message": {"content": [{
+                "type": "tool_use",
+                "name": "TodoWrite",
+                "input": {"todos": [{
+                    "content": "keep report precedence honest",
+                    "status": "in_progress"
+                }]}
+            }]}
+        }));
+        bytes.extend(line(serde_json::json!({
+            "type": "assistant",
+            "timestamp": unrelated_at,
+            "message": {"content": [{"type": "text", "text": "still working"}]}
+        })));
+        let mut cursor = TranscriptCursor::new();
+
+        cursor.ingest(&bytes, true);
+
+        assert_eq!(
+            cursor.last_tasks_at,
+            crate::agent_state::parse_rfc3339(task_at)
+        );
+        assert_eq!(
+            cursor.last_row_at,
+            crate::agent_state::parse_rfc3339(unrelated_at)
+        );
+    }
+
+    #[test]
+    fn transcript_task_timestamp_tracks_latest_unchanged_task_tool_call() {
+        let created_at = "2026-08-14T06:18:40.100Z";
+        let repeated_at = "2026-08-14T06:18:43.100Z";
+        let mut cursor = TranscriptCursor::new();
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "assistant",
+                "timestamp": created_at,
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "name": "TaskCreate",
+                    "id": "toolu_task_create",
+                    "input": {"subject": "keep precedence current"}
+                }]}
+            })),
+            false,
+        );
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "assistant",
+                "timestamp": repeated_at,
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "name": "TaskUpdate",
+                    "input": {
+                        "taskId": "tool-use:toolu_task_create",
+                        "subject": "keep precedence current",
+                        "status": "pending"
+                    }
+                }]}
+            })),
+            true,
+        );
+
+        assert_eq!(
+            cursor.last_tasks_at,
+            crate::agent_state::parse_rfc3339(repeated_at)
+        );
+    }
+
+    #[test]
+    fn task_result_does_not_override_a_newer_reported_task() {
+        let created_at = crate::agent_state::parse_rfc3339("2026-08-14T06:18:40Z").unwrap();
+        let reported_at = crate::agent_state::parse_rfc3339("2026-08-14T06:18:41Z").unwrap();
+        let result_at = crate::agent_state::parse_rfc3339("2026-08-14T06:18:42Z").unwrap();
+        let pane_id = crate::layout::PaneId::from_raw(82);
+        let mut cursor = TranscriptCursor::new();
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-08-14T06:18:40Z",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "name": "TaskCreate",
+                    "id": "toolu_task_create",
+                    "input": {"subject": "transcript task"}
+                }]}
+            })),
+            true,
+        );
+
+        let mut store = crate::agent_state::AgentStateStore::default();
+        store.observe_transcript(
+            pane_id,
+            Some(created_at),
+            cursor.tasks(),
+            cursor.last_tasks_at,
+            Vec::new(),
+            Vec::new(),
+        );
+        let reported_task = AgentTask {
+            text: "reported task".into(),
+            status: AgentTaskStatus::InProgress,
+        };
+        store
+            .report(
+                pane_id,
+                crate::agent_state::AgentReportPayload {
+                    tasks: Some(vec![reported_task.clone()]),
+                    ..crate::agent_state::AgentReportPayload::default()
+                },
+                reported_at,
+            )
+            .expect("valid report");
+
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-08-14T06:18:42Z",
+                "toolUseResult": {"task": {
+                    "id": "17",
+                    "subject": "transcript task"
+                }}
+            })),
+            true,
+        );
+        store.observe_transcript(
+            pane_id,
+            Some(result_at),
+            cursor.tasks(),
+            cursor.last_tasks_at,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            store
+                .snapshot(pane_id, crate::api::schema::AgentStatus::Working)
+                .tasks,
+            vec![reported_task]
+        );
+        assert_eq!(cursor.last_tasks_at, Some(created_at));
+    }
+
+    #[test]
+    fn transcript_task_timestamp_tracks_latest_unchanged_todo_write() {
+        let first_at = "2026-08-14T06:18:40.100Z";
+        let repeated_at = "2026-08-14T06:18:44.100Z";
+        let todo_row = |timestamp| {
+            line(serde_json::json!({
+                "type": "assistant",
+                "timestamp": timestamp,
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "name": "TodoWrite",
+                    "input": {"todos": [{
+                        "content": "keep precedence current",
+                        "status": "in_progress"
+                    }]}
+                }]}
+            }))
+        };
+        let mut cursor = TranscriptCursor::new();
+        cursor.ingest(&todo_row(first_at), false);
+        cursor.ingest(&todo_row(repeated_at), true);
+
+        assert_eq!(
+            cursor.last_tasks_at,
+            crate::agent_state::parse_rfc3339(repeated_at)
+        );
+    }
+
+    #[test]
+    fn empty_todo_write_clears_transcript_tasks_at_its_timestamp() {
+        let cleared_at = "2026-08-14T06:18:45.100Z";
+        let mut cursor = TranscriptCursor::new();
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-08-14T06:18:40.100Z",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "name": "TodoWrite",
+                    "input": {"todos": [{
+                        "content": "remove me",
+                        "status": "pending"
+                    }]}
+                }]}
+            })),
+            false,
+        );
+        cursor.ingest(
+            &line(serde_json::json!({
+                "type": "assistant",
+                "timestamp": cleared_at,
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "name": "TodoWrite",
+                    "input": {"todos": []}
+                }]}
+            })),
+            true,
+        );
+
+        assert_eq!(cursor.tasks(), Some(Vec::new()));
+        assert_eq!(
+            cursor.last_tasks_at,
+            crate::agent_state::parse_rfc3339(cleared_at)
+        );
+    }
+
+    #[test]
     fn task_tool_calls_project_before_results_and_reconcile_without_duplicates() {
         let mut cursor = TranscriptCursor::new();
         cursor.ingest(
@@ -1817,6 +2109,7 @@ mod tests {
                         session_id: SESSION_ID.into(),
                         path: path.clone(),
                         target_generation: 1,
+                        turn_generation: 0,
                     },
                     tracker: TranscriptTracker::new(SESSION_ID.into(), path, 1),
                 }
@@ -1849,6 +2142,7 @@ mod tests {
                         session_id: SESSION_ID.into(),
                         path: path.clone(),
                         target_generation: 1,
+                        turn_generation: 0,
                     },
                     tracker: TranscriptTracker::new(SESSION_ID.into(), path, 1),
                 }
@@ -1886,6 +2180,7 @@ mod tests {
                         session_id: SESSION_ID.into(),
                         path: path.clone(),
                         target_generation: index,
+                        turn_generation: 0,
                     },
                     tracker: TranscriptTracker::new(SESSION_ID.into(), path, index),
                 }
@@ -1989,6 +2284,7 @@ mod tests {
                 session_id: SESSION_ID.into(),
                 path,
                 target_generation,
+                turn_generation: 0,
             },
             count: tracker.count(),
             observations: tracker.observations(),
@@ -2014,12 +2310,92 @@ mod tests {
                 session_id: SESSION_ID.into(),
                 path,
                 target_generation,
+                turn_generation: 0,
             },
             count: tracker.count(),
             observations: tracker.observations(),
             tracker,
             stats: ScanStats::default(),
         }
+    }
+
+    #[test]
+    fn completed_task_becomes_unread_done_when_native_worker_count_drains() {
+        let dir = TestDir::new("done-after-native-worker");
+        let path = dir.transcript();
+        let (mut app, terminal_id) = app_with_claude_target(path.clone());
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.active = None;
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(crate::detect::Agent::Claude), AgentState::Idle);
+
+        app.claude_subagent_trackers.insert(
+            terminal_id.clone(),
+            TranscriptTracker::new(SESSION_ID.into(), path.clone(), 7),
+        );
+        app.last_claude_subagent_refresh_generation = 1;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 1,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+        assert!(app.handle_claude_subagents_refreshed(
+            1,
+            vec![observation(terminal_id.clone(), path.clone(), 7, AGENT_A,)],
+            BatchStats::default(),
+        ));
+
+        app.handle_internal_event_with_pane_updates(crate::events::AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:claude-closing-block".into(),
+            agent_label: "claude".into(),
+            state: AgentState::Idle,
+            message: None,
+            seq: Some(1),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            session_ref: None,
+            closing_block: Some(Box::new(crate::events::ClosingBlockReport {
+                gates: Vec::new(),
+                items: Vec::new(),
+                decisions: Vec::new(),
+                agents: None,
+                completion: Some(crate::api::schema::ClosingCompletion::Complete),
+                external_wait: None,
+                parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
+                workers_unknown: Some(false),
+                dependencies_authoritative: true,
+                session_id: Some(SESSION_ID.into()),
+            })),
+        });
+        let pane = app.state.workspaces[0].pane_state(pane_id).unwrap();
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(
+            pane.agent_projection(terminal).status_key(),
+            "waiting_on_agents"
+        );
+        assert!(pane.seen);
+        assert!(pane.done_since.is_none());
+
+        app.last_claude_subagent_refresh_generation = 2;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 2,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+        assert!(app.handle_claude_subagents_refreshed(
+            2,
+            vec![completed_observation(terminal_id.clone(), path, 7, AGENT_A)],
+            BatchStats::default(),
+        ));
+
+        let pane = app.state.workspaces[0].pane_state(pane_id).unwrap();
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(pane.agent_projection(terminal).status_key(), "done");
+        assert!(!pane.seen);
+        assert!(pane.done_since.is_some());
     }
 
     #[test]
@@ -2211,6 +2587,237 @@ mod tests {
             BatchStats::default(),
         ));
         assert_eq!(app.state.terminals[&terminal_id].active_subagents, None);
+    }
+
+    #[test]
+    fn new_transcript_session_without_tasks_clears_previous_session_tasks() {
+        let dir = TestDir::new("new-session-clears-tasks");
+        let path = dir.transcript();
+        let (mut app, terminal_id) = app_with_claude_target(path.clone());
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let old_task_at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
+        app.state.agent_states.observe_transcript(
+            pane_id,
+            Some(old_task_at),
+            Some(vec![AgentTask {
+                text: "old session task".into(),
+                status: AgentTaskStatus::InProgress,
+            }]),
+            Some(old_task_at),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let new_session = "e6f47cd4-0e58-4de7-8ce3-8a704654573a";
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_claude_transcript_target(Some(new_session.into()), Some(path.clone()));
+        let mut tracker = TranscriptTracker::new(new_session.into(), path.clone(), 8);
+        tracker.cursor.ingest(
+            &line(serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-08-14T06:18:45.100Z",
+                "message": {"content": "new session without todo calls"}
+            })),
+            true,
+        );
+        assert_eq!(tracker.tasks(), Some(Vec::new()));
+        assert_eq!(tracker.last_tasks_at(), None);
+        let refresh = RefreshObservation {
+            target: TargetIdentity {
+                terminal_id: terminal_id.clone(),
+                source: "herdr:claude".into(),
+                session_id: new_session.into(),
+                path: path.clone(),
+                target_generation: 8,
+                turn_generation: app.state.terminals[&terminal_id].agent_turn_generation(),
+            },
+            count: tracker.count(),
+            observations: tracker.observations(),
+            tracker: tracker.clone(),
+            stats: ScanStats::default(),
+        };
+        app.claude_subagent_trackers.insert(terminal_id, tracker);
+        app.last_claude_subagent_refresh_generation = 1;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 1,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+
+        assert!(app.handle_claude_subagents_refreshed(1, vec![refresh], BatchStats::default(),));
+        assert!(app
+            .state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Working)
+            .tasks
+            .is_empty());
+    }
+
+    #[test]
+    fn refresh_sampled_before_a_new_turn_cannot_clear_its_worker() {
+        let dir = TestDir::new("stale-turn-result");
+        let path = dir.transcript();
+        let (mut app, terminal_id) = app_with_claude_target(path.clone());
+        let sampled_zero = completed_observation(terminal_id.clone(), path.clone(), 7, AGENT_A);
+        let reported_at = Instant::now();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(crate::detect::Agent::Claude), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            Some(1),
+            reported_at,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            reported_at + std::time::Duration::from_secs(1),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            reported_at + std::time::Duration::from_secs(2),
+        );
+        terminal.set_active_subagents(Some(1));
+
+        app.claude_subagent_trackers.insert(
+            terminal_id.clone(),
+            TranscriptTracker::new(SESSION_ID.into(), path, 7),
+        );
+        app.last_claude_subagent_refresh_generation = 1;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 1,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+
+        assert!(!app.handle_claude_subagents_refreshed(
+            1,
+            vec![sampled_zero],
+            BatchStats::default(),
+        ));
+        assert_eq!(app.state.terminals[&terminal_id].active_subagents, Some(1));
+    }
+
+    #[test]
+    fn refresh_sampled_before_a_hookless_native_turn_cannot_clear_its_worker() {
+        let dir = TestDir::new("stale-hookless-turn-result");
+        let path = dir.transcript();
+        let (mut app, terminal_id) = app_with_claude_target(path.clone());
+        let sampled_zero = completed_observation(terminal_id.clone(), path.clone(), 7, AGENT_A);
+        let observed_at = Instant::now();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            observed_at,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            observed_at + std::time::Duration::from_secs(1),
+        );
+        terminal.set_active_subagents(Some(1));
+
+        app.claude_subagent_trackers.insert(
+            terminal_id.clone(),
+            TranscriptTracker::new(SESSION_ID.into(), path, 7),
+        );
+        app.last_claude_subagent_refresh_generation = 1;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 1,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+
+        assert!(!app.handle_claude_subagents_refreshed(
+            1,
+            vec![sampled_zero],
+            BatchStats::default(),
+        ));
+        assert_eq!(app.state.terminals[&terminal_id].active_subagents, Some(1));
+    }
+
+    #[test]
+    fn refresh_sampled_before_a_user_prompt_hook_turn_cannot_clear_its_worker() {
+        let dir = TestDir::new("stale-user-prompt-turn-result");
+        let path = dir.transcript();
+        let (mut app, terminal_id) = app_with_claude_target(path.clone());
+        let sampled_zero = completed_observation(terminal_id.clone(), path.clone(), 7, AGENT_A);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_hook_authority(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            Some(1),
+        );
+        let sampled_generation = terminal.agent_turn_generation();
+
+        app.handle_internal_event(crate::events::AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:claude-closing-block".into(),
+            agent_label: "claude".into(),
+            state: AgentState::Working,
+            message: None,
+            seq: Some(2),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            session_ref: None,
+            closing_block: None,
+        });
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_active_subagents(Some(1));
+        assert_eq!(
+            app.state.terminals[&terminal_id].agent_turn_generation(),
+            sampled_generation.wrapping_add(1),
+            "the accepted UserPromptSubmit hook starts a new turn"
+        );
+
+        app.claude_subagent_trackers.insert(
+            terminal_id.clone(),
+            TranscriptTracker::new(SESSION_ID.into(), path, 7),
+        );
+        app.last_claude_subagent_refresh_generation = 1;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 1,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+
+        assert!(!app.handle_claude_subagents_refreshed(
+            1,
+            vec![sampled_zero],
+            BatchStats::default(),
+        ));
+        assert_eq!(app.state.terminals[&terminal_id].active_subagents, Some(1));
     }
 
     #[test]

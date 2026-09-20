@@ -403,6 +403,22 @@ pub struct PaneGraphicsStreamParams {
 
 pub const CLOSING_BLOCK_VERSION: u8 = 2;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClosingCompletion {
+    Complete,
+    Incomplete,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ClosingParseStatus {
+    Ok,
+    Missing,
+    Malformed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct PaneReportAgentParams {
     pub pane_id: String,
@@ -431,6 +447,18 @@ pub struct PaneReportAgentParams {
     pub items: Option<Vec<ClosingBlockItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decisions: Option<Vec<ClosingBlockDecision>>,
+    /// Explicit task completion from the authoritative final report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<ClosingCompletion>,
+    /// Registered external dependency with a wake mechanism.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_wait: Option<String>,
+    /// Whether the adapter parsed an authoritative closing report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse_status: Option<ClosingParseStatus>,
+    /// A previously reported worker disappeared without terminal evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workers_unknown: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<u32>,
 }
@@ -473,6 +501,13 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             #[serde(default)]
             decisions: Option<serde_json::Value>,
             #[serde(default)]
+            completion: Option<ClosingCompletion>,
+            #[serde(default)]
+            external_wait: Option<String>,
+            #[serde(default)]
+            parse_status: Option<ClosingParseStatus>,
+            #[serde(default)]
+            workers_unknown: Option<bool>,
             agents: Option<u32>,
         }
 
@@ -511,6 +546,10 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
                 gates: None,
                 items: None,
                 decisions: None,
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
                 agents: None,
             });
         }
@@ -534,6 +573,10 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             gates: typed(raw.gates, strict)?,
             items: typed(raw.items, strict)?,
             decisions: typed(raw.decisions, strict)?,
+            completion: raw.completion,
+            external_wait: raw.external_wait,
+            parse_status: raw.parse_status,
+            workers_unknown: raw.workers_unknown,
             agents: raw.agents,
         })
     }
@@ -556,6 +599,15 @@ pub struct ClosingBlockItem {
     pub default: Option<String>,
     #[serde(default)]
     pub default_at: Option<String>,
+}
+
+impl ClosingBlockItem {
+    pub(crate) fn requires_human_input(&self) -> bool {
+        let label = self.label.trim();
+        ["gate", "answer", "verify"]
+            .iter()
+            .any(|action| label.eq_ignore_ascii_case(action))
+    }
 }
 
 impl<'de> Deserialize<'de> for ClosingBlockItem {
@@ -583,18 +635,20 @@ impl<'de> Deserialize<'de> for ClosingBlockItem {
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        let _ = (wire.default, wire.default_at);
-        Ok(Self {
+        let _ = (wire.blocking, wire.default, wire.default_at);
+        let mut item = Self {
             n: wire.n,
             label: wire.label,
             text: wire.text,
-            blocking: wire.blocking,
+            blocking: false,
             pr: wire.pr,
             ticket: wire.ticket,
             url: wire.url,
             default: None,
             default_at: None,
-        })
+        };
+        item.blocking = item.requires_human_input();
+        Ok(item)
     }
 }
 

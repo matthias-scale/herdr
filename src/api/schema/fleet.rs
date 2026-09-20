@@ -17,6 +17,8 @@ pub struct FleetAgentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snoozed_until: Option<u64>,
     pub source: String,
 }
 

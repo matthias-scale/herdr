@@ -789,34 +789,19 @@ struct FullLifecycleHookRetirementPorts<'a> {
     state_events: &'a mpsc::Sender<AppEvent>,
 }
 
-// URL extraction runs only after a chunk marked the gate dirty. Reading 128
-// recent rows covers the reproduced 80-line burst while keeping terminal lock
-// time and the allocated snapshot independent of total scrollback size.
-const AGENT_LINK_RECENT_LINES: usize = 128;
-
 async fn publish_agent_links_if_dirty(
     pane_id: PaneId,
     gate: &crate::agent_state::LinkExtractionGate,
-    terminal: &PaneTerminal,
     state_events: &mpsc::Sender<AppEvent>,
 ) {
-    if !gate.take_dirty() {
+    let Some(links) = gate.take_links() else {
         return;
-    }
-    let recent = terminal.recent_text_snapshot(AGENT_LINK_RECENT_LINES);
-    let output_urls = crate::agent_state::extract_urls(&recent.text);
-    let mut osc8_urls: Vec<_> = terminal
-        .visible_hyperlinks(Rect::new(0, 0, u16::MAX, u16::MAX))
-        .into_iter()
-        .map(|(_, _, url)| url)
-        .collect();
-    osc8_urls.sort_unstable();
-    osc8_urls.dedup();
+    };
     let _ = state_events
         .send(AppEvent::AgentLinksDetected {
             pane_id,
-            output_urls,
-            osc8_urls,
+            output_urls: links.output_urls,
+            osc8_urls: links.osc8_urls,
             observed_at: std::time::SystemTime::now(),
         })
         .await;
@@ -966,7 +951,7 @@ fn spawn_basic_detection_task(
             }
 
             let now = std::time::Instant::now();
-            publish_agent_links_if_dirty(pane_id, &link_extraction, &terminal, &state_events).await;
+            publish_agent_links_if_dirty(pane_id, &link_extraction, &state_events).await;
             let suppressed_agent = active_pending_release(&pending_release_for_task, now);
             if suppressed_agent.is_none() && release_was_active {
                 has_process_probe = false;
@@ -3238,13 +3223,8 @@ impl PaneRuntime {
                     }
 
                     let now = Instant::now();
-                    publish_agent_links_if_dirty(
-                        pane_id,
-                        &link_extraction_for_task,
-                        &terminal,
-                        &state_events,
-                    )
-                    .await;
+                    publish_agent_links_if_dirty(pane_id, &link_extraction_for_task, &state_events)
+                        .await;
                     let suppressed_agent = active_pending_release(&pending_release_for_task, now);
                     if suppressed_agent.is_none() && release_was_active {
                         has_process_probe = false;
@@ -4525,12 +4505,12 @@ mod tests {
     async fn dirty_link_snapshot_includes_osc8_hyperlink_target() {
         let uri = "https://osc.example.test/target";
         let screen = format!("\x1b]8;;{uri}\x1b\\label\x1b]8;;\x1b\\");
-        let runtime = PaneRuntime::test_with_screen_bytes(80, 24, screen.as_bytes());
+        let _runtime = PaneRuntime::test_with_screen_bytes(80, 24, screen.as_bytes());
         let gate = crate::agent_state::LinkExtractionGate::default();
         gate.observe_chunk(screen.as_bytes());
         let (tx, mut rx) = mpsc::channel(1);
 
-        publish_agent_links_if_dirty(PaneId::from_raw(71), &gate, &runtime.terminal, &tx).await;
+        publish_agent_links_if_dirty(PaneId::from_raw(71), &gate, &tx).await;
 
         let event = rx.recv().await.expect("link event");
         let AppEvent::AgentLinksDetected {
@@ -4552,18 +4532,153 @@ mod tests {
         for index in 0..80 {
             screen.push_str(&format!("ordinary line {index}\r\n"));
         }
-        let runtime = PaneRuntime::test_with_scrollback_bytes(80, 24, 64 * 1024, screen.as_bytes());
+        let _runtime =
+            PaneRuntime::test_with_scrollback_bytes(80, 24, 64 * 1024, screen.as_bytes());
         let gate = crate::agent_state::LinkExtractionGate::default();
-        gate.observe_chunk(uri.as_bytes());
+        gate.observe_chunk(format!("{uri}\n").as_bytes());
         let (tx, mut rx) = mpsc::channel(1);
 
-        publish_agent_links_if_dirty(PaneId::from_raw(72), &gate, &runtime.terminal, &tx).await;
+        publish_agent_links_if_dirty(PaneId::from_raw(72), &gate, &tx).await;
 
         let event = rx.recv().await.expect("link event");
         let AppEvent::AgentLinksDetected { output_urls, .. } = event else {
             panic!("expected agent link event");
         };
         assert!(output_urls.iter().any(|url| url == uri));
+    }
+
+    #[tokio::test]
+    async fn link_capture_does_not_restamp_urls_from_earlier_output() {
+        let pane_id = PaneId::from_raw(73);
+        let first_uri = "https://first.example.test/a";
+        let second_uri = "https://second.example.test/b";
+        let runtime = PaneRuntime::test_with_scrollback_bytes(
+            80,
+            24,
+            64 * 1024,
+            format!("{first_uri}\r\n").as_bytes(),
+        );
+        let gate = crate::agent_state::LinkExtractionGate::default();
+        let (tx, mut rx) = mpsc::channel(2);
+        gate.observe_chunk(format!("{first_uri}\n").as_bytes());
+        publish_agent_links_if_dirty(pane_id, &gate, &tx).await;
+        let first_event = rx.recv().await.expect("first link event");
+
+        runtime.test_process_pty_bytes(format!("{second_uri}\r\n").as_bytes());
+        gate.observe_chunk(format!("{second_uri}\n").as_bytes());
+        publish_agent_links_if_dirty(pane_id, &gate, &tx).await;
+        let second_event = rx.recv().await.expect("second link event");
+
+        let mut store = crate::agent_state::AgentStateStore::default();
+        for event in [first_event, second_event] {
+            let AppEvent::AgentLinksDetected {
+                output_urls,
+                observed_at,
+                ..
+            } = event
+            else {
+                panic!("expected agent link event");
+            };
+            store.observe_links(
+                pane_id,
+                output_urls,
+                crate::agent_state::AgentLinkSource::Output,
+                observed_at,
+            );
+        }
+        let links = store
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Idle)
+            .links;
+        let first = links
+            .iter()
+            .find(|link| link.url == first_uri)
+            .expect("first URL retained");
+        assert_eq!(first.first_seen, first.last_seen);
+    }
+
+    #[tokio::test]
+    async fn link_capture_keeps_url_before_two_hundred_following_lines_in_one_chunk() {
+        let uri = "https://burst.example.test/lost";
+        let mut output = format!("{uri}\r\n");
+        for index in 1..=200 {
+            output.push_str(&format!("{index}\r\n"));
+        }
+        let _runtime =
+            PaneRuntime::test_with_scrollback_bytes(80, 24, 64 * 1024, output.as_bytes());
+        let gate = crate::agent_state::LinkExtractionGate::default();
+        gate.observe_chunk(output.as_bytes());
+        let (tx, mut rx) = mpsc::channel(1);
+
+        publish_agent_links_if_dirty(PaneId::from_raw(74), &gate, &tx).await;
+
+        let AppEvent::AgentLinksDetected { output_urls, .. } = rx.recv().await.expect("link event")
+        else {
+            panic!("expected agent link event");
+        };
+        assert_eq!(output_urls, vec![uri]);
+    }
+
+    #[tokio::test]
+    async fn link_capture_joins_soft_wrapped_url() {
+        let uri = "https://wrapped.example.test/a/path/that/is/wider/than/the/pane";
+        let output = format!("{uri}\r\n");
+        let _runtime =
+            PaneRuntime::test_with_scrollback_bytes(20, 24, 64 * 1024, output.as_bytes());
+        let gate = crate::agent_state::LinkExtractionGate::default();
+        gate.observe_chunk(output.as_bytes());
+        let (tx, mut rx) = mpsc::channel(1);
+
+        publish_agent_links_if_dirty(PaneId::from_raw(75), &gate, &tx).await;
+
+        let AppEvent::AgentLinksDetected { output_urls, .. } = rx.recv().await.expect("link event")
+        else {
+            panic!("expected agent link event");
+        };
+        assert_eq!(output_urls, vec![uri]);
+    }
+
+    #[tokio::test]
+    async fn hidden_osc8_link_capture_does_not_depend_on_visible_hyperlinks() {
+        let uri = "https://hidden.example.test/target";
+        let mut output = format!("\x1b]8;;{uri}\x1b\\label\x1b]8;;\x1b\\\r\n");
+        for index in 1..=200 {
+            output.push_str(&format!("{index}\r\n"));
+        }
+        let _runtime =
+            PaneRuntime::test_with_scrollback_bytes(80, 24, 64 * 1024, output.as_bytes());
+        let gate = crate::agent_state::LinkExtractionGate::default();
+        gate.observe_chunk(output.as_bytes());
+        let (tx, mut rx) = mpsc::channel(1);
+
+        publish_agent_links_if_dirty(PaneId::from_raw(76), &gate, &tx).await;
+
+        let AppEvent::AgentLinksDetected {
+            output_urls,
+            osc8_urls,
+            ..
+        } = rx.recv().await.expect("link event")
+        else {
+            panic!("expected agent link event");
+        };
+        assert!(output_urls.is_empty());
+        assert_eq!(osc8_urls, vec![uri]);
+    }
+
+    #[tokio::test]
+    async fn link_capture_publishes_url_with_scheme_split_across_chunks() {
+        let uri = "https://split.example.test/path";
+        let gate = crate::agent_state::LinkExtractionGate::default();
+        gate.observe_chunk(b"https:");
+        gate.observe_chunk(b"//split.example.test/path\r\n");
+        let (tx, mut rx) = mpsc::channel(1);
+
+        publish_agent_links_if_dirty(PaneId::from_raw(77), &gate, &tx).await;
+
+        let AppEvent::AgentLinksDetected { output_urls, .. } = rx.recv().await.expect("link event")
+        else {
+            panic!("expected agent link event");
+        };
+        assert_eq!(output_urls, vec![uri]);
     }
 
     #[tokio::test]

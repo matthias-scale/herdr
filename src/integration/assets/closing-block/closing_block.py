@@ -1,10 +1,8 @@
 """Parse the existing closing block into herdr status channels.
 
-The adapter deliberately keeps the authoring format unchanged. Critical action
-points retain their Gate/Answer/Verify labels. A Gate always blocks; Answer and
-Verify block once no sub-agent work remains unless their label carries the
-`· non-blocking` marker. The optional What to test section is context, and
-auto-proceeded decisions are a separate delimited list.
+Critical action points retain their Gate/Answer/Verify labels and every retained
+item is a pending human decision. Task completion, active workers, external waits,
+and parse quality remain separate facts.
 """
 
 from __future__ import annotations
@@ -17,8 +15,8 @@ from typing import Any
 # HERDR_INTEGRATION_VERSION=2
 # The header line alone is the trigger: agents drop the bold markers, add a
 # heading marker or a colon, or vary the case often enough that any strictness
-# here silently un-latches gates. The `(N blocking)` count still counts Gates;
-# owed Answer and Verify items independently mark an idle pane as blocked.
+# here silently un-latches gates. The `(N blocking)` count covers every retained
+# Gate, Answer, and Verify item; labels describe input kind, not blocking policy.
 # Only the full-line anchor is kept so prose mentions never match.
 _HEADER_RE = re.compile(
     r"^(?:#{1,6}[ \t]*)?(?:\*\*)?Critical action points"
@@ -33,10 +31,26 @@ _NOTHING_RE = re.compile(
     r"^(?:\*\*)?Nothing to act on\.?(?:\*\*)?[ \t]*\r?$", re.MULTILINE
 )
 _AGENTS_RE = re.compile(
-    r"^(?P<n>\d+)[ \t]+agents?[ \t]+running:[ \t]*(?P<rest>.+?)[ \t]*\r?$",
+    r"^(?:\*\*)?(?P<n>\d+)[ \t]+agents?[ \t]+running:[ \t]*(?P<rest>.+?)"
+    r"(?=(?:[ \t]+·[ \t]+(?:Waiting on you\b|Waiting(?:[ \t]+for|[ \t]*:)))|"
+    r"(?:\*\*)?[ \t]*\r?$)",
     re.MULTILINE | re.IGNORECASE,
 )
-_DONE_RE = re.compile(r"^Done here\.[ \t]*\r?$", re.MULTILINE)
+_DONE_RE = re.compile(
+    r"^(?:\*\*)?Done here\.(?:\*\*)?[ \t]*\r?$", re.MULTILINE | re.IGNORECASE
+)
+_WAITING_ON_YOU_RE = re.compile(
+    r"^(?:(?:\*\*)?\d+[ \t]+agents?[ \t]+running:.*?[ \t]+·[ \t]+)?"
+    r"(?:Waiting(?:[ \t]+for|[ \t]*:)[ \t]+.*?[ \t]+·[ \t]+)?"
+    r"(?:\*\*)?Waiting on you[ \t]*[—–:-][ \t]*(?P<rest>.+?)(?:\*\*)?[ \t]*\r?$",
+    re.MULTILINE | re.IGNORECASE,
+)
+_EXTERNAL_WAIT_RE = re.compile(
+    r"^(?:(?:\*\*)?\d+[ \t]+agents?[ \t]+running:.*?[ \t]+·[ \t]+)?"
+    r"(?:\*\*)?Waiting(?:[ \t]+for|[ \t]*:)[ \t]+(?P<rest>.+?)"
+    r"(?=(?:[ \t]+·[ \t]+Waiting on you\b)|(?:\*\*)?[ \t]*\r?$)",
+    re.MULTILINE | re.IGNORECASE,
+)
 _CONTRACT_RE = re.compile(
     r"^CONTRACT:[ \t]+(?P<text>.+?)[ \t]+—[ \t]+(?P<state>met|unmet)[ \t]*\r?$",
     re.MULTILINE | re.IGNORECASE,
@@ -46,10 +60,10 @@ _FENCE_OPEN_RE = re.compile(
 )
 _FENCE_CLOSE_RE = re.compile(r"^[ \t]{0,3}(?P<marker>`{3,}|~{3,})[ \t]*$")
 
-# A label is bold in the authored form; a plain `Gate — ...` prefix counts too,
-# but only with a following separator so an item that merely *starts* with the
-# word (`Verify the deploy...`) stays unlabeled instead of being half-eaten.
-# The item opener and the body terminator must accept exactly the same shapes.
+# A label may open the numbered item or appear on a later top-level line after a
+# URL and its plain-language summary. Plain labels require a separator so prose
+# such as `Verify the deploy` cannot be half-eaten. Legacy `· non-blocking`
+# spelling is accepted only as presentation; it no longer changes semantics.
 # When the terminator was stricter, a real item it failed to recognise was
 # swallowed into the previous item's body instead: `2)**Gate**` and an indented
 # `  2. **Gate**` both vanished into an `Answer` above them, taking a declared
@@ -60,13 +74,24 @@ _FENCE_CLOSE_RE = re.compile(r"^[ \t]{0,3}(?P<marker>`{3,}|~{3,})[ \t]*$")
 # had been doing incidentally.
 _ITEM_START = r"^[ \t]*\d+[.)](?=[ \t]|\*\*|$)"
 _ITEM_RE = re.compile(
-    rf"^[ \t]*(?P<idx>\d+)[.)]\s*"
-    rf"(?:\*\*(?P<label>Gate|Answer|Verify)\*\*"
-    rf"|(?P<plain_label>Gate|Answer|Verify)(?=[ \t]*(?:[—–:]|-[ \t])))?"
-    rf"\s*(?P<body>.*?)(?={_ITEM_START}|^\*\*What to test\b|"
+    rf"^[ \t]*(?P<idx>\d+)[.)]\s*(?P<body>.*?)(?={_ITEM_START}|^\*\*What to test\b|"
     r"^\*\*Auto-proceeded decisions\*\*|^\d+\s+agents?\s+running:|"
-    r"^Done here\.|\Z)",
+    r"^(?:\*\*)?Waiting on you\b|^(?:\*\*)?Waiting(?:[ \t]+for|[ \t]*:)|"
+    r"^(?:\*\*)?Done here\.|\Z)",
     re.MULTILINE | re.IGNORECASE | re.DOTALL,
+)
+_ITEM_LABEL_RE = re.compile(
+    r"^[ \t]*(?:"
+    r"\*\*(?P<bold_label>Gate|Answer|Verify)"
+    r"(?:[ \t]*·[ \t]*non-blocking)?\*\*"
+    r"(?:[ \t]*·[ \t]*non-blocking)?[ \t]*(?:[—–:]|-[ \t])?[ \t]*"
+    r"|(?P<plain_label>Gate|Answer|Verify)"
+    r"(?:[ \t]*·[ \t]*non-blocking)?[ \t]*(?:[—–:]|-[ \t])[ \t]*"
+    r")",
+    re.MULTILINE | re.IGNORECASE,
+)
+_LEGACY_NONBLOCKING_SUFFIX_RE = re.compile(
+    r"(?s)(?P<text>.*?)\s*·\s*non-blocking\b\s*[.]*\s*$", re.IGNORECASE
 )
 _DECISIONS_RE = re.compile(
     r"^\*\*Auto-proceeded decisions\*\*[ \t]*\r?$",
@@ -89,12 +114,6 @@ _RECOMMENDATION_RE = re.compile(
     r"\b(?:recommend(?:ation|ed)?|proceed(?:ed)?\s+with)\s*[:\-]?\s*"
     r"(?P<value>.+?)(?=\s+(?:because|at\s+\d{1,2}:\d{2}|decided\s+at)|$)",
     re.IGNORECASE,
-)
-_NONBLOCKING_MARKER_RE = re.compile(
-    r"^·[ \t]+non-blocking\b[ \t]*(?:[:—–-][ \t]*)?", re.IGNORECASE
-)
-_NONBLOCKING_MARKER_SUFFIX_RE = re.compile(
-    r"(?s)(?P<text>.*?)\s*·\s*non-blocking\b\s*[.]*\s*$", re.IGNORECASE
 )
 _DECIDED_AT_RE = re.compile(
     r"\b(?:decided\s+at|at)\s+(?P<value>\d{1,2}:\d{2}(?:\s*[A-Z]{2})?)",
@@ -184,6 +203,10 @@ class ClosingBlock:
     done_here: bool = False
     contract: str | None = None
     contract_met: bool | None = None
+    waiting_on_you: bool = False
+    waiting_count: int | None = None
+    external_wait: str | None = None
+    workers_unknown: bool = False
     # Whether the author labeled anything themselves, and whether any parsed
     # line was discarded for carrying no label. Both are needed to tell a
     # miscounted header apart from an incomplete parse.
@@ -203,50 +226,84 @@ class ClosingBlock:
         return [
             item
             for item in self.items
-            if item.label in {"Answer", "Verify"} and item.blocking
+            if item.label in {"Answer", "Verify"}
         ]
 
     @property
     def blocking(self) -> int:
-        # Labels are the authority for the authored Gate count. Answer and
-        # Verify do not increment `(N blocking)`, though owed ones still block
-        # an idle pane because the human owes an action. Once any item parsed with
-        # a label, the labeled gates are the count. A header that says
-        # "(1 blocking)" above a lone Answer is a miscounted header, not a
-        # hidden Gate.
-        #
-        # The header still wins when nothing labeled parsed at all: there
-        # under-reporting a gate is the real failure mode, and a declared
-        # count is the only evidence left.
-        # Both conditions matter. `authored_labels` excludes gates this parser
-        # promoted itself: a block with no labels at all and fewer parsed lines
-        # than it declared has lost a gate somewhere, and the header is the only
-        # evidence left. `discarded_items` excludes a parse that dropped an
-        # unlabeled or malformed line beside real labels -- a mistyped `Gate`
-        # next to an `Answer` must not silently retire the human decision.
-        if self.authored_labels and self.discarded_items == 0:
-            return len(self.gates)
-        return max(len(self.gates), self.declared_blocking or 0)
+        return len(
+            [
+                item
+                for item in self.items
+                if item.label in {"Gate", "Answer", "Verify"}
+            ]
+        )
+
+    @property
+    def parse_status(self) -> str:
+        if not self.present:
+            return "missing"
+        if self.discarded_items:
+            return "malformed"
+        if (
+            self.declared_blocking is not None
+            and self.declared_blocking != self.blocking
+        ):
+            return "malformed"
+        if self.waiting_count is not None and self.waiting_count != self.blocking:
+            return "malformed"
+        if self.waiting_on_you and self.blocking == 0:
+            return "malformed"
+        if self.done_here and (
+            self.blocking > 0 or self.agents_running > 0 or self.external_wait
+        ):
+            return "malformed"
+        return "ok"
+
+    @property
+    def completion(self) -> str:
+        if self.parse_status == "missing":
+            return "missing"
+        if (
+            self.done_here
+            and self.parse_status == "ok"
+            and self.blocking == 0
+            and self.agents_running == 0
+            and not self.external_wait
+            and not self.workers_unknown
+            and self.contract_met is not False
+        ):
+            return "complete"
+        return "incomplete"
 
     @property
     def agents_running(self) -> int:
+        if self.workers_unknown:
+            return 0
         if self.declared_agents is not None:
             return self.declared_agents
         return len(self.agents)
 
     @property
     def herdr_state(self) -> str:
-        if self.blocking > 0:
-            return "blocked"
-        if self.agents_running > 0:
+        if self.agents_running > 0 or self.external_wait:
             return "working"
-        if self.action_points:
+        if (
+            self.blocking > 0
+            or self.waiting_on_you
+            or (self.parse_status == "malformed" and (self.declared_blocking or 0) > 0)
+        ):
             return "blocked"
         return "idle"
 
     def message(self) -> str | None:
         if self.blocking > 0:
-            head = self.gates[0].text if self.gates else ""
+            pending = [
+                item
+                for item in self.items
+                if item.label in {"Gate", "Answer", "Verify"}
+            ]
+            head = pending[0].text if pending else ""
             if not head:
                 return f"{self.blocking} blocking"
             extra = f" (+{self.blocking - 1})" if self.blocking > 1 else ""
@@ -442,26 +499,34 @@ def _parse_items(
             )
         item_end = min(end_candidates)
         body = text[match.start("body") : item_end]
-        label = match.group("label") or match.group("plain_label") or ""
+        item_metadata = _metadata(body)
+        label_match = None
+        for candidate in _ITEM_LABEL_RE.finditer(body):
+            absolute_start = match.start("body") + candidate.start()
+            if not any(
+                fence_start <= absolute_start < fence_end
+                for fence_start, fence_end in fences
+            ):
+                label_match = candidate
+                break
+        label = ""
+        if label_match:
+            label = label_match.group("bold_label") or label_match.group("plain_label") or ""
+            before = body[: label_match.start()].rstrip()
+            after = body[label_match.end() :].lstrip()
+            body = "\n".join(part for part in (after, before) if part)
         cleaned_body = _clean_body(body)
-        nonblocking_prefix = _NONBLOCKING_MARKER_RE.match(cleaned_body)
-        nonblocking = False
-        if nonblocking_prefix:
-            cleaned_body = cleaned_body[nonblocking_prefix.end() :].strip()
-            nonblocking = True
-        else:
-            nonblocking_suffix = _NONBLOCKING_MARKER_SUFFIX_RE.match(cleaned_body)
-            if nonblocking_suffix:
-                cleaned_body = nonblocking_suffix.group("text").rstrip()
-                nonblocking = True
+        legacy_suffix = _LEGACY_NONBLOCKING_SUFFIX_RE.match(cleaned_body)
+        if legacy_suffix:
+            cleaned_body = legacy_suffix.group("text").rstrip()
         normalized_label = label.capitalize()
         parsed.append(
             Item(
                 int(match.group("idx")),
                 normalized_label,
                 cleaned_body,
-                blocking=normalized_label == "Gate"
-                or (normalized_label in {"Answer", "Verify"} and not nonblocking),
+                metadata=item_metadata,
+                blocking=normalized_label in {"Gate", "Answer", "Verify"},
             )
         )
     return parsed
@@ -536,6 +601,7 @@ def parse(text: str) -> ClosingBlock:
     blocks = _closing_blocks(text, fences)
     selected = blocks[-1] if blocks else None
     start = None
+    authoritative_start = selected.start if selected else 0
     if selected:
         block.present = True
         if selected.header:
@@ -547,22 +613,53 @@ def parse(text: str) -> ClosingBlock:
 
         if start is not None:
             block.items.extend(_parse_items(text, start, selected.end, fences))
-            # Unlabeled numbered items exist only in the lenient plain form.
-            # Promote them to gates, oldest first, until the declared blocking
-            # count is met; the rest are dropped exactly as the strict parser
-            # always dropped them, so labeled authoring is unchanged.
-            # Only for a block that carries no labels at all. Mixing an
-            # unlabeled line in beside real labels means the author did label
-            # their gates, so the unlabeled line is prose, not a silent gate.
-            labeled_gates = len(block.gates)
+            waiting = None
+            for candidate in _visible_matches(
+                _WAITING_ON_YOU_RE,
+                text,
+                authoritative_start,
+                selected.end,
+                fences,
+            ):
+                waiting = candidate
+            waiting_indices: set[int] = set()
+            if waiting:
+                block.waiting_on_you = True
+                count_match = re.search(
+                    r"\b(?P<n>\d+)[ \t]+items?\b", waiting.group("rest"), re.I
+                )
+                if count_match:
+                    block.waiting_count = int(count_match.group("n"))
+                item_match = re.search(
+                    r"\bitem[ \t]+(?P<n>\d+)\b", waiting.group("rest"), re.I
+                )
+                if item_match:
+                    waiting_indices.add(int(item_match.group("n")))
+                paren_match = re.search(r"\((?P<items>[\d, \t]+)\)", waiting.group("rest"))
+                if paren_match:
+                    waiting_indices.update(
+                        int(value)
+                        for value in paren_match.group("items").split(",")
+                        if value.strip().isdigit()
+                    )
+
+            # A Waiting-on-you footer is bounded to this authoritative CAP and
+            # can safely recover its referenced unlabeled item. Legacy unlabeled
+            # blocks still promote only as many entries as their heading declares.
+            labeled_items = sum(1 for item in block.items if item.label)
             declared = block.declared_blocking or 0
             block.authored_labels = any(item.label for item in block.items)
+            for item in block.items:
+                if not item.label and item.index in waiting_indices:
+                    item.label = "Answer"
+                    item.blocking = True
+                    labeled_items += 1
             if not block.authored_labels:
                 for item in block.items:
-                    if item.label == "" and labeled_gates < declared:
+                    if item.label == "" and labeled_items < declared:
                         item.label = "Gate"
                         item.blocking = True
-                        labeled_gates += 1
+                        labeled_items += 1
             kept = [item for item in block.items if item.label]
             block.discarded_items = len(block.items) - len(kept)
             block.items = kept
@@ -601,18 +698,50 @@ def parse(text: str) -> ClosingBlock:
             )
         )
 
-    agents = None
-    for candidate in _visible_matches(_AGENTS_RE, text, 0, len(text), fences):
-        agents = candidate
+    lifecycle_agents = list(
+        _visible_matches(_AGENTS_RE, text, authoritative_start, len(text), fences)
+    )
+    lifecycle_done = list(
+        _visible_matches(_DONE_RE, text, authoritative_start, len(text), fences)
+    )
+    lifecycle_waits = list(
+        _visible_matches(_EXTERNAL_WAIT_RE, text, authoritative_start, len(text), fences)
+    )
+    last_done = lifecycle_done[-1] if lifecycle_done else None
+    agents = lifecycle_agents[-1] if lifecycle_agents else None
+    external_wait = lifecycle_waits[-1] if lifecycle_waits else None
+    if last_done and (agents is None or last_done.start() > agents.start()):
+        agents = None
+    if last_done and (
+        external_wait is None or last_done.start() > external_wait.start()
+    ):
+        external_wait = None
+
     if agents:
         block.declared_agents = int(agents.group("n"))
         block.agents = [
-            part.strip() for part in agents.group("rest").split(";") if part.strip()
+            part.strip()
+            for part in re.split(
+                r"(?:[ \t]*;[ \t]+|[ \t]+·[ \t]+)", agents.group("rest")
+            )
+            if part.strip()
         ]
+        # Closing prose is an unverified claim. Keep names as reconciliation
+        # hints, but reserve the active count for runtime worker lifecycle.
+        block.workers_unknown = block.declared_agents > 0
         block.present = True
-    elif next(_visible_matches(_DONE_RE, text, 0, len(text), fences), None):
-        block.done_here = True
+    else:
         block.declared_agents = 0
+    if external_wait:
+        block.external_wait = external_wait.group("rest").strip().rstrip(".")
+        block.present = True
+    done_is_final = bool(
+        last_done
+        and (not lifecycle_agents or last_done.start() > lifecycle_agents[-1].start())
+        and (not lifecycle_waits or last_done.start() > lifecycle_waits[-1].start())
+    )
+    if done_is_final:
+        block.done_here = True
         block.present = True
 
     if block.present:

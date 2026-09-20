@@ -586,8 +586,12 @@ mod tests {
         let agent = agents.into_iter().next().expect("one agent");
         let sidebar_title = crate::ui::sidebar_thread_entries(&app.state)
             .into_iter()
-            .find(|entry| entry.pane_id == pane_id)
-            .and_then(|entry| entry.primary_tab_label)
+            .find(|entry| {
+                entry
+                    .local_target()
+                    .is_some_and(|target| target.pane_id == pane_id)
+            })
+            .and_then(|entry| entry.primary_tab_label.clone())
             .expect("sidebar title");
         assert_eq!(agent.display_title.as_deref(), Some(expected));
         assert_eq!(agent.display_title.as_deref(), Some(sidebar_title.as_str()));
@@ -904,6 +908,13 @@ mod tests {
             false,
             screen_observed_at,
         );
+        terminal.apply_closing_task_report(
+            None,
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            hook_reported_at,
+        );
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
@@ -996,8 +1007,8 @@ mod tests {
             panic!("expected panel-removed explain response");
         };
         assert_eq!(explain["screen_state"], "idle");
-        assert_eq!(explain["effective_state"], "idle");
-        assert_eq!(explain["arbitration"], "screen");
+        assert_eq!(explain["effective_state"], "unknown");
+        assert_eq!(explain["arbitration"], "closing_task_uncertain");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1225,6 +1236,17 @@ mod tests {
                 .get_mut(&terminal_id)
                 .unwrap()
                 .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .apply_closing_task_report(
+                    None,
+                    None,
+                    Some(crate::api::schema::ClosingParseStatus::Ok),
+                    Some(false),
+                    std::time::Instant::now(),
+                );
             let screen = include_bytes!(
                 "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
             );
@@ -1282,8 +1304,8 @@ mod tests {
             app.handle_internal_event(event);
             assert_eq!(
                 app.agent_info(0, pane_id).unwrap().agent_status,
-                AgentStatus::Done,
-                "hidden pane reaches Done only from the manifest-confirmed idle screen"
+                AgentStatus::Unknown,
+                "screen idle cannot complete a task report with missing completion evidence"
             );
         }
     }
@@ -1291,10 +1313,25 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn closing_block_authority_is_limited_to_live_blocked_gates_explain_matches_effective_state(
     ) {
-        for (report_state, expected_status, expected_label) in [
-            (AgentState::Working, AgentStatus::Working, "working"),
-            (AgentState::Idle, AgentStatus::Idle, "idle"),
-            (AgentState::Unknown, AgentStatus::Unknown, "unknown"),
+        for (report_state, expected_status, expected_label, expected_arbitration) in [
+            (
+                AgentState::Working,
+                AgentStatus::Working,
+                "working",
+                "closing_block_report",
+            ),
+            (
+                AgentState::Idle,
+                AgentStatus::Unknown,
+                "unknown",
+                "closing_task_uncertain",
+            ),
+            (
+                AgentState::Unknown,
+                AgentStatus::Unknown,
+                "unknown",
+                "closing_block_report",
+            ),
         ] {
             let mut app = app_with_agent();
             let pane_id = app.state.workspaces[0].tabs[0].root_pane;
@@ -1306,6 +1343,17 @@ mod tests {
                 .get_mut(&terminal_id)
                 .unwrap()
                 .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .apply_closing_task_report(
+                    None,
+                    None,
+                    Some(crate::api::schema::ClosingParseStatus::Ok),
+                    Some(false),
+                    std::time::Instant::now(),
+                );
             let screen = include_bytes!(
                 "../../../tests/fixtures/agent-detection/claude-empty-prompt-ub1-wM-pJ-20260825.txt"
             );
@@ -1341,7 +1389,7 @@ mod tests {
             };
             assert_eq!(info.agent_status, expected_status, "{report_state:?}");
             assert_eq!(explain["effective_state"], expected_label);
-            assert_eq!(explain["arbitration"], "closing_block_report");
+            assert_eq!(explain["arbitration"], expected_arbitration);
 
             app.handle_internal_event(crate::events::AppEvent::StateChanged {
                 pane_id,
@@ -1359,9 +1407,9 @@ mod tests {
             let ResponseResult::AgentExplain { explain } = success.result else {
                 panic!("expected refreshed agent explain response");
             };
-            assert_eq!(info.agent_status, AgentStatus::Idle);
-            assert_eq!(explain["effective_state"], "idle");
-            assert_eq!(explain["arbitration"], "screen");
+            assert_eq!(info.agent_status, AgentStatus::Unknown);
+            assert_eq!(explain["effective_state"], "unknown");
+            assert_eq!(explain["arbitration"], "closing_task_uncertain");
         }
     }
 

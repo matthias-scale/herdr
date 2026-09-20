@@ -3,6 +3,8 @@
 The closing-block adapter writes one payload:
 
     {"v": 2, "agent": "claude", "blocking": 1, "agents": 0,
+     "completion": "incomplete", "external_wait": null,
+     "parse_status": "ok", "workers_unknown": false,
      "gates": [{"n": 1, "label": "Gate", "text": "...", "blocking": true,
                 "pr": null,
                 "ticket": null, "url": null, "default": null,
@@ -30,15 +32,18 @@ from typing import Any
 VERSION = 2
 
 
-STATES = ("idle", "working", "blocked")
+STATES = ("idle", "working", "blocked", "unknown")
 
 
-def state_for(blocking: int, agents: int, action_points: int = 0) -> str:
-    if blocking > 0:
-        return "blocked"
-    if agents > 0:
+def state_for(
+    blocking: int,
+    agents: int,
+    action_points: int = 0,
+    external_wait: str | None = None,
+) -> str:
+    if agents > 0 or external_wait:
         return "working"
-    if action_points > 0:
+    if blocking > 0 or action_points > 0:
         return "blocked"
     return "idle"
 
@@ -48,6 +53,7 @@ def resolve_state(
     agents: int,
     override: str | None,
     action_points: int = 0,
+    external_wait: str | None = None,
 ) -> str:
     """Counts imply the state unless a caller names one it knows better.
 
@@ -58,7 +64,7 @@ def resolve_state(
     """
     if isinstance(override, str) and override in STATES:
         return override
-    return state_for(blocking, agents, action_points)
+    return state_for(blocking, agents, action_points, external_wait)
 
 
 def _item_text(item: dict[str, Any]) -> str:
@@ -123,13 +129,15 @@ def blocked_state_label(
     Full Gate text stays in `closing_gates` and `gates[]`; Answer and Verify
     text stays in `items[]`.
     """
+    action_points = action_points or []
+    if len(action_points) == blocking == 1:
+        return str(action_points[0].get("label") or "action point").lower()
+    if action_points and len(action_points) == blocking:
+        return f"{blocking} action points"
     if blocking <= 0:
-        action_points = action_points or []
-        if len(action_points) == 1:
-            return str(action_points[0].get("label") or "action point").lower()
-        if action_points:
-            return f"{len(action_points)} action points"
         return "blocked"
+    if action_points:
+        return f"{blocking} action points"
     return "gate" if blocking == 1 else f"{blocking} gates"
 
 
@@ -140,7 +148,8 @@ def message_for(
     action_points: list[dict[str, Any]] | None = None,
 ) -> str | None:
     if blocking > 0:
-        head = _item_text(gates[0]) if gates else ""
+        pending = [*gates, *(action_points or [])]
+        head = _item_text(pending[0]) if pending else ""
         extra = f" (+{blocking - 1})" if blocking > 1 else ""
         return ((head or f"{blocking} blocking")[:80]) + extra
     if agents > 0:
@@ -155,6 +164,35 @@ def mirror_path(pane_id: str) -> str:
     d = os.path.join(root, "herdr", "agent-status")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, f"{pane_id.replace(':', '_')}.json")
+
+
+def _blocking_item_identity(item: dict[str, Any]) -> tuple:
+    return (
+        str(item.get("label") or "").strip().lower(),
+        str(item.get("text") or "").strip(),
+        item.get("pr"),
+        item.get("ticket"),
+        item.get("url"),
+    )
+
+
+def _merge_blocking_items(prior: Any, current: Any) -> list[dict[str, Any]]:
+    merged = [item for item in prior or [] if isinstance(item, dict)]
+    identities = {_blocking_item_identity(item) for item in merged}
+    for item in current or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("label") or "").strip().lower() not in {
+            "gate",
+            "answer",
+            "verify",
+        }:
+            continue
+        identity = _blocking_item_identity(item)
+        if identity not in identities:
+            merged.append(item)
+            identities.add(identity)
+    return merged
 
 
 def write_mirror(pane_id: str, payload: dict) -> str | None:
@@ -172,6 +210,7 @@ def write_mirror(pane_id: str, payload: dict) -> str | None:
                     prior = json.load(fh)
                 prior_seq = prior.get("seq") if isinstance(prior, dict) else None
             except (OSError, ValueError):
+                prior = {}
                 prior_seq = None
             if (
                 isinstance(prior_seq, int)
@@ -179,16 +218,65 @@ def write_mirror(pane_id: str, payload: dict) -> str | None:
                 and payload["seq"] <= prior_seq
             ):
                 return None
+            mirror_payload = dict(payload)
+            same_session = (
+                isinstance(prior, dict)
+                and prior.get("session_id") == payload.get("session_id")
+            )
+            parse_status = payload.get("parse_status")
+            if same_session and parse_status == "missing":
+                for key in (
+                    "blocking",
+                    "agents",
+                    "gates",
+                    "items",
+                    "decisions",
+                    "agent_names",
+                    "external_wait",
+                    "workers_unknown",
+                ):
+                    if key in prior:
+                        mirror_payload[key] = prior[key]
+            elif same_session and parse_status == "malformed":
+                for key in (
+                    "agents",
+                    "decisions",
+                    "agent_names",
+                    "external_wait",
+                    "workers_unknown",
+                ):
+                    if key in prior:
+                        mirror_payload[key] = prior[key]
+                merged_gates = _merge_blocking_items(
+                    prior.get("gates"), payload.get("gates")
+                )
+                merged_items = _merge_blocking_items(
+                    prior.get("items"), payload.get("items")
+                )
+                if merged_gates or "gates" in prior or "gates" in payload:
+                    mirror_payload["gates"] = merged_gates
+                if merged_items or "items" in prior or "items" in payload:
+                    mirror_payload["items"] = merged_items
+                recognized_blocking = len(merged_gates) + sum(
+                    str(item.get("label") or "").strip().lower()
+                    in {"answer", "verify"}
+                    for item in merged_items
+                )
+                mirror_payload["blocking"] = max(
+                    int(prior.get("blocking") or 0),
+                    int(payload.get("blocking") or 0),
+                    recognized_blocking,
+                )
             fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh)
+                json.dump(mirror_payload, fh)
             os.replace(tmp, path)
             return path
     except OSError:
         return None
 
 
-def _rpc(sock_path: str, source: str, method: str, params: dict) -> None:
+def _rpc(sock_path: str, source: str, method: str, params: dict) -> bool:
     req = {
         "id": f"{source}:{int(time.time() * 1000)}:{random.randrange(10**6):06d}",
         "method": method,
@@ -199,10 +287,18 @@ def _rpc(sock_path: str, source: str, method: str, params: dict) -> None:
     try:
         client.connect(sock_path)
         client.sendall((json.dumps(req) + "\n").encode())
-        try:
-            client.recv(4096)
-        except OSError:
-            pass
+        raw = client.recv(4096)
+        if not raw:
+            return False
+        response = json.loads(raw.splitlines()[0])
+        return (
+            isinstance(response, dict)
+            and response.get("id") == req["id"]
+            and "result" in response
+            and "error" not in response
+        )
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
     finally:
         client.close()
 
@@ -213,6 +309,11 @@ def accepts_payload(payload: object) -> bool:
         return False
     version = payload.get("v")
     return version is None or version == VERSION
+
+
+def reserve_sequence() -> int:
+    """Reserve report ordering before a caller performs a fallible slow read."""
+    return time.time_ns()
 
 
 def report(
@@ -228,12 +329,17 @@ def report(
     agent_names: list[str] | None = None,
     contract: str | None = None,
     contract_met: bool | None = None,
+    completion: str = "missing",
+    external_wait: str | None = None,
+    parse_status: str = "ok",
+    workers_unknown: bool = False,
     session_id: str | None = None,
     session_path: str | None = None,
     title: str | None = None,
     pane_id: str | None = None,
     sock_path: str | None = None,
     state: str | None = None,
+    seq: int | None = None,
 ) -> dict:
     """Push one v2 turn-end status. Never raises; returns what it did."""
     gate_objects = [
@@ -244,12 +350,15 @@ def report(
         _normalize_item(value, index=index, label="Answer")
         for index, value in enumerate(items or [], start=1)
     ]
+    for item in [*gate_objects, *item_objects]:
+        if str(item.get("label") or "").lower() in {"gate", "answer", "verify"}:
+            item["blocking"] = True
     action_points = [
         item
         for item in item_objects
         if str(item.get("label") or "").lower() in {"answer", "verify"}
-        and item.get("blocking", True) is not False
     ]
+    blocking = max(blocking, len(gate_objects) + len(action_points))
     decision_objects = [
         _normalize_decision(value, index=index)
         for index, value in enumerate(decisions or [], start=1)
@@ -258,9 +367,25 @@ def report(
     pane_id = pane_id or os.environ.get("HERDR_PANE_ID") or ""
     sock_path = sock_path or os.environ.get("HERDR_SOCKET_PATH") or ""
 
-    seq = time.time_ns()
+    seq = seq if isinstance(seq, int) else reserve_sequence()
     reported_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    state = resolve_state(blocking, agents, state, len(action_points))
+    completion = (
+        completion if completion in {"complete", "incomplete", "missing"} else "missing"
+    )
+    parse_status = (
+        parse_status if parse_status in {"ok", "missing", "malformed"} else "malformed"
+    )
+    external_wait = external_wait.strip() if isinstance(external_wait, str) else None
+    external_wait = external_wait or None
+    workers_unknown = workers_unknown is True
+    dependencies_authoritative = parse_status == "ok"
+    reported_agents = agents if dependencies_authoritative and not workers_unknown else None
+    requested_state = state
+    state = resolve_state(
+        blocking, agents, state, len(action_points), external_wait
+    )
+    if not dependencies_authoritative and requested_state != "working":
+        state = "unknown"
     payload = {
         "v": VERSION,
         "agent": agent,
@@ -268,12 +393,23 @@ def report(
         "reported_at": reported_at,
         "state": state,
         "blocking": blocking,
-        "agents": agents,
-        "gates": gate_objects,
-        "items": item_objects,
-        "decisions": decision_objects,
-        "agent_names": agent_names,
+        "completion": completion,
+        "external_wait": external_wait,
+        "parse_status": parse_status,
+        "workers_unknown": workers_unknown,
     }
+    if dependencies_authoritative:
+        payload["gates"] = gate_objects
+        payload["items"] = item_objects
+        payload["decisions"] = decision_objects
+        payload["agent_names"] = agent_names
+    elif parse_status == "malformed":
+        if gate_objects:
+            payload["gates"] = gate_objects
+        if action_points:
+            payload["items"] = action_points
+    if reported_agents is not None:
+        payload["agents"] = reported_agents
     if title:
         payload["title"] = title
     if state == "working" and wait and isinstance(eta_s, int) and eta_s >= 0:
@@ -282,7 +418,10 @@ def report(
 
     outcome = {"payload": payload, "mirror": None, "socket": False}
     if pane_id:
-        outcome["mirror"] = write_mirror(pane_id, payload)
+        mirror_payload = dict(payload)
+        if session_id:
+            mirror_payload["session_id"] = session_id
+        outcome["mirror"] = write_mirror(pane_id, mirror_payload)
     if not (pane_id and sock_path):
         return outcome
 
@@ -300,10 +439,22 @@ def report(
 
     agent_params = {"pane_id": pane_id, "source": source, "agent": agent,
                     "state": state, "seq": seq, "v": VERSION,
-                    "agents": agents,
                     "reported_at": reported_at,
-                    "gates": gate_objects, "items": item_objects,
-                    "decisions": decision_objects}
+                    "completion": completion,
+                    "external_wait": external_wait,
+                    "parse_status": parse_status,
+                    "workers_unknown": workers_unknown}
+    if dependencies_authoritative:
+        agent_params["gates"] = gate_objects
+        agent_params["items"] = item_objects
+        agent_params["decisions"] = decision_objects
+    elif parse_status == "malformed":
+        if gate_objects:
+            agent_params["gates"] = gate_objects
+        if action_points:
+            agent_params["items"] = action_points
+    if reported_agents is not None:
+        agent_params["agents"] = reported_agents
     if state == "working" and wait and isinstance(eta_s, int) and eta_s >= 0:
         agent_params["wait"] = wait
         agent_params["eta_s"] = eta_s
@@ -313,19 +464,30 @@ def report(
 
     gate_texts = [_item_text(gate) for gate in gate_objects]
     tokens = {
-        "closing_blocking": str(blocking),
-        "closing_agents": str(agents),
-        "closing_idle": "1" if state == "idle" else "0",
-        "closing_agent_names": "; ".join(agent_names)[:200],
-        "closing_gates": "; ".join(gate_texts)[:200],
+        "closing_completion": completion,
+        "closing_parse": parse_status,
         "session_title": (title or "")[:120],
     }
-    if contract and isinstance(contract_met, bool):
-        tokens["closing_contract"] = contract[:200]
-        tokens["closing_contract_met"] = "1" if contract_met else "0"
+    if dependencies_authoritative:
+        tokens.update(
+            {
+                "closing_blocking": str(blocking),
+                "closing_idle": "1" if state == "idle" else "0",
+                "closing_agent_names": "; ".join(agent_names)[:200],
+                "closing_gates": "; ".join(gate_texts)[:200],
+                "closing_wait": (external_wait or "")[:200],
+                "closing_workers_unknown": "1" if workers_unknown else "0",
+            }
+        )
+        if reported_agents is not None:
+            tokens["closing_agents"] = str(reported_agents)
+        if contract and isinstance(contract_met, bool):
+            tokens["closing_contract"] = contract[:200]
+            tokens["closing_contract_met"] = "1" if contract_met else "0"
     meta_params = {
         "pane_id": pane_id,
         "source": source,
+        "agent": agent,
         "applies_to_source": source,
         "tokens": tokens,
         "state_labels": {
@@ -334,12 +496,16 @@ def report(
         },
         "seq": seq,
     }
+    if session_id:
+        agent_params["agent_session_id"] = session_id
+        meta_params["agent_session_id"] = session_id
 
-    try:
-        _rpc(sock_path, source, "pane.report_agent_session", session_params)
-        _rpc(sock_path, source, "pane.report_agent", agent_params)
-        _rpc(sock_path, source, "pane.report_metadata", meta_params)
-        outcome["socket"] = True
-    except OSError:
-        pass
+    session_delivered = _rpc(
+        sock_path, source, "pane.report_agent_session", session_params
+    )
+    report_delivered = _rpc(sock_path, source, "pane.report_agent", agent_params)
+    metadata_delivered = _rpc(sock_path, source, "pane.report_metadata", meta_params)
+    outcome["socket"] = bool(
+        session_delivered and report_delivered and metadata_delivered
+    )
     return outcome

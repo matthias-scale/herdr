@@ -1686,6 +1686,9 @@ impl AppState {
         let Some(target) = entries.get(idx) else {
             return false;
         };
+        let Some(target) = target.local_target() else {
+            return false;
+        };
         let ws_idx = target.ws_idx;
         let pane_id = target.pane_id;
 
@@ -1705,6 +1708,9 @@ impl AppState {
     #[cfg(test)]
     fn cycle_agent_entry(&mut self, forward: bool) {
         if let Some((_idx, target)) = crate::ui::relative_agent_navigation_entry(self, forward) {
+            let Some(target) = target.local_target() else {
+                return;
+            };
             let (ws_idx, pane_id) = (target.ws_idx, target.pane_id);
             self.focus_pane_in_workspace(ws_idx, pane_id);
             self.ensure_agent_row_visible(ws_idx, pane_id);
@@ -1726,7 +1732,9 @@ impl AppState {
             matches!(
                 row,
                 crate::ui::SidebarRow::Tab { entry, .. }
-                    if entry.ws_idx == ws_idx && Some(entry.tab_idx) == tab_idx
+                    if entry.local_target().is_some_and(|target| {
+                        target.ws_idx == ws_idx && Some(target.tab_idx) == tab_idx
+                    })
             )
         };
         if self.sidebar_collapsed {
@@ -3226,7 +3234,7 @@ impl AppState {
                     eta_s,
                     reported_at,
                     session_ref,
-                    closing_block,
+                    closing_block: closing_block.map(|report| *report),
                 });
                 (updates, Some(accepted))
             }
@@ -3262,6 +3270,8 @@ impl AppState {
             })
         } else {
             let now = Instant::now();
+            let closing_scope_source = source.clone();
+            let closing_turn_seq = seq;
             self.update_terminal_state_at(pane_id, now, |terminal| {
                 let mutation = terminal.set_hook_authority_report_at(
                     source,
@@ -3278,19 +3288,63 @@ impl AppState {
                 accepted = mutation.is_some();
                 let mut mutation = mutation?;
                 if let Some(closing_block) = closing_block {
-                    let before = mutation
+                    let task_was_complete = terminal.closing_task_complete();
+                    let task_had_external_wait = terminal.closing_external_wait().is_some();
+                    let merge_malformed_blockers = matches!(
+                        closing_block.parse_status,
+                        Some(crate::api::schema::ClosingParseStatus::Malformed)
+                    ) && !closing_block.dependencies_authoritative;
+                    let mut before = mutation
                         .effective_state_change
                         .clone()
                         .unwrap_or_else(|| terminal.unchanged_effective_state_change_at(now));
-                    let payload_changed = terminal.apply_closing_block_payload(
-                        closing_block.gates,
-                        closing_block.items,
-                        closing_block.decisions,
+                    terminal.set_closing_report_scope(
+                        closing_scope_source,
+                        closing_block.session_id,
+                        closing_turn_seq,
                     );
-                    let agents_changed = terminal
-                        .apply_closing_report_subagents_at(closing_block.agents, now)
-                        .is_some();
-                    let after = terminal.unchanged_effective_state_change_at(now);
+                    let task_changed = terminal.apply_closing_task_report(
+                        closing_block.completion,
+                        closing_block.external_wait,
+                        closing_block.parse_status,
+                        closing_block.workers_unknown,
+                        now,
+                    );
+                    let (payload_changed, agents_changed) = if closing_block
+                        .dependencies_authoritative
+                    {
+                        (
+                            terminal.apply_closing_block_payload(
+                                closing_block.gates,
+                                closing_block.items,
+                                closing_block.decisions,
+                            ),
+                            terminal
+                                .apply_closing_report_subagents_at(closing_block.agents, now)
+                                .is_some(),
+                        )
+                    } else if merge_malformed_blockers {
+                        (
+                            terminal
+                                .merge_closing_blockers(closing_block.gates, closing_block.items),
+                            false,
+                        )
+                    } else {
+                        (false, false)
+                    };
+                    let completed_after_retirement =
+                        !task_was_complete && terminal.take_retired_closing_report_completion();
+                    let after = if completed_after_retirement || !task_had_external_wait {
+                        terminal.recompute_effective_state_from_current_at(now)
+                    } else {
+                        terminal.unchanged_effective_state_change_at(now)
+                    };
+                    if completed_after_retirement
+                        && before.previous_state == after.state
+                        && after.state == AgentState::Idle
+                    {
+                        before.previous_state = AgentState::Working;
+                    }
                     mutation.effective_state_change = Some(EffectiveStateChange {
                         previous_agent_label: before.previous_agent_label,
                         previous_known_agent: before.previous_known_agent,
@@ -3301,7 +3355,8 @@ impl AppState {
                         state: after.state,
                         presentation: after.presentation,
                     });
-                    mutation.sidebar_projection_changed |= payload_changed || agents_changed;
+                    mutation.sidebar_projection_changed |=
+                        task_changed || payload_changed || agents_changed;
                 }
                 Some(mutation)
             })
@@ -3482,7 +3537,7 @@ impl AppState {
                     eta_s,
                     reported_at,
                     session_ref,
-                    closing_block,
+                    closing_block: closing_block.map(|report| *report),
                 })
                 .0
             }
@@ -3586,7 +3641,11 @@ impl AppState {
                     pane_id,
                     suppress_completion,
                     |terminal| {
-                        terminal.retire_blocked_full_lifecycle_hook_authority_at(observed_at)
+                        if suppress_completion {
+                            terminal.retire_blocked_full_lifecycle_hook_authority_at(observed_at)
+                        } else {
+                            terminal.retire_output_inconsistent_hook_authority_at(observed_at)
+                        }
                     },
                 )
                 .into_iter()
@@ -3834,9 +3893,17 @@ impl AppState {
         {
             self.mark_session_dirty();
         }
+        let retired_scoped_closing_report =
+            mutation.session_replaced && mutation.sidebar_projection_changed;
         if mutation.session_replaced {
             if let Some(tab_idx) = self.workspaces[ws_idx].find_tab_index_for_pane(pane_id) {
                 self.workspaces[ws_idx].tabs[tab_idx].expire_agent_scoped_name();
+            }
+            if retired_scoped_closing_report {
+                if let Some(pane) = self.workspaces[ws_idx].pane_state_mut(pane_id) {
+                    pane.seen = true;
+                    pane.done_since = None;
+                }
             }
         }
         let agent_released = mutation.agent_released;
@@ -3859,7 +3926,10 @@ impl AppState {
             );
         }
         let suppress_completion = change.state == AgentState::Idle
-            && (suppress_completion || managed_launch_pending || suppress_acquisition_completion);
+            && (suppress_completion
+                || retired_scoped_closing_report
+                || managed_launch_pending
+                || suppress_acquisition_completion);
         if change.previous_state != change.state {
             self.next_agent_state_change_seq += 1;
             if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
@@ -5182,7 +5252,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(filtered, vec![panes[2]]);
+        assert_eq!(filtered, vec![panes[0], panes[2]]);
         state.assert_invariants_for_test();
         state.workspaces[0].assert_invariants_for_test();
     }
@@ -5741,7 +5811,10 @@ mod tests {
         set_agent_state(&mut state, 0, 0, first_second, AgentState::Working);
         set_agent_state(&mut state, 1, 0, second_root, AgentState::Blocked);
         assert_eq!(
-            crate::ui::agent_panel_entries(&state)[0].pane_id,
+            crate::ui::agent_panel_entries(&state)[0]
+                .local_target()
+                .unwrap()
+                .pane_id,
             second_root
         );
 
@@ -5772,11 +5845,23 @@ mod tests {
 
         transition_agent_state(&mut state, first, AgentState::Idle);
         transition_agent_state(&mut state, second, AgentState::Working);
-        assert_eq!(crate::ui::agent_panel_entries(&state)[0].pane_id, second);
+        assert_eq!(
+            crate::ui::agent_panel_entries(&state)[0]
+                .local_target()
+                .unwrap()
+                .pane_id,
+            second
+        );
 
         transition_agent_state(&mut state, second, AgentState::Idle);
 
-        assert_eq!(crate::ui::agent_panel_entries(&state)[0].pane_id, second);
+        assert_eq!(
+            crate::ui::agent_panel_entries(&state)[0]
+                .local_target()
+                .unwrap()
+                .pane_id,
+            second
+        );
         state.assert_invariants_for_test();
     }
 
@@ -6206,6 +6291,42 @@ mod tests {
             .links
             .is_empty());
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn repeated_link_event_updates_the_url_keyed_row() {
+        let mut state = app_with_workspaces(&["links"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let first_seen =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
+        state.handle_app_event(AppEvent::AgentLinksDetected {
+            pane_id,
+            output_urls: vec!["https://same.example.test/path".into()],
+            osc8_urls: Vec::new(),
+            observed_at: first_seen,
+        });
+        state.handle_app_event(AppEvent::AgentLinksDetected {
+            pane_id,
+            output_urls: vec!["https://same.example.test/path".into()],
+            osc8_urls: Vec::new(),
+            observed_at: first_seen + std::time::Duration::from_secs(3),
+        });
+
+        let links = state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Idle)
+            .links;
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, "https://same.example.test/path");
+        assert_eq!(
+            links[0].first_seen,
+            crate::agent_state::format_rfc3339(first_seen).unwrap()
+        );
+        assert_eq!(
+            links[0].last_seen,
+            crate::agent_state::format_rfc3339(first_seen + std::time::Duration::from_secs(3))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -6867,6 +6988,20 @@ mod tests {
     fn closing_reports_emit_one_waiting_projection_transition() {
         let mut state = app_with_workspaces(&["active"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .apply_closing_task_report(
+                None,
+                None,
+                Some(crate::api::schema::ClosingParseStatus::Ok),
+                Some(false),
+                std::time::Instant::now(),
+            );
 
         let started = state.handle_app_event(AppEvent::HookStateReported {
             pane_id,
@@ -6879,12 +7014,18 @@ mod tests {
             eta_s: None,
             reported_at: None,
             session_ref: None,
-            closing_block: Some(crate::events::ClosingBlockReport {
+            closing_block: Some(Box::new(crate::events::ClosingBlockReport {
                 gates: Vec::new(),
                 items: Vec::new(),
                 decisions: Vec::new(),
                 agents: Some(3),
-            }),
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
+                dependencies_authoritative: true,
+                session_id: None,
+            })),
         });
         assert_eq!(started.len(), 1);
         assert!(!started[0].previous_waiting_on_agents);
@@ -6902,17 +7043,118 @@ mod tests {
             eta_s: None,
             reported_at: None,
             session_ref: None,
-            closing_block: Some(crate::events::ClosingBlockReport {
+            closing_block: Some(Box::new(crate::events::ClosingBlockReport {
                 gates: Vec::new(),
                 items: Vec::new(),
                 decisions: Vec::new(),
                 agents: Some(0),
-            }),
+                completion: None,
+                external_wait: None,
+                parse_status: None,
+                workers_unknown: None,
+                dependencies_authoritative: true,
+                session_id: None,
+            })),
         });
         assert_eq!(finished.len(), 1);
         assert!(finished[0].previous_waiting_on_agents);
         assert!(!finished[0].waiting_on_agents);
-        assert_eq!(finished[0].state, AgentState::Idle);
+        assert_eq!(finished[0].state, AgentState::Unknown);
+    }
+
+    #[test]
+    fn current_closing_report_completion_survives_previous_session_retirement() {
+        let mut state = app_with_workspaces(&["active"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        state.active = None;
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Codex),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            usage_limited: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+
+        let session = |id: &str, seq: u64, start: &str| AppEvent::AgentSessionReported {
+            pane_id,
+            source: "herdr:codex".into(),
+            agent_label: "codex".into(),
+            seq: Some(seq),
+            session_ref: crate::agent_resume::AgentSessionRef::id(id),
+            claude_transcript_path: None,
+            session_name_write_target: None,
+            session_name_target_evaluated: false,
+            session_start_source: Some(start.into()),
+        };
+
+        let report = |session: &str, state, seq, completion| AppEvent::HookStateReported {
+            pane_id,
+            source: "herdr:codex-closing-block".into(),
+            agent_label: "codex".into(),
+            state,
+            message: None,
+            seq: Some(seq),
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            session_ref: None,
+            closing_block: Some(Box::new(crate::events::ClosingBlockReport {
+                gates: Vec::new(),
+                items: Vec::new(),
+                decisions: Vec::new(),
+                agents: Some(0),
+                completion: Some(completion),
+                external_wait: None,
+                parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
+                workers_unknown: Some(false),
+                dependencies_authoritative: true,
+                session_id: Some(session.into()),
+            })),
+        };
+
+        state.handle_app_event(session("old-session", 1, "startup"));
+        state.handle_app_event(report(
+            "old-session",
+            AgentState::Working,
+            1,
+            crate::api::schema::ClosingCompletion::Incomplete,
+        ));
+        let retirement = state.handle_app_event(session("new-session", 2, "clear"));
+        assert!(retirement[0].session_replaced);
+        assert!(retirement[0].suppress_completion);
+        let update = state
+            .handle_app_event(report(
+                "new-session",
+                AgentState::Idle,
+                2,
+                crate::api::schema::ClosingCompletion::Complete,
+            ))
+            .pop()
+            .expect("current-session completion update");
+
+        assert!(!update.suppress_completion);
+        let pane = &state.workspaces[0].panes[&pane_id];
+        assert!(!pane.seen);
+        assert!(pane.done_since.is_some());
+
+        let terminal_id = pane.attached_terminal_id.clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .detected_agent = None;
+        state.handle_app_event(AppEvent::AgentProcessDetected {
+            pane_id,
+            agent: Agent::Codex,
+            observed_at: Instant::now(),
+        });
+
+        let pane = &state.workspaces[0].panes[&pane_id];
+        assert!(!pane.seen);
+        assert!(pane.done_since.is_some());
     }
 
     #[test]
