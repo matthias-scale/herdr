@@ -52,10 +52,11 @@ impl App {
         }
     }
 
-    fn install_fleet_snapshot(&mut self, snapshot: crate::fleet::Snapshot) -> bool {
+    fn install_fleet_snapshot(&mut self, mut snapshot: crate::fleet::Snapshot) -> bool {
         if snapshot.config_generation != self.fleet_poller_config.generation() {
             return false;
         }
+        snapshot.retain_unreachable_inventory_from(&self.state.fleet_snapshot);
         self.remote_focus_transport
             .observe_fleet_snapshot(&snapshot);
         let changed = self.state.fleet_snapshot != snapshot;
@@ -936,32 +937,26 @@ impl App {
         let Some(terminal) = self.state.terminals.get(&terminal_id) else {
             return;
         };
-        let tokens = terminal.metadata_tokens.values();
         let active_subagents = terminal
-            .active_subagents
-            .or_else(|| {
-                tokens
-                    .get("closing_agents")
-                    .and_then(|value| value.parse::<u32>().ok())
-            })
+            .effective_active_subagents()
             .filter(|count| *count > 0);
         let tier = crate::terminal::state::derive_completion_tier(
             terminal.raw_agent_state(),
-            terminal.closing_contract.as_deref(),
-            terminal.closing_contract_met,
-            terminal.closing_idle,
-            !terminal.closing_gates.is_empty(),
+            terminal.closing_contract(),
+            terminal.closing_contract_met(),
+            terminal.closing_idle(),
+            !terminal.closing_gates().is_empty(),
             active_subagents,
             terminal.holds_shell,
-            tokens.keys().any(|key| key.starts_with("closing_")),
+            terminal.has_closing_report(),
         );
         if tier != Some(crate::terminal::state::CompletionTier::ContractSatisfied) {
             return;
         }
-        let Some(contract_met_at) = terminal.closing_contract_met_at else {
+        let Some(contract_met_at) = terminal.closing_contract_met_at() else {
             return;
         };
-        let Some(contract) = terminal.closing_contract.clone() else {
+        let Some(contract) = terminal.closing_contract().map(str::to_string) else {
             return;
         };
         let session_id = terminal.current_agent_session_id().map(str::to_string);
@@ -1195,7 +1190,7 @@ impl App {
         }
     }
 
-    fn emit_terminal_or_system_agent_notifications(
+    pub(crate) fn emit_terminal_or_system_agent_notifications(
         &self,
         pane_updates: &[crate::app::actions::PaneStateUpdate],
     ) {
@@ -2120,6 +2115,39 @@ mod tests {
             app.state.fleet_snapshot.configured_hosts,
             vec!["office", "home"]
         );
+    }
+
+    #[test]
+    fn unreachable_host_retains_prior_rows_as_unknown() {
+        let config = crate::config::Config::default();
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let mut reachable = fleet_host("office", "machine-a");
+        reachable.entries = vec![crate::fleet::FleetRow::test_agent_row(
+            "office",
+            "retained-task",
+        )];
+        assert!(app.install_fleet_snapshot(fleet_snapshot(vec![reachable])));
+
+        let mut unreachable = fleet_host("office", "machine-a");
+        unreachable.state = crate::fleet::HostState::Unreachable;
+        unreachable.error = Some("offline".into());
+        unreachable.remote_identity = Some("must-not-survive".into());
+        assert!(app.install_fleet_snapshot(fleet_snapshot(vec![unreachable])));
+
+        let host = &app.state.fleet_snapshot.hosts[0];
+        assert_eq!(host.state, crate::fleet::HostState::Unreachable);
+        assert_eq!(host.remote_identity, None);
+        assert_eq!(host.entries.len(), 1);
+        let retained = &app.state.remote_agent_panel_entries[0];
+        assert_eq!(retained.agent_ref.to_string(), "office::retained-task");
+        assert_eq!(retained.state, crate::detect::AgentState::Unknown);
+        assert!(retained.stale);
     }
 
     fn codex_catalog(model: &str) -> crate::app::home_catalog::HomeProviderCatalog {

@@ -15,6 +15,7 @@ APP_SERVER_SOURCES = (
     *sorted((PROJECT_ROOT / "src" / "app").rglob("*.rs")),
     *sorted((PROJECT_ROOT / "src" / "server").rglob("*.rs")),
 )
+RUST_SOURCES = tuple(sorted((PROJECT_ROOT / "src").rglob("*.rs")))
 TEST_MODULE = re.compile(r"(?m)^#\[cfg\(test\)\]\s*\nmod\s+\w+\s*\{")
 INPUT_STATE_CALL = re.compile(r"(?:\.|::)input_state\b")
 KEYBOARD_STATE_ANSI_CALL = re.compile(
@@ -135,6 +136,21 @@ def production_code(source: str) -> str:
     return code
 
 
+def function_body(source: str, signature: str) -> str:
+    code = production_code(source)
+    start = code.index(signature)
+    opening = code.index("{", start)
+    depth = 0
+    for index in range(opening, len(code)):
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[opening + 1 : index]
+    raise AssertionError(f"unclosed function: {signature}")
+
+
 def find_violations(paths, rules) -> list[str]:
     violations: list[str] = []
     for path in paths:
@@ -166,6 +182,124 @@ class UiHotPathArchitectureTests(unittest.TestCase):
             violations,
             [],
             "App/server code must use narrow terminal-state accessors:\n"
+            + "\n".join(violations),
+        )
+
+    def test_pane_projection_scans_closing_items_once_without_allocating(self) -> None:
+        pane_projection = function_body(
+            (PROJECT_ROOT / "src" / "pane" / "state.rs").read_text(encoding="utf-8"),
+            "fn agent_projection",
+        )
+        item_classification = function_body(
+            (PROJECT_ROOT / "src" / "api" / "schema" / "panes.rs").read_text(
+                encoding="utf-8"
+            ),
+            "fn requires_human_input",
+        )
+
+        self.assertNotIn("has_pending_human_input", pane_projection)
+        self.assertEqual(pane_projection.count(".closing_items"), 1)
+        self.assertNotIn(".sidebar_projection(", pane_projection)
+        self.assertIn(
+            ".sidebar_projection_with_pending_human_input(", pane_projection
+        )
+        preclassified_projection = function_body(
+            (PROJECT_ROOT / "src" / "terminal" / "state.rs").read_text(
+                encoding="utf-8"
+            ),
+            "fn sidebar_projection_with_pending_human_input",
+        )
+        self.assertNotIn("has_pending_human_input()", preclassified_projection)
+        self.assertNotIn(".closing_items", preclassified_projection)
+        pane_details = function_body(
+            (PROJECT_ROOT / "src" / "workspace" / "aggregate.rs").read_text(
+                encoding="utf-8"
+            ),
+            "fn pane_details",
+        )
+        self.assertNotIn("metadata_tokens_for_api", pane_details)
+        self.assertIn("terminal.has_closing_report()", pane_details)
+        self.assertNotIn("to_ascii_lowercase", item_classification)
+
+    def test_terminal_closing_report_is_the_only_runtime_fact_owner(self) -> None:
+        terminal_state = production_code(
+            (PROJECT_ROOT / "src" / "terminal" / "state.rs").read_text(
+                encoding="utf-8"
+            )
+        )
+        terminal_fields_start = terminal_state.index("pub struct TerminalState {")
+        terminal_fields = terminal_state[
+            terminal_fields_start : terminal_state.index(
+                "impl TerminalState", terminal_fields_start
+            )
+        ]
+        self.assertIn("closing_report: Option<ClosingReport>", terminal_fields)
+        field_declarations = re.findall(
+            r"^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z0-9_]+)\s*:\s*([^,\n]+),",
+            terminal_fields,
+            re.M,
+        )
+        closing_fields = [
+            name
+            for name, field_type in field_declarations
+            if "closing" in name.lower() or "closing" in field_type.lower()
+        ]
+        self.assertEqual(
+            closing_fields,
+            ["closing_report"],
+            "ClosingReport must own every terminal closing fact",
+        )
+        synthetic_fields = re.findall(
+            r"^\s*(?:pub(?:\([^)]*\))?\s+)?([a-z0-9_]+)\s*:\s*([^,\n]+),",
+            "legacy_guard: Option<LegacyClosingReportGuard>,",
+            re.M,
+        )
+        self.assertTrue(
+            any(
+                "closing" in name.lower() or "closing" in field_type.lower()
+                for name, field_type in synthetic_fields
+            ),
+            "ownership scan must catch closing state hidden behind another prefix",
+        )
+        for legacy_field in (
+            "closing_gates:",
+            "closing_items:",
+            "closing_decisions:",
+            "closing_report_subagents:",
+            "closing_idle:",
+            "closing_contract:",
+            "closing_contract_met:",
+            "closing_contract_met_at:",
+        ):
+            self.assertNotIn(legacy_field, terminal_fields)
+
+        sidebar = function_body(
+            (PROJECT_ROOT / "src" / "ui" / "sidebar.rs").read_text(encoding="utf-8"),
+            "fn collect_agent_panel_entries_with_runtimes",
+        )
+        self.assertIn("detail.has_closing_report", sidebar)
+        self.assertIn("detail.active_subagents", sidebar)
+        self.assertNotIn('get("closing_agents")', sidebar)
+        self.assertNotIn('starts_with("closing_")', sidebar)
+
+        violations = []
+        direct_read = re.compile(
+            r"\bterminal\.closing_(?:gates|items|decisions|idle|contract"
+            r"|contract_met|contract_met_at|report_subagents)\b(?!\s*\()"
+        )
+        legacy_token_read = re.compile(r"metadata_tokens\s*\.\s*get\s*\(\s*\"closing_")
+        for path in RUST_SOURCES:
+            code = production_code(path.read_text(encoding="utf-8"))
+            for pattern in (direct_read, legacy_token_read):
+                for match in pattern.finditer(code):
+                    violations.append(
+                        f"{path.relative_to(PROJECT_ROOT)}:"
+                        f"{code.count(chr(10), 0, match.start()) + 1}"
+                    )
+        self.assertEqual(
+            violations,
+            [],
+            "Closing facts must be read through TerminalState's ClosingReport accessors:\n"
             + "\n".join(violations),
         )
 

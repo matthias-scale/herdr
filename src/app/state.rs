@@ -2368,6 +2368,9 @@ pub struct ViewState {
     /// The status row's right-aligned segments, fitted once per frame so the
     /// title and the links can be laid out beside what will actually be drawn.
     pub(crate) status_segments: Vec<crate::ui::status::Segment>,
+    /// Remote host of the focused pane, resolved once during view computation.
+    /// Status layout and render only read this projection.
+    pub(crate) focused_remote_host: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3500,6 +3503,9 @@ pub struct AppState {
     /// Clock snapshot captured during `compute_view`; renderers consume it
     /// without reading the clock or mutating shared runtime state.
     pub(crate) view_observed_at: Instant,
+    /// Wall-clock companion to `view_observed_at`, used for persisted UNIX
+    /// deadlines without reading the clock in row construction or rendering.
+    pub(crate) view_observed_unix_s: u64,
     /// Server-owned observation facts loaded from the fleet receipt and loop
     /// registry files. The UI detail projection reads these values without
     /// touching the filesystem during render.
@@ -3516,6 +3522,9 @@ pub struct AppState {
         std::collections::HashMap<PaneId, crate::ui::AgentPanelLocalIdentity>,
     /// TUI projection materialized only when the fleet snapshot changes.
     pub(crate) remote_agent_panel_entries: Vec<std::sync::Arc<crate::ui::RemoteAgentPanelEntry>>,
+    /// Local panes backed by remote-focus operations. Agent identity remains
+    /// owned by `RemoteFocusOperations`; this marker only hides proxy chrome.
+    pub(crate) remote_focus_proxy_panes: std::collections::HashSet<crate::layout::PaneId>,
     /// Read-only remote row selected by blocked navigation. Activation remains
     /// reserved for the later remote-control slice.
     pub(crate) sidebar_selected_remote_agent: Option<crate::api::schema::AgentRef>,
@@ -3692,9 +3701,6 @@ pub struct AppState {
     /// `collapsed_space_keys`, which folds one space inside the tree; this folds
     /// a whole group, the tree included.
     pub collapsed_sidebar_groups: std::collections::HashSet<String>,
-    /// Remote host groups start folded. This records the inverse only after an
-    /// operator expands one, so new hosts stay folded without refresh-time work.
-    pub(crate) expanded_remote_host_groups: std::collections::HashSet<String>,
     pub(crate) sidebar_group_mode: SidebarGroupMode,
     /// Whether the keyboard belongs to the sidebar.
     ///
@@ -5808,10 +5814,11 @@ impl AppState {
         else {
             return false;
         };
-        if crate::ui::sidebar_thread_entries(self)
-            .iter()
-            .all(|entry| entry.ws_idx != ws_idx)
-        {
+        if crate::ui::sidebar_thread_entries(self).iter().all(|entry| {
+            entry
+                .local_target()
+                .is_none_or(|target| target.ws_idx != ws_idx)
+        }) {
             return false;
         }
         if !self
@@ -6093,6 +6100,7 @@ impl AppState {
     pub fn test_new() -> Self {
         Self {
             view_observed_at: std::time::Instant::now(),
+            view_observed_unix_s: super::settled::unix_seconds(std::time::SystemTime::now()),
             loop_run_history: crate::loop_runs::RunHistory::default(),
             loop_registry: crate::loop_runs::LoopRegistry::default(),
             loop_run_history_detail: None,
@@ -6101,6 +6109,7 @@ impl AppState {
             agent_host_name: "localhost".to_string(),
             local_agent_panel_identities: std::collections::HashMap::new(),
             remote_agent_panel_entries: Vec::new(),
+            remote_focus_proxy_panes: std::collections::HashSet::new(),
             sidebar_selected_remote_agent: None,
             symphony_detail: None,
             dock_symphony: None,
@@ -6203,7 +6212,6 @@ impl AppState {
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
             collapsed_sidebar_groups: std::iter::once("repo:Recently done".to_string()).collect(),
-            expanded_remote_host_groups: std::collections::HashSet::new(),
             sidebar_group_mode: SidebarGroupMode::Repo,
             sidebar_focused: false,
             sidebar_group_menu_open: false,
@@ -6328,6 +6336,7 @@ impl AppState {
                 status_buttons: Vec::new(),
                 status_work_links: Vec::new(),
                 status_segments: Vec::new(),
+                focused_remote_host: None,
             },
             drag: None,
             workspace_presses: std::collections::HashMap::new(),

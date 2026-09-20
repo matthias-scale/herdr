@@ -8,14 +8,14 @@ use ratatui::{
 
 #[cfg(test)]
 use super::sidebar::agent_panel_entries;
-#[cfg(test)]
-use super::sidebar::AgentPanelEntry;
 use super::sidebar::{
     mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout, render_compact_agent_row,
-    render_remote_compact_agent_row, sidebar_row_belongs_to_workspace,
+    render_remote_compact_agent_row_with_identity, sidebar_row_belongs_to_workspace,
     sidebar_space_member_indices, sidebar_thread_entries_from, sidebar_workspace_labels,
     SidebarRow, RECENTLY_DONE_SECTION_TITLE,
 };
+#[cfg(test)]
+use super::sidebar::{AgentPanelEntry, AgentPanelEntryData};
 use super::status::{state_icon, state_icon_symbol};
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::{Palette, ToastKind, ToastNotification};
@@ -142,15 +142,21 @@ fn mobile_switcher_target_for_row(
                 MobileSwitcherTarget::Workspace(*ws_idx)
             }
         }
-        SidebarRow::Agent { entry, .. } => MobileSwitcherTarget::Agent {
-            ws_idx: entry.ws_idx,
-            tab_idx: entry.tab_idx,
-            pane_id: entry.pane_id,
-        },
-        SidebarRow::Tab { entry, .. } => MobileSwitcherTarget::SidebarTab {
-            ws_idx: entry.ws_idx,
-            tab_idx: entry.tab_idx,
-        },
+        SidebarRow::Agent { entry, .. } => {
+            let target = entry.local_target()?;
+            MobileSwitcherTarget::Agent {
+                ws_idx: target.ws_idx,
+                tab_idx: target.tab_idx,
+                pane_id: target.pane_id,
+            }
+        }
+        SidebarRow::Tab { entry, .. } => {
+            let target = entry.local_target()?;
+            MobileSwitcherTarget::SidebarTab {
+                ws_idx: target.ws_idx,
+                tab_idx: target.tab_idx,
+            }
+        }
         SidebarRow::RemoteAgent { entry, .. } => {
             MobileSwitcherTarget::RemoteAgent(entry.agent_ref.clone())
         }
@@ -717,7 +723,11 @@ fn render_mobile_switcher_content(
                     .sum::<usize>();
                 let agent_count = sidebar_thread_entries_from(app, terminal_runtimes)
                     .into_iter()
-                    .filter(|entry| member_indices.contains(&entry.ws_idx) && entry.has_agent)
+                    .filter(|entry| {
+                        entry.local_target().is_some_and(|target| {
+                            member_indices.contains(&target.ws_idx) && entry.has_agent
+                        })
+                    })
                     .count();
                 let count_label = count.map_or_else(
                     || format!(" ({agent_count}/{window_count})"),
@@ -756,12 +766,15 @@ fn render_mobile_switcher_content(
                 );
             }
             SidebarRow::Agent { entry, depth } => {
+                let target = entry.local_target();
                 let bg = mobile_item_bg(
                     false,
                     focused_agent.is_some_and(|(ws_idx, tab_idx, pane_id)| {
-                        entry.ws_idx == ws_idx
-                            && entry.tab_idx == tab_idx
-                            && entry.pane_id == pane_id
+                        target.is_some_and(|target| {
+                            target.ws_idx == ws_idx
+                                && target.tab_idx == tab_idx
+                                && target.pane_id == pane_id
+                        })
                     }),
                     p,
                 );
@@ -777,20 +790,25 @@ fn render_mobile_switcher_content(
                     );
                 }
             }
-            SidebarRow::RemoteAgent { entry, depth } => {
+            SidebarRow::RemoteAgent {
+                entry,
+                depth,
+                show_host_identity,
+            } => {
                 let selected = app
                     .sidebar_selected_remote_agent
                     .as_ref()
                     .is_some_and(|agent_ref| agent_ref == &entry.agent_ref);
                 let bg = mobile_item_bg(selected, false, p);
                 if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
-                    render_remote_compact_agent_row(
+                    render_remote_compact_agent_row_with_identity(
                         app,
                         frame,
                         entry,
                         Rect::new(content.x, y, content.width, 1),
                         *depth,
                         Some(bg),
+                        *show_host_identity,
                     );
                 }
             }
@@ -891,11 +909,13 @@ fn render_mobile_switcher_content(
                 );
             }
             SidebarRow::Tab { entry, depth } => {
-                let active = app.active == Some(entry.ws_idx)
-                    && app
-                        .workspaces
-                        .get(entry.ws_idx)
-                        .is_some_and(|ws| ws.active_tab_index() == entry.tab_idx);
+                let active = entry.local_target().is_some_and(|target| {
+                    app.active == Some(target.ws_idx)
+                        && app
+                            .workspaces
+                            .get(target.ws_idx)
+                            .is_some_and(|ws| ws.active_tab_index() == target.tab_idx)
+                });
                 let bg = mobile_item_bg(false, active, p);
                 if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
                     render_compact_agent_row(
@@ -1009,10 +1029,7 @@ fn mobile_agent_detail(entry: &AgentPanelEntry) -> String {
                 entry.seen,
             ))
             .cloned()
-            .unwrap_or_else(|| match entry.state {
-                AgentState::Idle => "done".to_string(),
-                _ => super::status::state_label(entry.state, entry.seen).to_string(),
-            })
+            .unwrap_or_else(|| super::status::state_label(entry.state, entry.seen).to_string())
     };
     parts.push(status);
     if let Some(agent_label) = entry.agent_label.as_deref() {
@@ -1227,16 +1244,15 @@ impl GlobalAgentCounts {
 fn global_agent_counts(app: &AppState) -> GlobalAgentCounts {
     let mut counts = GlobalAgentCounts::default();
     for entry in crate::ui::all_agent_panel_entries(app) {
-        match super::sidebar::entry_attention_tier(&entry) {
-            crate::terminal::state::AttentionTier::Blocked => {
-                counts.blocked += 1;
-                continue;
-            }
-            crate::terminal::state::AttentionTier::Attention => {
-                counts.attention += 1;
-                continue;
-            }
-            crate::terminal::state::AttentionTier::None => {}
+        if super::sidebar::entry_is_blocked(&entry) {
+            counts.blocked += 1;
+            continue;
+        }
+        if super::sidebar::entry_attention_tier(&entry)
+            == crate::terminal::state::AttentionTier::Attention
+        {
+            counts.attention += 1;
+            continue;
         }
         match super::sidebar::agent_panel_status_key(entry.state, entry.seen) {
             "blocked" => counts.blocked += 1,
@@ -1559,48 +1575,53 @@ mod tests {
     }
 
     fn agent_entry(primary_tab_label: Option<&str>, agent_label: Option<&str>) -> AgentPanelEntry {
-        AgentPanelEntry {
-            usage_limited: false,
-            ws_idx: 0,
-            tab_idx: 0,
-            pane_id: PaneId::from_raw(1),
-            primary_label: "herdr".into(),
-            space_label: String::new(),
-            space_label_redundant: false,
-            primary_tab_label: primary_tab_label.map(str::to_string),
-            tab_has_custom_name: false,
-            tab_label_leads_with_agent: false,
-            pane_label: None,
-            pane_label_is_agent_identity: false,
-            terminal_title: None,
-            terminal_title_stripped: None,
-            agent_label: agent_label.map(str::to_string),
-            agent_kind_label: agent_label.map(str::to_string),
-            agent: agent_label.and_then(crate::detect::parse_agent_label),
-            agent_context: agent_label.and_then(crate::detect::parse_agent_label),
-            has_agent: agent_label.is_some(),
-            foreground_process_name: None,
-            prio: false,
-            starred: false,
-            state: AgentState::Idle,
-            attention_tier: None,
-            open_blockers: false,
-            completion_tier: None,
-            active_subagents: None,
-            waiting_on_agents: false,
-            holds_shell: false,
-            gate_count: 0,
-            seen: true,
-            done_since: None,
-            stale: false,
-            reported_at: None,
-            last_agent_state_change_seq: None,
-            activity_at: None,
-            state_labels: std::collections::HashMap::new(),
-            tokens: std::collections::HashMap::new(),
-            tab_first_pane: false,
-            remote_host: None,
-        }
+        AgentPanelEntry::new(
+            crate::ui::sidebar::AgentPanelIdentity::Local(
+                crate::ui::sidebar::AgentPanelLocalTarget {
+                    ws_idx: 0,
+                    tab_idx: 0,
+                    pane_id: PaneId::from_raw(1),
+                },
+            ),
+            AgentPanelEntryData {
+                usage_limited: false,
+                primary_label: "herdr".into(),
+                space_label: String::new(),
+                primary_tab_label: primary_tab_label.map(str::to_string),
+                tab_has_custom_name: false,
+                tab_label_leads_with_agent: false,
+                pane_label: None,
+                pane_label_is_agent_identity: false,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                agent_label: agent_label.map(str::to_string),
+                agent_kind_label: agent_label.map(str::to_string),
+                agent: agent_label.and_then(crate::detect::parse_agent_label),
+                agent_context: agent_label.and_then(crate::detect::parse_agent_label),
+                has_agent: agent_label.is_some(),
+                foreground_process_name: None,
+                prio: false,
+                starred: false,
+                state: AgentState::Idle,
+                attention_tier: None,
+                open_blockers: false,
+                completion_tier: None,
+                active_subagents: None,
+                waiting_on_agents: false,
+                holds_shell: false,
+                gate_count: 0,
+                seen: true,
+                done_since: None,
+                stale: false,
+                reported_at: None,
+                last_agent_state_change_seq: None,
+                activity_at: None,
+                state_labels: std::collections::HashMap::new(),
+                tokens: std::collections::HashMap::new(),
+                tab_first_pane: false,
+                remote_host: None,
+            },
+        )
     }
 
     #[test]
@@ -1638,7 +1659,7 @@ mod tests {
     }
 
     #[test]
-    fn global_agent_counts_separate_answer_only_attention_from_blocked() {
+    fn global_agent_counts_treat_verify_as_blocked() {
         let mut app = AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("attention")];
         app.ensure_test_terminals();
@@ -1660,8 +1681,37 @@ mod tests {
         }];
 
         let counts = global_agent_counts(&app);
+        assert_eq!(counts.blocked, 1);
+        assert_eq!(counts.attention, 0);
+        assert_eq!(counts.total(), 1);
+    }
+
+    #[test]
+    fn global_agent_counts_keep_resumed_work_with_a_pending_cap_working() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("resumed")];
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].terminal_id(pane_id).unwrap().clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(crate::detect::Agent::Codex);
+        terminal.set_raw_agent_state_for_test(AgentState::Working);
+        terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose the independent release lane".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+
+        let counts = global_agent_counts(&app);
+        assert_eq!(counts.working, 1);
         assert_eq!(counts.blocked, 0);
-        assert_eq!(counts.attention, 1);
+        assert_eq!(counts.attention, 0);
         assert_eq!(counts.total(), 1);
     }
 
@@ -2219,23 +2269,23 @@ mod tests {
     fn mobile_agent_detail_keeps_tab_title_owned_by_the_tab_row() {
         let entry = agent_entry(Some("mobile-state"), Some("pi"));
 
-        assert_eq!(mobile_agent_detail(&entry), "  done · pi");
+        assert_eq!(mobile_agent_detail(&entry), "  idle · pi");
     }
 
     #[test]
     fn mobile_agent_detail_keeps_existing_compact_detail_without_tab_context() {
         let entry = agent_entry(None, Some("pi"));
 
-        assert_eq!(mobile_agent_detail(&entry), "  done · pi");
+        assert_eq!(mobile_agent_detail(&entry), "  idle · pi");
     }
 
     #[test]
-    fn mobile_agent_detail_keeps_completed_idle_panes_done_after_viewing() {
+    fn mobile_agent_detail_acknowledges_completed_idle_panes_after_viewing() {
         let mut entry = agent_entry(None, Some("pi"));
         entry.seen = true;
         entry.state_labels.clear();
 
-        assert_eq!(mobile_agent_detail(&entry), "  done · pi");
+        assert_eq!(mobile_agent_detail(&entry), "  idle · pi");
     }
 
     #[test]

@@ -1615,6 +1615,10 @@ fn pane_report_agent(args: &[String]) -> std::io::Result<i32> {
         gates: None,
         items: None,
         decisions: None,
+        completion: None,
+        external_wait: None,
+        parse_status: None,
+        workers_unknown: None,
         agents: None,
     }))
 }

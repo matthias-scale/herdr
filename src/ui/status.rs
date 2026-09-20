@@ -20,13 +20,15 @@ use crate::{
     config::{StatusIndicatorStyle, ToastClipboardPosition, ToastHerdrPosition},
     detect::AgentState,
     platform::status_metrics::StatusMetrics,
+    terminal::TerminalRuntimeRegistry,
 };
 
 /// Full-width, right-aligned top status row.
 ///
 /// Contents, left to right: provider quota (Claude, Codex, Kimi) · link dot ·
-/// agent dot · device · CPU · memory · disk. The row before the first surviving
-/// segment is intentionally blank.
+/// agent dot · remote device (only when the focused pane is attached to a
+/// fleet host) · device · CPU · memory · disk. The row before the first
+/// surviving segment is intentionally blank.
 ///
 /// Every value is a filled column because the question the row answers is "is
 /// anything close to its ceiling", not "what is the exact number". Expanded
@@ -34,7 +36,8 @@ use crate::{
 ///
 /// Layout: spans the full client width above the sidebar and pads before the
 /// first surviving segment. On narrow widths Kimi, then Codex, then Claude,
-/// then the device elide in that order; CPU and memory remain required.
+/// then the remote device, then the device elide in that order; CPU and memory
+/// remain required.
 pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -418,10 +421,15 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
     let (blocked, attention) = crate::ui::sidebar::all_agent_panel_entries(app)
         .into_iter()
         .fold((0usize, 0usize), |(blocked, attention), entry| {
-            match crate::ui::sidebar::entry_attention_tier(&entry) {
-                crate::terminal::state::AttentionTier::Blocked => (blocked + 1, attention),
-                crate::terminal::state::AttentionTier::Attention => (blocked, attention + 1),
-                crate::terminal::state::AttentionTier::None => (blocked, attention),
+            let tier = crate::ui::sidebar::entry_attention_tier(&entry);
+            let is_blocked = tier == crate::terminal::state::AttentionTier::Blocked
+                && (entry.state != AgentState::Working || entry.usage_limited);
+            if is_blocked {
+                (blocked + 1, attention)
+            } else if tier == crate::terminal::state::AttentionTier::Attention {
+                (blocked, attention + 1)
+            } else {
+                (blocked, attention)
             }
         });
     let specs = status_button_specs(app, blocked, attention);
@@ -688,6 +696,22 @@ fn status_segments(
         });
     }
 
+    // A focused pane attached to a fleet host names its machine ahead of the
+    // local one: the local hostname stays next to CPU/MEM, which it still
+    // labels. View computation resolves attached panes and remote-focus
+    // proxies before either status layout pass reaches this function. The
+    // remote segment shares the device's elide rank and sits earlier in the
+    // row, so the first-minimum tie-break sheds it first: a surviving remote
+    // name must never end up labeling local metrics.
+    if let Some(host) = app.view.focused_remote_host.as_deref() {
+        out.push(Segment {
+            text: format!(" \u{2192} {host} "),
+            style: Style::default().fg(p.teal),
+            preserve_bg: false,
+            elide_rank: Some(4),
+        });
+    }
+
     out.push(Segment {
         text: format!(" {} ", metrics.hostname),
         style: Style::default().fg(p.green),
@@ -718,6 +742,29 @@ pub(crate) fn memory_percent(
         return None;
     }
     Some((used / total * 100.0).round().clamp(0.0, 100.0) as u8)
+}
+
+/// Resolve the focused pane's remote host once for the current view. Proxy
+/// panes use their cached configured host; attached panes use the same
+/// launch-argv lookup as the sidebar.
+pub(crate) fn resolve_focused_remote_host(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> Option<String> {
+    let workspace = app.workspaces.get(app.active?)?;
+    let terminal_id = workspace.terminal_id(workspace.focused_pane_id()?)?;
+    let terminal = app.terminals.get(terminal_id)?;
+    if terminal_runtimes
+        .get(terminal_id)
+        .is_some_and(crate::terminal::TerminalRuntime::is_remote_proxy)
+    {
+        return terminal.remote_proxy_host.clone();
+    }
+    terminal
+        .launch_argv
+        .as_deref()
+        .and_then(|argv| crate::fleet::attached_host_name(&app.fleet_snapshot, argv))
+        .map(str::to_owned)
 }
 
 fn metric_segment(label: &str, percent: Option<u8>, expanded: bool, p: &Palette) -> Segment {
@@ -1631,6 +1678,228 @@ mod tests {
         assert!(rendered.contains("MEM \u{2584}"), "{rendered}");
     }
 
+    fn fleet_host_fixture() -> crate::fleet::HostSnapshot {
+        crate::fleet::HostSnapshot {
+            name: "workbox".to_string(),
+            target: "you@workbox".to_string(),
+            local: false,
+            session: Some("agents".to_string()),
+            socket: None,
+            state: crate::fleet::HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            remote_identity: None,
+            entries: Vec::new(),
+        }
+    }
+
+    fn app_with_focused_attached_pane() -> AppState {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        let host = fleet_host_fixture();
+        let argv = crate::fleet::agent_attach_argv(&host, "w1:p2").expect("attach argv");
+        let terminal_id = app.workspaces[0]
+            .terminal_id(app.workspaces[0].focused_pane_id().expect("focused pane"))
+            .expect("focused terminal")
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .launch_argv = Some(argv);
+        app.fleet_snapshot = crate::fleet::Snapshot {
+            hosts: vec![host],
+            ..crate::fleet::Snapshot::default()
+        };
+        app.status_metrics = Some(crate::platform::status_metrics::StatusMetricsSnapshot {
+            metrics: crate::platform::status_metrics::status_metrics_fixture(),
+            sampled_at: std::time::Instant::now(),
+        });
+        app.view.focused_remote_host =
+            resolve_focused_remote_host(&app, &TerminalRuntimeRegistry::new());
+        app
+    }
+
+    fn render_status_row(app: &AppState, width: u16) -> String {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| render_status_bar(app, frame, Rect::new(0, 0, width, 1)))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn attached_focused_pane_names_the_remote_host_before_the_local_one() {
+        let mut app = app_with_focused_attached_pane();
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, 120, 20),
+        );
+
+        let rendered = render_status_row(&app, 120);
+
+        let remote = rendered
+            .find("\u{2192} workbox")
+            .expect("remote segment renders");
+        let local = rendered.find("testhost").expect("local hostname renders");
+        assert!(
+            remote < local,
+            "remote segment precedes the local hostname: {rendered}"
+        );
+        assert!(rendered.contains("CPU"), "{rendered}");
+    }
+
+    #[test]
+    fn local_focused_pane_keeps_the_row_free_of_a_remote_segment() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        app.status_metrics = Some(crate::platform::status_metrics::StatusMetricsSnapshot {
+            metrics: crate::platform::status_metrics::status_metrics_fixture(),
+            sampled_at: std::time::Instant::now(),
+        });
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, 120, 20),
+        );
+
+        let rendered = render_status_row(&app, 120);
+
+        assert_eq!(app.view.focused_remote_host, None);
+        assert!(rendered.contains("testhost"), "{rendered}");
+        assert!(!rendered.contains('\u{2192}'), "{rendered}");
+    }
+
+    #[test]
+    fn focused_remote_proxy_names_its_cached_host() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        app.status_metrics = Some(crate::platform::status_metrics::StatusMetricsSnapshot {
+            metrics: crate::platform::status_metrics::status_metrics_fixture(),
+            sampled_at: std::time::Instant::now(),
+        });
+        let pane_id = app.workspaces[0].focused_pane_id().expect("focused pane");
+        let terminal_id = app.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("focused terminal")
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .remote_proxy_host = Some("buildbox".into());
+        let (runtime, _channels) = crate::terminal::TerminalRuntime::spawn_remote_proxy(
+            pane_id,
+            24,
+            120,
+            0,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+            crate::remote::RemoteFocusOperationState::new(),
+        )
+        .expect("proxy runtime");
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        runtimes.insert(terminal_id, runtime);
+
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &runtimes,
+            Rect::new(0, 0, 120, 20),
+        );
+        let rendered = render_status_row(&app, 120);
+
+        assert_eq!(app.view.focused_remote_host.as_deref(), Some("buildbox"));
+        assert!(rendered.contains("\u{2192} buildbox"), "{rendered}");
+    }
+
+    #[test]
+    fn render_fallback_only_reads_the_resolved_remote_host() {
+        let mut app = app_with_focused_attached_pane();
+        let terminal_id = app.workspaces[0]
+            .terminal_id(app.workspaces[0].focused_pane_id().expect("focused pane"))
+            .expect("focused terminal")
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .launch_argv = None;
+        app.fleet_snapshot = crate::fleet::Snapshot::default();
+
+        let rendered = render_status_row(&app, 120);
+
+        assert!(rendered.contains("\u{2192} workbox"), "{rendered}");
+    }
+
+    #[test]
+    fn narrow_width_elides_the_remote_segment_after_providers_and_before_metrics() {
+        let mut app = app_with_focused_attached_pane();
+        app.provider_usage = usage_fixture();
+        let metrics = crate::platform::status_metrics::status_metrics_fixture();
+        let full = status_segments(&app, &metrics, &app.palette);
+        assert_eq!(
+            full.iter()
+                .filter_map(|segment| segment.elide_rank)
+                .collect::<Vec<_>>(),
+            vec![3, 2, 1, 4, 4],
+            "providers elide first; the remote segment shares the device's rank"
+        );
+
+        // Once the providers are gone the remote segment still fits; one more
+        // segment-width of pressure sheds it while the local hostname, CPU and
+        // memory stay.
+        let provider_width: usize = full
+            .iter()
+            .take(3)
+            .map(|segment| display_width(&segment.text))
+            .sum();
+        let remote_width = display_width(" \u{2192} workbox ");
+        let fitted = fitted_segments(
+            status_segments(&app, &metrics, &app.palette),
+            segment_width(&full) - provider_width,
+        );
+        let rendered = fitted
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>();
+        assert!(rendered.contains("\u{2192} workbox"), "{rendered}");
+        assert!(!rendered.contains("CC"), "{rendered}");
+
+        let fitted = fitted_segments(
+            status_segments(&app, &metrics, &app.palette),
+            segment_width(&full) - provider_width - remote_width,
+        );
+        let rendered = fitted
+            .iter()
+            .map(|segment| segment.text.as_str())
+            .collect::<String>();
+        assert!(!rendered.contains("workbox"), "{rendered}");
+        assert!(rendered.contains("testhost"), "{rendered}");
+        assert!(rendered.contains("CPU \u{2581}"), "{rendered}");
+        assert!(rendered.contains("MEM \u{2584}"), "{rendered}");
+
+        // The same holds through the real render path at the narrowest
+        // supported width: only the required metrics survive.
+        let narrow = minimum_required_status_width(&app) as u16;
+        let rendered = render_status_row(&app, narrow);
+        assert!(!rendered.contains("workbox"), "{rendered}");
+        assert!(rendered.contains("CPU"), "{rendered}");
+        assert!(rendered.contains("MEM"), "{rendered}");
+    }
+
     /// Two providers with known windows: Claude half-spent on the week, Codex
     /// idle. Fixed values so the glyph a percentage maps to is asserted, not
     /// assumed.
@@ -2087,13 +2356,13 @@ mod tests {
             button_for(&attention, StatusButtonAction::BlockedFilter)
                 .label
                 .trim(),
-            "blocked"
+            "blocked 1"
         );
         assert_eq!(
             button_for(&attention, StatusButtonAction::Attention)
                 .label
                 .trim(),
-            "attention 1"
+            "attention"
         );
 
         app.workspaces[0].tabs[0]
@@ -2329,8 +2598,8 @@ mod tests {
             &crate::terminal::TerminalRuntimeRegistry::new(),
         )
         .into_iter()
-        .find(|entry| entry.ws_idx == 0)
-        .and_then(|entry| entry.primary_tab_label)
+        .find(|entry| entry.local_target().unwrap().ws_idx == 0)
+        .and_then(|entry| entry.primary_tab_label.clone())
         .expect("the sidebar names this session");
 
         assert_eq!(
