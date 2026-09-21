@@ -351,9 +351,9 @@ pub enum ClientMessage {
         cols: u16,
         /// Terminal height in rows.
         rows: u16,
-        /// Width of a terminal cell in physical pixels, or 0 when client-side Kitty graphics are disabled.
+        /// Width of a terminal cell in physical pixels, or 0 when unavailable.
         cell_width_px: u32,
-        /// Height of a terminal cell in physical pixels, or 0 when client-side Kitty graphics are disabled.
+        /// Height of a terminal cell in physical pixels, or 0 when unavailable.
         cell_height_px: u32,
         /// Render encoding requested by the client.
         requested_encoding: RenderEncoding,
@@ -383,9 +383,9 @@ pub enum ClientMessage {
         cols: u16,
         /// New terminal height in rows.
         rows: u16,
-        /// Width of a terminal cell in physical pixels, or 0 when client-side Kitty graphics are disabled.
+        /// Width of a terminal cell in physical pixels, or 0 when unavailable.
         cell_width_px: u32,
-        /// Height of a terminal cell in physical pixels, or 0 when client-side Kitty graphics are disabled.
+        /// Height of a terminal cell in physical pixels, or 0 when unavailable.
         cell_height_px: u32,
     },
 

@@ -2121,29 +2121,20 @@ impl App {
                 let mut cell_size = self.state.host_cell_size;
                 terminal.draw(|frame| {
                     let area = frame.area();
-                    if kitty_graphics_enabled {
-                        if let Some(observed_cell_size) =
-                            crate::kitty_graphics::HostCellSize::try_from_terminal(area)
-                        {
-                            self.state.host_cell_size = observed_cell_size;
-                            cell_size = observed_cell_size;
-                        } else if !cell_size.is_known() {
-                            cell_size =
-                                crate::kitty_graphics::HostCellSize::fallback_for_area(area);
-                        }
-                        crate::ui::compute_view_with_cell_size(
-                            &mut self.state,
-                            &self.terminal_runtimes,
-                            area,
-                            cell_size,
-                        );
-                    } else {
-                        crate::ui::compute_view_with_runtime_registry(
-                            &mut self.state,
-                            &self.terminal_runtimes,
-                            area,
-                        );
+                    if let Some(observed_cell_size) =
+                        crate::kitty_graphics::HostCellSize::try_from_terminal(area)
+                    {
+                        self.state.host_cell_size = observed_cell_size;
+                        cell_size = observed_cell_size;
+                    } else if kitty_graphics_enabled && !cell_size.is_known() {
+                        cell_size = crate::kitty_graphics::HostCellSize::fallback_for_area(area);
                     }
+                    crate::ui::compute_view_with_cell_size(
+                        &mut self.state,
+                        &self.terminal_runtimes,
+                        area,
+                        cell_size,
+                    );
                     self.ensure_dock_editor();
                     self.resize_dock_editor();
                     self.ensure_scratchpad();
@@ -2727,7 +2718,6 @@ impl App {
             if was_kitty_graphics_enabled && !config.experimental.kitty_graphics {
                 let _ = crate::kitty_graphics::clear_all_host_graphics();
                 self.pane_graphics.clear();
-                self.state.host_cell_size = crate::kitty_graphics::HostCellSize::default();
             }
             self.state.reveal_hidden_cursor_for_cjk_ime =
                 config.experimental.reveal_hidden_cursor_for_cjk_ime;
