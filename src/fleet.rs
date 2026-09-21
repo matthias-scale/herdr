@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -341,6 +341,14 @@ struct GroupCatalogCacheEntry {
     snapshot: crate::groups::GroupAuthoritySnapshot,
 }
 
+type GroupCatalogCacheKey = (
+    String,
+    bool,
+    Option<String>,
+    Option<String>,
+    crate::groups::AuthorityId,
+);
+
 impl GroupCatalogCacheEntry {
     fn matches_config(&self, host: &FleetHostConfig) -> bool {
         self.target == host.target
@@ -415,22 +423,38 @@ pub(crate) fn load_group_catalog_cache(path: &Path, fleet: &FleetConfig) -> Vec<
 }
 
 pub(crate) fn save_group_catalog_cache(path: &Path, snapshot: &Snapshot) -> std::io::Result<()> {
-    let entries = snapshot
-        .group_catalogs
-        .iter()
-        .filter_map(|catalog| {
-            catalog
-                .snapshot
-                .as_ref()
-                .map(|accepted| GroupCatalogCacheEntry {
-                    target: catalog.target.clone(),
-                    local: catalog.local,
-                    session: catalog.session.clone(),
-                    socket: catalog.socket.clone(),
-                    snapshot: accepted.clone(),
-                })
-        })
-        .collect();
+    let mut entries_by_key: BTreeMap<GroupCatalogCacheKey, GroupCatalogCacheEntry> =
+        BTreeMap::new();
+    for catalog in &snapshot.group_catalogs {
+        let Some(accepted) = catalog.snapshot.as_ref() else {
+            continue;
+        };
+        let key = (
+            catalog.target.clone(),
+            catalog.local,
+            catalog.session.clone(),
+            catalog.socket.clone(),
+            accepted.authority_id.clone(),
+        );
+        let entry = GroupCatalogCacheEntry {
+            target: catalog.target.clone(),
+            local: catalog.local,
+            session: catalog.session.clone(),
+            socket: catalog.socket.clone(),
+            snapshot: accepted.clone(),
+        };
+        if let Some(previous) = entries_by_key.get(&key) {
+            if previous.snapshot != entry.snapshot {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "one authority reported conflicting catalogs through the same connection",
+                ));
+            }
+            continue;
+        }
+        entries_by_key.insert(key, entry);
+    }
+    let entries = entries_by_key.into_values().collect();
     let file = GroupCatalogCacheFile {
         version: GROUP_CATALOG_CACHE_VERSION,
         entries,
@@ -610,6 +634,54 @@ impl Snapshot {
                 catalog.state = GroupCatalogState::IdentityConflict;
                 catalog.error = Some(format!(
                     "authority identity conflict: {authority} is reported by multiple connections"
+                ));
+            }
+        }
+    }
+
+    pub(crate) fn reject_unpersisted_group_catalogs_from(
+        &mut self,
+        previous: &Self,
+        error: &std::io::Error,
+    ) {
+        for catalog in &mut self.group_catalogs {
+            let authority = catalog.authority_id().cloned();
+            let retained = previous.group_catalogs.iter().find(|old| {
+                old.matches_connection(catalog)
+                    && authority
+                        .as_ref()
+                        .is_none_or(|authority| old.authority_id() == Some(authority))
+                    && old.snapshot.is_some()
+            });
+            if let Some(retained) = retained {
+                catalog.snapshot = retained.snapshot.clone();
+                catalog.state = GroupCatalogState::Stale;
+            } else {
+                catalog.snapshot = None;
+                catalog.state = GroupCatalogState::Unavailable;
+            }
+            catalog.error = Some(format!("durable cache persistence failed: {error}"));
+        }
+
+        let mut authority_counts = HashMap::new();
+        for catalog in &self.group_catalogs {
+            if let Some(authority) = catalog.authority_id() {
+                *authority_counts.entry(authority.clone()).or_insert(0_usize) += 1;
+            }
+        }
+        for catalog in &mut self.group_catalogs {
+            let Some(authority) = catalog.authority_id().cloned() else {
+                continue;
+            };
+            if authority_counts
+                .get(&authority)
+                .copied()
+                .unwrap_or_default()
+                > 1
+            {
+                catalog.state = GroupCatalogState::IdentityConflict;
+                catalog.error = Some(format!(
+                    "authority identity conflict after durable cache failure: {authority}"
                 ));
             }
         }
@@ -2893,10 +2965,12 @@ mod tests {
             2,
             vec![group_record(1, 1, 2, true)],
         );
+        let mut duplicate_alias = accepted.clone();
+        duplicate_alias.host = "duplicate".into();
         save_group_catalog_cache(
             &path,
             &Snapshot {
-                group_catalogs: vec![accepted.clone()],
+                group_catalogs: vec![accepted.clone(), duplicate_alias],
                 ..Snapshot::default()
             },
         )

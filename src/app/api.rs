@@ -61,19 +61,23 @@ impl App {
         }
         snapshot.retain_unreachable_inventory_from(&self.state.fleet_snapshot);
         snapshot.admit_group_catalogs_from(&self.state.fleet_snapshot);
+        let candidate_catalogs_changed =
+            self.state.fleet_snapshot.group_catalogs != snapshot.group_catalogs;
+        if candidate_catalogs_changed {
+            if let Some(path) = self.group_catalog_cache_path.as_deref() {
+                if let Err(error) = crate::fleet::save_group_catalog_cache(path, &snapshot) {
+                    tracing::warn!(%error, path = %path.display(), "cannot persist remote group catalog cache");
+                    snapshot
+                        .reject_unpersisted_group_catalogs_from(&self.state.fleet_snapshot, &error);
+                }
+            }
+        }
         self.remote_focus_transport
             .observe_fleet_snapshot(&snapshot);
         let catalogs_changed = self.state.fleet_snapshot.group_catalogs != snapshot.group_catalogs;
         let changed = self.state.fleet_snapshot != snapshot;
         self.state.fleet_snapshot = snapshot;
         if catalogs_changed {
-            if let Some(path) = self.group_catalog_cache_path.as_deref() {
-                if let Err(error) =
-                    crate::fleet::save_group_catalog_cache(path, &self.state.fleet_snapshot)
-                {
-                    tracing::warn!(%error, path = %path.display(), "cannot persist remote group catalog cache");
-                }
-            }
             self.emit_event(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::AuthorityCatalogsUpdated,
                 data: crate::api::schema::EventData::AuthorityCatalogsUpdated {
@@ -2224,6 +2228,80 @@ mod tests {
             catalogs[0].state,
             crate::api::schema::AuthorityCatalogStateInfo::Fresh
         );
+    }
+
+    #[test]
+    fn catalog_admission_fails_closed_when_the_durable_cache_cannot_advance() {
+        let config = crate::config::Config::default();
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let authority = crate::groups::AuthorityId::from_random_bytes([10; 16]);
+        let record = |revision, state| crate::groups::GroupRecord {
+            id: crate::groups::GroupId {
+                owner: authority.clone(),
+                local: 1,
+            },
+            revision,
+            state,
+        };
+        let catalog = |revision, state| crate::fleet::GroupCatalog {
+            host: "office".into(),
+            target: "machine-a".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Fresh,
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: authority.clone(),
+                revision,
+                groups: vec![record(revision, state)],
+                memberships: Vec::new(),
+            }),
+            error: None,
+        };
+        app.state.fleet_snapshot.group_catalogs = vec![catalog(
+            1,
+            crate::groups::GroupState::Active {
+                name: "Work".into(),
+            },
+        )];
+
+        let blocker = std::env::temp_dir().join(format!(
+            "herdr-group-cache-blocker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&blocker, b"not a directory").expect("create cache blocker");
+        app.group_catalog_cache_path = Some(blocker.join("remote-group-catalogs.json"));
+        let mut incoming = fleet_snapshot(Vec::new());
+        incoming.group_catalogs = vec![catalog(2, crate::groups::GroupState::Deleted)];
+
+        assert!(app.install_fleet_snapshot(incoming));
+
+        let retained = &app.state.fleet_snapshot.group_catalogs[0];
+        assert_eq!(retained.state, crate::fleet::GroupCatalogState::Stale);
+        assert!(matches!(
+            retained
+                .snapshot
+                .as_ref()
+                .expect("previous accepted catalog")
+                .groups[0]
+                .state,
+            crate::groups::GroupState::Active { .. }
+        ));
+        assert!(retained
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("durable cache")));
+        std::fs::remove_file(blocker).expect("remove cache blocker");
     }
 
     fn codex_catalog(model: &str) -> crate::app::home_catalog::HomeProviderCatalog {
