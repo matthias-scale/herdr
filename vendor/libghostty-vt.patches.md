@@ -94,6 +94,7 @@ vendored base: `c5a21edfcbc2d5b46540ad91b7980aca31f5f1f3`
 local files:
 
 - `vendor/libghostty-vt/include/ghostty/vt/terminal.h`
+- `vendor/libghostty-vt/src/terminal/Terminal.zig`
 - `vendor/libghostty-vt/src/terminal/c/terminal.zig`
 - `vendor/libghostty-vt/src/terminal/osc.zig`
 - `vendor/libghostty-vt/src/terminal/stream.zig`
@@ -104,17 +105,19 @@ leave scrollback, but must not maintain a second VT visibility state machine.
 This patch exposes printable text and parser-confirmed OSC 8 targets from the
 same action stream that updates the terminal. OSC 8 capture is bounded at two
 8 KiB components plus their delimiter, and the callback is disabled outside
-live PTY writes.
+live PTY writes. Printable callbacks use the terminal's own print result so
+codepoints discarded by Ghostty are not exposed as visible output.
 
 remove when: the vendored source exposes equivalent post-parse text and OSC 8
 events, including confirmed BEL, 8-bit ST, and split `ESC \\` termination, with
-bounded 8 KiB targets and suppression for non-rendered status-display text, and
-the Herdr visibility regressions pass without this patch.
+bounded 8 KiB targets and suppression for non-rendered status-display text and
+discarded codepoints, and the Herdr visibility regressions pass without this
+patch.
 
 verification:
 
 ```sh
-cargo nextest run --locked 'test(c1_introducers_and_st_match_ghostty_rendered_text) | test(escape_followed_by_c0_matches_ghostty_rendered_text) | test(status_display_text_matches_ghostty_rendered_text)'
+cargo nextest run --locked 'test(c1_introducers_and_st_match_ghostty_rendered_text) | test(escape_followed_by_c0_matches_ghostty_rendered_text) | test(status_display_text_matches_ghostty_rendered_text) | test(ignored_zero_width_text_matches_ghostty_rendered_text)'
 cargo nextest run --locked 'test(cancelled_osc_capture_matches_ghostty_visible_output) | test(osc8_target_bound_excludes_split_and_unsplit_st_bytes)'
 python3 -m unittest scripts.test_vendor_libghostty_vt
 ```
