@@ -1404,7 +1404,7 @@ where
     let hosts = hosts.into_iter().collect::<std::collections::BTreeSet<_>>();
     let mut tokens = std::collections::HashMap::new();
     let mut used_tokens = std::collections::HashSet::new();
-    for width in 2..=SIDEBAR_HOST_TOKEN_NARROW_WIDTH {
+    for width in (2..=SIDEBAR_HOST_TOKEN_NARROW_WIDTH).rev() {
         let mut counts = std::collections::HashMap::new();
         for host in &hosts {
             *counts.entry(middle_elide(host, width)).or_insert(0usize) += 1;
@@ -13197,7 +13197,7 @@ pub(crate) mod tests {
         let rendered = (0..area.height)
             .map(|row| row_text(terminal.backend().buffer(), row, area.width))
             .collect::<Vec<_>>();
-        let host_tokens = short_fleet_host_names(hosts.into_iter());
+        let host_tokens = short_fleet_host_names(hosts);
         assert!(
             rendered.iter().any(|row| row.contains("same")),
             "{rendered:?}"
@@ -13242,7 +13242,8 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
         app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
-        let area = Rect::new(0, 0, 18, 8);
+        expand_fleet(&mut app);
+        let area = Rect::new(0, 0, 30, 20);
         app.view.sidebar_rect = area;
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
@@ -13297,7 +13298,7 @@ pub(crate) mod tests {
             let rendered = (0..area.height)
                 .map(|row| row_text(terminal.backend().buffer(), row, area.width))
                 .collect::<Vec<_>>();
-            let host_tokens = short_fleet_host_names(hosts.into_iter());
+            let host_tokens = short_fleet_host_names(hosts);
             for (host, short) in host_tokens {
                 assert!(
                     rendered
