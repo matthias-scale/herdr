@@ -424,6 +424,65 @@ enum AltScreenReadConflict {
     RestoreFailed,
 }
 
+/// Complete attach-local app presentation installed while one client's input
+/// is resolved. Cell and pixel input share this transaction so hit geometry
+/// cannot be computed from another client's sidebar, dock, or detail state.
+struct ClientInputPresentation {
+    sidebar: crate::app::state::SidebarPresentationState,
+    dock: crate::app::state::DockPresentationState,
+    notepad: crate::notepad::NotepadPresentationState,
+    loop_run_history_detail: Option<crate::app::state::LoopRunHistoryDetail>,
+    symphony_detail: Option<crate::app::state::SymphonyDetail>,
+    work_view: Option<crate::app::state::WorkViewState>,
+    usage_view: Option<crate::app::state::UsageViewState>,
+}
+
+impl ClientInputPresentation {
+    fn take(client: &mut ClientConnection) -> Self {
+        Self {
+            sidebar: std::mem::take(&mut client.sidebar_presentation),
+            dock: std::mem::take(&mut client.dock_presentation),
+            notepad: std::mem::take(&mut client.notepad_presentation),
+            loop_run_history_detail: client.loop_run_history_detail.take(),
+            symphony_detail: client.symphony_detail.take(),
+            work_view: client.work_view.take(),
+            usage_view: client.usage_view.take(),
+        }
+    }
+
+    fn install(&mut self, state: &mut crate::app::state::AppState) {
+        state.swap_sidebar_presentation(&mut self.sidebar);
+        state.reconcile_sidebar_presentation();
+        state.swap_dock_presentation(&mut self.dock);
+        state.reconcile_dock_home_with_focused_pane();
+        state.notepad.swap_presentation(&mut self.notepad);
+        state.swap_loop_run_history_detail(&mut self.loop_run_history_detail);
+        state.swap_symphony_detail(&mut self.symphony_detail);
+        state.swap_work_view(&mut self.work_view);
+        state.swap_usage_view(&mut self.usage_view);
+    }
+
+    fn uninstall(&mut self, state: &mut crate::app::state::AppState) {
+        state.swap_usage_view(&mut self.usage_view);
+        state.swap_work_view(&mut self.work_view);
+        state.swap_symphony_detail(&mut self.symphony_detail);
+        state.swap_loop_run_history_detail(&mut self.loop_run_history_detail);
+        state.swap_sidebar_presentation(&mut self.sidebar);
+        state.swap_dock_presentation(&mut self.dock);
+        state.notepad.swap_presentation(&mut self.notepad);
+    }
+
+    fn store(self, client: &mut ClientConnection) {
+        client.sidebar_presentation = self.sidebar;
+        client.dock_presentation = self.dock;
+        client.notepad_presentation = self.notepad;
+        client.loop_run_history_detail = self.loop_run_history_detail;
+        client.symphony_detail = self.symphony_detail;
+        client.work_view = self.work_view;
+        client.usage_view = self.usage_view;
+    }
+}
+
 /// The headless server — runs the herdr event loop without a real terminal.
 pub struct HeadlessServer {
     app: app::App,
@@ -4144,66 +4203,15 @@ impl HeadlessServer {
         let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
         // Client-local theme reports were applied above; routing them again would update every
         // pane once per palette entry instead of once per captured batch.
-        let mut sidebar_presentation = source_is_full_app.then(|| {
+        let mut input_presentation = if source_is_full_app {
             self.clients
                 .get_mut(&client_id)
-                .map(|client| std::mem::take(&mut client.sidebar_presentation))
-                .unwrap_or_default()
-        });
-        let mut dock_presentation = source_is_full_app.then(|| {
-            self.clients
-                .get_mut(&client_id)
-                .map(|client| std::mem::take(&mut client.dock_presentation))
-                .unwrap_or_default()
-        });
-        let mut notepad_presentation = source_is_full_app.then(|| {
-            self.clients
-                .get_mut(&client_id)
-                .map(|client| std::mem::take(&mut client.notepad_presentation))
-                .unwrap_or_default()
-        });
-        let mut loop_run_history_detail = source_is_full_app.then(|| {
-            self.clients
-                .get_mut(&client_id)
-                .and_then(|client| client.loop_run_history_detail.take())
-        });
-        let mut symphony_detail = source_is_full_app.then(|| {
-            self.clients
-                .get_mut(&client_id)
-                .and_then(|client| client.symphony_detail.take())
-        });
-        let mut work_view = source_is_full_app.then(|| {
-            self.clients
-                .get_mut(&client_id)
-                .and_then(|client| client.work_view.take())
-        });
-        let mut usage_view = source_is_full_app.then(|| {
-            self.clients
-                .get_mut(&client_id)
-                .and_then(|client| client.usage_view.take())
-        });
-        if let Some(presentation) = &mut sidebar_presentation {
-            self.app.state.swap_sidebar_presentation(presentation);
-            self.app.state.reconcile_sidebar_presentation();
-        }
-        if let Some(presentation) = &mut dock_presentation {
-            self.app.state.swap_dock_presentation(presentation);
-            self.app.state.reconcile_dock_home_with_focused_pane();
-        }
-        if let Some(presentation) = &mut notepad_presentation {
-            self.app.state.notepad.swap_presentation(presentation);
-        }
-        if let Some(detail) = &mut loop_run_history_detail {
-            self.app.state.swap_loop_run_history_detail(detail);
-        }
-        if let Some(detail) = &mut symphony_detail {
-            self.app.state.swap_symphony_detail(detail);
-        }
-        if let Some(view) = &mut work_view {
-            self.app.state.swap_work_view(view);
-        }
-        if let Some(view) = &mut usage_view {
-            self.app.state.swap_usage_view(view);
+                .map(ClientInputPresentation::take)
+        } else {
+            None
+        };
+        if let Some(presentation) = &mut input_presentation {
+            presentation.install(&mut self.app.state);
         }
         let input_geometry_dirty = source_is_full_app
             && self
@@ -4229,54 +4237,10 @@ impl HeadlessServer {
             }
         }
         self.app.start_usage_scan_if_requested();
-        if let Some(view) = &mut usage_view {
-            self.app.state.swap_usage_view(view);
-        }
-        if let Some(view) = &mut work_view {
-            self.app.state.swap_work_view(view);
-        }
-        if let Some(detail) = &mut symphony_detail {
-            self.app.state.swap_symphony_detail(detail);
-        }
-        if let Some(detail) = &mut loop_run_history_detail {
-            self.app.state.swap_loop_run_history_detail(detail);
-        }
-        if let Some(mut presentation) = sidebar_presentation {
-            self.app.state.swap_sidebar_presentation(&mut presentation);
+        if let Some(mut presentation) = input_presentation {
+            presentation.uninstall(&mut self.app.state);
             if let Some(client) = self.clients.get_mut(&client_id) {
-                client.sidebar_presentation = presentation;
-            }
-        }
-        if let Some(mut presentation) = dock_presentation {
-            self.app.state.swap_dock_presentation(&mut presentation);
-            if let Some(client) = self.clients.get_mut(&client_id) {
-                client.dock_presentation = presentation;
-            }
-        }
-        if let Some(mut presentation) = notepad_presentation {
-            self.app.state.notepad.swap_presentation(&mut presentation);
-            if let Some(client) = self.clients.get_mut(&client_id) {
-                client.notepad_presentation = presentation;
-            }
-        }
-        if let Some(detail) = loop_run_history_detail {
-            if let Some(client) = self.clients.get_mut(&client_id) {
-                client.loop_run_history_detail = detail;
-            }
-        }
-        if let Some(detail) = symphony_detail {
-            if let Some(client) = self.clients.get_mut(&client_id) {
-                client.symphony_detail = detail;
-            }
-        }
-        if let Some(view) = work_view {
-            if let Some(client) = self.clients.get_mut(&client_id) {
-                client.work_view = view;
-            }
-        }
-        if let Some(view) = usage_view {
-            if let Some(client) = self.clients.get_mut(&client_id) {
-                client.usage_view = view;
+                presentation.store(client);
             }
         }
         if self.app.take_config_reloaded_from_disk() {
@@ -4527,15 +4491,11 @@ impl HeadlessServer {
                 let foreground_changed = self.promote_client_to_foreground(client_id);
                 let mut pomodoro_presentation =
                     self.pomodoro_input_presentation_for_input(client_id);
-                let mut notepad_presentation = self
-                    .clients
-                    .get_mut(&client_id)
-                    .map(|client| std::mem::take(&mut client.notepad_presentation))
-                    .unwrap_or_default();
-                self.app
-                    .state
-                    .notepad
-                    .swap_presentation(&mut notepad_presentation);
+                let Some(client) = self.clients.get_mut(&client_id) else {
+                    return false;
+                };
+                let mut input_presentation = ClientInputPresentation::take(client);
+                input_presentation.install(&mut self.app.state);
                 let input_geometry_dirty = self
                     .clients
                     .get(&client_id)
@@ -4552,13 +4512,10 @@ impl HeadlessServer {
                     geometry,
                     &mut pomodoro_presentation,
                 );
-                self.app
-                    .state
-                    .notepad
-                    .swap_presentation(&mut notepad_presentation);
+                input_presentation.uninstall(&mut self.app.state);
                 if let Some(client) = self.clients.get_mut(&client_id) {
+                    input_presentation.store(client);
                     client.pomodoro_presentation = pomodoro_presentation;
-                    client.notepad_presentation = notepad_presentation;
                 }
                 changed || foreground_changed
             }

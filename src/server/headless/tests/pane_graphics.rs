@@ -612,6 +612,46 @@ fn r361_2_resize_then_link_click_uses_new_geometry_on_both_mouse_paths() {
 }
 
 #[test]
+fn r361_2_resize_then_pixel_dock_divider_uses_source_client_presentation() {
+    let (mut server, _control_rx, _link_click, _expected) = promoted_agent_link_fixture(true);
+    server
+        .clients
+        .get_mut(&2)
+        .expect("source client")
+        .dock_presentation
+        .collapsed = false;
+
+    let mut source_dock = server.clients[&2].dock_presentation.clone();
+    server.app.state.swap_dock_presentation(&mut source_dock);
+    crate::ui::compute_view(&mut server.app.state, Rect::new(0, 0, 80, 30));
+    let divider = server.app.state.view.dock_divider_rect;
+    assert_eq!(divider.width, 1, "expanded source client has a divider");
+    server.app.state.swap_dock_presentation(&mut source_dock);
+    assert!(server.app.state.dock_collapsed);
+
+    assert!(server.handle_server_event(ServerEvent::ClientResize {
+        client_id: 2,
+        cols: 80,
+        rows: 30,
+        cell_width_px: 10,
+        cell_height_px: 20,
+    }));
+    let geometry = crate::input::mouse::HostGeometry::new(80, 30, 800, 600).unwrap();
+    let x = u32::from(divider.x) * 10 + 1;
+    let y = u32::from(divider.y + 2) * 20 + 1;
+    assert!(server.handle_server_event(ServerEvent::ClientInputPixels {
+        client_id: 2,
+        data: format!("\x1b[<0;{x};{y}M").into_bytes(),
+        geometry,
+    }));
+
+    assert!(matches!(
+        server.app.state.drag.as_ref().map(|drag| &drag.target),
+        Some(crate::app::state::DragTarget::DockDivider)
+    ));
+}
+
+#[test]
 fn direct_eligibility_is_installed_with_the_client_connection() {
     let mut server = test_headless_server();
     let (writer, _control_rx, _render_rx) = test_client_writer();
