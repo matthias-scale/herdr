@@ -71,6 +71,7 @@ mod events;
 mod files;
 mod fleet;
 mod ghostty;
+mod groups;
 mod handoff_runtime;
 mod hyperspace;
 mod input;

@@ -993,7 +993,7 @@ impl Tab {
         ratio: f32,
         before: bool,
         focus: bool,
-    ) -> Result<PaneId, MovedPane> {
+    ) -> Result<PaneId, Box<MovedPane>> {
         if !self.layout.insert_pane_near_with_placement(
             target_pane_id,
             moved.pane_id,
@@ -1002,7 +1002,7 @@ impl Tab {
             before,
             focus,
         ) {
-            return Err(moved);
+            return Err(Box::new(moved));
         }
         let pane_id = moved.pane_id;
         self.panes.insert(pane_id, moved.pane_state);

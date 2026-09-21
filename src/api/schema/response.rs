@@ -82,6 +82,17 @@ pub enum ResponseResult {
     FleetList {
         snapshot: FleetSnapshotInfo,
     },
+    GroupHostSnapshot {
+        snapshot: crate::groups::GroupAuthoritySnapshot,
+    },
+    GroupMutation {
+        record: crate::groups::GroupRecord,
+        revision: u64,
+    },
+    PaneGroupSet {
+        pane_id: String,
+        membership: crate::groups::PaneGroupMembership,
+    },
     WorktreeList {
         source: WorktreeSourceInfo,
         worktrees: Vec<WorktreeInfo>,

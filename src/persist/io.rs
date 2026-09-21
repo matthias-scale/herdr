@@ -47,7 +47,7 @@ fn save_json_to_path<T: serde::Serialize>(path: &Path, snapshot: &T) -> std::io:
     commit_json_to_path(path, &json)
 }
 
-fn commit_json_to_path(path: &Path, json: &str) -> std::io::Result<()> {
+pub(crate) fn commit_json_to_path(path: &Path, json: &str) -> std::io::Result<()> {
     let target = resolve_write_target(path)?;
     let parent = target
         .parent()
@@ -92,7 +92,7 @@ fn json_with_generation<T: serde::Serialize>(
     Ok(serde_json::to_string_pretty(&value)?)
 }
 
-pub(super) fn save_to_paths(
+pub(crate) fn save_to_paths(
     session_path: &Path,
     history_path: &Path,
     snapshot: &SessionSnapshot,

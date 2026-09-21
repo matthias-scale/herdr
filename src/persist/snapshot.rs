@@ -130,6 +130,11 @@ pub struct TabSnapshot {
 #[derive(Serialize, Deserialize)]
 pub struct PaneSnapshot {
     pub cwd: PathBuf,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::groups::PaneGroupMembership::is_default"
+    )]
+    pub group_membership: crate::groups::PaneGroupMembership,
     /// Unix timestamp of the pane's last meaningful activity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<u64>,
@@ -590,6 +595,9 @@ fn capture_tab(
             id.raw(),
             PaneSnapshot {
                 cwd,
+                group_membership: pane
+                    .map(|pane| pane.group_membership.clone())
+                    .unwrap_or_default(),
                 last_activity_at: pane.map(|pane| {
                     pane.activity
                         .unix_timestamp_at(captured_at, captured_at_unix)
@@ -1717,6 +1725,7 @@ mod tests {
                 agent_name: None,
                 managed_agent_kind: None,
                 agent_session: None,
+                group_membership: Default::default(),
                 launch_argv: None,
             },
         );
@@ -1737,6 +1746,7 @@ mod tests {
                 agent_name: None,
                 managed_agent_kind: None,
                 agent_session: None,
+                group_membership: Default::default(),
                 launch_argv: None,
             },
         );
@@ -2502,6 +2512,7 @@ mod tests {
                 agent_name: None,
                 managed_agent_kind: None,
                 agent_session: None,
+                group_membership: Default::default(),
                 launch_argv: None,
             },
         );
@@ -2524,6 +2535,7 @@ mod tests {
                 agent_name: None,
                 managed_agent_kind: None,
                 agent_session: None,
+                group_membership: Default::default(),
                 launch_argv: None,
             },
         );

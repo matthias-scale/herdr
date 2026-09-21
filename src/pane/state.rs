@@ -52,6 +52,8 @@ impl PaneAgentProjection {
 /// Terminal identity, cwd, labels, and agent metadata live in TerminalState.
 pub struct PaneState {
     pub attached_terminal_id: TerminalId,
+    /// Owner-issued group assignment. It moves with the pane rather than its public locator.
+    pub group_membership: crate::groups::PaneGroupMembership,
     /// Whether the user has seen this pane since its last state change to Idle.
     /// False = "Done" (agent finished while user was in another workspace).
     pub seen: bool,
@@ -74,6 +76,7 @@ impl PaneState {
     pub fn new(attached_terminal_id: TerminalId) -> Self {
         Self {
             attached_terminal_id,
+            group_membership: crate::groups::PaneGroupMembership::default(),
             seen: true,
             right_click_passthrough: false,
             done_since: None,
