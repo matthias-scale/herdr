@@ -2206,6 +2206,12 @@
           "type": "string",
           "default": "unset",
           "description": "Configured fleet host that runs Temporal for Symphony polling. Unset keeps localhost polling."
+        },
+        {
+          "key": "remote.fleet.aloop_host",
+          "type": "string",
+          "default": "ub2",
+          "description": "Fleet host that produces Aloops findings and run records. When it matches `self_name`, Herdr reads the local store instead of using SSH."
         }
       ]
     },
