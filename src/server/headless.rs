@@ -5678,6 +5678,11 @@ impl HeadlessServer {
                 .handle_deferred_worktree_api_request(msg.request, msg.respond_to);
             return changed | deferred_changed;
         }
+        if self.app.should_defer_group_api_request(&msg.request) {
+            self.app
+                .start_deferred_group_api_request(msg.request, msg.respond_to);
+            return changed;
+        }
         let (response, api_pane_state_updates) = if matches!(
             &msg.request.method,
             api::schema::Method::ServerReloadConfig(_)

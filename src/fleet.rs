@@ -483,12 +483,94 @@ pub(crate) fn save_group_catalog_cache(path: &Path, snapshot: &Snapshot) -> std:
     Ok(())
 }
 
-pub(crate) fn route_api_request(
-    catalog: &GroupCatalog,
-    request: &Request,
+struct RoutedApiRequest {
+    catalog: GroupCatalog,
+    request: Request,
+    respond_to: std::sync::mpsc::Sender<String>,
+}
+
+/// FIFO worker for remote authority mutations. One worker preserves API arrival
+/// order while keeping every IPC or SSH wait off the app event loop.
+pub(crate) struct AuthorityMutationRouter {
+    sender: std::sync::Mutex<Option<std::sync::mpsc::Sender<RoutedApiRequest>>>,
+    ssh_program: std::ffi::OsString,
     timeout: Duration,
-) -> Result<String, String> {
-    route_api_request_with_ssh_program(catalog, request, timeout, "ssh")
+}
+
+impl Default for AuthorityMutationRouter {
+    fn default() -> Self {
+        Self {
+            sender: std::sync::Mutex::new(None),
+            ssh_program: std::ffi::OsString::from("ssh"),
+            timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+impl AuthorityMutationRouter {
+    #[cfg(test)]
+    pub(crate) fn with_ssh_program(program: PathBuf, timeout: Duration) -> Self {
+        Self {
+            sender: std::sync::Mutex::new(None),
+            ssh_program: program.into_os_string(),
+            timeout,
+        }
+    }
+
+    pub(crate) fn enqueue(
+        &self,
+        catalog: GroupCatalog,
+        request: Request,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) -> Result<(), String> {
+        let mut sender = self
+            .sender
+            .lock()
+            .map_err(|_| "remote authority mutation queue is unavailable".to_string())?;
+        if sender.is_none() {
+            let (request_tx, request_rx) = std::sync::mpsc::channel::<RoutedApiRequest>();
+            let ssh_program = self.ssh_program.clone();
+            let timeout = self.timeout;
+            std::thread::Builder::new()
+                .name("herdr-group-mutations".into())
+                .spawn(move || {
+                    while let Ok(job) = request_rx.recv() {
+                        let id = job.request.id.clone();
+                        let response = route_api_request_with_ssh_program(
+                            &job.catalog,
+                            &job.request,
+                            timeout,
+                            &ssh_program,
+                        )
+                        .unwrap_or_else(|error| {
+                            serde_json::to_string(&crate::api::schema::ErrorResponse {
+                                id,
+                                error: crate::api::schema::ErrorBody {
+                                    code: "authority_unreachable".into(),
+                                    message: error,
+                                },
+                            })
+                            .unwrap_or_else(|_| "{}".to_string())
+                        });
+                        let _ = job.respond_to.send(response);
+                    }
+                })
+                .map_err(|error| {
+                    format!("cannot start remote authority mutation worker: {error}")
+                })?;
+            *sender = Some(request_tx);
+        }
+        let Some(sender) = sender.as_ref() else {
+            return Err("remote authority mutation queue did not initialize".into());
+        };
+        sender
+            .send(RoutedApiRequest {
+                catalog,
+                request,
+                respond_to,
+            })
+            .map_err(|_| "remote authority mutation worker stopped".to_string())
+    }
 }
 
 fn route_api_request_with_ssh_program(
@@ -4237,6 +4319,75 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
             serde_json::json!({"id": "mutation", "result": {"type": "ok"}})
         );
         std::fs::remove_dir_all(root).expect("remove fake SSH fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authority_mutation_router_preserves_request_and_revision_order() {
+        let root = run_fixture_dir("authority-mutation-order");
+        let fake_ssh = root.join("ssh");
+        let log = root.join("requests");
+        write_executable(
+            &fake_ssh,
+            &format!(
+                "#!/bin/sh\ncat >> '{}'\nprintf '%s\\n' '{{\"id\":\"ok\",\"result\":{{\"type\":\"ok\"}}}}'\n",
+                log.display()
+            ),
+        );
+        let authority = crate::groups::AuthorityId::from_random_bytes([15; 16]);
+        let catalog = GroupCatalog {
+            host: "office".into(),
+            target: "fixture".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
+            snapshot: None,
+            error: None,
+        };
+        let request = |id: &str, expected_revision| Request {
+            id: id.into(),
+            method: Method::GroupAuthorityMutate(crate::api::schema::AuthorityMutationParams {
+                expected_authority: authority.clone(),
+                forwarded: true,
+                mutation: crate::api::schema::AuthorityMutation::Delete(
+                    crate::api::schema::GroupDeleteParams {
+                        group_id: crate::groups::GroupId {
+                            owner: authority.clone(),
+                            local: 7,
+                        },
+                        expected_revision,
+                    },
+                ),
+            }),
+        };
+        let router = AuthorityMutationRouter::with_ssh_program(fake_ssh, Duration::from_secs(2));
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        let (second_tx, second_rx) = std::sync::mpsc::channel();
+
+        router
+            .enqueue(catalog.clone(), request("first", 3), first_tx)
+            .expect("enqueue first mutation");
+        router
+            .enqueue(catalog, request("second", 4), second_tx)
+            .expect("enqueue second mutation");
+        first_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first mutation response");
+        second_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second mutation response");
+
+        let requests = std::fs::read_to_string(&log).expect("captured mutation requests");
+        let first = requests
+            .find("\"expected_revision\":3")
+            .expect("first expected revision");
+        let second = requests
+            .find("\"expected_revision\":4")
+            .expect("second expected revision");
+        assert!(first < second, "mutation queue reordered requests");
+        std::fs::remove_dir_all(root).expect("remove mutation order fixture");
     }
 
     #[test]

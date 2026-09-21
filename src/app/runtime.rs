@@ -125,6 +125,15 @@ impl App {
             self.sync_prefix_input_source(previous_mode);
             return changed | deferred_changed;
         }
+        if self.should_defer_group_api_request(&msg.request) {
+            self.drain_all_internal_events();
+            self.start_deferred_group_api_request(msg.request, msg.respond_to);
+            if !skip_default_workspace {
+                changed |= self.ensure_default_workspace();
+            }
+            self.sync_prefix_input_source(previous_mode);
+            return changed;
+        }
         let response = self.handle_api_request(msg.request);
         if let (Some(params), Some(active)) = (stream_open.as_ref(), stream_active) {
             self.attach_pane_graphics_stream_active(params, active, &response);

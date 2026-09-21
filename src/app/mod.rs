@@ -199,6 +199,8 @@ pub struct App {
     pub(crate) group_catalog_cache_path: Option<std::path::PathBuf>,
     /// A non-missing cache that could not be trusted quarantines remote catalogs.
     pub(crate) group_catalog_cache_error: Option<String>,
+    /// Serial remote mutation transport, kept off the app event loop.
+    pub(crate) authority_mutation_router: crate::fleet::AuthorityMutationRouter,
     /// Owner-only pane memberships maintained at lifecycle boundaries so
     /// fleet snapshot requests never walk the pane tree.
     pub(crate) group_membership_projection:
@@ -1470,6 +1472,7 @@ impl App {
             group_runtime,
             group_catalog_cache_path,
             group_catalog_cache_error,
+            authority_mutation_router: crate::fleet::AuthorityMutationRouter::default(),
             group_membership_projection: std::collections::BTreeMap::new(),
             #[cfg(test)]
             group_session_paths_override: None,

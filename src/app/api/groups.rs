@@ -455,22 +455,127 @@ impl App {
         authority: crate::groups::AuthorityId,
         mutation: AuthorityMutation,
     ) -> String {
+        match self.prepare_authority_mutation(id.clone(), authority, mutation) {
+            Ok(_) => encode_error(
+                id,
+                "deferred_response_required",
+                "remote authority mutations require the deferred API transport",
+            ),
+            Err(response) => response,
+        }
+    }
+
+    fn prepare_authority_mutation(
+        &self,
+        id: String,
+        authority: crate::groups::AuthorityId,
+        mutation: AuthorityMutation,
+    ) -> Result<(crate::fleet::GroupCatalog, Request), String> {
         let catalog = match self.state.fleet_snapshot.fresh_group_catalog(&authority) {
             Ok(catalog) => catalog.clone(),
-            Err(message) => return encode_error(id, "authority_not_fresh", message),
+            Err(message) => return Err(encode_error(id, "authority_not_fresh", message)),
         };
         let request = Request {
-            id: id.clone(),
+            id,
             method: crate::api::schema::Method::GroupAuthorityMutate(AuthorityMutationParams {
                 expected_authority: authority,
                 forwarded: true,
                 mutation,
             }),
         };
-        match crate::fleet::route_api_request(&catalog, &request, std::time::Duration::from_secs(5))
+        Ok((catalog, request))
+    }
+
+    pub(crate) fn should_defer_group_api_request(&self, request: &Request) -> bool {
+        match &request.method {
+            crate::api::schema::Method::GroupRename(params) => {
+                !self.local_group_owner(&params.group_id.owner)
+            }
+            crate::api::schema::Method::GroupDelete(params) => {
+                !self.local_group_owner(&params.group_id.owner)
+            }
+            crate::api::schema::Method::PaneGroupSet(params) => params
+                .expected_pane_authority
+                .as_ref()
+                .is_some_and(|owner| !self.local_group_owner(owner)),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn start_deferred_group_api_request(
+        &mut self,
+        request: Request,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) {
+        let id = request.id;
+        let prepared = match request.method {
+            crate::api::schema::Method::GroupRename(params) => {
+                let authority = params.group_id.owner.clone();
+                self.prepare_authority_mutation(id, authority, AuthorityMutation::Rename(params))
+            }
+            crate::api::schema::Method::GroupDelete(params) => {
+                let authority = params.group_id.owner.clone();
+                self.prepare_authority_mutation(id, authority, AuthorityMutation::Delete(params))
+            }
+            crate::api::schema::Method::PaneGroupSet(params) => {
+                let Some(owner) = params.expected_pane_authority.clone() else {
+                    let _ = respond_to.send(encode_error(
+                        id,
+                        "invalid_authority_route",
+                        "remote pane mutation has no expected authority",
+                    ));
+                    return;
+                };
+                let catalog = match self.state.fleet_snapshot.fresh_group_catalog(&owner) {
+                    Ok(catalog) => catalog,
+                    Err(message) => {
+                        let _ = respond_to.send(encode_error(id, "authority_not_fresh", message));
+                        return;
+                    }
+                };
+                let pane_is_reported = catalog.snapshot.as_ref().is_some_and(|snapshot| {
+                    snapshot
+                        .memberships
+                        .iter()
+                        .any(|membership| membership.pane_id == params.pane_id)
+                });
+                if !pane_is_reported {
+                    let _ = respond_to.send(encode_error(
+                        id,
+                        "pane_not_found",
+                        format!("authority {owner} does not report pane {}", params.pane_id),
+                    ));
+                    return;
+                }
+                if let Some(group_id) = params.group_id.as_ref() {
+                    if let Err(message) = self.validate_group_target(group_id) {
+                        let _ = respond_to.send(encode_error(id, "authority_not_fresh", message));
+                        return;
+                    }
+                }
+                self.prepare_authority_mutation(id, owner, AuthorityMutation::PaneGroupSet(params))
+            }
+            _ => {
+                let _ = respond_to.send(encode_error(
+                    id,
+                    "invalid_authority_route",
+                    "request is not a remote authority mutation",
+                ));
+                return;
+            }
+        };
+        let (catalog, request) = match prepared {
+            Ok(prepared) => prepared,
+            Err(response) => {
+                let _ = respond_to.send(response);
+                return;
+            }
+        };
+        if let Err(error) =
+            self.authority_mutation_router
+                .enqueue(catalog, request.clone(), respond_to.clone())
         {
-            Ok(response) => response,
-            Err(error) => encode_error(id, "authority_unreachable", error),
+            let _ = respond_to.send(encode_error(request.id, "authority_unreachable", error));
         }
     }
 }
@@ -579,6 +684,18 @@ mod tests {
             panic!("expected group mutation response");
         };
         record
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &std::path::Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, contents).expect("write executable fixture");
+        let mut permissions = std::fs::metadata(path)
+            .expect("executable fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("mark fixture executable");
     }
 
     #[test]
@@ -1357,6 +1474,103 @@ mod tests {
         assert!(response["error"]["message"]
             .as_str()
             .is_some_and(|message| message.contains(local.as_str())));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreachable_remote_mutation_does_not_block_the_app_event_loop() {
+        let (mut app, dir, _) = app_with_groups("deferred-remote-mutation");
+        let fake_ssh = dir.0.join("blocking-ssh");
+        let started_marker = dir.0.join("ssh-started");
+        let captured_request = dir.0.join("ssh-request");
+        write_executable(
+            &fake_ssh,
+            &format!(
+                "#!/bin/sh\ncat > '{}'\ntouch '{}'\nsleep 30\n",
+                captured_request.display(),
+                started_marker.display(),
+            ),
+        );
+        app.authority_mutation_router = crate::fleet::AuthorityMutationRouter::with_ssh_program(
+            fake_ssh,
+            std::time::Duration::from_secs(2),
+        );
+        let authority = crate::groups::AuthorityId::from_random_bytes([14; 16]);
+        let group_id = GroupId {
+            owner: authority.clone(),
+            local: 1,
+        };
+        app.state.fleet_snapshot.group_catalogs = vec![crate::fleet::GroupCatalog {
+            host: "remote".into(),
+            target: "unreachable".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
+            snapshot: Some(GroupAuthoritySnapshot {
+                authority_id: authority,
+                revision: 1,
+                groups: vec![GroupRecord {
+                    id: group_id.clone(),
+                    revision: 1,
+                    state: GroupState::Active {
+                        name: "Remote".into(),
+                    },
+                }],
+                memberships: Vec::new(),
+            }),
+            error: None,
+        }];
+        let (mutation_tx, mutation_rx) = std::sync::mpsc::channel();
+        app.handle_api_request_message(crate::api::ApiRequestMessage {
+            request: Request {
+                id: "mutation".into(),
+                method: Method::GroupDelete(GroupDeleteParams {
+                    group_id,
+                    expected_revision: 1,
+                }),
+            },
+            respond_to: mutation_tx,
+            response_write_complete: None,
+            stream_active: None,
+        });
+
+        assert!(mutation_rx.try_recv().is_err());
+        let transport_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !started_marker.exists() && std::time::Instant::now() < transport_deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(started_marker.exists(), "fake SSH transport did not start");
+        let captured_request =
+            std::fs::read_to_string(captured_request).expect("captured remote mutation framing");
+        assert!(captured_request.contains("herdr api relay"));
+        assert!(captured_request.contains("expected_revision"));
+
+        let (status_tx, status_rx) = std::sync::mpsc::channel();
+        app.handle_api_request_message(crate::api::ApiRequestMessage {
+            request: Request {
+                id: "status".into(),
+                method: Method::ThemeStatus(Default::default()),
+            },
+            respond_to: status_tx,
+            response_write_complete: None,
+            stream_active: None,
+        });
+        let status = status_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("event loop answers while remote mutation is blocked");
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&status).is_ok(),
+            "unexpected status response: {status}"
+        );
+
+        let response = mutation_rx
+            .recv_timeout(std::time::Duration::from_secs(4))
+            .expect("timed-out mutation response");
+        let response: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&response).expect("mutation error response");
+        assert_eq!(response.error.code, "authority_unreachable");
     }
 
     #[test]
