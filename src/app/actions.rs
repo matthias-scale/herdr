@@ -3486,6 +3486,23 @@ impl AppState {
                 .apply_pane_process_state(pane_id, holds_shell, stale_resolution, observed_at)
                 .into_iter()
                 .collect(),
+            AppEvent::OrderedAgentLinksDetected {
+                pane_id,
+                links,
+                observed_at,
+            } => {
+                if !self
+                    .workspaces
+                    .iter()
+                    .any(|workspace| workspace.pane_state(pane_id).is_some())
+                {
+                    return Vec::new();
+                }
+                self.agent_states
+                    .observe_detected_links(pane_id, links, observed_at);
+                Vec::new()
+            }
+            #[cfg(test)]
             AppEvent::AgentLinksDetected {
                 pane_id,
                 output_urls,
@@ -6279,10 +6296,12 @@ mod tests {
             .goal
             .is_none());
 
-        state.handle_app_event(AppEvent::AgentLinksDetected {
+        state.handle_app_event(AppEvent::OrderedAgentLinksDetected {
             pane_id,
-            output_urls: vec!["https://late.example.test/stale".into()],
-            osc8_urls: Vec::new(),
+            links: vec![crate::agent_state::DetectedAgentLink {
+                url: "https://late.example.test/stale".into(),
+                source: crate::agent_state::AgentLinkSource::Output,
+            }],
             observed_at: std::time::SystemTime::now(),
         });
         assert!(state
@@ -6299,16 +6318,20 @@ mod tests {
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
         let first_seen =
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
-        state.handle_app_event(AppEvent::AgentLinksDetected {
+        state.handle_app_event(AppEvent::OrderedAgentLinksDetected {
             pane_id,
-            output_urls: vec!["https://same.example.test/path".into()],
-            osc8_urls: Vec::new(),
+            links: vec![crate::agent_state::DetectedAgentLink {
+                url: "https://same.example.test/path".into(),
+                source: crate::agent_state::AgentLinkSource::Output,
+            }],
             observed_at: first_seen,
         });
-        state.handle_app_event(AppEvent::AgentLinksDetected {
+        state.handle_app_event(AppEvent::OrderedAgentLinksDetected {
             pane_id,
-            output_urls: vec!["https://same.example.test/path".into()],
-            osc8_urls: Vec::new(),
+            links: vec![crate::agent_state::DetectedAgentLink {
+                url: "https://same.example.test/path".into(),
+                source: crate::agent_state::AgentLinkSource::Output,
+            }],
             observed_at: first_seen + std::time::Duration::from_secs(3),
         });
 
@@ -6327,6 +6350,61 @@ mod tests {
             crate::agent_state::format_rfc3339(first_seen + std::time::Duration::from_secs(3))
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn mixed_source_detection_event_keeps_newest_two_hundred_and_first_source() {
+        let mut state = app_with_workspaces(&["links"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let mut stream = Vec::new();
+        for index in 0..=200 {
+            if index % 2 == 0 {
+                stream.extend_from_slice(
+                    format!("https://mixed-output.example/{index:03}\n").as_bytes(),
+                );
+            } else {
+                stream.extend_from_slice(
+                    format!(
+                        "\x1b]8;;https://mixed-osc.example/{index:03}\x1b\\label\x1b]8;;\x1b\\\n"
+                    )
+                    .as_bytes(),
+                );
+            }
+        }
+        stream.extend_from_slice(b"https://mixed-osc.example/001\n");
+        stream.extend_from_slice(b"https://mixed-output.example/201\n");
+
+        let gate = crate::agent_state::LinkExtractionGate::default();
+        gate.observe_chunk(&stream);
+        let detected = gate.take_links().expect("mixed-source detection cycle");
+        state.handle_app_event(AppEvent::OrderedAgentLinksDetected {
+            pane_id,
+            links: detected.ordered_links,
+            observed_at: std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_750_000_000),
+        });
+
+        let links = state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Idle)
+            .links;
+        assert_eq!(links.len(), 200);
+        assert!(!links
+            .iter()
+            .any(|link| link.url == "https://mixed-output.example/002"));
+        let repeated = links
+            .iter()
+            .find(|link| link.url == "https://mixed-osc.example/001")
+            .expect("repeated mixed-source URL");
+        assert_eq!(repeated.source, crate::agent_state::AgentLinkSource::Osc8);
+        assert!(links
+            .iter()
+            .any(|link| link.url == "https://mixed-output.example/200"));
+        assert_eq!(
+            links[198].url, "https://mixed-osc.example/001",
+            "the repeated URL must move to its latest arrival position"
+        );
+        assert_eq!(links[199].url, "https://mixed-output.example/201");
     }
 
     #[test]
