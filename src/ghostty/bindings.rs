@@ -2394,6 +2394,8 @@ pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_CURSOR_
     GhosttyTerminalParsedOutputKind = 4;
 pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_RENDER_INVALIDATION:
     GhosttyTerminalParsedOutputKind = 5;
+pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_PRESERVED_PREFIX_BOUNDARY:
+    GhosttyTerminalParsedOutputKind = 6;
 pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE:
     GhosttyTerminalParsedOutputKind = 2147483647;
 pub type GhosttyTerminalParsedOutputKind = ::std::os::raw::c_uint;

@@ -32,6 +32,7 @@ pub const ParsedOutputKind = enum(c_int) {
     boundary = 3,
     cursor_transition = 4,
     render_invalidation = 5,
+    preserved_prefix_boundary = 6,
     _,
 };
 
@@ -244,6 +245,10 @@ pub const Handler = struct {
                 callback(self, .separator, "");
                 return;
             },
+            .preserved_prefix_boundary => {
+                callback(self, .preserved_prefix_boundary, "");
+                return;
+            },
         }
         const cursor_after = self.parsedCursorSnapshot();
         if (!cursor_before.eql(cursor_after)) {
@@ -302,6 +307,7 @@ pub const Handler = struct {
         separator,
         invalidate,
         invalidate_separator,
+        preserved_prefix_boundary,
     };
 
     /// Classifies post-action rendering effects that cursor comparison alone
@@ -316,19 +322,13 @@ pub const Handler = struct {
 
             // These actions can erase, shift, replace, or scroll cells while
             // leaving the cursor coordinates unchanged.
-            .erase_display_below,
             .erase_display_above,
             .erase_display_complete,
             .erase_display_scrollback,
             .erase_display_scroll_complete,
-            .erase_line_right,
             .erase_line_left,
             .erase_line_complete,
-            .erase_line_right_unless_pending_wrap,
-            .delete_chars,
-            .erase_chars,
             .insert_lines,
-            .insert_blanks,
             .delete_lines,
             .scroll_up,
             .scroll_down,
@@ -337,6 +337,17 @@ pub const Handler = struct {
             .reverse_index,
             .decaln,
             => .invalidate,
+
+            // These operations preserve every cell before the cursor. They
+            // form a parser-owned lexical boundary between that prefix and
+            // any cells subsequently rendered in the affected region.
+            .erase_display_below,
+            .erase_line_right,
+            .erase_line_right_unless_pending_wrap,
+            .delete_chars,
+            .erase_chars,
+            .insert_blanks,
+            => .preserved_prefix_boundary,
 
             // Surface replacement is also a lexical boundary, allowing text
             // rendered on the newly selected surface to recover immediately.

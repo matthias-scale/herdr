@@ -474,6 +474,7 @@ pub(crate) enum ParsedOutput<'a> {
     Boundary,
     CursorTransition(Option<ParsedCursorTransition>),
     RenderInvalidation,
+    PreservedPrefixBoundary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -535,6 +536,9 @@ unsafe extern "C" fn parsed_output_trampoline(
         }
         ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_RENDER_INVALIDATION => {
             callback(ParsedOutput::RenderInvalidation);
+        }
+        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_PRESERVED_PREFIX_BOUNDARY => {
+            callback(ParsedOutput::PreservedPrefixBoundary);
         }
         _ => {}
     }

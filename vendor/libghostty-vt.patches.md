@@ -114,7 +114,9 @@ identity. Herdr can therefore reconcile same-row overwrites, including CSI
 positioning and nonzero left margins, while failing closed across row changes.
 An exhaustive Ghostty-side action classification also invalidates open
 candidates when erase, insert/delete, scrolling, screen/status switching, or
-reset actions can replace cells without moving the cursor.
+reset actions can replace cells without moving the cursor. Right-side
+mutations report a preserved-prefix boundary so links wholly before Ghostty's
+cursor remain eligible without reproducing region semantics in Rust.
 
 remove when: the vendored source exposes equivalent post-parse text and OSC 8
 events, including confirmed BEL, 8-bit ST, and split `ESC \\` termination, with
@@ -123,7 +125,8 @@ discarded codepoints, charset-mapped glyph reporting, and continuity across
 non-rendering controls, plus generic post-action cursor transitions with
 rendered-row identity for non-print actions not already classified as
 separators and render invalidations for all cell-mutating non-print actions,
-and the Herdr visibility regressions pass without this patch.
+including preserved-prefix boundaries for right-side mutations, and the Herdr
+visibility regressions pass without this patch.
 
 verification:
 

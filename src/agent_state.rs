@@ -588,6 +588,25 @@ impl LinkExtractionGate {
         self.active.store(true, Ordering::Release);
     }
 
+    /// Publishes an untouched rendered prefix before Ghostty mutates later cells.
+    pub(crate) fn observe_parsed_preserved_prefix_boundary(&self) {
+        self.record_parsed_event(0);
+        let Ok(_processing) = self.processing.lock() else {
+            return;
+        };
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
+        if !self.active.load(Ordering::Acquire) {
+            let (prefix, _) = self.marker_tail.load();
+            pending.scanner.restore_prefix(prefix);
+            self.marker_tail.store(&[]);
+        }
+        pending.observe_preserved_prefix_boundary();
+        pending.dirty = true;
+        self.active.store(true, Ordering::Release);
+    }
+
     /// Receives a complete OSC 8 target from Ghostty's parser.
     pub(crate) fn observe_parsed_hyperlink(&self, bytes: &[u8]) {
         self.record_parsed_event(bytes.len());
@@ -825,6 +844,11 @@ impl PendingLinkBytes {
     fn observe_separator(&mut self) {
         self.scanner.observe_separator(&mut self.queued_links);
     }
+
+    fn observe_preserved_prefix_boundary(&mut self) {
+        self.scanner
+            .observe_preserved_prefix_boundary(&mut self.queued_links);
+    }
 }
 
 impl LinkStreamScanner {
@@ -845,6 +869,15 @@ impl LinkStreamScanner {
     fn observe_separator(&mut self, links: &mut VecDeque<DetectedAgentLink>) {
         self.finish_rendered_rewrite(links);
         self.scan_byte(b'\n', links);
+    }
+
+    fn observe_preserved_prefix_boundary(&mut self, links: &mut VecDeque<DetectedAgentLink>) {
+        // A sparse rewrite may include cells on both sides of Ghostty's cursor;
+        // discard it rather than applying terminal-width rules locally.
+        if self.rendered_rewrite.is_some() {
+            self.fail_closed_until_separator();
+        }
+        self.observe_separator(links);
     }
 
     fn observe_cursor_transition(
@@ -1739,6 +1772,9 @@ mod tests {
                 }
                 crate::ghostty::ParsedOutput::RenderInvalidation => {
                     gate_for_callback.observe_parsed_render_invalidation();
+                }
+                crate::ghostty::ParsedOutput::PreservedPrefixBoundary => {
+                    gate_for_callback.observe_parsed_preserved_prefix_boundary();
                 }
             });
             Self {

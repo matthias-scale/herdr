@@ -4920,6 +4920,31 @@ mod tests {
             assert_eq!(links.output_urls, [recovered_url], "split {split}");
             assert!(!links.output_urls.iter().any(|url| url == erased_url));
         }
+
+        let preserved_url = "https://visible.example/path";
+        let recovered_url = "https://after.example/path";
+        let stream = format!("{preserved_url}\x1b[0J\n{recovered_url}\n");
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+            let rendered = runtime.visible_text();
+            assert!(
+                rendered.contains(preserved_url) && rendered.contains(recovered_url),
+                "Ghostty preserved text before CSI 0J at split {split}: {rendered:?}"
+            );
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("preserved CSI 0J URL at split {split}"));
+            assert_eq!(
+                links.output_urls,
+                [recovered_url, preserved_url],
+                "split {split}"
+            );
+        }
     }
 
     #[tokio::test]

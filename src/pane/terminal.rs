@@ -1111,6 +1111,9 @@ impl GhosttyPaneTerminal {
                 crate::ghostty::ParsedOutput::RenderInvalidation => {
                     gate.observe_parsed_render_invalidation();
                 }
+                crate::ghostty::ParsedOutput::PreservedPrefixBoundary => {
+                    gate.observe_parsed_preserved_prefix_boundary();
+                }
             });
     }
 

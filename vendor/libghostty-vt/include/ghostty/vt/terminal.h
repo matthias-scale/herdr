@@ -486,6 +486,9 @@ typedef enum GHOSTTY_ENUM_TYPED {
 
   /** A non-print action may have replaced or removed rendered cells. */
   GHOSTTY_TERMINAL_PARSED_OUTPUT_RENDER_INVALIDATION = 5,
+
+  /** Cells before the cursor remain rendered; later cells may have changed. */
+  GHOSTTY_TERMINAL_PARSED_OUTPUT_PRESERVED_PREFIX_BOUNDARY = 6,
   GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalParsedOutputKind;
 
