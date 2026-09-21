@@ -2156,6 +2156,58 @@ mod tests {
     }
 
     #[test]
+    fn reload_removing_a_fleet_connection_emits_one_catalog_removal_event() {
+        let mut config = crate::config::Config::default();
+        config.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "office".into(),
+            target: "machine-a".into(),
+            ..Default::default()
+        }];
+        let hub = crate::api::EventHub::default();
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            hub.clone(),
+        );
+        let authority = crate::groups::AuthorityId::from_random_bytes([11; 16]);
+        app.state.fleet_snapshot.group_catalogs = vec![crate::fleet::GroupCatalog {
+            host: "office".into(),
+            target: "machine-a".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: authority,
+                revision: 1,
+                groups: Vec::new(),
+                memberships: Vec::new(),
+            }),
+            error: None,
+        }];
+
+        let removed = crate::config::Config::default();
+        app.apply_live_config(&removed, &[], &[], false);
+        app.apply_live_config(&removed, &[], &[], false);
+
+        let removal_events = hub
+            .events_after(0)
+            .into_iter()
+            .filter(|(_, event)| {
+                matches!(
+                    event.data,
+                    crate::api::schema::EventData::AuthorityCatalogsUpdated { ref catalogs }
+                        if catalogs.is_empty()
+                )
+            })
+            .count();
+        assert_eq!(removal_events, 1);
+    }
+
+    #[test]
     fn unreachable_host_retains_prior_rows_as_unknown() {
         let config = crate::config::Config::default();
         let mut app = App::new(

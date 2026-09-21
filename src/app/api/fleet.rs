@@ -8,7 +8,7 @@ use crate::fleet::{EvidenceSource, HostState};
 use super::responses::encode_success;
 
 impl App {
-    pub(super) fn authority_catalog_infos(&self) -> Vec<AuthorityCatalogInfo> {
+    pub(crate) fn authority_catalog_infos(&self) -> Vec<AuthorityCatalogInfo> {
         self.state
             .fleet_snapshot
             .group_catalogs

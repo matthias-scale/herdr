@@ -2587,10 +2587,21 @@ impl App {
             let config_generation = self
                 .fleet_poller_config
                 .replace(config.remote.fleet.clone());
-            self.state.fleet_snapshot = self
+            let reconciled_snapshot = self
                 .state
                 .fleet_snapshot
                 .reconcile_after_config_reload(&config.remote.fleet, config_generation);
+            let catalogs_changed =
+                self.state.fleet_snapshot.group_catalogs != reconciled_snapshot.group_catalogs;
+            self.state.fleet_snapshot = reconciled_snapshot;
+            if catalogs_changed {
+                self.emit_event(crate::api::schema::EventEnvelope {
+                    event: crate::api::schema::EventKind::AuthorityCatalogsUpdated,
+                    data: crate::api::schema::EventData::AuthorityCatalogsUpdated {
+                        catalogs: self.authority_catalog_infos(),
+                    },
+                });
+            }
             self.state.reconcile_dock_hosts_selection();
             self.refresh_remote_agent_panel_entries();
             for operation_id in revoked_operations {
