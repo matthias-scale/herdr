@@ -488,6 +488,15 @@ pub(crate) fn route_api_request(
     request: &Request,
     timeout: Duration,
 ) -> Result<String, String> {
+    route_api_request_with_ssh_program(catalog, request, timeout, "ssh")
+}
+
+fn route_api_request_with_ssh_program(
+    catalog: &GroupCatalog,
+    request: &Request,
+    timeout: Duration,
+    ssh_program: impl AsRef<OsStr>,
+) -> Result<String, String> {
     let value = if catalog.local {
         api_client_for_catalog(catalog)
             .request_value_with_timeout(request, timeout)
@@ -508,7 +517,7 @@ pub(crate) fn route_api_request(
             "set -u\n{socket}{session}printf '%s\\n' {} | herdr api relay\n",
             shell_quote(&request_json)
         );
-        let output = run_ssh_with_timeout(&catalog.target, &script, timeout)?;
+        let output = run_ssh_program_with_timeout(ssh_program, &catalog.target, &script, timeout)?;
         serde_json::from_slice(output.trim_ascii())
             .map_err(|error| format!("invalid authority mutation response: {error}"))?
     };
@@ -4124,6 +4133,110 @@ mod tests {
         );
         assert!(runs[0].as_ref().unwrap().pid_alive);
         assert_eq!(runtime, HostRuntime::default());
+    }
+
+    #[test]
+    fn remote_output_parses_a_complete_group_segment() {
+        let agent_response = serde_json::json!({
+            "id": "agents",
+            "result": {"type": "agent_list", "agents": []}
+        });
+        let authority = crate::groups::AuthorityId::from_random_bytes([12; 16]);
+        let expected = crate::groups::GroupAuthoritySnapshot {
+            authority_id: authority.clone(),
+            revision: 3,
+            groups: vec![crate::groups::GroupRecord {
+                id: crate::groups::GroupId {
+                    owner: authority,
+                    local: 7,
+                },
+                revision: 3,
+                state: crate::groups::GroupState::Active {
+                    name: "Shared".into(),
+                },
+            }],
+            memberships: Vec::new(),
+        };
+        let group_response = crate::api::schema::SuccessResponse {
+            id: "groups".into(),
+            result: ResponseResult::GroupHostSnapshot {
+                snapshot: expected.clone(),
+            },
+        };
+        let output = [
+            serde_json::to_vec(&agent_response).expect("agent response JSON"),
+            REMOTE_GROUPS_MARKER.to_vec(),
+            serde_json::to_vec(&group_response).expect("group response JSON"),
+            REMOTE_RUNS_MARKER.to_vec(),
+        ]
+        .concat();
+
+        let (agents, groups, runs, runtime) = parse_remote_output(&output);
+
+        assert!(agents.expect("agent segment").is_empty());
+        assert_eq!(groups.expect("group segment"), expected);
+        assert!(runs.is_empty());
+        assert_eq!(runtime, HostRuntime::default());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_authority_mutation_uses_api_relay_framing_over_ssh() {
+        let root = run_fixture_dir("authority-mutation-relay");
+        let fake_ssh = root.join("ssh");
+        write_executable(
+            &fake_ssh,
+            r#"#!/bin/sh
+input=$(cat)
+case "$input" in *"herdr api relay"*) ;; *) exit 41 ;; esac
+case "$input" in *"group.authority_mutate"*) ;; *) exit 42 ;; esac
+case "$input" in *"HERDR_SOCKET_PATH"*) ;; *) exit 43 ;; esac
+case "$input" in *"HERDR_SESSION"*) ;; *) exit 44 ;; esac
+printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
+"#,
+        );
+        let authority = crate::groups::AuthorityId::from_random_bytes([13; 16]);
+        let catalog = GroupCatalog {
+            host: "office".into(),
+            target: "fixture".into(),
+            local: false,
+            session: Some("agents".into()),
+            socket: Some("/tmp/herdr fixture.sock".into()),
+            state: GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
+            snapshot: None,
+            error: None,
+        };
+        let request = Request {
+            id: "mutation".into(),
+            method: Method::GroupAuthorityMutate(crate::api::schema::AuthorityMutationParams {
+                expected_authority: authority.clone(),
+                forwarded: true,
+                mutation: crate::api::schema::AuthorityMutation::Delete(
+                    crate::api::schema::GroupDeleteParams {
+                        group_id: crate::groups::GroupId {
+                            owner: authority,
+                            local: 7,
+                        },
+                        expected_revision: 3,
+                    },
+                ),
+            }),
+        };
+
+        let response = route_api_request_with_ssh_program(
+            &catalog,
+            &request,
+            Duration::from_secs(2),
+            &fake_ssh,
+        )
+        .expect("fake SSH relay response");
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response).expect("response JSON"),
+            serde_json::json!({"id": "mutation", "result": {"type": "ok"}})
+        );
+        std::fs::remove_dir_all(root).expect("remove fake SSH fixture");
     }
 
     #[test]
