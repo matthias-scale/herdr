@@ -8161,8 +8161,11 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let ws_area = workspace_list_rect_for_app(app, area);
-    render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
+    // render_workspace_list takes the full sidebar rect, like the compute and
+    // input paths do; its walkers subtract the separator, notepad and
+    // animation reservations themselves. Passing the already-shrunk list rect
+    // here takes them twice and clips rows compute_view considers visible.
+    render_workspace_list(app, terminal_runtimes, frame, area, is_navigating);
     crate::ui::notepad::render_notepad(app, frame, sidebar_notepad_rect(app, area));
     crate::ui::hyperspace::render_animation(app, frame, sidebar_animation_rect(app, area));
     render_sidebar_header(app, frame, area, p);
@@ -8837,6 +8840,13 @@ fn render_workspace_list(
     is_navigating: bool,
 ) {
     let p = &app.palette;
+    // The full sidebar rect, same as compute_view and the input handlers pass
+    // to these walkers; each walker subtracts the separator and the
+    // notepad/animation reservations itself.
+    let sidebar_area = area;
+    let list_area = workspace_list_rect_for_app(app, sidebar_area);
+    let list_bottom = list_area.y + list_area.height;
+    let workspace_labels = sidebar_workspace_labels(app, terminal_runtimes);
     let dragged_ws_idx = match app.drag.as_ref().map(|drag| &drag.target) {
         Some(crate::app::state::DragTarget::WorkspaceReorder { source_ws_idx, .. }) => {
             Some(*source_ws_idx)
@@ -8847,14 +8857,16 @@ fn render_workspace_list(
         Some(crate::app::state::DragTarget::WorkspaceReorder {
             drop_target: Some(drop_target),
             ..
-        }) => workspace_drop_indicator_row(app, &app.view.workspace_card_areas, area, *drop_target),
+        }) => workspace_drop_indicator_row(
+            app,
+            &app.view.workspace_card_areas,
+            list_area,
+            *drop_target,
+        ),
         _ => None,
     };
 
-    let list_bottom = area.y + area.height;
-    let workspace_labels = sidebar_workspace_labels(app, terminal_runtimes);
-
-    let metrics = workspace_list_scroll_metrics(app, area);
+    let metrics = workspace_list_scroll_metrics(app, list_area);
     let row_entries = sidebar_rows_from(app, terminal_runtimes);
     let workspace_headers = row_entries
         .iter()
@@ -8877,8 +8889,7 @@ fn render_workspace_list(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let scrollbar_rect = workspace_list_scrollbar_rect(app, area);
-    let sidebar_area = Rect::new(area.x, area.y, area.width.saturating_add(1), area.height);
+    let scrollbar_rect = workspace_list_scrollbar_rect(app, sidebar_area);
     let computed_cards = compute_workspace_card_areas(app, sidebar_area);
     let cards = &computed_cards;
     for (card_index, card) in cards.iter().enumerate() {
@@ -9027,7 +9038,7 @@ fn render_workspace_list(
     if (!has_matching_rows && !app.sidebar_work_filter.query.is_empty())
         || (row_entries.is_empty() && !app.sidebar_shows_spaces_tree())
     {
-        let body = workspace_list_body_rect(area, should_show_scrollbar(metrics));
+        let body = workspace_list_body_rect(list_area, should_show_scrollbar(metrics));
         let empty_y = section_headers
             .iter()
             .map(|header| header.rect.bottom())
@@ -9106,7 +9117,7 @@ fn render_workspace_list(
         render_agent_card(app, frame, entry, card.rect, depth, narrow_prefix);
     }
     if !app.remote_agent_panel_entries.is_empty() {
-        let body = workspace_list_body_rect(area, should_show_scrollbar(metrics));
+        let body = workspace_list_body_rect(list_area, should_show_scrollbar(metrics));
         let scroll = workspace_list_scroll_skip(app, &metrics);
         for row_area in remote_agent_row_areas_from_rows(app, &row_entries, body, scroll) {
             let Some(SidebarRow::RemoteAgent {
@@ -9139,7 +9150,7 @@ fn render_workspace_list(
     // The Needs-you strip leads the same row list, so its geometry comes from
     // the same walk as the remote rows above it.
     {
-        let body = workspace_list_body_rect(area, should_show_scrollbar(metrics));
+        let body = workspace_list_body_rect(list_area, should_show_scrollbar(metrics));
         let scroll = workspace_list_scroll_skip(app, &metrics);
         for (row_idx, rect) in needs_you_row_areas_from_rows(app, &row_entries, body, scroll) {
             let Some(SidebarRow::NeedsYou {
@@ -18483,6 +18494,93 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             }))
         );
         assert_eq!(hits.next(), None, "one blocked pane is one strip row");
+    }
+
+    #[test]
+    fn needs_you_strip_never_pushes_the_hoisted_panes_row_below_the_render_fold() {
+        let mut app = app_with_agents(&["alpha", "beta"]);
+        let blocked_pane = app.workspaces[1].tabs[0].root_pane;
+        let terminal_id = app.workspaces[1].tabs[0].panes[&blocked_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Blocked);
+        // The idle animation reserves rows at the bottom of the sidebar; the
+        // renderer must subtract that reservation exactly once, or the strip's
+        // two leading rows push the hoisted pane's own row below the fold.
+        app.hyperspace.enabled = true;
+
+        let area = Rect::new(0, 0, 40, 20);
+        let card = compute_tab_card_areas(&app, area)
+            .into_iter()
+            .find(|card| card.pane_id == blocked_pane)
+            .expect("compute_view keeps the blocked pane's row visible");
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
+        assert!(
+            rendered.contains('○') && rendered.contains("pi"),
+            "the row compute_view placed at y={} must be the one rendered there: {rendered:?}",
+            card.rect.y
+        );
+    }
+
+    #[test]
+    fn repo_group_chevron_and_body_agree_in_both_collapse_states() {
+        let mut app = app_with_agents(&["alpha"]);
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("owner/alpha".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        app.reconcile_sidebar_presentation();
+
+        let has_child_rows = |app: &AppState| {
+            sidebar_rows(app).iter().any(|row| {
+                matches!(row, SidebarRow::Tab { entry, .. } if entry
+                    .local_target()
+                    .is_some_and(|target| target.ws_idx == 0))
+            })
+        };
+        let area = Rect::new(0, 0, 40, 12);
+        let rendered_chevron = |app: &AppState| {
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let header = compute_workspace_card_areas(app, area)
+                .into_iter()
+                .find(|card| card.ws_idx == 0)
+                .expect("group header card");
+            row_text(terminal.backend().buffer(), header.rect.y, area.width - 1)
+        };
+
+        assert!(has_child_rows(&app));
+        assert!(workspace_card_expanded(&app, 0, Some("repo:owner/alpha")));
+        assert!(
+            rendered_chevron(&app).contains('▾'),
+            "an expanded group shows the open chevron"
+        );
+
+        app.collapsed_sidebar_groups
+            .insert("repo:repo:owner/alpha".into());
+
+        assert!(!has_child_rows(&app));
+        assert!(!workspace_card_expanded(&app, 0, Some("repo:owner/alpha")));
+        assert!(
+            rendered_chevron(&app).contains('▸'),
+            "a collapsed group shows the closed chevron"
+        );
     }
 
     #[test]
