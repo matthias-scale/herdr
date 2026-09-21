@@ -16,6 +16,7 @@ const osc_color = @import("osc/parsers/color.zig");
 const kitty_color = @import("kitty/color.zig");
 const size_report = @import("size_report.zig");
 const Terminal = @import("Terminal.zig");
+const Cell = @import("page.zig").Cell;
 
 const log = std.log.scoped(.stream_terminal);
 
@@ -545,18 +546,34 @@ pub const Handler = struct {
 
     fn emitParsedRowMutation(self: *Handler, mutation: ParsedRowMutation) void {
         const callback = self.effects.parsed_output orelse return;
+        const cells = self.terminal.screens.active.cursor.page_pin.cells(.all);
+        const left_boundary = parsedBoundaryCell(cells[mutation.left]);
+        const right_boundary = parsedBoundaryCell(cells[mutation.right - 1]);
         var buf: [96]u8 = undefined;
         const data = std.fmt.bufPrint(
             &buf,
-            "{d},{d},{d},{d}",
+            "{d},{d},{d},{d},{d},{d}",
             .{
                 mutation.cursor_before,
                 mutation.left,
                 mutation.right,
                 @intFromBool(mutation.slice_survives),
+                left_boundary,
+                right_boundary,
             },
         ) catch return;
         callback(self, .row_mutation, data);
+    }
+
+    const parsed_boundary_unknown = 256;
+    const parsed_boundary_gap = 257;
+
+    fn parsedBoundaryCell(cell: Cell) usize {
+        if (cell.wide != .narrow) return parsed_boundary_unknown;
+        if (!cell.hasText()) return parsed_boundary_gap;
+        if (cell.content_tag != .codepoint) return parsed_boundary_unknown;
+        const cp = cell.content.codepoint;
+        return if (cp <= 0x7f) cp else parsed_boundary_unknown;
     }
 
     /// Classifies post-action rendering effects that cursor comparison alone

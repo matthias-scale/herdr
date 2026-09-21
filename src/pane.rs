@@ -5397,6 +5397,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replaced_row_slice_boundaries_match_ghostty_rendered_text() {
+        let kept_url = "https://kept.example/x";
+        let recovery_url = "https://recovery.example/path";
+        let recovery = format!("\x1b[?69l\x1b[r\x1b[20;1H\n{recovery_url}\n");
+        let cases = [
+            (
+                "left incoming text",
+                format!(
+                    "\x1b[?69h\x1b[23;70s\x1b[2;23Hchanged\x1b[1;1H\t\x1b[1G{kept_url}\x1b[1M{recovery}"
+                ),
+                format!("{kept_url}changed"),
+                false,
+            ),
+            (
+                "left incoming terminator",
+                format!(
+                    "\x1b[?69h\x1b[23;70s\x1b[2;23H changed\x1b[1;1H\t\x1b[1G{kept_url}\x1b[1M{recovery}"
+                ),
+                format!("{kept_url} changed"),
+                true,
+            ),
+            (
+                "right incoming text",
+                format!(
+                    "\x1b[?69h\x1b[10;30s\x1b[2;24Hchanged\x1b[1;1H\t\x1b[31G{kept_url}\x1b[30G\x1b[1M{recovery}"
+                ),
+                format!("changed{kept_url}"),
+                false,
+            ),
+            (
+                "right incoming terminator",
+                format!(
+                    "\x1b[?69h\x1b[10;30s\x1b[2;23Hchanged \x1b[1;1H\t\x1b[31G{kept_url}\x1b[30G\x1b[1M{recovery}"
+                ),
+                format!("changed {kept_url}"),
+                true,
+            ),
+        ];
+        for (label, stream, rendered_token, keeps_url) in cases {
+            for split in 0..=stream.len() {
+                let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+                let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+                runtime.terminal.install_link_extraction(gate.clone());
+                runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+                runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+                let rendered = runtime.visible_text();
+                assert!(
+                    rendered.lines().any(|line| line.contains(&rendered_token))
+                        && rendered.contains(recovery_url),
+                    "Ghostty replacement after {label} at split {split}: {rendered:?}"
+                );
+                let links = gate
+                    .take_links()
+                    .unwrap_or_else(|| panic!("replacement links after {label} at split {split}"));
+                let expected = if keeps_url {
+                    vec![kept_url, recovery_url]
+                } else {
+                    vec![recovery_url]
+                };
+                assert_eq!(links.output_urls, expected, "{label} split {split}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn dec_special_charset_matches_ghostty_rendered_text() {
         let mapped = "https://mapped.example.test/path";
         let visible = "https://visible-after-reset.example.test/path";

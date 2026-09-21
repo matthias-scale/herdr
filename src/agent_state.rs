@@ -1009,7 +1009,14 @@ impl LinkStreamScanner {
             let crosses_boundary =
                 (first < left && last >= left) || (first < right && last >= right);
             let inside_affected_slice = first >= left && last < right;
-            if !crosses_boundary && (!inside_affected_slice || mutation.slice_survives) {
+            let joins_replaced_slice = !mutation.slice_survives
+                && ((last.checked_add(1) == Some(left)
+                    && !parsed_boundary_terminates(mutation.left_boundary))
+                    || (first == right && !parsed_boundary_terminates(mutation.right_boundary)));
+            if !crosses_boundary
+                && !joins_replaced_slice
+                && (!inside_affected_slice || mutation.slice_survives)
+            {
                 for &(_, byte) in &cells[component_start..component_end] {
                     self.scan_byte(byte, links);
                 }
@@ -1235,6 +1242,14 @@ impl LinkStreamScanner {
     #[cfg(test)]
     fn rewrite_operation_count(&self) -> usize {
         self.rewrite_operations
+    }
+}
+
+fn parsed_boundary_terminates(boundary: crate::ghostty::ParsedBoundaryCell) -> bool {
+    match boundary {
+        crate::ghostty::ParsedBoundaryCell::Ascii(byte) => is_url_terminator(byte),
+        crate::ghostty::ParsedBoundaryCell::Gap => true,
+        crate::ghostty::ParsedBoundaryCell::Unknown => false,
     }
 }
 

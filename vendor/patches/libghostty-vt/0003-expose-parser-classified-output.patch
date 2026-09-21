@@ -1,5 +1,5 @@
 diff --git a/vendor/libghostty-vt/include/ghostty/vt/terminal.h b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
-index 9bb961d3..6df2cc2b 100644
+index 9bb961d3..0939815a 100644
 --- a/vendor/libghostty-vt/include/ghostty/vt/terminal.h
 +++ b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
 @@ -467,6 +467,50 @@ typedef GhosttyClipboardWriteResult (*GhosttyTerminalClipboardWriteFn)(
@@ -32,7 +32,7 @@ index 9bb961d3..6df2cc2b 100644
 +  /** Row mutation; erase events append a hex bitset of cells actually cleared. */
 +  GHOSTTY_TERMINAL_PARSED_OUTPUT_CELL_SHIFT = 7,
 +
-+  /** Row-slice movement; data is `cursor,left,right,slice-survives`. */
++  /** Row movement; `cursor,left,right,survives,left-cell,right-cell`. */
 +  GHOSTTY_TERMINAL_PARSED_OUTPUT_ROW_MUTATION = 8,
 +  GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 +} GhosttyTerminalParsedOutputKind;
@@ -480,10 +480,18 @@ index efb06ecd..6e09a4de 100644
  
          /// Finalize and dispatch a CSI directly from parser state for
 diff --git a/vendor/libghostty-vt/src/terminal/stream_terminal.zig b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
-index 91cfb21c..0bea1630 100644
+index 91cfb21c..07c0c257 100644
 --- a/vendor/libghostty-vt/src/terminal/stream_terminal.zig
 +++ b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
-@@ -23,6 +23,21 @@ const log = std.log.scoped(.stream_terminal);
+@@ -16,6 +16,7 @@ const osc_color = @import("osc/parsers/color.zig");
+ const kitty_color = @import("kitty/color.zig");
+ const size_report = @import("size_report.zig");
+ const Terminal = @import("Terminal.zig");
++const Cell = @import("page.zig").Cell;
+ 
+ const log = std.log.scoped(.stream_terminal);
+ 
+@@ -23,6 +24,21 @@ const log = std.log.scoped(.stream_terminal);
  /// a Terminal and updates the Terminal state.
  pub const Stream = stream.Stream(Handler);
  
@@ -505,7 +513,7 @@ index 91cfb21c..0bea1630 100644
  /// A stream handler that updates terminal state. By default, it is
  /// readonly in the sense that it only updates terminal state and ignores
  /// all other sequences that require a response or otherwise have side
-@@ -46,6 +61,10 @@ pub const Handler = struct {
+@@ -46,6 +62,10 @@ pub const Handler = struct {
      /// the kitty graphics protocol.
      apc_handler: apc.Handler = .{},
  
@@ -516,7 +524,7 @@ index 91cfb21c..0bea1630 100644
      /// Default cursor style used by DECSCUSR reset (CSI 0 q).
      default_cursor: bool = true,
      default_cursor_style: Screen.CursorStyle = .block,
-@@ -105,6 +124,10 @@ pub const Handler = struct {
+@@ -105,6 +125,10 @@ pub const Handler = struct {
          /// library has no way to mediate that with user consent.
          clipboard_write: ?*const fn (*Handler, clipboard.Write) clipboard.WriteResult,
  
@@ -527,7 +535,7 @@ index 91cfb21c..0bea1630 100644
          /// Called in response to an XTVERSION query. Returns the version
          /// string to report (e.g. "ghostty 1.2.3"). The returned memory
          /// must be valid for the lifetime of the call. The maximum length
-@@ -117,6 +140,7 @@ pub const Handler = struct {
+@@ -117,6 +141,7 @@ pub const Handler = struct {
          pub const readonly: Effects = .{
              .bell = null,
              .clipboard_write = null,
@@ -535,7 +543,7 @@ index 91cfb21c..0bea1630 100644
              .color_scheme = null,
              .device_attributes = null,
              .enquiry = null,
-@@ -143,9 +167,610 @@ pub const Handler = struct {
+@@ -143,11 +168,628 @@ pub const Handler = struct {
          comptime action: Action.Tag,
          value: Action.Value(action),
      ) void {
@@ -557,7 +565,7 @@ index 91cfb21c..0bea1630 100644
          self.vtFallible(action, value) catch |err| {
              log.warn("error handling VT action action={} err={}", .{ action, err });
 +            return;
-         };
++        };
 +        self.emitParsedOutput(action, value, cursor_before, cell_shift, row_mutation);
 +    }
 +
@@ -917,18 +925,34 @@ index 91cfb21c..0bea1630 100644
 +
 +    fn emitParsedRowMutation(self: *Handler, mutation: ParsedRowMutation) void {
 +        const callback = self.effects.parsed_output orelse return;
++        const cells = self.terminal.screens.active.cursor.page_pin.cells(.all);
++        const left_boundary = parsedBoundaryCell(cells[mutation.left]);
++        const right_boundary = parsedBoundaryCell(cells[mutation.right - 1]);
 +        var buf: [96]u8 = undefined;
 +        const data = std.fmt.bufPrint(
 +            &buf,
-+            "{d},{d},{d},{d}",
++            "{d},{d},{d},{d},{d},{d}",
 +            .{
 +                mutation.cursor_before,
 +                mutation.left,
 +                mutation.right,
 +                @intFromBool(mutation.slice_survives),
++                left_boundary,
++                right_boundary,
 +            },
 +        ) catch return;
 +        callback(self, .row_mutation, data);
++    }
++
++    const parsed_boundary_unknown = 256;
++    const parsed_boundary_gap = 257;
++
++    fn parsedBoundaryCell(cell: Cell) usize {
++        if (cell.wide != .narrow) return parsed_boundary_unknown;
++        if (!cell.hasText()) return parsed_boundary_gap;
++        if (cell.content_tag != .codepoint) return parsed_boundary_unknown;
++        const cp = cell.content.codepoint;
++        return if (cp <= 0x7f) cp else parsed_boundary_unknown;
 +    }
 +
 +    /// Classifies post-action rendering effects that cursor comparison alone
@@ -1062,9 +1086,9 @@ index 91cfb21c..0bea1630 100644
 +            .color_operation,
 +            .semantic_prompt,
 +            => .none,
-+        };
-+    }
-+
+         };
+     }
+ 
 +    /// Handle printable actions while reporting only codepoints the terminal
 +    /// accepted into its rendered text. Ghostty's normal slice fast path is
 +    /// preserved; its tracked fallback owns every suppression decision.
@@ -1143,6 +1167,8 @@ index 91cfb21c..0bea1630 100644
 +            if (len == 0) return;
 +            callback(self, .text, buf[0..len]);
 +        }
-     }
-
++    }
++
      inline fn vtFallible(
+         self: *Handler,
+         comptime action: Action.Tag,

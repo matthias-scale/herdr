@@ -509,6 +509,15 @@ pub(crate) struct ParsedRowMutation {
     pub(crate) left_column: usize,
     pub(crate) right_column: usize,
     pub(crate) slice_survives: bool,
+    pub(crate) left_boundary: ParsedBoundaryCell,
+    pub(crate) right_boundary: ParsedBoundaryCell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParsedBoundaryCell {
+    Ascii(u8),
+    Unknown,
+    Gap,
 }
 
 const MAX_CLIPBOARD_BYTES: usize = 192 * 1024;
@@ -643,6 +652,8 @@ fn parse_row_mutation(bytes: &[u8]) -> Option<ParsedRowMutation> {
     let left_column = fields.next()?.parse().ok()?;
     let right_column = fields.next()?.parse().ok()?;
     let slice_survives = parse_payload_bool(fields.next()?)?;
+    let left_boundary = parse_boundary_cell(fields.next()?)?;
+    let right_boundary = parse_boundary_cell(fields.next()?)?;
     if fields.next().is_some() || left_column >= right_column {
         return None;
     }
@@ -651,7 +662,18 @@ fn parse_row_mutation(bytes: &[u8]) -> Option<ParsedRowMutation> {
         left_column,
         right_column,
         slice_survives,
+        left_boundary,
+        right_boundary,
     })
+}
+
+fn parse_boundary_cell(field: &str) -> Option<ParsedBoundaryCell> {
+    match field.parse::<u16>().ok()? {
+        value @ 0..=127 => Some(ParsedBoundaryCell::Ascii(value as u8)),
+        256 => Some(ParsedBoundaryCell::Unknown),
+        257 => Some(ParsedBoundaryCell::Gap),
+        _ => None,
+    }
 }
 
 fn parse_payload_bool(field: &str) -> Option<bool> {
@@ -3533,23 +3555,27 @@ mod tests {
     }
 
     #[test]
-    fn row_mutation_payload_requires_exact_interval_and_survival() {
+    fn row_mutation_payload_requires_exact_interval_survival_and_boundaries() {
         assert_eq!(
-            parse_row_mutation(b"24,9,40,1"),
+            parse_row_mutation(b"24,9,40,1,32,257"),
             Some(ParsedRowMutation {
                 cursor_before: 24,
                 left_column: 9,
                 right_column: 40,
                 slice_survives: true,
+                left_boundary: ParsedBoundaryCell::Ascii(b' '),
+                right_boundary: ParsedBoundaryCell::Gap,
             })
         );
         for malformed in [
             b"".as_slice(),
-            b"24,9,40",
-            b"24,40,9,1",
-            b"24,9,40,2",
-            b"24,9,40,1,0",
-            b"24,0,0,0",
+            b"24,9,40,1,32",
+            b"24,40,9,1,32,257",
+            b"24,9,40,2,32,257",
+            b"24,9,40,1,258,257",
+            b"24,9,40,1,32,258",
+            b"24,9,40,1,32,257,0",
+            b"24,0,0,0,32,257",
         ] {
             assert_eq!(parse_row_mutation(malformed), None, "{malformed:?}");
         }
