@@ -387,38 +387,41 @@ pub(crate) fn load_group_catalog_cache(
 
     let mut catalogs = Vec::new();
     for host in &fleet.hosts {
-        let matching = file
+        let mut matching_by_authority = BTreeMap::new();
+        for entry in file
             .entries
             .iter()
             .filter(|entry| entry.matches_config(host))
-            .collect::<Vec<_>>();
-        let entry = match matching.as_slice() {
-            [] => continue,
-            [entry] => *entry,
-            _ => {
+        {
+            if matching_by_authority
+                .insert(entry.snapshot.authority_id.clone(), entry)
+                .is_some()
+            {
                 return Err(format!(
                     "remote group catalog cache has ambiguous history for connection {}",
                     host.name
                 ));
             }
-        };
-        crate::groups::admit_authority_snapshot(None, &entry.snapshot).map_err(|error| {
-            format!(
-                "remote group catalog cache has invalid history for connection {}: {error}",
-                host.name
-            )
-        })?;
-        catalogs.push(GroupCatalog {
-            host: host.name.clone(),
-            target: host.target.clone(),
-            local: host.local,
-            session: host.session.clone(),
-            socket: host.socket.clone(),
-            state: GroupCatalogState::Stale,
-            observed_authority_id: Some(entry.snapshot.authority_id.clone()),
-            snapshot: Some(entry.snapshot.clone()),
-            error: Some("retained from durable cache".into()),
-        });
+        }
+        for entry in matching_by_authority.into_values() {
+            crate::groups::admit_authority_snapshot(None, &entry.snapshot).map_err(|error| {
+                format!(
+                    "remote group catalog cache has invalid history for connection {}: {error}",
+                    host.name
+                )
+            })?;
+            catalogs.push(GroupCatalog {
+                host: host.name.clone(),
+                target: host.target.clone(),
+                local: host.local,
+                session: host.session.clone(),
+                socket: host.socket.clone(),
+                state: GroupCatalogState::Stale,
+                observed_authority_id: Some(entry.snapshot.authority_id.clone()),
+                snapshot: Some(entry.snapshot.clone()),
+                error: Some("retained from durable cache".into()),
+            });
+        }
     }
     Ok(catalogs)
 }
@@ -614,6 +617,30 @@ impl Snapshot {
                 catalog.snapshot = retained.snapshot.clone();
                 catalog.state = GroupCatalogState::Stale;
             }
+        }
+
+        for retained in &previous.group_catalogs {
+            let Some(retained_authority) = retained.authority_id() else {
+                continue;
+            };
+            let Some(current_connection) = self
+                .group_catalogs
+                .iter()
+                .find(|current| current.matches_connection(retained))
+            else {
+                continue;
+            };
+            if self.group_catalogs.iter().any(|current| {
+                current.matches_connection(retained)
+                    && current.authority_id() == Some(retained_authority)
+            }) {
+                continue;
+            }
+            let mut history = retained.clone();
+            history.host.clone_from(&current_connection.host);
+            history.state = GroupCatalogState::Stale;
+            history.error = Some("retained accepted authority history".into());
+            self.group_catalogs.push(history);
         }
 
         let mut authority_counts = HashMap::new();
@@ -3037,6 +3064,81 @@ mod tests {
             .expect("ignore cache for a different connection")
             .is_empty());
         std::fs::remove_dir_all(dir).expect("remove catalog cache fixture");
+    }
+
+    #[test]
+    fn accepted_history_survives_a_connection_switching_authorities() {
+        let accepted_a = group_catalog(
+            "office",
+            "machine-a",
+            1,
+            2,
+            vec![group_record(1, 1, 2, true)],
+        );
+        let mut authority_b = Snapshot {
+            group_catalogs: vec![group_catalog(
+                "office",
+                "machine-a",
+                2,
+                1,
+                vec![group_record(2, 1, 1, false)],
+            )],
+            ..Snapshot::default()
+        };
+        authority_b.admit_group_catalogs_from(&Snapshot {
+            group_catalogs: vec![accepted_a],
+            ..Snapshot::default()
+        });
+
+        let dir = run_fixture_dir("authority-switch-cache");
+        let path = dir.join("remote-group-catalogs.json");
+        save_group_catalog_cache(&path, &authority_b).expect("persist both authority histories");
+        let fleet = FleetConfig {
+            hosts: vec![FleetHostConfig {
+                name: "office".into(),
+                target: "machine-a".into(),
+                local: false,
+                session: Some("agents".into()),
+                socket: Some("/tmp/herdr.sock".into()),
+            }],
+            ..FleetConfig::default()
+        };
+        let retained_history = load_group_catalog_cache(&path, &fleet)
+            .expect("load independent histories for the connection");
+        assert_eq!(retained_history.len(), 2);
+
+        let mut rolled_back_a = Snapshot {
+            group_catalogs: vec![group_catalog(
+                "office",
+                "machine-a",
+                1,
+                1,
+                vec![group_record(1, 1, 1, false)],
+            )],
+            ..Snapshot::default()
+        };
+        rolled_back_a.admit_group_catalogs_from(&Snapshot {
+            group_catalogs: retained_history,
+            ..Snapshot::default()
+        });
+
+        let authority_a = crate::groups::AuthorityId::from_random_bytes([1; 16]);
+        let retained = rolled_back_a
+            .group_catalogs
+            .iter()
+            .find(|catalog| catalog.authority_id() == Some(&authority_a))
+            .expect("authority A history must survive the identity switch");
+        assert_eq!(retained.state, GroupCatalogState::Stale);
+        assert!(matches!(
+            retained
+                .snapshot
+                .as_ref()
+                .expect("accepted authority A snapshot")
+                .groups[0]
+                .state,
+            crate::groups::GroupState::Deleted
+        ));
+        std::fs::remove_dir_all(dir).expect("remove authority switch cache fixture");
     }
 
     #[test]
