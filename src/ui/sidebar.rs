@@ -15,7 +15,7 @@ use self::tokens::{ResolvedToken, ResolvedTokenKind};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::state_label_color;
 use super::status::status_report_age_compact_label;
-use super::text::{display_width, display_width_u16, truncate_end};
+use super::text::{display_width, display_width_u16, middle_elide, truncate_end};
 use crate::app::state::{Palette, SidebarGroupMode, SidebarSortMode};
 use crate::app::{AppState, Mode};
 use crate::config::StatusIndicatorStyle;
@@ -35,6 +35,7 @@ pub(super) const DEFAULT_THREAD_TITLE: &str = "New Thread";
 const ACTIVE_SUBAGENT_GLYPH: &str = "+";
 const SIDEBAR_WIDE_ROW_MIN_WIDTH: usize = 44;
 const SIDEBAR_HOST_TOKEN_MIN_TITLE_WIDTH: usize = 6;
+const SIDEBAR_HOST_TOKEN_NARROW_WIDTH: usize = 3;
 
 /// Focus-star suffix drawn immediately after a starred session's title. Kept to
 /// two display columns (space + glyph) so it costs the title field almost
@@ -1326,9 +1327,11 @@ impl RemoteAgentPanelEntry {
     pub(crate) fn new(agent_ref: crate::api::schema::AgentRef, entry: AgentPanelEntry) -> Self {
         let mut entry = entry;
         entry.identity = AgentPanelIdentity::Remote(agent_ref.clone());
-        Self::new_with_host(
+        let narrow_host = middle_elide(agent_ref.host.as_str(), SIDEBAR_HOST_TOKEN_NARROW_WIDTH);
+        Self::new_with_narrow_host(
             agent_ref,
             entry,
+            narrow_host,
             crate::work_context::PaneWorkContext::default(),
             String::new(),
             false,
@@ -1336,20 +1339,19 @@ impl RemoteAgentPanelEntry {
         )
     }
 
-    fn new_with_host(
+    fn new_with_narrow_host(
         agent_ref: crate::api::schema::AgentRef,
         entry: AgentPanelEntry,
+        narrow_host: String,
         work_context: crate::work_context::PaneWorkContext,
         workspace_id: String,
         settled: bool,
         snoozed_until: Option<u64>,
     ) -> Self {
-        let host = agent_ref.host.as_str();
-        let short_host = short_fleet_host_name(host);
         let render_dot = compact_row_dot(&entry);
         let render_title = compact_row_title(&entry, false).to_string();
         let render_provider = compact_provider(&entry);
-        let host_suffix = format!(" · {short_host}");
+        let host_suffix = format!(" · {narrow_host}");
         let narrow_host_suffix = host_suffix.clone();
         let search_key_lowercase = format!(
             "{} {} {} {} {}",
@@ -1395,8 +1397,62 @@ impl RemoteAgentPanelEntry {
     }
 }
 
-pub(crate) fn short_fleet_host_name(host: &str) -> String {
-    host.chars().take(3).collect()
+fn narrow_host_tokens<'a, I>(hosts: I) -> std::collections::HashMap<String, String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let hosts = hosts.into_iter().collect::<std::collections::BTreeSet<_>>();
+    let mut tokens = std::collections::HashMap::new();
+    let mut used_tokens = std::collections::HashSet::new();
+    for width in 2..=SIDEBAR_HOST_TOKEN_NARROW_WIDTH {
+        let mut counts = std::collections::HashMap::new();
+        for host in &hosts {
+            *counts.entry(middle_elide(host, width)).or_insert(0usize) += 1;
+        }
+        for host in &hosts {
+            if tokens.contains_key(*host) {
+                continue;
+            }
+            let candidate = middle_elide(host, width);
+            if counts.get(&candidate) == Some(&1) && used_tokens.insert(candidate.clone()) {
+                tokens.insert((*host).to_string(), candidate);
+            }
+        }
+    }
+    let mut ordinal = 1usize;
+    for host in hosts {
+        if tokens.contains_key(host) {
+            continue;
+        }
+        let candidate = loop {
+            let candidate = format!("#{ordinal}");
+            ordinal += 1;
+            if used_tokens.insert(candidate.clone()) {
+                break candidate;
+            }
+        };
+        tokens.insert(host.to_string(), candidate);
+    }
+    tokens
+}
+
+fn narrow_remote_host_tokens(
+    snapshot: &crate::fleet::Snapshot,
+) -> std::collections::HashMap<String, String> {
+    narrow_host_tokens(
+        snapshot
+            .hosts
+            .iter()
+            .filter(|host| !host.local)
+            .map(|host| host.name.as_str()),
+    )
+}
+
+pub(crate) fn short_fleet_host_names<'a, I>(hosts: I) -> std::collections::HashMap<String, String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    narrow_host_tokens(hosts)
 }
 
 impl std::ops::Deref for RemoteAgentPanelEntry {
@@ -1728,6 +1784,7 @@ pub(crate) fn remote_agent_panel_entries_at(
     snapshot: &crate::fleet::Snapshot,
     now_unix_s: u64,
 ) -> Vec<std::sync::Arc<RemoteAgentPanelEntry>> {
+    let narrow_host_tokens = narrow_remote_host_tokens(snapshot);
     let mut entries = snapshot
         .hosts
         .iter()
@@ -1803,54 +1860,63 @@ pub(crate) fn remote_agent_panel_entries_at(
             let reported_at = row.age_seconds_at(now_unix_s).and_then(|age| {
                 std::time::Instant::now().checked_sub(std::time::Duration::from_secs(age))
             });
-            Some(std::sync::Arc::new(RemoteAgentPanelEntry::new_with_host(
-                row.agent_ref.clone(),
-                AgentPanelEntry::new(
-                    AgentPanelIdentity::Remote(row.agent_ref.clone()),
-                    AgentPanelEntryData {
-                        primary_label: row.agent_ref.host.clone(),
-                        space_label: workspace_id.clone(),
-                        primary_tab_label: Some(title),
-                        tab_has_custom_name,
-                        tab_label_leads_with_agent: false,
-                        pane_label,
-                        pane_label_is_agent_identity: true,
-                        terminal_title,
-                        terminal_title_stripped,
-                        agent_label,
-                        agent_kind_label: row.agent.clone(),
-                        agent,
-                        foreground_process_name: None,
-                        agent_context: agent,
-                        has_agent: true,
-                        prio: false,
-                        starred: false,
-                        state: lifecycle.state,
-                        attention_tier: lifecycle.attention_tier,
-                        open_blockers: lifecycle.open_blockers,
-                        completion_tier: None,
-                        usage_limited: lifecycle.usage_limited,
-                        active_subagents: None,
-                        waiting_on_agents: lifecycle.waiting_on_agents,
-                        holds_shell: false,
-                        gate_count,
-                        seen: lifecycle.seen,
-                        done_since: None,
-                        stale: lifecycle.stale,
-                        reported_at,
-                        last_agent_state_change_seq: state_change_seq,
-                        activity_at: reported_at,
-                        state_labels,
-                        tokens,
-                        tab_first_pane: false,
-                        remote_host: None,
-                    },
+            let narrow_host = narrow_host_tokens
+                .get(&row.agent_ref.host)
+                .cloned()
+                .unwrap_or_else(|| {
+                    middle_elide(row.agent_ref.host.as_str(), SIDEBAR_HOST_TOKEN_NARROW_WIDTH)
+                });
+            Some(std::sync::Arc::new(
+                RemoteAgentPanelEntry::new_with_narrow_host(
+                    row.agent_ref.clone(),
+                    AgentPanelEntry::new(
+                        AgentPanelIdentity::Remote(row.agent_ref.clone()),
+                        AgentPanelEntryData {
+                            primary_label: row.agent_ref.host.clone(),
+                            space_label: workspace_id.clone(),
+                            primary_tab_label: Some(title),
+                            tab_has_custom_name,
+                            tab_label_leads_with_agent: false,
+                            pane_label,
+                            pane_label_is_agent_identity: true,
+                            terminal_title,
+                            terminal_title_stripped,
+                            agent_label,
+                            agent_kind_label: row.agent.clone(),
+                            agent,
+                            foreground_process_name: None,
+                            agent_context: agent,
+                            has_agent: true,
+                            prio: false,
+                            starred: false,
+                            state: lifecycle.state,
+                            attention_tier: lifecycle.attention_tier,
+                            open_blockers: lifecycle.open_blockers,
+                            completion_tier: None,
+                            usage_limited: lifecycle.usage_limited,
+                            active_subagents: None,
+                            waiting_on_agents: lifecycle.waiting_on_agents,
+                            holds_shell: false,
+                            gate_count,
+                            seen: lifecycle.seen,
+                            done_since: None,
+                            stale: lifecycle.stale,
+                            reported_at,
+                            last_agent_state_change_seq: state_change_seq,
+                            activity_at: reported_at,
+                            state_labels,
+                            tokens,
+                            tab_first_pane: false,
+                            remote_host: None,
+                        },
+                    ),
+                    narrow_host,
+                    work_context,
+                    workspace_id,
+                    lifecycle.settled,
+                    lifecycle.snoozed_until,
                 ),
-                work_context,
-                workspace_id,
-                lifecycle.settled,
-                lifecycle.snoozed_until,
-            )))
+            ))
         })
         .collect::<Vec<_>>();
     let mut title_counts = std::collections::HashMap::<String, usize>::new();
@@ -3666,6 +3732,17 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
     if hosts.is_empty() {
         return;
     }
+    let host_tokens = hosts
+        .iter()
+        .map(|(host, entries)| {
+            let token = entries
+                .first()
+                .and_then(|entry| entry.remote_entry.as_ref())
+                .and_then(|remote| remote.narrow_host_suffix.strip_prefix(" · "))
+                .expect("host token for Fleet row");
+            (host.clone(), token.to_string())
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     let host_counts = hosts
         .iter()
         .filter_map(|(host, entries)| {
@@ -3679,7 +3756,10 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
                 })
                 .count();
             (count > 0).then(|| SidebarHostCount {
-                host: short_fleet_host_name(host),
+                host: host_tokens
+                    .get(host)
+                    .cloned()
+                    .expect("host token for Fleet host"),
                 count,
             })
         })
@@ -3702,7 +3782,10 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
             action_key: None,
             sort_key: None,
             sort_mode: SidebarSortMode::Default,
-            title: short_fleet_host_name(&host),
+            title: host_tokens
+                .get(&host)
+                .cloned()
+                .expect("host token for Fleet host"),
             count: host_entries.len(),
             collapsed,
             dim: false,
@@ -10335,6 +10418,41 @@ pub(crate) mod tests {
     #[test]
     fn machine_scope_switch_hides_fleet_and_names_the_current_host() {
         let mut app = app_with_two_remote_hosts();
+        app.collapsed_sidebar_groups.remove("repo:Runs");
+        app.fleet_snapshot = crate::fleet::Snapshot {
+            polled: true,
+            hosts: vec![fleet_host_snapshot(
+                "remote-b",
+                false,
+                vec![crate::fleet::FleetRow::test_run_summary_row(
+                    crate::agent_runs::Summary {
+                        host: "remote-b".into(),
+                        run_id: "ra-remote".into(),
+                        label: "remote run".into(),
+                        task: "remote task".into(),
+                        phase: "verify".into(),
+                        started_at: "2026-09-17T08:00:00Z".into(),
+                        started_at_unix_s: 1_779_000_000,
+                        heartbeat_age_s: Some(1),
+                        state: crate::agent_runs::DisplayState::Active,
+                    },
+                )],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+        let all_machine_rows = sidebar_rows(&app);
+        assert!(all_machine_rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader { title, .. } if *title == FLEET_SECTION_TITLE
+        )));
+        assert!(all_machine_rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader { title, .. } if *title == RUNS_SECTION_TITLE
+        )));
+        assert!(all_machine_rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::AgentRun { host, .. } if host == "remote-b"
+        )));
         assert!(sidebar_rows(&app)
             .iter()
             .any(|row| matches!(row, SidebarRow::SectionHeader { title, .. } if *title == FLEET_SECTION_TITLE)));
@@ -10357,7 +10475,41 @@ pub(crate) mod tests {
             row,
             SidebarRow::SectionHeader { title, .. } if *title == FLEET_SECTION_TITLE
         )));
+        assert!(!sidebar_rows(&app).iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader { title, .. } if *title == RUNS_SECTION_TITLE
+        )));
+        assert!(!sidebar_rows(&app).iter().any(|row| matches!(
+            row,
+            SidebarRow::AgentRun { host, .. } if host == "remote-b"
+        )));
         assert!(sidebar_header_mode_label(&app).contains("this machine (mbpro)"));
+
+        let all_machines = sidebar_filter_options(&app)
+            .iter()
+            .position(|option| {
+                matches!(
+                    option,
+                    SidebarFilterOption::MachineScope(
+                        crate::app::state::SidebarMachineScope::AllMachines
+                    )
+                )
+            })
+            .expect("all-machines scope option");
+        app.select_sidebar_filter_option(all_machines);
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader { title, .. } if *title == FLEET_SECTION_TITLE
+        )));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader { title, .. } if *title == RUNS_SECTION_TITLE
+        )));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::AgentRun { host, .. } if host == "remote-b"
+        )));
     }
 
     #[test]
@@ -13011,8 +13163,9 @@ pub(crate) mod tests {
     #[test]
     fn full_sidebar_clamps_host_tokens_to_three_cells() {
         let mut app = AppState::test_new();
+        let hosts = ["alpha-a1", "alpha-b1"];
         let snapshot = crate::fleet::Snapshot {
-            hosts: ["alpha-a1", "alpha-b1"]
+            hosts: hosts
                 .into_iter()
                 .map(|host| {
                     fleet_host_snapshot(
@@ -13044,12 +13197,70 @@ pub(crate) mod tests {
         let rendered = (0..area.height)
             .map(|row| row_text(terminal.backend().buffer(), row, area.width))
             .collect::<Vec<_>>();
+        let host_tokens = short_fleet_host_names(hosts.into_iter());
+        assert!(
+            rendered.iter().any(|row| row.contains("same")),
+            "{rendered:?}"
+        );
+        for (host, token) in host_tokens {
+            assert!(
+                crate::ui::text::display_width(&token) <= SIDEBAR_HOST_TOKEN_NARROW_WIDTH,
+                "{host} rendered as {token:?}"
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|row| row.contains(&format!("· {token}"))),
+                "host {host} ({token}) missing from {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_sidebar_keeps_distinct_host_tokens_when_aliases_diverge_in_the_middle() {
+        let mut app = AppState::test_new();
+        let snapshot = crate::fleet::Snapshot {
+            hosts: ["alpha-a1", "alpha-b1"]
+                .into_iter()
+                .map(|host| {
+                    fleet_host_snapshot(
+                        host,
+                        false,
+                        vec![crate::fleet::FleetRow::test_agent_info_row(
+                            host,
+                            remote_agent_info(
+                                "same-agent",
+                                "same task",
+                                crate::api::schema::AgentStatus::Working,
+                                false,
+                                false,
+                            ),
+                        )],
+                    )
+                })
+                .collect(),
+            ..crate::fleet::Snapshot::default()
+        };
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        let area = Rect::new(0, 0, 18, 8);
+        app.view.sidebar_rect = area;
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let rendered = (0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width))
+            .collect::<Vec<_>>();
         assert!(
             rendered.iter().any(|row| row.contains("same")),
             "{rendered:?}"
         );
         assert!(
-            rendered.iter().any(|row| row.contains("· alp")),
+            rendered.iter().any(|row| row.contains("· #1")),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|row| row.contains("· #2")),
             "{rendered:?}"
         );
     }
@@ -13086,8 +13297,8 @@ pub(crate) mod tests {
             let rendered = (0..area.height)
                 .map(|row| row_text(terminal.backend().buffer(), row, area.width))
                 .collect::<Vec<_>>();
-            for host in hosts {
-                let short = short_fleet_host_name(host);
+            let host_tokens = short_fleet_host_names(hosts.into_iter());
+            for (host, short) in host_tokens {
                 assert!(
                     rendered
                         .iter()

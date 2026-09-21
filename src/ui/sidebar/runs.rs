@@ -10,7 +10,7 @@ use ratatui::{
 
 use super::{
     compact_dot_for_state, compact_row_widths, pad_left, pad_right, section_is_collapsed,
-    short_fleet_host_name, sidebar_row_gap, sidebar_row_height, sidebar_rows,
+    short_fleet_host_names, sidebar_row_gap, sidebar_row_height, sidebar_rows,
     workspace_list_body_rect, workspace_list_rect_for_app, SidebarHostCount, SidebarRow,
     RUNS_SECTION_TITLE, SIDEBAR_AGE_FIELD_WIDTH, SIDEBAR_DOT_FIELD_WIDTH,
 };
@@ -26,10 +26,19 @@ pub(super) fn append_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
     if !app.fleet_snapshot.polled {
         return;
     }
-    let projection = crate::agent_runs::project(&app.fleet_snapshot);
+    let mut projection = crate::agent_runs::project(&app.fleet_snapshot);
+    if app.sidebar_work_filter.machine_scope == crate::app::state::SidebarMachineScope::ThisMachine
+    {
+        projection
+            .hosts
+            .retain(|host| host.name == app.agent_host_name);
+        projection.active_count = projection.hosts.iter().map(|host| host.active_count).sum();
+    }
     if projection.hosts.is_empty() {
         return;
     }
+    let host_tokens =
+        short_fleet_host_names(projection.hosts.iter().map(|host| host.name.as_str()));
     let collapsed = section_is_collapsed(app, RUNS_SECTION_TITLE);
     rows.push(SidebarRow::SectionHeader {
         title: RUNS_SECTION_TITLE,
@@ -39,7 +48,10 @@ pub(super) fn append_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
             .iter()
             .filter(|host| host.active_count > 0)
             .map(|host| SidebarHostCount {
-                host: short_fleet_host_name(&host.name),
+                host: host_tokens
+                    .get(&host.name)
+                    .cloned()
+                    .expect("host token for Runs host"),
                 count: host.active_count,
             })
             .collect(),
@@ -56,7 +68,10 @@ pub(super) fn append_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
             action_key: None,
             sort_key: None,
             sort_mode: crate::app::state::SidebarSortMode::Default,
-            title: short_fleet_host_name(&host.name),
+            title: host_tokens
+                .get(&host.name)
+                .cloned()
+                .expect("host token for Runs host"),
             count: host.active_count,
             collapsed,
             dim: false,
