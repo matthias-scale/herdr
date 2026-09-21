@@ -214,7 +214,7 @@ pub const Handler = struct {
     ) void {
         const callback = self.effects.parsed_output orelse return;
         switch (action) {
-            .bell, .backspace, .horizontal_tab, .linefeed, .carriage_return, .enquiry => callback(self, .separator, ""),
+            .backspace, .horizontal_tab, .linefeed, .carriage_return => callback(self, .separator, ""),
             .start_hyperlink => self.parsed_hyperlink_pending = value.uri,
             else => {},
         }
@@ -231,9 +231,9 @@ pub const Handler = struct {
         const callback = self.effects.parsed_output orelse return false;
         switch (action) {
             .print => {
-                if (!try self.terminal.printTracked(value.cp)) return true;
+                const cp = try self.terminal.printTracked(value.cp) orelse return true;
                 var buf: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(value.cp, &buf) catch return true;
+                const len = std.unicode.utf8Encode(cp, &buf) catch return true;
                 callback(self, .text, buf[0..len]);
                 return true;
             },
@@ -243,21 +243,32 @@ pub const Handler = struct {
                     const result = try self.terminal.printSliceTracked(value.cps[start..]);
                     if (result.consumed == 0) break;
                     const end = start + result.consumed;
-                    if (result.visible) self.emitParsedCodepoints(value.cps[start..end]);
+                    switch (result.output) {
+                        .unchanged => self.emitParsedCodepoints(value.cps[start..end]),
+                        .codepoint => |cp| {
+                            var buf: [4]u8 = undefined;
+                            const len = std.unicode.utf8Encode(cp, &buf) catch {
+                                start = end;
+                                continue;
+                            };
+                            callback(self, .text, buf[0..len]);
+                        },
+                        .hidden => {},
+                    }
                     start = end;
                 }
                 return true;
             },
             .print_repeat => {
                 const cp = self.terminal.previous_char orelse return true;
-                var encoded: [4]u8 = undefined;
-                const encoded_len = std.unicode.utf8Encode(cp, &encoded) catch return true;
                 var buf: [4096]u8 = undefined;
                 var remaining = @max(value, 1);
                 var len: usize = 0;
                 while (remaining > 0) {
                     remaining -= 1;
-                    if (!try self.terminal.printTracked(cp)) continue;
+                    const rendered = try self.terminal.printTracked(cp) orelse continue;
+                    var encoded: [4]u8 = undefined;
+                    const encoded_len = std.unicode.utf8Encode(rendered, &encoded) catch continue;
                     if (len + encoded_len > buf.len) {
                         callback(self, .text, buf[0..len]);
                         len = 0;
