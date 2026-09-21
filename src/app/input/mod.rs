@@ -4,7 +4,10 @@ use bytes::Bytes;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use tracing::warn;
 
-use crate::app::PaneClickState;
+use crate::app::{
+    state::{ClientInputOwner, DockInputOwner, InputOwner, ServerInputOwner, SurfaceInputOwner},
+    PaneClickState,
+};
 use crate::input::TerminalKey;
 #[cfg(test)]
 use ratatui::layout::Direction;
@@ -51,11 +54,12 @@ mod sidebar;
 mod terminal;
 
 #[cfg(test)]
+pub(crate) use self::modal::open_new_tab_dialog;
+#[cfg(test)]
 pub(crate) use self::navigate::{
     action_for_key_for_test, non_indexed_navigation_actions_for_test, BindingDispatch,
 };
 pub(crate) use self::notepad::NotepadRequest;
-#[cfg(test)]
 pub(crate) use self::sidebar::SidebarWorkGroupKeyAction;
 pub(crate) use self::{
     lease::{ConsumedInputLease, ForwardedInputLease, InputLeaseKey, InputLeaseTable, RepeatPlan},
@@ -161,15 +165,23 @@ impl App {
             .await
     }
 
+    #[cfg(test)]
     pub(super) async fn handle_key_with_pomodoro_prompt_visibility(
         &mut self,
         key: TerminalKey,
         prompt_visible: bool,
     ) -> Option<super::TerminalInputTarget> {
+        let owner = self.state.input_owner_with_pomodoro(prompt_visible);
+        self.handle_key_for_input_owner(key, owner).await
+    }
+
+    pub(super) async fn handle_key_for_input_owner(
+        &mut self,
+        key: TerminalKey,
+        owner: InputOwner,
+    ) -> Option<super::TerminalInputTarget> {
         self.state.clear_hovered_control();
-        let target = self
-            .handle_key_inner_with_pomodoro_prompt_visibility(key, prompt_visible)
-            .await;
+        let target = self.handle_key_inner_for_input_owner(key, owner).await;
         // Every keyboard path that can enter a probed settings section runs
         // through here, so the probes start once from one place.
         self.start_requested_tool_probes();
@@ -183,180 +195,201 @@ impl App {
             .await
     }
 
+    #[cfg(test)]
     async fn handle_key_inner_with_pomodoro_prompt_visibility(
         &mut self,
         key: TerminalKey,
         prompt_visible: bool,
     ) -> Option<super::TerminalInputTarget> {
-        // A due break reminder outranks every other surface, panes included:
-        // an overlay that can be typed past is not a reminder.
-        if prompt_visible && self.intercept_notepad_key_with_prompt_visibility(&key, true) {
-            return None;
-        }
-        if self.state.popup_pane.is_some() {
-            return self.handle_terminal_key(key).await;
-        }
-        let key_event = key.as_key_event();
-        // The subgroup picker floats above panes and is not sidebar-focus
-        // gated: it opens from a right-click menu that never claims the
-        // sidebar's bare-key focus.
-        if self.state.handle_sidebar_subgroup_picker_key(key_event) {
-            return None;
-        }
-        if self.intercept_notepad_key_with_prompt_visibility(&key, false) {
-            return None;
-        }
-        // Every sidebar shortcut below is a bare key the operator also types
-        // into a pane, so they are reachable only while the sidebar owns the
-        // keyboard. Gating them on their own selection or menu state instead
-        // let a stale click keep answering `m`, `n`, Enter and the search
-        // field while the operator was typing in an editor pane.
-        if self.state.sidebar_focused {
-            if self.state.handle_sidebar_new_menu_key(key_event) {
-                return None;
-            }
-            if self.state.handle_sidebar_new_thread_key(key_event) {
-                return None;
-            }
-            if self.state.handle_sidebar_project_menu_key(key_event) {
-                return None;
-            }
-            if self.state.handle_sidebar_search_key(key_event) {
-                return None;
-            }
-        }
-        if self.handle_pr_action_confirmation_key(key_event) {
-            return None;
-        }
-        if self.handle_dock_surface_menu_key(&key) {
-            return None;
-        }
-        if self.state.sidebar_focused {
-            if self.state.sidebar_settled_menu_target.is_some()
-                && self.handle_sidebar_settled_key(key_event)
-            {
-                return None;
-            }
-            if self.handle_sidebar_object_menu_key(key_event) {
-                return None;
-            }
-            if self.state.handle_sidebar_sort_menu_key(key_event) {
-                return None;
-            }
-            if self.state.handle_sidebar_group_menu_key(key_event) {
-                return None;
-            }
-            if self.state.handle_sidebar_filter_menu_key(key_event) {
-                return None;
-            }
-            match self.state.handle_sidebar_work_group_key(key_event) {
-                sidebar::SidebarWorkGroupKeyAction::Ignored => {}
-                sidebar::SidebarWorkGroupKeyAction::Consumed => return None,
-                sidebar::SidebarWorkGroupKeyAction::Dispatch(plan) => {
-                    self.dispatch_sidebar_work_group_plan(*plan);
-                    return None;
-                }
-            }
-            if self.handle_sidebar_settled_key(key_event) {
-                return None;
-            }
-        }
-        if self.handle_symphony_key(key_event) {
-            return None;
-        }
-        if self.handle_loop_run_history_key(key_event) {
-            return None;
-        }
-        if self.handle_usage_view_key(key_event) {
-            return None;
-        }
-        if self.handle_work_view_key(key_event) {
-            return None;
-        }
-        if self.state.home.is_some() && self.handle_home_key_event(key_event) {
-            return None;
-        }
-        if self.state.inbox.is_some() {
-            return self.handle_inbox_key(key).await;
-        }
-        if self.handle_dock_hosts_key(&key) {
-            return None;
-        }
-        if self.handle_dock_agents_key(&key) {
-            return None;
-        }
-        if self.handle_dock_files_key(&key) {
-            return None;
-        }
-        if self.handle_dock_home_key(&key) {
-            return None;
-        }
-        if self.handle_dock_diff_key(&key) {
-            return None;
-        }
-        if key_event.code == KeyCode::Esc
-            && key_event.modifiers.is_empty()
-            && self.state.dock_object_preview.take().is_some()
-        {
-            self.state.dock_pr_focused = false;
-            self.state.dock_linear_focused = false;
-            return None;
-        }
-        if self.handle_dock_linear_key(&key) {
-            return None;
-        }
-        if self.handle_dock_pr_key(&key) {
-            return None;
-        }
-        if self.handle_dock_chooser_key(&key) {
-            return None;
-        }
-        if self.state.dock_object_preview.is_some() {
-            return None;
-        }
-        if modal_paste_target_active(&self.state) && is_modal_paste_shortcut(&key_event) {
-            if let Some(text) = crate::platform::read_clipboard_text() {
-                self.paste_into_active_text_input(&text);
-            }
-            return None;
-        }
+        let owner = self.state.input_owner_with_pomodoro(prompt_visible);
+        self.handle_key_inner_for_input_owner(key, owner).await
+    }
 
-        match self.state.mode {
-            Mode::Terminal => return self.handle_terminal_key(key).await,
-            Mode::Prefix => self.handle_prefix_key(key),
-            Mode::Navigate => self.handle_navigate_key(key),
-            Mode::Copy => self.handle_copy_mode_key(key),
-            _ => match self.state.mode {
-                Mode::Onboarding => self.handle_onboarding_key(key_event),
-                Mode::ReleaseNotes => self.handle_release_notes_key(key_event),
-                Mode::ProductAnnouncement => self.handle_product_announcement_key(key_event),
-                Mode::Prefix | Mode::Navigate | Mode::Copy => unreachable!(),
-                Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
-                    self.handle_rename_key_via_api(key_event)
+    async fn handle_key_inner_for_input_owner(
+        &mut self,
+        key: TerminalKey,
+        owner: InputOwner,
+    ) -> Option<super::TerminalInputTarget> {
+        let key_event = key.as_key_event();
+        if self.paste_clipboard_shortcut_for_input_owner(
+            owner,
+            &key_event,
+            crate::platform::read_clipboard_text,
+        ) {
+            return None;
+        }
+        match owner {
+            InputOwner::Pomodoro => {
+                self.intercept_notepad_key_with_prompt_visibility(&key, true);
+            }
+            InputOwner::Client(owner) => match owner {
+                ClientInputOwner::Overlay(overlay) => {
+                    self.handle_client_overlay_key(overlay, key_event);
                 }
-                Mode::NewLinkedWorktree => self.handle_worktree_create_key(key_event),
-                Mode::OpenExistingWorktree => self.handle_worktree_open_key(key_event),
-                Mode::ConfirmRemoveWorktree => self.handle_worktree_remove_key(key_event),
-                Mode::Resize => self.handle_resize_key_via_api(key),
-                Mode::ConfirmClose => self.handle_confirm_close_key_via_api(key_event),
-                Mode::ContextMenu => {
-                    self.handle_context_menu_key_via_api(key_event);
+                ClientInputOwner::SnoozeMenu => {
+                    self.handle_sidebar_snooze_menu_key(key_event);
                 }
-                Mode::GitMenu => handle_git_menu_key(&mut self.state, key_event),
-                Mode::AddAction => self.handle_add_action_key(key_event),
-                Mode::Settings => self.handle_settings_key(key_event),
-                Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key_event),
-                Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key),
-                Mode::Navigator => {
+                ClientInputOwner::SnoozeTime => {
+                    self.handle_sidebar_snooze_time_key(key_event);
+                }
+                ClientInputOwner::SettledMenu | ClientInputOwner::SettledDeleteConfirm => {
+                    self.handle_sidebar_settled_key(key_event);
+                }
+                ClientInputOwner::AgentPicker => self.handle_agent_picker_key(key_event),
+                ClientInputOwner::SidebarGroupMenu => {
+                    self.state.handle_sidebar_group_menu_key(key_event);
+                }
+                ClientInputOwner::SidebarFilterMenu => {
+                    self.state.handle_sidebar_filter_menu_key(key_event);
+                }
+                ClientInputOwner::SidebarNewMenu => {
+                    self.state.handle_sidebar_new_menu_key(key_event);
+                }
+                ClientInputOwner::SidebarNewThread => {
+                    self.state.handle_sidebar_new_thread_key(key_event);
+                }
+                ClientInputOwner::SidebarProjectMenu => {
+                    self.state.handle_sidebar_project_menu_key(key_event);
+                }
+                ClientInputOwner::SidebarObjectMenu => {
+                    self.handle_sidebar_object_menu_key(key_event);
+                }
+                ClientInputOwner::SidebarSortMenu => {
+                    self.state.handle_sidebar_sort_menu_key(key_event);
+                }
+                ClientInputOwner::SidebarSubgroupPicker => {
+                    self.state.handle_sidebar_subgroup_picker_key(key_event);
+                }
+                ClientInputOwner::PrActionConfirmation => {
+                    self.handle_pr_action_confirmation_key(key_event);
+                }
+                ClientInputOwner::DockSurfaceMenu => {
+                    self.handle_dock_surface_menu_key(&key);
+                }
+            },
+            InputOwner::AddProject | InputOwner::Surface(SurfaceInputOwner::Home) => {
+                self.handle_home_key_event(key_event);
+            }
+            InputOwner::Server(owner) => match owner {
+                ServerInputOwner::Onboarding => self.handle_onboarding_key(key_event),
+                ServerInputOwner::ReleaseNotes => self.handle_release_notes_key(key_event),
+                ServerInputOwner::ProductAnnouncement => {
+                    self.handle_product_announcement_key(key_event)
+                }
+                ServerInputOwner::Navigate => self.handle_navigate_key(key),
+                ServerInputOwner::Prefix => self.handle_prefix_key(key),
+                ServerInputOwner::Copy => self.handle_copy_mode_key(key),
+                ServerInputOwner::Resize => self.handle_resize_key_via_api(key),
+                ServerInputOwner::GitMenu => handle_git_menu_key(&mut self.state, key_event),
+                ServerInputOwner::AddAction => self.handle_add_action_key(key_event),
+                ServerInputOwner::Settings => self.handle_settings_key(key_event),
+                ServerInputOwner::GlobalMenu => handle_global_menu_key(&mut self.state, key_event),
+                ServerInputOwner::KeybindHelp => handle_keybind_help_key(&mut self.state, key),
+                ServerInputOwner::Navigator => {
                     handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event)
                 }
-                Mode::CommandPalette => self.handle_command_palette_key(key_event),
-                Mode::WorkLinkPicker => self.handle_work_link_picker_key(key_event),
-                Mode::AgentPicker => self.handle_agent_picker_key(key_event),
-                Mode::Terminal => unreachable!(),
+                ServerInputOwner::CommandPalette => self.handle_command_palette_key(key_event),
+                ServerInputOwner::WorkLinkPicker => self.handle_work_link_picker_key(key_event),
             },
+            InputOwner::Popup | InputOwner::Pane => return self.handle_terminal_key(key).await,
+            InputOwner::Surface(SurfaceInputOwner::Symphony) => {
+                self.handle_symphony_key(key_event);
+            }
+            InputOwner::Surface(SurfaceInputOwner::LoopRunHistory) => {
+                self.handle_loop_run_history_key(key_event);
+            }
+            InputOwner::Surface(SurfaceInputOwner::Usage) => {
+                self.handle_usage_view_key(key_event);
+            }
+            InputOwner::Surface(SurfaceInputOwner::Work) => {
+                self.handle_work_view_key(key_event);
+            }
+            InputOwner::Surface(SurfaceInputOwner::DockObjectPreview) => {
+                if key_event.code == KeyCode::Esc && key_event.modifiers.is_empty() {
+                    self.state.dock_object_preview = None;
+                    self.state.dock_pr_focused = false;
+                    self.state.dock_linear_focused = false;
+                }
+            }
+            InputOwner::Surface(SurfaceInputOwner::Inbox) => {
+                return self.handle_inbox_key(key).await;
+            }
+            InputOwner::Surface(SurfaceInputOwner::EditorPreview) => {}
+            InputOwner::Notepad => {
+                self.intercept_notepad_key_with_prompt_visibility(&key, false);
+            }
+            InputOwner::Dock(owner) => {
+                if matches!(owner, DockInputOwner::Editor) {
+                    return self.handle_terminal_key(key).await;
+                }
+                if self.handle_dock_chooser_key(&key) {
+                    return None;
+                }
+                let consumed = match owner {
+                    DockInputOwner::Home => self.handle_dock_home_key(&key),
+                    DockInputOwner::PullRequest => self.handle_dock_pr_key(&key),
+                    DockInputOwner::Linear => self.handle_dock_linear_key(&key),
+                    DockInputOwner::Diff => self.handle_dock_diff_key(&key),
+                    DockInputOwner::Files => self.handle_dock_files_key(&key),
+                    DockInputOwner::Agents => self.handle_dock_agents_key(&key),
+                    DockInputOwner::Hosts => self.handle_dock_hosts_key(&key),
+                    DockInputOwner::Chooser | DockInputOwner::Editor => false,
+                };
+                if !consumed {
+                    return self.handle_terminal_key(key).await;
+                }
+            }
+            InputOwner::Sidebar => {
+                if self.state.handle_sidebar_search_key(key_event) {
+                    return None;
+                }
+                if self.handle_sidebar_object_menu_key(key_event) {
+                    return None;
+                }
+                match self.state.handle_sidebar_work_group_key(key_event) {
+                    sidebar::SidebarWorkGroupKeyAction::Ignored => {}
+                    sidebar::SidebarWorkGroupKeyAction::Consumed => return None,
+                    sidebar::SidebarWorkGroupKeyAction::Dispatch(plan) => {
+                        self.dispatch_sidebar_work_group_plan(*plan);
+                        return None;
+                    }
+                }
+                if !self.handle_sidebar_session_action_key(key_event) {
+                    self.handle_sidebar_settled_key(key_event);
+                }
+            }
+            InputOwner::None => {}
         }
         None
+    }
+
+    pub(super) fn handle_client_overlay_key(
+        &mut self,
+        overlay: crate::app::state::ClientOverlay,
+        key: KeyEvent,
+    ) -> bool {
+        match overlay {
+            crate::app::state::ClientOverlay::RenameWorkspace
+            | crate::app::state::ClientOverlay::RenameTab
+            | crate::app::state::ClientOverlay::RenamePane => self.handle_rename_key_via_api(key),
+            crate::app::state::ClientOverlay::NewLinkedWorktree => {
+                self.handle_worktree_create_key(key)
+            }
+            crate::app::state::ClientOverlay::OpenExistingWorktree => {
+                self.handle_worktree_open_key(key)
+            }
+            crate::app::state::ClientOverlay::ConfirmRemoveWorktree => {
+                self.handle_worktree_remove_key(key)
+            }
+            crate::app::state::ClientOverlay::ConfirmClose => {
+                self.handle_confirm_close_key_via_api(key)
+            }
+            crate::app::state::ClientOverlay::ContextMenu => {
+                self.handle_context_menu_key_via_api(key)
+            }
+            crate::app::state::ClientOverlay::None => return false,
+        }
+        true
     }
 
     /// Card shortcuts are written uppercase, so the shift that produces them is
@@ -368,7 +401,7 @@ impl App {
     /// Keys of the surface chooser: the card-grid shortcuts of an empty dock,
     /// the open `+` menu, and the one keypress that restores a maximised dock.
     fn handle_dock_chooser_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.mode != Mode::Terminal || self.state.dock_collapsed {
+        if self.state.effective_interaction_mode() != Mode::Terminal || self.state.dock_collapsed {
             return false;
         }
         let event = key.as_key_event();
@@ -435,8 +468,7 @@ impl App {
     }
 
     fn handle_dock_home_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.mode != Mode::Terminal
-            || self.state.dock_collapsed
+        if self.state.dock_collapsed
             || self.state.dock_tab != Some(crate::app::DockSurface::Home)
             || !self.state.dock_home_focused
         {
@@ -525,7 +557,7 @@ impl App {
     }
 
     fn handle_dock_diff_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.mode != Mode::Terminal
+        if self.state.effective_interaction_mode() != Mode::Terminal
             || self.state.dock_collapsed
             || self.state.dock_tab != Some(crate::app::DockSurface::Diff)
             || !self.state.dock_diff_focused
@@ -562,8 +594,8 @@ impl App {
         true
     }
 
-    fn handle_dock_agents_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.mode != Mode::Terminal
+    pub(super) fn handle_dock_agents_key(&mut self, key: &TerminalKey) -> bool {
+        if self.state.effective_interaction_mode() != Mode::Terminal
             || self.state.dock_collapsed
             || self.state.dock_tab != Some(crate::app::DockSurface::Agents)
             || !self.state.dock_agents_focused
@@ -592,8 +624,8 @@ impl App {
         true
     }
 
-    fn handle_dock_hosts_key(&mut self, key: &TerminalKey) -> bool {
-        if self.state.mode != Mode::Terminal
+    pub(super) fn handle_dock_hosts_key(&mut self, key: &TerminalKey) -> bool {
+        if self.state.effective_interaction_mode() != Mode::Terminal
             || self.state.dock_collapsed
             || self.state.dock_tab != Some(crate::app::DockSurface::Hosts)
             || !self.state.dock_hosts_focused
@@ -962,7 +994,7 @@ impl App {
                     .is_some_and(|home| home.close_composer_or_home());
                 if close_home {
                     self.state.clear_home();
-                    self.state.mode = Mode::Terminal;
+                    self.state.set_server_mode(Mode::Terminal);
                 }
             }
             KeyCode::Char('d')
@@ -1051,7 +1083,10 @@ impl App {
         self.finish_home_dispatch(dispatch);
     }
 
-    fn dispatch_sidebar_work_group_plan(&mut self, plan: crate::app::home::HomeDispatchPlan) {
+    pub(super) fn dispatch_sidebar_work_group_plan(
+        &mut self,
+        plan: crate::app::home::HomeDispatchPlan,
+    ) {
         let mut home = self.state.new_home_state();
         home.prompt = plan.prompt.clone();
         home.directory = plan.directory.clone();
@@ -1109,7 +1144,7 @@ impl App {
                     .is_none_or(|home| home.pending_dispatch.is_none())
                 {
                     self.state.clear_home();
-                    self.state.mode = Mode::Terminal;
+                    self.state.set_server_mode(Mode::Terminal);
                 }
             }
             Err(error) => {
@@ -1126,7 +1161,7 @@ impl App {
         }
         if key.code == KeyCode::Esc && key.modifiers.is_empty() {
             self.state.clear_loop_run_history();
-            self.state.mode = Mode::Terminal;
+            self.state.set_server_mode(Mode::Terminal);
         }
         true
     }
@@ -1141,7 +1176,7 @@ impl App {
         let event = key.as_key_event();
         if event.code == KeyCode::Esc && event.modifiers.is_empty() {
             self.state.clear_inbox();
-            self.state.mode = Mode::Terminal;
+            self.state.set_server_mode(Mode::Terminal);
             return None;
         }
         let queue = self.state.blocked_agents();
@@ -1161,7 +1196,7 @@ impl App {
         }
         if key.code == KeyCode::Esc && key.modifiers.is_empty() {
             self.state.clear_inbox();
-            self.state.mode = Mode::Terminal;
+            self.state.set_server_mode(Mode::Terminal);
             return true;
         }
         let queue = self.state.blocked_agents();
@@ -1233,7 +1268,7 @@ impl App {
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.state.clear_symphony();
-                self.state.mode = Mode::Terminal;
+                self.state.set_server_mode(Mode::Terminal);
             }
             KeyCode::Up | KeyCode::Char('k') if key.modifiers.is_empty() => {
                 detail.selected = detail.selected.saturating_sub(1);
@@ -1321,7 +1356,7 @@ impl App {
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.state.clear_usage_view();
-                self.state.mode = Mode::Terminal;
+                self.state.set_server_mode(Mode::Terminal);
             }
             KeyCode::Char('c') if key.modifiers.is_empty() => {
                 if let Some(view) = self.state.usage_view.as_mut() {
@@ -1820,7 +1855,7 @@ impl App {
         match key.code {
             KeyCode::Esc if key.modifiers.is_empty() => {
                 self.state.clear_work_view();
-                self.state.mode = Mode::Terminal;
+                self.state.set_server_mode(Mode::Terminal);
             }
             KeyCode::Left if key.modifiers.is_empty() => {
                 if let Some(state) = self.state.work_view.as_mut() {
@@ -3432,7 +3467,7 @@ impl App {
         })
     }
 
-    fn handle_pr_action_confirmation_key(&mut self, key: KeyEvent) -> bool {
+    pub(super) fn handle_pr_action_confirmation_key(&mut self, key: KeyEvent) -> bool {
         let Some(confirmation) = self.state.pr_action_confirmation.clone() else {
             return false;
         };
@@ -3643,10 +3678,7 @@ impl App {
                 .is_some_and(|object| object.surface == crate::app::DockSurface::Pr);
         let dock_hosted =
             !self.state.dock_collapsed && self.state.dock_tab == Some(crate::app::DockSurface::Pr);
-        if self.state.mode != Mode::Terminal
-            || !(previewed || dock_hosted)
-            || !self.state.dock_pr_focused
-        {
+        if !(previewed || dock_hosted) || !self.state.dock_pr_focused {
             return false;
         }
         let event = key.as_key_event();
@@ -3972,10 +4004,7 @@ impl App {
                 .is_some_and(|object| object.surface == crate::app::DockSurface::Linear);
         let dock_hosted = !self.state.dock_collapsed
             && self.state.dock_tab == Some(crate::app::DockSurface::Linear);
-        if self.state.mode != Mode::Terminal
-            || !(previewed || dock_hosted)
-            || !self.state.dock_linear_focused
-        {
+        if !(previewed || dock_hosted) || !self.state.dock_linear_focused {
             return false;
         }
         let event = key.as_key_event();
@@ -4396,7 +4425,7 @@ impl App {
         // surface is saved under the old pane and the checkout opens without it.
         self.state.bind_symphony_dock_to_focused_pane(workflow);
         self.state.clear_symphony();
-        self.state.mode = Mode::Terminal;
+        self.state.set_server_mode(Mode::Terminal);
     }
 
     #[cfg(test)]
@@ -4404,20 +4433,33 @@ impl App {
         self.handle_text_commit_headless_with_hook(text, &mut |_| {}, None);
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_text_commit_headless_with_hook(
         &mut self,
         text: &str,
         before_terminal_input: &mut impl FnMut(&super::TerminalInputTarget),
         controlled_owners: Option<&std::collections::HashMap<crate::terminal::TerminalId, u64>>,
     ) {
-        if text.is_empty()
-            || self.state.symphony_detail.is_some()
-            || self.state.work_view.is_some()
-            || self.state.dock_object_preview.is_some()
-        {
+        let owner = self.state.input_owner();
+        self.handle_text_commit_headless_for_owner_with_hook(
+            owner,
+            text,
+            before_terminal_input,
+            controlled_owners,
+        );
+    }
+
+    pub(crate) fn handle_text_commit_headless_for_owner_with_hook(
+        &mut self,
+        owner: InputOwner,
+        text: &str,
+        before_terminal_input: &mut impl FnMut(&super::TerminalInputTarget),
+        controlled_owners: Option<&std::collections::HashMap<crate::terminal::TerminalId, u64>>,
+    ) {
+        if text.is_empty() {
             return;
         }
-        if self.state.popup_pane.is_some() {
+        if owner == InputOwner::Popup {
             if let Some(runtime) = self.popup_runtime() {
                 let _ = runtime.try_send_bytes(Bytes::copy_from_slice(text.as_bytes()));
             } else {
@@ -4425,14 +4467,16 @@ impl App {
             }
             return;
         }
-        if self.route_text_to_sidebar_subgroup_picker(text) {
+        if owner == InputOwner::Dock(DockInputOwner::Editor) {
+            if let Some(runtime) = self.dock_editor_runtime() {
+                let _ = runtime.try_send_bytes(Bytes::copy_from_slice(text.as_bytes()));
+            }
             return;
         }
-        if self.try_route_text_to_home(text) {
+        if self.paste_into_input_owner(owner, text) {
             return;
         }
-        if self.state.mode != Mode::Terminal || self.state.notepad.focused {
-            self.paste_into_active_text_input(text);
+        if !owner.forwards_unhandled_input_to_pane() {
             return;
         }
 
@@ -4486,15 +4530,21 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn handle_text_commit(&mut self, text: String) {
-        if text.is_empty()
-            || self.state.symphony_detail.is_some()
-            || self.state.work_view.is_some()
-            || self.state.dock_object_preview.is_some()
-        {
+        let owner = self.state.input_owner();
+        self.handle_text_commit_for_input_owner(owner, text).await;
+    }
+
+    pub(super) async fn handle_text_commit_for_input_owner(
+        &mut self,
+        owner: InputOwner,
+        text: String,
+    ) {
+        if text.is_empty() {
             return;
         }
-        if self.state.popup_pane.is_some() {
+        if owner == InputOwner::Popup {
             if let Some(runtime) = self.popup_runtime() {
                 let _ = runtime.send_bytes(Bytes::from(text)).await;
             } else {
@@ -4502,14 +4552,16 @@ impl App {
             }
             return;
         }
-        if self.route_text_to_sidebar_subgroup_picker(&text) {
+        if owner == InputOwner::Dock(DockInputOwner::Editor) {
+            if let Some(runtime) = self.dock_editor_runtime() {
+                let _ = runtime.send_bytes(Bytes::from(text)).await;
+            }
             return;
         }
-        if self.try_route_text_to_home(&text) {
+        if self.paste_into_input_owner(owner, &text) {
             return;
         }
-        if self.state.mode != Mode::Terminal {
-            self.paste_into_active_text_input(&text);
+        if !owner.forwards_unhandled_input_to_pane() {
             return;
         }
 
@@ -4545,21 +4597,14 @@ impl App {
         }
     }
 
-    pub(super) fn try_route_paste_to_overlay(&self) -> bool {
-        if self.state.symphony_detail.is_some()
-            || self.state.work_view.is_some()
-            || self.state.dock_object_preview.is_some()
-        {
-            return true;
-        }
-        false
+    #[cfg(test)]
+    pub(super) async fn handle_paste(&mut self, text: String) {
+        let owner = self.state.input_owner();
+        self.handle_paste_for_input_owner(owner, text).await;
     }
 
-    pub(super) async fn handle_paste(&mut self, text: String) {
-        if self.try_route_paste_to_overlay() {
-            return;
-        }
-        if self.state.popup_pane.is_some() {
+    pub(super) async fn handle_paste_for_input_owner(&mut self, owner: InputOwner, text: String) {
+        if owner == InputOwner::Popup {
             if let Some(runtime) = self.popup_runtime() {
                 let _ = runtime.send_paste(text).await;
             } else {
@@ -4567,19 +4612,13 @@ impl App {
             }
             return;
         }
-        if self.route_text_to_sidebar_subgroup_picker(&text) {
+        if owner == InputOwner::Dock(DockInputOwner::Editor) {
+            if let Some(runtime) = self.dock_editor_runtime() {
+                let _ = runtime.send_paste(text).await;
+            }
             return;
         }
-        if self.try_route_text_to_home(&text) {
-            return;
-        }
-        if self.state.mode != Mode::Terminal {
-            self.paste_into_active_text_input(&text);
-            return;
-        }
-
-        if let Some(runtime) = self.dock_editor_runtime() {
-            let _ = runtime.send_paste(text).await;
+        if self.paste_into_input_owner(owner, &text) || !owner.forwards_unhandled_input_to_pane() {
             return;
         }
 
@@ -4624,31 +4663,48 @@ impl App {
         true
     }
 
-    pub(super) fn try_route_text_to_home(&mut self, text: &str) -> bool {
-        if self.state.home.is_none() {
-            return false;
-        }
-        self.handle_home_text_commit(text);
-        true
+    #[cfg(test)]
+    pub(crate) fn paste_into_active_text_input(&mut self, text: &str) -> bool {
+        let owner = self.state.input_owner();
+        self.paste_into_input_owner(owner, text)
     }
 
-    pub(crate) fn paste_into_active_text_input(&mut self, text: &str) -> bool {
-        if self.state.notepad.focused {
-            self.state
-                .notepad
-                .insert_text(text, std::time::Instant::now());
-            return true;
-        }
-        match self.state.mode {
-            Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+    pub(crate) fn paste_into_input_owner(&mut self, owner: InputOwner, text: &str) -> bool {
+        match owner {
+            InputOwner::Notepad => {
+                self.state
+                    .notepad
+                    .insert_text(text, std::time::Instant::now());
+                true
+            }
+            InputOwner::Client(ClientInputOwner::SnoozeTime) => {
+                let Some(snooze) = self.state.sidebar_snooze.as_mut() else {
+                    return false;
+                };
+                let Some(draft) = snooze.time_draft.as_mut() else {
+                    return false;
+                };
+                snooze.error = None;
+                draft.extend(text.chars().filter(|character| !character.is_control()));
+                true
+            }
+            InputOwner::Client(ClientInputOwner::Overlay(
+                crate::app::state::ClientOverlay::RenameWorkspace
+                | crate::app::state::ClientOverlay::RenameTab
+                | crate::app::state::ClientOverlay::RenamePane,
+            )) => {
                 insert_rename_input_text(&mut self.state, text);
                 true
             }
-            Mode::NewLinkedWorktree => {
+            InputOwner::Client(ClientInputOwner::Overlay(
+                crate::app::state::ClientOverlay::NewLinkedWorktree,
+            )) => {
                 self.insert_worktree_create_text(text);
                 true
             }
-            Mode::OpenExistingWorktree => {
+            InputOwner::Client(ClientInputOwner::Overlay(
+                crate::app::state::ClientOverlay::OpenExistingWorktree,
+            )) => {
                 if !self
                     .state
                     .worktree_open
@@ -4660,25 +4716,32 @@ impl App {
                 self.insert_worktree_open_search_text(text);
                 true
             }
-            Mode::Navigator => {
+            InputOwner::Client(ClientInputOwner::SidebarSubgroupPicker) => {
+                self.route_text_to_sidebar_subgroup_picker(text)
+            }
+            InputOwner::AddProject | InputOwner::Surface(SurfaceInputOwner::Home) => {
+                self.handle_home_text_commit(text);
+                true
+            }
+            InputOwner::Server(ServerInputOwner::Navigator) => {
                 if !self.state.navigator.search_focused {
                     return false;
                 }
                 insert_navigator_search_text(&mut self.state, &self.terminal_runtimes, text);
                 true
             }
-            Mode::CommandPalette => {
+            InputOwner::Server(ServerInputOwner::CommandPalette) => {
                 self.state.insert_command_palette_query_text(text);
                 true
             }
-            Mode::KeybindHelp => {
+            InputOwner::Server(ServerInputOwner::KeybindHelp) => {
                 if !self.state.keybind_help.search_focused {
                     return false;
                 }
                 insert_keybind_help_query_text(&mut self.state, text);
                 true
             }
-            Mode::Copy => {
+            InputOwner::Server(ServerInputOwner::Copy) => {
                 let Some(prompt) = self
                     .state
                     .copy_mode
@@ -4692,9 +4755,18 @@ impl App {
                     .extend(text.chars().filter(|ch| !ch.is_control()));
                 true
             }
-            Mode::WorkLinkPicker => false,
             _ => false,
         }
+    }
+
+    pub(crate) fn paste_clipboard_shortcut_for_input_owner(
+        &mut self,
+        owner: InputOwner,
+        key: &KeyEvent,
+        read_clipboard: impl FnOnce() -> Option<String>,
+    ) -> bool {
+        is_modal_paste_shortcut(key)
+            && read_clipboard().is_some_and(|text| self.paste_into_input_owner(owner, &text))
     }
 
     pub(crate) fn handle_onboarding_key(&mut self, key: KeyEvent) {
@@ -4785,15 +4857,29 @@ impl App {
         );
     }
 
+    #[cfg(test)]
     pub(super) fn handle_mouse_from_input_source_with_pomodoro_presentation(
         &mut self,
         source_id: super::InputSourceId,
         mouse: MouseEvent,
         presentation: crate::ui::pomodoro::InputPresentation,
     ) {
+        let owner = self
+            .state
+            .input_owner_with_pomodoro(presentation.prompt.is_some());
+        self.handle_mouse_for_input_owner(source_id, mouse, presentation, owner);
+    }
+
+    pub(super) fn handle_mouse_for_input_owner(
+        &mut self,
+        source_id: super::InputSourceId,
+        mouse: MouseEvent,
+        presentation: crate::ui::pomodoro::InputPresentation,
+        owner: InputOwner,
+    ) {
         // A due break reminder is the topmost modal and must decide the click
         // before hover, pane focus, or any underlying control can react.
-        if presentation.prompt.is_some() {
+        if owner == InputOwner::Pomodoro {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if let Some((confirm, snooze)) =
                     crate::ui::pomodoro::prompt_button_rects(presentation.area)
@@ -4813,6 +4899,10 @@ impl App {
                     }
                 }
             }
+            return;
+        }
+        if let InputOwner::Client(owner) = owner {
+            self.handle_client_mouse_for_input_owner(source_id, mouse, owner);
             return;
         }
         match mouse.kind {
@@ -4840,29 +4930,6 @@ impl App {
         } else {
             self.state.clear_hovered_control();
         }
-        if self.state.pr_action_confirmation.is_some() {
-            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                if let Some((cancel, confirm)) = crate::ui::pr_actions::confirmation_button_rects(
-                    &self.state,
-                    self.state.screen_rect(),
-                ) {
-                    let hit = |rect: ratatui::layout::Rect| {
-                        mouse.column >= rect.x
-                            && mouse.column < rect.right()
-                            && mouse.row >= rect.y
-                            && mouse.row < rect.bottom()
-                    };
-                    if hit(confirm) {
-                        if let Some(confirmation) = self.state.pr_action_confirmation.take() {
-                            self.execute_pr_action_confirmation(confirmation);
-                        }
-                    } else if hit(cancel) {
-                        self.state.pr_action_confirmation = None;
-                    }
-                }
-            }
-            return;
-        }
         if self.state.config_diagnostic.is_some()
             && self.state.point_in_rect(
                 self.state.view.config_diagnostic_hit_area,
@@ -4882,7 +4949,7 @@ impl App {
             self.config_diagnostic_deadline = None;
             return;
         }
-        if self.state.usage_view.is_some() {
+        if owner == InputOwner::Surface(SurfaceInputOwner::Usage) {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 let target = self
                     .state
@@ -4902,7 +4969,7 @@ impl App {
             }
             return;
         }
-        if self.state.work_view.is_some() {
+        if owner == InputOwner::Surface(SurfaceInputOwner::Work) {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
                 && self.fold_work_view_section_at(mouse.column, mouse.row)
             {
@@ -4911,7 +4978,7 @@ impl App {
             self.handle_ticket_board_mouse(mouse);
             return;
         }
-        if self.state.symphony_detail.is_some() {
+        if owner == InputOwner::Surface(SurfaceInputOwner::Symphony) {
             return;
         }
         match mouse.kind {
@@ -4931,16 +4998,18 @@ impl App {
             _ => {}
         }
 
-        if self.state.popup_pane.is_some() {
+        if owner == InputOwner::Popup {
             self.handle_popup_mouse(mouse);
             return;
         }
-        if self.handle_overlay_mouse(mouse) {
+        if matches!(owner, InputOwner::Server(_)) && self.handle_overlay_mouse(mouse) {
             return;
         }
 
-        if matches!(self.state.mode, Mode::Terminal | Mode::Navigate)
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        if matches!(
+            self.state.effective_interaction_mode(),
+            Mode::Terminal | Mode::Navigate
+        ) && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             let notifications = self.state.view.notification_hit_area;
             if self
@@ -5132,9 +5201,9 @@ impl App {
             return;
         }
 
-        if self.state.add_project_active() {
+        if owner == InputOwner::AddProject {
             self.state
-                .handle_mouse(&mut self.terminal_runtimes, source_id, mouse);
+                .handle_mouse_for_owner(&mut self.terminal_runtimes, source_id, mouse, owner);
             self.start_home_github_refresh_if_requested();
             return;
         }
@@ -5144,16 +5213,19 @@ impl App {
                 .state
                 .point_in_rect(self.state.view.terminal_area, mouse.column, mouse.row);
         let handled_pane_double_click = !editor_preview_hit && self.handle_pane_double_click(mouse);
-        if !handled_pane_double_click && !editor_preview_hit {
+        if owner == InputOwner::Pane && !handled_pane_double_click && !editor_preview_hit {
             self.focus_pane_before_mouse_press(mouse);
         }
 
         let previous_agent_panel_sort = self.state.agent_panel_sort;
         let previous_settings_section = self.state.settings.section;
         if !handled_pane_double_click {
-            let action = self
-                .state
-                .handle_mouse(&mut self.terminal_runtimes, source_id, mouse);
+            let action = self.state.handle_mouse_for_owner(
+                &mut self.terminal_runtimes,
+                source_id,
+                mouse,
+                owner,
+            );
             self.start_home_ref_refresh_if_requested();
             self.start_home_github_refresh_if_requested();
             if let Some(pane_id) = self.state.take_forwarded_pane_input() {
@@ -5169,7 +5241,26 @@ impl App {
                     MouseAction::SettledMenu { index } => {
                         self.apply_sidebar_settled_menu_action(index)
                     }
+                    MouseAction::SnoozeMenu { action } => {
+                        self.apply_sidebar_snooze_menu_action(action)
+                    }
+                    MouseAction::AgentPickerSelect(index) => {
+                        if let Ok(digit) = u8::try_from(index.saturating_add(1)) {
+                            if let Some(digit) = b'0'.checked_add(digit).map(char::from) {
+                                self.handle_agent_picker_key(KeyEvent::new(
+                                    KeyCode::Char(digit),
+                                    KeyModifiers::empty(),
+                                ));
+                            }
+                        }
+                    }
                     MouseAction::FocusLiveSettledPane(target) => self.focus_settled_pane(target),
+                    MouseAction::OpenSnoozeMenu {
+                        ws_idx,
+                        pane_id,
+                        column,
+                        row,
+                    } => self.open_sidebar_snooze_menu(ws_idx, pane_id, column, row),
                     MouseAction::SettlePane { ws_idx, pane_id } => {
                         self.settle_sidebar_pane(ws_idx, pane_id)
                     }
@@ -5198,10 +5289,6 @@ impl App {
                     MouseAction::FocusTab { tab_idx } => {
                         self.state.clear_home();
                         self.focus_tab_idx_via_api(tab_idx)
-                    }
-                    MouseAction::FocusSidebarTab { ws_idx, tab_idx } => {
-                        self.state.clear_home();
-                        self.focus_workspace_tab_via_api(ws_idx, tab_idx)
                     }
                     MouseAction::FocusPane { ws_idx, pane_id } => {
                         self.state.clear_home();
@@ -5260,9 +5347,10 @@ impl App {
                         self.apply_rename_mouse_action_via_api(action)
                     }
                     MouseAction::ConfirmCloseAccept => self.confirm_close_accept_via_api(),
-                    MouseAction::ContextMenu { menu, idx } => {
+                    MouseAction::ContextMenu { menu, action } => {
                         let menu = *menu;
-                        self.apply_context_menu_action_via_api(menu, idx)
+                        self.state.close_client_overlay();
+                        self.apply_context_menu_action_via_api(menu, action)
                     }
                 }
             }
@@ -5276,6 +5364,118 @@ impl App {
                 self.selection_highlight_clear_deadline = None;
             }
         }
+        self.finish_mouse_handling(previous_agent_panel_sort, previous_settings_section);
+    }
+
+    fn handle_client_mouse_for_input_owner(
+        &mut self,
+        source_id: super::InputSourceId,
+        mouse: MouseEvent,
+        owner: ClientInputOwner,
+    ) {
+        let previous_agent_panel_sort = self.state.agent_panel_sort;
+        let previous_settings_section = self.state.settings.section;
+        let action = match owner {
+            ClientInputOwner::PrActionConfirmation => {
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    if let Some((cancel, confirm)) =
+                        crate::ui::pr_actions::confirmation_button_rects(
+                            &self.state,
+                            self.state.screen_rect(),
+                        )
+                    {
+                        let hit = |rect: ratatui::layout::Rect| {
+                            mouse.column >= rect.x
+                                && mouse.column < rect.right()
+                                && mouse.row >= rect.y
+                                && mouse.row < rect.bottom()
+                        };
+                        if hit(confirm) {
+                            if let Some(confirmation) = self.state.pr_action_confirmation.take() {
+                                self.execute_pr_action_confirmation(confirmation);
+                            }
+                        } else if hit(cancel) {
+                            self.state.pr_action_confirmation = None;
+                        }
+                    }
+                }
+                return;
+            }
+            ClientInputOwner::SnoozeTime => self.state.handle_mouse_for_owner(
+                &mut self.terminal_runtimes,
+                source_id,
+                mouse,
+                InputOwner::Client(ClientInputOwner::SnoozeTime),
+            ),
+            ClientInputOwner::Overlay(overlay) => self.state.handle_mouse_for_owner(
+                &mut self.terminal_runtimes,
+                source_id,
+                mouse,
+                InputOwner::Client(ClientInputOwner::Overlay(overlay)),
+            ),
+            ClientInputOwner::SnoozeMenu
+            | ClientInputOwner::SettledMenu
+            | ClientInputOwner::SettledDeleteConfirm
+            | ClientInputOwner::AgentPicker
+            | ClientInputOwner::SidebarGroupMenu
+            | ClientInputOwner::SidebarFilterMenu
+            | ClientInputOwner::SidebarNewMenu
+            | ClientInputOwner::SidebarNewThread
+            | ClientInputOwner::SidebarProjectMenu
+            | ClientInputOwner::SidebarObjectMenu
+            | ClientInputOwner::SidebarSortMenu
+            | ClientInputOwner::SidebarSubgroupPicker
+            | ClientInputOwner::DockSurfaceMenu => self.state.handle_mouse_for_owner(
+                &mut self.terminal_runtimes,
+                source_id,
+                mouse,
+                InputOwner::Client(owner),
+            ),
+        };
+        self.start_home_ref_refresh_if_requested();
+        self.start_home_github_refresh_if_requested();
+        if let Some(action) = action {
+            match action {
+                MouseAction::SidebarObjectMenu { index } => {
+                    self.apply_sidebar_object_menu_action(index)
+                }
+                MouseAction::SettledMenu { index } => self.apply_sidebar_settled_menu_action(index),
+                MouseAction::SnoozeMenu { action } => self.apply_sidebar_snooze_menu_action(action),
+                MouseAction::AgentPickerSelect(index) => {
+                    if let Ok(digit) = u8::try_from(index.saturating_add(1)) {
+                        if let Some(digit) = b'0'.checked_add(digit).map(char::from) {
+                            self.handle_agent_picker_key(KeyEvent::new(
+                                KeyCode::Char(digit),
+                                KeyModifiers::empty(),
+                            ));
+                        }
+                    }
+                }
+                MouseAction::SidebarNewMenu { action } => {
+                    if action == crate::app::state::SidebarNewMenuAction::NewSpace {
+                        self.begin_tui_workspace_create("tui.mouse.workspace.create");
+                    } else {
+                        self.state.dispatch_sidebar_new_menu_action(action);
+                    }
+                }
+                MouseAction::RenameModal(action) => self.apply_rename_mouse_action_via_api(action),
+                MouseAction::ConfirmCloseAccept => self.confirm_close_accept_via_api(),
+                MouseAction::ContextMenu { menu, action } => {
+                    let menu = *menu;
+                    self.state.close_client_overlay();
+                    self.apply_context_menu_action_via_api(menu, action);
+                }
+                _ => unreachable!("client input owner returned a generic mouse action"),
+            }
+        }
+        self.finish_mouse_handling(previous_agent_panel_sort, previous_settings_section);
+    }
+
+    fn finish_mouse_handling(
+        &mut self,
+        previous_agent_panel_sort: crate::app::state::AgentPanelSort,
+        previous_settings_section: crate::app::state::SettingsSection,
+    ) {
         if previous_settings_section != crate::app::state::SettingsSection::Integrations
             && self.state.settings.section == crate::app::state::SettingsSection::Integrations
         {
@@ -5285,11 +5485,7 @@ impl App {
         if self.state.agent_panel_sort != previous_agent_panel_sort {
             self.save_agent_panel_sort(self.state.agent_panel_sort);
         }
-
         self.dispatch_pending_clipboard_write();
-
-        // Sync autoscroll deadline with state (mouse handler may have
-        // set or cleared selection_autoscroll during handle_mouse).
         if self.state.selection_autoscroll.is_none() {
             self.selection_autoscroll_deadline = None;
         } else if self.selection_autoscroll_deadline.is_none() {
@@ -5427,12 +5623,13 @@ impl App {
     }
 
     fn focus_pane_before_mouse_press(&mut self, mouse: MouseEvent) {
-        if !matches!(self.state.mode, Mode::Terminal | Mode::Resize)
-            || !matches!(
-                mouse.kind,
-                MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
-            )
-        {
+        if !matches!(
+            self.state.effective_interaction_mode(),
+            Mode::Terminal | Mode::Resize
+        ) || !matches!(
+            mouse.kind,
+            MouseEventKind::Down(MouseButton::Left | MouseButton::Middle)
+        ) {
             return;
         }
 
@@ -5480,7 +5677,7 @@ impl App {
         mouse: MouseEvent,
         open_url: impl FnOnce(&str) -> std::io::Result<Option<std::process::Child>>,
     ) -> bool {
-        if self.state.mode != Mode::Terminal
+        if self.state.effective_interaction_mode() != Mode::Terminal
             || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             || !mouse.modifiers.contains(modified_url_click_modifier())
         {
@@ -5599,7 +5796,7 @@ impl App {
             return None;
         }
 
-        if self.state.mode != Mode::Terminal {
+        if self.state.effective_interaction_mode() != Mode::Terminal {
             self.last_pane_click = None;
             return None;
         }
@@ -5707,11 +5904,19 @@ pub(crate) fn is_modal_paste_shortcut(key: &KeyEvent) -> bool {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
     if state.notepad.focused {
         return true;
     }
-    match state.mode {
+    if state
+        .sidebar_snooze
+        .as_ref()
+        .is_some_and(|snooze| snooze.time_draft.is_some())
+    {
+        return true;
+    }
+    match state.effective_interaction_mode() {
         Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane | Mode::NewLinkedWorktree => {
             true
         }
@@ -5817,7 +6022,7 @@ impl AppState {
                     .insert(new_pane.terminal.id.clone(), new_pane.terminal);
                 self.record_pane_focus_change(previous_focus, ws_idx, new_id);
                 self.mark_session_dirty();
-                self.mode = Mode::Terminal;
+                self.set_server_mode(Mode::Terminal);
             }
         }
     }
@@ -5833,7 +6038,7 @@ fn state_with_workspaces(names: &[&str]) -> AppState {
     if !state.workspaces.is_empty() {
         state.active = Some(0);
         state.selected = 0;
-        state.mode = Mode::Navigate;
+        state.set_server_mode(Mode::Navigate);
     }
     state
 }
@@ -5848,7 +6053,7 @@ fn app_for_mouse_test() -> App {
         api_rx,
         crate::api::EventHub::default(),
     );
-    app.state.mode = Mode::Terminal;
+    app.state.set_server_mode(Mode::Terminal);
     app.state.sidebar_collapsed = false;
     // Deliberately not the shipped default (`Hidden`): these tests click on a
     // tab row, so they need one.
@@ -5999,7 +6204,7 @@ enabled = true
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         );
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("ub1")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -6383,7 +6588,7 @@ enabled = true
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_detected_state(
             Some(crate::detect::Agent::Codex),
@@ -6511,7 +6716,7 @@ enabled = true
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_open_surfaces.clear();
         app.state.dock_tab = None;
@@ -6572,7 +6777,7 @@ enabled = true
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.dock_home_focused = true;
@@ -6589,7 +6794,7 @@ enabled = true
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Scratchpad);
         app.state.dock_maximized = true;
@@ -6615,7 +6820,7 @@ enabled = true
     #[test]
     fn diff_whitespace_key_updates_session_state_and_invalidates_the_active_projection() {
         let mut app = test_app();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Diff);
         app.state.dock_diff_focused = true;
@@ -6639,7 +6844,7 @@ enabled = true
     #[test]
     fn dock_hosted_pr_keys_open_checkout_and_shared_action_menus() {
         let mut app = test_app();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Pr);
         app.state.dock_pr_focused = true;
@@ -6815,7 +7020,7 @@ enabled = true
     #[test]
     fn pr_comment_digits_only_bind_on_the_sub_tab_that_shows_comments() {
         let mut app = test_app();
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Pr);
         app.state.dock_pr_focused = true;
@@ -6835,7 +7040,7 @@ enabled = true
         app.state = crate::ui::sidebar_work_item_fixture();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Linear);
         app.state.dock_linear_focused = true;
@@ -7130,7 +7335,7 @@ enabled = true
         app.state = crate::ui::sidebar_work_item_fixture();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Pr);
         app.state.dock_pr_focused = true;
@@ -7515,6 +7720,39 @@ enabled = true
     }
 
     #[test]
+    fn pr_action_confirmation_is_isolated_between_clients() {
+        let mut app = test_app();
+        let mut client_a = crate::app::state::DockPresentationState::default();
+        let mut client_b = crate::app::state::DockPresentationState::default();
+        let confirmation = crate::app::state::PrActionConfirmation {
+            key: crate::app::state::WorkItemKey {
+                repo: "owner/repo".into(),
+                pr_number: Some(42),
+                pr_url: Some("https://github.com/owner/repo/pull/42".into()),
+                ticket_id: None,
+            },
+            action: crate::ui::work_list_detail::PrActionKind::Merge(
+                crate::config::MergeMethodConfig::Rebase,
+            ),
+        };
+
+        app.state.swap_dock_presentation(&mut client_a);
+        app.state.pr_action_confirmation = Some(confirmation.clone());
+        app.state.swap_dock_presentation(&mut client_a);
+
+        app.state.swap_dock_presentation(&mut client_b);
+        assert!(!app.handle_pr_action_confirmation_key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::empty()
+        )));
+        assert!(app.state.request_pr_command.is_none());
+        app.state.swap_dock_presentation(&mut client_b);
+
+        app.state.swap_dock_presentation(&mut client_a);
+        assert_eq!(app.state.pr_action_confirmation, Some(confirmation));
+    }
+
+    #[test]
     fn usage_view_keys_change_metric_range_breakdown_and_close() {
         use crate::app::state::{UsageBreakdown, UsageMetric, UsageRange};
 
@@ -7626,7 +7864,7 @@ enabled = true
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_surface_menu = Some(crate::app::state::DockSurfaceMenu { selected: 0 });
 
@@ -7650,7 +7888,7 @@ enabled = true
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("claude")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let pane_id = app.state.workspaces[0]
             .focused_pane_id()
             .expect("focused pane");
@@ -7728,7 +7966,7 @@ enabled = true
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Files);
         app.state.dock_open_surfaces = vec![crate::app::DockSurface::Files];
@@ -8163,7 +8401,7 @@ printf '%s' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"i
         let mut app = ticket_view_app();
         let area = ratatui::layout::Rect::new(0, 0, 120, 40);
         app.state.view.terminal_area = area;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let key = app
             .visible_ticket_view_keys()
             .first()
@@ -8485,7 +8723,7 @@ printf '%s' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"i
         app.state.ensure_test_terminals();
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.dock_collapsed = false;
         app.state.dock_tab = Some(crate::app::DockSurface::Home);
         app.state.dock_home_focused = true;
@@ -8733,7 +8971,7 @@ navigate_workspace_down = "ctrl+j"
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         for pane_id in &pane_ids {
             let terminal_id = app.state.workspaces[0]
                 .terminal_id(*pane_id)
@@ -9201,7 +9439,7 @@ navigate_workspace_down = "ctrl+j"
         app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
             .await;
         assert!(app.state.home.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[tokio::test]
@@ -9333,7 +9571,8 @@ navigate_workspace_down = "ctrl+j"
         app.state.workspaces = vec![crate::workspace::Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::RenameTab;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
         app.state.name_input = "2".into();
         app.state.name_input_replace_on_type = true;
 
@@ -9469,7 +9708,7 @@ navigate_workspace_down = "ctrl+j"
     #[tokio::test]
     async fn paste_routes_to_keybind_help_query_only_when_searching() {
         let mut app = test_app();
-        app.state.mode = Mode::KeybindHelp;
+        app.state.set_server_mode(Mode::KeybindHelp);
         app.handle_paste("ignored".into()).await;
         assert!(app.state.keybind_help.query.is_empty());
 
@@ -9484,7 +9723,8 @@ navigate_workspace_down = "ctrl+j"
     #[tokio::test]
     async fn paste_routes_to_new_linked_worktree_input() {
         let mut app = test_app();
-        app.state.mode = Mode::NewLinkedWorktree;
+        app.state
+            .open_client_overlay(crate::app::state::ClientOverlay::NewLinkedWorktree);
         app.state.name_input = "generated-branch".into();
         app.state.name_input_replace_on_type = true;
         app.state.worktree_create = Some(crate::app::state::WorktreeCreateState {
@@ -9534,25 +9774,92 @@ navigate_workspace_down = "ctrl+j"
     }
 
     #[test]
+    fn ctrl_v_pastes_into_rename_and_worktree_dialogs_for_local_and_attached_routes() {
+        #[cfg(target_os = "macos")]
+        let modifiers = KeyModifiers::SUPER;
+        #[cfg(not(target_os = "macos"))]
+        let modifiers = KeyModifiers::CONTROL;
+        let key = KeyEvent::new(KeyCode::Char('v'), modifiers);
+
+        for route in ["local", "attached"] {
+            let mut rename = test_app();
+            rename
+                .state
+                .open_client_overlay(crate::app::state::ClientOverlay::RenameWorkspace);
+            assert!(rename.paste_clipboard_shortcut_for_input_owner(
+                rename.state.input_owner(),
+                &key,
+                || Some("renamed".into()),
+            ));
+            assert_eq!(rename.state.name_input, "renamed", "{route} rename");
+
+            let mut create = test_app();
+            create
+                .state
+                .open_client_overlay(crate::app::state::ClientOverlay::NewLinkedWorktree);
+            assert!(create.paste_clipboard_shortcut_for_input_owner(
+                create.state.input_owner(),
+                &key,
+                || Some("feature/client-owner".into()),
+            ));
+            assert_eq!(
+                create.state.name_input, "feature/client-owner",
+                "{route} create"
+            );
+
+            let mut open = test_app();
+            open.state.worktree_open = Some(crate::app::state::WorktreeOpenState {
+                source_workspace_id: "source".into(),
+                source_existing_membership: None,
+                source_checkout_path: "/repo/herdr".into(),
+                source_repo_root: "/repo/herdr".into(),
+                repo_key: "repo-key".into(),
+                repo_name: "herdr".into(),
+                entries: Vec::new(),
+                selected: 0,
+                query: String::new(),
+                search_focused: true,
+                error: None,
+            });
+            open.state
+                .open_client_overlay(crate::app::state::ClientOverlay::OpenExistingWorktree);
+            assert!(open.paste_clipboard_shortcut_for_input_owner(
+                open.state.input_owner(),
+                &key,
+                || Some("existing".into()),
+            ));
+            assert_eq!(
+                open.state
+                    .worktree_open
+                    .as_ref()
+                    .map(|state| state.query.as_str()),
+                Some("existing"),
+                "{route} open"
+            );
+        }
+    }
+
+    #[test]
     fn modal_paste_target_is_active_only_for_text_inputs() {
         let mut state = AppState::test_new();
 
-        state.mode = Mode::RenameTab;
+        state.open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
         assert!(modal_paste_target_active(&state));
+        state.close_client_overlay();
 
-        state.mode = Mode::Navigator;
+        state.set_server_mode(Mode::Navigator);
         state.navigator.search_focused = false;
         assert!(!modal_paste_target_active(&state));
         state.navigator.search_focused = true;
         assert!(modal_paste_target_active(&state));
 
-        state.mode = Mode::KeybindHelp;
+        state.set_server_mode(Mode::KeybindHelp);
         state.keybind_help.search_focused = false;
         assert!(!modal_paste_target_active(&state));
         state.keybind_help.search_focused = true;
         assert!(modal_paste_target_active(&state));
 
-        state.mode = Mode::ConfirmClose;
+        state.open_client_overlay(crate::app::state::ClientOverlay::ConfirmClose);
         assert!(!modal_paste_target_active(&state));
     }
 

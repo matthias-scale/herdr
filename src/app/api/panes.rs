@@ -156,7 +156,7 @@ impl App {
             self.state.switch_workspace_tab(ws_idx, target_tab_idx);
             self.state
                 .record_pane_focus_change(previous_focus, ws_idx, new_pane.pane_id);
-            self.state.settle_terminal_mode_after_focus();
+            self.focus_client_on_pane();
         }
         self.terminal_runtimes
             .insert(new_pane.terminal.id.clone(), new_pane.runtime);
@@ -346,7 +346,7 @@ impl App {
 
         self.state.focus_pane_in_workspace(ws_idx, pane_id);
         self.state.mark_active_pane_seen();
-        self.state.settle_terminal_mode_after_focus();
+        self.focus_client_on_pane();
 
         let Some(pane) = self.pane_info(ws_idx, pane_id) else {
             return pane_not_found(id, &target.pane_id);
@@ -539,7 +539,7 @@ impl App {
         if let Some(target_pane_id) = target {
             self.state.focus_pane_in_workspace(ws_idx, target_pane_id);
             self.state.switch_workspace_tab(ws_idx, tab_idx);
-            self.state.settle_terminal_mode_after_focus();
+            self.focus_client_on_pane();
         }
         let focused_pane_id = self
             .state
@@ -1126,7 +1126,7 @@ impl App {
                 .switch_workspace_tab(target_ws_idx, target_tab_idx);
             self.state
                 .record_pane_focus_change(previous_focus, target_ws_idx, moved_pane_id);
-            self.state.settle_terminal_mode_after_focus();
+            self.focus_client_on_pane();
         }
         let created_workspace = created_workspace.then(|| self.workspace_info(target_ws_idx));
         let created_tab = if created_tab {
@@ -1286,7 +1286,7 @@ impl App {
         if outcome.changed || outcome.focus_changed {
             self.schedule_session_save();
         }
-        self.state.settle_terminal_mode_after_focus();
+        self.focus_client_on_pane();
         let Some(layout) = self.pane_layout_snapshot(ws_idx, tab_idx) else {
             return encode_error(id, "pane_layout_unavailable", "pane layout unavailable");
         };
@@ -5027,8 +5027,9 @@ mod tests {
     }
 
     #[test]
-    fn api_pane_move_focuses_copy_mode_pane_back_into_copy_mode() {
+    fn api_pane_move_focus_preserves_shared_mode() {
         let mut app = app_with_linked_worktree();
+        app.state.set_server_mode(Mode::Settings);
         let source = app.state.workspaces[0].tabs[0].root_pane;
         let target_tab = app.state.workspaces[0].test_add_tab(Some("target"));
         let target = app.state.workspaces[0].tabs[target_tab].root_pane;
@@ -5064,7 +5065,7 @@ mod tests {
             panic!("expected pane move response");
         };
         assert!(move_result.changed);
-        assert_eq!(app.state.mode, Mode::Copy);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
         assert_eq!(app.state.copy_mode.expect("copy mode").pane_id, source);
         assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), source);
     }
@@ -5089,7 +5090,7 @@ mod tests {
         app.state.workspaces.push(Workspace::test_new("other"));
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let source_public = app.public_pane_id(0, source).unwrap();
         let target = app.state.workspaces[1].tabs[0].root_pane;
         let target_tab_id = app.public_tab_id(1, 0).unwrap();
@@ -5851,7 +5852,7 @@ mod tests {
         app.state.workspaces[1].tabs[0].layout.focus_pane(target);
         app.state.active = Some(1);
         app.state.selected = 1;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.copy_mode = Some(crate::app::state::CopyModeState {
             pane_id: source,
             cursor_row: 0,
@@ -5876,7 +5877,7 @@ mod tests {
         };
         assert!(zoom.focus_changed);
         assert_eq!(app.state.active, Some(0));
-        assert_eq!(app.state.mode, Mode::Copy);
+        assert_eq!(app.state.server_mode(), Mode::Copy);
         assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(source));
         assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(target));
     }
@@ -6208,6 +6209,7 @@ mod tests {
         app.state.ensure_test_terminals();
         let target_public = app.public_pane_id(1, target_pane).unwrap();
         app.state.switch_workspace(0);
+        app.state.set_server_mode(Mode::Settings);
         assert_eq!(app.state.active, Some(0));
 
         let response = app.handle_pane_focus(
@@ -6225,7 +6227,7 @@ mod tests {
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.workspaces[1].active_tab, target_tab_idx);
         assert_eq!(app.state.workspaces[1].focused_pane_id(), Some(target_pane));
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
     }
 
     #[test]

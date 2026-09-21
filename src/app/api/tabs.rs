@@ -5,7 +5,7 @@ use crate::api::schema::{
     TabMoveParams, TabPinMode, TabPinParams, TabPrioMode, TabPrioParams, TabPrioResult,
     TabRenameParams, TabStarMode, TabStarParams, TabTarget,
 };
-use crate::app::{App, Mode};
+use crate::app::App;
 use crate::workspace::TabPrioAction as StateTabPrioAction;
 
 use super::responses::{encode_error, encode_success};
@@ -123,7 +123,7 @@ impl App {
                 }
                 if focus {
                     self.state.switch_workspace_tab(ws_idx, tab_idx);
-                    self.state.mode = Mode::Terminal;
+                    self.focus_client_on_pane();
                 }
                 self.schedule_session_save();
                 self.emit_tab_created_events(ws_idx, tab_idx);
@@ -142,6 +142,7 @@ impl App {
             return tab_not_found(id, &target.tab_id);
         };
         self.state.switch_workspace_tab(ws_idx, tab_idx);
+        self.focus_client_on_pane();
         let tab = self.tab_info(ws_idx, tab_idx).unwrap();
 
         encode_success(id, ResponseResult::TabInfo { tab })

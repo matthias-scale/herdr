@@ -25,6 +25,7 @@ pub struct ClosingBlockReport {
 
 #[derive(Debug)]
 pub struct ApiWorktreeAddRequest {
+    pub client_id: Option<u64>,
     pub id: String,
     pub operation_id: u64,
     pub checkout_key: std::path::PathBuf,
@@ -49,6 +50,7 @@ pub struct WorktreeAddResult {
 
 #[derive(Debug)]
 pub struct ApiWorktreeRemoveRequest {
+    pub client_id: Option<u64>,
     pub id: String,
     pub operation_id: u64,
     pub checkout_key: std::path::PathBuf,
@@ -247,10 +249,12 @@ pub enum AppEvent {
     /// re-emits it through herdr's own clipboard writer.
     ClipboardWrite { content: Vec<u8> },
     /// Prefix-mode ASCII input-source request, emitted on entering/leaving the ASCII input
-    /// realm. The foreground process applies the host-local TIS switch (`active = true`) /
-    /// restore (`active = false`): the client in server mode (via server forwarding), the
-    /// app itself in monolithic mode.
-    PrefixInputSource { active: bool },
+    /// realm. `client_id` binds queued server-mode transitions to the client that produced
+    /// them; monolithic events leave it empty and apply the switch in-process.
+    PrefixInputSource {
+        client_id: Option<crate::app::InputSourceId>,
+        active: bool,
+    },
     /// A pane child reported its shell current directory through terminal
     /// metadata such as OSC 7.
     TerminalCwdReported {

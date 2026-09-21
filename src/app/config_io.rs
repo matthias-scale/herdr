@@ -631,7 +631,7 @@ mod keybinding_capture_tests {
         app.handle_settings_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
 
         assert_eq!(app.state.settings.keybind_capture, None);
-        assert_eq!(app.state.mode, crate::app::Mode::Settings);
+        assert_eq!(app.state.server_mode(), crate::app::Mode::Settings);
         assert_eq!(scratch.read(), "[ui]\nsidebar_width = 31\n");
     }
 }

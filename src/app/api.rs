@@ -19,7 +19,9 @@ mod worktrees;
 
 pub(crate) use panes::PaneSendError;
 
-use super::{api_helpers::pane_agent_status_with_stale, App, Mode, OverlayPaneState, ToastKind};
+#[cfg(test)]
+use super::Mode;
+use super::{api_helpers::pane_agent_status_with_stale, App, OverlayPaneState, ToastKind};
 use crate::events::AppEvent;
 
 const API_NOTIFICATION_RATE_LIMIT: Duration = Duration::from_secs(1);
@@ -425,7 +427,7 @@ impl App {
             return None;
         }
 
-        if let AppEvent::PrefixInputSource { active } = ev {
+        if let AppEvent::PrefixInputSource { active, .. } = ev {
             // Monolithic path applies the switch here. Server mode forwards it to the foreground
             // client instead (see HeadlessServer::handle_internal_event_with_forwarding); should an
             // App-internal drain consume the event before the forwarding drain, the flag keeps the
@@ -1029,7 +1031,7 @@ impl App {
         tab.zoomed = overlay.previous_zoomed;
 
         if was_overlay_active && self.state.active == Some(overlay.ws_idx) {
-            self.state.mode = Mode::Terminal;
+            self.focus_client_on_pane();
         }
     }
 
@@ -2252,7 +2254,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.overlay_panes.insert(
             overlay_pane,
             OverlayPaneState {
@@ -3132,7 +3134,7 @@ mod tests {
         app.state.terminals.get_mut(&terminal_id).unwrap().cwd = stale_cwd;
         app.state.active = None;
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
         app.state.toast_config.delay_seconds = 0;
 
@@ -3227,7 +3229,7 @@ mod tests {
         app.state.terminals.get_mut(&terminal_id).unwrap().cwd = stale_cwd;
         app.state.active = None;
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
         app.state.toast_config.delay_seconds = 1;
 
@@ -3464,7 +3466,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         let tab_id = app.public_tab_id(0, 0).unwrap();
         app.overlay_panes.insert(
             overlay_pane,
@@ -3520,6 +3522,7 @@ mod tests {
         let overlay_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
         workspace.tabs[0].zoomed = true;
         let mut app = app_with_overlay(workspace, overlay_pane, previous_focus, false);
+        app.state.set_server_mode(Mode::Prefix);
 
         app.handle_internal_event(AppEvent::PaneDied {
             pane_id: overlay_pane,
@@ -3530,6 +3533,8 @@ mod tests {
         assert_eq!(tab.layout.focused(), previous_focus);
         assert!(!tab.zoomed);
         assert!(app.overlay_panes.is_empty());
+        assert_eq!(app.state.server_mode(), Mode::Prefix);
+        assert!(app.take_pending_client_pane_focus());
     }
 
     #[tokio::test]
@@ -3682,7 +3687,7 @@ mod tests {
         app.state.terminals.get_mut(&terminal_id).unwrap().cwd = "/__herdr_projects__".into();
         app.state.active = None;
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.toast_config.delivery = crate::config::ToastDelivery::Terminal;
 
         app.handle_internal_event(AppEvent::StateChanged {

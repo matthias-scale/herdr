@@ -66,6 +66,11 @@ impl App {
         if self.state.handle_sidebar_subgroup_picker_key(key_event) {
             return None;
         }
+        if self.handle_sidebar_snooze_time_key(key_event)
+            || self.handle_sidebar_snooze_menu_key(key_event)
+        {
+            return None;
+        }
 
         // This is the key already on its way to a pane, so the sidebar may only
         // intercept it while the sidebar owns the keyboard.
@@ -90,6 +95,9 @@ impl App {
                     self.dispatch_sidebar_work_group_plan(*plan);
                     return None;
                 }
+            }
+            if self.handle_sidebar_session_action_key(key_event) {
+                return None;
             }
         }
 
@@ -200,7 +208,7 @@ impl App {
         }
 
         if self.state.is_prefix_key(&key) {
-            self.state.mode = Mode::Prefix;
+            self.state.set_server_mode(Mode::Prefix);
             return None;
         }
 
@@ -340,7 +348,7 @@ impl App {
         };
         rt.scroll_reset();
         let bytes = rt.encode_terminal_key(key.clone());
-        self.state.mode = Mode::Terminal;
+        self.state.set_server_mode(Mode::Terminal);
         if bytes.is_empty() {
             PreparedPopupInput::Consumed
         } else {
@@ -353,14 +361,17 @@ impl App {
 
     pub(crate) fn host_keyboard_report_all_requested(&self) -> bool {
         if self.state.popup_pane.is_none()
-            && matches!(self.state.mode, Mode::Prefix | Mode::Navigate)
+            && matches!(
+                self.state.effective_interaction_mode(),
+                Mode::Prefix | Mode::Navigate
+            )
         {
             return true;
         }
 
         let runtime = if self.state.popup_pane.is_some() {
             self.popup_runtime()
-        } else if self.state.mode == Mode::Terminal {
+        } else if self.state.effective_interaction_mode() == Mode::Terminal {
             self.dock_editor_runtime().or_else(|| {
                 self.state.active.and_then(|ws_idx| {
                     self.state
@@ -582,7 +593,7 @@ mod tests {
         app.state.terminals.insert(terminal.id.clone(), terminal);
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app
     }
 
@@ -611,7 +622,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
         (app, info)
     }
@@ -667,6 +678,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attached_client_routes_sidebar_session_keys_without_reaching_the_pane() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("sidebar-session-input");
+        let pane_id = workspace.tabs[0].root_pane;
+        let (runtime, mut pane_input) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.sidebar_focused = true;
+        app.state.sidebar_width = 40;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+
+        for code in [KeyCode::Char('z'), KeyCode::Down, KeyCode::Enter] {
+            app.route_client_events_from(
+                42,
+                vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                    code,
+                    KeyModifiers::empty(),
+                ))],
+                false,
+            );
+            assert!(
+                pane_input.try_recv().is_err(),
+                "sidebar-owned key reached the pane"
+            );
+        }
+        assert!(app.state.pane_is_snoozed(0, pane_id));
+
+        assert!(app.state.unsnooze_pane_at(
+            0,
+            pane_id,
+            crate::api::schema::PaneUnsnoozeReason::Explicit,
+            std::time::Instant::now(),
+        ));
+        app.route_client_events_from(
+            42,
+            vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(
+                KeyCode::Char('s'),
+                KeyModifiers::empty(),
+            ))],
+            false,
+        );
+
+        assert!(app.state.pane_is_settled(0, pane_id));
+        assert!(
+            pane_input.try_recv().is_err(),
+            "settle shortcut reached the pane"
+        );
+    }
+
+    #[tokio::test]
     async fn headless_subgroup_picker_owns_key_text_and_paste_input() {
         let mut app = app_for_mouse_test();
         let mut workspace = Workspace::test_new("subgroup-input");
@@ -677,7 +742,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.sidebar_focused = false;
         app.state.toggle_home();
         let home_prompt_before = app
@@ -784,7 +849,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         assert!(app.state.focus_pane_in_workspace(0, shell));
         assert!(!app.host_keyboard_report_all_requested());
@@ -895,7 +960,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
 
         let start_metrics = app
@@ -961,7 +1026,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
 
         let row = info.inner_rect.y;
@@ -1652,7 +1717,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
         app.state.copy_on_select = false;
 
@@ -1708,7 +1773,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
 
         let start_metrics = app
@@ -1759,7 +1824,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
         app.state.view.pane_infos = app.state.workspaces[0]
             .active_tab()
@@ -1773,7 +1838,7 @@ mod tests {
             .await;
 
         assert_ne!(app.state.workspaces[0].layout.focused(), focused_before);
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[cfg(unix)]
@@ -1801,7 +1866,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         let output_path = unique_temp_path("direct-edit-scrollback");
         let mut env = crate::config::TestConfigEnvGuard::acquire();
@@ -1822,7 +1887,7 @@ mod tests {
         let content = wait_for_file(&output_path);
         assert!(content.contains("alpha"));
         assert!(content.contains("beta"));
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
 
         let _ = std::fs::remove_file(output_path);
     }
@@ -1841,7 +1906,7 @@ mod tests {
         app.state.workspaces = vec![Workspace::test_new("test")];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         let output_path = unique_temp_path("direct-custom-command");
         let command = format!("printf direct > '{}'", output_path.display());
@@ -1862,7 +1927,7 @@ mod tests {
         .await;
 
         assert_eq!(wait_for_file(&output_path), "direct");
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         let _ = std::fs::remove_file(output_path);
     }
 
@@ -1889,7 +1954,7 @@ mod tests {
 
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
         assert!(app.state.workspaces[0].tabs[0].zoomed);
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
 
         shutdown_test_runtimes(&mut app);
     }
@@ -1922,7 +1987,7 @@ mod tests {
             .agent_detection_enabled_for_test());
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 1);
         assert!(!app.state.workspaces[0].tabs[0].zoomed);
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         let snapshot = crate::persist::capture(
             &app.state.workspaces,
             &app.state.terminals,
@@ -2006,7 +2071,7 @@ mod tests {
             .scroll_metrics()
             .is_some_and(|metrics| metrics.offset_from_bottom > 0));
         app.install_test_popup_runtime(runtime);
-        app.state.mode = Mode::Settings;
+        app.state.set_server_mode(Mode::Settings);
 
         app.handle_terminal_key_headless(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()));
 
@@ -2029,7 +2094,7 @@ mod tests {
             .try_send_bytes(Bytes::from_static(b"queued"))
             .unwrap();
         app.install_test_popup_runtime(runtime);
-        app.state.mode = Mode::Settings;
+        app.state.set_server_mode(Mode::Settings);
 
         let mut send = Box::pin(
             app.handle_terminal_key(TerminalKey::new(KeyCode::Char('x'), KeyModifiers::empty())),
@@ -2061,7 +2126,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
 
         let key = crate::input::parse_terminal_key_sequence("\x1b\x7f").unwrap();
@@ -2087,7 +2152,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
         assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
         assert!(crate::ui::sidebar_rows(&app.state).into_iter().any(|row| {
@@ -2129,7 +2194,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
         assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
 
@@ -2158,7 +2223,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos.clone();
         assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
         assert!(crate::ui::sidebar_rows(&app.state).into_iter().any(|row| {
@@ -2209,7 +2274,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos.clone();
 
         let inner = pane_infos[0].inner_rect;
@@ -2242,7 +2307,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.outer_terminal_focus = Some(false);
         app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
         app.state.toast_config.delay_seconds = 1;
@@ -2332,7 +2397,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
         (app, pane_id, pane_info)
     }
@@ -2465,7 +2530,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
 
         let page_up = physical_page_up(1);
@@ -2510,7 +2575,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
 
         let (popup_runtime, _popup_rx) =
             crate::terminal::TerminalRuntime::test_with_channel(40, 12);
@@ -2639,7 +2704,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
 
         let start_metrics = app
@@ -2682,7 +2747,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
 
         let start_metrics = app
@@ -2727,7 +2792,7 @@ mod tests {
         app.state.workspaces = vec![ws];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.view.pane_infos = pane_infos;
 
         app.handle_terminal_key_headless(TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty()));

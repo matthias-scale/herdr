@@ -172,7 +172,6 @@ pub(crate) fn paint_local_pane_graphics(
             app,
             graphics,
             terminal_runtimes,
-            app.view.tab_surface(),
             cell_size,
             None,
             &mut cache,
@@ -194,7 +193,6 @@ pub(crate) fn paint_local_pane_graphics(
             app,
             graphics,
             terminal_runtimes,
-            app.view.tab_surface(),
             cell_size,
             None,
             &mut cache,
@@ -220,20 +218,34 @@ pub(crate) fn encode_local_pane_graphics(
     app: &AppState,
     graphics: &crate::app::pane_graphics::Runtime,
     terminal_runtimes: &TerminalRuntimeRegistry,
-    surface: crate::ui::TabSurfaceView<'_>,
     cell_size: HostCellSize,
     transaction_budget: Option<usize>,
     cache: &mut HostGraphicsCache,
 ) -> EncodedGraphics {
-    // A full-terminal overlay covers the panes, but the graphics plane sits above
-    // the text and is not repainted by ratatui. Leaving placements up while home
-    // or the inbox is open lets a pane's image fight the overlay's text every
-    // frame, which reads as flicker.
-    let overlay_open = app.home.is_some() || app.inbox.is_some();
-    let visible = app.mode == Mode::Terminal && !overlay_open && cell_size.is_known();
+    encode_local_pane_graphics_for_client(
+        app,
+        graphics,
+        terminal_runtimes,
+        app.client_presentation_policy(),
+        cell_size,
+        transaction_budget,
+        cache,
+    )
+}
+
+pub(crate) fn encode_local_pane_graphics_for_client(
+    app: &AppState,
+    graphics: &crate::app::pane_graphics::Runtime,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    presentation_policy: crate::app::state::ClientPresentationPolicy<'_>,
+    cell_size: HostCellSize,
+    transaction_budget: Option<usize>,
+    cache: &mut HostGraphicsCache,
+) -> EncodedGraphics {
+    let surface = presentation_policy.tab_surface();
+    let visible = presentation_policy.pane_graphics_visible() && cell_size.is_known();
     tracing::debug!(
         visible,
-        overlay_open,
         cell_width_px = cell_size.width_px,
         cell_height_px = cell_size.height_px,
         active = ?app.active,
@@ -313,7 +325,7 @@ pub(crate) fn has_visible_pane_graphics(
     surface: crate::ui::TabSurfaceView<'_>,
     cell_size: HostCellSize,
 ) -> bool {
-    if app.mode != Mode::Terminal || !cell_size.is_known() {
+    if app.effective_interaction_mode() != Mode::Terminal || !cell_size.is_known() {
         return false;
     }
 
@@ -1314,14 +1326,14 @@ pub(crate) struct DirectFileCommand {
 }
 
 pub(crate) fn prepare_direct_file(
-    app: &AppState,
     graphics: &crate::app::pane_graphics::Runtime,
-    surface: crate::ui::TabSurfaceView<'_>,
+    presentation_policy: crate::app::state::ClientPresentationPolicy<'_>,
     cell_size: HostCellSize,
     allow_placement: bool,
     cache: &HostGraphicsCache,
     key: &crate::app::pane_graphics::Key,
 ) -> Option<DirectFileCommand> {
+    let surface = presentation_policy.tab_surface();
     let slot = graphics.slots.get(key)?;
     let layer = slot.layer.as_ref()?;
     layer.direct_lease()?;
@@ -1329,7 +1341,7 @@ pub(crate) fn prepare_direct_file(
     let info = allow_placement
         .then(|| surface.pane_infos.iter().find(|info| info.id == key.0))
         .flatten()
-        .filter(|_| app.mode == Mode::Terminal && cell_size.is_known() && app.active.is_some());
+        .filter(|_| presentation_policy.pane_graphics_visible() && cell_size.is_known());
     if let Some(command) = info
         .map(|info| {
             pane_graphics_host_placement(
@@ -3105,7 +3117,7 @@ mod tests {
         app.workspaces = vec![workspace];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         crate::ui::compute_view(&mut app, Rect::new(0, 0, 80, 24));
 
         let source = HostSourceKey::Terminal {
@@ -3128,7 +3140,6 @@ mod tests {
             &app,
             &crate::app::pane_graphics::Runtime::default(),
             &TerminalRuntimeRegistry::new(),
-            app.view.tab_surface(),
             HostCellSize {
                 width_px: 10,
                 height_px: 20,
@@ -3139,6 +3150,62 @@ mod tests {
 
         assert!(encoded.bytes.is_empty());
         assert!(cache.oversized.contains_key(&source));
+    }
+
+    #[test]
+    fn pomodoro_prompt_graphics_policy_follows_rendered_geometry() {
+        fn prompted_app(area: Rect) -> crate::app::state::AppState {
+            let mut app = crate::app::state::AppState::test_new();
+            let workspace = crate::workspace::Workspace::test_new("prompt-graphics");
+            app.workspaces = vec![workspace];
+            app.active = Some(0);
+            app.selected = 0;
+            app.set_server_mode(Mode::Terminal);
+            app.pomodoro.prompt = Some(crate::pomodoro::PomodoroPrompt {
+                ended: crate::pomodoro::PomodoroPhase::Work,
+                next: crate::pomodoro::PomodoroPhase::ShortBreak,
+                raised_at: std::time::Instant::now(),
+                input: String::new(),
+                error: None,
+            });
+            crate::ui::compute_view(&mut app, area);
+            app
+        }
+
+        let runtime = crate::app::pane_graphics::Runtime::default();
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+        let cell_size = HostCellSize {
+            width_px: 10,
+            height_px: 20,
+        };
+
+        let renderable = prompted_app(Rect::new(0, 0, 8, 24));
+        let mut renderable_cache = HostGraphicsCache::default();
+        renderable_cache.test_mark_non_empty();
+        let renderable_encoded = encode_local_pane_graphics(
+            &renderable,
+            &runtime,
+            &terminal_runtimes,
+            cell_size,
+            None,
+            &mut renderable_cache,
+        );
+        assert!(!renderable_encoded.bytes.is_empty());
+        assert_eq!(renderable_cache.test_image_count(), 0);
+
+        let hidden = prompted_app(Rect::new(0, 0, 7, 24));
+        let mut hidden_cache = HostGraphicsCache::default();
+        hidden_cache.test_mark_non_empty();
+        let hidden_encoded = encode_local_pane_graphics(
+            &hidden,
+            &runtime,
+            &terminal_runtimes,
+            cell_size,
+            None,
+            &mut hidden_cache,
+        );
+        assert!(hidden_encoded.bytes.is_empty());
+        assert_eq!(hidden_cache.test_image_count(), 1);
     }
 
     #[test]

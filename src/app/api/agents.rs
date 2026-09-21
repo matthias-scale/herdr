@@ -426,7 +426,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app
     }
 
@@ -1825,7 +1825,7 @@ mod tests {
                 .layout
                 .focus_pane(root_pane_id);
             app.state.active = None;
-            app.state.mode = Mode::Navigate;
+            app.state.set_server_mode(Mode::Navigate);
             assert_eq!(
                 app.state.workspaces[0].focused_pane_id(),
                 Some(root_pane_id)
@@ -1881,7 +1881,8 @@ mod tests {
             assert_eq!(app.state.active, Some(0));
             assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(pane_id));
             assert!(app.state.workspaces[0].tabs[0].panes[&pane_id].seen);
-            assert_eq!(app.state.mode, Mode::Terminal);
+            assert_eq!(app.state.server_mode(), Mode::Navigate);
+            assert_eq!(app.state.effective_interaction_mode(), Mode::Terminal);
             assert_eq!(app.remote_focus_operations.len(), 0);
         }
         let parsed: SuccessResponse = serde_json::from_str(&agent_ref_response).expect("response");

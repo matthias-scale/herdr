@@ -461,7 +461,7 @@ impl App {
             Ok(pane_id) => {
                 tracing::info!(machine, pane_id, "home dispatched to another machine");
                 self.state.clear_home();
-                self.state.mode = super::Mode::Terminal;
+                self.state.set_server_mode(super::Mode::Terminal);
             }
             Err(error) => {
                 if let Some(home) = self.state.home.as_mut() {
@@ -493,7 +493,7 @@ impl App {
             Ok(()) => match self.dispatch_home_composer(plan) {
                 Ok(()) => {
                     self.state.clear_home();
-                    self.state.mode = super::Mode::Terminal;
+                    self.state.set_server_mode(super::Mode::Terminal);
                 }
                 Err(error) => {
                     if let Some(home) = self.state.home.as_mut() {

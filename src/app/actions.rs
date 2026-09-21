@@ -17,7 +17,7 @@ use crate::workspace::{TabPrioAction, WorkspaceGitStatus};
 use super::api_helpers::pane_agent_status;
 use super::state::{
     navigator_display_index_of_row, navigator_display_lines, navigator_first_row_at_or_after,
-    text_matches_query, AgentNotificationDelivery, AppState, Mode, NavigatorRow,
+    text_matches_query, AgentNotificationDelivery, AppState, ClientOverlay, Mode, NavigatorRow,
     NavigatorStateFilter, NavigatorTarget, PaneFocusTarget, PendingAgentNotification, ToastKind,
     ToastNotification, ToastTarget, ViewLayout,
 };
@@ -438,7 +438,7 @@ impl AppState {
             self.navigator.expanded_workspaces.insert(ws.id.clone());
         }
 
-        self.mode = Mode::Navigator;
+        self.set_server_mode(Mode::Navigator);
         self.navigator.selected = self
             .current_navigator_row_index_from(terminal_runtimes)
             .unwrap_or(0);
@@ -916,7 +916,7 @@ impl AppState {
                     return false;
                 }
                 self.switch_workspace(ws_idx);
-                self.mode = Mode::Terminal;
+                self.set_server_mode(Mode::Terminal);
                 true
             }
             NavigatorTarget::Tab { ws_idx, tab_idx } => {
@@ -931,7 +931,7 @@ impl AppState {
                     return false;
                 }
                 self.switch_workspace_tab(ws_idx, tab_idx);
-                self.mode = Mode::Terminal;
+                self.set_server_mode(Mode::Terminal);
                 true
             }
             NavigatorTarget::Pane {
@@ -949,7 +949,7 @@ impl AppState {
                     .is_some_and(|tab| tab.panes.contains_key(&pane_id))
                 {
                     self.focus_pane_in_workspace(ws_idx, pane_id);
-                    self.mode = Mode::Terminal;
+                    self.set_server_mode(Mode::Terminal);
                     return true;
                 }
                 false
@@ -1347,7 +1347,7 @@ impl AppState {
             return;
         }
 
-        if self.view.layout == ViewLayout::Mobile && self.mode == Mode::Navigate {
+        if self.view.layout == ViewLayout::Mobile && self.server_mode() == Mode::Navigate {
             self.ensure_mobile_workspace_visible(idx);
             return;
         }
@@ -2270,7 +2270,7 @@ impl AppState {
         };
         self.selected = ws_idx;
         self.confirm_close_workspace_id = Some(workspace_id);
-        self.mode = Mode::ConfirmClose;
+        self.open_client_overlay(ClientOverlay::ConfirmClose);
         true
     }
 
@@ -4451,8 +4451,8 @@ impl AppState {
             if self.workspaces.is_empty() {
                 self.active = None;
                 self.selected = 0;
-                if self.mode == Mode::Terminal {
-                    self.mode = Mode::Navigate;
+                if self.server_mode() == Mode::Terminal {
+                    self.set_server_mode(Mode::Navigate);
                 }
             } else {
                 // Keep focus on the previously focused workspace
@@ -4534,7 +4534,7 @@ mod tests {
         state.ensure_test_terminals();
         if !state.workspaces.is_empty() {
             state.active = Some(0);
-            state.mode = Mode::Terminal;
+            state.set_server_mode(Mode::Terminal);
         }
         state
     }
@@ -4877,7 +4877,7 @@ mod tests {
         assert!(state.accept_navigator_selection());
         assert_eq!(state.active, Some(1));
         assert_eq!(state.workspaces[1].active_tab_index(), 0);
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.server_mode(), Mode::Terminal);
     }
 
     #[tokio::test]
@@ -5065,7 +5065,7 @@ mod tests {
 
         assert_eq!(state.active, Some(1));
         assert_eq!(state.workspaces[1].focused_pane_id(), Some(target));
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -5703,7 +5703,7 @@ mod tests {
         state.ensure_test_terminals();
         state.active = Some(0);
         state.selected = 0;
-        state.mode = Mode::Terminal;
+        state.set_server_mode(Mode::Terminal);
         mark_agent(&mut state, 0, 0, first_root);
         mark_agent(&mut state, 0, 0, first_second);
         mark_agent(&mut state, 1, 0, second_root);
@@ -5735,7 +5735,7 @@ mod tests {
         state.workspaces = vec![first, second];
         state.active = Some(0);
         state.selected = 0;
-        state.mode = Mode::Terminal;
+        state.set_server_mode(Mode::Terminal);
         mark_agent(&mut state, 0, 0, first_root);
         mark_agent(&mut state, 0, 0, first_second);
         mark_agent(&mut state, 1, 0, second_root);
@@ -5773,7 +5773,7 @@ mod tests {
         state.ensure_test_terminals();
         state.active = Some(0);
         state.selected = 0;
-        state.mode = Mode::Terminal;
+        state.set_server_mode(Mode::Terminal);
         state.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
         set_agent_state(&mut state, 0, 0, first_root, AgentState::Idle);
         set_agent_state(&mut state, 0, 0, first_second, AgentState::Working);
@@ -5808,7 +5808,7 @@ mod tests {
         state.ensure_test_terminals();
         state.active = Some(0);
         state.selected = 0;
-        state.mode = Mode::Terminal;
+        state.set_server_mode(Mode::Terminal);
         state.agent_panel_sort = crate::app::state::AgentPanelSort::Priority;
 
         transition_agent_state(&mut state, first, AgentState::Idle);
@@ -5846,7 +5846,7 @@ mod tests {
         state.ensure_test_terminals();
         state.active = Some(0);
         state.selected = 0;
-        state.mode = Mode::Terminal;
+        state.set_server_mode(Mode::Terminal);
         for tab_idx in 0..state.workspaces[0].tabs.len() {
             let pane_id = state.workspaces[0].tabs[tab_idx].root_pane;
             mark_agent(&mut state, 0, tab_idx, pane_id);
@@ -6236,13 +6236,13 @@ mod tests {
     #[test]
     fn pane_died_last_workspace_enters_navigate() {
         let mut state = app_with_workspaces(&["only"]);
-        state.mode = Mode::Terminal;
+        state.set_server_mode(Mode::Terminal);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
 
         state.handle_pane_died(pane_id);
 
         assert!(state.workspaces.is_empty());
-        assert_eq!(state.mode, Mode::Navigate);
+        assert_eq!(state.server_mode(), Mode::Navigate);
         state.assert_invariants_for_test();
     }
 
@@ -8032,7 +8032,7 @@ mod tests {
         let deferred = state.close_pane();
 
         assert!(deferred);
-        assert_eq!(state.mode, Mode::ConfirmClose);
+        assert_eq!(state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(state.selected, 0);
         assert_eq!(state.workspaces.len(), 2);
     }
@@ -8062,7 +8062,7 @@ mod tests {
         let deferred = state.close_tab();
 
         assert!(deferred);
-        assert_eq!(state.mode, Mode::ConfirmClose);
+        assert_eq!(state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(state.selected, 0);
         assert_eq!(state.workspaces.len(), 2);
     }
