@@ -167,7 +167,6 @@ pub(crate) struct GhosttyPaneTerminal {
     pub core: Mutex<GhosttyPaneCore>,
     key_encoder: Mutex<crate::ghostty::KeyEncoder>,
     pending_pty_responses: Arc<Mutex<Vec<Bytes>>>,
-    link_extraction: Mutex<Option<Arc<crate::agent_state::LinkExtractionGate>>>,
     content_revision: AtomicU64,
 }
 
@@ -1086,7 +1085,6 @@ impl GhosttyPaneTerminal {
             }),
             key_encoder: Mutex::new(key_encoder),
             pending_pty_responses,
-            link_extraction: Mutex::new(None),
             content_revision: AtomicU64::new(0),
         })
     }
@@ -1096,9 +1094,18 @@ impl GhosttyPaneTerminal {
     }
 
     fn install_link_extraction(&self, gate: Arc<crate::agent_state::LinkExtractionGate>) {
-        if let Ok(mut link_extraction) = self.link_extraction.lock() {
-            *link_extraction = Some(gate);
-        }
+        let Ok(mut core) = self.core.lock() else {
+            return;
+        };
+        core.terminal
+            .set_parsed_output_callback(move |event| match event {
+                crate::ghostty::ParsedOutput::Text(bytes) => gate.observe_parsed_text(bytes),
+                crate::ghostty::ParsedOutput::Separator => gate.observe_parsed_separator(),
+                crate::ghostty::ParsedOutput::Hyperlink(bytes) => {
+                    gate.observe_parsed_hyperlink(bytes);
+                }
+                crate::ghostty::ParsedOutput::Boundary => gate.observe_parsed_boundary(),
+            });
     }
 
     pub(super) fn set_windows_powershell_prompt_cwd_reporting(&self, enabled: bool) {
@@ -1332,6 +1339,13 @@ impl GhosttyPaneTerminal {
         let default_color_events = core.default_color_event_tracker.drain_pending();
         let xtgettcap_responses = core.xtgettcap_query_tracker.drain_pending();
         let write_started = crate::render_prof::timer();
+        if let Err(error) = core.terminal.set_parsed_output_enabled(true) {
+            debug!(
+                pane = pane_id.raw(),
+                ?error,
+                "failed to enable parsed output callback"
+            );
+        }
         self.write_pty_bytes_with_ordered_responses(
             &mut core,
             filtered_bytes.as_ref(),
@@ -1340,10 +1354,12 @@ impl GhosttyPaneTerminal {
             xtgettcap_responses,
             &mut terminal_responses,
         );
-        if let Ok(link_extraction) = self.link_extraction.lock() {
-            if let Some(gate) = link_extraction.as_ref() {
-                gate.observe_chunk(filtered_bytes.as_ref());
-            }
+        if let Err(error) = core.terminal.set_parsed_output_enabled(false) {
+            debug!(
+                pane = pane_id.raw(),
+                ?error,
+                "failed to disable parsed output callback"
+            );
         }
         if !filtered_bytes.is_empty() {
             self.content_revision.fetch_add(1, Ordering::Release);

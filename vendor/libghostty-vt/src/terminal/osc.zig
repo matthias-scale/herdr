@@ -297,6 +297,10 @@ pub const Parser = struct {
     /// Maximum size of a "normal" OSC.
     pub const MAX_BUF = 2048;
 
+    /// Maximum accepted OSC 8 `params;URI` payload. Each component may be as
+    /// large as 8 KiB while the parser remains bounded.
+    pub const MAX_HYPERLINK_CAPTURE = 16 * 1024 + 1;
+
     /// Optional allocator used to accept data longer than MAX_BUF.
     /// This only applies to some commands (e.g. OSC 52) that can
     /// reasonably exceed MAX_BUF.
@@ -551,6 +555,10 @@ pub const Parser = struct {
         // If a writer has been initialized, we just accumulate the rest of the
         // OSC sequence in the writer's buffer and skip the state machine.
         if (self.capture) |*cap| {
+            if (self.state == .@"8" and cap.trailing().len >= MAX_HYPERLINK_CAPTURE) {
+                self.state = .invalid;
+                return;
+            }
             cap.writer.writeByte(c) catch |err| switch (err) {
                 // We have overflowed our buffer or had some other error, set the
                 // state to invalid so that we discard any further input.
@@ -743,10 +751,14 @@ pub const Parser = struct {
             .@"0",
             .@"22",
             .@"777",
-            .@"8",
             .@"9",
             => switch (c) {
                 ';' => self.captureTrailing(.fixed),
+                else => self.state = .invalid,
+            },
+
+            .@"8" => switch (c) {
+                ';' => self.captureTrailing(.allocating),
                 else => self.state = .invalid,
             },
         }

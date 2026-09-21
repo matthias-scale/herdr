@@ -42,6 +42,10 @@ pub(crate) struct LinkExtractionGate {
     #[cfg(test)]
     scanned_bytes: AtomicU64,
     #[cfg(test)]
+    parsed_events: AtomicU64,
+    #[cfg(test)]
+    parsed_event_bytes: AtomicU64,
+    #[cfg(test)]
     observe_race_hook: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
 }
 
@@ -59,6 +63,10 @@ impl Default for LinkExtractionGate {
             #[cfg(test)]
             scanned_bytes: AtomicU64::new(0),
             #[cfg(test)]
+            parsed_events: AtomicU64::new(0),
+            #[cfg(test)]
+            parsed_event_bytes: AtomicU64::new(0),
+            #[cfg(test)]
             observe_race_hook: Mutex::new(None),
         }
     }
@@ -68,7 +76,6 @@ impl Default for LinkExtractionGate {
 struct AtomicMarkerTail {
     words: [AtomicU64; MAX_MARKER_TAIL_BYTES.div_ceil(8)],
     len: AtomicU64,
-    state: AtomicU64,
     sequence: AtomicU64,
 }
 
@@ -77,7 +84,6 @@ impl Default for AtomicMarkerTail {
         Self {
             words: std::array::from_fn(|_| AtomicU64::new(0)),
             len: AtomicU64::new(0),
-            state: AtomicU64::new(0),
             sequence: AtomicU64::new(0),
         }
     }
@@ -99,9 +105,8 @@ impl AtomicMarkerTail {
                 let end = (start + 8).min(MAX_MARKER_TAIL_BYTES);
                 bytes[start..end].copy_from_slice(&unpacked[..end - start]);
             }
-            let state = self.state.load(Ordering::Relaxed);
             if self.sequence.load(Ordering::Acquire) == sequence {
-                return (decode_scanner_prefix(&bytes[..len], state), sequence);
+                return (decode_scanner_prefix(&bytes[..len]), sequence);
             }
         }
     }
@@ -121,7 +126,7 @@ impl AtomicMarkerTail {
     }
 
     fn store_prefix_if_sequence(&self, prefix: &ScannerPrefix, sequence: u64) -> bool {
-        let (bytes, state) = encode_scanner_prefix(prefix);
+        let bytes = encode_scanner_prefix(prefix);
         debug_assert!(bytes.len() <= MAX_MARKER_TAIL_BYTES);
         if self
             .sequence
@@ -145,7 +150,6 @@ impl AtomicMarkerTail {
             word.store(u64::from_le_bytes(packed), Ordering::Relaxed);
         }
         self.len.store(bytes.len() as u64, Ordering::Relaxed);
-        self.state.store(state, Ordering::Relaxed);
         self.sequence
             .store(sequence.wrapping_add(2), Ordering::Release);
         true
@@ -162,7 +166,6 @@ struct PendingLinkBytes {
 #[derive(Debug, Default)]
 struct LinkStreamScanner {
     visible: VisibleLinkState,
-    terminal: TerminalScanState,
 }
 
 #[derive(Debug, Default)]
@@ -196,7 +199,6 @@ struct UrlCandidate {
 #[derive(Debug, Clone, Default)]
 struct ScannerPrefix {
     visible: PrefixVisibleState,
-    terminal: PrefixTerminalState,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -207,29 +209,6 @@ enum PrefixVisibleState {
     AfterColon(SchemeCandidate),
     AfterSlash(SchemeCandidate),
     InvalidScheme,
-}
-
-#[derive(Debug, Clone, Default)]
-enum PrefixTerminalState {
-    #[default]
-    Visible,
-    Escape,
-    Charset,
-    Csi,
-    ControlString {
-        escaped: bool,
-    },
-    Osc {
-        phase: PrefixOscPhase,
-        escaped: bool,
-    },
-}
-
-#[derive(Debug, Clone)]
-enum PrefixOscPhase {
-    Prefix(usize),
-    Parameters,
-    Ignore,
 }
 
 enum PrefixScanOutcome {
@@ -267,100 +246,13 @@ impl ScannerPrefix {
 
     fn would_activate(&self, byte: u8) -> bool {
         matches!(
-            (&self.terminal, &self.visible, byte),
-            (
-                PrefixTerminalState::Visible,
-                PrefixVisibleState::AfterSlash(_),
-                b'/'
-            ) | (
-                PrefixTerminalState::Osc {
-                    phase: PrefixOscPhase::Prefix(1),
-                    escaped: false,
-                },
-                _,
-                b';'
-            ) | (
-                PrefixTerminalState::Osc {
-                    phase: PrefixOscPhase::Parameters,
-                    escaped: false,
-                },
-                _,
-                b';'
-            )
+            (&self.visible, byte),
+            (PrefixVisibleState::AfterSlash(_), b'/')
         )
     }
 
     fn scan_byte(&mut self, byte: u8) {
-        let terminal = std::mem::take(&mut self.terminal);
-        self.terminal = match terminal {
-            PrefixTerminalState::Visible if byte == b'\x1b' => PrefixTerminalState::Escape,
-            PrefixTerminalState::Visible => {
-                self.scan_visible(byte);
-                PrefixTerminalState::Visible
-            }
-            PrefixTerminalState::Escape => match byte {
-                b'\x1b' => PrefixTerminalState::Escape,
-                b'[' => PrefixTerminalState::Csi,
-                b']' => PrefixTerminalState::Osc {
-                    phase: PrefixOscPhase::Prefix(0),
-                    escaped: false,
-                },
-                byte if is_control_string_introducer(byte) => {
-                    PrefixTerminalState::ControlString { escaped: false }
-                }
-                b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => PrefixTerminalState::Charset,
-                _ => PrefixTerminalState::Visible,
-            },
-            PrefixTerminalState::Charset => PrefixTerminalState::Visible,
-            PrefixTerminalState::Csi if (0x40..=0x7e).contains(&byte) => {
-                PrefixTerminalState::Visible
-            }
-            PrefixTerminalState::Csi => PrefixTerminalState::Csi,
-            PrefixTerminalState::ControlString { .. } if byte == b'\x18' || byte == b'\x1a' => {
-                PrefixTerminalState::Visible
-            }
-            PrefixTerminalState::ControlString { escaped: true } if byte == b'\\' => {
-                PrefixTerminalState::Visible
-            }
-            PrefixTerminalState::ControlString { escaped: true } => {
-                self.terminal = PrefixTerminalState::Escape;
-                self.scan_byte(byte);
-                return;
-            }
-            PrefixTerminalState::ControlString { escaped: false } if byte == b'\x1b' => {
-                PrefixTerminalState::ControlString { escaped: true }
-            }
-            PrefixTerminalState::ControlString { escaped: false } => {
-                PrefixTerminalState::ControlString { escaped: false }
-            }
-            PrefixTerminalState::Osc { .. } if byte == b'\x18' || byte == b'\x1a' => {
-                PrefixTerminalState::Visible
-            }
-            PrefixTerminalState::Osc {
-                phase: _,
-                escaped: true,
-            } => {
-                if byte == b'\\' {
-                    PrefixTerminalState::Visible
-                } else {
-                    self.terminal = PrefixTerminalState::Escape;
-                    self.scan_byte(byte);
-                    return;
-                }
-            }
-            PrefixTerminalState::Osc { .. } if byte == b'\x07' => PrefixTerminalState::Visible,
-            PrefixTerminalState::Osc { phase, .. } if byte == b'\x1b' => PrefixTerminalState::Osc {
-                phase,
-                escaped: true,
-            },
-            PrefixTerminalState::Osc { mut phase, .. } => {
-                scan_prefix_osc_content(&mut phase, byte);
-                PrefixTerminalState::Osc {
-                    phase,
-                    escaped: false,
-                }
-            }
-        };
+        self.scan_visible(byte);
     }
 
     fn scan_visible(&mut self, byte: u8) {
@@ -395,21 +287,6 @@ impl ScannerPrefix {
     }
 }
 
-fn scan_prefix_osc_content(phase: &mut PrefixOscPhase, byte: u8) {
-    *phase = match std::mem::replace(phase, PrefixOscPhase::Ignore) {
-        PrefixOscPhase::Prefix(0) if byte == b'8' => PrefixOscPhase::Prefix(1),
-        PrefixOscPhase::Prefix(_) => PrefixOscPhase::Ignore,
-        PrefixOscPhase::Parameters => PrefixOscPhase::Parameters,
-        PrefixOscPhase::Ignore => PrefixOscPhase::Ignore,
-    };
-}
-
-// R360-35: Ghostty's stream-parser state is not exposed through its Rust FFI.
-// Keep every scanner tier on this one list of Ghostty-hidden string introducers.
-fn is_control_string_introducer(byte: u8) -> bool {
-    matches!(byte, b'P' | b'X' | b'^' | b'_')
-}
-
 fn start_prefix_scheme(byte: u8) -> PrefixVisibleState {
     if byte.is_ascii_alphabetic() {
         PrefixVisibleState::Scheme(SchemeCandidate::new(byte))
@@ -420,74 +297,29 @@ fn start_prefix_scheme(byte: u8) -> PrefixVisibleState {
     }
 }
 
-fn encode_scanner_prefix(prefix: &ScannerPrefix) -> (&[u8], u64) {
-    let (bytes, visible) = match &prefix.visible {
-        PrefixVisibleState::Empty => (&[][..], 0),
-        PrefixVisibleState::Scheme(candidate) => (&candidate.bytes[..candidate.len], 1),
-        PrefixVisibleState::AfterColon(candidate) => (&candidate.bytes[..candidate.len], 2),
-        PrefixVisibleState::AfterSlash(candidate) => (&candidate.bytes[..candidate.len], 3),
-        PrefixVisibleState::InvalidScheme => (&[][..], 4),
-    };
-    let terminal = match &prefix.terminal {
-        PrefixTerminalState::Visible => 0,
-        PrefixTerminalState::Escape => 1,
-        PrefixTerminalState::Charset => 2,
-        PrefixTerminalState::Csi => 3,
-        PrefixTerminalState::ControlString { escaped } => 8 | (u64::from(*escaped) << 4),
-        PrefixTerminalState::Osc {
-            phase: PrefixOscPhase::Prefix(0),
-            escaped,
-        } => 4 | (u64::from(*escaped) << 4),
-        PrefixTerminalState::Osc {
-            phase: PrefixOscPhase::Prefix(_),
-            escaped,
-        } => 5 | (u64::from(*escaped) << 4),
-        PrefixTerminalState::Osc {
-            phase: PrefixOscPhase::Parameters,
-            escaped,
-        } => 6 | (u64::from(*escaped) << 4),
-        PrefixTerminalState::Osc {
-            phase: PrefixOscPhase::Ignore,
-            escaped,
-        } => 7 | (u64::from(*escaped) << 4),
-    };
-    (bytes, visible | (terminal << 3))
+fn encode_scanner_prefix(prefix: &ScannerPrefix) -> &[u8] {
+    match &prefix.visible {
+        PrefixVisibleState::Scheme(candidate)
+        | PrefixVisibleState::AfterColon(candidate)
+        | PrefixVisibleState::AfterSlash(candidate) => &candidate.bytes[..candidate.len],
+        PrefixVisibleState::InvalidScheme => b"\0",
+        PrefixVisibleState::Empty => &[],
+    }
 }
 
-fn decode_scanner_prefix(bytes: &[u8], state: u64) -> ScannerPrefix {
-    let visible = match state & 0b111 {
-        1 if !bytes.is_empty() => PrefixVisibleState::Scheme(SchemeCandidate::from_bytes(bytes)),
-        2 if !bytes.is_empty() => {
-            PrefixVisibleState::AfterColon(SchemeCandidate::from_bytes(bytes))
-        }
-        3 if !bytes.is_empty() => {
-            PrefixVisibleState::AfterSlash(SchemeCandidate::from_bytes(bytes))
-        }
-        4 => PrefixVisibleState::InvalidScheme,
-        _ => PrefixVisibleState::Empty,
+fn decode_scanner_prefix(bytes: &[u8]) -> ScannerPrefix {
+    let visible = if bytes == b"\0" {
+        PrefixVisibleState::InvalidScheme
+    } else if bytes.is_empty() {
+        PrefixVisibleState::Empty
+    } else if bytes.ends_with(b":/") {
+        PrefixVisibleState::AfterSlash(SchemeCandidate::from_bytes(bytes))
+    } else if bytes.ends_with(b":") {
+        PrefixVisibleState::AfterColon(SchemeCandidate::from_bytes(bytes))
+    } else {
+        PrefixVisibleState::Scheme(SchemeCandidate::from_bytes(bytes))
     };
-    let terminal = match state >> 3 {
-        1 => PrefixTerminalState::Escape,
-        2 => PrefixTerminalState::Charset,
-        3 => PrefixTerminalState::Csi,
-        encoded @ (8 | 24) => PrefixTerminalState::ControlString {
-            escaped: encoded & 0b1_0000 != 0,
-        },
-        encoded @ 4..=23 => {
-            let phase = match encoded & 0b1111 {
-                4 => PrefixOscPhase::Prefix(0),
-                5 => PrefixOscPhase::Prefix(1),
-                6 => PrefixOscPhase::Parameters,
-                _ => PrefixOscPhase::Ignore,
-            };
-            PrefixTerminalState::Osc {
-                phase,
-                escaped: encoded & 0b1_0000 != 0,
-            }
-        }
-        _ => PrefixTerminalState::Visible,
-    };
-    ScannerPrefix { visible, terminal }
+    ScannerPrefix { visible }
 }
 
 impl SchemeCandidate {
@@ -657,49 +489,6 @@ fn update_delimiter_counts(byte: u8, open: &mut [usize; 3], close: &mut [usize; 
     }
 }
 
-#[derive(Debug, Default)]
-enum TerminalScanState {
-    #[default]
-    Visible,
-    Escape,
-    Charset,
-    Csi,
-    ControlString {
-        escaped: bool,
-    },
-    Osc(OscScanState),
-}
-
-#[derive(Debug)]
-struct OscScanState {
-    phase: OscPhase,
-    escaped: bool,
-}
-
-impl Default for OscScanState {
-    fn default() -> Self {
-        Self {
-            phase: OscPhase::Prefix(0),
-            escaped: false,
-        }
-    }
-}
-
-#[derive(Debug)]
-enum OscPhase {
-    Prefix(usize),
-    Parameters,
-    Target(UrlCandidate),
-    Ignore,
-}
-
-enum OscScanOutcome {
-    Continue,
-    Terminated,
-    Cancelled,
-    ReplayEscape,
-}
-
 #[derive(Debug)]
 pub(crate) struct ExtractedAgentLinks {
     pub(crate) ordered_links: Vec<DetectedAgentLink>,
@@ -716,8 +505,66 @@ pub(crate) struct DetectedAgentLink {
 }
 
 impl LinkExtractionGate {
-    /// The pane's PTY `on_read` callback is the sole producer for a gate.
-    /// Detection may consume links concurrently through `take_links`.
+    /// Receives only text Ghostty's VT parser classified as printable.
+    pub(crate) fn observe_parsed_text(&self, bytes: &[u8]) {
+        self.record_parsed_event(bytes.len());
+        self.observe_chunk(bytes);
+    }
+
+    /// Separates printable runs without exposing a private terminal parser.
+    pub(crate) fn observe_parsed_separator(&self) {
+        self.record_parsed_event(0);
+        self.observe_chunk(b"\n");
+    }
+
+    /// Receives a complete OSC 8 target from Ghostty's parser.
+    pub(crate) fn observe_parsed_hyperlink(&self, bytes: &[u8]) {
+        self.record_parsed_event(bytes.len());
+        if bytes.len() > MAX_URL_BYTES {
+            return;
+        }
+        let urls = extract_urls(&String::from_utf8_lossy(bytes));
+        if urls.is_empty() {
+            return;
+        }
+        let Ok(_processing) = self.processing.lock() else {
+            return;
+        };
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
+        if !self.active.load(Ordering::Acquire) {
+            let (prefix, _) = self.marker_tail.load();
+            pending.scanner.restore_prefix(prefix);
+            self.marker_tail.store(&[]);
+        }
+        for url in urls {
+            queue_link(&mut pending.queued_links, url, AgentLinkSource::Osc8);
+        }
+        pending.dirty = true;
+        self.active.store(true, Ordering::Release);
+    }
+
+    /// Applies a parser-confirmed OSC boundary to lexical prefix state.
+    pub(crate) fn observe_parsed_boundary(&self) {
+        self.record_parsed_event(0);
+        let Ok(_processing) = self.processing.lock() else {
+            return;
+        };
+        if self.active.load(Ordering::Acquire) {
+            let Ok(mut pending) = self.pending.lock() else {
+                return;
+            };
+            pending.scanner.observe_control_boundary();
+        } else {
+            let (mut prefix, _) = self.marker_tail.load();
+            prefix.observe_control_boundary();
+            self.marker_tail.store_prefix(&prefix);
+        }
+    }
+
+    /// Scans one already-visible byte run. Unit tests use this directly;
+    /// production calls it only through Ghostty's parsed-output callback.
     pub(crate) fn observe_chunk(&self, bytes: &[u8]) {
         let mut fast_scan = None;
         if !self.active.load(Ordering::Acquire) {
@@ -865,6 +712,24 @@ impl LinkExtractionGate {
             .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
+    fn record_parsed_event(&self, bytes: usize) {
+        let _ = bytes;
+        #[cfg(test)]
+        {
+            self.parsed_events.fetch_add(1, Ordering::Relaxed);
+            self.parsed_event_bytes
+                .fetch_add(bytes as u64, Ordering::Relaxed);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parsed_event_measurement(&self) -> (u64, u64) {
+        (
+            self.parsed_events.load(Ordering::Relaxed),
+            self.parsed_event_bytes.load(Ordering::Relaxed),
+        )
+    }
+
     #[cfg(test)]
     fn retained_byte_count(&self) -> usize {
         self.pending
@@ -890,66 +755,14 @@ impl PendingLinkBytes {
 }
 
 impl LinkStreamScanner {
+    fn observe_control_boundary(&mut self) {
+        if matches!(self.visible, VisibleLinkState::InvalidScheme) {
+            self.visible = VisibleLinkState::Empty;
+        }
+    }
+
     fn scan_byte(&mut self, byte: u8, links: &mut VecDeque<DetectedAgentLink>) {
-        let terminal = std::mem::take(&mut self.terminal);
-        self.terminal = match terminal {
-            TerminalScanState::Visible if byte == b'\x1b' => {
-                if let VisibleLinkState::Url(url) = &mut self.visible {
-                    if !url.flush_pending_utf8() {
-                        self.visible = VisibleLinkState::DiscardUrl(Vec::new());
-                    }
-                }
-                TerminalScanState::Escape
-            }
-            TerminalScanState::Visible => {
-                self.scan_visible(byte, links);
-                TerminalScanState::Visible
-            }
-            TerminalScanState::Escape => match byte {
-                b'\x1b' => TerminalScanState::Escape,
-                b'[' => TerminalScanState::Csi,
-                b']' => TerminalScanState::Osc(OscScanState::default()),
-                byte if is_control_string_introducer(byte) => {
-                    TerminalScanState::ControlString { escaped: false }
-                }
-                b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => TerminalScanState::Charset,
-                _ => TerminalScanState::Visible,
-            },
-            TerminalScanState::Charset => TerminalScanState::Visible,
-            TerminalScanState::Csi if (0x40..=0x7e).contains(&byte) => TerminalScanState::Visible,
-            TerminalScanState::Csi => TerminalScanState::Csi,
-            TerminalScanState::ControlString { .. } if byte == b'\x18' || byte == b'\x1a' => {
-                TerminalScanState::Visible
-            }
-            TerminalScanState::ControlString { escaped: true } if byte == b'\\' => {
-                TerminalScanState::Visible
-            }
-            TerminalScanState::ControlString { escaped: true } => {
-                self.terminal = TerminalScanState::Escape;
-                self.scan_byte(byte, links);
-                return;
-            }
-            TerminalScanState::ControlString { escaped: false } if byte == b'\x1b' => {
-                TerminalScanState::ControlString { escaped: true }
-            }
-            TerminalScanState::ControlString { escaped: false } => {
-                TerminalScanState::ControlString { escaped: false }
-            }
-            TerminalScanState::Osc(mut osc) => match osc.scan_byte(byte, links) {
-                OscScanOutcome::Continue => TerminalScanState::Osc(osc),
-                OscScanOutcome::Terminated | OscScanOutcome::Cancelled => {
-                    if matches!(self.visible, VisibleLinkState::InvalidScheme) {
-                        self.visible = VisibleLinkState::Empty;
-                    }
-                    TerminalScanState::Visible
-                }
-                OscScanOutcome::ReplayEscape => {
-                    self.terminal = TerminalScanState::Escape;
-                    self.scan_byte(byte, links);
-                    return;
-                }
-            },
-        };
+        self.scan_visible(byte, links);
     }
 
     fn scan_visible(&mut self, byte: u8, links: &mut VecDeque<DetectedAgentLink>) {
@@ -1021,35 +834,12 @@ impl LinkStreamScanner {
             PrefixVisibleState::AfterSlash(candidate) => VisibleLinkState::AfterSlash(candidate),
             PrefixVisibleState::InvalidScheme => VisibleLinkState::InvalidScheme,
         };
-        self.terminal = match prefix.terminal {
-            PrefixTerminalState::Visible => TerminalScanState::Visible,
-            PrefixTerminalState::Escape => TerminalScanState::Escape,
-            PrefixTerminalState::Charset => TerminalScanState::Charset,
-            PrefixTerminalState::Csi => TerminalScanState::Csi,
-            PrefixTerminalState::ControlString { escaped } => {
-                TerminalScanState::ControlString { escaped }
-            }
-            PrefixTerminalState::Osc { phase, escaped } => TerminalScanState::Osc(OscScanState {
-                phase: match phase {
-                    PrefixOscPhase::Prefix(value) => OscPhase::Prefix(value),
-                    PrefixOscPhase::Parameters => OscPhase::Parameters,
-                    PrefixOscPhase::Ignore => OscPhase::Ignore,
-                },
-                escaped,
-            }),
-        };
     }
 
     fn take_prefix(&mut self) -> Option<ScannerPrefix> {
         if matches!(
             self.visible,
             VisibleLinkState::Url(_) | VisibleLinkState::DiscardUrl(_)
-        ) || matches!(
-            self.terminal,
-            TerminalScanState::Osc(OscScanState {
-                phase: OscPhase::Target(_),
-                ..
-            })
         ) {
             return None;
         }
@@ -1061,30 +851,12 @@ impl LinkStreamScanner {
             VisibleLinkState::InvalidScheme => PrefixVisibleState::InvalidScheme,
             VisibleLinkState::Url(_) | VisibleLinkState::DiscardUrl(_) => unreachable!(),
         };
-        let terminal = match std::mem::take(&mut self.terminal) {
-            TerminalScanState::Visible => PrefixTerminalState::Visible,
-            TerminalScanState::Escape => PrefixTerminalState::Escape,
-            TerminalScanState::Charset => PrefixTerminalState::Charset,
-            TerminalScanState::Csi => PrefixTerminalState::Csi,
-            TerminalScanState::ControlString { escaped } => {
-                PrefixTerminalState::ControlString { escaped }
-            }
-            TerminalScanState::Osc(osc) => PrefixTerminalState::Osc {
-                phase: match osc.phase {
-                    OscPhase::Prefix(value) => PrefixOscPhase::Prefix(value),
-                    OscPhase::Parameters => PrefixOscPhase::Parameters,
-                    OscPhase::Ignore => PrefixOscPhase::Ignore,
-                    OscPhase::Target(_) => unreachable!(),
-                },
-                escaped: osc.escaped,
-            },
-        };
-        Some(ScannerPrefix { visible, terminal })
+        Some(ScannerPrefix { visible })
     }
 
     #[cfg(test)]
     fn retained_byte_count(&self) -> usize {
-        let visible = match &self.visible {
+        match &self.visible {
             VisibleLinkState::Scheme(bytes)
             | VisibleLinkState::AfterColon(bytes)
             | VisibleLinkState::AfterSlash(bytes) => bytes.len,
@@ -1094,70 +866,14 @@ impl LinkStreamScanner {
             VisibleLinkState::Empty
             | VisibleLinkState::InvalidScheme
             | VisibleLinkState::DiscardUrl(_) => 0,
-        };
-        let osc = match &self.terminal {
-            TerminalScanState::Osc(OscScanState {
-                phase: OscPhase::Target(target),
-                ..
-            }) => target.bytes.len() + target.trim_suffix.len() + target.pending_utf8.len(),
-            _ => 0,
-        };
-        visible + osc
+        }
     }
 }
 
-impl OscScanState {
-    fn scan_byte(&mut self, byte: u8, links: &mut VecDeque<DetectedAgentLink>) -> OscScanOutcome {
-        if byte == b'\x18' || byte == b'\x1a' {
-            return OscScanOutcome::Cancelled;
-        }
-        if self.escaped {
-            if byte == b'\\' {
-                self.publish_target(links);
-                return OscScanOutcome::Terminated;
-            }
-            return OscScanOutcome::ReplayEscape;
-        }
-        match byte {
-            b'\x07' => {
-                self.publish_target(links);
-                OscScanOutcome::Terminated
-            }
-            b'\x1b' => {
-                self.escaped = true;
-                OscScanOutcome::Continue
-            }
-            _ => {
-                self.scan_content(byte);
-                OscScanOutcome::Continue
-            }
-        }
-    }
-
-    fn scan_content(&mut self, byte: u8) {
-        self.phase = match std::mem::replace(&mut self.phase, OscPhase::Ignore) {
-            OscPhase::Prefix(0) if byte == b'8' => OscPhase::Prefix(1),
-            OscPhase::Prefix(1) if byte == b';' => OscPhase::Parameters,
-            OscPhase::Prefix(_) => OscPhase::Ignore,
-            OscPhase::Parameters if byte == b';' => OscPhase::Target(UrlCandidate::default()),
-            OscPhase::Parameters => OscPhase::Parameters,
-            OscPhase::Target(mut target) => match target.scan_byte(byte) {
-                UrlScanOutcome::Continue => OscPhase::Target(target),
-                UrlScanOutcome::Terminated | UrlScanOutcome::Discard => OscPhase::Ignore,
-            },
-            OscPhase::Ignore => OscPhase::Ignore,
-        };
-    }
-
-    fn publish_target(&mut self, links: &mut VecDeque<DetectedAgentLink>) {
-        let OscPhase::Target(target) = std::mem::replace(&mut self.phase, OscPhase::Ignore) else {
-            return;
-        };
-        let Some(target) = target.finish() else {
-            return;
-        };
-        for url in extract_urls(&String::from_utf8_lossy(&target)) {
-            queue_link(links, url, AgentLinkSource::Osc8);
+impl ScannerPrefix {
+    fn observe_control_boundary(&mut self) {
+        if matches!(self.visible, PrefixVisibleState::InvalidScheme) {
+            self.visible = PrefixVisibleState::Empty;
         }
     }
 }
@@ -1682,6 +1398,58 @@ mod tests {
         osc8_urls: Vec<String>,
     }
 
+    struct ParsedLinkHarness {
+        gate: Arc<LinkExtractionGate>,
+        terminal: Mutex<crate::ghostty::Terminal>,
+    }
+
+    impl Default for ParsedLinkHarness {
+        fn default() -> Self {
+            let gate = Arc::new(LinkExtractionGate::default());
+            let gate_for_callback = gate.clone();
+            let mut terminal = crate::ghostty::Terminal::new(240, 24, 0).expect("Ghostty terminal");
+            terminal.set_parsed_output_callback(move |event| match event {
+                crate::ghostty::ParsedOutput::Text(bytes) => {
+                    gate_for_callback.observe_parsed_text(bytes);
+                }
+                crate::ghostty::ParsedOutput::Separator => {
+                    gate_for_callback.observe_parsed_separator();
+                }
+                crate::ghostty::ParsedOutput::Hyperlink(bytes) => {
+                    gate_for_callback.observe_parsed_hyperlink(bytes);
+                }
+                crate::ghostty::ParsedOutput::Boundary => {
+                    gate_for_callback.observe_parsed_boundary();
+                }
+            });
+            Self {
+                gate,
+                terminal: Mutex::new(terminal),
+            }
+        }
+    }
+
+    impl ParsedLinkHarness {
+        fn observe_chunk(&self, bytes: &[u8]) {
+            let mut terminal = self.terminal.lock().expect("Ghostty terminal");
+            terminal
+                .set_parsed_output_enabled(true)
+                .expect("enable parsed output callback");
+            terminal.write(bytes);
+            terminal
+                .set_parsed_output_enabled(false)
+                .expect("disable parsed output callback");
+        }
+    }
+
+    impl std::ops::Deref for ParsedLinkHarness {
+        type Target = LinkExtractionGate;
+
+        fn deref(&self) -> &Self::Target {
+            &self.gate
+        }
+    }
+
     fn collected_links(mut batches: Vec<ExtractedAgentLinks>) -> CollectedLinks {
         let mut output_urls = Vec::new();
         let mut osc8_urls = Vec::new();
@@ -1689,145 +1457,6 @@ mod tests {
             output_urls.append(&mut batch.output_urls);
             osc8_urls.append(&mut batch.osc8_urls);
         }
-        output_urls.sort_unstable();
-        output_urls.dedup();
-        osc8_urls.sort_unstable();
-        osc8_urls.dedup();
-        CollectedLinks {
-            output_urls,
-            osc8_urls,
-        }
-    }
-
-    fn reader_visible_link_oracle(bytes: &[u8]) -> CollectedLinks {
-        #[derive(Default)]
-        enum State {
-            #[default]
-            Visible,
-            Escape,
-            Charset,
-            Csi,
-            Osc {
-                content: Vec<u8>,
-                escaped: bool,
-            },
-            ControlString {
-                escaped: bool,
-            },
-        }
-
-        fn finish_osc(content: &[u8], osc8_urls: &mut Vec<String>) {
-            let Some(rest) = content.strip_prefix(b"8;") else {
-                return;
-            };
-            let Some(separator) = rest.iter().position(|byte| *byte == b';') else {
-                return;
-            };
-            osc8_urls.extend(extract_urls(&String::from_utf8_lossy(
-                &rest[separator + 1..],
-            )));
-        }
-
-        let mut state = State::Visible;
-        let mut visible = Vec::new();
-        let mut osc8_urls = Vec::new();
-        for byte in bytes.iter().copied() {
-            state = match state {
-                State::Visible if byte == b'\x1b' => State::Escape,
-                State::Visible => {
-                    visible.push(byte);
-                    State::Visible
-                }
-                State::Escape => match byte {
-                    b'\x1b' => State::Escape,
-                    b'[' => State::Csi,
-                    b']' => State::Osc {
-                        content: Vec::new(),
-                        escaped: false,
-                    },
-                    byte if is_control_string_introducer(byte) => {
-                        State::ControlString { escaped: false }
-                    }
-                    b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => State::Charset,
-                    _ => State::Visible,
-                },
-                State::Charset => State::Visible,
-                State::Csi if (0x40..=0x7e).contains(&byte) => State::Visible,
-                State::Csi => State::Csi,
-                State::Osc {
-                    content,
-                    escaped: true,
-                } if byte == b'\\' => {
-                    finish_osc(&content, &mut osc8_urls);
-                    State::Visible
-                }
-                State::Osc {
-                    content: _,
-                    escaped: true,
-                } => match byte {
-                    b'\x18' | b'\x1a' => State::Visible,
-                    b'\x1b' => State::Escape,
-                    b'[' => State::Csi,
-                    b']' => State::Osc {
-                        content: Vec::new(),
-                        escaped: false,
-                    },
-                    byte if is_control_string_introducer(byte) => {
-                        State::ControlString { escaped: false }
-                    }
-                    b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => State::Charset,
-                    _ => State::Visible,
-                },
-                State::Osc {
-                    content,
-                    escaped: false,
-                } if byte == b'\x07' => {
-                    finish_osc(&content, &mut osc8_urls);
-                    State::Visible
-                }
-                State::Osc {
-                    content: _,
-                    escaped: false,
-                } if byte == b'\x18' || byte == b'\x1a' => State::Visible,
-                State::Osc {
-                    content,
-                    escaped: false,
-                } if byte == b'\x1b' => State::Osc {
-                    content,
-                    escaped: true,
-                },
-                State::Osc {
-                    mut content,
-                    escaped: false,
-                } => {
-                    content.push(byte);
-                    State::Osc {
-                        content,
-                        escaped: false,
-                    }
-                }
-                State::ControlString { .. } if byte == b'\x18' || byte == b'\x1a' => State::Visible,
-                State::ControlString { escaped: true } if byte == b'\\' => State::Visible,
-                State::ControlString { escaped: true } => match byte {
-                    byte if is_control_string_introducer(byte) => {
-                        State::ControlString { escaped: false }
-                    }
-                    b'[' => State::Csi,
-                    b']' => State::Osc {
-                        content: Vec::new(),
-                        escaped: false,
-                    },
-                    b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => State::Charset,
-                    _ => State::Visible,
-                },
-                State::ControlString { escaped: false } if byte == b'\x1b' => {
-                    State::ControlString { escaped: true }
-                }
-                State::ControlString { escaped: false } => State::ControlString { escaped: false },
-            };
-        }
-
-        let mut output_urls = extract_urls(&String::from_utf8_lossy(&visible));
         output_urls.sort_unstable();
         output_urls.dedup();
         osc8_urls.sort_unstable();
@@ -1893,7 +1522,7 @@ mod tests {
     }
 
     fn scan_with_generated_splits(bytes: &[u8], seed: u64) -> CollectedLinks {
-        let gate = LinkExtractionGate::default();
+        let gate = ParsedLinkHarness::default();
         let mut batches = Vec::new();
         let mut offset = 0;
         let mut random = seed;
@@ -2092,7 +1721,7 @@ mod tests {
 
     #[test]
     fn split_osc8_before_scheme_stays_an_osc8_link() {
-        let gate = LinkExtractionGate::default();
+        let gate = ParsedLinkHarness::default();
         gate.observe_chunk(b"\x1b]8;;htt");
         gate.observe_chunk(b"ps://osc.example.test/path\x1b\\label\x1b]8;;\x1b\\\n");
 
@@ -2113,7 +1742,7 @@ mod tests {
                 b";https://osc.example.test/from-semicolon\x1b\\label\n".as_slice(),
             ),
         ] {
-            let gate = LinkExtractionGate::default();
+            let gate = ParsedLinkHarness::default();
             gate.observe_chunk(first);
             assert!(gate.take_links().is_none());
             gate.observe_chunk(second);
@@ -2134,26 +1763,26 @@ mod tests {
                     "{prefix}{}",
                     "a".repeat(MAX_URL_BYTES + extra_bytes - prefix.len())
                 );
-                let gate = LinkExtractionGate::default();
+                let gate = ParsedLinkHarness::default();
+                let mut batches = Vec::new();
                 if split_st {
                     gate.observe_chunk(format!("\x1b]8;;{uri}\x1b").as_bytes());
-                    assert!(gate.take_links().is_none());
+                    batches.extend(gate.take_links());
                     gate.observe_chunk(b"\\label\x1b]8;;\x1b\\\n");
                 } else {
                     gate.observe_chunk(
                         format!("\x1b]8;;{uri}\x1b\\label\x1b]8;;\x1b\\\n").as_bytes(),
                     );
                 }
+                batches.extend(gate.take_links());
 
-                let links = gate.take_links();
+                let links = collected_links(batches);
                 if extra_bytes == 0 {
-                    let links = links.unwrap_or_else(|| {
-                        panic!("maximum-length OSC 8 target, split ST: {split_st}")
-                    });
                     assert!(links.output_urls.is_empty());
                     assert_eq!(links.osc8_urls, vec![uri], "split ST: {split_st}");
                 } else {
-                    assert!(links.is_none(), "split ST: {split_st}");
+                    assert!(links.output_urls.is_empty(), "split ST: {split_st}");
+                    assert!(links.osc8_urls.is_empty(), "split ST: {split_st}");
                 }
             }
         }
@@ -2256,7 +1885,7 @@ mod tests {
     fn interleaved_output_and_osc8_urls_keep_independent_timestamps() {
         let pane_id = PaneId::from_raw(85);
         let first_seen = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
-        let gate = LinkExtractionGate::default();
+        let gate = ParsedLinkHarness::default();
         let mut store = AgentStateStore::default();
 
         gate.observe_chunk(b"https://open.example/path");
@@ -2358,7 +1987,7 @@ mod tests {
 
     #[test]
     fn styled_url_ignores_csi_osc_and_charset_select_sequences() {
-        let gate = LinkExtractionGate::default();
+        let gate = ParsedLinkHarness::default();
         gate.observe_chunk(
             concat!(
                 "https://sty",
@@ -2378,7 +2007,7 @@ mod tests {
 
     #[test]
     fn round_10_styled_scheme_preserves_prefix_across_detection_cycle() {
-        let styled = LinkExtractionGate::default();
+        let styled = ParsedLinkHarness::default();
         styled.observe_chunk(b"h\x1b[31mttps:");
         assert!(styled.take_links().is_none());
         styled.observe_chunk(b"//styled-scheme.example/path\n");
@@ -2390,7 +2019,7 @@ mod tests {
 
     #[test]
     fn round_10_non_hyperlink_osc_hides_embedded_url() {
-        let hidden = LinkExtractionGate::default();
+        let hidden = ParsedLinkHarness::default();
         hidden.observe_chunk(
             b"\x1b]0;title https://hidden.example/path\x07https://visible.example/path\n",
         );
@@ -2500,7 +2129,7 @@ mod tests {
         }
         mixed_stream.extend_from_slice(b"https://mixed-osc.example/001\n");
 
-        let mixed_gate = LinkExtractionGate::default();
+        let mixed_gate = ParsedLinkHarness::default();
         mixed_gate.observe_chunk(&mixed_stream);
         let mixed = mixed_gate.take_links().expect("mixed-source URL batch");
         assert_eq!(
@@ -2550,7 +2179,7 @@ mod tests {
 
         for pane_count in [1_usize, 15] {
             let gates = (0..pane_count)
-                .map(|_| LinkExtractionGate::default())
+                .map(|_| ParsedLinkHarness::default())
                 .collect::<Vec<_>>();
             let started = std::time::Instant::now();
             for _ in 0..CALLBACKS_PER_PANE {
@@ -2563,9 +2192,17 @@ mod tests {
             let nanos_per_callback = elapsed.as_nanos() as f64 / callbacks as f64;
             let mebibytes_per_second =
                 callbacks as f64 * CHUNK.len() as f64 / elapsed.as_secs_f64() / (1024.0 * 1024.0);
+            let (parsed_events, parsed_bytes) = gates
+                .iter()
+                .map(|gate| gate.parsed_event_measurement())
+                .fold((0, 0), |(events, bytes), (next_events, next_bytes)| {
+                    (events + next_events, bytes + next_bytes)
+                });
             eprintln!(
-                "short-url PTY callback: panes={pane_count} callbacks={callbacks} ns/callback={nanos_per_callback:.1} MiB/s={mebibytes_per_second:.1}"
+                "short-url parser callback: panes={pane_count} writes={callbacks} parsed_events={parsed_events} parsed_bytes={parsed_bytes} ns/write={nanos_per_callback:.1} MiB/s={mebibytes_per_second:.1}"
             );
+            assert_eq!(parsed_events, (callbacks * 2) as u64);
+            assert_eq!(parsed_bytes, (callbacks * (CHUNK.len() - 1)) as u64);
             assert!(gates.into_iter().all(|gate| {
                 gate.take_links()
                     .is_some_and(|links| links.output_urls == ["https://short.example/x"])
@@ -2574,27 +2211,35 @@ mod tests {
     }
 
     #[test]
-    fn round_10_generated_terminal_interleavings_match_reader_visible_oracle() {
+    fn round_10_generated_terminal_interleavings_match_visibility_contract() {
         for seed in 0..32 {
             let stream = generated_terminal_stream(seed);
-            let expected = reader_visible_link_oracle(&stream);
+            let mut output_urls = vec![
+                format!("https://visible-{seed}.example/path"),
+                format!("https://after-can-{seed}.example/path"),
+                format!("https://after-sub-{seed}.example/path"),
+                format!("https://after-esc-{seed}.example/path"),
+            ];
+            output_urls.sort_unstable();
+            let expected = CollectedLinks {
+                output_urls,
+                osc8_urls: vec![format!("https://osc-{seed}.example/target")],
+            };
 
-            let one_piece = LinkExtractionGate::default();
+            let one_piece = ParsedLinkHarness::default();
             one_piece.observe_chunk(&stream);
             let one_piece = collected_links(one_piece.take_links().into_iter().collect());
             assert_eq!(one_piece, expected, "one-piece input, seed {seed}");
 
             let chunked = scan_with_generated_splits(&stream, seed + 1);
             assert_eq!(chunked, one_piece, "chunked detection cycles, seed {seed}");
-            assert_eq!(chunked, expected, "reader-visible oracle, seed {seed}");
-            assert_eq!(chunked.output_urls.len(), 4, "visible sources, seed {seed}");
-            assert_eq!(chunked.osc8_urls.len(), 1, "OSC 8 sources, seed {seed}");
+            assert_eq!(chunked, expected, "visibility contract, seed {seed}");
         }
     }
 
     #[test]
     fn incomplete_osc8_target_resumes_when_terminator_arrives_without_colon() {
-        let gate = LinkExtractionGate::default();
+        let gate = ParsedLinkHarness::default();
         gate.observe_chunk(b"\x1b]8;;https://osc.example.test/path");
         assert!(gate.take_links().is_none());
 
@@ -2747,7 +2392,7 @@ mod tests {
 
     #[test]
     fn unterminated_url_survives_many_detection_cycles_until_terminated() {
-        let gate = LinkExtractionGate::default();
+        let gate = ParsedLinkHarness::default();
         gate.observe_chunk(b"https://many-cycles.example/");
 
         let styling = b"\x1b[31m".repeat(LARGE_TEST_OUTPUT_BYTES / 5 + 1);
@@ -2806,7 +2451,7 @@ mod tests {
     #[test]
     fn overflow_suffix_resumes_after_open_osc_terminator() {
         for split_st in [false, true] {
-            let gate = LinkExtractionGate::default();
+            let gate = ParsedLinkHarness::default();
             let first = b"https://before-overflow.example/path\n";
             gate.observe_chunk(first);
 
@@ -2867,7 +2512,7 @@ mod tests {
 
     #[test]
     fn styled_unfinished_url_does_not_restart_after_each_split_escape() {
-        let gate = LinkExtractionGate::default();
+        let gate = ParsedLinkHarness::default();
         let prefix = b"https://styled-incremental.example/";
         gate.observe_chunk(prefix);
         assert!(gate.take_links().is_none());

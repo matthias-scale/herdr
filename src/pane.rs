@@ -2769,6 +2769,7 @@ impl PaneRuntime {
         let reflected_input_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let link_extraction = Arc::new(crate::agent_state::LinkExtractionGate::default());
+        terminal.install_link_extraction(link_extraction.clone());
         let agent_output_seq = Arc::new(AtomicU64::new(0));
         let suppress_pane_died = Arc::new(AtomicBool::new(false));
 
@@ -2782,7 +2783,6 @@ impl PaneRuntime {
             let input_delivery_seq_for_read = Arc::clone(&input_delivery_seq);
             let reflected_input_seq_for_read = Arc::clone(&reflected_input_seq);
             let detection_content_seq = detection_content_seq.clone();
-            let link_extraction_for_read = link_extraction.clone();
             let agent_output_seq = agent_output_seq.clone();
             let child_pid = child_pid.clone();
             let read_events = events.clone();
@@ -2805,7 +2805,6 @@ impl PaneRuntime {
                     );
                 }
                 publish_terminal_bells(pane_id, result.terminal_bells, &read_events);
-                link_extraction_for_read.observe_chunk(bytes);
                 observe_detection_content_change(bytes, &detection_content_seq);
                 observe_agent_output(bytes, &agent_output_seq);
                 if result.request_render && render_dirty.request_pty(pane_id) {
@@ -2984,6 +2983,7 @@ impl PaneRuntime {
         let reflected_input_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let link_extraction = Arc::new(crate::agent_state::LinkExtractionGate::default());
+        terminal.install_link_extraction(link_extraction.clone());
         let full_lifecycle_hook_baseline_content_seq = Arc::new(AtomicU64::new(0));
         let agent_output_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
@@ -3030,7 +3030,6 @@ impl PaneRuntime {
             let input_delivery_seq_for_read = Arc::clone(&input_delivery_seq);
             let reflected_input_seq_for_read = Arc::clone(&reflected_input_seq);
             let detection_content_seq = detection_content_seq.clone();
-            let link_extraction_for_read = link_extraction.clone();
             let agent_output_seq = agent_output_seq.clone();
             let first_output = Arc::new(AtomicBool::new(false));
             let first_output_for_read = first_output.clone();
@@ -3059,7 +3058,6 @@ impl PaneRuntime {
                     );
                 }
                 publish_terminal_bells(pane_id, result.terminal_bells, &events);
-                link_extraction_for_read.observe_chunk(bytes);
                 if agent_detection == AgentDetection::Enabled {
                     observe_detection_content_change(bytes, &detection_content_seq);
                     observe_agent_output(bytes, &agent_output_seq);
@@ -4524,11 +4522,12 @@ mod tests {
             stream.extend_from_slice(uri.as_bytes());
             stream.push(b'\n');
 
-            let runtime = PaneRuntime::test_with_screen_bytes(120, 24, &stream);
+            let runtime = PaneRuntime::test_with_screen_bytes(120, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream);
             assert!(runtime.visible_text().contains(uri), "Ghostty {name}");
 
-            let gate = crate::agent_state::LinkExtractionGate::default();
-            gate.observe_chunk(&stream);
             let links = gate.take_links().expect("visible URL after cancelled OSC");
             assert_eq!(links.output_urls, vec![uri], "link gate {name}");
             assert!(links.osc8_urls.is_empty(), "link gate {name}");
@@ -4568,9 +4567,13 @@ mod tests {
             let links = gate
                 .take_links()
                 .unwrap_or_else(|| panic!("visible URL after {label} at split {split}"));
+            let mut expected_urls = vec![visible];
+            if let Some(fragment) = rendered_fragment {
+                expected_urls.push(fragment);
+            }
+            expected_urls.sort_unstable();
             assert_eq!(
-                links.output_urls,
-                vec![visible],
+                links.output_urls, expected_urls,
                 "link capture must match Ghostty-rendered text for {label} at split {split}"
             );
             assert!(links.osc8_urls.is_empty(), "{label} at split {split}");
@@ -4593,13 +4596,7 @@ mod tests {
             stream.extend_from_slice(visible.as_bytes());
             stream.push(b'\n');
 
-            assert_parser_classified_link_capture(
-                label,
-                &stream,
-                &hidden,
-                &visible,
-                None,
-            );
+            assert_parser_classified_link_capture(label, &stream, &hidden, &visible, None);
         }
 
         let hidden = "https://hidden-dcs-st.example.test/path";
@@ -4630,9 +4627,10 @@ mod tests {
     async fn dirty_link_snapshot_includes_osc8_hyperlink_target() {
         let uri = "https://osc.example.test/target";
         let screen = format!("\x1b]8;;{uri}\x1b\\label\x1b]8;;\x1b\\");
-        let _runtime = PaneRuntime::test_with_screen_bytes(80, 24, screen.as_bytes());
-        let gate = crate::agent_state::LinkExtractionGate::default();
-        gate.observe_chunk(screen.as_bytes());
+        let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+        let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+        runtime.terminal.install_link_extraction(gate.clone());
+        runtime.test_process_pty_bytes(screen.as_bytes());
         let (tx, mut rx) = mpsc::channel(1);
 
         publish_agent_links_if_dirty(PaneId::from_raw(71), &gate, &tx).await;
@@ -4721,10 +4719,10 @@ mod tests {
         for index in 1..=200 {
             output.push_str(&format!("{index}\r\n"));
         }
-        let _runtime =
-            PaneRuntime::test_with_scrollback_bytes(80, 24, 64 * 1024, output.as_bytes());
-        let gate = crate::agent_state::LinkExtractionGate::default();
-        gate.observe_chunk(output.as_bytes());
+        let runtime = PaneRuntime::test_with_scrollback_bytes(80, 24, 64 * 1024, b"");
+        let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+        runtime.terminal.install_link_extraction(gate.clone());
+        runtime.test_process_pty_bytes(output.as_bytes());
         let (tx, mut rx) = mpsc::channel(1);
 
         publish_agent_links_if_dirty(PaneId::from_raw(74), &gate, &tx).await;
@@ -4770,10 +4768,10 @@ mod tests {
         for index in 1..=200 {
             output.push_str(&format!("{index}\r\n"));
         }
-        let _runtime =
-            PaneRuntime::test_with_scrollback_bytes(80, 24, 64 * 1024, output.as_bytes());
-        let gate = crate::agent_state::LinkExtractionGate::default();
-        gate.observe_chunk(output.as_bytes());
+        let runtime = PaneRuntime::test_with_scrollback_bytes(80, 24, 64 * 1024, b"");
+        let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+        runtime.terminal.install_link_extraction(gate.clone());
+        runtime.test_process_pty_bytes(output.as_bytes());
         let (tx, mut rx) = mpsc::channel(1);
 
         publish_agent_links_if_dirty(PaneId::from_raw(76), &gate, &tx).await;

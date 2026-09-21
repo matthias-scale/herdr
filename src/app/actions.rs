@@ -6356,26 +6356,20 @@ mod tests {
     fn mixed_source_detection_event_keeps_newest_two_hundred_and_first_source() {
         let mut state = app_with_workspaces(&["links"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
-        let mut stream = Vec::new();
+        let gate = crate::agent_state::LinkExtractionGate::default();
         for index in 0..=200 {
             if index % 2 == 0 {
-                stream.extend_from_slice(
+                gate.observe_parsed_text(
                     format!("https://mixed-output.example/{index:03}\n").as_bytes(),
                 );
             } else {
-                stream.extend_from_slice(
-                    format!(
-                        "\x1b]8;;https://mixed-osc.example/{index:03}\x1b\\label\x1b]8;;\x1b\\\n"
-                    )
-                    .as_bytes(),
+                gate.observe_parsed_hyperlink(
+                    format!("https://mixed-osc.example/{index:03}").as_bytes(),
                 );
             }
         }
-        stream.extend_from_slice(b"https://mixed-osc.example/001\n");
-        stream.extend_from_slice(b"https://mixed-output.example/201\n");
-
-        let gate = crate::agent_state::LinkExtractionGate::default();
-        gate.observe_chunk(&stream);
+        gate.observe_parsed_text(b"https://mixed-osc.example/001\n");
+        gate.observe_parsed_text(b"https://mixed-output.example/201\n");
         let detected = gate.take_links().expect("mixed-source detection cycle");
         state.handle_app_event(AppEvent::OrderedAgentLinksDetected {
             pane_id,
