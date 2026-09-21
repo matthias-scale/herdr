@@ -122,10 +122,11 @@ clears after ISO/DEC selective-erase protection. This also covers margin no-ops,
 pending wrap, spacer tails, and wide-glyph erase expansion.
 Scrollback-only erase remains continuous because Ghostty does not mutate active
 rows; scroll-complete and other active-surface clears still invalidate.
-Row-moving actions publish a boundary only when Ghostty's scrolling-region and
-row-retention facts prove the cursor row survives; otherwise they invalidate.
-Herdr can therefore preserve known rendered cells on both sides without
-reproducing VT action or region semantics in Rust.
+Row-moving actions report Ghostty's affected horizontal interval and whether
+the cursor row's slice survives or is discarded. Herdr can therefore split
+known cells at partial-width scrolling margins, preserve unaffected or moved
+slices, and reject URLs whose rendered cells were split without reproducing VT
+action or region semantics in Rust.
 
 remove when: the vendored source exposes equivalent post-parse text and OSC 8
 events, including confirmed BEL, 8-bit ST, and split `ESC \\` termination, with
@@ -135,8 +136,9 @@ non-rendering controls, plus generic post-action cursor transitions with
 rendered-row identity for non-print actions not already classified as
 separators and render invalidations for all cell-mutating non-print actions,
 including bounded actual-cell mutation facts for protected
-display/line/character erases and insert/delete actions, and the
-Herdr visibility regressions pass without this patch.
+display/line/character erases and insert/delete actions plus affected-interval
+and row-slice-survival facts for partial-width row movement, and the Herdr
+visibility regressions pass without this patch.
 
 verification:
 
@@ -144,6 +146,8 @@ verification:
 just test-one matches_ghostty_rendered_text
 just test-one c1_introducers_and_st_match_ghostty_rendered_text
 just test-one cursor_overwrite_matches_ghostty_rendered_text
+just test-one partial_width_row_mutations_match_ghostty_rendered_text
+just test-one row_mutation_payload_requires_exact_interval_and_survival
 just test-one cancelled_osc_capture_matches_ghostty_visible_output
 just test-one osc8_target_bound_excludes_split_and_unsplit_st_bytes
 python3 -m unittest scripts.test_vendor_libghostty_vt

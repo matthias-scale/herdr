@@ -2398,6 +2398,8 @@ pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_PRESERV
     GhosttyTerminalParsedOutputKind = 6;
 pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_CELL_SHIFT:
     GhosttyTerminalParsedOutputKind = 7;
+pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_ROW_MUTATION:
+    GhosttyTerminalParsedOutputKind = 8;
 pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE:
     GhosttyTerminalParsedOutputKind = 2147483647;
 pub type GhosttyTerminalParsedOutputKind = ::std::os::raw::c_uint;

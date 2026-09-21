@@ -626,6 +626,28 @@ impl LinkExtractionGate {
         self.active.store(true, Ordering::Release);
     }
 
+    /// Applies Ghostty's authoritative row-slice survival facts.
+    pub(crate) fn observe_parsed_row_mutation(
+        &self,
+        mutation: Option<crate::ghostty::ParsedRowMutation>,
+    ) {
+        self.record_parsed_event(0);
+        let Ok(_processing) = self.processing.lock() else {
+            return;
+        };
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
+        if !self.active.load(Ordering::Acquire) {
+            let (prefix, _) = self.marker_tail.load();
+            pending.scanner.restore_prefix(prefix);
+            self.marker_tail.store(&[]);
+        }
+        pending.observe_row_mutation(mutation);
+        pending.dirty = true;
+        self.active.store(true, Ordering::Release);
+    }
+
     /// Receives a complete OSC 8 target from Ghostty's parser.
     pub(crate) fn observe_parsed_hyperlink(&self, bytes: &[u8]) {
         self.record_parsed_event(bytes.len());
@@ -873,6 +895,11 @@ impl PendingLinkBytes {
         self.scanner
             .observe_cell_shift(shift, &mut self.queued_links);
     }
+
+    fn observe_row_mutation(&mut self, mutation: Option<crate::ghostty::ParsedRowMutation>) {
+        self.scanner
+            .observe_row_mutation(mutation, &mut self.queued_links);
+    }
 }
 
 impl LinkStreamScanner {
@@ -930,6 +957,96 @@ impl LinkStreamScanner {
             _ => self.fail_closed_until_separator(),
         }
         self.observe_separator(links);
+    }
+
+    fn observe_row_mutation(
+        &mut self,
+        mutation: Option<crate::ghostty::ParsedRowMutation>,
+        links: &mut VecDeque<DetectedAgentLink>,
+    ) {
+        let Some(mutation) = mutation else {
+            self.fail_closed_until_separator();
+            self.observe_separator(links);
+            return;
+        };
+        if !mutation.moves_slice {
+            self.observe_separator(links);
+            return;
+        }
+        let (Ok(cursor), Ok(left), Ok(right)) = (
+            u16::try_from(mutation.cursor_before),
+            u16::try_from(mutation.left_column),
+            u16::try_from(mutation.right_column),
+        ) else {
+            self.fail_closed_until_separator();
+            self.observe_separator(links);
+            return;
+        };
+        if left >= right {
+            self.fail_closed_until_separator();
+            self.observe_separator(links);
+            return;
+        }
+
+        self.observe_cursor_transition(Some(crate::ghostty::ParsedCursorTransition {
+            before_column: mutation.cursor_before,
+            after_column: mutation.cursor_before,
+            same_row: true,
+        }));
+        let Some(rewrite) = self.rendered_rewrite.take() else {
+            self.fail_closed_until_separator();
+            self.observe_separator(links);
+            return;
+        };
+        if rewrite.overflowed || rewrite.cursor_column != cursor {
+            self.visible = VisibleLinkState::DiscardUrl(Vec::new());
+            self.scan_byte(b'\n', links);
+            return;
+        }
+        let cells = rewrite.into_sorted_cells();
+        let mut occupied_segments = [false; 3];
+        for &(column, _) in &cells {
+            occupied_segments[if column < left {
+                0
+            } else if column >= right {
+                1
+            } else {
+                2
+            }] = true;
+        }
+        let original_crosses_boundary =
+            occupied_segments[2] && (occupied_segments[0] || occupied_segments[1]);
+        if original_crosses_boundary {
+            self.scan_byte(b'\n', links);
+            return;
+        }
+        occupied_segments[2] &= mutation.slice_survives;
+        for segment in 0..3 {
+            if !occupied_segments[segment] {
+                continue;
+            }
+            let mut previous = None;
+            for &(column, byte) in &cells {
+                let belongs = match segment {
+                    0 => column < left,
+                    1 => column >= right,
+                    2 => column >= left && column < right,
+                    _ => unreachable!(),
+                };
+                if !belongs {
+                    continue;
+                }
+                if previous.is_some_and(|previous: u16| previous.checked_add(1) != Some(column)) {
+                    self.scan_byte(b'\n', links);
+                }
+                self.scan_byte(byte, links);
+                previous = Some(column);
+            }
+            if previous.is_some() {
+                self.scan_byte(b'\n', links);
+            }
+        }
+        self.scan_byte(b'\n', links);
     }
 
     fn observe_cursor_transition(
@@ -1906,6 +2023,9 @@ mod tests {
                 }
                 crate::ghostty::ParsedOutput::CellShift(shift) => {
                     gate_for_callback.observe_parsed_cell_shift(shift);
+                }
+                crate::ghostty::ParsedOutput::RowMutation(mutation) => {
+                    gate_for_callback.observe_parsed_row_mutation(mutation);
                 }
             });
             Self {

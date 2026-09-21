@@ -34,6 +34,7 @@ pub const ParsedOutputKind = enum(c_int) {
     render_invalidation = 5,
     preserved_prefix_boundary = 6,
     cell_shift = 7,
+    row_mutation = 8,
     _,
 };
 
@@ -180,12 +181,12 @@ pub const Handler = struct {
         }
         const cursor_before = self.parsedCursorSnapshot();
         const cell_shift = self.parsedCellShift(action, value);
-        const row_mutation_preserves = self.parsedRowMutationPreserves(action, value);
+        const row_mutation = self.parsedRowMutation(action, value);
         self.vtFallible(action, value) catch |err| {
             log.warn("error handling VT action action={} err={}", .{ action, err });
             return;
         };
-        self.emitParsedOutput(action, value, cursor_before, cell_shift, row_mutation_preserves);
+        self.emitParsedOutput(action, value, cursor_before, cell_shift, row_mutation);
     }
 
     /// Finalizes an OSC-derived callback using the parser transition that
@@ -225,7 +226,7 @@ pub const Handler = struct {
         value: Action.Value(action),
         cursor_before: ParsedCursorSnapshot,
         cell_shift: ?ParsedCellShift,
-        row_mutation_preserves: ?bool,
+        row_mutation: ?ParsedRowMutation,
     ) void {
         const callback = self.effects.parsed_output orelse return;
         switch (action) {
@@ -267,11 +268,7 @@ pub const Handler = struct {
                 return;
             },
             .row_mutation => {
-                callback(
-                    self,
-                    if (row_mutation_preserves orelse false) .separator else .render_invalidation,
-                    "",
-                );
+                if (row_mutation) |mutation| self.emitParsedRowMutation(mutation) else callback(self, .render_invalidation, "");
                 return;
             },
         }
@@ -471,46 +468,95 @@ pub const Handler = struct {
         row_mutation,
     };
 
-    fn parsedRowMutationPreserves(
+    const ParsedRowMutation = struct {
+        cursor_before: usize,
+        left: usize,
+        right: usize,
+        slice_survives: bool,
+        moves_slice: bool,
+    };
+
+    fn parsedRowMutation(
         self: *Handler,
         comptime action: Action.Tag,
         value: Action.Value(action),
-    ) ?bool {
+    ) ?ParsedRowMutation {
         const cursor = self.terminal.screens.active.cursor;
         const region = self.terminal.scrolling_region;
-        const inside = cursor.y >= region.top and cursor.y <= region.bottom and
+        const row_inside = cursor.y >= region.top and cursor.y <= region.bottom;
+        const inside = row_inside and
             cursor.x >= region.left and cursor.x <= region.right;
+        const intact: ParsedRowMutation = .{
+            .cursor_before = cursor.x,
+            .left = 0,
+            .right = 0,
+            .slice_survives = true,
+            .moves_slice = false,
+        };
+        const base: ParsedRowMutation = .{
+            .cursor_before = cursor.x,
+            .left = region.left,
+            .right = region.right + 1,
+            .slice_survives = false,
+            .moves_slice = true,
+        };
+        const retains_scrollback = region.top == 0 and
+            region.left == 0 and
+            region.right == self.terminal.cols - 1 and
+            !self.terminal.screens.active.no_scrollback;
         switch (action) {
             .index, .next_line => {
-                if (!inside or cursor.y != region.bottom) return true;
-                if (region.top != region.bottom) return true;
-                return region.top == 0 and
-                    region.left == 0 and
-                    region.right == self.terminal.cols - 1 and
-                    !self.terminal.screens.active.no_scrollback;
+                if (!inside or cursor.y != region.bottom) return intact;
+                var result = base;
+                result.slice_survives = region.top != region.bottom or retains_scrollback;
+                return result;
             },
-            .reverse_index => return !inside or cursor.y != region.top or region.top != region.bottom,
+            .reverse_index => {
+                if (!inside or cursor.y != region.top) return intact;
+                var result = base;
+                result.slice_survives = region.top != region.bottom;
+                return result;
+            },
             .insert_lines => {
-                if (!inside or value == 0) return true;
-                return value <= region.bottom - cursor.y;
+                if (!inside or value == 0) return intact;
+                var result = base;
+                result.slice_survives = value <= region.bottom - cursor.y;
+                return result;
             },
-            .delete_lines => return !inside or value == 0,
+            .delete_lines => return if (!inside or value == 0) intact else base,
             .scroll_up => {
-                if (value == 0 or cursor.y < region.top or cursor.y > region.bottom) return true;
+                if (value == 0 or !row_inside) return intact;
                 const count = @min(value, region.bottom - region.top + 1);
-                if (cursor.y >= region.top + count) return true;
-                return region.top == 0 and
-                    region.left == 0 and
-                    region.right == self.terminal.cols - 1 and
-                    !self.terminal.screens.active.no_scrollback;
+                var result = base;
+                result.slice_survives = cursor.y >= region.top + count or retains_scrollback;
+                return result;
             },
             .scroll_down => {
-                if (value == 0 or cursor.y < region.top or cursor.y > region.bottom) return true;
+                if (value == 0 or !row_inside) return intact;
                 const count = @min(value, region.bottom - region.top + 1);
-                return cursor.y + count <= region.bottom;
+                var result = base;
+                result.slice_survives = cursor.y + count <= region.bottom;
+                return result;
             },
             else => return null,
         }
+    }
+
+    fn emitParsedRowMutation(self: *Handler, mutation: ParsedRowMutation) void {
+        const callback = self.effects.parsed_output orelse return;
+        var buf: [96]u8 = undefined;
+        const data = std.fmt.bufPrint(
+            &buf,
+            "{d},{d},{d},{d},{d}",
+            .{
+                mutation.cursor_before,
+                mutation.left,
+                mutation.right,
+                @intFromBool(mutation.slice_survives),
+                @intFromBool(mutation.moves_slice),
+            },
+        ) catch return;
+        callback(self, .row_mutation, data);
     }
 
     /// Classifies post-action rendering effects that cursor comparison alone

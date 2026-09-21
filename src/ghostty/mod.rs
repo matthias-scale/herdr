@@ -476,6 +476,7 @@ pub(crate) enum ParsedOutput<'a> {
     RenderInvalidation,
     PreservedPrefixBoundary(Option<usize>),
     CellShift(Option<ParsedCellShift>),
+    RowMutation(Option<ParsedRowMutation>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -500,6 +501,15 @@ pub(crate) enum ParsedCellShiftOperation {
     Insert,
     Delete,
     Erase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParsedRowMutation {
+    pub(crate) cursor_before: usize,
+    pub(crate) left_column: usize,
+    pub(crate) right_column: usize,
+    pub(crate) slice_survives: bool,
+    pub(crate) moves_slice: bool,
 }
 
 const MAX_CLIPBOARD_BYTES: usize = 192 * 1024;
@@ -561,6 +571,9 @@ unsafe extern "C" fn parsed_output_trampoline(
         ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_CELL_SHIFT => {
             callback(ParsedOutput::CellShift(parse_cell_shift(bytes)));
         }
+        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_ROW_MUTATION => {
+            callback(ParsedOutput::RowMutation(parse_row_mutation(bytes)));
+        }
         _ => {}
     }
 }
@@ -621,6 +634,36 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn parse_row_mutation(bytes: &[u8]) -> Option<ParsedRowMutation> {
+    let mut fields = std::str::from_utf8(bytes).ok()?.split(',');
+    let cursor_before = fields.next()?.parse().ok()?;
+    let left_column = fields.next()?.parse().ok()?;
+    let right_column = fields.next()?.parse().ok()?;
+    let slice_survives = parse_payload_bool(fields.next()?)?;
+    let moves_slice = parse_payload_bool(fields.next()?)?;
+    if fields.next().is_some()
+        || (moves_slice && left_column >= right_column)
+        || (!moves_slice && (left_column != 0 || right_column != 0 || !slice_survives))
+    {
+        return None;
+    }
+    Some(ParsedRowMutation {
+        cursor_before,
+        left_column,
+        right_column,
+        slice_survives,
+        moves_slice,
+    })
+}
+
+fn parse_payload_bool(field: &str) -> Option<bool> {
+    match field {
+        "0" => Some(false),
+        "1" => Some(true),
         _ => None,
     }
 }
@@ -3492,6 +3535,40 @@ mod tests {
             b"E,12,3,80,1,gg",
         ] {
             assert_eq!(parse_cell_shift(malformed), None, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn row_mutation_payload_requires_exact_interval_and_survival() {
+        assert_eq!(
+            parse_row_mutation(b"24,9,40,1,1"),
+            Some(ParsedRowMutation {
+                cursor_before: 24,
+                left_column: 9,
+                right_column: 40,
+                slice_survives: true,
+                moves_slice: true,
+            })
+        );
+        assert_eq!(
+            parse_row_mutation(b"24,0,0,1,0"),
+            Some(ParsedRowMutation {
+                cursor_before: 24,
+                left_column: 0,
+                right_column: 0,
+                slice_survives: true,
+                moves_slice: false,
+            })
+        );
+        for malformed in [
+            b"".as_slice(),
+            b"24,9,40,1",
+            b"24,40,9,1,1",
+            b"24,9,40,2,1",
+            b"24,9,40,1,0",
+            b"24,0,0,0,0",
+        ] {
+            assert_eq!(parse_row_mutation(malformed), None, "{malformed:?}");
         }
     }
 

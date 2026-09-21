@@ -492,6 +492,9 @@ typedef enum GHOSTTY_ENUM_TYPED {
 
   /** Row mutation; erase events append a hex bitset of cells actually cleared. */
   GHOSTTY_TERMINAL_PARSED_OUTPUT_CELL_SHIFT = 7,
+
+  /** Row movement; data is `cursor,left,right,slice-survives,moves-slice`. */
+  GHOSTTY_TERMINAL_PARSED_OUTPUT_ROW_MUTATION = 8,
   GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalParsedOutputKind;
 

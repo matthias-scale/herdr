@@ -1117,6 +1117,9 @@ impl GhosttyPaneTerminal {
                 crate::ghostty::ParsedOutput::CellShift(shift) => {
                     gate.observe_parsed_cell_shift(shift);
                 }
+                crate::ghostty::ParsedOutput::RowMutation(mutation) => {
+                    gate.observe_parsed_row_mutation(mutation);
+                }
             });
     }
 

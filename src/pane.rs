@@ -5097,6 +5097,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn partial_width_row_mutations_match_ghostty_rendered_text() {
+        let crossing_url = "https://old.example/path";
+        let kept_url = "https://kept.example/x";
+        let recovery_url = "https://recovery.example/path";
+        let recovery = format!("\x1b[?69l\x1b[r\x1b[20;1H\n{recovery_url}\n");
+        let exact_repro = format!("\x1b[?69h\x1b[10;40s{crossing_url}\x1b[1L{recovery}");
+        for split in 0..=exact_repro.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&exact_repro.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&exact_repro.as_bytes()[split..]);
+
+            let rendered = runtime.visible_text();
+            assert!(
+                !rendered.contains(crossing_url) && rendered.contains(recovery_url),
+                "Ghostty split the exact partial-width IL repro at split {split}: {rendered:?}"
+            );
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("recovery after exact partial-width IL split {split}"));
+            assert_eq!(links.output_urls, [recovery_url], "split {split}");
+        }
+        let crossing_cases = [
+            ("insert lines", "\x1b[?69h\x1b[10;40s", "\x1b[1L"),
+            ("delete lines", "\x1b[?69h\x1b[10;40s", "\x1b[1M"),
+            ("index", "\x1b[?69h\x1b[10;40s\x1b[1;2r\x1b[2;1H", "\x1bD"),
+            (
+                "reverse index",
+                "\x1b[?69h\x1b[10;40s\x1b[1;2r\x1b[1;1H",
+                "\x1bM",
+            ),
+            (
+                "scroll up",
+                "\x1b[?69h\x1b[10;40s\x1b[1;2r\x1b[1;1H",
+                "\x1b[1S",
+            ),
+            (
+                "scroll down",
+                "\x1b[?69h\x1b[10;40s\x1b[1;2r\x1b[1;1H",
+                "\x1b[1T",
+            ),
+        ];
+        for (label, setup, action) in crossing_cases {
+            let stream = format!("{setup}\t\x1b[1G{crossing_url}{action}{recovery}");
+            for split in 0..=stream.len() {
+                let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+                let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+                runtime.terminal.install_link_extraction(gate.clone());
+                runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+                runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+                let rendered = runtime.visible_text();
+                assert!(
+                    !rendered.contains(crossing_url) && rendered.contains(recovery_url),
+                    "Ghostty split the margin-crossing URL after {label} at split {split}: {rendered:?}"
+                );
+                let links = gate.take_links().unwrap_or_else(|| {
+                    panic!("recovery after partial-width {label} at split {split}")
+                });
+                assert_eq!(links.output_urls, [recovery_url], "{label} split {split}");
+            }
+        }
+
+        let preserved_cases = [
+            ("insert lines", "\x1b[?69h\x1b[40;70s", "\x1b[40G\x1b[1L"),
+            ("delete lines", "\x1b[?69h\x1b[40;70s", "\x1b[40G\x1b[1M"),
+            (
+                "index",
+                "\x1b[?69h\x1b[40;70s\x1b[1;2r\x1b[2;1H",
+                "\x1b[40G\x1bD",
+            ),
+            (
+                "reverse index",
+                "\x1b[?69h\x1b[40;70s\x1b[1;2r\x1b[1;1H",
+                "\x1b[40G\x1bM",
+            ),
+            (
+                "scroll up",
+                "\x1b[?69h\x1b[40;70s\x1b[1;2r\x1b[1;1H",
+                "\x1b[40G\x1b[1S",
+            ),
+            (
+                "scroll down",
+                "\x1b[?69h\x1b[40;70s\x1b[1;2r\x1b[1;1H",
+                "\x1b[40G\x1b[1T",
+            ),
+        ];
+        for (label, setup, action) in preserved_cases {
+            let stream = format!("{setup}\t\x1b[1G{kept_url}{action}{recovery}");
+            for split in 0..=stream.len() {
+                let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+                let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+                runtime.terminal.install_link_extraction(gate.clone());
+                runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+                runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+                let rendered = runtime.visible_text();
+                assert!(
+                    rendered.contains(kept_url) && rendered.contains(recovery_url),
+                    "Ghostty preserved the outside URL after {label} at split {split}: {rendered:?}"
+                );
+                let links = gate.take_links().unwrap_or_else(|| {
+                    panic!("preserved URL after partial-width {label} at split {split}")
+                });
+                assert_eq!(
+                    links.output_urls,
+                    [kept_url, recovery_url],
+                    "{label} split {split}"
+                );
+            }
+        }
+
+        let inside_url = "https://inside.example/x";
+        let stream = format!("\x1b[?69h\x1b[10;70s\t\x1b[10G{inside_url}\x1b[1L{recovery}");
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+            let rendered = runtime.visible_text();
+            assert!(rendered.contains(inside_url), "split {split}: {rendered:?}");
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("surviving inside slice at split {split}"));
+            assert_eq!(
+                links.output_urls,
+                [inside_url, recovery_url],
+                "split {split}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn dec_special_charset_matches_ghostty_rendered_text() {
         let mapped = "https://mapped.example.test/path";
         let visible = "https://visible-after-reset.example.test/path";
