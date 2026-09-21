@@ -73,6 +73,11 @@ pub struct WorktreeRemoveResult {
 pub enum AppEvent {
     /// A read-only fleet host inventory poll completed.
     FleetRefreshed { snapshot: crate::fleet::Snapshot },
+    /// A remote group catalog snapshot finished its durable cache write.
+    GroupCatalogCachePersisted {
+        snapshot: Box<crate::fleet::Snapshot>,
+        result: Result<(), String>,
+    },
     /// A remote focus transport advanced a server-owned operation. The wire
     /// transport will construct this event when the next slice lands.
     #[allow(dead_code)]

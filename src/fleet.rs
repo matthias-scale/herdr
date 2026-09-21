@@ -485,6 +485,85 @@ pub(crate) fn save_group_catalog_cache(path: &Path, snapshot: &Snapshot) -> std:
     Ok(())
 }
 
+struct GroupCatalogCacheWrite {
+    path: PathBuf,
+    snapshot: Snapshot,
+}
+
+type GroupCatalogCacheSave =
+    dyn Fn(&Path, &Snapshot) -> std::io::Result<()> + Send + Sync + 'static;
+
+/// Serial durable cache writer. The app loop admits each candidate before it
+/// enters this queue and publishes it only after the matching completion.
+pub(crate) struct GroupCatalogCacheWriter {
+    sender: std::sync::Mutex<Option<std::sync::mpsc::Sender<GroupCatalogCacheWrite>>>,
+    event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    save: Arc<GroupCatalogCacheSave>,
+}
+
+impl GroupCatalogCacheWriter {
+    pub(crate) fn new(event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>) -> Self {
+        Self {
+            sender: std::sync::Mutex::new(None),
+            event_tx,
+            save: Arc::new(save_group_catalog_cache),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_save(
+        event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+        save: impl Fn(&Path, &Snapshot) -> std::io::Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            sender: std::sync::Mutex::new(None),
+            event_tx,
+            save: Arc::new(save),
+        }
+    }
+
+    pub(crate) fn enqueue(&self, path: PathBuf, snapshot: Snapshot) -> Result<(), String> {
+        let mut sender = self
+            .sender
+            .lock()
+            .map_err(|_| "group catalog cache queue is unavailable".to_string())?;
+        if sender.is_none() {
+            let (write_tx, write_rx) = std::sync::mpsc::channel::<GroupCatalogCacheWrite>();
+            let event_tx = self.event_tx.clone();
+            let save = Arc::clone(&self.save);
+            std::thread::Builder::new()
+                .name("herdr-group-cache".into())
+                .spawn(move || {
+                    while let Ok(job) = write_rx.recv() {
+                        let result = save(&job.path, &job.snapshot).map_err(|error| {
+                            format!(
+                                "cannot persist remote group catalog cache at {}: {error}",
+                                job.path.display()
+                            )
+                        });
+                        if event_tx
+                            .blocking_send(crate::events::AppEvent::GroupCatalogCachePersisted {
+                                snapshot: Box::new(job.snapshot),
+                                result,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                })
+                .map_err(|error| format!("cannot start group catalog cache writer: {error}"))?;
+            *sender = Some(write_tx);
+        }
+        let Some(sender) = sender.as_ref() else {
+            return Err("group catalog cache queue did not initialize".into());
+        };
+        sender
+            .send(GroupCatalogCacheWrite { path, snapshot })
+            .map_err(|_| "group catalog cache writer stopped".to_string())
+    }
+}
+
 struct RoutedApiRequest {
     catalog: GroupCatalog,
     config_generation: u64,

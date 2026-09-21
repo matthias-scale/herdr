@@ -199,6 +199,10 @@ pub struct App {
     pub(crate) group_catalog_cache_path: Option<std::path::PathBuf>,
     /// A non-missing cache that could not be trusted quarantines remote catalogs.
     pub(crate) group_catalog_cache_error: Option<String>,
+    /// Serial durable cache writer. Only its completion events publish catalogs.
+    pub(crate) group_catalog_cache_writer: crate::fleet::GroupCatalogCacheWriter,
+    pub(crate) group_catalog_cache_write_in_flight: bool,
+    pub(crate) queued_fleet_snapshot: Option<crate::fleet::Snapshot>,
     /// Serial remote mutation transport, kept off the app event loop.
     pub(crate) authority_mutation_router: crate::fleet::AuthorityMutationRouter,
     /// Owner-only pane memberships maintained at lifecycle boundaries so
@@ -1409,6 +1413,8 @@ impl App {
         }
         let fleet_poller_config =
             crate::fleet::start_poller(config.remote.fleet.clone(), event_tx.clone());
+        let group_catalog_cache_writer =
+            crate::fleet::GroupCatalogCacheWriter::new(event_tx.clone());
         crate::symphony::start_poller(fleet_poller_config.clone(), event_tx.clone());
         #[cfg(not(test))]
         let group_runtime = crate::groups::Runtime::load_default();
@@ -1472,6 +1478,9 @@ impl App {
             group_runtime,
             group_catalog_cache_path,
             group_catalog_cache_error,
+            group_catalog_cache_writer,
+            group_catalog_cache_write_in_flight: false,
+            queued_fleet_snapshot: None,
             authority_mutation_router: crate::fleet::AuthorityMutationRouter::default(),
             group_membership_projection: std::collections::BTreeMap::new(),
             #[cfg(test)]

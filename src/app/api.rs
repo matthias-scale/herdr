@@ -59,6 +59,10 @@ impl App {
         if snapshot.config_generation != self.fleet_poller_config.generation() {
             return false;
         }
+        if self.group_catalog_cache_write_in_flight {
+            self.queued_fleet_snapshot = Some(snapshot);
+            return false;
+        }
         snapshot.retain_unreachable_inventory_from(&self.state.fleet_snapshot);
         snapshot.admit_group_catalogs_from(&self.state.fleet_snapshot);
         let candidate_catalogs_changed =
@@ -70,15 +74,55 @@ impl App {
             );
         } else if candidate_catalogs_changed {
             if let Some(path) = self.group_catalog_cache_path.as_deref() {
-                if let Err(error) = crate::fleet::save_group_catalog_cache(path, &snapshot) {
-                    tracing::warn!(%error, path = %path.display(), "cannot persist remote group catalog cache");
-                    snapshot.reject_group_catalogs_without_durable_history_from(
-                        &self.state.fleet_snapshot,
-                        &format!("durable cache persistence failed: {error}"),
-                    );
+                match self
+                    .group_catalog_cache_writer
+                    .enqueue(path.to_path_buf(), snapshot.clone())
+                {
+                    Ok(()) => {
+                        self.group_catalog_cache_write_in_flight = true;
+                        return false;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, path = %path.display(), "cannot queue remote group catalog cache write");
+                        snapshot.reject_group_catalogs_without_durable_history_from(
+                            &self.state.fleet_snapshot,
+                            &format!("durable cache persistence failed: {error}"),
+                        );
+                    }
                 }
             }
         }
+        self.commit_fleet_snapshot(snapshot)
+    }
+
+    fn finish_group_catalog_cache_write(
+        &mut self,
+        mut snapshot: crate::fleet::Snapshot,
+        result: Result<(), String>,
+    ) -> bool {
+        self.group_catalog_cache_write_in_flight = false;
+        let mut changed = false;
+        if snapshot.config_generation == self.fleet_poller_config.generation() {
+            if let Err(error) = result {
+                if let Some(path) = self.group_catalog_cache_path.as_deref() {
+                    tracing::warn!(%error, path = %path.display(), "cannot persist remote group catalog cache");
+                } else {
+                    tracing::warn!(%error, "cannot persist remote group catalog cache");
+                }
+                snapshot.reject_group_catalogs_without_durable_history_from(
+                    &self.state.fleet_snapshot,
+                    &format!("durable cache persistence failed: {error}"),
+                );
+            }
+            changed = self.commit_fleet_snapshot(snapshot);
+        }
+        if let Some(queued) = self.queued_fleet_snapshot.take() {
+            changed |= self.install_fleet_snapshot(queued);
+        }
+        changed
+    }
+
+    fn commit_fleet_snapshot(&mut self, snapshot: crate::fleet::Snapshot) -> bool {
         self.remote_focus_transport
             .observe_fleet_snapshot(&snapshot);
         let catalogs_changed = self.state.fleet_snapshot.group_catalogs != snapshot.group_catalogs;
@@ -136,6 +180,9 @@ impl App {
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
             AppEvent::FleetRefreshed { snapshot } => self.install_fleet_snapshot(snapshot),
+            AppEvent::GroupCatalogCachePersisted { snapshot, result } => {
+                self.finish_group_catalog_cache_write(*snapshot, result)
+            }
             AppEvent::SymphonyWorkflowsRefreshed { snapshot } => {
                 self.refresh_symphony_snapshot(snapshot)
             }
@@ -384,6 +431,10 @@ impl App {
 
         if let AppEvent::FleetRefreshed { snapshot } = ev {
             return Some(self.install_fleet_snapshot(snapshot));
+        }
+
+        if let AppEvent::GroupCatalogCachePersisted { snapshot, result } = ev {
+            return Some(self.finish_group_catalog_cache_write(*snapshot, result));
         }
 
         if let AppEvent::ScratchpadChanged = ev {
@@ -2072,6 +2123,21 @@ mod tests {
         }
     }
 
+    fn wait_for_app_event(app: &mut App, description: &str) -> crate::events::AppEvent {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match app.event_rx.try_recv() {
+                Ok(event) => return event,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => panic!("{description} event unavailable: {error}"),
+            }
+        }
+    }
+
     #[test]
     fn stale_fleet_snapshot_after_reload_is_not_installed() {
         let mut config = crate::config::Config::default();
@@ -2350,6 +2416,82 @@ mod tests {
     }
 
     #[test]
+    fn durable_catalog_write_runs_off_the_app_event_loop() {
+        let config = crate::config::Config::default();
+        let hub = crate::api::EventHub::default();
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            hub.clone(),
+        );
+        let root = std::env::temp_dir().join(format!(
+            "herdr-group-cache-worker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let path = root.join("remote-group-catalogs.json");
+        app.group_catalog_cache_path = Some(path.clone());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
+        app.group_catalog_cache_writer = crate::fleet::GroupCatalogCacheWriter::with_save(
+            app.event_tx.clone(),
+            move |path, snapshot| {
+                let _ = started_tx.send(());
+                release_rx
+                    .lock()
+                    .map_err(|_| std::io::Error::other("cache release gate poisoned"))?
+                    .recv()
+                    .map_err(|_| std::io::Error::other("cache release gate closed"))?;
+                crate::fleet::save_group_catalog_cache(path, snapshot)
+            },
+        );
+        let authority = crate::groups::AuthorityId::from_random_bytes([13; 16]);
+        let mut snapshot = fleet_snapshot(Vec::new());
+        snapshot.group_catalogs = vec![crate::fleet::GroupCatalog {
+            host: "office".into(),
+            target: "machine-a".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: authority,
+                revision: 1,
+                groups: Vec::new(),
+                memberships: Vec::new(),
+            }),
+            error: None,
+        }];
+
+        assert!(!app.install_fleet_snapshot(snapshot));
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("background cache write started");
+        let status = app.dispatch_api_request(
+            "status",
+            crate::api::schema::Method::ThemeStatus(Default::default()),
+        );
+        assert!(serde_json::from_str::<crate::api::schema::SuccessResponse>(&status).is_ok());
+        assert!(hub.events_after(0).is_empty());
+        assert!(app.state.fleet_snapshot.group_catalogs.is_empty());
+
+        release_tx.send(()).expect("release cache writer");
+        let completion = wait_for_app_event(&mut app, "cache completion");
+        assert!(app.handle_internal_event_with_render_impact(completion));
+        assert_eq!(app.state.fleet_snapshot.group_catalogs.len(), 1);
+        assert_eq!(hub.events_after(0).len(), 1);
+        assert!(path.is_file());
+        std::fs::remove_dir_all(root).expect("remove cache worker fixture");
+    }
+
+    #[test]
     fn catalog_admission_fails_closed_when_the_durable_cache_cannot_advance() {
         let config = crate::config::Config::default();
         let mut app = App::new(
@@ -2404,7 +2546,9 @@ mod tests {
         let mut incoming = fleet_snapshot(Vec::new());
         incoming.group_catalogs = vec![catalog(2, crate::groups::GroupState::Deleted)];
 
-        assert!(app.install_fleet_snapshot(incoming));
+        assert!(!app.install_fleet_snapshot(incoming));
+        let completion = wait_for_app_event(&mut app, "failed cache write");
+        assert!(app.handle_internal_event_with_render_impact(completion));
 
         let retained = &app.state.fleet_snapshot.group_catalogs[0];
         assert_eq!(retained.state, crate::fleet::GroupCatalogState::Stale);
