@@ -195,13 +195,15 @@ pub struct App {
     pub(crate) fleet_poller_config: crate::fleet::FleetPollerHandle,
     /// Server-owned group authority. Persistence is separate from client presentation state.
     pub(crate) group_runtime: crate::groups::Runtime,
-    /// Separate versioned admission cache for remote authority snapshots.
-    pub(crate) group_catalog_cache_path: Option<std::path::PathBuf>,
-    /// A non-missing cache that could not be trusted quarantines remote catalogs.
-    pub(crate) group_catalog_cache_error: Option<String>,
-    /// Serial durable cache writer. Only its completion events publish catalogs.
-    pub(crate) group_catalog_cache_writer: crate::fleet::GroupCatalogCacheWriter,
-    pub(crate) group_catalog_cache_write_in_flight: bool,
+    /// Advance-only authority history, independent from current fleet routes.
+    pub(crate) authority_acceptance_ledger: crate::fleet::AuthorityAcceptanceLedger,
+    pub(crate) authority_acceptance_ledger_path: Option<std::path::PathBuf>,
+    /// An unreadable non-missing ledger quarantines remote catalogs.
+    pub(crate) authority_acceptance_ledger_error: Option<String>,
+    /// Serial ledger writer. Only its completion events publish new catalogs.
+    pub(crate) authority_acceptance_ledger_writer: crate::fleet::AuthorityAcceptanceLedgerWriter,
+    pub(crate) authority_acceptance_ledger_write_in_flight: bool,
+    pub(crate) pending_authority_acceptance_ledger: Option<crate::fleet::AuthorityAcceptanceLedger>,
     pub(crate) queued_fleet_snapshot: Option<crate::fleet::Snapshot>,
     /// Serial remote mutation transport, kept off the app event loop.
     pub(crate) authority_mutation_router: crate::fleet::AuthorityMutationRouter,
@@ -1413,24 +1415,26 @@ impl App {
         }
         let fleet_poller_config =
             crate::fleet::start_poller(config.remote.fleet.clone(), event_tx.clone());
-        let group_catalog_cache_writer =
-            crate::fleet::GroupCatalogCacheWriter::new(event_tx.clone());
+        let authority_acceptance_ledger_writer =
+            crate::fleet::AuthorityAcceptanceLedgerWriter::new(event_tx.clone());
         crate::symphony::start_poller(fleet_poller_config.clone(), event_tx.clone());
         #[cfg(not(test))]
         let group_runtime = crate::groups::Runtime::load_default();
         #[cfg(test)]
         let group_runtime = crate::groups::Runtime::unavailable_for_tests();
         #[cfg(not(test))]
-        let group_catalog_cache_path = Some(crate::fleet::group_catalog_cache_path());
+        let authority_acceptance_ledger_path =
+            Some(crate::fleet::authority_acceptance_ledger_path());
         #[cfg(test)]
-        let group_catalog_cache_path = None;
-        let mut group_catalog_cache_error = None;
-        if let Some(path) = group_catalog_cache_path.as_deref() {
-            match crate::fleet::load_group_catalog_cache(path, &config.remote.fleet) {
-                Ok(catalogs) => state.fleet_snapshot.group_catalogs = catalogs,
+        let authority_acceptance_ledger_path = None;
+        let mut authority_acceptance_ledger = crate::fleet::AuthorityAcceptanceLedger::default();
+        let mut authority_acceptance_ledger_error = None;
+        if let Some(path) = authority_acceptance_ledger_path.as_deref() {
+            match crate::fleet::load_authority_acceptance_ledger(path) {
+                Ok(ledger) => authority_acceptance_ledger = ledger,
                 Err(error) => {
                     tracing::warn!(%error, path = %path.display(), "remote group catalog history is unavailable");
-                    group_catalog_cache_error = Some(error);
+                    authority_acceptance_ledger_error = Some(error);
                 }
             }
         }
@@ -1476,10 +1480,12 @@ impl App {
             )),
             fleet_poller_config,
             group_runtime,
-            group_catalog_cache_path,
-            group_catalog_cache_error,
-            group_catalog_cache_writer,
-            group_catalog_cache_write_in_flight: false,
+            authority_acceptance_ledger,
+            authority_acceptance_ledger_path,
+            authority_acceptance_ledger_error,
+            authority_acceptance_ledger_writer,
+            authority_acceptance_ledger_write_in_flight: false,
+            pending_authority_acceptance_ledger: None,
             queued_fleet_snapshot: None,
             authority_mutation_router: crate::fleet::AuthorityMutationRouter::default(),
             group_membership_projection: std::collections::BTreeMap::new(),
@@ -2607,6 +2613,8 @@ impl App {
                 .reconcile_after_config_reload(&config.remote.fleet, config_generation);
             let catalogs_changed =
                 self.state.fleet_snapshot.group_catalogs != reconciled_snapshot.group_catalogs;
+            self.authority_mutation_router
+                .observe_snapshot(&reconciled_snapshot);
             self.state.fleet_snapshot = reconciled_snapshot;
             if catalogs_changed {
                 self.emit_event(crate::api::schema::EventEnvelope {

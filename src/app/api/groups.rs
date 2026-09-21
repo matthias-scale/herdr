@@ -1524,6 +1524,8 @@ mod tests {
             }),
             error: None,
         }];
+        app.authority_mutation_router
+            .observe_snapshot(&app.state.fleet_snapshot);
         let (mutation_tx, mutation_rx) = std::sync::mpsc::channel();
         app.handle_api_request_message(crate::api::ApiRequestMessage {
             request: Request {
@@ -1633,6 +1635,8 @@ mod tests {
             }),
             error: None,
         }];
+        app.authority_mutation_router
+            .observe_snapshot(&app.state.fleet_snapshot);
         let enqueue = |app: &mut App, id: &str| {
             let (respond_to, response_rx) = std::sync::mpsc::channel();
             app.handle_api_request_message(crate::api::ApiRequestMessage {
@@ -1673,6 +1677,205 @@ mod tests {
             serde_json::from_str(&second).expect("queued mutation error response");
         assert_eq!(second.error.code, "authority_not_fresh");
         assert!(!second_started.exists(), "removed connection was contacted");
+    }
+
+    #[cfg(unix)]
+    fn assert_poll_cancels_queued_mutation(
+        fixture: &str,
+        recover_route_before_send: bool,
+        poll_catalogs: impl FnOnce(
+            &crate::groups::AuthorityId,
+            &GroupAuthoritySnapshot,
+        ) -> Vec<crate::fleet::GroupCatalog>,
+    ) {
+        let mut config = crate::config::Config::default();
+        config.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "remote".into(),
+            target: "fixture".into(),
+            ..Default::default()
+        }];
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        let dir = TestDir::new(fixture);
+        std::fs::create_dir_all(&dir.0).expect("create mutation fixture directory");
+        let fake_ssh = dir.0.join("blocking-ssh");
+        let first_started = dir.0.join("first-started");
+        let release_first = dir.0.join("release-first");
+        let second_started = dir.0.join("second-started");
+        write_executable(
+            &fake_ssh,
+            &format!(
+                "#!/bin/sh\ncat >/dev/null\nif [ ! -e '{}' ]; then\n  touch '{}'\n  while [ ! -e '{}' ]; do sleep 0.01; done\nelse\n  touch '{}'\nfi\nprintf '%s\\n' '{{\"id\":\"ok\",\"result\":{{\"type\":\"ok\"}}}}'\n",
+                first_started.display(),
+                first_started.display(),
+                release_first.display(),
+                second_started.display(),
+            ),
+        );
+        app.authority_mutation_router = crate::fleet::AuthorityMutationRouter::with_ssh_program(
+            fake_ssh,
+            std::time::Duration::from_secs(2),
+        );
+        let authority = crate::groups::AuthorityId::from_random_bytes([17; 16]);
+        let group_id = GroupId {
+            owner: authority.clone(),
+            local: 1,
+        };
+        let accepted = GroupAuthoritySnapshot {
+            authority_id: authority.clone(),
+            revision: 1,
+            groups: vec![GroupRecord {
+                id: group_id.clone(),
+                revision: 1,
+                state: GroupState::Active {
+                    name: "Remote".into(),
+                },
+            }],
+            memberships: Vec::new(),
+        };
+        app.state.fleet_snapshot.group_catalogs = vec![crate::fleet::GroupCatalog {
+            host: "remote".into(),
+            target: "fixture".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
+            snapshot: Some(accepted.clone()),
+            error: None,
+        }];
+        app.authority_mutation_router
+            .observe_snapshot(&app.state.fleet_snapshot);
+        let enqueue = |app: &mut App, id: &str| {
+            let (respond_to, response_rx) = std::sync::mpsc::channel();
+            app.handle_api_request_message(crate::api::ApiRequestMessage {
+                request: Request {
+                    id: id.into(),
+                    method: Method::GroupDelete(GroupDeleteParams {
+                        group_id: group_id.clone(),
+                        expected_revision: 1,
+                    }),
+                },
+                respond_to,
+                response_write_complete: None,
+                stream_active: None,
+            });
+            response_rx
+        };
+        let first_rx = enqueue(&mut app, "first");
+        let second_rx = enqueue(&mut app, "second");
+        let transport_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !first_started.exists() && std::time::Instant::now() < transport_deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            first_started.exists(),
+            "first mutation did not reach transport"
+        );
+
+        let snapshot = crate::fleet::Snapshot {
+            polled: true,
+            configured_hosts: vec!["remote".into()],
+            group_catalogs: poll_catalogs(&authority, &accepted),
+            ..crate::fleet::Snapshot::default()
+        };
+        app.handle_internal_event_with_render_impact(crate::events::AppEvent::FleetRefreshed {
+            snapshot,
+        });
+        if recover_route_before_send {
+            let recovered = crate::fleet::Snapshot {
+                polled: true,
+                configured_hosts: vec!["remote".into()],
+                group_catalogs: vec![crate::fleet::GroupCatalog {
+                    host: "remote".into(),
+                    target: "fixture".into(),
+                    local: false,
+                    session: None,
+                    socket: None,
+                    state: crate::fleet::GroupCatalogState::Fresh,
+                    observed_authority_id: Some(authority.clone()),
+                    snapshot: Some(accepted),
+                    error: None,
+                }],
+                ..crate::fleet::Snapshot::default()
+            };
+            app.handle_internal_event_with_render_impact(crate::events::AppEvent::FleetRefreshed {
+                snapshot: recovered,
+            });
+        }
+        std::fs::write(&release_first, b"").expect("release first mutation");
+
+        first_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("in-flight mutation response");
+        let second = second_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("queued mutation cancellation");
+        let second: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&second).expect("queued mutation error response");
+        assert_eq!(second.error.code, "authority_not_fresh");
+        assert!(!second_started.exists(), "invalid route was contacted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_mutation_is_cancelled_when_poll_makes_route_stale() {
+        assert_poll_cancels_queued_mutation("poll-stale-cancels-mutation", false, |_, _| {
+            vec![crate::fleet::GroupCatalog {
+                host: "remote".into(),
+                target: "fixture".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: crate::fleet::GroupCatalogState::Unavailable,
+                observed_authority_id: None,
+                snapshot: None,
+                error: Some("offline".into()),
+            }]
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_mutation_is_cancelled_when_poll_makes_authority_conflicted() {
+        assert_poll_cancels_queued_mutation(
+            "poll-conflict-cancels-mutation",
+            false,
+            |authority, accepted| {
+                [("remote", "fixture"), ("duplicate", "other-fixture")]
+                    .into_iter()
+                    .map(|(host, target)| crate::fleet::GroupCatalog {
+                        host: host.into(),
+                        target: target.into(),
+                        local: false,
+                        session: None,
+                        socket: None,
+                        state: crate::fleet::GroupCatalogState::Fresh,
+                        observed_authority_id: Some(authority.clone()),
+                        snapshot: Some(accepted.clone()),
+                        error: None,
+                    })
+                    .collect()
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_mutation_stays_cancelled_after_a_stale_route_recovers() {
+        assert_poll_cancels_queued_mutation("poll-stale-route-recovers", true, |_, _| {
+            vec![crate::fleet::GroupCatalog {
+                host: "remote".into(),
+                target: "fixture".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: crate::fleet::GroupCatalogState::Unavailable,
+                observed_authority_id: None,
+                snapshot: None,
+                error: Some("offline".into()),
+            }]
+        });
     }
 
     #[test]

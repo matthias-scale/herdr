@@ -1860,8 +1860,8 @@ fn two_servers_share_groups_route_concurrent_mutations_and_recover_stale_catalog
         .find(|catalog| catalog["authority_id"] == authority_a)
         .expect("retained catalog after beta restart");
     assert_eq!(
-        rejected_catalog["snapshot"]["groups"][0]["state"],
-        "deleted"
+        rejected_catalog["snapshot"]["groups"][0]["state"], "active",
+        "the live catalog reports the owner's current rolled-back answer"
     );
 
     drop(server_a.take());

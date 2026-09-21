@@ -73,8 +73,9 @@ pub struct WorktreeRemoveResult {
 pub enum AppEvent {
     /// A read-only fleet host inventory poll completed.
     FleetRefreshed { snapshot: crate::fleet::Snapshot },
-    /// A remote group catalog snapshot finished its durable cache write.
-    GroupCatalogCachePersisted {
+    /// An authority admission advance finished its durable ledger write.
+    AuthorityAcceptanceLedgerPersisted {
+        ledger: crate::fleet::AuthorityAcceptanceLedger,
         snapshot: Box<crate::fleet::Snapshot>,
         result: Result<(), String>,
     },

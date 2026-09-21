@@ -24,9 +24,9 @@ const MIN_REFRESH_INTERVAL_MS: u64 = 100;
 // select its newest records while keeping malformed or unbounded stores capped.
 const MAX_RUN_DIRECTORY_ENTRIES: usize = 2_048;
 const MAX_REMOTE_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
-const GROUP_CATALOG_CACHE_VERSION: u32 = 1;
+const AUTHORITY_ACCEPTANCE_LEDGER_VERSION: u32 = 2;
 #[cfg(not(test))]
-const GROUP_CATALOG_CACHE_FILE: &str = "remote-group-catalogs-v1.json";
+const AUTHORITY_ACCEPTANCE_LEDGER_FILE: &str = "remote-group-catalogs-v1.json";
 type ParsedRemoteOutput = (
     Result<Vec<AgentInfo>, String>,
     Result<crate::groups::GroupAuthoritySnapshot, String>,
@@ -331,13 +331,13 @@ impl GroupCatalog {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct GroupCatalogCacheFile {
+struct AuthorityAcceptanceLedgerFile {
     version: u32,
-    entries: Vec<GroupCatalogCacheEntry>,
+    authorities: Vec<crate::groups::GroupAuthoritySnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct GroupCatalogCacheEntry {
+struct LegacyGroupCatalogCacheEntry {
     target: String,
     local: bool,
     session: Option<String>,
@@ -345,123 +345,150 @@ struct GroupCatalogCacheEntry {
     snapshot: crate::groups::GroupAuthoritySnapshot,
 }
 
-type GroupCatalogCacheKey = (
-    String,
-    bool,
-    Option<String>,
-    Option<String>,
-    crate::groups::AuthorityId,
-);
+impl LegacyGroupCatalogCacheEntry {
+    fn into_snapshot(self) -> crate::groups::GroupAuthoritySnapshot {
+        let Self {
+            target: _,
+            local: _,
+            session: _,
+            socket: _,
+            snapshot,
+        } = self;
+        snapshot
+    }
+}
 
-impl GroupCatalogCacheEntry {
-    fn matches_config(&self, host: &FleetHostConfig) -> bool {
-        self.target == host.target
-            && self.local == host.local
-            && self.session == host.session
-            && self.socket == host.socket
+#[derive(Debug, Serialize, Deserialize)]
+struct LegacyGroupCatalogCacheFile {
+    version: u32,
+    entries: Vec<LegacyGroupCatalogCacheEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthorityAcceptanceLedgerHeader {
+    version: u32,
+}
+
+/// Durable, authority-owned admission history. Connection catalogs describe
+/// the latest poll; this ledger records every authority snapshot accepted by
+/// this server and cannot be narrowed by the current fleet configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AuthorityAcceptanceLedger {
+    authorities: BTreeMap<crate::groups::AuthorityId, crate::groups::GroupAuthoritySnapshot>,
+}
+
+impl AuthorityAcceptanceLedger {
+    fn canonical_snapshot(
+        mut snapshot: crate::groups::GroupAuthoritySnapshot,
+    ) -> crate::groups::GroupAuthoritySnapshot {
+        snapshot.groups.sort_by_key(|record| record.id.local);
+        snapshot.memberships.clear();
+        snapshot
+    }
+
+    fn from_snapshots(
+        snapshots: impl IntoIterator<Item = crate::groups::GroupAuthoritySnapshot>,
+    ) -> Result<Self, String> {
+        let mut by_authority: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for snapshot in snapshots {
+            let snapshot = Self::canonical_snapshot(snapshot);
+            by_authority
+                .entry(snapshot.authority_id.clone())
+                .or_default()
+                .push(snapshot);
+        }
+        let mut ledger = Self::default();
+        for snapshots in by_authority.values_mut() {
+            snapshots.sort_by_key(|snapshot| snapshot.revision);
+            for snapshot in snapshots.drain(..) {
+                ledger.advance(&snapshot)?;
+            }
+        }
+        Ok(ledger)
+    }
+
+    pub(crate) fn advance(
+        &mut self,
+        snapshot: &crate::groups::GroupAuthoritySnapshot,
+    ) -> Result<bool, String> {
+        let candidate = Self::canonical_snapshot(snapshot.clone());
+        let retained = self.authorities.get(&candidate.authority_id);
+        crate::groups::admit_authority_snapshot(retained, &candidate)
+            .map_err(|error| error.to_string())?;
+        if retained == Some(&candidate) {
+            return Ok(false);
+        }
+        self.authorities
+            .insert(candidate.authority_id.clone(), candidate);
+        Ok(true)
+    }
+
+    pub(crate) fn accepted(
+        &self,
+        authority: &crate::groups::AuthorityId,
+    ) -> Option<&crate::groups::GroupAuthoritySnapshot> {
+        self.authorities.get(authority)
+    }
+
+    fn contains_snapshot(&self, snapshot: &crate::groups::GroupAuthoritySnapshot) -> bool {
+        let snapshot = Self::canonical_snapshot(snapshot.clone());
+        self.authorities.get(&snapshot.authority_id) == Some(&snapshot)
+    }
+
+    fn snapshots(&self) -> Vec<crate::groups::GroupAuthoritySnapshot> {
+        self.authorities.values().cloned().collect()
     }
 }
 
 #[cfg(not(test))]
-pub(crate) fn group_catalog_cache_path() -> PathBuf {
-    crate::session::data_dir().join(GROUP_CATALOG_CACHE_FILE)
+pub(crate) fn authority_acceptance_ledger_path() -> PathBuf {
+    // Keep the slice-2 preview filename so a v1 cache can migrate in place.
+    crate::session::data_dir().join(AUTHORITY_ACCEPTANCE_LEDGER_FILE)
 }
 
-pub(crate) fn load_group_catalog_cache(
+pub(crate) fn load_authority_acceptance_ledger(
     path: &Path,
-    fleet: &FleetConfig,
-) -> Result<Vec<GroupCatalog>, String> {
+) -> Result<AuthorityAcceptanceLedger, String> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("cannot read remote group catalog cache: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AuthorityAcceptanceLedger::default());
+        }
+        Err(error) => return Err(format!("cannot read authority acceptance ledger: {error}")),
     };
-    let file: GroupCatalogCacheFile = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("cannot parse remote group catalog cache: {error}"))?;
-    if file.version != GROUP_CATALOG_CACHE_VERSION {
-        return Err(format!(
-            "unsupported remote group catalog cache version {} (expected {})",
-            file.version, GROUP_CATALOG_CACHE_VERSION
-        ));
-    }
-
-    let mut catalogs = Vec::new();
-    for host in &fleet.hosts {
-        let mut matching_by_authority = BTreeMap::new();
-        for entry in file
-            .entries
-            .iter()
-            .filter(|entry| entry.matches_config(host))
-        {
-            if matching_by_authority
-                .insert(entry.snapshot.authority_id.clone(), entry)
-                .is_some()
-            {
-                return Err(format!(
-                    "remote group catalog cache has ambiguous history for connection {}",
-                    host.name
-                ));
-            }
+    let header: AuthorityAcceptanceLedgerHeader = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("cannot parse authority acceptance ledger: {error}"))?;
+    let snapshots = match header.version {
+        1 => {
+            let file: LegacyGroupCatalogCacheFile = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("cannot parse legacy group catalog cache: {error}"))?;
+            file.entries
+                .into_iter()
+                .map(LegacyGroupCatalogCacheEntry::into_snapshot)
+                .collect::<Vec<_>>()
         }
-        for entry in matching_by_authority.into_values() {
-            crate::groups::admit_authority_snapshot(None, &entry.snapshot).map_err(|error| {
-                format!(
-                    "remote group catalog cache has invalid history for connection {}: {error}",
-                    host.name
-                )
-            })?;
-            catalogs.push(GroupCatalog {
-                host: host.name.clone(),
-                target: host.target.clone(),
-                local: host.local,
-                session: host.session.clone(),
-                socket: host.socket.clone(),
-                state: GroupCatalogState::Stale,
-                observed_authority_id: None,
-                snapshot: Some(entry.snapshot.clone()),
-                error: Some("retained from durable cache".into()),
-            });
+        AUTHORITY_ACCEPTANCE_LEDGER_VERSION => {
+            let file: AuthorityAcceptanceLedgerFile = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("cannot parse authority acceptance ledger: {error}"))?;
+            file.authorities
         }
-    }
-    Ok(catalogs)
+        version => {
+            return Err(format!(
+                "unsupported authority acceptance ledger version {version} (expected {AUTHORITY_ACCEPTANCE_LEDGER_VERSION})"
+            ));
+        }
+    };
+    AuthorityAcceptanceLedger::from_snapshots(snapshots)
+        .map_err(|error| format!("authority acceptance ledger has invalid history: {error}"))
 }
 
-pub(crate) fn save_group_catalog_cache(path: &Path, snapshot: &Snapshot) -> std::io::Result<()> {
-    let mut entries_by_key: BTreeMap<GroupCatalogCacheKey, GroupCatalogCacheEntry> =
-        BTreeMap::new();
-    for catalog in &snapshot.group_catalogs {
-        let Some(accepted) = catalog.snapshot.as_ref() else {
-            continue;
-        };
-        let key = (
-            catalog.target.clone(),
-            catalog.local,
-            catalog.session.clone(),
-            catalog.socket.clone(),
-            accepted.authority_id.clone(),
-        );
-        let entry = GroupCatalogCacheEntry {
-            target: catalog.target.clone(),
-            local: catalog.local,
-            session: catalog.session.clone(),
-            socket: catalog.socket.clone(),
-            snapshot: accepted.clone(),
-        };
-        if let Some(previous) = entries_by_key.get(&key) {
-            if previous.snapshot != entry.snapshot {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "one authority reported conflicting catalogs through the same connection",
-                ));
-            }
-            continue;
-        }
-        entries_by_key.insert(key, entry);
-    }
-    let entries = entries_by_key.into_values().collect();
-    let file = GroupCatalogCacheFile {
-        version: GROUP_CATALOG_CACHE_VERSION,
-        entries,
+pub(crate) fn save_authority_acceptance_ledger(
+    path: &Path,
+    ledger: &AuthorityAcceptanceLedger,
+) -> std::io::Result<()> {
+    let file = AuthorityAcceptanceLedgerFile {
+        version: AUTHORITY_ACCEPTANCE_LEDGER_VERSION,
+        authorities: ledger.snapshots(),
     };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -483,35 +510,36 @@ pub(crate) fn save_group_catalog_cache(path: &Path, snapshot: &Snapshot) -> std:
     Ok(())
 }
 
-struct GroupCatalogCacheWrite {
+struct AuthorityAcceptanceLedgerWrite {
     path: PathBuf,
+    ledger: AuthorityAcceptanceLedger,
     snapshot: Snapshot,
 }
 
-type GroupCatalogCacheSave =
-    dyn Fn(&Path, &Snapshot) -> std::io::Result<()> + Send + Sync + 'static;
+type AuthorityAcceptanceLedgerSave =
+    dyn Fn(&Path, &AuthorityAcceptanceLedger) -> std::io::Result<()> + Send + Sync + 'static;
 
-/// Serial durable cache writer. The app loop admits each candidate before it
+/// Serial durable ledger writer. The app loop admits each candidate before it
 /// enters this queue and publishes it only after the matching completion.
-pub(crate) struct GroupCatalogCacheWriter {
-    sender: std::sync::Mutex<Option<std::sync::mpsc::Sender<GroupCatalogCacheWrite>>>,
+pub(crate) struct AuthorityAcceptanceLedgerWriter {
+    sender: std::sync::Mutex<Option<std::sync::mpsc::Sender<AuthorityAcceptanceLedgerWrite>>>,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
-    save: Arc<GroupCatalogCacheSave>,
+    save: Arc<AuthorityAcceptanceLedgerSave>,
 }
 
-impl GroupCatalogCacheWriter {
+impl AuthorityAcceptanceLedgerWriter {
     pub(crate) fn new(event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>) -> Self {
         Self {
             sender: std::sync::Mutex::new(None),
             event_tx,
-            save: Arc::new(save_group_catalog_cache),
+            save: Arc::new(save_authority_acceptance_ledger),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn with_save(
         event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
-        save: impl Fn(&Path, &Snapshot) -> std::io::Result<()> + Send + Sync + 'static,
+        save: impl Fn(&Path, &AuthorityAcceptanceLedger) -> std::io::Result<()> + Send + Sync + 'static,
     ) -> Self {
         Self {
             sender: std::sync::Mutex::new(None),
@@ -520,53 +548,118 @@ impl GroupCatalogCacheWriter {
         }
     }
 
-    pub(crate) fn enqueue(&self, path: PathBuf, snapshot: Snapshot) -> Result<(), String> {
+    pub(crate) fn enqueue(
+        &self,
+        path: PathBuf,
+        ledger: AuthorityAcceptanceLedger,
+        snapshot: Snapshot,
+    ) -> Result<(), String> {
         let mut sender = self
             .sender
             .lock()
-            .map_err(|_| "group catalog cache queue is unavailable".to_string())?;
+            .map_err(|_| "authority acceptance ledger queue is unavailable".to_string())?;
         if sender.is_none() {
-            let (write_tx, write_rx) = std::sync::mpsc::channel::<GroupCatalogCacheWrite>();
+            let (write_tx, write_rx) = std::sync::mpsc::channel::<AuthorityAcceptanceLedgerWrite>();
             let event_tx = self.event_tx.clone();
             let save = Arc::clone(&self.save);
             std::thread::Builder::new()
-                .name("herdr-group-cache".into())
+                .name("herdr-group-ledger".into())
                 .spawn(move || {
                     while let Ok(job) = write_rx.recv() {
-                        let result = save(&job.path, &job.snapshot).map_err(|error| {
+                        let result = save(&job.path, &job.ledger).map_err(|error| {
                             format!(
-                                "cannot persist remote group catalog cache at {}: {error}",
+                                "cannot persist authority acceptance ledger at {}: {error}",
                                 job.path.display()
                             )
                         });
                         if event_tx
-                            .blocking_send(crate::events::AppEvent::GroupCatalogCachePersisted {
-                                snapshot: Box::new(job.snapshot),
-                                result,
-                            })
+                            .blocking_send(
+                                crate::events::AppEvent::AuthorityAcceptanceLedgerPersisted {
+                                    ledger: job.ledger,
+                                    snapshot: Box::new(job.snapshot),
+                                    result,
+                                },
+                            )
                             .is_err()
                         {
                             return;
                         }
                     }
                 })
-                .map_err(|error| format!("cannot start group catalog cache writer: {error}"))?;
+                .map_err(|error| {
+                    format!("cannot start authority acceptance ledger writer: {error}")
+                })?;
             *sender = Some(write_tx);
         }
         let Some(sender) = sender.as_ref() else {
-            return Err("group catalog cache queue did not initialize".into());
+            return Err("authority acceptance ledger queue did not initialize".into());
         };
         sender
-            .send(GroupCatalogCacheWrite { path, snapshot })
-            .map_err(|_| "group catalog cache writer stopped".to_string())
+            .send(AuthorityAcceptanceLedgerWrite {
+                path,
+                ledger,
+                snapshot,
+            })
+            .map_err(|_| "authority acceptance ledger writer stopped".to_string())
     }
 }
 
 struct RoutedApiRequest {
     catalog: GroupCatalog,
     config_generation: u64,
+    route: AuthorityRoute,
+    route_lease: u64,
     request: Request,
     respond_to: std::sync::mpsc::Sender<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct AuthorityRoute {
+    authority: crate::groups::AuthorityId,
+    target: String,
+    local: bool,
+    session: Option<String>,
+    socket: Option<String>,
+}
+
+impl AuthorityRoute {
+    fn from_catalog(catalog: &GroupCatalog) -> Option<Self> {
+        Some(Self {
+            authority: catalog.observed_authority_id.clone()?,
+            target: catalog.target.clone(),
+            local: catalog.local,
+            session: catalog.session.clone(),
+            socket: catalog.socket.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct AuthorityRouteLeases {
+    next: u64,
+    valid: BTreeMap<AuthorityRoute, u64>,
+}
+
+impl AuthorityRouteLeases {
+    fn issue(&mut self) -> u64 {
+        self.next = self.next.wrapping_add(1);
+        if self.next == 0 {
+            self.valid.clear();
+            self.next = 1;
+        }
+        self.next
+    }
+
+    fn observe(&mut self, routes: BTreeMap<AuthorityRoute, ()>) {
+        self.valid.retain(|route, _| routes.contains_key(route));
+        for route in routes.into_keys() {
+            if self.valid.contains_key(&route) {
+                continue;
+            }
+            let lease = self.issue();
+            self.valid.insert(route, lease);
+        }
+    }
 }
 
 /// FIFO worker for remote authority mutations. One worker preserves API arrival
@@ -574,6 +667,7 @@ struct RoutedApiRequest {
 pub(crate) struct AuthorityMutationRouter {
     sender: std::sync::Mutex<Option<std::sync::mpsc::Sender<RoutedApiRequest>>>,
     config_generation: Arc<std::sync::atomic::AtomicU64>,
+    route_leases: Arc<std::sync::Mutex<AuthorityRouteLeases>>,
     ssh_program: std::ffi::OsString,
     timeout: Duration,
 }
@@ -583,6 +677,7 @@ impl Default for AuthorityMutationRouter {
         Self {
             sender: std::sync::Mutex::new(None),
             config_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            route_leases: Arc::new(std::sync::Mutex::new(AuthorityRouteLeases::default())),
             ssh_program: std::ffi::OsString::from("ssh"),
             timeout: Duration::from_secs(5),
         }
@@ -595,6 +690,7 @@ impl AuthorityMutationRouter {
         Self {
             sender: std::sync::Mutex::new(None),
             config_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            route_leases: Arc::new(std::sync::Mutex::new(AuthorityRouteLeases::default())),
             ssh_program: program.into_os_string(),
             timeout,
         }
@@ -605,6 +701,26 @@ impl AuthorityMutationRouter {
             .store(config_generation, std::sync::atomic::Ordering::Release);
     }
 
+    pub(crate) fn observe_snapshot(&self, snapshot: &Snapshot) {
+        let conflicts = snapshot.identity_conflicts();
+        let routes = snapshot
+            .group_catalogs
+            .iter()
+            .filter(|catalog| catalog.state == GroupCatalogState::Fresh)
+            .filter(|catalog| {
+                catalog
+                    .observed_authority_id
+                    .as_ref()
+                    .is_some_and(|authority| !conflicts.contains(authority))
+            })
+            .filter_map(AuthorityRoute::from_catalog)
+            .map(|route| (route, ()))
+            .collect();
+        if let Ok(mut leases) = self.route_leases.lock() {
+            leases.observe(routes);
+        }
+    }
+
     pub(crate) fn enqueue(
         &self,
         catalog: GroupCatalog,
@@ -612,6 +728,16 @@ impl AuthorityMutationRouter {
         request: Request,
         respond_to: std::sync::mpsc::Sender<String>,
     ) -> Result<(), String> {
+        let route = AuthorityRoute::from_catalog(&catalog)
+            .ok_or_else(|| "authority route has no observed authority".to_string())?;
+        let route_lease = self
+            .route_leases
+            .lock()
+            .map_err(|_| "authority route leases are unavailable".to_string())?
+            .valid
+            .get(&route)
+            .copied()
+            .ok_or_else(|| "authority route is no longer fresh".to_string())?;
         let mut sender = self
             .sender
             .lock()
@@ -621,6 +747,7 @@ impl AuthorityMutationRouter {
             let ssh_program = self.ssh_program.clone();
             let timeout = self.timeout;
             let current_generation = Arc::clone(&self.config_generation);
+            let current_route_leases = Arc::clone(&self.route_leases);
             std::thread::Builder::new()
                 .name("herdr-group-mutations".into())
                 .spawn(move || {
@@ -635,6 +762,25 @@ impl AuthorityMutationRouter {
                                     error: crate::api::schema::ErrorBody {
                                         code: "authority_not_fresh".into(),
                                         message: "fleet configuration changed before the queued mutation could run".into(),
+                                    },
+                                },
+                            )
+                            .unwrap_or_else(|_| "{}".to_string());
+                            let _ = job.respond_to.send(response);
+                            continue;
+                        }
+                        let route_is_current = current_route_leases
+                            .lock()
+                            .is_ok_and(|leases| {
+                                leases.valid.get(&job.route) == Some(&job.route_lease)
+                            });
+                        if !route_is_current {
+                            let response = serde_json::to_string(
+                                &crate::api::schema::ErrorResponse {
+                                    id,
+                                    error: crate::api::schema::ErrorBody {
+                                        code: "authority_not_fresh".into(),
+                                        message: "authority route changed before the queued mutation could run".into(),
                                     },
                                 },
                             )
@@ -673,6 +819,8 @@ impl AuthorityMutationRouter {
             .send(RoutedApiRequest {
                 catalog,
                 config_generation,
+                route,
+                route_lease,
                 request,
                 respond_to,
             })
@@ -840,33 +988,14 @@ impl Snapshot {
             .collect()
     }
 
-    /// Admit complete owner catalogs once per fleet refresh. Retention keys on
-    /// both the reported authority and the full connection tuple, never the
-    /// configured display alias.
-    pub(crate) fn admit_group_catalogs_from(&mut self, previous: &Self) {
+    /// Retain only a connection's last live answer when the current poll could
+    /// not read one. Durable authority history lives in
+    /// `AuthorityAcceptanceLedger`, never in this presentation snapshot.
+    pub(crate) fn retain_unavailable_group_catalogs_from(&mut self, previous: &Self) {
         for catalog in &mut self.group_catalogs {
-            let incoming = catalog.snapshot.as_ref();
-            if let Some(incoming) = incoming {
-                let retained = previous.group_catalogs.iter().find(|old| {
-                    old.matches_connection(catalog)
-                        && old.authority_id() == Some(&incoming.authority_id)
-                });
-                if let Err(error) = crate::groups::admit_authority_snapshot(
-                    retained.and_then(|old| old.snapshot.as_ref()),
-                    incoming,
-                ) {
-                    if let Some(retained) = retained {
-                        catalog.snapshot = retained.snapshot.clone();
-                        catalog.state = GroupCatalogState::Stale;
-                    } else {
-                        catalog.snapshot = None;
-                        catalog.state = GroupCatalogState::Unavailable;
-                    }
-                    catalog.error = Some(format!("catalog rejected: {error}"));
-                }
+            if catalog.snapshot.is_some() {
                 continue;
             }
-
             if let Some(retained) = previous
                 .group_catalogs
                 .iter()
@@ -876,72 +1005,75 @@ impl Snapshot {
                 catalog.state = GroupCatalogState::Stale;
             }
         }
-
-        for retained in &previous.group_catalogs {
-            let Some(retained_authority) = retained.authority_id() else {
-                continue;
-            };
-            let current_host = self
-                .group_catalogs
-                .iter()
-                .find(|current| current.matches_connection(retained))
-                .map(|current| current.host.clone())
-                .or_else(|| {
-                    // Validation failures still materialize the configured
-                    // connections as hosts. Unlike an unpolled snapshot, that
-                    // is enough to retain history when no catalog was produced.
-                    if !self.polled {
-                        return None;
-                    }
-                    self.hosts
-                        .iter()
-                        .find(|host| host.matches_catalog_connection(retained))
-                        .map(|host| host.name.clone())
-                });
-            let Some(current_host) = current_host else {
-                continue;
-            };
-            if self.group_catalogs.iter().any(|current| {
-                current.matches_connection(retained)
-                    && current.authority_id() == Some(retained_authority)
-            }) {
-                continue;
-            }
-            let mut history = retained.clone();
-            history.host = current_host;
-            history.state = GroupCatalogState::Stale;
-            history.observed_authority_id = None;
-            history.error = Some("retained accepted authority history".into());
-            self.group_catalogs.push(history);
-        }
-
-        self.mark_identity_conflicts(true);
     }
 
-    pub(crate) fn reject_group_catalogs_without_durable_history_from(
+    /// Validate current authority reports against durable history and return
+    /// the complete advance-only candidate ledger. Conflicted reports never
+    /// advance history, and rejected reports remain visible only as stale
+    /// current observations.
+    pub(crate) fn admit_group_catalogs(
         &mut self,
-        previous: &Self,
-        error: &str,
-    ) {
+        ledger: &AuthorityAcceptanceLedger,
+    ) -> AuthorityAcceptanceLedger {
+        self.mark_identity_conflicts(true);
+        let mut candidate = ledger.clone();
         for catalog in &mut self.group_catalogs {
-            let authority = catalog.authority_id().cloned();
-            let retained = previous.group_catalogs.iter().find(|old| {
-                old.matches_connection(catalog)
-                    && authority
-                        .as_ref()
-                        .is_none_or(|authority| old.authority_id() == Some(authority))
-                    && old.snapshot.is_some()
-            });
-            if let Some(retained) = retained {
-                catalog.snapshot = retained.snapshot.clone();
+            if catalog.state != GroupCatalogState::Fresh {
+                continue;
+            }
+            let Some(incoming) = catalog.snapshot.as_ref() else {
+                catalog.state = GroupCatalogState::Unavailable;
+                catalog.error = Some("fresh authority catalog had no snapshot".into());
+                continue;
+            };
+            if catalog.observed_authority_id.as_ref() != Some(&incoming.authority_id) {
+                catalog.state = GroupCatalogState::Unavailable;
+                catalog.error = Some("reported authority does not match its snapshot".into());
+                continue;
+            }
+            if let Err(error) = candidate.advance(incoming) {
                 catalog.state = GroupCatalogState::Stale;
-            } else {
-                catalog.snapshot = None;
+                catalog.error = Some(format!("catalog rejected: {error}"));
+            }
+        }
+        candidate
+    }
+
+    pub(crate) fn reject_group_catalogs_without_durable_history(&mut self, error: &str) {
+        for catalog in &mut self.group_catalogs {
+            if catalog.state != GroupCatalogState::IdentityConflict {
                 catalog.state = GroupCatalogState::Unavailable;
             }
             catalog.error = Some(error.to_string());
         }
 
+        self.mark_identity_conflicts(false);
+    }
+
+    pub(crate) fn quarantine_unpersisted_advances(
+        &mut self,
+        ledger: &AuthorityAcceptanceLedger,
+        error: &str,
+    ) {
+        for catalog in &mut self.group_catalogs {
+            if catalog.state != GroupCatalogState::Fresh {
+                continue;
+            }
+            let Some(snapshot) = catalog.snapshot.as_ref() else {
+                catalog.state = GroupCatalogState::Unavailable;
+                catalog.error = Some(error.to_string());
+                continue;
+            };
+            if ledger.contains_snapshot(snapshot) {
+                continue;
+            }
+            catalog.state = if ledger.accepted(&snapshot.authority_id).is_some() {
+                GroupCatalogState::Stale
+            } else {
+                GroupCatalogState::Unavailable
+            };
+            catalog.error = Some(error.to_string());
+        }
         self.mark_identity_conflicts(false);
     }
 
@@ -1033,13 +1165,6 @@ impl HostSnapshot {
             && self.target == configured.target
             && self.socket == configured.socket
             && self.session == configured.session
-    }
-
-    fn matches_catalog_connection(&self, catalog: &GroupCatalog) -> bool {
-        self.local == catalog.local
-            && self.target == catalog.target
-            && self.socket == catalog.socket
-            && self.session == catalog.session
     }
 }
 
@@ -1413,10 +1538,10 @@ fn collect_snapshot_with_implicit_local(
             .iter()
             .cloned()
             .map(|host| {
-                let name = host.name.clone();
+                let fallback = host.clone();
                 let runs_only = host.local && implicit_local_name.as_deref() == Some(&host.name);
                 (
-                    name,
+                    fallback,
                     scope.spawn(move || {
                         if runs_only {
                             fetch_local_run_host(host)
@@ -1429,13 +1554,10 @@ fn collect_snapshot_with_implicit_local(
             .collect::<Vec<_>>();
         handles
             .into_iter()
-            .map(|(name, handle)| match handle.join() {
+            .map(|(host, handle)| match handle.join() {
                 Ok(evidence) => evidence,
                 Err(_) => HostEvidence {
-                    host: FleetHostConfig {
-                        name,
-                        ..FleetHostConfig::default()
-                    },
+                    host,
                     agents: Err("host reader panicked".into()),
                     groups: Some(Err("group catalog reader panicked".into())),
                     runs: Vec::new(),
@@ -3122,6 +3244,184 @@ mod tests {
         }
     }
 
+    fn ledger_with_deleted_group() -> AuthorityAcceptanceLedger {
+        let mut ledger = AuthorityAcceptanceLedger::default();
+        ledger
+            .advance(
+                group_catalog(
+                    "history",
+                    "ignored",
+                    1,
+                    2,
+                    vec![group_record(1, 1, 2, true)],
+                )
+                .snapshot
+                .as_ref()
+                .expect("authority snapshot"),
+            )
+            .expect("accept tombstone");
+        ledger
+    }
+
+    fn assert_rolled_back_group_is_not_fresh(
+        ledger: &AuthorityAcceptanceLedger,
+        host: &str,
+        target: &str,
+    ) {
+        let mut rolled_back = Snapshot {
+            polled: true,
+            group_catalogs: vec![group_catalog(
+                host,
+                target,
+                1,
+                1,
+                vec![group_record(1, 1, 1, false)],
+            )],
+            ..Snapshot::default()
+        };
+        let candidate = rolled_back.admit_group_catalogs(ledger);
+
+        assert_eq!(candidate, *ledger);
+        assert_eq!(
+            rolled_back.group_catalogs[0].state,
+            GroupCatalogState::Stale
+        );
+        assert!(matches!(
+            ledger
+                .accepted(&crate::groups::AuthorityId::from_random_bytes([1; 16]))
+                .expect("accepted tombstone history")
+                .groups[0]
+                .state,
+            crate::groups::GroupState::Deleted
+        ));
+        assert!(matches!(
+            rolled_back.group_catalogs[0]
+                .snapshot
+                .as_ref()
+                .expect("current rolled-back answer")
+                .groups[0]
+                .state,
+            crate::groups::GroupState::Active { .. }
+        ));
+    }
+
+    #[test]
+    fn deleted_group_stays_deleted_after_connection_remove_and_readd() {
+        let dir = run_fixture_dir("group-history-remove-readd");
+        let path = dir.join("remote-group-catalogs.json");
+        let ledger = ledger_with_deleted_group();
+        save_authority_acceptance_ledger(&path, &ledger).expect("persist accepted tombstone");
+
+        let removed = Snapshot::default().reconcile_after_config_reload(&FleetConfig::default(), 1);
+        assert!(removed.group_catalogs.is_empty());
+
+        let retained =
+            load_authority_acceptance_ledger(&path).expect("reload after restoring connection");
+        assert_rolled_back_group_is_not_fresh(&retained, "office", "machine-a");
+        std::fs::remove_dir_all(dir).expect("remove remove-readd fixture");
+    }
+
+    #[test]
+    fn deleted_group_stays_deleted_after_connection_repoint() {
+        let dir = run_fixture_dir("group-history-repoint");
+        let path = dir.join("remote-group-catalogs.json");
+        let ledger = ledger_with_deleted_group();
+        save_authority_acceptance_ledger(&path, &ledger).expect("persist accepted tombstone");
+
+        let retained =
+            load_authority_acceptance_ledger(&path).expect("load after repointing the connection");
+        assert_rolled_back_group_is_not_fresh(&retained, "office", "machine-b");
+        std::fs::remove_dir_all(dir).expect("remove repoint fixture");
+    }
+
+    struct PanickingReader;
+
+    impl HostReader for PanickingReader {
+        fn fetch_local(&self, _host: FleetHostConfig, _timeout: Duration) -> HostEvidence {
+            panic!("fixture poll panic")
+        }
+
+        fn fetch_remote(&self, _host: FleetHostConfig, _timeout: Duration) -> HostEvidence {
+            panic!("fixture poll panic")
+        }
+    }
+
+    #[test]
+    fn deleted_group_stays_deleted_after_poll_worker_panic() {
+        let dir = run_fixture_dir("group-history-poll-panic");
+        let path = dir.join("remote-group-catalogs.json");
+        let configured = FleetHostConfig {
+            name: "office".into(),
+            target: "machine-a".into(),
+            local: false,
+            session: Some("agents".into()),
+            socket: Some("/tmp/herdr.sock".into()),
+        };
+        let fleet = FleetConfig {
+            hosts: vec![configured.clone()],
+            ..FleetConfig::default()
+        };
+        let ledger = ledger_with_deleted_group();
+        save_authority_acceptance_ledger(&path, &ledger).expect("persist accepted tombstone");
+
+        let panicked = collect_snapshot_with(&PanickingReader, &[configured], &fleet);
+        assert_eq!(panicked.group_catalogs[0].target, "machine-a");
+        assert_eq!(
+            panicked.group_catalogs[0].state,
+            GroupCatalogState::Unavailable
+        );
+
+        let retained = load_authority_acceptance_ledger(&path).expect("reload after poll panic");
+        assert_rolled_back_group_is_not_fresh(&retained, "office", "machine-a");
+        std::fs::remove_dir_all(dir).expect("remove poll panic fixture");
+    }
+
+    #[test]
+    fn deleted_group_stays_deleted_after_invalid_fleet_configuration() {
+        let dir = run_fixture_dir("group-history-invalid-config");
+        let path = dir.join("remote-group-catalogs.json");
+        let ledger = ledger_with_deleted_group();
+        save_authority_acceptance_ledger(&path, &ledger).expect("persist accepted tombstone");
+
+        let invalid = FleetConfig {
+            self_name: Some("invalid::self".into()),
+            ..FleetConfig::default()
+        };
+        let unusable = poll_without_generation(&invalid);
+        assert!(unusable.group_catalogs.is_empty());
+
+        let retained =
+            load_authority_acceptance_ledger(&path).expect("reload after repairing fleet config");
+        assert_rolled_back_group_is_not_fresh(&retained, "office", "machine-a");
+        std::fs::remove_dir_all(dir).expect("remove invalid config fixture");
+    }
+
+    #[test]
+    fn deleted_group_stays_deleted_after_authority_a_then_b_then_rolled_back_a() {
+        let dir = run_fixture_dir("group-history-a-b-a");
+        let path = dir.join("remote-group-catalogs.json");
+        let mut ledger = ledger_with_deleted_group();
+        let authority_b = group_catalog(
+            "office",
+            "machine-b",
+            2,
+            1,
+            vec![group_record(2, 1, 1, false)],
+        );
+        ledger
+            .advance(authority_b.snapshot.as_ref().expect("authority B snapshot"))
+            .expect("accept authority B");
+        save_authority_acceptance_ledger(&path, &ledger).expect("persist both authority histories");
+
+        let retained =
+            load_authority_acceptance_ledger(&path).expect("load after authority switch");
+        assert!(retained
+            .accepted(&crate::groups::AuthorityId::from_random_bytes([2; 16]))
+            .is_some());
+        assert_rolled_back_group_is_not_fresh(&retained, "office", "machine-b");
+        std::fs::remove_dir_all(dir).expect("remove authority switch fixture");
+    }
+
     #[test]
     fn rejected_catalog_retains_the_last_accepted_snapshot_as_stale() {
         let previous_catalog = group_catalog(
@@ -3131,21 +3431,23 @@ mod tests {
             2,
             vec![group_record(1, 1, 2, true)],
         );
-        let previous = Snapshot {
-            group_catalogs: vec![previous_catalog.clone()],
-            ..Snapshot::default()
-        };
+        let mut ledger = AuthorityAcceptanceLedger::default();
+        ledger
+            .advance(
+                previous_catalog
+                    .snapshot
+                    .as_ref()
+                    .expect("accepted snapshot"),
+            )
+            .expect("accept retained snapshot");
         let mut incoming = Snapshot {
             group_catalogs: vec![group_catalog("office", "machine-a", 1, 3, Vec::new())],
             ..Snapshot::default()
         };
 
-        incoming.admit_group_catalogs_from(&previous);
+        let candidate = incoming.admit_group_catalogs(&ledger);
 
-        assert_eq!(
-            incoming.group_catalogs[0].snapshot,
-            previous_catalog.snapshot
-        );
+        assert_eq!(candidate, ledger);
         assert_eq!(incoming.group_catalogs[0].state, GroupCatalogState::Stale);
         assert!(incoming.group_catalogs[0]
             .error
@@ -3175,7 +3477,7 @@ mod tests {
             group_catalogs: vec![renamed_alias],
             ..Snapshot::default()
         };
-        same_connection.admit_group_catalogs_from(&previous);
+        same_connection.retain_unavailable_group_catalogs_from(&previous);
         assert_eq!(
             same_connection.group_catalogs[0].state,
             GroupCatalogState::Stale
@@ -3189,7 +3491,7 @@ mod tests {
         repointed.group_catalogs[0].target = "machine-b".into();
         repointed.group_catalogs[0].snapshot = None;
         repointed.group_catalogs[0].state = GroupCatalogState::Unavailable;
-        repointed.admit_group_catalogs_from(&previous);
+        repointed.retain_unavailable_group_catalogs_from(&previous);
         assert!(repointed.group_catalogs[0].snapshot.is_none());
         assert_eq!(
             repointed.group_catalogs[0].state,
@@ -3207,7 +3509,7 @@ mod tests {
             ..Snapshot::default()
         };
 
-        snapshot.admit_group_catalogs_from(&Snapshot::default());
+        snapshot.admit_group_catalogs(&AuthorityAcceptanceLedger::default());
 
         assert!(snapshot
             .group_catalogs
@@ -3241,7 +3543,7 @@ mod tests {
             ],
             ..Snapshot::default()
         };
-        snapshot.admit_group_catalogs_from(&Snapshot::default());
+        snapshot.admit_group_catalogs(&AuthorityAcceptanceLedger::default());
 
         let reloaded = snapshot.reconcile_after_config_reload(&fleet, 2);
 
@@ -3274,7 +3576,7 @@ mod tests {
             ],
             ..Snapshot::default()
         };
-        snapshot.admit_group_catalogs_from(&Snapshot::default());
+        snapshot.admit_group_catalogs(&AuthorityAcceptanceLedger::default());
 
         let reloaded = snapshot.reconcile_after_config_reload(&fleet, 2);
 
@@ -3290,7 +3592,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_catalog_cache_retains_tombstones_only_for_the_same_connection_tuple() {
+    fn legacy_catalog_cache_migrates_history_without_connection_filtering() {
         let dir = run_fixture_dir("group-catalog-cache");
         let path = dir.join("remote-group-catalogs.json");
         let accepted = group_catalog(
@@ -3300,71 +3602,34 @@ mod tests {
             2,
             vec![group_record(1, 1, 2, true)],
         );
-        let mut duplicate_alias = accepted.clone();
-        duplicate_alias.host = "duplicate".into();
-        save_group_catalog_cache(
+        let accepted = accepted.snapshot.expect("accepted snapshot");
+        let file = LegacyGroupCatalogCacheFile {
+            version: 1,
+            entries: vec![
+                LegacyGroupCatalogCacheEntry {
+                    target: "machine-a".into(),
+                    local: false,
+                    session: Some("agents".into()),
+                    socket: Some("/tmp/herdr.sock".into()),
+                    snapshot: accepted.clone(),
+                },
+                LegacyGroupCatalogCacheEntry {
+                    target: "machine-b".into(),
+                    local: false,
+                    session: None,
+                    socket: None,
+                    snapshot: accepted,
+                },
+            ],
+        };
+        std::fs::write(
             &path,
-            &Snapshot {
-                group_catalogs: vec![accepted.clone(), duplicate_alias],
-                ..Snapshot::default()
-            },
+            serde_json::to_vec(&file).expect("serialize legacy cache"),
         )
-        .expect("persist catalog cache");
-        let fleet = FleetConfig {
-            hosts: vec![FleetHostConfig {
-                name: "renamed".into(),
-                target: "machine-a".into(),
-                local: false,
-                session: Some("agents".into()),
-                socket: Some("/tmp/herdr.sock".into()),
-            }],
-            ..FleetConfig::default()
-        };
+        .expect("write legacy cache");
 
-        let retained = load_group_catalog_cache(&path, &fleet).expect("load retained catalog");
-        assert_eq!(retained.len(), 1);
-        assert_eq!(retained[0].host, "renamed");
-        assert_eq!(retained[0].state, GroupCatalogState::Stale);
-        assert_eq!(retained[0].snapshot, accepted.snapshot);
-
-        let mut rolled_back = Snapshot {
-            group_catalogs: vec![group_catalog(
-                "renamed",
-                "machine-a",
-                1,
-                1,
-                vec![group_record(1, 1, 1, false)],
-            )],
-            ..Snapshot::default()
-        };
-        rolled_back.admit_group_catalogs_from(&Snapshot {
-            group_catalogs: retained,
-            ..Snapshot::default()
-        });
-        assert_eq!(
-            rolled_back.group_catalogs[0].state,
-            GroupCatalogState::Stale
-        );
-        assert!(matches!(
-            rolled_back.group_catalogs[0]
-                .snapshot
-                .as_ref()
-                .expect("retained snapshot")
-                .groups[0]
-                .state,
-            crate::groups::GroupState::Deleted
-        ));
-
-        let repointed = FleetConfig {
-            hosts: vec![FleetHostConfig {
-                target: "machine-b".into(),
-                ..fleet.hosts[0].clone()
-            }],
-            ..FleetConfig::default()
-        };
-        assert!(load_group_catalog_cache(&path, &repointed)
-            .expect("ignore cache for a different connection")
-            .is_empty());
+        let retained = load_authority_acceptance_ledger(&path).expect("migrate legacy cache");
+        assert_rolled_back_group_is_not_fresh(&retained, "renamed", "machine-b");
         std::fs::remove_dir_all(dir).expect("remove catalog cache fixture");
     }
 
@@ -3382,26 +3647,16 @@ mod tests {
             }],
             ..FleetConfig::default()
         };
-        let accepted = Snapshot {
-            polled: true,
-            group_catalogs: vec![group_catalog(
-                "office",
-                "machine-a",
-                1,
-                2,
-                vec![group_record(1, 1, 2, true)],
-            )],
-            ..Snapshot::default()
-        };
-        save_group_catalog_cache(&path, &accepted).expect("persist accepted tombstone history");
+        let ledger = ledger_with_deleted_group();
+        save_authority_acceptance_ledger(&path, &ledger)
+            .expect("persist accepted tombstone history");
 
-        let mut not_polled = Snapshot::unpolled(&fleet.hosts);
-        not_polled.admit_group_catalogs_from(&accepted);
+        let not_polled = Snapshot::unpolled(&fleet.hosts);
         assert!(not_polled.group_catalogs.is_empty());
 
         let mut unusable_config = fleet.clone();
         unusable_config.timeout_ms = 1;
-        let mut unusable_poll = poll_without_generation(&unusable_config);
+        let unusable_poll = poll_without_generation(&unusable_config);
         assert!(unusable_poll.polled);
         assert!(unusable_poll.group_catalogs.is_empty());
         assert!(unusable_poll.hosts.iter().any(|host| {
@@ -3411,119 +3666,37 @@ mod tests {
                 && host.socket.as_deref() == Some("/tmp/herdr.sock")
         }));
 
-        unusable_poll.admit_group_catalogs_from(&accepted);
-        save_group_catalog_cache(&path, &unusable_poll)
-            .expect("unusable poll must not erase durable history");
-
-        let retained = load_group_catalog_cache(&path, &fleet)
+        let retained = load_authority_acceptance_ledger(&path)
             .expect("load retained history after repairing config");
-        let mut rolled_back = Snapshot {
-            polled: true,
-            group_catalogs: vec![group_catalog(
-                "office",
-                "machine-a",
-                1,
-                1,
-                vec![group_record(1, 1, 1, false)],
-            )],
-            ..Snapshot::default()
-        };
-        rolled_back.admit_group_catalogs_from(&Snapshot {
-            group_catalogs: retained,
-            ..Snapshot::default()
-        });
-
-        let catalog = &rolled_back.group_catalogs[0];
-        assert_eq!(catalog.state, GroupCatalogState::Stale);
-        assert!(matches!(
-            catalog
-                .snapshot
-                .as_ref()
-                .expect("retained accepted catalog")
-                .groups[0]
-                .state,
-            crate::groups::GroupState::Deleted
-        ));
-        assert!(catalog
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("rolled back")));
+        assert_eq!(retained, ledger);
+        assert_rolled_back_group_is_not_fresh(&retained, "office", "machine-a");
 
         std::fs::remove_dir_all(dir).expect("remove unusable poll fixture");
     }
 
     #[test]
     fn accepted_history_survives_a_connection_switching_authorities() {
-        let accepted_a = group_catalog(
+        let mut ledger = ledger_with_deleted_group();
+        let authority_b = group_catalog(
             "office",
             "machine-a",
-            1,
             2,
-            vec![group_record(1, 1, 2, true)],
+            1,
+            vec![group_record(2, 1, 1, false)],
         );
-        let mut authority_b = Snapshot {
-            group_catalogs: vec![group_catalog(
-                "office",
-                "machine-a",
-                2,
-                1,
-                vec![group_record(2, 1, 1, false)],
-            )],
-            ..Snapshot::default()
-        };
-        authority_b.admit_group_catalogs_from(&Snapshot {
-            group_catalogs: vec![accepted_a],
-            ..Snapshot::default()
-        });
+        ledger
+            .advance(authority_b.snapshot.as_ref().expect("authority B snapshot"))
+            .expect("accept authority B");
 
         let dir = run_fixture_dir("authority-switch-cache");
         let path = dir.join("remote-group-catalogs.json");
-        save_group_catalog_cache(&path, &authority_b).expect("persist both authority histories");
-        let fleet = FleetConfig {
-            hosts: vec![FleetHostConfig {
-                name: "office".into(),
-                target: "machine-a".into(),
-                local: false,
-                session: Some("agents".into()),
-                socket: Some("/tmp/herdr.sock".into()),
-            }],
-            ..FleetConfig::default()
-        };
-        let retained_history = load_group_catalog_cache(&path, &fleet)
+        save_authority_acceptance_ledger(&path, &ledger).expect("persist both authority histories");
+        let retained_history = load_authority_acceptance_ledger(&path)
             .expect("load independent histories for the connection");
-        assert_eq!(retained_history.len(), 2);
-
-        let mut rolled_back_a = Snapshot {
-            group_catalogs: vec![group_catalog(
-                "office",
-                "machine-a",
-                1,
-                1,
-                vec![group_record(1, 1, 1, false)],
-            )],
-            ..Snapshot::default()
-        };
-        rolled_back_a.admit_group_catalogs_from(&Snapshot {
-            group_catalogs: retained_history,
-            ..Snapshot::default()
-        });
-
-        let authority_a = crate::groups::AuthorityId::from_random_bytes([1; 16]);
-        let retained = rolled_back_a
-            .group_catalogs
-            .iter()
-            .find(|catalog| catalog.authority_id() == Some(&authority_a))
-            .expect("authority A history must survive the identity switch");
-        assert_eq!(retained.state, GroupCatalogState::Stale);
-        assert!(matches!(
-            retained
-                .snapshot
-                .as_ref()
-                .expect("accepted authority A snapshot")
-                .groups[0]
-                .state,
-            crate::groups::GroupState::Deleted
-        ));
+        assert!(retained_history
+            .accepted(&crate::groups::AuthorityId::from_random_bytes([2; 16]))
+            .is_some());
+        assert_rolled_back_group_is_not_fresh(&retained_history, "office", "machine-a");
         std::fs::remove_dir_all(dir).expect("remove authority switch cache fixture");
     }
 
@@ -3531,7 +3704,7 @@ mod tests {
     fn retained_history_does_not_conflict_with_a_current_authority_report() {
         let authority_a = crate::groups::AuthorityId::from_random_bytes([1; 16]);
         let authority_b = crate::groups::AuthorityId::from_random_bytes([2; 16]);
-        let x_reports_a = Snapshot {
+        let mut x_reports_a = Snapshot {
             group_catalogs: vec![group_catalog(
                 "x",
                 "machine-x",
@@ -3541,6 +3714,7 @@ mod tests {
             )],
             ..Snapshot::default()
         };
+        let ledger = x_reports_a.admit_group_catalogs(&AuthorityAcceptanceLedger::default());
         let mut x_reports_b = Snapshot {
             group_catalogs: vec![group_catalog(
                 "x",
@@ -3551,7 +3725,8 @@ mod tests {
             )],
             ..Snapshot::default()
         };
-        x_reports_b.admit_group_catalogs_from(&x_reports_a);
+        let ledger = x_reports_b.admit_group_catalogs(&ledger);
+        assert_eq!(x_reports_b.group_catalogs.len(), 1);
 
         let mut y_reports_a = Snapshot {
             group_catalogs: vec![
@@ -3560,7 +3735,7 @@ mod tests {
             ],
             ..Snapshot::default()
         };
-        y_reports_a.admit_group_catalogs_from(&x_reports_b);
+        let ledger = y_reports_a.admit_group_catalogs(&ledger);
 
         let current_a = y_reports_a
             .fresh_group_catalog(&authority_a)
@@ -3571,59 +3746,41 @@ mod tests {
             .expect("X currently reports authority B");
         assert_eq!(current_b.host, "x");
         assert!(!y_reports_a.authority_has_identity_conflict(&authority_a));
-        assert_eq!(
-            y_reports_a
-                .group_catalogs
-                .iter()
-                .filter(|catalog| catalog.authority_id() == Some(&authority_a))
-                .count(),
-            2,
-            "A history remains available for rollback admission"
-        );
+        assert_eq!(y_reports_a.group_catalogs.len(), 2);
+        assert!(ledger.accepted(&authority_a).is_some());
+        assert!(ledger.accepted(&authority_b).is_some());
     }
 
     #[test]
-    fn durable_catalog_cache_rejects_unreadable_or_ambiguous_history() {
+    fn authority_acceptance_ledger_rejects_unreadable_or_conflicting_history() {
         let dir = run_fixture_dir("invalid-group-catalog-cache");
         let path = dir.join("remote-group-catalogs.json");
-        let fleet = FleetConfig {
-            hosts: vec![FleetHostConfig {
-                name: "office".into(),
-                target: "machine-a".into(),
-                session: Some("agents".into()),
-                ..FleetHostConfig::default()
-            }],
-            ..FleetConfig::default()
-        };
 
         std::fs::write(&path, b"not json").expect("write corrupt cache");
-        assert!(load_group_catalog_cache(&path, &fleet).is_err());
+        assert!(load_authority_acceptance_ledger(&path).is_err());
 
-        let snapshot = group_catalog("office", "machine-a", 1, 2, Vec::new());
+        let snapshot = group_catalog(
+            "office",
+            "machine-a",
+            1,
+            2,
+            vec![group_record(1, 1, 2, false)],
+        );
         let mut duplicate = snapshot.clone();
-        duplicate.snapshot.as_mut().expect("snapshot").revision = 3;
-        let file = GroupCatalogCacheFile {
-            version: GROUP_CATALOG_CACHE_VERSION,
-            entries: vec![
-                GroupCatalogCacheEntry {
-                    target: "machine-a".into(),
-                    local: false,
-                    session: Some("agents".into()),
-                    socket: None,
-                    snapshot: snapshot.snapshot.expect("first snapshot"),
-                },
-                GroupCatalogCacheEntry {
-                    target: "machine-a".into(),
-                    local: false,
-                    session: Some("agents".into()),
-                    socket: None,
-                    snapshot: duplicate.snapshot.expect("duplicate snapshot"),
-                },
+        duplicate.snapshot.as_mut().expect("snapshot").groups[0].state =
+            crate::groups::GroupState::Active {
+                name: "Focus".into(),
+            };
+        let file = AuthorityAcceptanceLedgerFile {
+            version: AUTHORITY_ACCEPTANCE_LEDGER_VERSION,
+            authorities: vec![
+                snapshot.snapshot.expect("first snapshot"),
+                duplicate.snapshot.expect("conflicting snapshot"),
             ],
         };
         std::fs::write(&path, serde_json::to_vec(&file).expect("serialize cache"))
             .expect("write ambiguous cache");
-        assert!(load_group_catalog_cache(&path, &fleet).is_err());
+        assert!(load_authority_acceptance_ledger(&path).is_err());
 
         std::fs::remove_dir_all(dir).expect("remove catalog cache fixture");
     }
@@ -3637,18 +3794,15 @@ mod tests {
             ],
             ..Snapshot::default()
         };
-        snapshot.admit_group_catalogs_from(&Snapshot::default());
-        snapshot.reject_group_catalogs_without_durable_history_from(
-            &Snapshot::default(),
-            "retained history is unreadable",
-        );
+        snapshot.admit_group_catalogs(&AuthorityAcceptanceLedger::default());
+        snapshot.reject_group_catalogs_without_durable_history("retained history is unreadable");
 
         let authority = crate::groups::AuthorityId::from_random_bytes([1; 16]);
         assert!(snapshot.authority_has_identity_conflict(&authority));
         assert!(snapshot.group_catalogs.iter().all(|catalog| {
             catalog.state == GroupCatalogState::IdentityConflict
                 && catalog.authority_id() == Some(&authority)
-                && catalog.snapshot.is_none()
+                && catalog.snapshot.is_some()
         }));
     }
 
@@ -4713,6 +4867,10 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
             }),
         };
         let router = AuthorityMutationRouter::with_ssh_program(fake_ssh, Duration::from_secs(2));
+        router.observe_snapshot(&Snapshot {
+            group_catalogs: vec![catalog.clone()],
+            ..Snapshot::default()
+        });
         let (first_tx, first_rx) = std::sync::mpsc::channel();
         let (second_tx, second_rx) = std::sync::mpsc::channel();
 

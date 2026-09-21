@@ -59,62 +59,84 @@ impl App {
         if snapshot.config_generation != self.fleet_poller_config.generation() {
             return false;
         }
-        if self.group_catalog_cache_write_in_flight {
-            self.queued_fleet_snapshot = Some(snapshot);
+        let raw_snapshot = snapshot.clone();
+        snapshot.retain_unreachable_inventory_from(&self.state.fleet_snapshot);
+        snapshot.retain_unavailable_group_catalogs_from(&self.state.fleet_snapshot);
+        let admission_base = self
+            .pending_authority_acceptance_ledger
+            .as_ref()
+            .unwrap_or(&self.authority_acceptance_ledger);
+        let candidate_ledger =
+            if let Some(error) = self.authority_acceptance_ledger_error.as_deref() {
+                snapshot.reject_group_catalogs_without_durable_history(error);
+                admission_base.clone()
+            } else {
+                snapshot.admit_group_catalogs(admission_base)
+            };
+        self.authority_mutation_router.observe_snapshot(&snapshot);
+        if self.authority_acceptance_ledger_write_in_flight {
+            self.queued_fleet_snapshot = Some(raw_snapshot);
             return false;
         }
-        snapshot.retain_unreachable_inventory_from(&self.state.fleet_snapshot);
-        snapshot.admit_group_catalogs_from(&self.state.fleet_snapshot);
-        let candidate_catalogs_changed =
-            self.state.fleet_snapshot.group_catalogs != snapshot.group_catalogs;
-        if let Some(error) = self.group_catalog_cache_error.as_deref() {
-            snapshot.reject_group_catalogs_without_durable_history_from(
-                &self.state.fleet_snapshot,
-                error,
-            );
-        } else if candidate_catalogs_changed {
-            if let Some(path) = self.group_catalog_cache_path.as_deref() {
-                match self
-                    .group_catalog_cache_writer
-                    .enqueue(path.to_path_buf(), snapshot.clone())
-                {
+        if candidate_ledger != self.authority_acceptance_ledger {
+            if let Some(path) = self.authority_acceptance_ledger_path.as_deref() {
+                match self.authority_acceptance_ledger_writer.enqueue(
+                    path.to_path_buf(),
+                    candidate_ledger.clone(),
+                    snapshot.clone(),
+                ) {
                     Ok(()) => {
-                        self.group_catalog_cache_write_in_flight = true;
+                        self.authority_acceptance_ledger_write_in_flight = true;
+                        self.pending_authority_acceptance_ledger = Some(candidate_ledger);
                         return false;
                     }
                     Err(error) => {
-                        tracing::warn!(%error, path = %path.display(), "cannot queue remote group catalog cache write");
-                        snapshot.reject_group_catalogs_without_durable_history_from(
-                            &self.state.fleet_snapshot,
-                            &format!("durable cache persistence failed: {error}"),
+                        tracing::warn!(%error, path = %path.display(), "cannot queue authority acceptance ledger write");
+                        snapshot.quarantine_unpersisted_advances(
+                            &self.authority_acceptance_ledger,
+                            &format!("durable ledger persistence failed: {error}"),
                         );
+                        self.authority_mutation_router.observe_snapshot(&snapshot);
                     }
                 }
+            } else {
+                self.authority_acceptance_ledger = candidate_ledger;
             }
         }
         self.commit_fleet_snapshot(snapshot)
     }
 
-    fn finish_group_catalog_cache_write(
+    fn finish_authority_acceptance_ledger_write(
         &mut self,
+        ledger: crate::fleet::AuthorityAcceptanceLedger,
         mut snapshot: crate::fleet::Snapshot,
         result: Result<(), String>,
     ) -> bool {
-        self.group_catalog_cache_write_in_flight = false;
+        self.authority_acceptance_ledger_write_in_flight = false;
+        self.pending_authority_acceptance_ledger = None;
         let mut changed = false;
-        if snapshot.config_generation == self.fleet_poller_config.generation() {
-            if let Err(error) = result {
-                if let Some(path) = self.group_catalog_cache_path.as_deref() {
-                    tracing::warn!(%error, path = %path.display(), "cannot persist remote group catalog cache");
-                } else {
-                    tracing::warn!(%error, "cannot persist remote group catalog cache");
+        match result {
+            Ok(()) => {
+                self.authority_acceptance_ledger = ledger;
+                if snapshot.config_generation == self.fleet_poller_config.generation() {
+                    changed = self.commit_fleet_snapshot(snapshot);
                 }
-                snapshot.reject_group_catalogs_without_durable_history_from(
-                    &self.state.fleet_snapshot,
-                    &format!("durable cache persistence failed: {error}"),
-                );
             }
-            changed = self.commit_fleet_snapshot(snapshot);
+            Err(error) => {
+                if let Some(path) = self.authority_acceptance_ledger_path.as_deref() {
+                    tracing::warn!(%error, path = %path.display(), "cannot persist authority acceptance ledger");
+                } else {
+                    tracing::warn!(%error, "cannot persist authority acceptance ledger");
+                }
+                if snapshot.config_generation == self.fleet_poller_config.generation() {
+                    snapshot.quarantine_unpersisted_advances(
+                        &self.authority_acceptance_ledger,
+                        &format!("durable ledger persistence failed: {error}"),
+                    );
+                    self.authority_mutation_router.observe_snapshot(&snapshot);
+                    changed = self.commit_fleet_snapshot(snapshot);
+                }
+            }
         }
         if let Some(queued) = self.queued_fleet_snapshot.take() {
             changed |= self.install_fleet_snapshot(queued);
@@ -123,6 +145,7 @@ impl App {
     }
 
     fn commit_fleet_snapshot(&mut self, snapshot: crate::fleet::Snapshot) -> bool {
+        self.authority_mutation_router.observe_snapshot(&snapshot);
         self.remote_focus_transport
             .observe_fleet_snapshot(&snapshot);
         let catalogs_changed = self.state.fleet_snapshot.group_catalogs != snapshot.group_catalogs;
@@ -180,9 +203,11 @@ impl App {
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
             AppEvent::FleetRefreshed { snapshot } => self.install_fleet_snapshot(snapshot),
-            AppEvent::GroupCatalogCachePersisted { snapshot, result } => {
-                self.finish_group_catalog_cache_write(*snapshot, result)
-            }
+            AppEvent::AuthorityAcceptanceLedgerPersisted {
+                ledger,
+                snapshot,
+                result,
+            } => self.finish_authority_acceptance_ledger_write(ledger, *snapshot, result),
             AppEvent::SymphonyWorkflowsRefreshed { snapshot } => {
                 self.refresh_symphony_snapshot(snapshot)
             }
@@ -433,8 +458,13 @@ impl App {
             return Some(self.install_fleet_snapshot(snapshot));
         }
 
-        if let AppEvent::GroupCatalogCachePersisted { snapshot, result } = ev {
-            return Some(self.finish_group_catalog_cache_write(*snapshot, result));
+        if let AppEvent::AuthorityAcceptanceLedgerPersisted {
+            ledger,
+            snapshot,
+            result,
+        } = ev
+        {
+            return Some(self.finish_authority_acceptance_ledger_write(ledger, *snapshot, result));
         }
 
         if let AppEvent::ScratchpadChanged = ev {
@@ -2435,22 +2465,23 @@ mod tests {
                 .as_nanos()
         ));
         let path = root.join("remote-group-catalogs.json");
-        app.group_catalog_cache_path = Some(path.clone());
+        app.authority_acceptance_ledger_path = Some(path.clone());
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
-        app.group_catalog_cache_writer = crate::fleet::GroupCatalogCacheWriter::with_save(
-            app.event_tx.clone(),
-            move |path, snapshot| {
-                let _ = started_tx.send(());
-                release_rx
-                    .lock()
-                    .map_err(|_| std::io::Error::other("cache release gate poisoned"))?
-                    .recv()
-                    .map_err(|_| std::io::Error::other("cache release gate closed"))?;
-                crate::fleet::save_group_catalog_cache(path, snapshot)
-            },
-        );
+        app.authority_acceptance_ledger_writer =
+            crate::fleet::AuthorityAcceptanceLedgerWriter::with_save(
+                app.event_tx.clone(),
+                move |path, ledger| {
+                    let _ = started_tx.send(());
+                    release_rx
+                        .lock()
+                        .map_err(|_| std::io::Error::other("cache release gate poisoned"))?
+                        .recv()
+                        .map_err(|_| std::io::Error::other("cache release gate closed"))?;
+                    crate::fleet::save_authority_acceptance_ledger(path, ledger)
+                },
+            );
         let authority = crate::groups::AuthorityId::from_random_bytes([13; 16]);
         let mut snapshot = fleet_snapshot(Vec::new());
         snapshot.group_catalogs = vec![crate::fleet::GroupCatalog {
@@ -2492,7 +2523,88 @@ mod tests {
     }
 
     #[test]
-    fn catalog_admission_fails_closed_when_the_durable_cache_cannot_advance() {
+    fn successful_ledger_write_survives_config_reload_without_publishing_stale_catalog() {
+        let config = crate::config::Config::default();
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let root = std::env::temp_dir().join(format!(
+            "herdr-ledger-reload-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let path = root.join("remote-group-catalogs.json");
+        app.authority_acceptance_ledger_path = Some(path.clone());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
+        app.authority_acceptance_ledger_writer =
+            crate::fleet::AuthorityAcceptanceLedgerWriter::with_save(
+                app.event_tx.clone(),
+                move |path, ledger| {
+                    let _ = started_tx.send(());
+                    release_rx
+                        .lock()
+                        .map_err(|_| std::io::Error::other("ledger release gate poisoned"))?
+                        .recv()
+                        .map_err(|_| std::io::Error::other("ledger release gate closed"))?;
+                    crate::fleet::save_authority_acceptance_ledger(path, ledger)
+                },
+            );
+        let authority = crate::groups::AuthorityId::from_random_bytes([18; 16]);
+        let mut snapshot = fleet_snapshot(Vec::new());
+        snapshot.group_catalogs = vec![crate::fleet::GroupCatalog {
+            host: "office".into(),
+            target: "machine-a".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: authority.clone(),
+                revision: 1,
+                groups: Vec::new(),
+                memberships: Vec::new(),
+            }),
+            error: None,
+        }];
+
+        assert!(!app.install_fleet_snapshot(snapshot));
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("background ledger write started");
+        let mut reloaded = config;
+        reloaded.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "replacement".into(),
+            target: "machine-b".into(),
+            ..Default::default()
+        }];
+        app.apply_live_config(&reloaded, &[], &[], false);
+        release_tx.send(()).expect("release ledger writer");
+        let completion = wait_for_app_event(&mut app, "ledger completion");
+        assert!(!app.handle_internal_event_with_render_impact(completion));
+
+        assert!(app
+            .authority_acceptance_ledger
+            .accepted(&authority)
+            .is_some());
+        assert!(app.state.fleet_snapshot.group_catalogs.is_empty());
+        let reloaded_ledger =
+            crate::fleet::load_authority_acceptance_ledger(&path).expect("reload written ledger");
+        assert!(reloaded_ledger.accepted(&authority).is_some());
+        std::fs::remove_dir_all(root).expect("remove ledger reload fixture");
+    }
+
+    #[test]
+    fn catalog_admission_fails_closed_when_the_durable_ledger_cannot_advance() {
         let config = crate::config::Config::default();
         let mut app = App::new(
             &config,
@@ -2526,12 +2638,21 @@ mod tests {
             }),
             error: None,
         };
-        app.state.fleet_snapshot.group_catalogs = vec![catalog(
+        let accepted_catalog = catalog(
             1,
             crate::groups::GroupState::Active {
                 name: "Work".into(),
             },
-        )];
+        );
+        app.authority_acceptance_ledger
+            .advance(
+                accepted_catalog
+                    .snapshot
+                    .as_ref()
+                    .expect("accepted snapshot"),
+            )
+            .expect("seed accepted history");
+        app.state.fleet_snapshot.group_catalogs = vec![accepted_catalog];
 
         let blocker = std::env::temp_dir().join(format!(
             "herdr-group-cache-blocker-{}-{}",
@@ -2542,7 +2663,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::write(&blocker, b"not a directory").expect("create cache blocker");
-        app.group_catalog_cache_path = Some(blocker.join("remote-group-catalogs.json"));
+        app.authority_acceptance_ledger_path = Some(blocker.join("remote-group-catalogs.json"));
         let mut incoming = fleet_snapshot(Vec::new());
         incoming.group_catalogs = vec![catalog(2, crate::groups::GroupState::Deleted)];
 
@@ -2550,21 +2671,29 @@ mod tests {
         let completion = wait_for_app_event(&mut app, "failed cache write");
         assert!(app.handle_internal_event_with_render_impact(completion));
 
-        let retained = &app.state.fleet_snapshot.group_catalogs[0];
-        assert_eq!(retained.state, crate::fleet::GroupCatalogState::Stale);
+        let current = &app.state.fleet_snapshot.group_catalogs[0];
+        assert_eq!(current.state, crate::fleet::GroupCatalogState::Stale);
         assert!(matches!(
-            retained
+            current
                 .snapshot
                 .as_ref()
-                .expect("previous accepted catalog")
+                .expect("current authority answer")
+                .groups[0]
+                .state,
+            crate::groups::GroupState::Deleted
+        ));
+        assert!(matches!(
+            app.authority_acceptance_ledger
+                .accepted(&authority)
+                .expect("previous accepted history")
                 .groups[0]
                 .state,
             crate::groups::GroupState::Active { .. }
         ));
-        assert!(retained
+        assert!(current
             .error
             .as_deref()
-            .is_some_and(|error| error.contains("durable cache")));
+            .is_some_and(|error| error.contains("durable ledger")));
         std::fs::remove_file(blocker).expect("remove cache blocker");
     }
 
@@ -2578,7 +2707,7 @@ mod tests {
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         );
-        app.group_catalog_cache_error = Some("cannot parse retained history".into());
+        app.authority_acceptance_ledger_error = Some("cannot parse retained history".into());
         let authority = crate::groups::AuthorityId::from_random_bytes([8; 16]);
         let mut incoming = fleet_snapshot(Vec::new());
         incoming.group_catalogs = vec![crate::fleet::GroupCatalog {
@@ -2602,7 +2731,7 @@ mod tests {
 
         let rejected = &app.state.fleet_snapshot.group_catalogs[0];
         assert_eq!(rejected.state, crate::fleet::GroupCatalogState::Unavailable);
-        assert!(rejected.snapshot.is_none());
+        assert!(rejected.snapshot.is_some());
         assert!(rejected
             .error
             .as_deref()

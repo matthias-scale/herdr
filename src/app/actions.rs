@@ -3366,7 +3366,7 @@ impl AppState {
     pub fn handle_app_event(&mut self, event: AppEvent) -> Vec<PaneStateUpdate> {
         match event {
             AppEvent::FleetRefreshed { .. } => Vec::new(),
-            AppEvent::GroupCatalogCachePersisted { .. } => Vec::new(),
+            AppEvent::AuthorityAcceptanceLedgerPersisted { .. } => Vec::new(),
             AppEvent::RemoteFocusTransition { .. } => Vec::new(),
             AppEvent::RemoteFocusFrame { .. } => Vec::new(),
             #[cfg(unix)]
