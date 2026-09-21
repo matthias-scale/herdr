@@ -193,6 +193,10 @@ pub struct App {
     pub(crate) remote_focus_operations: remote_focus::RemoteFocusOperations,
     pub(crate) remote_focus_transport: Box<dyn remote_focus::RemoteFocusTransport>,
     pub(crate) fleet_poller_config: crate::fleet::FleetPollerHandle,
+    /// Server-owned group authority. Persistence is separate from client presentation state.
+    pub(crate) group_runtime: crate::groups::Runtime,
+    #[cfg(test)]
+    pub(crate) group_session_paths_override: Option<(std::path::PathBuf, std::path::PathBuf)>,
     /// Runtime-only markers for shell panes launched by git and user actions.
     pub(crate) git_action_panes: HashMap<crate::layout::PaneId, git_actions::GitActionPaneState>,
     pub event_tx: mpsc::Sender<AppEvent>,
@@ -1397,6 +1401,10 @@ impl App {
         let fleet_poller_config =
             crate::fleet::start_poller(config.remote.fleet.clone(), event_tx.clone());
         crate::symphony::start_poller(fleet_poller_config.clone(), event_tx.clone());
+        #[cfg(not(test))]
+        let group_runtime = crate::groups::Runtime::load_default();
+        #[cfg(test)]
+        let group_runtime = crate::groups::Runtime::unavailable_for_tests();
 
         let last_focus = state.active.and_then(|idx| {
             state
@@ -1438,6 +1446,9 @@ impl App {
                 &config.remote.fleet,
             )),
             fleet_poller_config,
+            group_runtime,
+            #[cfg(test)]
+            group_session_paths_override: None,
             git_action_panes: HashMap::new(),
             event_tx,
             event_rx,

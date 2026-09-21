@@ -1265,10 +1265,10 @@ impl Workspace {
         ratio: f32,
         before: bool,
         focus: bool,
-    ) -> Result<PaneId, MovedPane> {
+    ) -> Result<PaneId, Box<MovedPane>> {
         let pane_id = moved.pane_id;
         let Some(tab) = self.tabs.get_mut(tab_idx) else {
-            return Err(moved);
+            return Err(Box::new(moved));
         };
         tab.insert_existing_pane(target_pane_id, moved, direction, ratio, before, focus)?;
         if !self.public_pane_numbers.contains_key(&pane_id) {
@@ -1957,18 +1957,32 @@ mod tests {
     }
 
     #[test]
-    fn moved_pane_keeps_its_identity_across_workspaces() {
+    fn moved_pane_keeps_its_identity_across_workspaces_and_tabs() {
         let mut source = Workspace::test_new("source");
         let mut target = Workspace::test_new("target");
+        let target_tab = target.test_add_tab(Some("destination"));
         let pane_id = source.tabs[0].root_pane;
         let terminal_id = source.tabs[0].panes[&pane_id].attached_terminal_id.clone();
-        let target_pane = target.tabs[0].root_pane;
+        let group_id: crate::groups::GroupId = serde_json::from_value(serde_json::json!({
+            "owner": "AQEBAQEBAQEBAQEBAQEBAQ",
+            "local": 7
+        }))
+        .expect("group id");
+        source.tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("source pane")
+            .group_membership = crate::groups::PaneGroupMembership {
+            group_id: Some(group_id.clone()),
+            revision: 3,
+        };
+        let target_pane = target.tabs[target_tab].root_pane;
 
         let taken = source
             .take_pane_for_move(pane_id)
             .expect("source pane should be movable");
         let inserted = match target.insert_moved_pane_into_tab(
-            0,
+            target_tab,
             target_pane,
             taken.moved,
             ratatui::layout::Direction::Horizontal,
@@ -1981,8 +1995,18 @@ mod tests {
         };
 
         assert_eq!(inserted, pane_id);
-        assert_eq!(target.public_pane_number(inserted), Some(2));
+        assert_eq!(target.public_pane_number(inserted), Some(3));
         assert_eq!(target.terminal_id(inserted), Some(&terminal_id));
+        assert_eq!(
+            target
+                .pane_state(inserted)
+                .expect("moved pane")
+                .group_membership,
+            crate::groups::PaneGroupMembership {
+                group_id: Some(group_id),
+                revision: 3,
+            }
+        );
     }
 
     #[tokio::test]

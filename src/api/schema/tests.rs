@@ -316,6 +316,63 @@ fn request_round_trips_for_server_reload_config() {
 }
 
 #[test]
+fn group_mutation_requests_are_typed_and_carry_expected_revisions() {
+    let group_id: crate::groups::GroupId = serde_json::from_value(serde_json::json!({
+        "owner": "AQEBAQEBAQEBAQEBAQEBAQ",
+        "local": 7
+    }))
+    .unwrap();
+    let requests = [
+        Request {
+            id: "create".into(),
+            method: Method::GroupCreate(GroupCreateParams {
+                name: "Work".into(),
+                expected_revision: 3,
+            }),
+        },
+        Request {
+            id: "rename".into(),
+            method: Method::GroupRename(GroupRenameParams {
+                group_id: group_id.clone(),
+                name: "Focus".into(),
+                expected_revision: 4,
+            }),
+        },
+        Request {
+            id: "delete".into(),
+            method: Method::GroupDelete(GroupDeleteParams {
+                group_id: group_id.clone(),
+                expected_revision: 5,
+            }),
+        },
+        Request {
+            id: "assign".into(),
+            method: Method::PaneGroupSet(PaneGroupSetParams {
+                pane_id: "workspace:p1".into(),
+                group_id: Some(group_id),
+                expected_revision: 6,
+            }),
+        },
+    ];
+
+    for request in requests {
+        let json = serde_json::to_value(&request).unwrap();
+        assert!(json["params"]["expected_revision"].is_u64());
+        assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+    }
+}
+
+#[test]
+fn groups_capability_defaults_off_for_older_servers() {
+    let capabilities: ServerCapabilities = serde_json::from_value(serde_json::json!({
+        "live_handoff": true
+    }))
+    .unwrap();
+
+    assert!(!capabilities.groups_v1);
+}
+
+#[test]
 fn theme_requests_round_trip() {
     for method in [
         Method::ThemeStatus(EmptyParams::default()),
@@ -1043,6 +1100,7 @@ fn success_response_round_trips() {
             capabilities: Some(ServerCapabilities {
                 live_handoff: true,
                 detached_server_daemon: true,
+                groups_v1: true,
             }),
         },
     };

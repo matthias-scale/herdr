@@ -1066,7 +1066,7 @@ impl App {
                     ) {
                     Ok(pane_id) => pane_id,
                     Err(moved) => {
-                        self.recover_failed_pane_move(recovery_context, moved);
+                        self.recover_failed_pane_move(recovery_context, *moved);
                         return encode_error(
                             id,
                             "pane_move_failed",
