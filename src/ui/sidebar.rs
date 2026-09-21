@@ -2862,14 +2862,15 @@ fn compact_sidebar_rows_inner(
         .partition(|entry| entry_is_past_done_hide_threshold(app, entry));
     settled_entries.extend(recently_done);
     settled_entries = ordered_tab_entries(app, &settled_entries);
+    let mut rows = Vec::new();
     if sidebar_rows_are_filtered(app)
         && visible_entries.is_empty()
         && snoozed_entries.is_empty()
         && settled_entries.is_empty()
     {
-        return Vec::new();
+        append_symphony_rows(app, &mut rows);
+        return rows;
     }
-    let mut rows = Vec::new();
     // A Space is a folder, so this separation must hold even when no pane
     // resolved a repository.
     if app.sidebar_group_mode == SidebarGroupMode::Spaces
@@ -22349,7 +22350,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         }
 
         app.sidebar_work_filter.query = "does-not-exist".into();
-        assert!(sidebar_rows(&app).is_empty(), "empty headers must collapse");
+        assert!(
+            visible_sidebar_panes(&app).is_empty(),
+            "a zero-match filter must remove every agent row"
+        );
     }
 
     #[test]
@@ -22817,6 +22821,64 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 collapsed: true,
             } if *title == SYMPHONY_SECTION_TITLE
         )));
+    }
+
+    #[test]
+    fn zero_match_filter_keeps_the_zero_symphony_header_dimmed() {
+        let mut app = app_with_agents(&["one"]);
+        app.sidebar_work_filter.query = "does-not-exist".into();
+        app.working_row_opacity_percent = 50;
+
+        assert!(sidebar_rows(&app).iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title,
+                count: 0,
+                ..
+            } if *title == SYMPHONY_SECTION_TITLE
+        )));
+
+        let expected_zero_color =
+            blended_test_color(app.palette.overlay0, app.palette.sidebar_background(), 25);
+        let assert_dimmed_header =
+            |buffer: &ratatui::buffer::Buffer, width: u16, height: u16, surface: &str| {
+                let title_cell = (0..height)
+                    .flat_map(|row| (0..width).filter_map(move |column| buffer.cell((column, row))))
+                    .find(|cell| cell.symbol() == "S")
+                    .unwrap_or_else(|| panic!("{surface} {width}: Symphony title cell"));
+                assert!(
+                    title_cell.modifier.contains(Modifier::DIM),
+                    "{surface} {width}: zero Symphony header is dimmed"
+                );
+                assert_eq!(
+                    title_cell.fg, expected_zero_color,
+                    "{surface} {width}: zero workflows use half the configured opacity"
+                );
+            };
+
+        for width in [18, 40] {
+            let area = Rect::new(0, 0, width, 12);
+            let mut desktop = Terminal::new(TestBackend::new(width, area.height)).unwrap();
+            desktop
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            assert_dimmed_header(desktop.backend().buffer(), width, area.height, "desktop");
+
+            app.view.mobile_header_rect = Rect::new(0, 0, width, 2);
+            app.view.terminal_area = Rect::new(0, 2, width, 10);
+            let mut mobile = Terminal::new(TestBackend::new(width, area.height)).unwrap();
+            mobile
+                .draw(|frame| {
+                    super::super::mobile::render_mobile_panel(
+                        &app,
+                        &TerminalRuntimeRegistry::new(),
+                        frame,
+                        area,
+                    )
+                })
+                .unwrap();
+            assert_dimmed_header(mobile.backend().buffer(), width, area.height, "mobile");
+        }
     }
 
     #[test]
