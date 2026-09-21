@@ -1255,6 +1255,79 @@ fn pane_group_clear_survives_missing_and_corrupt_group_store_after_restart() {
 }
 
 #[test]
+fn rolled_back_group_store_rejects_a_stale_revision_after_restart() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let server = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    let created = send_json_request(
+        &api_socket,
+        "group_create_before_rollback",
+        "group.create",
+        json!({"name": "Before", "expected_revision": 0}),
+    );
+    assert!(created.get("error").is_none(), "create failed: {created}");
+    let group_id = created["result"]["record"]["id"].clone();
+    let pre_rename_revision = created["result"]["revision"]
+        .as_u64()
+        .expect("created authority revision");
+    let data_dir = config_home.join("herdr-dev");
+    let groups_path = data_dir.join("groups.json");
+    let before_rename = fs::read_to_string(&groups_path).expect("pre-rename group store");
+
+    let renamed = send_json_request(
+        &api_socket,
+        "group_rename_before_rollback",
+        "group.rename",
+        json!({
+            "group_id": group_id,
+            "name": "After",
+            "expected_revision": pre_rename_revision
+        }),
+    );
+    assert!(renamed.get("error").is_none(), "rename failed: {renamed}");
+    let post_rename_revision = renamed["result"]["revision"]
+        .as_u64()
+        .expect("renamed authority revision");
+    assert!(post_rename_revision > pre_rename_revision);
+    drop(server);
+    fs::write(&groups_path, before_rename).unwrap();
+
+    let restarted = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    let snapshot = send_json_request(
+        &api_socket,
+        "group_snapshot_after_revision_rollback",
+        "group.host_snapshot",
+        json!({}),
+    );
+    let repaired_revision = snapshot["result"]["snapshot"]["revision"]
+        .as_u64()
+        .expect("repaired authority revision");
+    assert!(repaired_revision > post_rename_revision);
+    let stale = send_json_request(
+        &api_socket,
+        "group_rename_with_stale_revision",
+        "group.rename",
+        json!({
+            "group_id": group_id,
+            "name": "Stale",
+            "expected_revision": pre_rename_revision
+        }),
+    );
+    assert_eq!(stale["error"]["code"], "revision_conflict");
+    assert!(stale["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains(&repaired_revision.to_string())));
+
+    cleanup_spawned_herdr(restarted, base);
+}
+
+#[test]
 fn rolled_back_group_store_never_reissues_a_retired_identity_after_restart() {
     let _lock = test_lock();
     let base = unique_test_dir();

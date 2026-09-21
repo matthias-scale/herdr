@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::model::{AuthorityState, GroupId, GroupRecord, MutationError};
 use super::AuthorityId;
 
-const AUTHORITY_SCHEMA_VERSION: u32 = 2;
+const AUTHORITY_SCHEMA_VERSION: u32 = 3;
 const GROUP_STORE_SCHEMA_VERSION: u32 = 1;
 const AUTHORITY_FILE_NAME: &str = "group-authority.json";
 const GROUPS_FILE_NAME: &str = "groups.json";
@@ -15,6 +15,7 @@ const GROUPS_FILE_NAME: &str = "groups.json";
 struct AuthorityFile {
     schema_version: u32,
     authority_id: String,
+    revision: u64,
     next_group_id: u64,
     retired_groups: Vec<RetiredGroup>,
 }
@@ -28,6 +29,7 @@ struct RetiredGroup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AuthorityLedger {
     authority_id: AuthorityId,
+    revision: u64,
     next_group_id: u64,
     retired_groups: BTreeMap<u64, u64>,
 }
@@ -188,8 +190,8 @@ fn load_or_initialize(data_dir: &Path) -> Result<AuthorityState, String> {
 
     match (authority_exists, groups_exist) {
         (true, true) => {
-            let authority = load_authority(&authority_path)?;
-            load_store(&groups_path, &authority)
+            let mut authority = load_authority(&authority_path)?;
+            load_store(&groups_path, &authority_path, &mut authority)
         }
         (true, false) => Err("group store is missing while the authority file exists".to_string()),
         (false, true) => Err("authority file is missing while the group store exists".to_string()),
@@ -225,6 +227,7 @@ impl AuthorityLedger {
             .collect();
         Self {
             authority_id: state.authority_id().clone(),
+            revision: state.revision(),
             next_group_id: state.next_group_id(),
             retired_groups,
         }
@@ -263,6 +266,7 @@ fn load_authority(path: &Path) -> Result<AuthorityLedger, String> {
     }
     Ok(AuthorityLedger {
         authority_id,
+        revision: file.revision,
         next_group_id: file.next_group_id,
         retired_groups,
     })
@@ -272,6 +276,7 @@ fn save_authority(path: &Path, authority: &AuthorityLedger) -> std::io::Result<(
     let json = serde_json::to_string_pretty(&AuthorityFile {
         schema_version: AUTHORITY_SCHEMA_VERSION,
         authority_id: authority.authority_id.as_str().to_string(),
+        revision: authority.revision,
         next_group_id: authority.next_group_id,
         retired_groups: authority
             .retired_groups
@@ -282,7 +287,11 @@ fn save_authority(path: &Path, authority: &AuthorityLedger) -> std::io::Result<(
     crate::persist::commit_json_to_path(path, &json)
 }
 
-fn load_store(path: &Path, authority: &AuthorityLedger) -> Result<AuthorityState, String> {
+fn load_store(
+    path: &Path,
+    authority_path: &Path,
+    authority: &mut AuthorityLedger,
+) -> Result<AuthorityState, String> {
     let json = std::fs::read_to_string(path)
         .map_err(|error| format!("cannot read group store: {error}"))?;
     let file: GroupStoreFile = serde_json::from_str(&json)
@@ -306,6 +315,17 @@ fn load_store(path: &Path, authority: &AuthorityLedger) -> Result<AuthorityState
     if stored.next_group_id() > authority.next_group_id {
         return Err("group store allocation floor exceeds the authority ledger".to_string());
     }
+    if stored.revision() > authority.revision {
+        return Err("group store revision exceeds the authority ledger".to_string());
+    }
+    let repaired_revision = (stored.revision() < authority.revision)
+        .then(|| {
+            authority
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| "group authority revision is exhausted".to_string())
+        })
+        .transpose()?;
 
     let mut records: BTreeMap<_, _> = stored
         .records()
@@ -332,20 +352,27 @@ fn load_store(path: &Path, authority: &AuthorityLedger) -> Result<AuthorityState
             },
         );
     }
-    let revision = authority
-        .retired_groups
-        .values()
-        .copied()
-        .fold(stored.revision(), u64::max);
+    if let Some(revision) = repaired_revision {
+        for record in records.values_mut() {
+            if matches!(record.state, super::GroupState::Active { .. }) {
+                record.revision = revision;
+            }
+        }
+        authority.revision = revision;
+    }
     let reconciled = AuthorityState::from_persisted(
         stored_authority,
-        revision,
+        authority.revision,
         authority.next_group_id,
         records.into_values().collect(),
     )?;
     if reconciled != stored {
         save_store(path, &reconciled)
             .map_err(|error| format!("cannot repair rolled-back group store: {error}"))?;
+    }
+    if repaired_revision.is_some() {
+        save_authority(authority_path, authority)
+            .map_err(|error| format!("cannot persist repaired authority revision: {error}"))?;
     }
     Ok(reconciled)
 }
@@ -447,6 +474,39 @@ mod tests {
     }
 
     #[test]
+    fn legacy_authority_without_revision_fails_closed() {
+        let dir = TestDir::new("legacy-authority-revision");
+        let runtime = Runtime::load(&dir.0);
+        let authority_id = runtime.authority().unwrap().authority_id().clone();
+        let authority_path = dir.0.join(AUTHORITY_FILE_NAME);
+        let legacy = serde_json::json!({
+            "schema_version": 2,
+            "authority_id": authority_id.as_str(),
+            "next_group_id": 1,
+            "retired_groups": [],
+        });
+        std::fs::write(
+            &authority_path,
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let reloaded = Runtime::load(&dir.0);
+
+        assert!(matches!(
+            reloaded.authority(),
+            Err(RuntimeError::Unavailable(_))
+        ));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &std::fs::read_to_string(authority_path).unwrap()
+            )
+            .unwrap(),
+            legacy
+        );
+    }
+
+    #[test]
     fn new_authority_uses_the_ledger_schema() {
         let dir = TestDir::new("ledger-schema");
         Runtime::load(&dir.0);
@@ -457,6 +517,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(authority["schema_version"], AUTHORITY_SCHEMA_VERSION);
+        assert_eq!(authority["revision"], 0);
         assert_eq!(authority["next_group_id"], 1);
         assert_eq!(authority["retired_groups"], serde_json::json!([]));
     }
@@ -555,10 +616,15 @@ mod tests {
         std::fs::write(dir.0.join(GROUPS_FILE_NAME), before_second_group).unwrap();
 
         let mut reloaded = Runtime::load(&dir.0);
+        let repaired_revision = reloaded.authority().unwrap().revision();
         let records = reloaded.authority().unwrap().records();
-        let (replacement, _) = reloaded.create("Replacement", 3).unwrap();
+        let (replacement, _) = reloaded.create("Replacement", repaired_revision).unwrap();
 
-        assert_eq!(records, vec![first, deleted]);
+        assert!(repaired_revision > deleted.revision);
+        assert_eq!(records[0].id, first.id);
+        assert_eq!(records[0].state, first.state);
+        assert_eq!(records[0].revision, repaired_revision);
+        assert_eq!(records[1], deleted);
         assert_eq!(replacement.id.owner, second.id.owner);
         assert_eq!(replacement.id.local, 3);
     }
