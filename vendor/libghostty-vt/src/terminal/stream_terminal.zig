@@ -226,8 +226,8 @@ pub const Handler = struct {
         }
     }
 
-    /// Cursor-motion payloads contain the authoritative zero-based column
-    /// before Ghostty applies the control.
+    /// Cursor-motion payloads contain the authoritative zero-based columns
+    /// before and after Ghostty applies the control, formatted `before,after`.
     fn emitParsedCursorMotion(
         self: *Handler,
         kind: ParsedOutputKind,
@@ -235,7 +235,11 @@ pub const Handler = struct {
     ) void {
         const callback = self.effects.parsed_output orelse return;
         var buf: [32]u8 = undefined;
-        const data = std.fmt.bufPrint(&buf, "{d}", .{cursor_column}) catch return;
+        const data = std.fmt.bufPrint(
+            &buf,
+            "{d},{d}",
+            .{ cursor_column, self.terminal.screens.active.cursor.x },
+        ) catch return;
         callback(self, kind, data);
     }
 

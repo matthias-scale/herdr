@@ -481,19 +481,19 @@ typedef enum GHOSTTY_ENUM_TYPED {
   /** An OSC boundary that separates invalid prefixes but not styled text. */
   GHOSTTY_TERMINAL_PARSED_OUTPUT_BOUNDARY = 3,
 
-  /** Backspace cursor motion; data is the decimal pre-motion cursor column. */
+  /** Backspace; data is decimal `pre-motion,post-motion` cursor columns. */
   GHOSTTY_TERMINAL_PARSED_OUTPUT_BACKSPACE = 4,
 
-  /** Carriage return; data is the decimal pre-motion cursor column. */
+  /** Carriage return; data is decimal `pre-motion,post-motion` columns. */
   GHOSTTY_TERMINAL_PARSED_OUTPUT_CARRIAGE_RETURN = 5,
   GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalParsedOutputKind;
 
 /**
  * Callback for output already classified by the terminal VT parser.
- * Data is borrowed and valid only for the callback duration. Separator
- * Cursor-motion data is the decimal zero-based column before the control;
- * other non-text events carry zero bytes.
+ * Data is borrowed and valid only for the callback duration. Cursor-motion
+ * data is the comma-separated decimal zero-based columns before and after the
+ * control; other non-text events carry zero bytes.
  */
 typedef void (*GhosttyTerminalParsedOutputFn)(
     GhosttyTerminal terminal,

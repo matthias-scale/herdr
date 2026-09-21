@@ -4818,6 +4818,32 @@ mod tests {
             assert!(!links.output_urls.iter().any(|url| url == corrupt_url));
             assert!(links.osc8_urls.is_empty(), "split {split}");
         }
+
+        let stale_url = "https://old.example/path";
+        let rendered_url = "Xttps://old.example/path";
+        let stream = format!("\x1b[?69h\x1b[6;160s\x1b[?6h{stale_url}\rX\n");
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+            let rendered = runtime.visible_text();
+            assert!(
+                rendered.contains(&format!("     {rendered_url}")),
+                "Ghostty applied the left-margin CR at split {split}: {rendered:?}"
+            );
+            assert!(
+                !rendered.contains(stale_url),
+                "Ghostty overwrote the stale URL at split {split}: {rendered:?}"
+            );
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("rendered URL at split {split}"));
+            assert_eq!(links.output_urls, [rendered_url], "split {split}");
+            assert!(!links.output_urls.iter().any(|url| url == stale_url));
+        }
     }
 
     #[tokio::test]

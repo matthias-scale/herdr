@@ -1105,11 +1105,11 @@ impl GhosttyPaneTerminal {
                     gate.observe_parsed_hyperlink(bytes);
                 }
                 crate::ghostty::ParsedOutput::Boundary => gate.observe_parsed_boundary(),
-                crate::ghostty::ParsedOutput::Backspace(column) => {
-                    gate.observe_parsed_backspace(column);
+                crate::ghostty::ParsedOutput::Backspace(columns) => {
+                    gate.observe_parsed_backspace(columns);
                 }
-                crate::ghostty::ParsedOutput::CarriageReturn(column) => {
-                    gate.observe_parsed_carriage_return(column);
+                crate::ghostty::ParsedOutput::CarriageReturn(columns) => {
+                    gate.observe_parsed_carriage_return(columns);
                 }
             });
     }

@@ -1,5 +1,5 @@
 diff --git a/vendor/libghostty-vt/include/ghostty/vt/terminal.h b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
-index 9bb961d3..f4251f35 100644
+index 9bb961d3..2257e015 100644
 --- a/vendor/libghostty-vt/include/ghostty/vt/terminal.h
 +++ b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
 @@ -467,6 +467,41 @@ typedef GhosttyClipboardWriteResult (*GhosttyTerminalClipboardWriteFn)(
@@ -20,19 +20,19 @@ index 9bb961d3..f4251f35 100644
 +  /** An OSC boundary that separates invalid prefixes but not styled text. */
 +  GHOSTTY_TERMINAL_PARSED_OUTPUT_BOUNDARY = 3,
 +
-+  /** Backspace cursor motion; data is the decimal pre-motion cursor column. */
++  /** Backspace; data is decimal `pre-motion,post-motion` cursor columns. */
 +  GHOSTTY_TERMINAL_PARSED_OUTPUT_BACKSPACE = 4,
 +
-+  /** Carriage return; data is the decimal pre-motion cursor column. */
++  /** Carriage return; data is decimal `pre-motion,post-motion` columns. */
 +  GHOSTTY_TERMINAL_PARSED_OUTPUT_CARRIAGE_RETURN = 5,
 +  GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 +} GhosttyTerminalParsedOutputKind;
 +
 +/**
 + * Callback for output already classified by the terminal VT parser.
-+ * Data is borrowed and valid only for the callback duration. Separator
-+ * Cursor-motion data is the decimal zero-based column before the control;
-+ * other non-text events carry zero bytes.
++ * Data is borrowed and valid only for the callback duration. Cursor-motion
++ * data is the comma-separated decimal zero-based columns before and after the
++ * control; other non-text events carry zero bytes.
 + */
 +typedef void (*GhosttyTerminalParsedOutputFn)(
 +    GhosttyTerminal terminal,
@@ -471,7 +471,7 @@ index efb06ecd..6e09a4de 100644
  
          /// Finalize and dispatch a CSI directly from parser state for
 diff --git a/vendor/libghostty-vt/src/terminal/stream_terminal.zig b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
-index 91cfb21c..ba3f8dda 100644
+index 91cfb21c..d037dbe5 100644
 --- a/vendor/libghostty-vt/src/terminal/stream_terminal.zig
 +++ b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
 @@ -23,6 +23,18 @@ const log = std.log.scoped(.stream_terminal);
@@ -523,7 +523,7 @@ index 91cfb21c..ba3f8dda 100644
              .color_scheme = null,
              .device_attributes = null,
              .enquiry = null,
-@@ -143,9 +164,159 @@ pub const Handler = struct {
+@@ -143,9 +164,163 @@ pub const Handler = struct {
          comptime action: Action.Tag,
          value: Action.Value(action),
      ) void {
@@ -589,8 +589,8 @@ index 91cfb21c..ba3f8dda 100644
 +        }
 +    }
 +
-+    /// Cursor-motion payloads contain the authoritative zero-based column
-+    /// before Ghostty applies the control.
++    /// Cursor-motion payloads contain the authoritative zero-based columns
++    /// before and after Ghostty applies the control, formatted `before,after`.
 +    fn emitParsedCursorMotion(
 +        self: *Handler,
 +        kind: ParsedOutputKind,
@@ -598,7 +598,11 @@ index 91cfb21c..ba3f8dda 100644
 +    ) void {
 +        const callback = self.effects.parsed_output orelse return;
 +        var buf: [32]u8 = undefined;
-+        const data = std.fmt.bufPrint(&buf, "{d}", .{cursor_column}) catch return;
++        const data = std.fmt.bufPrint(
++            &buf,
++            "{d},{d}",
++            .{ cursor_column, self.terminal.screens.active.cursor.x },
++        ) catch return;
 +        callback(self, kind, data);
 +    }
 +
