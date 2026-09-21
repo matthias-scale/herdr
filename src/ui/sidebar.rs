@@ -5499,7 +5499,10 @@ fn append_symphony_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
     if collapsed {
         return;
     }
-    if workflows.is_empty() {
+    if workflows.is_empty()
+        && app.symphony_snapshot.polled
+        && app.symphony_snapshot.unavailable.is_none()
+    {
         rows.push(SidebarRow::SymphonyEmpty);
         return;
     }
@@ -6061,6 +6064,7 @@ pub(crate) fn compute_sidebar_row_areas(
                 ws_idx,
                 indented,
                 settled_pane_id,
+                title,
                 ..
             } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
@@ -6074,6 +6078,7 @@ pub(crate) fn compute_sidebar_row_areas(
                     ws_idx: *ws_idx,
                     rect: Rect::new(body.x, row_y, body.width, row_height),
                     indented: *indented,
+                    repo_header: !title.is_empty(),
                     settled_pane_id: *settled_pane_id,
                 });
             }
@@ -7056,17 +7061,19 @@ pub(crate) fn compute_sidebar_section_header_areas(
     out
 }
 
-fn compute_sidebar_divider_areas(app: &AppState, area: Rect) -> Vec<Rect> {
-    let ws_area = workspace_list_rect_for_app(app, area);
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+fn compute_sidebar_divider_areas(
+    app: &AppState,
+    body: Rect,
+    rows: &[SidebarRow],
+    metrics: crate::pane::ScrollMetrics,
+) -> Vec<Rect> {
+    let body = workspace_list_body_rect(body, should_show_scrollbar(metrics));
     let mut y = body.y;
     let mut out = Vec::new();
-    let rows = sidebar_rows(app);
     for (idx, row) in rows
         .iter()
         .enumerate()
-        .skip(app.workspace_scroll.min(metrics.max_offset_from_bottom))
+        .skip(workspace_list_scroll_skip(app, &metrics))
     {
         let height = sidebar_row_height(app, row, body.height);
         if y.saturating_add(height) > body.bottom() {
@@ -7077,7 +7084,7 @@ fn compute_sidebar_divider_areas(app: &AppState, area: Rect) -> Vec<Rect> {
         }
         y = y
             .saturating_add(height)
-            .saturating_add(sidebar_row_gap(app, &rows, idx));
+            .saturating_add(sidebar_row_gap(app, rows, idx));
     }
     out
 }
@@ -7108,7 +7115,16 @@ pub(crate) fn workspace_agent_chevron_rect(
     if !has_agents || card.rect.width < 2 || card.rect.height == 0 {
         return Rect::default();
     }
-    Rect::new(card.rect.x.saturating_add(1), card.rect.y, 1, 1)
+    Rect::new(
+        if card.repo_header {
+            card.rect.x
+        } else {
+            card.rect.x.saturating_add(1)
+        },
+        card.rect.y,
+        1,
+        1,
+    )
 }
 
 #[cfg(test)]
@@ -8409,7 +8425,7 @@ fn render_workspace_list(
         let sort_width = header
             .and_then(|(.., sort_key, _)| sort_key.map(|_| 2))
             .unwrap_or(0);
-        let repo_header = header.is_some_and(|(title, ..)| !title.is_empty());
+        let repo_header = card.repo_header;
         let prefix = if repo_header { "▾ " } else { " ▾ " };
         let fixed_width =
             display_width(prefix) + display_width(&count_label) + state_count_width + sort_width;
@@ -8507,7 +8523,8 @@ fn render_workspace_list(
         };
         render_section_header(app, frame, &header, count, collapsed);
     }
-    for divider in compute_sidebar_divider_areas(app, sidebar_area) {
+    let divider_body = workspace_list_rect_for_app(app, sidebar_area);
+    for divider in compute_sidebar_divider_areas(app, divider_body, &row_entries, metrics) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "─".repeat(usize::from(divider.width)),
@@ -17948,6 +17965,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ws_idx: 0,
             rect: Rect::new(0, 1, 15, 2),
             indented: false,
+            repo_header: false,
             settled_pane_id: None,
         }];
 
@@ -20563,6 +20581,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(cards.len(), 2);
         assert_eq!(cards[0].ws_idx, 0);
         assert_eq!(cards[1].ws_idx, 3);
+        let rendered_chevron_x = (cards[0].rect.x..cards[0].rect.right())
+            .find(|x| matches!(buffer[(*x, cards[0].rect.y)].symbol(), "▾" | "▸"))
+            .expect("grouped workspace chevron is rendered");
+        assert_eq!(
+            workspace_agent_chevron_rect(&app, &cards[0], true).x,
+            rendered_chevron_x,
+            "agent disclosure hitbox follows the rendered repo-header chevron"
+        );
         let grouped = row_text(buffer, cards[0].rect.y, cards[0].rect.width);
         assert!(grouped.contains("main (0/3)"), "{grouped:?}");
         assert!(!grouped.contains("issue"), "{grouped:?}");
@@ -21605,8 +21631,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ..Default::default()
         };
 
-        let structure = sidebar_rows(&app)
-            .into_iter()
+        let rows = sidebar_rows(&app);
+        let structure = rows
+            .iter()
             .filter_map(|row| match row {
                 SidebarRow::SectionHeader { title, .. } => Some(title.to_string()),
                 SidebarRow::Divider => Some("---".to_string()),
@@ -21628,6 +21655,23 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ]
         );
         assert!(!structure.iter().any(|title| title == "Recently done"));
+
+        let area = Rect::new(0, 0, 48, 24);
+        let metrics = workspace_list_scroll_metrics(&app, area);
+        let sidebar_area = Rect::new(area.x, area.y, area.width.saturating_add(1), area.height);
+        let divider_areas = compute_sidebar_divider_areas(
+            &app,
+            workspace_list_rect_for_app(&app, sidebar_area),
+            &rows,
+            metrics,
+        );
+        assert_eq!(
+            divider_areas.len(),
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Divider))
+                .count(),
+            "one render projection supplies the divider geometry"
+        );
     }
 
     #[test]
@@ -22821,6 +22865,34 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 collapsed: true,
             } if *title == SYMPHONY_SECTION_TITLE
         )));
+    }
+
+    #[test]
+    fn expanded_symphony_section_waits_for_its_first_reattach_poll() {
+        let mut app = app_with_agents(&["one"]);
+        app.collapsed_sidebar_groups.remove("repo:Symphony");
+
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title,
+                count: 0,
+                collapsed: false,
+            } if *title == SYMPHONY_SECTION_TITLE
+        )));
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::SymphonyEmpty)));
+
+        app.symphony_snapshot = crate::symphony::Snapshot {
+            workflows: Vec::new(),
+            unavailable: None,
+            polled: true,
+        };
+        assert!(sidebar_rows(&app)
+            .iter()
+            .any(|row| matches!(row, SidebarRow::SymphonyEmpty)));
     }
 
     #[test]

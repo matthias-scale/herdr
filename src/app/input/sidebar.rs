@@ -3637,6 +3637,7 @@ mod tests {
             ws_idx: 0,
             rect: cards[0].rect,
             indented: false,
+            repo_header: false,
             settled_pane_id: None,
         }];
 
