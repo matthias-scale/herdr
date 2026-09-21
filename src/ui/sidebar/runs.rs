@@ -226,6 +226,7 @@ mod tests {
     #[test]
     fn reachable_empty_host_has_runs_empty_state() {
         let mut app = AppState::test_new();
+        app.collapsed_sidebar_groups.remove("repo:Runs");
         app.fleet_snapshot.polled = true;
         app.fleet_snapshot.hosts = vec![host(crate::fleet::HostState::Reachable)];
 

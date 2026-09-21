@@ -4419,6 +4419,13 @@ impl HeadlessServer {
         if let Some((key, mode)) = self.app.state.take_sidebar_group_sort_persistence_request() {
             crate::client::presentation::save_sidebar_group_sort(&key, mode);
         }
+        if let Some((key, collapsed)) = self
+            .app
+            .state
+            .take_sidebar_group_collapsed_persistence_request()
+        {
+            crate::client::presentation::save_sidebar_group_collapsed(&key, collapsed);
+        }
         if self.app.state.take_sidebar_view_scan_request() {
             self.app.request_sidebar_view_scan(Instant::now());
         }
@@ -4548,9 +4555,10 @@ impl HeadlessServer {
                 self.seed_client_dock_presentation(client_id);
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     let group_mode = crate::client::presentation::load_sidebar_group_mode();
+                    let collapsed = crate::client::presentation::load_sidebar_group_collapsed();
                     client
                         .sidebar_presentation
-                        .initialize_group_mode(group_mode);
+                        .initialize_group_mode(group_mode, &collapsed);
                     client.sidebar_presentation.work_filter =
                         crate::client::presentation::load_sidebar_work_filter();
                     client.sidebar_presentation.group_sorts =

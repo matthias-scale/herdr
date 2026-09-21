@@ -578,9 +578,8 @@ fn blue_working_row(entry: &AgentPanelEntry, p: &Palette, dot_color: Color) -> b
     blue_working_state(entry.state, entry_attention_tier(entry), p, dot_color)
 }
 
-fn working_row_style(app: &AppState, fade: bool, style: Style, bg: Option<Color>) -> Style {
-    let opacity = app.working_row_opacity_percent;
-    if opacity == 100 || !fade {
+fn opacity_style(app: &AppState, opacity: u8, style: Style, bg: Option<Color>) -> Style {
+    if opacity == 100 {
         return compact_row_style(style, bg);
     }
     let row_bg = bg.unwrap_or_else(|| app.palette.sidebar_background());
@@ -608,6 +607,32 @@ fn working_row_style(app: &AppState, fade: bool, style: Style, bg: Option<Color>
         blend(foreground.b, background.b),
     ));
     compact_row_style(style, bg)
+}
+
+fn working_row_style(app: &AppState, fade: bool, style: Style, bg: Option<Color>) -> Style {
+    let opacity = if fade {
+        app.working_row_opacity_percent
+    } else {
+        100
+    };
+    opacity_style(app, opacity, style, bg)
+}
+
+pub(super) fn section_row_style(
+    app: &AppState,
+    collapsed: bool,
+    zero: bool,
+    style: Style,
+) -> Style {
+    if !collapsed && !zero {
+        return style;
+    }
+    let opacity = if zero {
+        app.working_row_opacity_percent.saturating_div(2).max(12)
+    } else {
+        app.working_row_opacity_percent
+    };
+    opacity_style(app, opacity, style.add_modifier(Modifier::DIM), None)
 }
 
 fn superscript(index: usize) -> String {
@@ -2260,6 +2285,13 @@ pub(crate) enum WorkspaceListEntry {
 }
 
 #[derive(Clone)]
+pub(crate) struct SidebarStateCount {
+    pub(super) glyph: &'static str,
+    pub(super) color: Color,
+    pub(super) count: usize,
+}
+
+#[derive(Clone)]
 pub(crate) enum SidebarRow {
     Workspace {
         ws_idx: usize,
@@ -2267,6 +2299,7 @@ pub(crate) enum SidebarRow {
         settled_pane_id: Option<crate::layout::PaneId>,
         title: String,
         count: Option<usize>,
+        state_counts: Vec<SidebarStateCount>,
         /// Canonical group key the sort dropdown writes to, when this header
         /// groups sortable rows. `sort_mode` is the group's effective sort
         /// (explicit choice or inherited), so the glyph can mark an active
@@ -2298,6 +2331,7 @@ pub(crate) enum SidebarRow {
         count: usize,
         collapsed: bool,
     },
+    Divider,
     NestedHeader {
         key: String,
         /// Canonical provider object key for the trailing action menu.
@@ -2347,20 +2381,58 @@ pub(crate) enum SidebarRow {
     },
 }
 
-/// Agents waiting on a human are the only ones whose wait you can end, so they
-/// are grouped above everything else rather than sorted among it. The group is
-/// omitted entirely when empty, which is the common case.
-pub(crate) const BLOCKED_SECTION_TITLE: &str = "Blocked";
-pub(crate) const RECENTLY_DONE_SECTION_TITLE: &str = "Recently done";
 pub(crate) const SNOOZED_SECTION_TITLE: &str = "Snoozed";
 pub(crate) const SETTLED_SECTION_TITLE: &str = "Settled";
-#[cfg(test)]
-pub(crate) const PINNED_SECTION_TITLE: &str = "Pinned";
 pub(crate) const SPACES_SECTION_TITLE: &str = "Spaces";
+pub(crate) const FLEET_SECTION_TITLE: &str = "Fleet";
 /// Symphony workflows run headless on a Temporal worker, so nothing in the
 /// pane list ever shows them. The section is the only ambient surface they get.
 pub(crate) const SYMPHONY_SECTION_TITLE: &str = "Symphony";
 pub(crate) const RUNS_SECTION_TITLE: &str = "Runs";
+
+pub(crate) const NO_REPO_YET_SECTION_TITLE: &str = "No repo yet";
+pub(crate) const UNASSIGNED_PRS_SECTION_TITLE: &str = "Unassigned PRs";
+pub(crate) const UNASSIGNED_TICKETS_SECTION_TITLE: &str = "Unassigned tickets";
+pub(crate) const UNASSIGNED_THREADS_SECTION_TITLE: &str = "Unassigned threads";
+
+pub(crate) fn unassigned_section_title(mode: SidebarGroupMode) -> Option<&'static str> {
+    match mode {
+        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => Some(NO_REPO_YET_SECTION_TITLE),
+        SidebarGroupMode::Spaces => None,
+        SidebarGroupMode::RepoPr => Some(UNASSIGNED_PRS_SECTION_TITLE),
+        SidebarGroupMode::LinearTeam => Some(UNASSIGNED_TICKETS_SECTION_TITLE),
+        SidebarGroupMode::Missive => Some(UNASSIGNED_THREADS_SECTION_TITLE),
+    }
+}
+
+pub(crate) fn initial_collapsed_sidebar_groups(
+    overrides: &std::collections::HashMap<String, bool>,
+) -> std::collections::HashSet<String> {
+    let mut groups = std::collections::HashSet::new();
+    for mode in SidebarGroupMode::ALL {
+        let namespace = mode.collapse_namespace();
+        if let Some(title) = unassigned_section_title(mode) {
+            groups.insert(format!("{namespace}:{title}"));
+        }
+        for title in [
+            SNOOZED_SECTION_TITLE,
+            SETTLED_SECTION_TITLE,
+            FLEET_SECTION_TITLE,
+            RUNS_SECTION_TITLE,
+            SYMPHONY_SECTION_TITLE,
+        ] {
+            groups.insert(format!("{namespace}:{title}"));
+        }
+    }
+    for (key, collapsed) in overrides {
+        if *collapsed {
+            groups.insert(key.clone());
+        } else {
+            groups.remove(key);
+        }
+    }
+    groups
+}
 
 /// Shown under a reachable runner with nothing to list. It states the fact so
 /// an empty section reads as an answer rather than as a missing feature.
@@ -2368,11 +2440,22 @@ pub(crate) const SYMPHONY_EMPTY_LABEL: &str = "no open jobs";
 
 /// Only the group that demands action is coloured. Pinned and Spaces are
 /// organisation, not urgency, so they stay in the muted chrome tone.
-fn section_header_color(title: &str, p: &Palette) -> ratatui::style::Color {
-    if title == BLOCKED_SECTION_TITLE {
-        p.red
-    } else {
-        p.overlay0
+fn section_header_color(_title: &str, p: &Palette) -> ratatui::style::Color {
+    p.overlay0
+}
+
+pub(super) fn section_header_glyph(title: &str) -> &'static str {
+    match title {
+        NO_REPO_YET_SECTION_TITLE => "",
+        UNASSIGNED_PRS_SECTION_TITLE => "",
+        UNASSIGNED_TICKETS_SECTION_TITLE => "",
+        UNASSIGNED_THREADS_SECTION_TITLE => "󰍡",
+        SNOOZED_SECTION_TITLE => "󰒲",
+        SETTLED_SECTION_TITLE => "󰄬",
+        RUNS_SECTION_TITLE => "󰑮",
+        SYMPHONY_SECTION_TITLE => "󰐱",
+        SPACES_SECTION_TITLE => "󰉖",
+        _ => "󰘬",
     }
 }
 
@@ -2764,7 +2847,7 @@ fn compact_sidebar_rows_inner(
     } else {
         snoozed_entries
     };
-    let settled_entries = ordered_tab_entries(app, &settled_panes);
+    let mut settled_entries = ordered_tab_entries(app, &settled_panes);
     let visible_entries = if app.blocked_filter {
         active_entries
             .iter()
@@ -2777,16 +2860,16 @@ fn compact_sidebar_rows_inner(
     let (recently_done, visible_entries): (Vec<_>, Vec<_>) = visible_entries
         .into_iter()
         .partition(|entry| entry_is_past_done_hide_threshold(app, entry));
+    settled_entries.extend(recently_done);
+    settled_entries = ordered_tab_entries(app, &settled_entries);
     if sidebar_rows_are_filtered(app)
         && visible_entries.is_empty()
-        && recently_done.is_empty()
         && snoozed_entries.is_empty()
         && settled_entries.is_empty()
     {
         return Vec::new();
     }
     let mut rows = Vec::new();
-    append_recently_done_rows(app, &mut rows, recently_done);
     // A Space is a folder, so this separation must hold even when no pane
     // resolved a repository.
     if app.sidebar_group_mode == SidebarGroupMode::Spaces
@@ -2802,15 +2885,16 @@ fn compact_sidebar_rows_inner(
         append_legacy_space_rows(
             app,
             &mut rows,
-            visible_entries,
+            visible_entries.clone(),
             expand_worktrees,
             terminal_runtimes,
         );
-        append_tail_sections(
+        append_ordered_sidebar_blocks(
             app,
             &mut rows,
-            snoozed_entries,
-            settled_entries,
+            &visible_entries,
+            &snoozed_entries,
+            &settled_entries,
             expand_worktrees,
         );
         let row_width = sidebar_row_render_width(app, &rows, expand_worktrees);
@@ -2820,18 +2904,18 @@ fn compact_sidebar_rows_inner(
     match app.sidebar_group_mode {
         SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {
             append_repo_group_rows(app, &mut rows, &visible_entries, false);
-            append_unassigned_rows(app, &mut rows, &visible_entries);
         }
         SidebarGroupMode::Spaces => {}
         SidebarGroupMode::RepoPr | SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive => {
             append_object_group_rows(app, &mut rows, &visible_entries, false);
         }
     }
-    append_tail_sections(
+    append_ordered_sidebar_blocks(
         app,
         &mut rows,
-        snoozed_entries,
-        settled_entries,
+        &visible_entries,
+        &snoozed_entries,
+        &settled_entries,
         expand_worktrees,
     );
     let row_width = sidebar_row_render_width(app, &rows, expand_worktrees);
@@ -3047,6 +3131,7 @@ fn append_legacy_space_rows(
             settled_pane_id: None,
             title: String::new(),
             count: None,
+            state_counts: Vec::new(),
             sort_key: space_sort_key,
             sort_mode: space_sort,
         });
@@ -3322,6 +3407,27 @@ fn mark_redundant_space_labels(entries: &mut [AgentPanelEntry], group_title: &st
     }
 }
 
+fn repo_state_counts(entries: &[AgentPanelEntry], palette: &Palette) -> Vec<SidebarStateCount> {
+    let mut counts = Vec::<SidebarStateCount>::new();
+    for entry in entries {
+        let glyph = compact_row_dot(entry);
+        let color = compact_row_color(entry, palette);
+        if let Some(existing) = counts
+            .iter_mut()
+            .find(|count| count.glyph == glyph && count.color == color)
+        {
+            existing.count += 1;
+        } else {
+            counts.push(SidebarStateCount {
+                glyph,
+                color,
+                count: 1,
+            });
+        }
+    }
+    counts
+}
+
 fn append_repo_group_rows(
     app: &AppState,
     rows: &mut Vec<SidebarRow>,
@@ -3347,6 +3453,7 @@ fn append_repo_group_rows(
                     settled_pane_id: settled.then_some(representative.pane_id),
                     title: group.title.clone(),
                     count: Some(group.entries.len()),
+                    state_counts: repo_state_counts(&group.entries, &app.palette),
                     sort_key: Some(group.key.clone()),
                     sort_mode: group_sort,
                 });
@@ -3513,30 +3620,62 @@ fn append_object_group_rows(
             );
         }
     }
-    if settled {
-        return;
-    }
-    if matches!(
-        app.sidebar_group_mode,
-        SidebarGroupMode::RepoPr | SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive
-    ) {
-        append_unassigned_rows(app, rows, entries);
-    }
 }
 
-/// Symphony follows the active agent groups because its workflows run on no
-/// pane. Settled is history and always sinks to the bottom.
-fn append_tail_sections(
+#[derive(Clone, Copy)]
+enum SidebarBlock {
+    Unassigned,
+    Deferred,
+    Fleet,
+    Ambient,
+}
+
+const SIDEBAR_BLOCK_ORDER: [SidebarBlock; 4] = [
+    SidebarBlock::Unassigned,
+    SidebarBlock::Deferred,
+    SidebarBlock::Fleet,
+    SidebarBlock::Ambient,
+];
+
+fn append_ordered_sidebar_blocks(
     app: &AppState,
     rows: &mut Vec<SidebarRow>,
-    snoozed_entries: Vec<AgentPanelEntry>,
-    settled_entries: Vec<AgentPanelEntry>,
+    active_entries: &[AgentPanelEntry],
+    snoozed_entries: &[AgentPanelEntry],
+    settled_entries: &[AgentPanelEntry],
     expand_worktrees: bool,
 ) {
-    runs::append_rows(app, rows);
-    append_symphony_rows(app, rows);
-    append_snoozed_rows(app, rows, snoozed_entries);
-    append_settled_rows(app, rows, settled_entries, expand_worktrees);
+    for block in SIDEBAR_BLOCK_ORDER {
+        let mut block_rows = Vec::new();
+        match block {
+            SidebarBlock::Unassigned => {
+                append_unassigned_rows(app, &mut block_rows, active_entries);
+            }
+            SidebarBlock::Deferred => {
+                append_snoozed_rows(app, &mut block_rows, snoozed_entries.to_vec());
+                append_settled_rows(
+                    app,
+                    &mut block_rows,
+                    settled_entries.to_vec(),
+                    expand_worktrees,
+                );
+            }
+            // The Fleet container lands in the next lane. Keeping its slot in
+            // this table prevents that change from reopening the row order.
+            SidebarBlock::Fleet => {}
+            SidebarBlock::Ambient => {
+                runs::append_rows(app, &mut block_rows);
+                append_symphony_rows(app, &mut block_rows);
+            }
+        }
+        if block_rows.is_empty() {
+            continue;
+        }
+        if !rows.is_empty() {
+            rows.push(SidebarRow::Divider);
+        }
+        rows.append(&mut block_rows);
+    }
 }
 
 fn append_snoozed_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: Vec<AgentPanelEntry>) {
@@ -4784,8 +4923,6 @@ pub(crate) fn sidebar_work_groups(
     groups
 }
 
-pub(crate) const UNASSIGNED_SECTION_TITLE: &str = "Unassigned";
-pub(crate) const NO_AGENT_YET_SECTION_TITLE: &str = "No agent yet";
 const UNASSIGNED_INITIAL_ROWS: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5044,23 +5181,10 @@ pub(crate) fn sidebar_show_more_key(mode: SidebarGroupMode) -> String {
 }
 
 fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[AgentPanelEntry]) {
-    let objects = sidebar_unassigned_objects(app, entries, app.sidebar_group_mode);
-    if objects.is_empty()
-        && !matches!(
-            app.sidebar_group_mode,
-            SidebarGroupMode::LinearTeam | SidebarGroupMode::RepoPr | SidebarGroupMode::Missive
-        )
-    {
+    let Some(title) = unassigned_section_title(app.sidebar_group_mode) else {
         return;
-    }
-    let title = match app.sidebar_group_mode {
-        SidebarGroupMode::LinearTeam | SidebarGroupMode::RepoPr | SidebarGroupMode::Missive => {
-            NO_AGENT_YET_SECTION_TITLE
-        }
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree | SidebarGroupMode::Spaces => {
-            UNASSIGNED_SECTION_TITLE
-        }
     };
+    let objects = sidebar_unassigned_objects(app, entries, app.sidebar_group_mode);
     let collapsed = section_is_collapsed(app, title);
     rows.push(SidebarRow::SectionHeader {
         title,
@@ -5363,19 +5487,8 @@ pub(crate) fn sidebar_filter_options(app: &AppState) -> Vec<SidebarFilterOption>
     }
 }
 
-/// The Symphony section is omitted entirely when no workflow is open, so a
-/// user who never runs Symphony never pays a row for it. A runtime that is
-/// merely unreachable stays silent too: the Symphony window reports that, and
-/// a permanent error row in the sidebar would be noise on every frame.
 fn append_symphony_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
     let workflows = &app.symphony_snapshot.workflows;
-    // An unreachable or not-yet-polled runner stays silent: there is nothing
-    // truthful to say about jobs we could not ask about. A reachable runner
-    // keeps its header even at zero, so an empty Symphony is distinguishable
-    // from a missing one.
-    if workflows.is_empty() && !app.symphony_snapshot.is_reachable() {
-        return;
-    }
     let collapsed = section_is_collapsed(app, SYMPHONY_SECTION_TITLE);
     rows.push(SidebarRow::SectionHeader {
         title: SYMPHONY_SECTION_TITLE,
@@ -5401,28 +5514,6 @@ fn append_symphony_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
                 started_at: workflow.started_at.clone(),
             }),
     );
-}
-
-fn append_recently_done_rows(
-    app: &AppState,
-    rows: &mut Vec<SidebarRow>,
-    entries: Vec<AgentPanelEntry>,
-) {
-    if entries.is_empty() {
-        return;
-    }
-    let collapsed = section_is_collapsed(app, RECENTLY_DONE_SECTION_TITLE);
-    rows.push(SidebarRow::SectionHeader {
-        title: RECENTLY_DONE_SECTION_TITLE,
-        count: entries.len(),
-        collapsed,
-    });
-    if !collapsed {
-        rows.extend(entries.into_iter().map(|entry| SidebarRow::Agent {
-            entry: Box::new(entry),
-            depth: 0,
-        }));
-    }
 }
 
 fn entry_is_past_done_hide_threshold(app: &AppState, entry: &AgentPanelEntry) -> bool {
@@ -5739,6 +5830,7 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
         }
         SidebarRow::Tab { .. }
         | SidebarRow::SectionHeader { .. }
+        | SidebarRow::Divider
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
@@ -5769,6 +5861,7 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
         return 0;
     };
     match (row, next) {
+        (SidebarRow::Divider, _) | (_, SidebarRow::Divider) => 0,
         (SidebarRow::Workspace { .. }, SidebarRow::Tab { .. }) => 0,
         (SidebarRow::Workspace { .. }, SidebarRow::NestedHeader { .. }) => 0,
         (SidebarRow::NestedHeader { .. }, SidebarRow::Tab { .. }) => 0,
@@ -5861,6 +5954,7 @@ pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) 
         // Headers belong to a state, not a workspace, so scrolling to a
         // workspace must never land on one.
         SidebarRow::SectionHeader { .. } => false,
+        SidebarRow::Divider => false,
         SidebarRow::NestedHeader { .. } => false,
         // A Symphony workflow runs on a worker, not in a workspace.
         SidebarRow::SymphonyJob { .. }
@@ -6001,6 +6095,7 @@ pub(crate) fn compute_sidebar_row_areas(
             SidebarRow::Tab { .. }
             | SidebarRow::RemoteAgent { .. }
             | SidebarRow::SectionHeader { .. }
+            | SidebarRow::Divider
             | SidebarRow::NestedHeader { .. }
             | SidebarRow::SymphonyJob { .. }
             | SidebarRow::SymphonyEmpty
@@ -6960,6 +7055,32 @@ pub(crate) fn compute_sidebar_section_header_areas(
     out
 }
 
+fn compute_sidebar_divider_areas(app: &AppState, area: Rect) -> Vec<Rect> {
+    let ws_area = workspace_list_rect_for_app(app, area);
+    let metrics = workspace_list_scroll_metrics(app, ws_area);
+    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    let mut y = body.y;
+    let mut out = Vec::new();
+    let rows = sidebar_rows(app);
+    for (idx, row) in rows
+        .iter()
+        .enumerate()
+        .skip(app.workspace_scroll.min(metrics.max_offset_from_bottom))
+    {
+        let height = sidebar_row_height(app, row, body.height);
+        if y.saturating_add(height) > body.bottom() {
+            break;
+        }
+        if matches!(row, SidebarRow::Divider) {
+            out.push(Rect::new(body.x, y, body.width, height));
+        }
+        y = y
+            .saturating_add(height)
+            .saturating_add(sidebar_row_gap(app, &rows, idx));
+    }
+    out
+}
+
 pub(crate) fn agent_counts_by_workspace(
     entries: &[AgentPanelEntry],
 ) -> std::collections::HashMap<usize, usize> {
@@ -7342,6 +7463,15 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     Paragraph::new(Line::from(Span::styled(
                         "─".repeat(usize::from(ws_area.width)),
                         Style::default().fg(section_header_color(title, p)),
+                    ))),
+                    Rect::new(ws_area.x, y, ws_area.width, 1),
+                );
+            }
+            SidebarRow::Divider => {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        "─".repeat(usize::from(ws_area.width)),
+                        Style::default().fg(p.surface_dim),
                     ))),
                     Rect::new(ws_area.x, y, ws_area.width, 1),
                 );
@@ -7968,26 +8098,32 @@ fn render_section_header(
     let p = &app.palette;
     let color = section_header_color(header.title, p);
     let count_label = format!(" ({count})");
+    let glyph = section_header_glyph(header.title);
+    let zero = header.title == SYMPHONY_SECTION_TITLE && count == 0;
     let title = truncate_end(
         header.title,
-        usize::from(header.rect.width)
-            .saturating_sub(display_width(" ▾ ") + display_width(&count_label)),
+        usize::from(header.rect.width).saturating_sub(
+            display_width(" ▾  ") + display_width(glyph) + display_width(&count_label),
+        ),
     );
+    let header_style = |style| section_row_style(app, collapsed, zero, style);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::raw(" "),
             Span::styled(
                 if collapsed { "▸" } else { "▾" },
-                Style::default().fg(color),
+                header_style(Style::default().fg(color)),
             ),
+            Span::raw(" "),
+            Span::styled(glyph, header_style(Style::default().fg(color))),
             Span::raw(" "),
             Span::styled(
                 title,
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
+                header_style(Style::default().fg(color).add_modifier(Modifier::BOLD)),
             ),
             Span::styled(
                 count_label,
-                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                header_style(Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)),
             ),
         ])),
         Rect::new(header.rect.x, header.rect.y, header.rect.width, 1),
@@ -8175,10 +8311,17 @@ fn render_workspace_list(
             SidebarRow::Workspace {
                 title,
                 count,
+                state_counts,
                 sort_key,
                 sort_mode,
                 ..
-            } => Some((title, *count, sort_key.as_deref(), *sort_mode)),
+            } => Some((
+                title,
+                *count,
+                state_counts.as_slice(),
+                sort_key.as_deref(),
+                *sort_mode,
+            )),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -8247,38 +8390,59 @@ fn render_workspace_list(
                         .is_some_and(|target| member_indices.contains(&target.ws_idx))
             })
             .count();
-        let count_label = header.and_then(|(_, count, ..)| *count).map_or_else(
-            || format!(" ({agent_count}/{window_count})"),
-            |count| format!(" ({count})"),
-        );
+        let state_counts = header.map(|(_, _, counts, ..)| *counts).unwrap_or_default();
+        let count_label = if state_counts.is_empty() {
+            header.and_then(|(_, count, ..)| *count).map_or_else(
+                || format!(" ({agent_count}/{window_count})"),
+                |count| format!(" ({count})"),
+            )
+        } else {
+            String::new()
+        };
+        let state_count_width = state_counts
+            .iter()
+            .map(|count| display_width(count.glyph) + count.count.to_string().len() + 1)
+            .sum::<usize>();
         // The sort control is right-aligned on the header row, so the title
         // gives it its cell up front rather than sliding under it.
         let sort_width = header
             .and_then(|(.., sort_key, _)| sort_key.map(|_| 2))
             .unwrap_or(0);
-        let fixed_width = display_width(" ▾ ") + display_width(&count_label) + sort_width;
+        let repo_header = header.is_some_and(|(title, ..)| !title.is_empty());
+        let prefix = if repo_header { "▾ " } else { " ▾ " };
+        let fixed_width =
+            display_width(prefix) + display_width(&count_label) + state_count_width + sort_width;
         let title = truncate_end(
             &display_label,
             usize::from(card.rect.width).saturating_sub(fixed_width),
         );
+        let mut spans = Vec::new();
+        if !repo_header {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            if app.workspace_agents_expanded(i) {
+                "▾"
+            } else {
+                "▸"
+            },
+            Style::default().fg(p.accent),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(title, name_style));
+        spans.push(Span::styled(
+            count_label,
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+        ));
+        for count in state_counts {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("{}{}", count.glyph, count.count),
+                Style::default().fg(count.color),
+            ));
+        }
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::raw(" "),
-                Span::styled(
-                    if app.workspace_agents_expanded(i) {
-                        "▾"
-                    } else {
-                        "▸"
-                    },
-                    Style::default().fg(p.accent),
-                ),
-                Span::raw(" "),
-                Span::styled(title, name_style),
-                Span::styled(
-                    count_label,
-                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
-                ),
-            ])),
+            Paragraph::new(Line::from(spans)),
             Rect::new(card.rect.x, row_y, card.rect.width, 1),
         );
         if let Some((.., Some(_), sort_mode)) = header {
@@ -8341,6 +8505,15 @@ fn render_workspace_list(
             continue;
         };
         render_section_header(app, frame, &header, count, collapsed);
+    }
+    for divider in compute_sidebar_divider_areas(app, sidebar_area) {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "─".repeat(usize::from(divider.width)),
+                Style::default().fg(p.surface_dim),
+            ))),
+            divider,
+        );
     }
     for header in compute_sidebar_nested_header_areas(app, sidebar_area) {
         render_nested_header(app, frame, &header);
@@ -10087,6 +10260,8 @@ pub(crate) mod tests {
     #[test]
     fn unified_fleet_local_and_remote_snooze_and_settle_share_sections() {
         let mut app = app_with_agents(&["active", "snoozed", "settled"]);
+        expand_section_for_all_views(&mut app, SNOOZED_SECTION_TITLE);
+        expand_section_for_all_views(&mut app, SETTLED_SECTION_TITLE);
         let snoozed_pane = app.workspaces[1].tabs[0].root_pane;
         let settled_pane = app.workspaces[2].tabs[0].root_pane;
         assert!(app.snooze_pane_at(1, snoozed_pane, 1_725_000_900));
@@ -10723,7 +10898,7 @@ pub(crate) mod tests {
             assert!(std::sync::Arc::ptr_eq(entry, projected));
         }
         assert!(!rows.iter().any(|row| {
-            matches!(row, SidebarRow::SectionHeader { title, .. } if *title == BLOCKED_SECTION_TITLE)
+            matches!(row, SidebarRow::SectionHeader { title, .. } if *title == "Blocked")
         }));
         let last_local = rows
             .iter()
@@ -10754,9 +10929,9 @@ pub(crate) mod tests {
 
         app.blocked_filter = true;
         let blocked_rows = sidebar_rows(&app);
-        assert!(blocked_rows
-            .iter()
-            .all(|row| !matches!(row, SidebarRow::SectionHeader { title, .. } if *title == BLOCKED_SECTION_TITLE)));
+        assert!(blocked_rows.iter().all(
+            |row| !matches!(row, SidebarRow::SectionHeader { title, .. } if *title == "Blocked")
+        ));
         assert_eq!(
             blocked_rows
                 .iter()
@@ -11967,8 +12142,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn settled_section_is_last_and_keeps_active_group_mode() {
+    fn settled_section_keeps_the_active_group_mode_inside_the_deferred_block() {
         let mut app = AppState::test_new();
+        expand_section_for_all_views(&mut app, SETTLED_SECTION_TITLE);
         app.workspaces = vec![
             Workspace::test_new("active"),
             Workspace::test_new("settled"),
@@ -12049,6 +12225,7 @@ pub(crate) mod tests {
     #[test]
     fn snoozed_section_hides_sessions_until_expiry_or_attention() {
         let mut app = AppState::test_new();
+        expand_section_for_all_views(&mut app, SNOOZED_SECTION_TITLE);
         app.workspaces = vec![
             Workspace::test_new("expires"),
             Workspace::test_new("attention"),
@@ -12110,6 +12287,7 @@ pub(crate) mod tests {
     #[test]
     fn split_tab_keeps_active_and_snoozed_panes_in_separate_rows() {
         let mut app = AppState::test_new();
+        expand_section_for_all_views(&mut app, SNOOZED_SECTION_TITLE);
         let mut workspace = Workspace::test_new("split snooze");
         let active_pane = workspace.tabs[0].root_pane;
         let snoozed_pane = workspace.test_split(Direction::Horizontal);
@@ -12246,6 +12424,7 @@ pub(crate) mod tests {
     #[test]
     fn settled_count_matches_distinct_tab_rows() {
         let mut app = AppState::test_new();
+        expand_section_for_all_views(&mut app, SETTLED_SECTION_TITLE);
         let mut workspace = Workspace::test_new("settled sessions");
         workspace.test_split(Direction::Horizontal);
         workspace.test_split(Direction::Vertical);
@@ -12713,6 +12892,13 @@ pub(crate) mod tests {
         app
     }
 
+    fn expand_section_for_all_views(app: &mut AppState, title: &str) {
+        for mode in SidebarGroupMode::ALL {
+            app.collapsed_sidebar_groups
+                .remove(&format!("{}:{title}", mode.collapse_namespace()));
+        }
+    }
+
     #[test]
     fn local_identity_cache_tracks_targets_and_host_changes() {
         let mut app = app_with_agents(&["local"]);
@@ -13004,7 +13190,7 @@ pub(crate) mod tests {
             "●"
         );
         assert!(!sidebar_rows(&app).iter().any(|row| {
-            matches!(row, SidebarRow::SectionHeader { title, .. } if *title == BLOCKED_SECTION_TITLE)
+            matches!(row, SidebarRow::SectionHeader { title, .. } if *title == "Blocked")
         }));
     }
 
@@ -13273,15 +13459,22 @@ pub(crate) mod tests {
     fn row_kinds(app: &AppState) -> Vec<(char, usize)> {
         sidebar_rows(app)
             .into_iter()
-            .map(|row| match row {
-                SidebarRow::Workspace { ws_idx, .. } => ('w', ws_idx),
-                SidebarRow::Tab { entry, .. } => ('t', entry.local_target().unwrap().ws_idx),
-                SidebarRow::Agent { entry, .. } => ('a', entry.local_target().unwrap().ws_idx),
-                SidebarRow::RemoteAgent { .. } => ('r', 0),
-                SidebarRow::SectionHeader { .. } => ('h', 0),
-                SidebarRow::NestedHeader { .. } => ('h', 0),
-                SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty => ('s', 0),
-                SidebarRow::AgentRun { .. } => ('u', 0),
+            .filter_map(|row| match row {
+                SidebarRow::Workspace { ws_idx, .. } => Some(('w', ws_idx)),
+                SidebarRow::Tab { entry, .. } => Some(('t', entry.local_target().unwrap().ws_idx)),
+                SidebarRow::Agent { entry, .. } => {
+                    Some(('a', entry.local_target().unwrap().ws_idx))
+                }
+                SidebarRow::RemoteAgent { .. } => Some(('r', 0)),
+                SidebarRow::SectionHeader { title, .. } if title == SPACES_SECTION_TITLE => {
+                    Some(('h', 0))
+                }
+                SidebarRow::NestedHeader { .. } => Some(('h', 0)),
+                SidebarRow::SectionHeader { .. }
+                | SidebarRow::Divider
+                | SidebarRow::SymphonyJob { .. }
+                | SidebarRow::SymphonyEmpty
+                | SidebarRow::AgentRun { .. } => None,
             })
             .collect()
     }
@@ -14029,9 +14222,9 @@ pub(crate) mod tests {
                 })
                 .filter(|red| *red)
                 .count();
-            let has_blocked_header = rows.iter().any(|row| {
-                matches!(row, SidebarRow::SectionHeader { title, .. } if *title == BLOCKED_SECTION_TITLE)
-            });
+            let has_blocked_header = rows.iter().any(
+                |row| matches!(row, SidebarRow::SectionHeader { title, .. } if *title == "Blocked"),
+            );
             (has_blocked_header, red_rows)
         };
         assert_eq!(blocked_summary(&sidebar_rows(&app)), (false, 0));
@@ -14601,10 +14794,15 @@ pub(crate) mod tests {
             .iter()
             .filter(|row| matches!(row, SidebarRow::SectionHeader { .. }))
             .count();
+        let divider_rows = rows
+            .iter()
+            .filter(|row| matches!(row, SidebarRow::Divider))
+            .count();
 
         assert_eq!(
             rows.len(),
             header_rows
+                + divider_rows
                 + workspace_cards.len()
                 + compute_tab_card_areas(&app, area).len()
                 + agent_cards.len()
@@ -14655,19 +14853,7 @@ pub(crate) mod tests {
         app.view.mobile_header_rect = Rect::new(0, 0, 30, 2);
         app.view.terminal_area = Rect::new(0, 2, 30, 20);
         assert_eq!(
-            mobile_sidebar_rows(&app)
-                .iter()
-                .map(|row| match row {
-                    SidebarRow::Workspace { ws_idx, .. } => ('w', *ws_idx),
-                    SidebarRow::Tab { entry, .. } => ('t', entry.local_target().unwrap().ws_idx),
-                    SidebarRow::Agent { entry, .. } => ('a', entry.local_target().unwrap().ws_idx),
-                    SidebarRow::RemoteAgent { .. } => ('r', 0),
-                    SidebarRow::SectionHeader { .. } => ('h', 0),
-                    SidebarRow::NestedHeader { .. } => ('h', 0),
-                    SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty => ('s', 0),
-                    SidebarRow::AgentRun { .. } => ('u', 0),
-                })
-                .collect::<Vec<_>>(),
+            row_kinds(&app),
             vec![('h', 0), ('w', 0), ('t', 0), ('w', 1), ('t', 1)]
         );
     }
@@ -14706,6 +14892,7 @@ pub(crate) mod tests {
                 | SidebarRow::Agent { .. }
                 | SidebarRow::RemoteAgent { .. }
                 | SidebarRow::SectionHeader { .. }
+                | SidebarRow::Divider
                 | SidebarRow::NestedHeader { .. }
                 | SidebarRow::SymphonyJob { .. }
                 | SidebarRow::SymphonyEmpty
@@ -14754,6 +14941,7 @@ pub(crate) mod tests {
                     }
                     SidebarRow::RemoteAgent { .. } => ("remote", 0, None, None),
                     SidebarRow::SectionHeader { .. } => ("section", 0, None, None),
+                    SidebarRow::Divider => ("divider", 0, None, None),
                     SidebarRow::NestedHeader { .. } => ("section", 0, None, None),
                     SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty => {
                         ("symphony", 0, None, None)
@@ -15014,7 +15202,7 @@ row_gap = 1
         assert!(rows.iter().any(|row| row.contains("Fleet docs")));
         assert!(
             rows.iter()
-                .any(|row| row.replace('│', "").trim().is_empty()),
+                .any(|row| row.replace(['│', '▕'], "").trim().is_empty()),
             "Space groups should have a visual gap: {rows:?}"
         );
 
@@ -16557,6 +16745,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .get_mut(&settled_pane)
             .expect("settled pane")
             .settled_at = Some(1_725_000_000);
+        settled.collapsed_sidebar_groups.remove("repo_pr:Settled");
         let settled_entry = sidebar_tab_entries(&settled)
             .into_iter()
             .find(|entry| entry.local_target().unwrap().pane_id == settled_pane)
@@ -16860,16 +17049,22 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn priority_row_shape(app: &AppState) -> Vec<(&'static str, String)> {
         sidebar_rows(app)
             .into_iter()
-            .map(|row| match row {
-                SidebarRow::SectionHeader { title, .. } => ("section", title.to_string()),
-                SidebarRow::Agent { entry, .. } => ("agent", entry.primary_label.clone()),
-                SidebarRow::RemoteAgent { entry, .. } => ("remote", entry.agent_ref.to_string()),
-                SidebarRow::Workspace { .. } => ("workspace", String::new()),
-                SidebarRow::Tab { .. } => ("tab", String::new()),
-                SidebarRow::NestedHeader { title, .. } => ("section", title),
-                SidebarRow::SymphonyJob { name, .. } => ("symphony", name),
-                SidebarRow::SymphonyEmpty => ("symphony", String::new()),
-                SidebarRow::AgentRun { host, .. } => ("run", host),
+            .filter_map(|row| match row {
+                SidebarRow::SectionHeader { title, .. } if title == SPACES_SECTION_TITLE => {
+                    Some(("section", title.to_string()))
+                }
+                SidebarRow::Agent { entry, .. } => Some(("agent", entry.primary_label.clone())),
+                SidebarRow::RemoteAgent { entry, .. } => {
+                    Some(("remote", entry.agent_ref.to_string()))
+                }
+                SidebarRow::Workspace { .. } => Some(("workspace", String::new())),
+                SidebarRow::Tab { .. } => Some(("tab", String::new())),
+                SidebarRow::NestedHeader { title, .. } => Some(("section", title)),
+                SidebarRow::SectionHeader { .. }
+                | SidebarRow::Divider
+                | SidebarRow::SymphonyJob { .. }
+                | SidebarRow::SymphonyEmpty
+                | SidebarRow::AgentRun { .. } => None,
             })
             .collect()
     }
@@ -16928,9 +17123,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(
             !rows.iter().any(|row| matches!(
                 row,
-                SidebarRow::SectionHeader { title, .. } if *title == RECENTLY_DONE_SECTION_TITLE
+                SidebarRow::SectionHeader { title, .. } if *title == SETTLED_SECTION_TITLE
             )),
-            "a pane waiting on a human must not be filed under Recently done"
+            "a pane waiting on a human must not be filed under Settled"
         );
         assert!(
             rows.iter().any(|row| matches!(row, SidebarRow::Tab { .. })),
@@ -16939,7 +17134,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn done_pane_moves_to_recently_done_only_after_hide_threshold() {
+    fn done_pane_moves_to_settled_only_after_hide_threshold() {
         let done_since = std::time::Instant::now();
         let mut app = priority_app_with_states(&[AgentState::Idle]);
         let pane_id = app.workspaces[0].tabs[0].root_pane;
@@ -16953,7 +17148,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(!boundary.iter().any(|row| matches!(
             row,
             SidebarRow::SectionHeader { title, .. }
-                if *title == RECENTLY_DONE_SECTION_TITLE
+                if *title == SETTLED_SECTION_TITLE
         )));
         assert!(boundary
             .iter()
@@ -16967,21 +17162,21 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 title,
                 count: 1,
                 collapsed: true,
-            } if *title == RECENTLY_DONE_SECTION_TITLE
+            } if *title == SETTLED_SECTION_TITLE
         )));
         assert!(!hidden
             .iter()
             .any(|row| matches!(row, SidebarRow::Tab { .. })));
 
-        app.collapsed_sidebar_groups.remove("repo:Recently done");
+        app.collapsed_sidebar_groups.remove("repo:Settled");
         let expanded = sidebar_rows(&app);
         assert!(expanded
             .iter()
-            .any(|row| matches!(row, SidebarRow::Agent { .. })));
+            .any(|row| matches!(row, SidebarRow::Tab { .. })));
     }
 
     #[test]
-    fn recently_done_header_renders_at_narrow_and_normal_widths() {
+    fn settled_header_renders_at_narrow_and_normal_widths() {
         let done_since = std::time::Instant::now();
         let mut app = priority_app_with_states(&[AgentState::Idle]);
         let pane_id = app.workspaces[0].tabs[0].root_pane;
@@ -16992,11 +17187,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             done_since + app.hide_done_after + std::time::Duration::from_nanos(1);
 
         for width in [18, 40] {
-            let expected_label = if width == 18 {
-                "Recently"
-            } else {
-                RECENTLY_DONE_SECTION_TITLE
-            };
+            let expected_label = SETTLED_SECTION_TITLE;
             let area = Rect::new(0, 0, width, 20);
             let mut desktop = Terminal::new(TestBackend::new(width, area.height)).unwrap();
             desktop
@@ -17145,10 +17336,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             shape.iter().filter(|(kind, _)| *kind == "section").count(),
             1
         );
-        assert!(!shape
-            .iter()
-            .any(|(_, title)| title == BLOCKED_SECTION_TITLE));
-        assert!(!shape.iter().any(|(_, title)| title == PINNED_SECTION_TITLE));
+        assert!(!shape.iter().any(|(_, title)| title == "Blocked"));
+        assert!(!shape.iter().any(|(_, title)| title == "Pinned"));
     }
 
     #[test]
@@ -17165,7 +17354,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             shape.iter().filter(|(kind, _)| *kind == "section").count(),
             1
         );
-        assert!(!shape.iter().any(|(_, title)| title == PINNED_SECTION_TITLE));
+        assert!(!shape.iter().any(|(_, title)| title == "Pinned"));
     }
 
     #[test]
@@ -17173,9 +17362,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let mut app = priority_app_with_states(&[AgentState::Working, AgentState::Idle]);
         app.workspaces[0].tabs[0].pinned = true;
         assert_eq!(
-            sidebar_rows(&app)
+            priority_row_shape(&app)
                 .iter()
-                .filter(|row| matches!(row, SidebarRow::SectionHeader { .. }))
+                .filter(|(kind, _)| *kind == "section")
                 .count(),
             1,
             "a pin does not open a separate sidebar group"
@@ -17183,14 +17372,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.workspaces[0].tabs[0].pinned = false;
         // Unpinning leaves the single Spaces header unchanged.
         assert_eq!(
-            sidebar_rows(&app)
-                .iter()
-                .filter_map(|row| match row {
-                    SidebarRow::SectionHeader { title, .. } => Some(*title),
-                    _ => None,
-                })
+            priority_row_shape(&app)
+                .into_iter()
+                .filter_map(|(kind, title)| (kind == "section").then_some(title))
                 .collect::<Vec<_>>(),
-            vec![SPACES_SECTION_TITLE],
+            vec![SPACES_SECTION_TITLE.to_string()],
             "with nothing pinned only the Spaces header remains"
         );
     }
@@ -17236,18 +17422,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn nothing_blocked_leaves_only_the_spaces_header() {
         let app = priority_app_with_states(&[AgentState::Working, AgentState::Idle]);
-        let rows = sidebar_rows(&app);
+        let rows = priority_row_shape(&app);
         assert_eq!(
-            rows.iter()
-                .filter(|row| matches!(row, SidebarRow::SectionHeader { .. }))
-                .count(),
+            rows.iter().filter(|(kind, _)| *kind == "section").count(),
             1,
             "an empty Blocked group does not cost a row"
         );
-        assert!(matches!(
-            rows[0],
-            SidebarRow::SectionHeader { title, .. } if title == SPACES_SECTION_TITLE
-        ));
+        assert_eq!(rows[0], ("section", SPACES_SECTION_TITLE.to_string()));
     }
 
     #[test]
@@ -17484,6 +17665,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let (mut app, first_pane, _) = collapsed_agent_app();
         let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
         assert!(app.snooze_pane_at(0, first_pane, deadline));
+        app.collapsed_sidebar_groups.remove("repo:Snoozed");
         let row_position = sidebar_rows(&app)
             .iter()
             .filter(|row| matches!(row, SidebarRow::Agent { .. } | SidebarRow::Tab { .. }))
@@ -17976,6 +18158,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             observed_at: std::time::SystemTime::UNIX_EPOCH,
         });
         app.reconcile_sidebar_presentation();
+        for mode in SidebarGroupMode::ALL {
+            if let Some(title) = unassigned_section_title(mode) {
+                app.collapsed_sidebar_groups
+                    .remove(&format!("{}:{title}", mode.collapse_namespace()));
+            }
+        }
         app
     }
 
@@ -18488,11 +18676,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             SidebarGroupMode::Missive,
         ] {
             app.sidebar_group_mode = mode;
+            let expected = unassigned_section_title(mode).expect("provider title");
             assert!(
                 sidebar_rows(&app).iter().any(|row| matches!(
                     row,
                     SidebarRow::SectionHeader { title, .. }
-                        if *title == NO_AGENT_YET_SECTION_TITLE
+                        if *title == expected
                 )),
                 "missing provider title for {mode:?}"
             );
@@ -19305,6 +19494,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let mut app = AppState::test_new();
         app.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        app.collapsed_sidebar_groups
+            .remove("repo_pr:Unassigned PRs");
         app.sidebar_work_filter.github.assignee = None;
         app.work_index_enabled = true;
         app.work_index_snapshot = Some(crate::work_index::Snapshot {
@@ -19370,6 +19561,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let mut app = AppState::test_new();
         app.sidebar_group_mode = SidebarGroupMode::Missive;
+        app.collapsed_sidebar_groups
+            .remove("missive:Unassigned threads");
         app.sidebar_work_filter.missive.assignee = None;
         app.work_index_snapshot = Some(crate::work_index::Snapshot {
             items: Vec::new(),
@@ -19397,7 +19590,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             matches!(
                 row,
                 SidebarRow::SectionHeader {
-                    title: NO_AGENT_YET_SECTION_TITLE,
+                    title: UNASSIGNED_THREADS_SECTION_TITLE,
                     ..
                 }
             )
@@ -19668,7 +19861,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ]
         );
         assert!(matches!(
-            rows.last(),
+            rows.iter().rev().find(|row| matches!(row, SidebarRow::Tab { .. })),
             Some(SidebarRow::Tab { entry, .. })
                 if entry.local_target().is_some_and(|target| {
                     target.ws_idx == 0 && target.tab_idx == 2
@@ -20019,18 +20212,19 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             0,
             0,
             crate::work_context::PaneWorkContext {
-                repo: Some("matthias-scale/herdr".into()),
+                repo: Some("Matthias-Scale/Herdr".into()),
                 work_title: Some("Sidebar fixes".into()),
                 ..Default::default()
             },
             Default::default(),
         );
         app.set_sidebar_group_mode(SidebarGroupMode::Repo);
+        app.reconcile_sidebar_presentation();
 
         let rows = sidebar_rows(&app);
         assert!(rows.iter().any(|row| matches!(
             row,
-            SidebarRow::Workspace { title, .. } if title == "matthias-scale/herdr"
+            SidebarRow::Workspace { title, .. } if title == "Matthias-Scale/Herdr"
         )));
 
         let area = Rect::new(0, 0, 18, 12);
@@ -20049,7 +20243,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
         // The trailing sort control costs the title its cells, so at minimum
         // width the elision starts one column earlier.
-        assert!(rendered.contains("matthia"), "{rendered:?}");
+        assert!(rendered.starts_with("▾ "), "{rendered:?}");
+        assert!(rendered.contains("Matthia"), "{rendered:?}");
         assert!(rendered.contains('…'), "{rendered:?}");
         assert!(rendered.contains(SIDEBAR_SORT_GLYPH), "{rendered:?}");
         assert!(display_width(&rendered) <= usize::from(header.rect.width));
@@ -20168,7 +20363,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                             "#159 · pricing",
                             "#160 · session fallback",
                             unlinked_bucket_title().as_str(),
-                            "no open PRs for me · author or assignee",
                         ]
                     )
                 }
@@ -20181,20 +20375,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                         unlinked_bucket_title().as_str(),
                     ]
                 ),
-                SidebarGroupMode::LinearTeam => assert_eq!(
-                    nested,
-                    [
-                        "unlinked".to_string(),
-                        "no active tickets for me · creator or assignee".to_string()
-                    ]
-                ),
-                SidebarGroupMode::Missive => assert_eq!(
-                    nested,
-                    [
-                        unlinked_bucket_title(),
-                        "no open conversations for me · assignee".to_string()
-                    ]
-                ),
+                SidebarGroupMode::LinearTeam => assert_eq!(nested, ["unlinked".to_string()]),
+                SidebarGroupMode::Missive => assert_eq!(nested, [unlinked_bucket_title()]),
             }
         }
         assert!(tab_sets.windows(2).all(|pair| pair[0] == pair[1]));
@@ -20216,14 +20398,16 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         app.set_sidebar_group_mode(SidebarGroupMode::RepoPr);
         assert!(section_is_collapsed(&app, pr_key));
-        assert_eq!(
-            app.collapsed_sidebar_groups,
-            std::collections::HashSet::from([
-                "repo:Recently done".to_string(),
-                format!("repo_pr:{pr_key}"),
-                format!("repo_worktree:{branch_key}"),
-            ])
-        );
+        assert!(app
+            .collapsed_sidebar_groups
+            .contains(&format!("repo_pr:{pr_key}")));
+        assert!(app
+            .collapsed_sidebar_groups
+            .contains(&format!("repo_worktree:{branch_key}")));
+        assert!(!app
+            .collapsed_sidebar_groups
+            .iter()
+            .any(|key| key.contains("Recently done")));
     }
 
     #[test]
@@ -20421,43 +20605,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.ensure_test_terminals();
         app.reconcile_sidebar_presentation();
 
-        let rows = sidebar_rows(&app);
         assert_eq!(
-            rows.iter()
-                .map(|row| match row {
-                    SidebarRow::Workspace { ws_idx, .. } => format!("space:{ws_idx}"),
-                    SidebarRow::Tab { entry, .. } => {
-                        let target = entry.local_target().unwrap();
-                        format!("window:{}:{}", target.ws_idx, target.tab_idx)
-                    }
-                    SidebarRow::Agent { .. } => "agent".to_string(),
-                    SidebarRow::RemoteAgent { entry, .. } => {
-                        format!("remote:{}", entry.agent_ref)
-                    }
-                    SidebarRow::SectionHeader { title, .. } => format!("section:{title}"),
-                    SidebarRow::NestedHeader { title, .. } => format!("nested:{title}"),
-                    SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
-                    SidebarRow::SymphonyEmpty => "symphony:empty".to_string(),
-                    SidebarRow::AgentRun { host, .. } => format!("run:{host}"),
-                })
-                .collect::<Vec<_>>(),
-            vec![
-                "section:Spaces",
-                "space:0",
-                "window:0:0",
-                "window:0:1",
-                "window:1:0"
-            ]
+            row_kinds(&app),
+            vec![('h', 0), ('w', 0), ('t', 0), ('t', 0), ('t', 1),]
         );
 
         assert!(app.toggle_workspace_agent_disclosure(0));
-        assert!(matches!(
-            sidebar_rows(&app).as_slice(),
-            [
-                SidebarRow::SectionHeader { .. },
-                SidebarRow::Workspace { ws_idx: 0, .. }
-            ]
-        ));
+        assert_eq!(row_kinds(&app), [('h', 0), ('w', 0)]);
         assert!(app.toggle_workspace_agent_disclosure(0));
         assert_eq!(
             sidebar_rows(&app)
@@ -20957,7 +21111,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
         let spacious_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 6));
         assert_eq!(spacious_metrics.viewport_rows, 2);
-        assert_eq!(spacious_metrics.max_offset_from_bottom, 1);
 
         app.sidebar_spaces.row_gap = 0;
         let (packed, _) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 30));
@@ -20965,8 +21118,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .windows(2)
             .all(|pair| pair[1].rect.y == pair[0].rect.y + pair[0].rect.height));
         let packed_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 6));
-        assert_eq!(packed_metrics.viewport_rows, 3);
-        assert_eq!(packed_metrics.max_offset_from_bottom, 0);
+        assert_eq!(
+            packed_metrics.viewport_rows,
+            spacious_metrics.viewport_rows + 2
+        );
+        assert_eq!(
+            spacious_metrics.max_offset_from_bottom,
+            packed_metrics.max_offset_from_bottom
+        );
     }
 
     #[test]
@@ -21106,8 +21265,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
 
         assert_eq!(metrics.viewport_rows, 3);
-        assert_eq!(metrics.max_offset_from_bottom, 0);
-        assert_eq!(metrics.offset_from_bottom, 0);
+        assert_eq!(metrics.max_offset_from_bottom, 3);
+        assert_eq!(metrics.offset_from_bottom, metrics.max_offset_from_bottom);
     }
 
     #[test]
@@ -21407,13 +21566,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let area = Rect::new(0, 0, 48, 24);
         let headers = compute_sidebar_section_header_areas(&app, area);
-        assert!(!headers
-            .iter()
-            .any(|header| header.title == PINNED_SECTION_TITLE));
+        assert!(!headers.iter().any(|header| header.title == "Pinned"));
         assert!(headers
             .iter()
             .any(|header| header.title == SPACES_SECTION_TITLE));
-        assert!(section_is_collapsed(&app, PINNED_SECTION_TITLE));
+        assert!(section_is_collapsed(&app, "Pinned"));
         assert!(app.collapsed_space_keys.contains("repo-key"));
 
         let snapshot = crate::persist::SessionSnapshot {
@@ -21432,6 +21589,175 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(restored.version, 3);
         assert_eq!(restored.collapsed_space_keys, app.collapsed_space_keys);
         assert_eq!(restored.prio_panel_collapsed, app.prio_panel_collapsed);
+    }
+
+    #[test]
+    fn sidebar_blocks_follow_the_reserved_fleet_order_with_one_divider_per_emitted_block() {
+        let mut app = app_with_agents(&["active", "snoozed", "settled"]);
+        let snoozed = app.workspaces[1].tabs[0].root_pane;
+        let settled = app.workspaces[2].tabs[0].root_pane;
+        assert!(app.snooze_pane_at(1, snoozed, 1_725_000_900));
+        assert!(app.settle_pane_at(2, settled, 1_725_000_000));
+        app.fleet_snapshot = crate::fleet::Snapshot {
+            polled: true,
+            hosts: vec![fleet_host_snapshot("ub2", false, Vec::new())],
+            ..Default::default()
+        };
+
+        let structure = sidebar_rows(&app)
+            .into_iter()
+            .filter_map(|row| match row {
+                SidebarRow::SectionHeader { title, .. } => Some(title.to_string()),
+                SidebarRow::Divider => Some("---".to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            structure,
+            [
+                SPACES_SECTION_TITLE,
+                "---",
+                NO_REPO_YET_SECTION_TITLE,
+                "---",
+                SNOOZED_SECTION_TITLE,
+                SETTLED_SECTION_TITLE,
+                "---",
+                RUNS_SECTION_TITLE,
+                SYMPHONY_SECTION_TITLE,
+            ]
+        );
+        assert!(!structure.iter().any(|title| title == "Recently done"));
+    }
+
+    #[test]
+    fn unassigned_titles_and_ambient_sections_follow_every_public_view() {
+        let mut app = app_with_agents(&["one"]);
+        app.fleet_snapshot = crate::fleet::Snapshot {
+            polled: true,
+            hosts: vec![fleet_host_snapshot("ub2", false, Vec::new())],
+            ..Default::default()
+        };
+        let expected = [
+            (SidebarGroupMode::Repo, Some(NO_REPO_YET_SECTION_TITLE)),
+            (SidebarGroupMode::Spaces, None),
+            (
+                SidebarGroupMode::LinearTeam,
+                Some(UNASSIGNED_TICKETS_SECTION_TITLE),
+            ),
+            (SidebarGroupMode::RepoPr, Some(UNASSIGNED_PRS_SECTION_TITLE)),
+            (
+                SidebarGroupMode::Missive,
+                Some(UNASSIGNED_THREADS_SECTION_TITLE),
+            ),
+        ];
+
+        let mut ambient = Vec::new();
+        for (mode, unassigned) in expected {
+            app.sidebar_group_mode = mode;
+            let headers = sidebar_rows(&app)
+                .into_iter()
+                .filter_map(|row| match row {
+                    SidebarRow::SectionHeader {
+                        title,
+                        count,
+                        collapsed,
+                    } => Some((title, count, collapsed)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for title in [
+                NO_REPO_YET_SECTION_TITLE,
+                UNASSIGNED_PRS_SECTION_TITLE,
+                UNASSIGNED_TICKETS_SECTION_TITLE,
+                UNASSIGNED_THREADS_SECTION_TITLE,
+            ] {
+                assert_eq!(
+                    headers.iter().any(|(actual, ..)| *actual == title),
+                    unassigned == Some(title),
+                    "view {mode:?}, title {title}"
+                );
+            }
+            let current_ambient = headers
+                .into_iter()
+                .filter(|(title, ..)| {
+                    *title == RUNS_SECTION_TITLE || *title == SYMPHONY_SECTION_TITLE
+                })
+                .collect::<Vec<_>>();
+            assert!(current_ambient.iter().all(|(_, _, collapsed)| *collapsed));
+            ambient.push(current_ambient);
+        }
+        assert!(ambient.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn section_styles_reuse_configured_opacity_and_zero_symphony_dims_further() {
+        let mut app = AppState::test_new();
+        app.working_row_opacity_percent = 50;
+        let base = Style::default().fg(app.palette.text);
+        let expanded = section_row_style(&app, false, false, base);
+        let collapsed = section_row_style(&app, true, false, base);
+        let zero = section_row_style(&app, true, true, base);
+
+        assert_eq!(expanded, base);
+        assert!(collapsed.add_modifier.contains(Modifier::DIM));
+        assert_ne!(collapsed.fg, expanded.fg);
+        assert_ne!(zero.fg, collapsed.fg);
+        for title in [
+            NO_REPO_YET_SECTION_TITLE,
+            UNASSIGNED_PRS_SECTION_TITLE,
+            UNASSIGNED_TICKETS_SECTION_TITLE,
+            UNASSIGNED_THREADS_SECTION_TITLE,
+            SNOOZED_SECTION_TITLE,
+            SETTLED_SECTION_TITLE,
+            RUNS_SECTION_TITLE,
+            SYMPHONY_SECTION_TITLE,
+        ] {
+            assert!(!section_header_glyph(title).is_empty(), "{title}");
+        }
+    }
+
+    #[test]
+    fn repo_headers_aggregate_one_dot_count_per_present_agent_state() {
+        let mut app = app_with_agents(&["one", "two"]);
+        for (ws_idx, state) in [AgentState::Working, AgentState::Blocked]
+            .into_iter()
+            .enumerate()
+        {
+            replace_tab_context(
+                &mut app,
+                ws_idx,
+                0,
+                crate::work_context::PaneWorkContext {
+                    repo: Some("scalable-so/herdr".into()),
+                    branch: Some("main".into()),
+                    ..Default::default()
+                },
+                Default::default(),
+            );
+            let pane = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.terminals
+                .get_mut(&terminal_id)
+                .expect("repo fixture terminal")
+                .set_raw_agent_state_for_test(state);
+        }
+        app.reconcile_sidebar_presentation();
+
+        let counts = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Workspace {
+                    title,
+                    state_counts,
+                    ..
+                } if title == "scalable-so/herdr" => Some(state_counts),
+                _ => None,
+            })
+            .expect("repo header");
+        assert_eq!(counts.iter().map(|state| state.count).sum::<usize>(), 2);
+        assert_eq!(counts.len(), 2);
     }
 
     #[test]
@@ -22016,6 +22342,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .get_mut(&target)
             .expect("query target pane")
             .settled_at = Some(1_725_000_000);
+        expand_section_for_all_views(&mut app, SETTLED_SECTION_TITLE);
         for mode in SidebarGroupMode::ALL {
             app.sidebar_group_mode = mode;
             assert_eq!(visible_sidebar_panes(&app), expected, "settled {mode:?}");
@@ -22451,16 +22778,21 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             unavailable: None,
             polled: true,
         };
+        app.collapsed_sidebar_groups.remove("repo:Symphony");
         app
     }
 
     #[test]
-    fn symphony_section_is_absent_without_open_workflows() {
+    fn symphony_section_is_always_present_and_collapsed_at_zero() {
         let app = app_with_agents(&["one"]);
-        assert!(!sidebar_rows(&app)
-            .iter()
-            .any(|row| matches!(row, SidebarRow::SectionHeader { title, .. }
-                if *title == SYMPHONY_SECTION_TITLE)));
+        assert!(sidebar_rows(&app).iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title,
+                count: 0,
+                collapsed: true,
+            } if *title == SYMPHONY_SECTION_TITLE
+        )));
 
         // An unreachable runtime is reported by the Symphony window, not by a
         // permanent error row in the sidebar.
@@ -22477,10 +22809,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(!rows
             .iter()
             .any(|row| matches!(row, SidebarRow::SymphonyEmpty)));
-        assert!(!rows
-            .iter()
-            .any(|row| matches!(row, SidebarRow::SectionHeader { title, .. }
-            if *title == SYMPHONY_SECTION_TITLE)));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title,
+                count: 0,
+                collapsed: true,
+            } if *title == SYMPHONY_SECTION_TITLE
+        )));
     }
 
     #[test]
@@ -22493,6 +22829,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             unavailable: None,
             polled: true,
         };
+        app.collapsed_sidebar_groups.remove("repo:Symphony");
         let rows = sidebar_rows(&app);
         let header = rows.iter().position(|row| {
             matches!(row, SidebarRow::SectionHeader { title, count, .. }
@@ -23087,20 +23424,25 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn sidebar_signature(app: &AppState) -> Vec<String> {
         sidebar_rows(app)
             .into_iter()
-            .map(|row| match row {
-                SidebarRow::Workspace { title, .. } => format!("workspace:{title}"),
-                SidebarRow::Tab { entry, depth } => {
-                    format!("tab:{}:{depth}", entry.local_target().unwrap().tab_idx)
+            .filter_map(|row| match row {
+                SidebarRow::Workspace { title, .. } => Some(format!("workspace:{title}")),
+                SidebarRow::Tab { entry, depth } => Some(format!(
+                    "tab:{}:{depth}",
+                    entry.local_target().unwrap().tab_idx
+                )),
+                SidebarRow::NestedHeader { key, title, .. } => Some(format!("group:{key}:{title}")),
+                SidebarRow::Agent { entry, .. } => Some(format!(
+                    "pane:{}",
+                    entry.local_target().unwrap().pane_id.raw()
+                )),
+                SidebarRow::RemoteAgent { entry, .. } => {
+                    Some(format!("remote:{}", entry.agent_ref))
                 }
-                SidebarRow::NestedHeader { key, title, .. } => format!("group:{key}:{title}"),
-                SidebarRow::SectionHeader { title, .. } => format!("section:{title}"),
-                SidebarRow::Agent { entry, .. } => {
-                    format!("pane:{}", entry.local_target().unwrap().pane_id.raw())
-                }
-                SidebarRow::RemoteAgent { entry, .. } => format!("remote:{}", entry.agent_ref),
-                SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
-                SidebarRow::SymphonyEmpty => "symphony:empty".to_string(),
-                SidebarRow::AgentRun { host, .. } => format!("run:{host}"),
+                SidebarRow::SectionHeader { .. }
+                | SidebarRow::Divider
+                | SidebarRow::SymphonyJob { .. }
+                | SidebarRow::SymphonyEmpty
+                | SidebarRow::AgentRun { .. } => None,
             })
             .collect()
     }

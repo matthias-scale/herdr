@@ -356,10 +356,10 @@ mod tests {
         assert_eq!(frame.cursor, None);
         assert_eq!(
             frame_digest(&frame),
-            // One-line mobile Space → direct tab/window projection with the
-            // selected row's Snooze and Settle controls. The digest includes
-            // both content and style.
-            "d33581c1b213f4f5abbbe74b1ce35e81d796982de24c93dbb9e87c4e53fcfc05"
+            // One-line mobile Space → direct tab/window projection followed by
+            // the collapsed section structure. The digest includes content
+            // and style.
+            "8f55d95c84d38343b4a72e6888dd0e922f9dea536fe701e3b724467b11ac84de"
         );
     }
 }
