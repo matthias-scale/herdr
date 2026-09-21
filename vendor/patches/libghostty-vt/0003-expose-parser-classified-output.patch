@@ -52,6 +52,147 @@ index 9bb961d3..e9ca58d2 100644
    GHOSTTY_TERMINAL_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
  } GhosttyTerminalOption;
  
+diff --git a/vendor/libghostty-vt/src/terminal/Terminal.zig b/vendor/libghostty-vt/src/terminal/Terminal.zig
+index 08920127..4cb249f3 100644
+--- a/vendor/libghostty-vt/src/terminal/Terminal.zig
++++ b/vendor/libghostty-vt/src/terminal/Terminal.zig
+@@ -365,6 +365,25 @@ pub fn printRepeat(self: *Terminal, count_req: usize) !void {
+     }
+ }
+ 
++pub const PrintSliceTrackedResult = struct {
++    consumed: usize,
++    visible: bool,
++};
++
++/// Print the next slice segment using the normal fast path when possible and
++/// report whether that entire segment became rendered text. A slow-path
++/// codepoint is consumed individually so ignored characters remain observable
++/// to callers without duplicating the terminal's rendering rules.
++pub fn printSliceTracked(self: *Terminal, cps: []const u32) !PrintSliceTrackedResult {
++    if (cps.len == 0) return .{ .consumed = 0, .visible = false };
++    const consumed = try self.printSliceFast(cps);
++    if (consumed > 0) return .{ .consumed = consumed, .visible = true };
++    return .{
++        .consumed = 1,
++        .visible = try self.printTracked(@intCast(cps[0])),
++    };
++}
++
+ /// Print multiple codepoints to the terminal at once. This is
+ /// semantically identical to calling `print` for each codepoint in
+ /// order, but is much faster because it can batch cell writes and
+@@ -880,12 +899,19 @@ inline fn printSliceCheckExpected(style_id: style.Id) u64 {
+ }
+ 
+ pub fn print(self: *Terminal, c: u21) !void {
++    _ = try self.printTracked(c);
++}
++
++/// Print one codepoint and report whether it changed rendered terminal text.
++/// This lets parser consumers observe the same visibility decision as the
++/// terminal without maintaining a second Unicode rendering predicate.
++pub fn printTracked(self: *Terminal, c: u21) !bool {
+     // log.debug("print={x} y={} x={}", .{ c, self.screens.active.cursor.y, self.screens.active.cursor.x });
+ 
+     // If we're not on the main display, do nothing for now
+     if (self.status_display != .main) {
+         @branchHint(.cold);
+-        return;
++        return false;
+     }
+ 
+     // After doing any printing, wrapping, scrolling, etc. we want to ensure
+@@ -971,7 +997,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+         // with the previous char.
+         if (!grapheme_break) {
+             switch (unicode.graphemeWidthEffect(previous_codepoint, c)) {
+-                .ignore => return,
++                .ignore => return false,
+                 .wide => wide: {
+                     if (prev.cell.wide == .wide) break :wide;
+ 
+@@ -983,7 +1009,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+                     // insert spacers and wrap. We need special handling if the
+                     // previous cell has grapheme data.
+                     if (self.screens.active.cursor.x == right_limit - 1) {
+-                        if (!self.modes.get(.wraparound)) return;
++                        if (!self.modes.get(.wraparound)) return false;
+ 
+                         // This path can write a spacer_head before printWrap
+                         // which can trigger integrity violations so mark
+@@ -1098,7 +1124,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+             });
+             self.screens.active.cursorMarkDirty();
+             try self.screens.active.appendGrapheme(prev.cell, c);
+-            return;
++            return true;
+         }
+     }
+ 
+@@ -1120,7 +1146,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+         // If we have grapheme clustering enabled, we don't blindly attach
+         // any zero width character to our cells and we instead just ignore
+         // it.
+-        if (self.modes.get(.grapheme_cluster)) return;
++        if (self.modes.get(.grapheme_cluster)) return false;
+ 
+         // If we have wraparound enabled and a pending wrap, the character
+         // we're attaching to is still under the cursor. Otherwise, it's the
+@@ -1133,7 +1159,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+         // character at the time of writing.
+         if (self.screens.active.cursor.x == 0 and left == 1) {
+             log.warn("zero-width character with no prior character, ignoring", .{});
+-            return;
++            return false;
+         }
+ 
+         // Find our previous cell
+@@ -1146,18 +1172,18 @@ pub fn print(self: *Terminal, c: u21) !void {
+         // If our previous cell has no text, just ignore the zero-width character
+         if (!prev.hasText()) {
+             log.warn("zero-width character with no prior character, ignoring", .{});
+-            return;
++            return false;
+         }
+ 
+         // If this is a emoji variation selector, prev must be an emoji
+         if (c == 0xFE0F or c == 0xFE0E) {
+             const prev_props = unicode.table.get(prev.content.codepoint);
+             const emoji = prev_props.grapheme_break == .extended_pictographic;
+-            if (!emoji) return;
++            if (!emoji) return false;
+         }
+ 
+         try self.screens.active.appendGrapheme(prev, c);
+-        return;
++        return true;
+     }
+ 
+     // We have a printable character, save it
+@@ -1196,7 +1222,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+                 // If we don't have wraparound enabled then we don't print
+                 // this character at all and don't move the cursor. This is
+                 // how xterm behaves.
+-                if (!self.modes.get(.wraparound)) return;
++                if (!self.modes.get(.wraparound)) return false;
+ 
+                 // We only create a spacer head if we're at the real edge
+                 // of the screen. Otherwise, we clear the space with a narrow.
+@@ -1232,11 +1258,12 @@ pub fn print(self: *Terminal, c: u21) !void {
+     // In this case, we don't move the cursor.
+     if (self.screens.active.cursor.x == right_limit - 1) {
+         self.screens.active.cursor.pending_wrap = true;
+-        return;
++        return true;
+     }
+ 
+     // Move the cursor
+     self.screens.active.cursorRight(1);
++    return true;
+ }
+ 
+ fn printCell(
 diff --git a/vendor/libghostty-vt/src/terminal/c/terminal.zig b/vendor/libghostty-vt/src/terminal/c/terminal.zig
 index 0f95fcf1..5e860179 100644
 --- a/vendor/libghostty-vt/src/terminal/c/terminal.zig
@@ -211,7 +352,7 @@ index efb06ecd..6e09a4de 100644
  
          /// Finalize and dispatch a CSI directly from parser state for
 diff --git a/vendor/libghostty-vt/src/terminal/stream_terminal.zig b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
-index 91cfb21c..86864c90 100644
+index 91cfb21c..976d19ce 100644
 --- a/vendor/libghostty-vt/src/terminal/stream_terminal.zig
 +++ b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
 @@ -23,6 +23,16 @@ const log = std.log.scoped(.stream_terminal);
@@ -261,8 +402,17 @@ index 91cfb21c..86864c90 100644
              .color_scheme = null,
              .device_attributes = null,
              .enquiry = null,
-@@ -145,7 +164,95 @@ pub const Handler = struct {
+@@ -143,9 +162,131 @@ pub const Handler = struct {
+         comptime action: Action.Tag,
+         value: Action.Value(action),
      ) void {
++        if (self.effects.parsed_output != null) {
++            const handled = self.vtParsedPrint(action, value) catch |err| {
++                log.warn("error handling VT action action={} err={}", .{ action, err });
++                return;
++            };
++            if (handled) return;
++        }
          self.vtFallible(action, value) catch |err| {
              log.warn("error handling VT action action={} err={}", .{ action, err });
 +            return;
@@ -308,51 +458,78 @@ index 91cfb21c..86864c90 100644
 +    ) void {
 +        const callback = self.effects.parsed_output orelse return;
 +        switch (action) {
-+            .print => {
-+                if (self.terminal.status_display != .main) return;
-+                var buf: [4]u8 = undefined;
-+                const len = std.unicode.utf8Encode(value.cp, &buf) catch return;
-+                callback(self, .text, buf[0..len]);
-+            },
-+            .print_slice => {
-+                if (self.terminal.status_display != .main) return;
-+                var buf: [4096]u8 = undefined;
-+                var start: usize = 0;
-+                while (start < value.cps.len) {
-+                    var len: usize = 0;
-+                    while (start < value.cps.len) : (start += 1) {
-+                        const cp: u21 = @intCast(value.cps[start]);
-+                        const cp_len = std.unicode.utf8CodepointSequenceLength(cp) catch break;
-+                        if (len + cp_len > buf.len) break;
-+                        len += std.unicode.utf8Encode(cp, buf[len..]) catch break;
-+                    }
-+                    if (len == 0) return;
-+                    callback(self, .text, buf[0..len]);
-+                }
-+            },
-+            .print_repeat => {
-+                if (self.terminal.status_display != .main) return;
-+                const cp = self.terminal.previous_char orelse return;
-+                var encoded: [4]u8 = undefined;
-+                const encoded_len = std.unicode.utf8Encode(cp, &encoded) catch return;
-+                var buf: [4096]u8 = undefined;
-+                const per_chunk = buf.len / encoded_len;
-+                var remaining = @max(value, 1);
-+                while (remaining > 0) {
-+                    const count = @min(remaining, per_chunk);
-+                    for (0..count) |index| {
-+                        @memcpy(
-+                            buf[index * encoded_len ..][0..encoded_len],
-+                            encoded[0..encoded_len],
-+                        );
-+                    }
-+                    callback(self, .text, buf[0 .. count * encoded_len]);
-+                    remaining -= count;
-+                }
-+            },
 +            .bell, .backspace, .horizontal_tab, .linefeed, .carriage_return, .enquiry => callback(self, .separator, ""),
 +            .start_hyperlink => self.parsed_hyperlink_pending = value.uri,
 +            else => {},
++        }
++    }
++
++    /// Handle printable actions while reporting only codepoints the terminal
++    /// accepted into its rendered text. Ghostty's normal slice fast path is
++    /// preserved; its tracked fallback owns every suppression decision.
++    fn vtParsedPrint(
++        self: *Handler,
++        comptime action: Action.Tag,
++        value: Action.Value(action),
++    ) !bool {
++        const callback = self.effects.parsed_output orelse return false;
++        switch (action) {
++            .print => {
++                if (!try self.terminal.printTracked(value.cp)) return true;
++                var buf: [4]u8 = undefined;
++                const len = std.unicode.utf8Encode(value.cp, &buf) catch return true;
++                callback(self, .text, buf[0..len]);
++                return true;
++            },
++            .print_slice => {
++                var start: usize = 0;
++                while (start < value.cps.len) {
++                    const result = try self.terminal.printSliceTracked(value.cps[start..]);
++                    if (result.consumed == 0) break;
++                    const end = start + result.consumed;
++                    if (result.visible) self.emitParsedCodepoints(value.cps[start..end]);
++                    start = end;
++                }
++                return true;
++            },
++            .print_repeat => {
++                const cp = self.terminal.previous_char orelse return true;
++                var encoded: [4]u8 = undefined;
++                const encoded_len = std.unicode.utf8Encode(cp, &encoded) catch return true;
++                var buf: [4096]u8 = undefined;
++                var remaining = @max(value, 1);
++                var len: usize = 0;
++                while (remaining > 0) {
++                    remaining -= 1;
++                    if (!try self.terminal.printTracked(cp)) continue;
++                    if (len + encoded_len > buf.len) {
++                        callback(self, .text, buf[0..len]);
++                        len = 0;
++                    }
++                    @memcpy(buf[len..][0..encoded_len], encoded[0..encoded_len]);
++                    len += encoded_len;
++                }
++                if (len > 0) callback(self, .text, buf[0..len]);
++                return true;
++            },
++            else => return false,
++        }
++    }
++
++    fn emitParsedCodepoints(self: *Handler, cps: []const u32) void {
++        const callback = self.effects.parsed_output orelse return;
++        var buf: [4096]u8 = undefined;
++        var start: usize = 0;
++        while (start < cps.len) {
++            var len: usize = 0;
++            while (start < cps.len) : (start += 1) {
++                const cp: u21 = @intCast(cps[start]);
++                const cp_len = std.unicode.utf8CodepointSequenceLength(cp) catch break;
++                if (len + cp_len > buf.len) break;
++                len += std.unicode.utf8Encode(cp, buf[len..]) catch break;
++            }
++            if (len == 0) return;
++            callback(self, .text, buf[0..len]);
 +        }
      }
  

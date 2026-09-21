@@ -162,6 +162,13 @@ pub const Handler = struct {
         comptime action: Action.Tag,
         value: Action.Value(action),
     ) void {
+        if (self.effects.parsed_output != null) {
+            const handled = self.vtParsedPrint(action, value) catch |err| {
+                log.warn("error handling VT action action={} err={}", .{ action, err });
+                return;
+            };
+            if (handled) return;
+        }
         self.vtFallible(action, value) catch |err| {
             log.warn("error handling VT action action={} err={}", .{ action, err });
             return;
@@ -207,51 +214,78 @@ pub const Handler = struct {
     ) void {
         const callback = self.effects.parsed_output orelse return;
         switch (action) {
-            .print => {
-                if (self.terminal.status_display != .main) return;
-                var buf: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(value.cp, &buf) catch return;
-                callback(self, .text, buf[0..len]);
-            },
-            .print_slice => {
-                if (self.terminal.status_display != .main) return;
-                var buf: [4096]u8 = undefined;
-                var start: usize = 0;
-                while (start < value.cps.len) {
-                    var len: usize = 0;
-                    while (start < value.cps.len) : (start += 1) {
-                        const cp: u21 = @intCast(value.cps[start]);
-                        const cp_len = std.unicode.utf8CodepointSequenceLength(cp) catch break;
-                        if (len + cp_len > buf.len) break;
-                        len += std.unicode.utf8Encode(cp, buf[len..]) catch break;
-                    }
-                    if (len == 0) return;
-                    callback(self, .text, buf[0..len]);
-                }
-            },
-            .print_repeat => {
-                if (self.terminal.status_display != .main) return;
-                const cp = self.terminal.previous_char orelse return;
-                var encoded: [4]u8 = undefined;
-                const encoded_len = std.unicode.utf8Encode(cp, &encoded) catch return;
-                var buf: [4096]u8 = undefined;
-                const per_chunk = buf.len / encoded_len;
-                var remaining = @max(value, 1);
-                while (remaining > 0) {
-                    const count = @min(remaining, per_chunk);
-                    for (0..count) |index| {
-                        @memcpy(
-                            buf[index * encoded_len ..][0..encoded_len],
-                            encoded[0..encoded_len],
-                        );
-                    }
-                    callback(self, .text, buf[0 .. count * encoded_len]);
-                    remaining -= count;
-                }
-            },
             .bell, .backspace, .horizontal_tab, .linefeed, .carriage_return, .enquiry => callback(self, .separator, ""),
             .start_hyperlink => self.parsed_hyperlink_pending = value.uri,
             else => {},
+        }
+    }
+
+    /// Handle printable actions while reporting only codepoints the terminal
+    /// accepted into its rendered text. Ghostty's normal slice fast path is
+    /// preserved; its tracked fallback owns every suppression decision.
+    fn vtParsedPrint(
+        self: *Handler,
+        comptime action: Action.Tag,
+        value: Action.Value(action),
+    ) !bool {
+        const callback = self.effects.parsed_output orelse return false;
+        switch (action) {
+            .print => {
+                if (!try self.terminal.printTracked(value.cp)) return true;
+                var buf: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(value.cp, &buf) catch return true;
+                callback(self, .text, buf[0..len]);
+                return true;
+            },
+            .print_slice => {
+                var start: usize = 0;
+                while (start < value.cps.len) {
+                    const result = try self.terminal.printSliceTracked(value.cps[start..]);
+                    if (result.consumed == 0) break;
+                    const end = start + result.consumed;
+                    if (result.visible) self.emitParsedCodepoints(value.cps[start..end]);
+                    start = end;
+                }
+                return true;
+            },
+            .print_repeat => {
+                const cp = self.terminal.previous_char orelse return true;
+                var encoded: [4]u8 = undefined;
+                const encoded_len = std.unicode.utf8Encode(cp, &encoded) catch return true;
+                var buf: [4096]u8 = undefined;
+                var remaining = @max(value, 1);
+                var len: usize = 0;
+                while (remaining > 0) {
+                    remaining -= 1;
+                    if (!try self.terminal.printTracked(cp)) continue;
+                    if (len + encoded_len > buf.len) {
+                        callback(self, .text, buf[0..len]);
+                        len = 0;
+                    }
+                    @memcpy(buf[len..][0..encoded_len], encoded[0..encoded_len]);
+                    len += encoded_len;
+                }
+                if (len > 0) callback(self, .text, buf[0..len]);
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    fn emitParsedCodepoints(self: *Handler, cps: []const u32) void {
+        const callback = self.effects.parsed_output orelse return;
+        var buf: [4096]u8 = undefined;
+        var start: usize = 0;
+        while (start < cps.len) {
+            var len: usize = 0;
+            while (start < cps.len) : (start += 1) {
+                const cp: u21 = @intCast(cps[start]);
+                const cp_len = std.unicode.utf8CodepointSequenceLength(cp) catch break;
+                if (len + cp_len > buf.len) break;
+                len += std.unicode.utf8Encode(cp, buf[len..]) catch break;
+            }
+            if (len == 0) return;
+            callback(self, .text, buf[0..len]);
         }
     }
 
