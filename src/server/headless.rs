@@ -6203,15 +6203,18 @@ impl HeadlessServer {
                         &self.app.state,
                         &self.app.terminal_runtimes,
                     );
+                    let hyperlink_spans =
+                        crate::server::render_stream::visible_hyperlink_spans(&self.app.state);
                     crate::render_prof::duration_since(
                         "full_render.visible_hyperlinks",
                         hyperlinks_started,
                     );
                     let frame_started = crate::render_prof::timer();
-                    let frame = FrameData::from_ratatui_buffer_with_hyperlinks(
+                    let frame = FrameData::from_ratatui_buffer_with_hyperlinks_and_spans(
                         &buffer,
                         cursor,
                         &hyperlinks,
+                        &hyperlink_spans,
                     );
                     let retained_pane_cursor =
                         !crate::server::render_stream::dock_editor_is_focused(&self.app.state);

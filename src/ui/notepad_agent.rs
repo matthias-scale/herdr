@@ -508,9 +508,9 @@ pub(crate) fn render_agent_body(app: &AppState, frame: &mut Frame, body: Rect) {
     }
 }
 
-/// The visible link labels as `((x, y), label, url)` spans, merged into the
-/// frame's hyperlink list so one URL allocation covers the whole OSC 8 label.
-pub(crate) fn hyperlink_cells(app: &AppState) -> Vec<((u16, u16), String, String)> {
+/// The visible link labels as typed spans so one URL allocation covers the
+/// whole OSC 8 label without changing terminal-cell hyperlink semantics.
+pub(crate) fn hyperlink_spans(app: &AppState) -> Vec<crate::protocol::HyperlinkSpan> {
     if !app.notepad.agent_tab {
         return Vec::new();
     }
@@ -534,7 +534,11 @@ pub(crate) fn hyperlink_cells(app: &AppState) -> Vec<((u16, u16), String, String
         let y = body.y.saturating_add(offset as u16);
         let x = body.x.saturating_add(*rel_x);
         if x < body.right() {
-            cells.push(((x, y), label.clone(), url.clone()));
+            cells.push(crate::protocol::HyperlinkSpan {
+                position: (x, y),
+                label: label.clone(),
+                uri: url.clone(),
+            });
         }
     }
     cells
@@ -876,7 +880,7 @@ mod tests {
         crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
         let body = crate::ui::notepad::notepad_body_rect(app.view.notepad_rect);
 
-        let spans = hyperlink_cells(&app);
+        let spans = hyperlink_spans(&app);
         assert!(!spans.is_empty());
         let (link_index, row) = app
             .view
@@ -887,19 +891,34 @@ mod tests {
             .expect("one visible link row");
         let y = body.y + link_index as u16;
         let label = row.link_label.clone().expect("link label").1;
-        let first = spans.iter().find(|((_, cy), _, _)| *cy == y).unwrap();
-        assert_eq!(first.0 .0, body.x + 4);
-        assert_eq!(first.1, label);
-        assert!(first.2.starts_with("https://github.com/owner/repo/pull/"));
-        assert_eq!(spans.iter().filter(|((_, cy), _, _)| *cy == y).count(), 1);
+        let first = spans.iter().find(|span| span.position.1 == y).unwrap();
+        assert_eq!(first.position.0, body.x + 4);
+        assert_eq!(first.label, label);
+        assert!(first.uri.starts_with("https://github.com/owner/repo/pull/"));
+        assert_eq!(spans.iter().filter(|span| span.position.1 == y).count(), 1);
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::render(&app, frame))
+            .expect("render");
+        let frame = crate::protocol::FrameData::from_ratatui_buffer_with_hyperlinks_and_spans(
+            terminal.backend().buffer(),
+            None,
+            &[],
+            &spans,
+        );
+        for x in first.position.0..first.position.0 + first.label.len() as u16 {
+            let index = usize::from(y) * usize::from(frame.width) + usize::from(x);
+            assert_eq!(frame.cells[index].hyperlink, Some(0));
+        }
 
         app.notepad.agent_scroll_by(1, 10);
         crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
-        let scrolled = hyperlink_cells(&app);
+        let scrolled = hyperlink_spans(&app);
         assert!(
             scrolled
                 .iter()
-                .any(|cell| cell.2 == first.2 && cell.0 .1 == y - 1),
+                .any(|span| span.uri == first.uri && span.position.1 == y - 1),
             "scrolling moves the row's hyperlink cells up with it"
         );
     }

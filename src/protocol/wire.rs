@@ -635,6 +635,16 @@ pub struct FrameData {
     pub graphics: Vec<u8>,
 }
 
+/// A rendered label whose cells share one hyperlink URI.
+///
+/// Unlike terminal hyperlink tuples, this is explicitly a multi-cell span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HyperlinkSpan {
+    pub(crate) position: (u16, u16),
+    pub(crate) label: String,
+    pub(crate) uri: String,
+}
+
 impl FrameData {
     /// Creates a `FrameData` from a ratatui `Buffer` and optional cursor.
     ///
@@ -654,6 +664,15 @@ impl FrameData {
         cursor: Option<CursorState>,
         hyperlinks: &[((u16, u16), String, String)],
     ) -> Self {
+        Self::from_ratatui_buffer_with_hyperlinks_and_spans(buffer, cursor, hyperlinks, &[])
+    }
+
+    pub(crate) fn from_ratatui_buffer_with_hyperlinks_and_spans(
+        buffer: &ratatui::buffer::Buffer,
+        cursor: Option<CursorState>,
+        hyperlinks: &[((u16, u16), String, String)],
+        spans: &[HyperlinkSpan],
+    ) -> Self {
         let area = buffer.area;
         let width = area.width;
         let height = area.height;
@@ -661,16 +680,21 @@ impl FrameData {
         let mut hyperlink_uris = Vec::<String>::new();
         let mut hyperlink_indices = HashMap::<&str, u32>::new();
         let mut hyperlink_by_position = HashMap::<(u16, u16), (&str, &str)>::new();
-        for ((x, y), symbols, uri) in hyperlinks {
-            let mut cell_x = *x;
-            let mut chars = symbols.char_indices().peekable();
-            while let Some((start, ch)) = chars.next() {
-                let end = chars.peek().map_or(symbols.len(), |(index, _)| *index);
-                hyperlink_by_position.insert((cell_x, *y), (&symbols[start..end], uri.as_str()));
-                let width = unicode_width::UnicodeWidthChar::width(ch)
-                    .unwrap_or(0)
-                    .max(1);
-                cell_x = cell_x.saturating_add(width.min(u16::MAX as usize) as u16);
+        for ((x, y), symbol, uri) in hyperlinks {
+            hyperlink_by_position.insert((*x, *y), (symbol.as_str(), uri.as_str()));
+        }
+        for span in spans {
+            let (mut x, y) = span.position;
+            let label_width = unicode_width::UnicodeWidthStr::width(span.label.as_str());
+            let right = x.saturating_add(label_width.min(u16::MAX as usize) as u16);
+            while x < right {
+                let Some(cell) = buffer.cell((x, y)) else {
+                    break;
+                };
+                let symbol = cell.symbol();
+                hyperlink_by_position.insert((x, y), (symbol, span.uri.as_str()));
+                let cell_width = unicode_width::UnicodeWidthStr::width(symbol).max(1);
+                x = x.saturating_add(cell_width.min(u16::MAX as usize) as u16);
             }
         }
         let mut cells = Vec::with_capacity((width as usize) * (height as usize));
@@ -2230,25 +2254,26 @@ mod tests {
             vec!["https://example.com".to_owned()]
         );
 
-        let mut span_buffer =
-            ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 4, 1));
-        for (column, symbol) in ["l", "i", "n", "k"].into_iter().enumerate() {
-            span_buffer
-                .cell_mut((column as u16, 0))
-                .unwrap()
-                .set_symbol(symbol);
-        }
-        let span_link = FrameData::from_ratatui_buffer_with_hyperlinks(
-            &span_buffer,
+        // Terminal callers pass one already-rendered grapheme for one cell.
+        // Splitting a multi-scalar grapheme would make the symbol comparison
+        // fail and silently discard its hyperlink.
+        let mut grapheme_buffer =
+            ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 1, 1));
+        grapheme_buffer
+            .cell_mut((0, 0))
+            .unwrap()
+            .set_symbol("ｶ\u{ff9e}");
+        let grapheme_link = FrameData::from_ratatui_buffer_with_hyperlinks(
+            &grapheme_buffer,
             None,
             &[(
                 (0, 0),
-                "link".to_owned(),
-                "https://example.com/long".to_owned(),
+                "ｶ\u{ff9e}".to_owned(),
+                "https://example.com/grapheme".to_owned(),
             )],
         );
-        assert!(span_link.cells.iter().all(|cell| cell.hyperlink == Some(0)));
-        assert_eq!(span_link.hyperlinks, ["https://example.com/long"]);
+        assert_eq!(grapheme_link.cells[0].hyperlink, Some(0));
+        assert_eq!(grapheme_link.hyperlinks, ["https://example.com/grapheme"]);
 
         // Convert back to ratatui buffer and compare.
         let restored = frame.to_ratatui_buffer().expect("should reconstruct");
