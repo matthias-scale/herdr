@@ -4785,6 +4785,39 @@ mod tests {
                 assert!(links.osc8_urls.is_empty(), "{label} split {split}");
             }
         }
+
+        let rendered_url = "https://example.com/path";
+        let corrupt_url = "https://exhmple.com/patX";
+        let following_url = "https://after-wrap.example/path";
+        let stream = format!("httpsX\x08://example.com/patX\x08h\n{following_url}\n");
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(13, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+            let rendered = runtime.visible_text();
+            let rendered_cells = rendered.replace('\n', "");
+            assert!(
+                rendered_cells.contains(rendered_url),
+                "Ghostty rendered the wrapped repaired URL at split {split}: {rendered:?}"
+            );
+            assert!(
+                !rendered_cells.contains(corrupt_url),
+                "Ghostty never rendered the aliased URL at split {split}: {rendered:?}"
+            );
+            assert!(
+                rendered_cells.contains(following_url),
+                "Ghostty rendered the recovery URL at split {split}: {rendered:?}"
+            );
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("following URL after wrapped rewrite at split {split}"));
+            assert_eq!(links.output_urls, [following_url], "split {split}");
+            assert!(!links.output_urls.iter().any(|url| url == corrupt_url));
+            assert!(links.osc8_urls.is_empty(), "split {split}");
+        }
     }
 
     #[tokio::test]

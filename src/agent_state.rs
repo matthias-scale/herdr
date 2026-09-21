@@ -841,6 +841,7 @@ impl LinkStreamScanner {
     }
 
     fn observe_cursor_motion(&mut self, motion: ParsedCursorMotion, cursor_column: usize) {
+        let validate_modeled_cursor = self.rendered_rewrite.is_some();
         let rewrite = self.rendered_rewrite.get_or_insert_with(|| {
             let reconcile_existing = matches!(motion, ParsedCursorMotion::Backspace)
                 || matches!(self.visible, VisibleLinkState::Url(_));
@@ -883,7 +884,7 @@ impl LinkStreamScanner {
                 overflowed,
             }
         });
-        rewrite.move_cursor(motion, cursor_column);
+        rewrite.move_cursor(motion, cursor_column, validate_modeled_cursor);
     }
 
     fn finish_rendered_rewrite(&mut self, links: &mut VecDeque<DetectedAgentLink>) {
@@ -1032,11 +1033,20 @@ impl LinkStreamScanner {
 }
 
 impl RenderedRewrite {
-    fn move_cursor(&mut self, motion: ParsedCursorMotion, cursor_column: usize) {
+    fn move_cursor(
+        &mut self,
+        motion: ParsedCursorMotion,
+        cursor_column: usize,
+        validate_modeled_cursor: bool,
+    ) {
         let Ok(cursor_column) = u16::try_from(cursor_column) else {
             self.fail_closed();
             return;
         };
+        if validate_modeled_cursor && cursor_column != self.cursor_column {
+            self.fail_closed();
+            return;
+        }
         self.cursor_column = match motion {
             ParsedCursorMotion::Backspace => cursor_column.saturating_sub(1),
             ParsedCursorMotion::CarriageReturn => 0,
