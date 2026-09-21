@@ -6372,6 +6372,7 @@ mod tests {
             }
         }
         stream.extend_from_slice(b"https://mixed-osc.example/001\n");
+        stream.extend_from_slice(b"https://mixed-output.example/201\n");
 
         let gate = crate::agent_state::LinkExtractionGate::default();
         gate.observe_chunk(&stream);
@@ -6390,7 +6391,7 @@ mod tests {
         assert_eq!(links.len(), 200);
         assert!(!links
             .iter()
-            .any(|link| link.url == "https://mixed-output.example/000"));
+            .any(|link| link.url == "https://mixed-output.example/002"));
         let repeated = links
             .iter()
             .find(|link| link.url == "https://mixed-osc.example/001")
@@ -6399,6 +6400,11 @@ mod tests {
         assert!(links
             .iter()
             .any(|link| link.url == "https://mixed-output.example/200"));
+        assert_eq!(
+            links[198].url, "https://mixed-osc.example/001",
+            "the repeated URL must move to its latest arrival position"
+        );
+        assert_eq!(links[199].url, "https://mixed-output.example/201");
     }
 
     #[test]
