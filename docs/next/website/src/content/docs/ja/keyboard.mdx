@@ -45,8 +45,7 @@ Herdr はマウスネイティブです。キーバインドをひとつも覚�
 
 | アクション | キー |
 | --- | --- |
-| 全 Space の次 / 前のタブ | `prefix+n` / `prefix+p` |
-| この Space の次 / 前のタブ | `prefix+ctrl+n` / `prefix+ctrl+p` |
+| 次 / 前のタブ | `prefix+n` / `prefix+p` |
 | タブ 1–9 にジャンプ | `prefix+1..9` |
 | タブの名前を変更 | `prefix+shift+t` |
 | タブを閉じる | `prefix+shift+x` |
@@ -59,22 +58,35 @@ Herdr はマウスネイティブです。キーバインドをひとつも覚�
 | ワークスペースの名前を変更 | `prefix+shift+w` |
 | ワークスペースを閉じる | `prefix+shift+d` |
 | Goto ピッカー | `prefix+g` |
-| サイドバーの表示切り替え | `prefix+shift+b` |
-| ループ実行履歴を開く | `prefix+ctrl+h` |
-| 読み取り専用の Symphony ダッシュボードを開く | `prefix+shift+s` |
-| フリートの Runs セクションを表示 | `prefix+alt+r` |
-
-ループ実行履歴ビューには、すべてのループのレシートに記録された実行が、結果、ゲート、人による操作回数、所要時間とともに表示されます。レシートファイルが変わると自動更新されます。Esc または `prefix+ctrl+h` をもう一度押すと閉じます。
-
-Symphony ダッシュボードは、実行中の Temporal ワークフローについて名前、フェーズ、名前付き待機、経過時間を表示します。Enter を押すと、対応するチェックアウトでワークフロー、チケット、プルリクエスト、レシートのコンテキストを持つ対話型 Herdr ウィンドウが開きます。ダッシュボードからワークフローの signal、cancel、merge は実行できません。
-
-Runs セクションは `ra-launch` と `ra-wrap` の実行をフリートのマシン別に表示します。実行をクリックすると、その `out.log` をターミナルタブで追跡します。
+| サイドバーの表示切り替え | `prefix+b` |
 
 完全なキーマップとバインドの構文は[キーバインドリファレンス](/ja/docs/configuration/#キーバインド)にあります。
+
+Goto ピッカー (`prefix+g`) は、各エージェントとターミナルをワークスペースごとに一行ずつ表示します。分割タブのペインも隠さず表示されます。行をクリックするか Enter を押すと、そのペインへ直接移動します。`/` で名前、エージェントの種類、タブ、ワークスペース、ブランチ、パスを検索できます。検索入力中でなければ上下矢印キーまたは `j/k` で行を移動します。左右矢印キーは前後のワークスペースの最初のエージェントまたはターミナルへ移動し、端では折り返しません。検索入力中は左右矢印キーでテキストカーソルを動かします。`b/w/i/d` で blocked、working、idle、done のエージェントに絞り込み、`a` ですべてのターミナルに戻します。選択した移動先の場所とパスは一覧の下に表示されます。一覧が収まらない場合は、マウスホイール、スクロールバーのトラックのクリック、つまみのドラッグで、移動先を開かずにスクロールできます。
+
+## テキスト欄の編集
+
+Herdr の名前入力、worktree のブランチ名、フィルター、コピーモードの検索欄では、カーソル位置で編集できます。以下は Herdr 自身の入力欄の操作であり、ペイン内のシェルやエージェントの操作は変わりません。
+
+| 操作 | キー |
+| --- | --- |
+| 1 文字移動 | Left / Right、Ctrl+B / Ctrl+F |
+| 先頭 / 末尾へ移動 | Home / End、Ctrl+A / Ctrl+E |
+| 1 単語移動 | Alt+B / Alt+F |
+| 前の文字を削除 | Backspace、Ctrl+H |
+| 次の文字を削除 | Delete、Ctrl+D |
+| 先頭 / 末尾まで切り取り | Ctrl+U / Ctrl+K |
+| 前の単語を切り取り | Ctrl+W、Alt+Backspace、Ctrl+Backspace |
+| 次の単語を切り取り | Alt+D |
+| 最後に切り取ったテキストを挿入 | Ctrl+Y |
+
+入力と貼り付けはカーソル位置に挿入されます。移動と削除は Unicode の書記素境界を尊重し、長い値は横にスクロールします。切り取ったテキストは現在の入力欄だけで保持し、システムのクリップボードは使いません。Alt ショートカットにはターミナルの Alt/Meta 報告が必要です。Enter と Esc は引き続きダイアログの確定とキャンセルに使います。
 
 ## コピーモード
 
 `prefix+[` を押すと、フォーカス中のペインでコピーモードに入ります。`h/j/k/l`、tmux 形式の `w/b/e`、`{`/`}` で移動します。`/` または `?` で前方または後方のリテラル検索を開始し、`n` または `N` で同じ方向または逆方向に繰り返します。クエリに大文字が含まれる場合だけ大文字と小文字を区別します。`v` または Space で選択を開始し、`y` または Enter でコピーし、`q` または Esc でコピーせずに抜けます。Esc は終了する前に、アクティブな選択または検索を消します。コピーモードはペインのプロセスを停止しません。最下部では出力を追従し、履歴へ移動するとその位置を保ちます。マウスのドラッグ選択なら、コピーモードに入らずにそのままコピーできます。
+
+マウスのドラッグ選択と、`v`、Space、`V` で開始した選択は、出力や再描画が続いても維持されます。選択範囲の一部が表示領域の外にある場合も同様です。コピーするのは固定されたスナップショットではなく、その範囲に現在あるテキストです。ペインのサイズ変更や通常画面と代替画面の切り替えでは、引き続き選択が解除されます。検索結果とダブルクリックによる単語選択では、内容変更のチェックが維持されます。
 
 ## 何でも変更できる
 
@@ -101,25 +113,13 @@ focus_pane_left = ["prefix+h", "ctrl+alt+h"]
 focus_pane_down = ["prefix+j", "ctrl+alt+j"]
 focus_pane_up = ["prefix+k", "ctrl+alt+k"]
 focus_pane_right = ["prefix+l", "ctrl+alt+l"]
-previous_window = "prefix+p" # 全 Space の前のタブ
-next_window = "prefix+n" # 全 Space の次のタブ
-next_blocked_window = "prefix+b" # 全 Space の次の blocked タブ
-previous_tab = ["prefix+ctrl+p", "ctrl+alt+["]
-next_tab = ["prefix+ctrl+n", "ctrl+alt+]"]
+previous_tab = ["prefix+p", "ctrl+alt+["]
+next_tab = ["prefix+n", "ctrl+alt+]"]
 new_tab = ["prefix+c", "ctrl+alt+c"]
 split_vertical = ["prefix+v", "ctrl+alt+d"]
-split_left = "prefix+shift+v"
-split_up = "prefix+shift+minus"
 split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
 zoom = ["prefix+z", "ctrl+alt+z"]
-toggle_sidebar = "prefix+shift+b"
 ```
-
-4 方向の分割には衝突しないデフォルトがあります。`prefix+v` は右、`prefix+shift+v` は左、`prefix+minus` は下、`prefix+shift+minus` は上です。従来の `split_vertical` と `split_horizontal` は引き続き右と下を表します。`next_window` と `previous_window` は、エージェントのないタブも含むすべてのタブを、ワークスペース順、その中のタブ順で循環し、両端でラップします。サイドバーや Space の折りたたみ状態は順序に影響しません。`next_tab` と `previous_tab` はアクティブな Space 内だけを移動します。
-
-`next_blocked_window` は同じグローバル順序を前に進み、ペイン状態が `blocked` に集約されるタブだけで停止します。最後の一致の後は先頭に戻ります。blocked なタブがなければ、フォーカスは移動しません。デフォルトは `prefix+b` です。`toggle_sidebar` は `prefix+shift+b` を使います。
-
-キーバインドなしでも、`herdr window next` と `herdr window previous` で同じグローバル循環を使えます。どちらも両端でラップします。
 
 いくつかの `ctrl+alt` コードは他で使われています。これらは避けてください:
 

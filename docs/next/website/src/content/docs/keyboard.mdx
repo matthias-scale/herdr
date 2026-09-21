@@ -17,15 +17,11 @@ The prefix solves this. Press the prefix key, default `ctrl+b`, and the next key
 
 Press `prefix+?` at any time to see every active binding. Press `/` in the keybind help to filter actions and shortcuts; use Backspace to edit the filter or `ctrl+u` to clear it.
 
-Press `ctrl+alt+p` to open the command palette. Type part of a command name, move through the fuzzy matches with the arrow keys, and press Enter or click a row to run it. The binding is configurable under `[keys].command_palette`; `super+p` is also available when your terminal sends the kitty keyboard protocol.
-
-The palette includes commands for moving and resizing panes, moving tabs, focusing the sidebar, switching dark and light themes, opening dock surfaces, and running Git pull, commit, push, and pull-request flows. Git commands are inactive unless the focused pane is inside a repository. Dock commands use the same availability checks as the dock chooser and expand a collapsed dock when they open a surface.
-
 ## Learn these five first
 
 | Action | Key |
 | --- | --- |
-| New tab | `prefix+alt+c` |
+| New tab | `prefix+c` |
 | Split right / down | `prefix+v` / `prefix+minus` |
 | Move between panes | `prefix+h/j/k/l` |
 | Workspace navigation | `prefix+w` |
@@ -45,24 +41,11 @@ Panes:
 | Resize mode | `prefix+r` |
 | Copy mode | `prefix+[` |
 
-Focused work:
-
-| Action | Key |
-| --- | --- |
-| Open numbered work link picker | `prefix+u` |
-| Copy numbered work link picker selection | `prefix+shift+u` |
-| Copy ticket ID | `prefix+ctrl+u` |
-| Copy pull request URL | `prefix+alt+u` |
-| Copy preview URL | `prefix+ctrl+shift+u` |
-
-The picker uses the focused pane's effective context in ticket, pull request, then preview order. One candidate acts immediately; multiple candidates are numbered 1–9 and selected with a digit. Esc cancels, and Herdr re-validates the selected link against live context before acting. The info panel is collapsed by default; toggle it with `prefix+i`. Click a panel link row to copy its ticket ID or canonical URL; clicks never open links.
-
 Tabs:
 
 | Action | Key |
 | --- | --- |
-| Next / previous tab across all Spaces | `prefix+n` / `prefix+p` |
-| Next / previous tab in this Space | `prefix+ctrl+n` / `prefix+ctrl+p` |
+| Next / previous tab | `prefix+n` / `prefix+p` |
 | Jump to tab 1–9 | `prefix+1..9` |
 | Rename tab | `prefix+shift+t` |
 | Close tab | `prefix+shift+x` |
@@ -72,40 +55,38 @@ Workspaces and session:
 | Action | Key |
 | --- | --- |
 | New workspace | `prefix+shift+n` |
-| New thread, picking its project first | `prefix+c` |
 | Rename workspace | `prefix+shift+w` |
 | Close workspace | `prefix+shift+d` |
 | Goto picker | `prefix+g` |
-| Toggle sidebar | `prefix+shift+b` |
-| Open loop run history | `prefix+ctrl+h` |
-| Open read-only Symphony dashboard | `prefix+shift+s` |
-| Show fleet Runs section | `prefix+alt+r` |
-| Open work projections | `prefix+ctrl+w` |
-| Open Linear tickets | `prefix+ctrl+t` |
-
-`prefix+c` opens the same project picker the sidebar's new-thread icon opens. It lists the checkouts of every configured `[[projects]]` entry, then the directories this session already used. Type to filter by repository or project name, move with Up and Down, and press Enter or `1`–`9` to open the Home composer in that checkout. With Current checkout selected, the composer reuses an eligible Space already working in that directory or repository; New Space remains available in the target picker.
-
-The loop run-history view lists receipt-backed runs across all loops with outcome, gates, human touches, and duration. It refreshes when the receipt file changes. Press Esc or `prefix+ctrl+h` again to close it.
-
-The Symphony dashboard polls open Temporal workflows and shows name, phase, named wait, and age. Enter opens an interactive Herdr window in the matching checkout with workflow, ticket, pull request, and receipt context; the dashboard cannot signal, cancel, or merge workflows.
-
-The Runs section groups active `ra-launch` and `ra-wrap` runs by configured fleet machine. It also shows stale records and a three-row recent-finished tail per host. Click a run to follow its `out.log` in a terminal tab.
-
-The work view projects the repo-wide index as pull requests grouped by repository, with a separate trailing `no ticket` group. Use Left and Right to rotate projections, Up and Down to move, `f` to filter by repository, and Enter to focus the selected pull request's owning pane.
-
-PR and Linear object tabs in the dock reuse the full detail views. In PR details, Tab advances through Overview, Files, Diff, Checks, and Timeline; below 60 cells it opens the tab picker instead. PageUp and PageDown scroll the selected object without resetting another object's position.
-
-Linear, GitHub, and Missive sidebar views list provider objects without a pane under `No agent yet`. Click a row or press Enter to open its object view without starting an agent. An expanded dock gets an object tab; a collapsed dock shows the same detail in the centre until a pane starts. The row's `+` and `n` still start an agent with that object as context.
-
-The tickets view lists assigned, triage, and current-cycle completed Linear issues. It supports search and filtering, ticket details, thread creation, and confirmed ticket writes. The same ticket detail is available from the Linear dock surface when the focused pane has ticket context.
-
-The Missive view is read-only. It lists configured team conversations, shows message previews, internal notes, drafts, and posts, and copies the Missive app URL instead of launching a browser. A pane with Missive context also gets a compact Missive dock surface.
+| Toggle sidebar | `prefix+b` |
 
 The full keymap and the binding syntax live in the [keybinding reference](/docs/configuration/#keybindings).
+
+The Goto picker (`prefix+g`) lists each agent or terminal on its own row, grouped by workspace. Split tabs never hide their panes behind another row. Click a row or press Enter to jump directly to it. Press `/` to search names, agent kinds, tabs, workspaces, branches, or paths; use Up/Down or `j/k` to move between rows when not typing a search. Left/Right jumps to the first agent or terminal in the previous/next workspace section, without wrapping. While editing a search, Left/Right moves the text cursor instead. Outside search, `b/w/i/d` filter blocked, working, idle, or done agents, and `a` shows all terminals again. The selected destination's location and path appear below the list. When the list overflows, use the mouse wheel, click the scrollbar track, or drag its thumb to scroll without opening a destination.
+
+## Editing text fields
+
+Herdr's naming dialogs, worktree branch fields, filters, and copy-mode search support editing at the cursor. These shortcuts apply to Herdr-owned fields, not to the shell or agent inside a pane.
+
+| Action | Keys |
+| --- | --- |
+| Move one character | Left / Right, Ctrl+B / Ctrl+F |
+| Move to the beginning / end | Home / End, Ctrl+A / Ctrl+E |
+| Move one word | Alt+B / Alt+F |
+| Delete the previous character | Backspace, Ctrl+H |
+| Delete the next character | Delete, Ctrl+D |
+| Cut to the beginning / end | Ctrl+U / Ctrl+K |
+| Cut the previous word | Ctrl+W, Alt+Backspace, Ctrl+Backspace |
+| Cut the next word | Alt+D |
+| Insert the last cut text | Ctrl+Y |
+
+Typing and paste insert at the cursor. Movement and deletion respect Unicode grapheme boundaries, and long values scroll horizontally. Cut text stays within the current field; it does not use the system clipboard. Alt shortcuts require the terminal to report Alt/Meta. Enter and Esc retain the dialog's confirm and cancel behavior.
 
 ## Copy mode
 
 Press `prefix+[` to enter copy mode for the focused pane. Use `h/j/k/l`, tmux-style `w/b/e` and big-word `W/B/E`, `{`/`}`, `PageUp`/`PageDown`, `ctrl+b`/`ctrl+f`, and `ctrl+u`/`ctrl+d` to move. Press `/` or `?` for forward or backward literal search, then `n` or `N` to repeat in the same or opposite direction. Search is case-insensitive unless the query contains an uppercase letter. Use `v` or Space to start a selection, `y` or Enter to copy it, and `q` or Esc to leave without copying. Esc clears an active selection or search before exiting. Copy mode does not pause the pane process: output remains live, follows at the bottom, and stays pinned when you navigate into history. The configured prefix keeps its normal meaning in copy mode; with the default prefix, `ctrl+b` enters prefix mode instead of paging up, so use a different prefix if you want `ctrl+b` for copy-mode page-up. Mouse drag-select copies without entering copy mode at all.
+
+Mouse drag selections and selections started with `v`, Space, or `V` remain active during output and redraws, including when part of the selected range is outside the viewport. Copy reads the current text in that range, not a frozen snapshot. Resizing the pane or switching between its normal and alternate screens still clears the selection. Search results and double-click word selections retain their content-change checks.
 
 ## Change anything
 
@@ -132,25 +113,13 @@ focus_pane_left = ["prefix+h", "ctrl+alt+h"]
 focus_pane_down = ["prefix+j", "ctrl+alt+j"]
 focus_pane_up = ["prefix+k", "ctrl+alt+k"]
 focus_pane_right = ["prefix+l", "ctrl+alt+l"]
-previous_window = "prefix+p" # previous tab across all Spaces
-next_window = "prefix+n" # next tab across all Spaces
-next_blocked_window = "prefix+b" # next blocked tab across all Spaces
-previous_tab = ["prefix+ctrl+p", "ctrl+alt+["]
-next_tab = ["prefix+ctrl+n", "ctrl+alt+]"]
+previous_tab = ["prefix+p", "ctrl+alt+["]
+next_tab = ["prefix+n", "ctrl+alt+]"]
 new_tab = ["prefix+c", "ctrl+alt+c"]
 split_vertical = ["prefix+v", "ctrl+alt+d"]
-split_left = "prefix+shift+v"
-split_up = "prefix+shift+minus"
 split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
 zoom = ["prefix+z", "ctrl+alt+z"]
-toggle_sidebar = "prefix+shift+b"
 ```
-
-The four split directions have collision-free defaults: `prefix+v` is right, `prefix+shift+v` is left, `prefix+minus` is down, and `prefix+shift+minus` is up. The legacy `split_vertical` and `split_horizontal` names remain right and down. `next_window` and `previous_window` cycle every tab, including tabs without agents. The order follows the workspace list, then each workspace's tab list, and wraps at both ends. Sidebar and Space collapse state do not change it. `next_tab` and `previous_tab` stay within the active Space.
-
-`next_blocked_window` moves forward through that same global order and stops only on a tab whose pane state rolls up to `blocked`. It wraps after the last match. If no tab is blocked, focus stays where it is. The default is `prefix+b`; `toggle_sidebar` uses `prefix+shift+b`.
-
-The same global cycle is available without a keybinding: `herdr window next` and `herdr window previous`. Both use the existing tab list/focus API and wrap at either end.
 
 A few `ctrl+alt` chords are taken elsewhere. Avoid these:
 

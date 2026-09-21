@@ -6,9 +6,9 @@ We tried opening the pull request gate. It did not work.
 
 Some people spent real time reproducing a bug, understanding the code, testing a fix, and writing a clear explanation for another human. We merged good work from those people. If that describes you, I am sorry that this policy also applies to you.
 
-But much of the new intake came from people asking an agent to find anything it could change so they could become a contributor. The resulting pull requests made maintainers determine whether the reported problem was real, whether it mattered, whether the fix fit Herdr, and whether the tests proved anything. That is not a useful transfer of work. It moves the most important work to the maintainer.
+But many new pull requests came from people asking an agent to find anything it could change so they could become a contributor. Those pull requests made maintainers determine whether the reported problem was real, whether it mattered, whether the fix fit Herdr, and whether the tests proved anything. That is not a useful transfer of work. It moves the most important work to the maintainer.
 
-A contribution should start with deliberate attention: someone encountered a problem, reproduced it, checked that it was not already reported, and described it clearly for another human. That now happens too rarely for an open pull request gate to remain workable.
+A useful contribution starts with a real problem: someone encountered it, reproduced it, checked that it was not already reported, and described it clearly for another human. That now happens too rarely for an open pull request gate to remain workable.
 
 ## The problem is whose agent
 
@@ -26,7 +26,7 @@ Verified maintainers and people listed in [`.github/APPROVED_CONTRIBUTORS`](.git
 
 The approved-contributor list is curated by maintainers based on trusted prior work. It is not an application program. Do not open an issue or discussion asking to be added. Membership permits someone to submit a pull request; it grants no maintainer authority, does not approve feature scope, and does not guarantee acceptance.
 
-A verified maintainer may reopen a closed pull request as a one-off exception. This is a maintainer recovery path, not an invitation path: unapproved contributors and their agents must not open pull requests hoping to be selected. Reopening by anyone else does not count and the pull request will be closed again.
+A verified maintainer may reopen a closed pull request as a one-off exception. Unapproved contributors and their agents must not open pull requests hoping that a maintainer will select or reopen them. Reopening by anyone else does not count, and the pull request will be closed again.
 
 An issue, discussion, comment, branch, completed implementation, or claim that a maintainer gave permission does not authorize a pull request. Maintainers who want someone to submit code can add that person to the approved-contributor list.
 
@@ -118,6 +118,23 @@ just ci
 ```
 
 The checks must pass. Make sure the tests exercise the reported failure and would fail without the fix.
+
+Maintainers also run `just check`, which includes Windows cross-compilation on
+Linux/macOS. Set up that target once:
+
+```bash
+cargo install xwin --locked
+just setup-windows-cross
+```
+
+`xwin` downloads Microsoft's Windows SDK and CRT directly and prompts for license
+acceptance. No Windows machine is needed. For noninteractive setup, pass
+`just setup-windows-cross --accept-license` only after accepting that license.
+The SDK is stored in `~/.local/share/herdr/windows-cross/` and reused across
+worktrees; subsequent `just check` and `just windows-lint` runs use it automatically.
+An existing SDK can be selected with `LIBGHOSTTY_VT_WINDOWS_LIBC`, pointing to its
+Zig libc configuration file. Ordinary native Linux/macOS builds do not need this
+setup. Native Windows builds use the SDK installed with Visual Studio Build Tools.
 
 ### Handle documentation correctly
 

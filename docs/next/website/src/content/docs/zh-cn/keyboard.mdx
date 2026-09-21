@@ -45,8 +45,7 @@ Herdr 是鼠标原生的。你可以点击窗格、标签页、工作区和智�
 
 | 动作 | 按键 |
 | --- | --- |
-| 所有 Space 中的下一个 / 上一个标签页 | `prefix+n` / `prefix+p` |
-| 当前 Space 中的下一个 / 上一个标签页 | `prefix+ctrl+n` / `prefix+ctrl+p` |
+| 下一个 / 上一个标签页 | `prefix+n` / `prefix+p` |
 | 跳转到标签页 1–9 | `prefix+1..9` |
 | 重命名标签页 | `prefix+shift+t` |
 | 关闭标签页 | `prefix+shift+x` |
@@ -59,22 +58,35 @@ Herdr 是鼠标原生的。你可以点击窗格、标签页、工作区和智�
 | 重命名工作区 | `prefix+shift+w` |
 | 关闭工作区 | `prefix+shift+d` |
 | Goto 选择器 | `prefix+g` |
-| 切换侧边栏 | `prefix+shift+b` |
-| 打开循环运行历史 | `prefix+ctrl+h` |
-| 打开只读 Symphony 仪表板 | `prefix+shift+s` |
-| 显示舰队 Runs 分区 | `prefix+alt+r` |
-
-循环运行历史视图会列出所有循环的回执记录，并显示结果、门控、人工操作次数和持续时间。回执文件变化时，视图会自动刷新。按 Esc 或再次按 `prefix+ctrl+h` 可关闭视图。
-
-Symphony 仪表板轮询运行中的 Temporal 工作流,显示名称、阶段、命名等待项和运行时长。按 Enter 会在匹配的检出目录中打开交互式 Herdr 窗口,并携带工作流、工单、拉取请求和回执上下文;仪表板不能 signal、cancel 或 merge 工作流。
-
-Runs 分区按舰队机器显示 `ra-launch` 和 `ra-wrap` 运行。点击运行会在终端标签页中跟踪其 `out.log`。
+| 切换侧边栏 | `prefix+b` |
 
 完整键位和绑定语法见[按键绑定参考](/zh-cn/docs/configuration/#按键绑定)。
+
+Goto 选择器 (`prefix+g`) 按工作区分组，每个代理或终端各占一行，分割标签页中的窗格也会直接显示。点击一行或按回车即可跳转到对应窗格。按 `/` 搜索名称、代理类型、标签页、工作区、分支或路径；未输入搜索时，用上下方向键或 `j/k` 在各行之间移动，左右方向键跳到上一个或下一个工作区中的第一个代理或终端，到达两端后不会循环。编辑搜索内容时，左右方向键只移动文本光标。用 `b/w/i/d` 筛选 blocked、working、idle 或 done 状态的代理，按 `a` 重新显示所有终端。所选目标的位置和路径显示在列表下方。列表超出可视区域时，可以使用鼠标滚轮、点击滚动条轨道或拖动滑块来滚动，而不会打开目标。
+
+## 编辑文本输入框
+
+Herdr 的命名对话框、worktree 分支名、筛选框和复制模式搜索框支持在光标处编辑。以下快捷键适用于 Herdr 自己的输入框，不改变窗格内 shell 或智能体的按键行为。
+
+| 操作 | 按键 |
+| --- | --- |
+| 移动一个字符 | Left / Right、Ctrl+B / Ctrl+F |
+| 移到开头 / 末尾 | Home / End、Ctrl+A / Ctrl+E |
+| 移动一个词 | Alt+B / Alt+F |
+| 删除前一个字符 | Backspace、Ctrl+H |
+| 删除后一个字符 | Delete、Ctrl+D |
+| 剪切到开头 / 末尾 | Ctrl+U / Ctrl+K |
+| 剪切前一个词 | Ctrl+W、Alt+Backspace、Ctrl+Backspace |
+| 剪切后一个词 | Alt+D |
+| 插入上次剪切的文本 | Ctrl+Y |
+
+输入和粘贴会插入光标所在位置。移动和删除遵循 Unicode 字素边界，长内容会水平滚动。剪切的文本只保留在当前输入框中，不使用系统剪贴板。Alt 快捷键需要终端报告 Alt/Meta。Enter 和 Esc 仍用于对话框的确认和取消。
 
 ## 复制模式
 
 按 `prefix+[` 让聚焦的窗格进入复制模式。用 `h/j/k/l`、tmux 风格的 `w/b/e` 和 `{`/`}` 移动。按 `/` 或 `?` 向前或向后进行文本搜索,再用 `n` 或 `N` 按相同或相反方向重复搜索。查询包含大写字母时区分大小写,否则不区分。用 `v` 或空格开始选择,用 `y` 或回车复制,用 `q` 或 Esc 不复制直接退出。Esc 会先清除当前选择或搜索,然后才退出。复制模式不会暂停窗格进程:停留在底部时继续跟随输出,进入历史记录后保持当前位置。鼠标拖选可以直接复制,完全不用进入复制模式。
+
+鼠标拖选以及通过 `v`、空格或 `V` 开始的选择会在输出和重绘期间保持有效，即使部分选中范围位于可视区域之外。复制读取的是该范围内当前的文本，而不是冻结的快照。调整窗格大小或在普通屏幕与备用屏幕之间切换仍会清除选择。搜索结果和双击单词选择仍保留内容变化检查。
 
 ## 一切都可以改
 
@@ -101,25 +113,13 @@ focus_pane_left = ["prefix+h", "ctrl+alt+h"]
 focus_pane_down = ["prefix+j", "ctrl+alt+j"]
 focus_pane_up = ["prefix+k", "ctrl+alt+k"]
 focus_pane_right = ["prefix+l", "ctrl+alt+l"]
-previous_window = "prefix+p" # 所有 Space 中的上一个标签页
-next_window = "prefix+n" # 所有 Space 中的下一个标签页
-next_blocked_window = "prefix+b" # 所有 Space 中的下一个 blocked 标签页
-previous_tab = ["prefix+ctrl+p", "ctrl+alt+["]
-next_tab = ["prefix+ctrl+n", "ctrl+alt+]"]
+previous_tab = ["prefix+p", "ctrl+alt+["]
+next_tab = ["prefix+n", "ctrl+alt+]"]
 new_tab = ["prefix+c", "ctrl+alt+c"]
 split_vertical = ["prefix+v", "ctrl+alt+d"]
-split_left = "prefix+shift+v"
-split_up = "prefix+shift+minus"
 split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
 zoom = ["prefix+z", "ctrl+alt+z"]
-toggle_sidebar = "prefix+shift+b"
 ```
-
-四个分割方向都有互不冲突的默认绑定:`prefix+v` 向右,`prefix+shift+v` 向左,`prefix+minus` 向下,`prefix+shift+minus` 向上。旧名称 `split_vertical` 和 `split_horizontal` 仍分别表示向右和向下。`next_window` 和 `previous_window` 会按工作区顺序、再按各工作区的标签页顺序循环所有标签页,包括没有智能体的标签页,并在两端循环。侧边栏和 Space 的折叠状态不会改变顺序。`next_tab` 和 `previous_tab` 只在当前 Space 中移动。
-
-`next_blocked_window` 按相同的全局顺序向前移动,只停在窗格状态汇总为 `blocked` 的标签页。到达最后一个匹配项后会回到开头。如果没有 blocked 标签页,焦点保持不变。默认键位是 `prefix+b`;`toggle_sidebar` 使用 `prefix+shift+b`。
-
-无需键位绑定也可使用相同的全局循环:`herdr window next` 和 `herdr window previous`。两者都会在两端循环。
 
 少数 `ctrl+alt` 组合键已被其他地方占用。请避开这些:
 

@@ -1,7 +1,7 @@
 # Past sponsors
 
-herdr's sponsorship program is closed and no longer accepts new sponsors.
-This file is the permanent record of everyone who backed herdr — thank you.
+herdr's sponsorship program is closed to new sponsors.
+This file permanently lists everyone who backed herdr.
 
 → Enterprise / partnership: hey@herdr.dev
 
@@ -64,4 +64,4 @@ This file is the permanent record of everyone who backed herdr — thank you.
 
 ---
 
-Thank you to everyone who supported herdr. The herd keeps moving because of you. 🐑
+Thank you to everyone who supported herdr. 🐑
