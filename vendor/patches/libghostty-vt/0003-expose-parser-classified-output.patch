@@ -211,7 +211,7 @@ index efb06ecd..6e09a4de 100644
  
          /// Finalize and dispatch a CSI directly from parser state for
 diff --git a/vendor/libghostty-vt/src/terminal/stream_terminal.zig b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
-index 91cfb21c..ab93265a 100644
+index 91cfb21c..86864c90 100644
 --- a/vendor/libghostty-vt/src/terminal/stream_terminal.zig
 +++ b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
 @@ -23,6 +23,16 @@ const log = std.log.scoped(.stream_terminal);
@@ -261,7 +261,7 @@ index 91cfb21c..ab93265a 100644
              .color_scheme = null,
              .device_attributes = null,
              .enquiry = null,
-@@ -145,7 +164,92 @@ pub const Handler = struct {
+@@ -145,7 +164,95 @@ pub const Handler = struct {
      ) void {
          self.vtFallible(action, value) catch |err| {
              log.warn("error handling VT action action={} err={}", .{ action, err });
@@ -309,11 +309,13 @@ index 91cfb21c..ab93265a 100644
 +        const callback = self.effects.parsed_output orelse return;
 +        switch (action) {
 +            .print => {
++                if (self.terminal.status_display != .main) return;
 +                var buf: [4]u8 = undefined;
 +                const len = std.unicode.utf8Encode(value.cp, &buf) catch return;
 +                callback(self, .text, buf[0..len]);
 +            },
 +            .print_slice => {
++                if (self.terminal.status_display != .main) return;
 +                var buf: [4096]u8 = undefined;
 +                var start: usize = 0;
 +                while (start < value.cps.len) {
@@ -329,6 +331,7 @@ index 91cfb21c..ab93265a 100644
 +                }
 +            },
 +            .print_repeat => {
++                if (self.terminal.status_display != .main) return;
 +                const cp = self.terminal.previous_char orelse return;
 +                var encoded: [4]u8 = undefined;
 +                const encoded_len = std.unicode.utf8Encode(cp, &encoded) catch return;

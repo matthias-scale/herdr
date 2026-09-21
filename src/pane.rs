@@ -4624,6 +4624,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_display_text_matches_ghostty_rendered_text() {
+        let hidden = "https://hidden-status-display.example.test/path";
+        let visible = "https://visible-main-display.example.test/path";
+        let stream = format!("\x1b[1$}}{hidden}\x1b[0$}}{visible}\n");
+
+        assert_parser_classified_link_capture(
+            "status display",
+            stream.as_bytes(),
+            hidden,
+            visible,
+            None,
+        );
+    }
+
+    #[tokio::test]
     async fn dirty_link_snapshot_includes_osc8_hyperlink_target() {
         let uri = "https://osc.example.test/target";
         let screen = format!("\x1b]8;;{uri}\x1b\\label\x1b]8;;\x1b\\");

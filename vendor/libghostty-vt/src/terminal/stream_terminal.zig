@@ -208,11 +208,13 @@ pub const Handler = struct {
         const callback = self.effects.parsed_output orelse return;
         switch (action) {
             .print => {
+                if (self.terminal.status_display != .main) return;
                 var buf: [4]u8 = undefined;
                 const len = std.unicode.utf8Encode(value.cp, &buf) catch return;
                 callback(self, .text, buf[0..len]);
             },
             .print_slice => {
+                if (self.terminal.status_display != .main) return;
                 var buf: [4096]u8 = undefined;
                 var start: usize = 0;
                 while (start < value.cps.len) {
@@ -228,6 +230,7 @@ pub const Handler = struct {
                 }
             },
             .print_repeat => {
+                if (self.terminal.status_display != .main) return;
                 const cp = self.terminal.previous_char orelse return;
                 var encoded: [4]u8 = undefined;
                 const encoded_len = std.unicode.utf8Encode(cp, &encoded) catch return;

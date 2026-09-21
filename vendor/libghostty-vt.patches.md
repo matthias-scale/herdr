@@ -108,13 +108,13 @@ live PTY writes.
 
 remove when: the vendored source exposes equivalent post-parse text and OSC 8
 events, including confirmed BEL, 8-bit ST, and split `ESC \\` termination, with
-bounded 8 KiB targets, and the Herdr visibility regressions pass without this
-patch.
+bounded 8 KiB targets and suppression for non-rendered status-display text, and
+the Herdr visibility regressions pass without this patch.
 
 verification:
 
 ```sh
-cargo nextest run --locked 'test(c1_introducers_and_st_match_ghostty_rendered_text) | test(escape_followed_by_c0_matches_ghostty_rendered_text)'
+cargo nextest run --locked 'test(c1_introducers_and_st_match_ghostty_rendered_text) | test(escape_followed_by_c0_matches_ghostty_rendered_text) | test(status_display_text_matches_ghostty_rendered_text)'
 cargo nextest run --locked 'test(cancelled_osc_capture_matches_ghostty_visible_output) | test(osc8_target_bound_excludes_split_and_unsplit_st_bytes)'
 python3 -m unittest scripts.test_vendor_libghostty_vt
 ```
