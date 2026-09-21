@@ -296,6 +296,7 @@ impl ScannerPrefix {
                 PrefixTerminalState::Visible
             }
             PrefixTerminalState::Escape => match byte {
+                b'\x1b' => PrefixTerminalState::Escape,
                 b'[' => PrefixTerminalState::Csi,
                 b']' => PrefixTerminalState::Osc {
                     phase: PrefixOscPhase::Prefix(0),
@@ -319,6 +320,7 @@ impl ScannerPrefix {
                 if byte == b'\\' {
                     PrefixTerminalState::Visible
                 } else {
+                    self.terminal = PrefixTerminalState::Escape;
                     self.scan_byte(byte);
                     return;
                 }
@@ -659,7 +661,7 @@ enum OscScanOutcome {
     Continue,
     Terminated,
     Cancelled,
-    ReplayVisible,
+    ReplayEscape,
 }
 
 #[derive(Debug)]
@@ -868,6 +870,7 @@ impl LinkStreamScanner {
                 TerminalScanState::Visible
             }
             TerminalScanState::Escape => match byte {
+                b'\x1b' => TerminalScanState::Escape,
                 b'[' => TerminalScanState::Csi,
                 b']' => TerminalScanState::Osc(OscScanState::default()),
                 b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => TerminalScanState::Charset,
@@ -884,8 +887,8 @@ impl LinkStreamScanner {
                     }
                     TerminalScanState::Visible
                 }
-                OscScanOutcome::ReplayVisible => {
-                    self.terminal = TerminalScanState::Visible;
+                OscScanOutcome::ReplayEscape => {
+                    self.terminal = TerminalScanState::Escape;
                     self.scan_byte(byte, links);
                     return;
                 }
@@ -1051,7 +1054,7 @@ impl OscScanState {
                 self.publish_target(links);
                 return OscScanOutcome::Terminated;
             }
-            return OscScanOutcome::ReplayVisible;
+            return OscScanOutcome::ReplayEscape;
         }
         match byte {
             b'\x07' => {
@@ -1152,9 +1155,11 @@ fn discarded_url_terminates(pending_utf8: &mut Vec<u8>, byte: u8) -> bool {
 }
 
 fn queue_link(queue: &mut VecDeque<DetectedAgentLink>, url: String, source: AgentLinkSource) {
-    if let Some(index) = queue.iter().position(|queued| queued.url == url) {
-        queue.remove(index);
-    }
+    let source = queue
+        .iter()
+        .position(|queued| queued.url == url)
+        .and_then(|index| queue.remove(index))
+        .map_or(source, |queued| queued.source);
     queue.push_back(DetectedAgentLink { url, source });
     if queue.len() > MAX_LINKS {
         queue.pop_front();
@@ -1669,6 +1674,7 @@ mod tests {
                     State::Visible
                 }
                 State::Escape => match byte {
+                    b'\x1b' => State::Escape,
                     b'[' => State::Csi,
                     b']' => State::Osc {
                         content: Vec::new(),
@@ -1693,10 +1699,13 @@ mod tests {
                 } => match byte {
                     b'\x18' | b'\x1a' => State::Visible,
                     b'\x1b' => State::Escape,
-                    _ => {
-                        visible.push(byte);
-                        State::Visible
-                    }
+                    b'[' => State::Csi,
+                    b']' => State::Osc {
+                        content: Vec::new(),
+                        escaped: false,
+                    },
+                    b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => State::Charset,
+                    _ => State::Visible,
                 },
                 State::Osc {
                     content,
@@ -1760,7 +1769,7 @@ mod tests {
             )
             .into_bytes(),
             format!(
-                "\x1b]8;;https://cancelled-esc-{seed}.example/target\x1bhttps://after-esc-{seed}.example/path\n"
+                "\x1b]8;;https://cancelled-esc-{seed}.example/target\x1bchttps://after-esc-{seed}.example/path\n"
             )
             .into_bytes(),
         ];
@@ -2384,6 +2393,7 @@ mod tests {
                 );
             }
         }
+        mixed_stream.extend_from_slice(b"https://mixed-osc.example/001\n");
 
         let mixed_gate = LinkExtractionGate::default();
         mixed_gate.observe_chunk(&mixed_stream);
@@ -2401,6 +2411,14 @@ mod tests {
             .output_urls
             .iter()
             .any(|url| { url == &format!("https://mixed-output.example/{MAX_LINKS:03}") }));
+        assert!(mixed
+            .osc8_urls
+            .iter()
+            .any(|url| url == "https://mixed-osc.example/001"));
+        assert!(!mixed
+            .output_urls
+            .iter()
+            .any(|url| url == "https://mixed-osc.example/001"));
     }
 
     #[test]

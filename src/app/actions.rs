@@ -6353,6 +6353,55 @@ mod tests {
     }
 
     #[test]
+    fn mixed_source_detection_event_keeps_newest_two_hundred_and_first_source() {
+        let mut state = app_with_workspaces(&["links"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let mut stream = Vec::new();
+        for index in 0..=200 {
+            if index % 2 == 0 {
+                stream.extend_from_slice(
+                    format!("https://mixed-output.example/{index:03}\n").as_bytes(),
+                );
+            } else {
+                stream.extend_from_slice(
+                    format!(
+                        "\x1b]8;;https://mixed-osc.example/{index:03}\x1b\\label\x1b]8;;\x1b\\\n"
+                    )
+                    .as_bytes(),
+                );
+            }
+        }
+        stream.extend_from_slice(b"https://mixed-osc.example/001\n");
+
+        let gate = crate::agent_state::LinkExtractionGate::default();
+        gate.observe_chunk(&stream);
+        let detected = gate.take_links().expect("mixed-source detection cycle");
+        state.handle_app_event(AppEvent::OrderedAgentLinksDetected {
+            pane_id,
+            links: detected.ordered_links,
+            observed_at: std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_750_000_000),
+        });
+
+        let links = state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Idle)
+            .links;
+        assert_eq!(links.len(), 200);
+        assert!(!links
+            .iter()
+            .any(|link| link.url == "https://mixed-output.example/000"));
+        let repeated = links
+            .iter()
+            .find(|link| link.url == "https://mixed-osc.example/001")
+            .expect("repeated mixed-source URL");
+        assert_eq!(repeated.source, crate::agent_state::AgentLinkSource::Osc8);
+        assert!(links
+            .iter()
+            .any(|link| link.url == "https://mixed-output.example/200"));
+    }
+
+    #[test]
     fn pane_died_last_workspace_enters_navigate() {
         let mut state = app_with_workspaces(&["only"]);
         state.mode = Mode::Terminal;

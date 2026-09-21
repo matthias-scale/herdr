@@ -4512,6 +4512,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_osc_capture_matches_ghostty_visible_output() {
+        let uri = "https://after-cancel.example.test/path";
+        for (name, cancellation) in [
+            ("CAN", b"\x18".as_slice()),
+            ("SUB", b"\x1a".as_slice()),
+            ("ESC", b"\x1bc".as_slice()),
+        ] {
+            let mut stream = b"\x1b]8;;https://cancelled.example.test/hidden".to_vec();
+            stream.extend_from_slice(cancellation);
+            stream.extend_from_slice(uri.as_bytes());
+            stream.push(b'\n');
+
+            let runtime = PaneRuntime::test_with_screen_bytes(120, 24, &stream);
+            assert!(runtime.visible_text().contains(uri), "Ghostty {name}");
+
+            let gate = crate::agent_state::LinkExtractionGate::default();
+            gate.observe_chunk(&stream);
+            let links = gate.take_links().expect("visible URL after cancelled OSC");
+            assert_eq!(links.output_urls, vec![uri], "link gate {name}");
+            assert!(links.osc8_urls.is_empty(), "link gate {name}");
+        }
+    }
+
+    #[tokio::test]
     async fn dirty_link_snapshot_includes_osc8_hyperlink_target() {
         let uri = "https://osc.example.test/target";
         let screen = format!("\x1b]8;;{uri}\x1b\\label\x1b]8;;\x1b\\");
