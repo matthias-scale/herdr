@@ -50,6 +50,7 @@ fn request_uses_dot_method_names() {
     let request = Request {
         id: "req_1".into(),
         method: Method::WorkspaceCreate(WorkspaceCreateParams {
+            source_workspace_id: None,
             cwd: Some("/tmp".into()),
             focus: true,
             label: Some("api".into()),
@@ -216,6 +217,7 @@ fn agent_start_and_prompt_requests_round_trip() {
             wait: Some(AgentPromptWaitOptions {
                 until: vec![AgentStatus::Idle, AgentStatus::Done],
                 timeout_ms: Some(120_000),
+                submission_deadline: None,
             }),
         }),
     };
@@ -1203,6 +1205,7 @@ fn worktree_request_and_response_round_trip() {
                 focused: true,
                 settled_at: None,
                 snoozed_until: None,
+                restore_error: None,
                 work_context: Default::default(),
                 cwd: Some("/worktrees/herdr/worktree-api".into()),
                 foreground_cwd: None,
@@ -1680,6 +1683,7 @@ fn create_response_round_trips_with_root_pane() {
                 focused: false,
                 settled_at: None,
                 snoozed_until: None,
+                restore_error: None,
                 work_context: Default::default(),
                 cwd: Some("/tmp/review".into()),
                 foreground_cwd: None,

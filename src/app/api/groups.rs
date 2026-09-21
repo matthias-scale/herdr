@@ -163,6 +163,7 @@ impl App {
         saved_pane.group_membership = membership.clone();
         let history = self.persist_pane_history.then(|| {
             crate::persist::capture_history(
+                &snapshot,
                 &self.state.workspaces,
                 &self.state.terminals,
                 &self.terminal_runtimes,

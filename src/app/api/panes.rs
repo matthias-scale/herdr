@@ -8424,6 +8424,9 @@ mod tests {
         ));
         env.set("XDG_CONFIG_HOME", &config_home);
         env.remove(crate::session::SESSION_ENV_VAR);
+        app.session_writer = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::persist::SessionWriter::new(false),
+        ));
 
         app.save_session_now();
         assert!(!app.state.session_dirty, "session save should complete");

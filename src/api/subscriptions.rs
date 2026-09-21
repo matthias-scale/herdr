@@ -670,6 +670,7 @@ mod tests {
             focused: true,
             settled_at: None,
             snoozed_until: None,
+            restore_error: None,
             work_context: Default::default(),
             cwd: None,
             foreground_cwd: None,

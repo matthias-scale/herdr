@@ -1377,6 +1377,7 @@ impl App {
                             label,
                             env: Default::default(),
                             work_context: None,
+                            source_workspace_id: None,
                         },
                     );
                 } else if !new_name.is_empty() {

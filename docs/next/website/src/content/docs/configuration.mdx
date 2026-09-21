@@ -50,6 +50,8 @@ You can also open the global menu in Herdr and choose `reload config`.
 
 Reload applies most UI settings without restarting panes. Startup-only settings still need a restart.
 
+Themes, sidebar layouts, copy behavior, and other presentation settings come from the client's local config, including when viewing an SSH machine. Pane defaults, worktrees, integrations, and custom commands belong to the server where the panes run. The UI's `reload config` action reloads both the client's local settings and the selected server's config. Local keybindings reload too; `--remote-keybindings server` instead uses the selected server's keybindings.
+
 ## Headless terminal size
 
 When no client is attached, the server uses a 120×40 virtual terminal for layout and newly created panes. Change that fallback for headless orchestration with:
@@ -60,7 +62,7 @@ headless_cols = 160
 headless_rows = 50
 ```
 
-An attached client remains authoritative for the shared runtime size. After it detaches, existing pane PTYs retain their last attached size while new headless layout uses the configured fallback.
+With one attached client, all tabs follow its size. With multiple clients, each viewed tab follows the client that most recently focused, selected, or interacted with it. When all but one client detach, all tabs immediately return to the remaining client's size. When no clients remain, existing pane PTYs retain their last size and new headless layout uses the configured fallback.
 
 ## Terminal defaults
 
@@ -71,7 +73,7 @@ Set the executable Herdr uses for newly created interactive panes:
 default_shell = "nu"
 ```
 
-When unset or empty, Herdr uses `$SHELL`, then `/bin/sh` on Unix and PowerShell on Windows. This is an executable name or path, not a shell command line. Existing panes keep their current shell until they are recreated. Custom command keybinding strings run through `/bin/sh -c` for pane commands and `/bin/sh -lc` for detached commands on Unix; on Windows they run through `cmd.exe /d /c`.
+When unset or empty, Herdr uses `$SHELL`, then `/bin/sh` on Unix. On Windows it uses `pwsh.exe` (PowerShell 7) when it resolves on `PATH`, and otherwise the inbox `powershell.exe` (Windows PowerShell 5.1). This is an executable name or path, not a shell command line. Existing panes keep their current shell until they are recreated. Custom command keybinding strings run through `/bin/sh -c` for pane commands and `/bin/sh -lc` for detached commands on Unix; on Windows they run through `cmd.exe /d /c`.
 
 Set how Herdr starts newly created interactive pane shells:
 
@@ -104,37 +106,9 @@ Herdr creates checkouts under `<directory>/<repo>/<branch-slug>`. For sibling-st
 
 Worktree actions are available from Git workspace rows. `New worktree` creates a checkout. It checks out an existing local branch when the entered branch exists; otherwise, it creates the branch. It then opens the checkout as a new Herdr workspace and groups it under the source workspace. `Open worktree...` lists existing Git worktree checkouts for that repo. Choosing an already-open checkout focuses it, while choosing a closed checkout opens it in the same group.
 
-Grouped worktrees still behave like normal Herdr workspaces: they can be focused, renamed, closed, and contain their own tabs and panes. In the sidebar, a repository and its linked worktrees share one Space row, with every workspace tab shown as a direct window child. Closing the Space row closes the whole Herdr group, but it does not delete checkout folders or branches.
+Grouped worktrees still behave like normal Herdr workspaces: they can be focused, renamed, closed, and contain their own tabs and panes. The parent row is the original workspace. Closing the parent row closes the whole Herdr group, but it does not delete checkout folders or branches.
 
 To delete a worktree checkout, use `Delete worktree checkout...` on a grouped child workspace. Herdr runs `git worktree remove`, first asking Git to remove safely. If Git refuses because the checkout has modified or untracked files, Herdr asks again before running the forced remove. Branches are not deleted.
-
-## Done pane lifecycle
-
-Done panes stay in the main sidebar for 30 minutes, then move into the collapsed `Recently done` section. After four hours, Herdr closes an eligible Done pane and records the reap in `~/.local/state/herdr/reap-log.jsonl`.
-
-```toml
-[session]
-hide_done_after_minutes = 30
-reap_done_after_minutes = 240
-reap_done_panes = true
-settle_after_days = 3
-auto_settle_finished = true
-auto_settle_inactive = true
-auto_settle_done = true
-settle_done_after_minutes = 30
-```
-
-Herdr never reaps the focused pane, a pane in a pinned tab, or a pane whose status is not Done. When the pane owns a linked Git worktree, Herdr removes that checkout only when it is clean and its commits are present on the configured upstream branch. Set `reap_done_panes = false` to keep automatic reaping disabled while retaining the Recently done section.
-
-Herdr moves panes into the collapsible Settled section when their primary pull request closes or merges, a linked ticket reaches Done, or they have no activity for `settle_after_days`. New pane input, output, or agent-state activity returns a settled pane to the active sidebar without stopping its terminal.
-
-A pane also settles after its agent stays quiet for `settle_done_after_minutes`. Quiet means the resolved agent state is idle with no closing gate, usage limit, active sub-agent, or held shell. The trigger applies whether or not the pane has been seen and when stale supervision resolves to an idle screen. Stale screens that resolve to working or blocked do not settle.
-
-When a settled pane has a native resume plan, Herdr can stop its process until you reply or choose **Resume** from its action menu. Clicking a settled row, its workspace header, or its pane content only focuses it; focus alone does not remove it from the Settled section. Settle an active local session with the row's checkmark action or **Settle** in its context menu. Without a resume plan, Herdr keeps the runtime live. Pressing `enter` on a keyboard-selected settled row opens its action menu. Live settled panes remain eligible for automatic reaping on `reap_done_after_minutes`; resumable settled panes remain exempt.
-
-The three triggers are independent. Set `auto_settle_finished = false` to stop settling panes whose linked work finished, `auto_settle_inactive = false` to stop the multi-day inactivity trigger, and `auto_settle_done = false` to stop settling quiet agents on the shorter minute clock. All three are on by default and are toggles in **Settings → General**.
-
-Settled panes are also listed in **Settings → Archive**, where `enter` restores one to the active sidebar and `d` closes it. When `ui.confirm_close` is on, `d` asks once before it closes anything.
 
 ## Remote attach
 
@@ -146,33 +120,6 @@ manage_ssh_config = true
 ```
 
 When enabled, `herdr --remote` writes a private temporary SSH config that includes your user and system SSH configs first, then adds fallback `ServerAliveInterval` and `ServerAliveCountMax` values. Your own keepalive settings win. Linux and macOS clients also use a private per-attach OpenSSH control socket to reuse the first authenticated connection; Windows OpenSSH does not. Set `manage_ssh_config = false` to run remote attach through plain `ssh` without Herdr's generated config or control socket.
-
-## Fleet status hosts
-
-`herdr fleet status` reads the local Herdr socket and remote hosts in parallel. Configure each display name and SSH target under `[remote.fleet]`:
-
-```toml
-[remote.fleet]
-timeout_ms = 5000
-heartbeat_stale_ms = 1800000
-symphony_host = "server"
-
-[[remote.fleet.hosts]]
-name = "laptop"
-local = true
-socket = "/Users/you/.config/herdr/herdr.sock"
-
-[[remote.fleet.hosts]]
-name = "workbox"
-target = "workbox"
-socket = "/home/you/.config/herdr/herdr.sock"
-```
-
-`name` is the table label and the value accepted by `--hosts`. `target` is an OpenSSH config alias or `user@host`. Set `local = true` on an entry that should read the local socket without SSH. `socket` is optional and overrides the normal Herdr socket path on that host.
-
-The per-host timeout applies to the entire read. An unreachable or slow host produces a `STATUS UNKNOWN` host row while reachable hosts still appear. The Runs sidebar section reads at most 40 recent `~/.agents/runs/*/state.json` records per host and keeps three finished rows per machine. Active or blocked state counts as live only while its PID exists on that host or its heartbeat is no older than `heartbeat_stale_ms`, 30 minutes by default. Click a run to follow its derived `out.log` path. Set `symphony_host` to a configured host name when Temporal does not run locally.
-
-These hosts are also the machines the Home composer can dispatch to. With more than one configured, the composer shows a machine chip; picking a remote machine asks that machine's own Herdr server to create the workspace and start the agent, so the pane belongs to that machine and outlives both this client and the SSH connection. The new pane appears in `herdr fleet status` under its host, not in the local workspace list.
 
 ## Keybindings
 
@@ -187,18 +134,12 @@ A small keybinding override looks like this:
 prefix = "ctrl+b"
 goto = "prefix+g"
 new_tab = "prefix+c"
-next_window = "prefix+n"
-previous_window = "prefix+p"
-next_blocked_window = "prefix+b"
-next_tab = "prefix+ctrl+n"
-previous_tab = "prefix+ctrl+p"
-toggle_sidebar = "prefix+shift+b"
+next_tab = "prefix+n"
+previous_tab = "prefix+p"
 focus_pane_left = "prefix+h"
 navigate_workspace_down = "j"
 navigate_pane_down = "ctrl+j"
 split_horizontal = "prefix+minus"
-split_left = "prefix+shift+v"
-split_up = "prefix+shift+minus"
 ```
 
 The default keymap is prefix-first so Herdr does not steal input from shells, editors, tmux, or terminal apps. Search `keys.` in the [Config reference](/docs/config-reference/) to see every action and default binding. The in-app help panel at `prefix+?` shows the active bindings.
@@ -207,7 +148,7 @@ A binding may also be an array when one action needs multiple shortcuts:
 
 ```toml
 [keys]
-next_tab = ["prefix+ctrl+n", "ctrl+alt+]"]
+next_tab = ["prefix+n", "ctrl+alt+]"]
 ```
 
 Optional actions are unset by default. Bind them with `prefix+` for prefix-mode behavior, or use an explicit modified chord when you intentionally want a direct shortcut. For example, tmux-style one-keystroke pane resizing without entering resize mode:
@@ -236,49 +177,6 @@ focus_agent = "prefix+alt+1..9"
 ```
 
 The legacy `[keys.indexed]` table is still parsed for compatibility, but new configs should prefer the explicit action fields.
-
-## Projects
-
-The Home composer can group your checkouts, so choosing where a task runs is a
-two-step pick rather than a typed path. Which repositories belong together is a
-fact about how you work, not about the filesystem, so it has to be configured:
-
-```toml
-[[projects]]
-id = "scalable"
-label = "scalable"
-roots = ["~/Repos/scalable"]
-repos = ["~/Repos/herdr"]
-
-[[projects]]
-id = "personal"
-label = "personal"
-roots = ["~/Projects"]
-```
-
-`roots` names directories whose immediate children are checkouts. `repos` names
-single checkouts, either absolute or relative to `~/Repos`. A directory counts
-as a checkout when it carries a `.git` entry, so linked worktrees are included.
-Scanning is one level deep and happens once, when the config is read.
-
-With no `[[projects]]` configured the composer groups everything under
-`~/Repos`. The project chip appears only when there is more than one group, and
-the repo chip only when the selected group holds at least one checkout.
-Selecting a repo sets the composer's directory.
-
-Projects are also the sidebar's scope. With more than one project configured,
-the header line ends in a project chip: click it, or open it from the sidebar,
-to filter the whole list to one project's threads. Type to narrow the list, move
-with Up and Down, and pick with Enter or `1`–`9`. The first row, **All
-projects**, clears the scope. A thread belongs to a project when its checkout is
-inside one of the project's repositories or when it is a linked worktree of one,
-so worktrees stay with the repository they came from. The scope is per client
-and persists across attaches; a scope whose project later disappears from the
-config reads as no scope rather than an empty sidebar.
-
-`prefix+c` opens the same project list as a spawn target: it starts a new
-Home thread in the project you pick, which is also what the sidebar's
-new-thread icon does.
 
 ## Custom command keybindings
 
@@ -339,22 +237,6 @@ Custom commands receive `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_ACTIVE_WOR
 
 On Windows, custom command strings use `cmd.exe /d /c`, so environment variables use `%HERDR_BIN_PATH%` syntax. To run PowerShell syntax, invoke it explicitly, for example `powershell.exe -NoProfile -Command "..."`.
 
-## User-defined actions
-
-User-defined actions appear after `+ Action` in the top bar and under **User actions** in keybinding help. Add them through the top-bar modal or as `[[actions]]` tables:
-
-```toml
-[[actions]]
-name = "test"
-command = "just test"
-key = "ctrl-b t" # optional; uses the normal keybinding syntax
-run_on_worktree_create = false
-open_in_bottom_pane = true
-repo = "owner/project" # optional; omit to show the action in every repository
-```
-
-An action runs in the focused terminal only when `open_in_bottom_pane = false` and that pane's foreground process is a shell. Otherwise Herdr opens the shared bottom command pane. Worktree-create actions run sequentially before the new agent starts; a failed command leaves a warning without blocking the agent.
-
 ## Theme
 
 Choose a built-in theme:
@@ -372,23 +254,19 @@ To let Herdr switch its own UI theme when the host terminal reports a light/dark
 [theme]
 name = "catppuccin"
 auto_switch = true
-auto_switch_poll_interval_seconds = 60
-host_appearance = "auto"
 light_name = "catppuccin-latte"
 dark_name = "catppuccin"
 ```
 
-`auto_switch` defaults to `false`, so existing theme configs keep manual behavior. Full clients query the host background on attach, focus gain, resize/resume, and periodically; the default poll interval is 60 seconds, limiting the periodic cost to one short OSC 11 query per minute, and accepted values are clamped to 5–3600 seconds. This keeps terminals without DEC private mode 2031, such as WezTerm, in sync without restarting Herdr. An explicit 2031 color-scheme report remains authoritative over inferred background luminance. If `light_name` or `dark_name` is omitted, Herdr uses the matching built-in sibling for the configured `name` when one exists, such as `tokyo-night`/`tokyo-night-day` or `gruvbox`/`gruvbox-light`. Manual theme selection in Settings disables `auto_switch`.
-
-`host_appearance` defaults to `auto`. Set it to `light` or `dark` when mosh or another terminal relay drops OSC 11 and Mode 2031 replies. The override takes precedence over host reports and applies to Herdr's UI and child panes. Run `herdr server reload-config` after editing it.
-
-When `host_appearance` is `auto`, a client can set `HERDR_HOST_APPEARANCE=light` or `HERDR_HOST_APPEARANCE=dark` before it attaches. The config value takes precedence over this environment variable. The environment variable takes precedence over host reports and the active palette. Herdr warns once and ignores any other value.
+`auto_switch` defaults to `false`, so existing theme configs keep manual behavior. If `light_name` or `dark_name` is omitted, Herdr uses the matching built-in sibling for the configured `name` when one exists, such as `tokyo-night`/`tokyo-night-day` or `gruvbox`/`gruvbox-light`. Manual theme selection in Settings disables `auto_switch`.
 
 You can override individual colors:
 
 ```toml
 [theme.custom]
 sidebar_bg = "#181825"
+active_row_bg = "#1e1e2e"
+selection_bg = "#313244"
 panel_bg = "reset"
 accent = "#a6e3a1"
 green = "#a6e3a1"
@@ -397,7 +275,7 @@ red = "#f38ba8"
 yellow = "#f9e2af"
 ```
 
-`sidebar_bg` optionally gives the desktop sidebar its own background. When omitted, the sidebar keeps the host terminal background.
+`sidebar_bg` optionally gives the desktop sidebar its own background. When omitted, the sidebar keeps the host terminal background. `active_row_bg` changes the active Space and focused Agent row background without affecting separators or scrollbar tracks. `selection_bg` changes the Navigate-mode cursor row background in the sidebar.
 
 Color values accept hex, named colors, `rgb(r,g,b)`, or reset aliases like `reset`, `default`, `none`, and `transparent`.
 
@@ -420,62 +298,9 @@ The active palette is applied in this order: built-in theme, `[theme.custom]`, t
 
 ## UI and sidebar
 
-The sidebar is the main Herdr dashboard. On desktop it starts with attention and organization sections in this order: Blocked, Prio, then Agents or Pinned when applicable, with Spaces last. Blocked remains visible at zero so you can confirm that no pane needs input. The Spaces section is the canonical ownership tree: each repository and its linked worktrees share one Space row, and every tab appears once as a direct window child even when it has no detected agent or owns multiple panes. Compact and mobile navigation preserve that ownership tree. Selection uses foreground weight rather than a filled row; terminal widgets do not provide a portable font-size control, so sidebar emphasis is limited to spacing, bold text, and glyphs.
+The sidebar is the main Herdr dashboard. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, Agent panel ordering, mouse behavior, pane borders, and other presentation settings.
 
-`ui.agent_panel_sort = "priority"` remains accepted for compatibility and the legacy indexed-Agent projection, but lifecycle changes never reorder the Spaces ownership tree. A transient `agent.view.set` query also leaves that tree unchanged; its compatibility behavior is documented under [Agent view queries](/docs/socket-api/#agent-view-queries). Each section can collapse independently. Section-header collapse is keyed by title, so reordering does not reset it; the version 3 session layout continues to preserve the Prio panel and individual Space collapse state. Search `ui.` in the [Config reference](/docs/config-reference/) for sizing, collapsed mode, ordering, mouse behavior, pane borders, and other presentation settings.
-
-Each worklist or expanded tab row shows its persisted title once, even when the
-tab owns multiple panes. At supported widths the compact shape is `<state>
-<title> · <cc|cx|pi> · <age>`. The sidebar never renders the agent CLI version.
-When the short suffix identifies the agent, Herdr omits a redundant provider
-word; agents without a short suffix keep their provider label. Agent-backed rows
-roll up pane state as `working`, `blocked`, or `done`; plan exhaustion uses
-`usage` until the live screen resumes. Agentless rows omit lifecycle status.
-Opening a completed tab clears `done` without moving it.
-
-**Settings → General → Working row opacity** cycles blue-dot working rows
-through 100%, 75%, 50%, and 25%. The same level applies to local and fleet
-rows, including the dots in the collapsed sidebar. Red and peach attention rows
-and green idle rows keep their normal colours. To set the value directly:
-
-```toml
-[ui]
-working_row_opacity_percent = 75
-```
-
-### Status row
-
-Desktop layouts show a right-aligned, full-width status row above the tab bar. Its visible fields are subscription usage per provider account, an offline dot, an agent dot, device name, CPU, memory, and disk; the left side carries the quick-access buttons. Each value is a filled column, `▁` through `█`, coloured green below 80%, yellow from 80%, red from 90%.
-
-Provider blocks read `CC`, `CX`, and `KI` for Claude, Codex, and Kimi, each followed by a short account code and one column per quota window, five-hour first and seven-day second. Codex reports no five-hour window on plans that do not have one, so it shows a single column. A source older than its freshness budget renders dim rather than asserting a number, and a window whose reset has already passed is dropped entirely.
-
-The agent dot counts agents on this machine, turning red and reading `● 5/2` when two of the five are blocked. The offline dot is a lone red `●` and is invisible while the connection is up. Disk appears only at 80% or above and hides again below 78%, so a volume sitting at the threshold does not flicker.
-
-The row does not display a Git branch, folder, Herdr version, session, workspace, tab, or pane identity, or usernames, and it does not show battery, date, or time. As the terminal narrows, Kimi, then Codex, then Claude, then the device name disappear; CPU and memory always survive. An unavailable metric renders `CPU -`.
-
-The sampler starts when a renderable status row first exists, refreshes every two seconds with at most one sample in flight, and retries failures at the next interval. Samples that reach four seconds old are discarded so unavailable values render instead. CPU, memory, and disk metrics come from native APIs or local proc files; on macOS the disk figure measures the data volume, which is the one that fills.
-
-Quota is read every 60 seconds off the render thread, from sources that are already on disk or already installed: the Claude Code statusline cache, the newest Codex rollout record, and `kimi-usage`. No provider API is called, so an unreachable network costs a dim segment rather than a stalled frame. Reachability itself is one TCP connection every ten seconds, and two consecutive failures are required before the row calls the machine offline.
-
-`ui.status_bar_expanded` starts the row expanded, adding the percentage and the time to reset beside every column. `keys.toggle_status_detail` (default `prefix+shift+m`) and the `▸`/`▾` button toggle it at runtime. Any window at 88% or above shows its number and reset time without expanding.
-
-```toml
-[ui.status_bar]
-enabled = false
-```
-
-The row is enabled by default. For an isolated preview, set `enabled = true` in that preview's own config; no terminal font-size control is involved. Disabling the row also stops the background metric sampler, so nothing is collected while it is hidden.
-
-Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.
-
-Agent status uses compact colored dots by default. To distinguish blocked, working, done, idle, and unknown states by shape as well as color, choose **distinct symbols** in Settings or configure:
-
-```toml
-[ui]
-status_indicators = "symbols"
-```
-
-The symbols are static, so this option does not enable spinner animation.
+`ui.pane_borders` accepts `"auto"` (the default, borders only for split panes), `"always"` (also frame a single pane), or `"off"`. A single-pane frame requires `ui.pane_outer_borders = true`, because all its edges are outer edges. Existing boolean values remain valid: `true` means `"auto"` and `false` means `"off"`.
 
 Set `tab_bar_position = "bottom"` under `[ui]` to place the desktop tab row below the terminal panes. Prefix, Navigate, Copy, and Resize mode bars temporarily replace the bottom tab row while active. The default is `"top"`.
 
@@ -523,87 +348,31 @@ status_indicators = "symbols"
 
 The symbols are static, so this option does not enable spinner animation.
 
-### Usage view
-
-The sidebar footer `▥` and `keys.usage` open a local usage dashboard. Herdr reads
-Claude Code history from `~/.claude/projects/**/*.jsonl` and Codex history from
-`~/.codex/sessions/**` on a background thread. Codex totals use incremental
-`token_usage_record.payload.usage` values, with the model taken from the matching
-`turn_context.payload.model`. The view stores per-file aggregates in
-`<state-dir>/usage-cache.json`; unchanged path, modification time, and size entries
-are reused on later scans.
-
-Costs are API list-price estimates. They do not describe subscription charges.
-Override the built-in USD-per-million-token defaults with `[usage.pricing]`:
-
-```toml
-[usage.pricing]
-claude-fable-5-1 = { input = 1.0, output = 5.0, cache_write = 1.25, cache_read = 0.10 }
-claude-opus-5 = { input = 15.0, output = 75.0, cache_write = 18.75, cache_read = 1.50 }
-claude-sonnet-5 = { input = 3.0, output = 15.0, cache_write = 3.75, cache_read = 0.30 }
-claude-haiku-4-5 = { input = 1.0, output = 5.0, cache_write = 1.25, cache_read = 0.10 }
-gpt-5.6-sol = { input = 1.25, output = 10.0, cache_write = 1.25, cache_read = 0.125 }
-gpt-5.6-luna = { input = 0.25, output = 2.0, cache_write = 0.25, cache_read = 0.025 }
-gpt-5.3-codex-spark = { input = 0.25, output = 2.0, cache_write = 0.25, cache_read = 0.025 }
-```
-
-Unknown model ids still count toward token and session totals. Their cost is shown
-as `—` until a pricing entry is added.
-
-### General settings keys
-
-Every row in **Settings → General** writes exactly one key. Herdr rewrites only
-that key and leaves the rest of the config file byte for byte as it was.
-
-```toml
-[ui]
-# Group workspaces that check out the same repository under one project header
-# even when their checkout roots differ, for example the same repo mounted from
-# two hosts. Default: false, one header per checkout root.
-combine_repos_across_hosts = false
-
-# Hide whitespace-only changes in the diff surface. Default: false.
-hide_whitespace_in_diff = false
-
-# Workspace preselected in the Home composer for a new thread.
-# "current_checkout" launches in the selected directory; "new_worktree" creates
-# a linked worktree first. Default: "current_checkout".
-new_thread_workspace = "current_checkout"
-
-# Directory the add-project picker starts in. Empty keeps the last used
-# directory, which is the default.
-add_project_start_dir = ""
-
-# Ask before closing a workspace, and before deleting a settled thread from the
-# sidebar menu or the settings archive. Default: true.
-confirm_close = true
-```
-
 ### Sidebar row layouts
 
-The final Spaces section is the ownership tree. A repository and its linked
-worktrees form one Space. Its fixed one-line row renders the disclosure icon,
-Space title, and direct window count; branch, model, agent, and pane subtitles
-are not rendered. Every disclosed tab/window below it uses one fixed line:
-state, its single title, short agent suffix when available, and activity age.
-A tab with several panes still has one row.
-
-The Space group gap remains configurable:
+The expanded desktop sidebar renders each inner array in `rows` as one line. These are the complete default layouts:
 
 ```toml
+[ui.sidebar.agents]
+row_gap = 0
+rows = [
+  ["state_icon", "machine", "workspace", "tab"],
+  ["agent"],
+]
+
 [ui.sidebar.spaces]
-row_gap = 1
+row_gap = 0
+rows = [
+  ["state_icon", "workspace"],
+  ["branch", "git_status"],
+]
 ```
 
-`ui.sidebar.spaces.rows` remains accepted for configuration compatibility, but
-the visible Space projection always uses disclosure, title, and window count.
-
-Legacy `ui.sidebar.agents` row declarations remain accepted so existing
-configuration does not fail to load, but they do not change the fixed worklist
-or Spaces rows. Their accepted tokens are:
+Agent rows accept these built-in tokens:
 
 - `state_icon` — colored icon for the agent's semantic state.
 - `state_text` — `idle`, `working`, `blocked`, `done`, or `unknown`, including a reported display label when present.
+- `machine` — machine label when the client has multiple machines; omitted for a single local machine.
 - `workspace` — workspace name.
 - `tab` — tab name when available.
 - `pane` — pane name when available.
@@ -612,7 +381,7 @@ or Spaces rows. Their accepted tokens are:
 - `terminal_title_stripped` — the terminal title with one recognized leading activity or spinner glyph and its following whitespace removed.
 - `$name` — custom pane metadata named `name`.
 
-Legacy Space row declarations accept these built-in tokens:
+Space rows accept these built-in tokens:
 
 - `state_icon` — colored icon for the space's rolled-up agent state.
 - `state_text` — text for the rolled-up agent state.
@@ -621,12 +390,7 @@ Legacy Space row declarations accept these built-in tokens:
 - `git_status` — Git ahead and behind counts when nonzero.
 - `$name` — custom workspace metadata named `name`.
 
-Legacy token declarations are validated as before so existing configuration
-continues to load. Agent tokens render in their configured order in compatibility
-projections. Herdr normally separates adjacent values with ` · ` and uses a
-single space after `state_icon`. Missing values and their separators disappear;
-a row disappears when none of its tokens have a value. Each layout may contain
-at most 16 rows, with at most 16 tokens in each row.
+Tokens render in their configured order. Herdr normally separates adjacent values with ` · ` and uses a single space after `state_icon`. Missing values and their separators disappear; a row disappears when none of its tokens have a value. Existing custom rows remain unchanged, so add `machine` explicitly if you want machine identity in a custom multi-machine layout. Each layout may contain at most 16 rows, with at most 16 tokens in each row.
 
 A token entry can also be an inline style table:
 
@@ -640,26 +404,28 @@ rows = [
 
 `fg` accepts strict `#RGB` or `#RRGGBB`. `bold` and `dim` accept booleans. Omitted fields preserve the token's contextual style; explicit `false` removes that modifier. Styling applies to one occurrence, so the same token may look different in another row or agent override. A foreground override replaces all semantic foregrounds inside that occurrence: for example, styled `git_status` ahead and behind counts use one color instead of their default green and red. Token styles never change separators or row backgrounds.
 
-`row_gap` controls blank terminal rows between complete Space groups. Space
-rows default to `1`; set it to `0` for a fully packed list. Tabs within a Space
-remain packed as one group. Legacy Agent row declarations remain independently
-parseable and default to `0`.
+Text-valued tokens also accept up to 16 ordered `rules`. Each rule contains exactly one condition—`equals`, `contains`, `starts_with`, `gt`, or `lt`—and optional `fg`, `bold`, and `dim` overrides:
 
-Rows backed by one recognized provider append its short identifier immediately
-after the title: Claude uses `· cc`, Codex uses `· cx`, and Pi uses `· pi`.
-The suffix replaces a redundant provider word, and the CLI version is never
-shown in the sidebar. Agents without a short suffix keep their provider label;
-agentless, mixed-provider, and exited-agent rows omit the suffix.
-When Codex explicitly reports background terminals, a nonzero count appears
-after that suffix as `N >_`. The count is summed across panes owned by that tab,
-omitted when zero or unsupported, cleared when Codex exits, and never changes
-the window's lifecycle status or its position. The latest communication age
-remains right-aligned. On narrow rows, Herdr drops the age, background count,
-and lifecycle text in that order before truncating the title; the provider
-suffix remains reserved ahead of those optional fields.
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", "workspace", "tab"],
+  [{ token = "machine", fg = "#fff", rules = [{ equals = "Local", fg = "#f55" }, { equals = "Fedora", ignore_case = true, fg = "#51a2da" }] }, "agent"],
+  [{ token = "$load", fg = "#fff", rules = [{ gt = 80, fg = "#f55", bold = true }, { gt = 50, fg = "#fc0" }] }],
+]
+```
 
-Legacy per-agent overrides under `rows_by_agent` are also accepted for
-configuration compatibility, but they do not add model or agent subtitle rows:
+The first matching rule wins. Its specified style fields override the occurrence's defaults; unspecified fields inherit them. If no rule matches, the defaults remain. Matching uses the full token value before display truncation. Set `hide = true` on a rule to remove the matching token and its separator; rows with no remaining tokens also disappear. For example, `{ token = "machine", fg = "#61afef", rules = [{ equals = "Local", hide = true }] }` hides the machine token when its label is exactly `Local`. This compares the label, not the connection type. With `hide = false` or omitted, the token stays visible. A rule with no overrides still stops matching and keeps the defaults.
+
+`equals`, `contains`, and `starts_with` take strings and are case-sensitive. Add `ignore_case = true` for ASCII case-insensitive matching; non-ASCII characters remain case-sensitive. Empty strings follow ordinary string matching: empty `equals` matches only an empty value, while empty `contains` or `starts_with` matches any present value.
+
+`gt` and `lt` take finite numeric thresholds and compare strictly greater or less, not equal. Values must parse completely as finite numbers; decimal and exponent forms work, but whitespace, units, `NaN`, and infinity do not match. `ignore_case` is not accepted on numeric rules. Comparisons use floating-point numbers, not exact large-integer arithmetic.
+
+Rules work with text-valued built-ins and custom `$name` tokens in Agent rows, `rows_by_agent` overrides, and Space rows. Custom tokens match their reported value: `$load` reporting `"90"` selects red and bold above, `"60"` selects yellow, and `"90%"` keeps white. Unreported tokens still disappear. `state_icon` and composite `git_status` accept fixed styles only, not rules. Unknown conditions and malformed rules are rejected when loading config; regex, fuzzy matching, and scripts are not supported.
+
+`row_gap` controls the blank terminal rows between entries, independently for the Agent and Space panels. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
+
+Override the complete Agent layout for a known agent under `rows_by_agent`:
 
 ```toml
 [ui.sidebar.agents]
@@ -700,130 +466,15 @@ Use `herdr workspace report-metadata` in the same way for custom Space tokens. U
 
 Metadata reporters provide values only; styling stays in the local sidebar configuration. See [CLI reference: report metadata](/docs/cli-reference/#panes) for limits, clearing, sequencing, and expiry.
 
-The fixed Space and window projection is shared by expanded desktop, collapsed, and mobile views. Legacy row settings remain limited to compatibility projections.
-
-## Files dock
-
-The Files dock uses portable two-character badges by default. If your terminal
-font includes Nerd Font glyphs, opt in to file icons:
-
-```toml
-[files]
-icons = "nerd"
-```
-
-## Source control
-
-Settings → Source control shows these keys. Their defaults keep Herdr's previous
-behaviour:
-
-```toml
-[source_control]
-# Claude Code or Codex model used to draft a conventional commit message from
-# the cached diff, or the unstaged diff when the cache is empty. Empty, the
-# default, runs `git commit` unchanged. Only bare model tokens are accepted.
-commit_message_model = ""
-
-# Stage all working-tree changes before drafting and committing. The default
-# leaves the index unchanged.
-commit_stage_all = false
-
-# Prefix Herdr puts in front of a branch name derived from a ticket, for
-# example issue/sca-3165-image-edit. Default: "issue/".
-branch_prefix = "issue/"
-```
-
-The worktree root shown next to them is `worktrees.directory`.
-
-## Missive
-
-Missive reads use the public API and never write conversation state. `team` and
-`organization` are resource IDs from Missive's Settings > API > Resource IDs
-page. `token_env` names the environment variable Herdr reads when each request
-runs. Do not put the token value in this file.
-
-```toml
-[missive]
-token_env = "MISSIVE_API_TOKEN"
-team = "team-uuid"
-organization = "organization-uuid"
-```
-
-## Pull request landing
-
-The Land action requires successful checks, a clean merge state, and either an
-approved review or a configured label. The default label is `approved`:
-
-```toml
-[land]
-approval_label = "approved"
-```
-
-## Notepad
-
-A folder of Markdown notes lives at the bottom of the sidebar. Click into it and
-type; Herdr writes the note back shortly after you stop, and the header switches
-between the notes in the folder with a click, `Tab`, or `Shift+Tab`.
-
-```toml
-[notepad]
-enabled = true
-dir = "~/notes"
-files = ["todo", "ideas"]
-height = 8
-```
-
-Syncing across devices is the folder's job, not Herdr's. Point `dir` at a
-directory Syncthing, iCloud, or Dropbox already carries and every device edits
-the same notes; Herdr watches the directory and reloads a note the moment it
-changes underneath it. A note you are actively typing into is never overwritten
-by a remote change — the header shows `⇅` until your version is written.
-
-If you would rather sync with git, make the notes directory a checkout with a
-remote and set `git_sync = true`. Herdr then pulls it on an interval and commits
-and pushes after each write.
-
-`ctrl+alt+m` focuses the notepad from anywhere, `Esc` leaves it, and `ctrl+s`
-writes immediately.
-
-## Break timer
-
-The break timer runs a pomodoro cycle and, when a phase ends, raises an overlay
-that has to be answered in writing before it goes away. A countdown sits in the
-sidebar footer: click it to pause or resume, right-click it to end the current
-block early.
-
-```toml
-[pomodoro]
-enabled = true
-work_minutes = 25
-short_break_minutes = 5
-long_break_minutes = 20
-long_break_every = 4
-min_confirm_chars = 3
-log_file = "pomodoro-log.md"
-```
-
-With these defaults a break is due every 25 minutes and every fourth break is
-the long one, so a 20-minute break lands roughly every two hours. What you type
-into the overlay is appended to `log_file` in the notepad directory, which makes
-the log a by-product of taking the break rather than extra bookkeeping. Set
-`log_file = ""` to turn it off.
-
-`ctrl+alt+b` pauses and resumes the timer, and is also the way out of an overlay
-that fired at the wrong moment: it dismisses the reminder and leaves the next
-phase paused.
+Sidebar row settings affect only the expanded desktop sidebar. Collapsed and mobile views keep their compact layouts.
 
 ## Notifications
 
 Herdr can notify you when a background agent finishes or needs input:
 
-Notifications are muted by default. The bell beside the break timer toggles popup delivery and sound for this machine, and writes both choices to its config file.
-
 ```toml
 [ui.toast]
 delivery = "herdr"
-terminal_backend = "auto"
 delay_seconds = 1
 
 [ui.toast.herdr]
@@ -831,10 +482,6 @@ position = "bottom-right"
 ```
 
 Choose `herdr` for an in-app toast, `terminal` for an outer-terminal notification that also works over SSH, `system` for the local OS notification service, or `off` to disable popups. Herdr suppresses popups for the active tab. Search `ui.toast` in the [Config reference](/docs/config-reference/) for positions, delay behavior, and clipboard feedback settings.
-
-With `delivery = "terminal"`, `terminal_backend = "auto"` detects WezTerm, iTerm2, Ghostty, and Kitty. It also reads `LC_TERMINAL=WezTerm` and `LC_TERMINAL=iTerm2` when SSH forwards that variable. Set `terminal_backend = "osc9"` for WezTerm, iTerm2, or Ghostty, or `"osc99"` for Kitty when the terminal identity is unavailable over SSH.
-
-On macOS, `system` tries `terminal-notifier` first and falls back to `/usr/bin/osascript` when it is unavailable or fails. The fallback appears as Script Editor in Notification Center and cannot activate the hosting terminal. Install `terminal-notifier` with `brew install terminal-notifier`. For a supported, detected terminal, it can activate the terminal app when you click the notification. Alternatively, choose `terminal` to let a supported outer terminal own the notification.
 
 On macOS, `system` tries `terminal-notifier` first and falls back to `/usr/bin/osascript` when it is unavailable or fails. The fallback appears as Script Editor in Notification Center and cannot activate the hosting terminal. Install `terminal-notifier` with `brew install terminal-notifier`. For a supported, detected terminal, it can activate the terminal app when you click the notification. Alternatively, choose `terminal` to let a supported outer terminal own the notification.
 
@@ -844,13 +491,12 @@ Sound notifications play through the local Herdr client. Custom sounds must be m
 
 ```toml
 [ui.sound]
-enabled = true
 path = "sounds/notification.mp3"
 done_path = "sounds/done.mp3"
 request_path = "sounds/request.mp3"
 ```
 
-Sounds are muted by default. Set `enabled = true` to turn them on. `path` sets one sound for all sound notifications. `done_path` and `request_path` override only the finished and needs-input sounds.
+`path` sets one sound for all sound notifications. `done_path` and `request_path` override only the finished and needs-input sounds.
 
 Per-agent sound overrides accept `default`, `on`, or `off`. Use detected agent labels such as `claude`, `codex`, `devin`, or `droid` as keys. Droid is muted by default.
 
@@ -860,31 +506,24 @@ droid = "off"
 claude = "on"
 ```
 
-## Agent detection authority
-
-Full-lifecycle hook state wins while its latest accepted report is fresh. If an integration stops reporting, Herdr falls back to cached screen evidence after 10 minutes. Set a 30–3600 second timeout when the integration needs a different bound:
-
-```toml
-[agent_detection]
-full_lifecycle_hook_authority_timeout_seconds = 600
-```
-
-Visible native approval and login controls can still report `blocked` while hook authority is fresh.
-
 ## Advanced configuration
 
 Search the [Config reference](/docs/config-reference/) for scrollback limits, nested launches, and other advanced or experimental settings. See [Session state and restore](/docs/session-state/) before enabling pane screen history; that guide explains the security trade-off of saving pane contents.
 
 ## Kitty graphics
 
-Kitty graphics rendering for attached local clients is experimental and disabled by default:
+Herdr renders pane images by default in compatible outer terminals. Popups, menus, and notifications temporarily hide only the image placements they overlap. Uncovered images stay visible, and hidden placements return when uncovered. Images do not dim with dialog backgrounds.
+
+To disable graphics rendering and the pane graphics API:
 
 ```toml
-[experimental]
-kitty_graphics = true
+[terminal]
+kitty_graphics = false
 ```
 
-Enable it only when testing terminal image behavior.
+The legacy `experimental.kitty_graphics` setting remains accepted for existing configurations. `terminal.kitty_graphics` takes precedence when both are set.
+
+Changing this setting requires restarting the affected Herdr server or reattaching the client. In remote sessions, the server's setting controls pane graphics parsing and API availability, while the local client's setting controls output to the outer terminal.
 
 ## Agent session restore
 
@@ -895,21 +534,7 @@ Herdr resumes supported Agent conversations after a server restart by default:
 resume_agents_on_restore = true
 ```
 
-Only panes with a valid native session reference from an official integration can resume; other panes restore as normal shells.
-
-A resumed agent comes back at an idle prompt with its conversation replayed but
-its work stopped. Herdr sends it one prompt so it continues:
-
-```toml
-[session]
-nudge_resumed_agents = true
-resume_nudge_message = "continue"
-```
-
-The prompt is skipped when the agent resumes blocked, when it resumes straight
-back into work, and when the pane already holds text you typed.
-
-See [Session state and restore](/docs/session-state/) for supported Agents and persistence behavior.
+Only panes with a valid native session reference from an official integration can resume; other panes restore as normal shells. See [Session state and restore](/docs/session-state/) for supported Agents and persistence behavior.
 
 ## IME cursor tracking
 

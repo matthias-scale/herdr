@@ -42,6 +42,8 @@ pub struct SessionHistorySnapshot {
     /// Commit generation shared with the matching topology snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_fingerprint: Option<String>,
     pub workspaces: Vec<WorkspaceHistorySnapshot>,
 }
 
@@ -415,19 +417,8 @@ fn capture_workspace(
             captured
                 .snapshot
                 .root_pane
-                .and_then(|root_pane| {
-                    captured
-                        .tab
-                        .panes
-                        .keys()
-                        .find(|pane_id| pane_id.raw() == root_pane)
-                        .copied()
-                })
-                .and_then(|root_pane| {
-                    captured
-                        .tab
-                        .cwd_for_pane(root_pane, terminals, terminal_runtimes)
-                })
+                .and_then(|root_pane| captured.snapshot.panes.get(&root_pane))
+                .map(|pane| pane.cwd.clone())
         })
         .unwrap_or_else(|| ws.identity_cwd.clone());
     let public_tab_numbers = captured_tabs
@@ -538,8 +529,15 @@ fn capture_tab(
         if excluded_panes.contains(id) {
             continue;
         }
-        let cwd = tab
-            .cwd_for_pane(*id, terminals, terminal_runtimes)
+        let terminal_id = tab.terminal_id(*id);
+        let cwd = terminal_id
+            .and_then(|id| terminal_runtimes.get(id))
+            .and_then(TerminalRuntime::cwd_for_persistence)
+            .or_else(|| {
+                terminal_id
+                    .and_then(|id| terminals.get(id))
+                    .map(|state| state.cwd.clone())
+            })
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
         let pane = tab.panes.get(id);
         let terminal = pane.and_then(|pane| terminals.get(&pane.attached_terminal_id));
@@ -646,8 +644,25 @@ fn capture_tab(
     })
 }
 
+pub(super) fn layout_fingerprint(snapshot: &SessionSnapshot) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let mut value = serde_json::to_value(snapshot).ok()?;
+    // The commit generation is injected while topology and history are written.
+    // It proves that the two files belong together, but it is not part of the
+    // layout captured before that write.
+    value.as_object_mut()?.remove("generation");
+    // Sets serialize as arrays; normalize their order as well as JSON object keys.
+    let mut collapsed: Vec<_> = snapshot.collapsed_space_keys.iter().collect();
+    collapsed.sort_unstable();
+    value["collapsed_space_keys"] = serde_json::to_value(collapsed).ok()?;
+    let bytes = serde_json::to_vec(&value).ok()?;
+    Some(format!("{:x}", Sha256::digest(bytes)))
+}
+
 /// Capture pane screen history separately from the structural session snapshot.
 pub fn capture_history(
+    snapshot: &SessionSnapshot,
     workspaces: &[Workspace],
     terminals: &HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -660,6 +675,7 @@ pub fn capture_history(
     SessionHistorySnapshot {
         version: SNAPSHOT_VERSION,
         generation: None,
+        layout_fingerprint: layout_fingerprint(snapshot),
         workspaces: workspaces
             .iter()
             .map(|workspace| WorkspaceHistorySnapshot {
@@ -796,9 +812,13 @@ pub(super) fn parse_history_snapshot(content: &str) -> Result<SessionHistorySnap
 }
 
 pub(super) fn snapshot_file_version(content: &str) -> Option<u32> {
-    serde_json::from_str::<RawSessionSnapshot>(content)
+    #[derive(Deserialize)]
+    struct Header {
+        version: u32,
+    }
+    serde_json::from_str::<Header>(content)
         .ok()
-        .map(|raw| raw.version)
+        .map(|header| header.version)
 }
 
 #[cfg(test)]
@@ -875,7 +895,13 @@ mod tests {
         state: &AppState,
         terminal_runtimes: &TerminalRuntimeRegistry,
     ) -> SessionHistorySnapshot {
-        capture_history(&state.workspaces, &state.terminals, terminal_runtimes)
+        let snapshot = capture_from_state_with_runtimes(state, terminal_runtimes);
+        capture_history(
+            &snapshot,
+            &state.workspaces,
+            &state.terminals,
+            terminal_runtimes,
+        )
     }
 
     #[test]
@@ -1165,6 +1191,34 @@ mod tests {
         let active_pane = &active.workspaces[0].tabs[0].panes[&root.raw()];
         assert_eq!(active_pane.agent_name.as_deref(), Some("reviewer"));
         assert_eq!(active_pane.managed_agent_kind.as_deref(), Some("pi"));
+    }
+
+    #[test]
+    fn layout_fingerprint_survives_json_round_trip() {
+        let mut snapshot = parse_snapshot(include_str!(
+            "../../tests/fixtures/session/current-herdr-session.json"
+        ))
+        .unwrap();
+        snapshot.collapsed_space_keys = ["z", "a", "m"].map(String::from).into();
+        let expected = layout_fingerprint(&snapshot).unwrap();
+        for _ in 0..16 {
+            snapshot = parse_snapshot(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+            assert_eq!(
+                layout_fingerprint(&snapshot).as_deref(),
+                Some(expected.as_str())
+            );
+        }
+        snapshot.generation = Some("committed-generation".into());
+        assert_eq!(
+            layout_fingerprint(&snapshot).as_deref(),
+            Some(expected.as_str()),
+            "the atomic-write generation is not layout identity"
+        );
+        snapshot.workspaces.swap(0, 1);
+        assert_ne!(
+            layout_fingerprint(&snapshot).as_deref(),
+            Some(expected.as_str())
+        );
     }
 
     #[test]
@@ -2006,21 +2060,18 @@ mod tests {
     }
 
     #[test]
-    fn capture_contract_tracks_sidebar_state() {
+    fn capture_contract_preserves_fork_server_chrome_state() {
         let mut state = state_with_workspaces(&["one"]);
         state.sidebar_width = 31;
         state.sidebar_section_split = 0.4;
-        state.collapsed_space_keys.insert("repo-key".into());
+        state.collapsed_space_keys.insert("repo:one".into());
         state.prio_panel_collapsed = true;
 
         let snapshot = capture_from_state(&state);
         assert_eq!(snapshot.sidebar_width, Some(31));
         assert_eq!(snapshot.sidebar_section_split, Some(0.4));
-        assert!(snapshot.collapsed_space_keys.contains("repo-key"));
+        assert_eq!(snapshot.collapsed_space_keys, state.collapsed_space_keys);
         assert!(snapshot.prio_panel_collapsed);
-
-        let restored = parse_snapshot(&serde_json::to_string(&snapshot).unwrap()).unwrap();
-        assert!(restored.prio_panel_collapsed);
     }
 
     #[test]
@@ -2064,7 +2115,11 @@ mod tests {
         let mut state = state_with_workspaces(&["one"]);
         let root = state.workspaces[0].tabs[0].root_pane;
         let second = state.workspaces[0].test_split(Direction::Horizontal);
-        crate::ui::compute_view(&mut state, Rect::new(0, 0, 106, 20));
+        crate::ui::compute_view_with_runtime_registry(
+            &mut state,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, 106, 20),
+        );
 
         state.navigate_pane(NavDirection::Right);
 
@@ -2079,7 +2134,11 @@ mod tests {
         let root = state.workspaces[0].tabs[0].root_pane;
         state.workspaces[0].test_split(Direction::Horizontal);
         state.workspaces[0].layout.focus_pane(root);
-        crate::ui::compute_view(&mut state, Rect::new(0, 0, 106, 20));
+        crate::ui::compute_view_with_runtime_registry(
+            &mut state,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            Rect::new(0, 0, 106, 20),
+        );
         let before = capture_from_state(&state);
 
         state.resize_pane(NavDirection::Right);
@@ -2141,6 +2200,104 @@ mod tests {
         assert_eq!(workspace.next_public_pane_number, 5);
         assert_eq!(workspace.public_tab_numbers, vec![1, 2]);
         assert_eq!(workspace.next_public_tab_number, 3);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capture_prefers_live_shell_cwd_and_keeps_it_after_exit() {
+        let old = std::env::current_dir().unwrap();
+        let new = std::env::temp_dir().join(format!(
+            "herdr-persist-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&new).unwrap();
+        let new = std::fs::canonicalize(new).unwrap();
+        let mut state = AppState::test_new();
+        state.workspaces = vec![Workspace::test_new("cwd-source")];
+        state.workspaces[0].identity_cwd = old.clone();
+        state.active = Some(0);
+        state.ensure_test_terminals();
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].terminal_id(pane_id).unwrap().clone();
+        let (events, _rx) = tokio::sync::mpsc::channel(32);
+        let runtime = crate::terminal::TerminalRuntime::spawn(
+            pane_id,
+            24,
+            80,
+            old.clone(),
+            0,
+            Default::default(),
+            None,
+            crate::pane::PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
+            &crate::pane::PaneLaunchEnv::default(),
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        )
+        .unwrap();
+        let pid = runtime.child_pid().unwrap();
+        runtime
+            .try_send_bytes(bytes::Bytes::from(format!(
+                "cd '{}'; printf '\\033]7;file://{}\\007'; exec sleep 30\n",
+                new.display(),
+                old.display()
+            )))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while (crate::platform::process_cwd(pid).as_ref() != Some(&new)
+            || runtime.cwd().as_ref() != Some(&old))
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(crate::platform::process_cwd(pid), Some(new.clone()));
+        assert_eq!(
+            runtime.cwd(),
+            Some(old.clone()),
+            "existing reported-cwd accessor is unchanged"
+        );
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        runtimes.insert(terminal_id, runtime);
+        let before = capture_from_state_with_runtimes(&state, &runtimes);
+        assert_eq!(
+            before.workspaces[0].tabs[0]
+                .panes
+                .values()
+                .next()
+                .unwrap()
+                .cwd,
+            new
+        );
+        assert_eq!(before.workspaces[0].identity_cwd, new);
+        assert_eq!(runtimes.values().next().unwrap().cwd(), Some(old.clone()));
+        crate::platform::signal_processes(&[pid], crate::platform::Signal::Kill);
+        let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while crate::platform::process_cwd(pid).is_some()
+            && std::time::Instant::now() < exit_deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(crate::platform::process_cwd(pid).is_none());
+        let after = capture_from_state_with_runtimes(&state, &runtimes);
+        assert_eq!(
+            after.workspaces[0].tabs[0]
+                .panes
+                .values()
+                .next()
+                .unwrap()
+                .cwd,
+            new
+        );
+        assert_eq!(after.workspaces[0].identity_cwd, new);
+        assert_eq!(runtimes.values().next().unwrap().cwd(), Some(old));
+        for (_, runtime) in runtimes.drain() {
+            runtime.shutdown();
+        }
+        std::fs::remove_dir(new).unwrap();
     }
 
     #[test]
@@ -2493,7 +2650,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_falls_back_to_home_when_cwd_missing() {
+    fn snapshot_parsing_preserves_missing_cwd() {
         let mut panes = HashMap::new();
         panes.insert(
             0,

@@ -14,6 +14,7 @@
 
 #[cfg(unix)]
 mod direct_graphics;
+pub(crate) mod endpoint;
 mod input;
 pub(crate) mod presentation;
 
@@ -53,6 +54,15 @@ use crate::protocol::{
     MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
 };
 use crate::server::socket_paths::client_socket_path;
+
+pub(crate) fn probe_endpoint_negotiation(
+    _stream: &mut crate::ipc::LocalStream,
+) -> io::Result<endpoint::EndpointNegotiation> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "endpoint negotiation is unavailable in the fork client",
+    ))
+}
 
 static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 const HOST_APPEARANCE_ENV_VAR: &str = "HERDR_HOST_APPEARANCE";

@@ -361,8 +361,9 @@ impl App {
                     }
                     crossterm::event::KeyEventKind::Release => {
                         if let Some(lease) = self.input_leases.remove_forwarded(&lease_key) {
+                            let release = key.with_windows_composition_from(&lease.key);
                             let _ = self
-                                .forward_terminal_key_to_target(&lease.target, key)
+                                .forward_terminal_key_to_target(&lease.target, release)
                                 .await;
                         }
                         false

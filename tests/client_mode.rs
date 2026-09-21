@@ -1420,10 +1420,9 @@ fn client_receives_frame_after_pane_output() {
 }
 
 #[test]
-fn pane_spawn_cwd_fallback_in_server() {
-    // Pane spawn failure cwd fallback in server context.
-    // This test verifies that the server can start even with invalid
-    // session data pointing to non-existent directories.
+fn unavailable_restored_pane_keeps_saved_cwd_in_server() {
+    // Invalid saved directories remain visible and retryable instead of
+    // silently replacing the user's saved intent with another directory.
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -1478,12 +1477,11 @@ fn pane_spawn_cwd_fallback_in_server() {
     assert_eq!(pane["result"]["pane"]["workspace_id"], workspace_id);
     let cwd = pane["result"]["pane"]["cwd"]
         .as_str()
-        .expect("restored pane should report fallback cwd");
-    assert_ne!(cwd, missing_cwd);
-    assert!(
-        std::path::Path::new(cwd).exists(),
-        "fallback cwd should exist: {cwd}"
-    );
+        .expect("restored pane should retain saved cwd");
+    assert_eq!(cwd, missing_cwd);
+    assert!(pane["result"]["pane"]["restore_error"]
+        .as_str()
+        .is_some_and(|error| error.contains("directory")));
 
     cleanup_spawned_herdr(spawned, base);
 }

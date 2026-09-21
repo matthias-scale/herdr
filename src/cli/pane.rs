@@ -289,9 +289,7 @@ fn work_context_set_usage() -> String {
 }
 
 fn pane_current(args: &[String]) -> std::io::Result<i32> {
-    let env_pane_id = std::env::var("HERDR_PANE_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
+    let env_pane_id = super::target::caller_pane_id();
     let caller_pane_id = match parse_pane_current_args(args, env_pane_id.as_deref()) {
         Ok(caller_pane_id) => caller_pane_id,
         Err(message) => {
@@ -416,9 +414,7 @@ fn pane_resize(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn parse_optional_current_pane_args_from_env(args: &[String]) -> Result<Option<String>, String> {
-    let env_pane_id = std::env::var("HERDR_PANE_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
+    let env_pane_id = super::target::caller_pane_id();
     parse_optional_current_pane_args(args, env_pane_id.as_deref())
 }
 
@@ -752,9 +748,7 @@ fn parse_pane_read_args(args: &[String]) -> Result<PaneReadParams, String> {
 }
 
 fn pane_input(args: &[String]) -> std::io::Result<i32> {
-    let env_pane_id = std::env::var("HERDR_PANE_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
+    let env_pane_id = super::target::caller_pane_id();
     let params = match parse_pane_input_args(args, env_pane_id.as_deref()) {
         Ok(params) => params,
         Err(message) => {
@@ -824,9 +818,7 @@ fn parse_pane_input_args(
 }
 
 fn pane_split(args: &[String]) -> std::io::Result<i32> {
-    let env_pane_id = std::env::var("HERDR_PANE_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
+    let env_pane_id = super::target::caller_pane_id();
     let params = match parse_pane_split_args(args, env_pane_id.as_deref()) {
         Ok(params) => params,
         Err(message) => {

@@ -45,10 +45,20 @@ impl App {
         {
             crate::persist::save_to_paths(session_path, history_path, &snapshot, history.as_ref())
         } else {
-            crate::persist::save(&snapshot, history.as_ref())
+            run_session_save_job(
+                SessionSaveJob::Save { snapshot, history },
+                revision,
+                &self.session_writer,
+            )
+            .result
         };
         #[cfg(not(test))]
-        let result = crate::persist::save(&snapshot, history.as_ref());
+        let result = run_session_save_job(
+            SessionSaveJob::Save { snapshot, history },
+            revision,
+            &self.session_writer,
+        )
+        .result;
 
         match result {
             Ok(()) => {
@@ -161,6 +171,7 @@ impl App {
             );
             let history = self.persist_pane_history.then(|| {
                 crate::persist::capture_history(
+                    &snapshot,
                     &self.state.workspaces,
                     &self.state.terminals,
                     &self.terminal_runtimes,
@@ -195,25 +206,30 @@ impl App {
             return;
         }
 
+        self.pane_exit_checkpoint_pending = false;
         let job = self.capture_session_save_job();
         let revision = self.state.session_dirty_revision;
         self.session_save_scheduled_revision = Some(revision);
         self.session_save_retry_deadline = None;
         self.session_save_deadline = Some(Instant::now() + SESSION_SAVE_COMPLETION_POLL);
+        let writer = self.session_writer.clone();
         match std::thread::Builder::new()
             .name("herdr-session-save".into())
-            .spawn(move || run_session_save_job(job, revision))
+            .spawn(move || run_session_save_job(job, revision, &writer))
         {
             Ok(thread) => self.session_save_thread = Some(thread),
             Err(err) => {
                 tracing::warn!(err = %err, "failed to spawn session save thread; saving inline");
-                let result = run_session_save_job(self.capture_session_save_job(), revision);
+                let writer = self.session_writer.clone();
+                let job = self.capture_session_save_job();
+                let result = run_session_save_job(job, revision, &writer);
                 self.apply_session_save_result(result);
             }
         }
     }
 
     pub(crate) fn save_session_now(&mut self) {
+        self.pane_exit_checkpoint_pending = false;
         if let Some(thread) = self.session_save_thread.take() {
             match thread.join() {
                 Ok(result) => self.apply_session_save_result(result),
@@ -232,8 +248,38 @@ impl App {
         }
 
         let revision = self.state.session_dirty_revision;
-        let result = run_session_save_job(self.capture_session_save_job(), revision);
+        let writer = self.session_writer.clone();
+        let job = self.capture_session_save_job();
+        let result = run_session_save_job(job, revision, &writer);
         self.apply_session_save_result(result);
+    }
+
+    pub(crate) fn checkpoint_session_before_pane_exit(&mut self) {
+        if self.no_session || (self.pane_exit_checkpoint_pending && !self.state.session_dirty) {
+            return;
+        }
+        self.save_session_now();
+        if self.session_save_retry_deadline.is_none() {
+            self.pane_exit_checkpoint_pending = true;
+            self.state.session_dirty = false;
+        }
+    }
+
+    pub(crate) fn finish_checkpointed_pane_exit(&mut self) {
+        if self.pane_exit_checkpoint_pending {
+            self.state.session_dirty = false;
+            self.session_save_deadline = None;
+            self.session_save_scheduled_revision = None;
+            self.session_save_retry_deadline = None;
+        }
+    }
+
+    pub(crate) fn save_session_on_shutdown(&mut self) {
+        if self.pane_exit_checkpoint_pending && !self.state.session_dirty {
+            self.session_save_deadline = None;
+            return;
+        }
+        self.save_session_now();
     }
 }
 
@@ -244,12 +290,19 @@ fn session_save_retry_delay(failures: u32) -> Duration {
         .min(SESSION_SAVE_RETRY_MAX)
 }
 
-fn run_session_save_job(job: SessionSaveJob, revision: u64) -> SessionSaveResult {
-    let result = match job {
-        SessionSaveJob::Clear => crate::persist::clear(),
-        SessionSaveJob::Save { snapshot, history } => {
-            crate::persist::save(&snapshot, history.as_ref())
-        }
+fn run_session_save_job(
+    job: SessionSaveJob,
+    revision: u64,
+    writer: &std::sync::Mutex<crate::persist::SessionWriter>,
+) -> SessionSaveResult {
+    let result = match writer.lock() {
+        Ok(mut writer) => match job {
+            SessionSaveJob::Clear => writer.clear(),
+            SessionSaveJob::Save { snapshot, history } => writer.save(&snapshot, history.as_ref()),
+        },
+        Err(err) => Err(std::io::Error::other(format!(
+            "session writer mutex poisoned: {err}"
+        ))),
     };
     SessionSaveResult { revision, result }
 }

@@ -1092,7 +1092,7 @@ impl HeadlessServer {
 
         // Save session on exit.
         if !self.app.no_session {
-            self.app.save_session_now();
+            self.app.save_session_on_shutdown();
         }
 
         info!("headless server exiting");
@@ -1246,6 +1246,7 @@ impl HeadlessServer {
                 label,
                 env: Default::default(),
                 work_context: None,
+                source_workspace_id: None,
             }),
         )
     }

@@ -491,6 +491,7 @@ mod tests {
         let response = app.handle_workspace_create(
             "req".into(),
             WorkspaceCreateParams {
+                source_workspace_id: None,
                 cwd: None,
                 focus: false,
                 label: None,

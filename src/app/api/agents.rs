@@ -902,7 +902,7 @@ mod tests {
             panic!("expected agent explain response");
         };
         assert_eq!(explain["screen_detection_skipped"], false);
-        assert_eq!(explain["matched_rule"]["id"], "generic_permission_prompt");
+        assert_eq!(explain["matched_rule"]["id"], "bash_permission_prompt");
         assert_eq!(explain["screen_state"], "blocked");
         assert_eq!(explain["effective_state"], "working");
         assert_eq!(explain["arbitration"], "closing_block_report");

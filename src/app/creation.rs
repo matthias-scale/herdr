@@ -182,6 +182,7 @@ impl App {
                 label: None,
                 env: Default::default(),
                 work_context: None,
+                source_workspace_id: None,
             },
         );
         if let Ok(error) = serde_json::from_str::<crate::api::schema::ErrorResponse>(&response) {
@@ -851,6 +852,7 @@ impl App {
             agent_session: terminal_agent_session_info(terminal),
             scroll,
             revision: terminal.revision,
+            restore_error: terminal.restore_error.clone(),
         })
     }
 

@@ -27,6 +27,7 @@ mod api;
 mod completion;
 mod fleet;
 mod integration;
+mod machine;
 mod notification;
 mod pane;
 mod plugin;
@@ -37,6 +38,7 @@ mod server_not_running;
 mod spec;
 mod status;
 mod tab;
+mod target;
 mod theme;
 mod window;
 mod work_index;
@@ -56,6 +58,10 @@ pub(crate) const AGENT_HELP_FOOTER: &str = concat!(
     "  Control Herdr panes, agents, or workspaces:\n",
     "    SKIP if a Herdr skill is already in your context. Otherwise run: herdr --skill",
 );
+
+pub(crate) fn maybe_run_machine(args: &[String]) -> Option<std::io::Result<CommandOutcome>> {
+    target::maybe_run(args)
+}
 
 pub(crate) fn parse_token_assignment(raw: &str) -> Result<(String, Option<String>), String> {
     let Some((key, value)) = raw.split_once('=') else {
@@ -185,6 +191,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "fleet" => fleet::run_fleet_command(&args[2..])?,
         "work-index" => work_index::run_work_index_command(&args[2..])?,
         "channel" => run_channel_command(&args[2..])?,
+        "machine" => machine::run_machine_command(&args[2..])?,
         "workspace" => workspace::run_workspace_command(&args[2..])?,
         "worktree" => worktree::run_worktree_command(&args[2..])?,
         "tab" => tab::run_tab_command(&args[2..])?,
@@ -834,7 +841,7 @@ pub(super) fn send_ok_request(method: Method) -> std::io::Result<i32> {
 }
 
 pub(super) fn send_request(request: &Request) -> std::io::Result<serde_json::Value> {
-    let client = ApiClient::local();
+    let client = target::api_client()?;
     ensure_server_protocol_compatible(&client, &request.id)?;
     client
         .request_value(request)
@@ -842,24 +849,21 @@ pub(super) fn send_request(request: &Request) -> std::io::Result<serde_json::Val
 }
 
 pub(super) fn send_request_unchecked(request: &Request) -> std::io::Result<serde_json::Value> {
-    let client = ApiClient::local();
+    let client = target::api_client()?;
     client
         .request_value(request)
         .map_err(|err| map_server_not_running_or_io(err, &request.id, &client))
 }
 
 fn ensure_server_protocol_compatible(client: &ApiClient, request_id: &str) -> std::io::Result<()> {
-    let status = client
-        .status()
+    let status = target::server_status(client)
         .map_err(|err| map_server_not_running_or_io(err, request_id, client))?;
     let server_protocol = status
         .protocol
         .ok_or_else(|| std::io::Error::other("server ping did not include a protocol version"))?;
-    let Some(response) = protocol_guard::mismatch_response(
-        request_id,
-        server_protocol,
-        &crate::session::active_restart_after_update_guidance(),
-    ) else {
+    let Some(response) =
+        protocol_guard::mismatch_response(request_id, server_protocol, &target::restart_guidance())
+    else {
         return Ok(());
     };
 
@@ -906,6 +910,9 @@ fn map_server_not_running_or_io(
     request_id: &str,
     client: &ApiClient,
 ) -> std::io::Error {
+    if target::is_remote() {
+        return target::remote_error(api_client_error_to_io(err));
+    }
     match err {
         ApiClientError::Io(io_err) if server_not_running_error(&io_err) => {
             server_not_running::reported_error(server_not_running::response(

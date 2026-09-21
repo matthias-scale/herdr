@@ -8,6 +8,7 @@ mod io;
 pub mod plugin_registry;
 mod restore;
 mod snapshot;
+mod writer;
 
 pub(crate) use self::io::commit_json_to_path;
 #[cfg(test)]
@@ -20,3 +21,4 @@ pub use self::snapshot::{
     capture, capture_history, DirectionSnapshot, LayoutSnapshot, SessionHistorySnapshot,
     SessionSnapshot, TabSnapshot, WorkspaceSnapshot,
 };
+pub(crate) use self::writer::SessionWriter;

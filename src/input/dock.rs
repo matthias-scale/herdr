@@ -1,0 +1,637 @@
+use crossterm::event::{KeyCode, KeyModifiers};
+use ratatui::layout::Rect;
+
+use crate::{
+    app::{
+        state::{AppState, DockSurface},
+        App,
+    },
+    input::TerminalKey,
+};
+
+impl App {
+    /// The open surface menu owns every key so the focused surface cannot
+    /// receive input until the menu closes.
+    pub(crate) fn handle_dock_surface_menu_key(&mut self, key: &TerminalKey) -> bool {
+        if self.state.dock_surface_menu.is_none() {
+            return false;
+        }
+
+        let event = key.as_key_event();
+        let entries = crate::ui::dock::chooser::entries(&self.state, false);
+        let count = entries.len();
+        match event.code {
+            KeyCode::Esc => {
+                self.state.dock_surface_menu = None;
+            }
+            KeyCode::Down => {
+                if let Some(menu) = self.state.dock_surface_menu.as_mut() {
+                    menu.selected = (menu.selected + 1) % count;
+                }
+            }
+            KeyCode::Up => {
+                if let Some(menu) = self.state.dock_surface_menu.as_mut() {
+                    menu.selected = (menu.selected + count - 1) % count;
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self
+                    .state
+                    .dock_surface_menu
+                    .and_then(|menu| entries.get(menu.selected).cloned());
+                if let Some(entry) = selected {
+                    self.state.activate_dock_chooser_entry(entry);
+                }
+            }
+            KeyCode::Char(character)
+                if event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT =>
+            {
+                if let Some(surface) = DockSurface::from_shortcut(character) {
+                    self.state.activate_dock_surface(surface);
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Attach a Linear ticket to the focused pane by operator choice.
+    ///
+    /// Detection only finds a ticket when the branch name carries one, so a
+    /// pane working a ticket that was never encoded in a branch had no way to
+    /// reach its Linear surface. This is the manual tier, so it outranks the
+    /// git observation and survives the next refresh. A ticket is not
+    /// repository evidence, so it never reroutes the pane.
+    pub(crate) fn attach_ticket_to_focused_pane(&mut self, ticket_id: &str) -> bool {
+        let Some((ws_idx, pane_id, terminal_id)) = self.state.active.and_then(|ws_idx| {
+            let workspace = self.state.workspaces.get(ws_idx)?;
+            let pane_id = workspace.focused_pane_id()?;
+            let terminal_id = workspace.terminal_id(pane_id)?.clone();
+            Some((ws_idx, pane_id, terminal_id))
+        }) else {
+            return false;
+        };
+        let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
+            return false;
+        };
+        let patch = crate::work_context::PaneWorkContextPatch {
+            ticket_ids: Some(vec![ticket_id.to_string()]),
+            ..Default::default()
+        };
+        match terminal.apply_manual_work_context_patch(patch) {
+            Ok(changed) => {
+                if changed {
+                    self.state.mark_session_dirty();
+                    self.emit_pane_updated(ws_idx, pane_id);
+                    // A draft or menu staged against the previous subject must
+                    // not carry over and fire at the ticket just attached.
+                    self.state.dock_ticket_comment_draft = None;
+                    self.state.dock_ticket_start_menu = None;
+                    self.state.dock_ticket_action_menu = None;
+                    self.state
+                        .replace_unbound_linear_tab_with_its_object(ticket_id);
+                }
+                changed
+            }
+            Err(error) => {
+                tracing::warn!(ticket = ticket_id, %error, "manual ticket attach rejected");
+                false
+            }
+        }
+    }
+}
+
+impl AppState {
+    pub(crate) fn on_dock_toggle(&self, col: u16, row: u16) -> bool {
+        rect_contains(self.view.dock_handle_rect, col, row)
+    }
+
+    pub(crate) fn on_dock_divider(&self, col: u16, row: u16) -> bool {
+        !self.dock_collapsed && rect_contains(self.view.dock_divider_rect, col, row)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dock_tab_at(&self, col: u16, row: u16) -> Option<DockSurface> {
+        self.dock_tab_index_at(col, row)
+            .and_then(|index| self.dock_open_surfaces.get(index).copied())
+    }
+
+    pub(crate) fn dock_tab_index_at(&self, col: u16, row: u16) -> Option<usize> {
+        if self.dock_collapsed {
+            return None;
+        }
+        self.view
+            .dock_tab_hit_areas
+            .iter()
+            .position(|area| rect_contains(*area, col, row))
+    }
+
+    /// The close glyph of the active tab.
+    pub(crate) fn on_dock_tab_close(&self, col: u16, row: u16) -> bool {
+        !self.dock_collapsed && rect_contains(self.view.dock_tab_close_rect, col, row)
+    }
+
+    pub(crate) fn on_dock_plus(&self, col: u16, row: u16) -> bool {
+        !self.dock_collapsed && rect_contains(self.view.dock_plus_rect, col, row)
+    }
+
+    pub(crate) fn on_dock_maximize(&self, col: u16, row: u16) -> bool {
+        !self.dock_collapsed && rect_contains(self.view.dock_maximize_rect, col, row)
+    }
+
+    pub(crate) fn on_dock_auto_open(&self, col: u16, row: u16) -> bool {
+        !self.dock_collapsed && rect_contains(self.view.dock_auto_open_rect, col, row)
+    }
+
+    /// Card of the empty-dock grid under the cursor, available or not. The
+    /// caller decides what an unavailable card does, so the geometry stays a
+    /// pure function of the rect.
+    #[cfg(test)]
+    pub(crate) fn dock_surface_card_at(&self, col: u16, row: u16) -> Option<DockSurface> {
+        self.dock_chooser_entry_at(col, row, true)
+            .map(|entry| entry.surface)
+    }
+
+    pub(crate) fn dock_chooser_entry_at(
+        &self,
+        col: u16,
+        row: u16,
+        cards: bool,
+    ) -> Option<crate::ui::dock::chooser::DockChooserEntry> {
+        if self.dock_collapsed || self.dock_tab.is_some() {
+            return None;
+        }
+        self.view
+            .dock_surface_card_hit_areas
+            .iter()
+            .position(|area| rect_contains(*area, col, row))
+            .and_then(|index| {
+                crate::ui::dock::chooser::entries(self, cards)
+                    .get(index)
+                    .cloned()
+            })
+    }
+
+    /// Row of the open `+` menu under the cursor.
+    #[cfg(test)]
+    pub(crate) fn dock_surface_menu_at(&self, col: u16, row: u16) -> Option<DockSurface> {
+        self.dock_surface_menu_entry_at(col, row)
+            .map(|entry| entry.surface)
+    }
+
+    pub(crate) fn dock_surface_menu_entry_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::ui::dock::chooser::DockChooserEntry> {
+        let layout = self.view.dock_surface_menu_layout?;
+        crate::ui::dropdown::hit_test(&layout, col, row).and_then(|index| {
+            crate::ui::dock::chooser::entries(self, false)
+                .get(index)
+                .cloned()
+        })
+    }
+
+    pub(crate) fn activate_dock_chooser_entry(
+        &mut self,
+        entry: crate::ui::dock::chooser::DockChooserEntry,
+    ) -> bool {
+        if let Some(object) = entry.object {
+            self.open_dock_object(object, crate::app::state::DockTabOrigin::User);
+            self.finish_dock_surface_activation(entry.surface);
+            return true;
+        }
+        self.activate_dock_surface(entry.surface)
+    }
+
+    /// Open `surface` unless the focused pane makes it useless. A disabled card
+    /// or menu row is inert rather than opening an empty surface.
+    pub(crate) fn activate_dock_surface(&mut self, surface: DockSurface) -> bool {
+        let (context, in_git_repo) = crate::ui::dock::chooser::focused_availability(self);
+        let has_subagents = crate::ui::dock::agents::has_focused_observations(self);
+        if !crate::ui::dock::chooser::surface_available(
+            surface,
+            &context,
+            in_git_repo,
+            has_subagents,
+        ) {
+            return false;
+        }
+        self.dock_collapsed = false;
+        if matches!(
+            surface,
+            DockSurface::Pr | DockSurface::Linear | DockSurface::Missive
+        ) {
+            let object = self
+                .dock_context_objects
+                .iter()
+                .find(|object| object.surface == surface)
+                .cloned();
+            match object {
+                Some(object) => {
+                    self.open_dock_object(object, crate::app::state::DockTabOrigin::User)
+                }
+                // Linear stays available without a ticket so the operator can
+                // attach one; the surface renders its picker instead of a
+                // detail. The other two have nothing to offer without an object.
+                None if surface == DockSurface::Linear => self.open_dock_surface(surface),
+                None => return false,
+            }
+        } else {
+            self.open_dock_surface(surface);
+        }
+        self.finish_dock_surface_activation(surface);
+        true
+    }
+
+    fn finish_dock_surface_activation(&mut self, surface: DockSurface) {
+        self.dock_scroll = 0;
+        self.dock_editor_focused = surface == DockSurface::Editor;
+        self.dock_home_focused = surface == DockSurface::Home;
+        self.dock_diff_focused = surface == DockSurface::Diff;
+        self.dock_files_focused = surface == DockSurface::Files;
+        self.dock_agents_focused = surface == DockSurface::Agents;
+        self.dock_hosts_focused = surface == DockSurface::Hosts;
+        self.dock_pr_focused = surface == DockSurface::Pr;
+        self.dock_linear_focused = surface == DockSurface::Linear;
+        self.dock_pr_checkout_menu = None;
+        self.dock_ticket_start_menu = None;
+        self.dock_ticket_action_menu = None;
+        self.dock_ticket_comment_draft = None;
+        self.dock_pr_action_menu = None;
+        if self.dock_agents_focused {
+            self.reconcile_dock_agents_selection();
+        }
+        if self.dock_hosts_focused {
+            self.reconcile_dock_hosts_selection();
+        }
+    }
+
+    /// Open an agentless provider object in Home without creating a pane.
+    pub(crate) fn open_sidebar_unassigned_object(&mut self, key: &str) -> bool {
+        let Ok(plan) = self.sidebar_unassigned_dispatch_plan(key) else {
+            return false;
+        };
+        self.clear_work_view();
+        self.clear_usage_view();
+        self.clear_symphony();
+        self.clear_loop_run_history();
+        self.dock_object_preview = None;
+        self.open_home_composer_in_directory(plan.directory.clone(), plan.workspace.clone());
+        if let Some(home) = self.home.as_mut() {
+            home.prompt = plan.prompt;
+            home.target = plan.target;
+            home.selected_ref = plan.git_ref;
+            home.pr = plan.pr;
+            home.ticket = plan.ticket;
+            home.missive = plan.missive;
+            home.work_context_patch = plan.work_context_patch;
+        }
+        true
+    }
+
+    pub(crate) fn toggle_dock_diff_whitespace(&mut self) {
+        self.dock_diff_ignore_whitespace = !self.dock_diff_ignore_whitespace;
+        self.invalidate_dock_diff();
+        self.dock_scroll = 0;
+    }
+
+    /// Drop the rendered diff so the next frame re-runs `git diff` with the
+    /// current whitespace choice. Every writer of
+    /// `dock_diff_ignore_whitespace` calls this, not only the dock toggle.
+    pub(crate) fn invalidate_dock_diff(&mut self) {
+        self.dock_diff_active_key = None;
+        self.dock_diff_request = None;
+    }
+
+    pub(crate) fn toggle_selected_dock_diff_file(&mut self) -> bool {
+        let Some(key) = self.dock_diff_active_key.as_ref() else {
+            return false;
+        };
+        let Some(file) = self
+            .dock_diff_cache
+            .get(key)
+            .and_then(|entry| entry.files.get(self.dock_diff_selected))
+        else {
+            return false;
+        };
+        if !self.dock_diff_collapsed.remove(&file.path) {
+            self.dock_diff_collapsed.insert(file.path.clone());
+        }
+        true
+    }
+
+    pub(crate) fn dock_diff_file_at(&self, col: u16, row: u16) -> Option<usize> {
+        if self.dock_collapsed || self.dock_tab != Some(DockSurface::Diff) {
+            return None;
+        }
+        crate::ui::dock::diff::file_index_at(self, self.view.dock_body_rect, col, row)
+    }
+
+    pub(crate) fn on_dock_diff_whitespace_toggle(&self, col: u16, row: u16) -> bool {
+        !self.dock_collapsed
+            && self.dock_tab == Some(DockSurface::Diff)
+            && crate::ui::dock::diff::whitespace_toggle_at(self.view.dock_body_rect, col, row)
+    }
+
+    pub(crate) fn toggle_dock_surface_menu(&mut self) {
+        self.dock_surface_menu = match self.dock_surface_menu {
+            Some(_) => None,
+            None => Some(crate::app::state::DockSurfaceMenu { selected: 0 }),
+        };
+    }
+
+    pub(crate) fn dock_home_tab_at(&self, col: u16, row: u16) -> Option<usize> {
+        if self.dock_collapsed || self.dock_tab != Some(DockSurface::Home) {
+            return None;
+        }
+        self.view
+            .dock_home_tab_hit_areas
+            .iter()
+            .position(|area| rect_contains(*area, col, row))
+    }
+
+    pub(crate) fn dock_home_section_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::app::state::DockHomeSection> {
+        if self.dock_collapsed || self.dock_tab != Some(DockSurface::Home) {
+            return None;
+        }
+        self.view
+            .dock_home_section_hit_areas
+            .iter()
+            .position(|area| rect_contains(*area, col, row))
+            .and_then(|index| match index {
+                0 => Some(crate::app::state::DockHomeSection::Prs),
+                1 => Some(crate::app::state::DockHomeSection::Tickets),
+                2 => Some(crate::app::state::DockHomeSection::XPolls),
+                _ => None,
+            })
+    }
+
+    pub(crate) fn dock_home_detail_tab_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::app::state::DockHomeDetailTab> {
+        self.view
+            .dock_home_detail_tab_hit_areas
+            .iter()
+            .position(|area| rect_contains(*area, col, row))
+            .and_then(|index| {
+                crate::app::state::DockHomeDetailTab::ALL
+                    .get(index)
+                    .copied()
+            })
+    }
+
+    pub(crate) fn set_manual_dock_width(&mut self, divider_col: u16) {
+        let screen = self.screen_rect();
+        let right = screen.x.saturating_add(screen.width);
+        let width = right.saturating_sub(divider_col);
+        let width = width.clamp(crate::ui::DOCK_MIN_WIDTH, crate::ui::DOCK_MAX_WIDTH);
+        self.set_dock_width(width);
+    }
+}
+
+fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
+    col >= rect.x
+        && col < rect.x.saturating_add(rect.width)
+        && row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::{DiffCacheEntry, DiffCacheKey, DiffFileSummary};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    #[test]
+    fn linear_activates_without_a_context_object_so_the_picker_is_reachable() {
+        let mut app = AppState::test_new();
+        app.dock_context_objects.clear();
+
+        assert!(app.activate_dock_surface(DockSurface::Linear));
+        assert_eq!(app.dock_tab, Some(DockSurface::Linear));
+        assert!(app.dock_linear_focused);
+    }
+
+    #[test]
+    fn activating_a_surface_expands_a_collapsed_dock() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = true;
+
+        assert!(app.activate_dock_surface(DockSurface::Terminal));
+        assert!(!app.dock_collapsed);
+        assert_eq!(app.dock_tab, Some(DockSurface::Terminal));
+    }
+
+    #[test]
+    fn a_surface_without_an_object_and_without_a_picker_stays_shut() {
+        let mut app = AppState::test_new();
+        app.dock_context_objects.clear();
+
+        assert!(!app.activate_dock_surface(DockSurface::Pr));
+        assert!(!app.activate_dock_surface(DockSurface::Missive));
+    }
+
+    #[test]
+    fn dock_home_tab_at_maps_each_horizontal_hit_area() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_tab = Some(DockSurface::Home);
+        app.view.dock_home_tab_hit_areas = vec![Rect::new(80, 2, 8, 1), Rect::new(88, 2, 9, 1)];
+
+        assert_eq!(app.dock_home_tab_at(81, 2), Some(0));
+        assert_eq!(app.dock_home_tab_at(90, 2), Some(1));
+        assert_eq!(app.dock_home_tab_at(81, 3), None);
+        assert_eq!(app.dock_home_tab_at(79, 2), None);
+    }
+
+    #[test]
+    fn dock_home_detail_tab_at_maps_the_sub_tab_row() {
+        let mut app = AppState::test_new();
+        app.view.dock_home_detail_tab_hit_areas =
+            vec![Rect::new(80, 4, 8, 1), Rect::new(88, 4, 9, 1)];
+
+        assert_eq!(
+            app.dock_home_detail_tab_at(81, 4),
+            Some(crate::app::state::DockHomeDetailTab::Overview)
+        );
+        assert_eq!(
+            app.dock_home_detail_tab_at(90, 4),
+            Some(crate::app::state::DockHomeDetailTab::Comments)
+        );
+        assert_eq!(app.dock_home_detail_tab_at(81, 5), None);
+    }
+
+    #[test]
+    fn opening_a_surface_appends_a_tab_and_activates_it() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+
+        app.open_dock_surface(DockSurface::Files);
+
+        assert_eq!(app.dock_tab, Some(DockSurface::Files));
+        assert_eq!(
+            app.dock_open_surfaces.last().copied(),
+            Some(DockSurface::Files)
+        );
+
+        // Reopening an already-open surface must not move it in the strip.
+        let before = app.dock_open_surfaces.clone();
+        app.open_dock_surface(DockSurface::Files);
+        assert_eq!(app.dock_open_surfaces, before);
+        assert_eq!(app.dock_tab, Some(DockSurface::Files));
+    }
+
+    #[test]
+    fn closing_the_active_surface_moves_to_its_neighbour() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_open_surfaces = vec![
+            DockSurface::Home,
+            DockSurface::Editor,
+            DockSurface::Scratchpad,
+        ];
+        app.dock_tab = Some(DockSurface::Editor);
+
+        app.close_dock_surface(DockSurface::Editor);
+        assert_eq!(
+            app.dock_open_surfaces,
+            vec![DockSurface::Home, DockSurface::Scratchpad]
+        );
+        assert_eq!(app.dock_tab, Some(DockSurface::Scratchpad));
+
+        // Closing the last tab falls back to the one before it.
+        app.close_dock_surface(DockSurface::Scratchpad);
+        assert_eq!(app.dock_tab, Some(DockSurface::Home));
+    }
+
+    #[test]
+    fn closing_every_surface_leaves_the_chooser() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_open_surfaces = vec![DockSurface::Home, DockSurface::Editor];
+        app.dock_tab = Some(DockSurface::Home);
+        for surface in [DockSurface::Home, DockSurface::Editor] {
+            app.close_dock_surface(surface);
+        }
+
+        assert!(app.dock_open_surfaces.is_empty());
+        assert_eq!(app.dock_tab, None);
+        assert!(app.dock_chooser_focused);
+        assert!(!app.dock_home_focused);
+        assert!(!app.dock_editor_focused);
+    }
+
+    #[test]
+    fn an_unavailable_surface_refuses_to_open() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_open_surfaces.clear();
+        app.dock_tab = None;
+
+        // No focused pane: no pull request and no subagents. Linear is
+        // exempt; it opens its attach picker instead of nothing.
+        assert!(!app.activate_dock_surface(DockSurface::Pr));
+        assert!(!app.activate_dock_surface(DockSurface::Agents));
+        assert!(app.dock_open_surfaces.is_empty());
+        assert_eq!(app.dock_tab, None);
+
+        assert!(app.activate_dock_surface(DockSurface::Terminal));
+        assert_eq!(app.dock_tab, Some(DockSurface::Terminal));
+    }
+
+    #[test]
+    fn the_maximise_toggle_is_reversible() {
+        let mut app = AppState::test_new();
+        assert!(!app.dock_maximized);
+        app.toggle_dock_maximized();
+        assert!(app.dock_maximized);
+        app.toggle_dock_maximized();
+        assert!(!app.dock_maximized);
+    }
+
+    #[test]
+    fn the_plus_menu_toggles_and_the_tab_hit_areas_track_open_surfaces() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_open_surfaces = vec![DockSurface::Files, DockSurface::Diff];
+        app.dock_tab = Some(DockSurface::Files);
+        app.view.dock_tab_hit_areas = vec![Rect::new(80, 1, 8, 1), Rect::new(88, 1, 5, 1)];
+        app.view.dock_plus_rect = Rect::new(93, 1, 2, 1);
+
+        assert_eq!(app.dock_tab_at(81, 1), Some(DockSurface::Files));
+        assert_eq!(app.dock_tab_at(89, 1), Some(DockSurface::Diff));
+        assert_eq!(app.dock_tab_at(94, 1), None);
+        assert!(app.on_dock_plus(93, 1));
+
+        app.toggle_dock_surface_menu();
+        assert!(app.dock_surface_menu.is_some());
+        app.toggle_dock_surface_menu();
+        assert!(app.dock_surface_menu.is_none());
+    }
+
+    #[test]
+    fn card_hits_only_land_while_the_dock_is_a_chooser() {
+        let mut app = AppState::test_new();
+        app.dock_collapsed = false;
+        app.dock_open_surfaces.clear();
+        app.dock_tab = None;
+        app.view.dock_surface_card_hit_areas =
+            vec![Rect::new(80, 4, 12, 4), Rect::new(93, 4, 12, 4)];
+
+        assert_eq!(app.dock_surface_card_at(81, 5), Some(DockSurface::Terminal));
+        assert_eq!(app.dock_surface_card_at(94, 5), Some(DockSurface::Files));
+        assert_eq!(app.dock_surface_card_at(81, 9), None);
+
+        app.dock_tab = Some(DockSurface::Home);
+        assert_eq!(app.dock_surface_card_at(81, 5), None);
+    }
+
+    #[test]
+    fn diff_collapse_state_is_kept_per_file() {
+        let mut app = AppState::test_new();
+        let key = DiffCacheKey {
+            root: PathBuf::from("/repo"),
+            base: "main".into(),
+            ignore_whitespace: false,
+        };
+        app.dock_diff_cache.insert(
+            key.clone(),
+            DiffCacheEntry {
+                branch: "feature".into(),
+                files: ["one.rs", "two.rs"]
+                    .into_iter()
+                    .map(|path| DiffFileSummary {
+                        path: path.into(),
+                        display_path: path.into(),
+                        additions: 1,
+                        deletions: 0,
+                        binary: false,
+                    })
+                    .collect(),
+                contents: HashMap::new(),
+                error: None,
+            },
+        );
+        app.dock_diff_active_key = Some(key);
+
+        assert!(app.toggle_selected_dock_diff_file());
+        assert!(app.dock_diff_collapsed.contains("one.rs"));
+        assert!(!app.dock_diff_collapsed.contains("two.rs"));
+        app.dock_diff_selected = 1;
+        assert!(app.toggle_selected_dock_diff_file());
+        assert!(app.dock_diff_collapsed.contains("one.rs"));
+        assert!(app.dock_diff_collapsed.contains("two.rs"));
+        app.dock_diff_selected = 0;
+        assert!(app.toggle_selected_dock_diff_file());
+        assert!(!app.dock_diff_collapsed.contains("one.rs"));
+        assert!(app.dock_diff_collapsed.contains("two.rs"));
+    }
+}
