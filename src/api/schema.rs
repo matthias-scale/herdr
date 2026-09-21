@@ -101,6 +101,8 @@ pub enum Method {
     LoopList(EmptyParams),
     #[serde(rename = "loop.run_history")]
     LoopRunHistory(LoopRunHistoryParams),
+    #[serde(rename = "loop.findings")]
+    LoopFindings(EmptyParams),
     #[serde(rename = "symphony.list")]
     SymphonyList(EmptyParams),
     #[serde(rename = "fleet.list")]

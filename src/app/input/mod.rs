@@ -298,6 +298,9 @@ impl App {
             InputOwner::Surface(SurfaceInputOwner::LoopRunHistory) => {
                 self.handle_loop_run_history_key(key_event);
             }
+            InputOwner::Surface(SurfaceInputOwner::AloopRunLog) => {
+                self.handle_aloop_run_detail_key(key_event);
+            }
             InputOwner::Surface(SurfaceInputOwner::Usage) => {
                 self.handle_usage_view_key(key_event);
             }
@@ -1161,6 +1164,17 @@ impl App {
         }
         if key.code == KeyCode::Esc && key.modifiers.is_empty() {
             self.state.clear_loop_run_history();
+            self.state.set_server_mode(Mode::Terminal);
+        }
+        true
+    }
+
+    pub(crate) fn handle_aloop_run_detail_key(&mut self, key: KeyEvent) -> bool {
+        if self.state.aloop_run_detail.is_none() {
+            return false;
+        }
+        if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+            self.state.clear_aloop_run_detail();
             self.state.set_server_mode(Mode::Terminal);
         }
         true
@@ -6620,6 +6634,36 @@ enabled = true
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[tokio::test]
+    async fn escape_closes_aloop_run_log_through_surface_input_owner() {
+        let mut app = test_app();
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.show_aloop_run_detail(
+            "nightly".into(),
+            "ub2".into(),
+            std::sync::Arc::new(crate::aloop::RunRecord {
+                at: "2026-09-18T09:59:00Z".into(),
+                at_unix_s: 1_758_186_740,
+                duration_ms: 1_200,
+                exit: 0,
+                findings: 0,
+                stable_ids: Vec::new(),
+                log_excerpt: "clean log tail".into(),
+            }),
+        );
+
+        assert_eq!(
+            app.state.input_owner(),
+            InputOwner::Surface(SurfaceInputOwner::AloopRunLog)
+        );
+        assert!(app.terminal_input_context().is_none());
+
+        app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+
+        assert!(app.state.aloop_run_detail.is_none());
     }
 
     fn pr_action_test_app() -> (App, crate::app::state::WorkItemKey) {

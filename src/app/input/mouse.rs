@@ -1297,6 +1297,37 @@ impl AppState {
                     if let Some((host, run_id)) = crate::ui::sidebar_agent_run_at(self, mouse.row) {
                         return Some(MouseAction::OpenAgentRunLog { host, run_id });
                     }
+                    if let Some(target) =
+                        crate::ui::sidebar_aloop_target_at(self, mouse.column, mouse.row)
+                    {
+                        use crate::ui::sidebar::aloops::AloopTarget;
+                        match target {
+                            AloopTarget::Finding { key } => {
+                                self.sidebar_selected_work_group = Some(key.clone());
+                                if !self.open_sidebar_unassigned_object(&key) {
+                                    self.config_diagnostic =
+                                        Some("aloop finding is no longer available".to_string());
+                                }
+                            }
+                            AloopTarget::Loop { key, name, fold } => {
+                                if fold {
+                                    self.toggle_sidebar_group(&key);
+                                } else {
+                                    self.sidebar_selected_work_group = Some(key);
+                                    self.open_aloop_loop_history(&name);
+                                }
+                            }
+                            AloopTarget::RunLine { key } | AloopTarget::CleanFold { key } => {
+                                self.sidebar_selected_work_group = Some(key.clone());
+                                self.toggle_sidebar_group(&key);
+                            }
+                            AloopTarget::CleanRun { key, loop_name, at } => {
+                                self.sidebar_selected_work_group = Some(key);
+                                self.open_aloop_run_log(&loop_name, &at);
+                            }
+                        }
+                        return None;
+                    }
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_presses.insert(
                             source_id,

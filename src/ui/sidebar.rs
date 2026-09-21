@@ -1,3 +1,4 @@
+pub(crate) mod aloops;
 mod runs;
 #[cfg(test)]
 mod tokens;
@@ -2379,6 +2380,47 @@ pub(crate) enum SidebarRow {
         host: String,
         summary: Option<std::sync::Arc<crate::agent_runs::Summary>>,
     },
+    /// Aloops section (MAT-159): one loop group header. Selecting it opens the
+    /// loop's run-history table (AC8); the glyph cell folds the group.
+    AloopLoop {
+        key: String,
+        name: String,
+        state: Option<crate::loop_runs::LoopState>,
+        interval: Option<String>,
+        host: String,
+        collapsed: bool,
+        pending: usize,
+    },
+    /// A run that produced findings, expanded by default (AC7).
+    AloopRunLine {
+        key: String,
+        run: std::sync::Arc<crate::aloop::RunRecord>,
+        pending: usize,
+        expanded: bool,
+    },
+    /// One pending finding. Enter opens the prefilled composer, `n` dispatches
+    /// (AC4).
+    AloopFinding {
+        key: String,
+        finding: std::sync::Arc<crate::aloop::Finding>,
+    },
+    /// The fold line covering a loop's clean runs, collapsed by default (AC7).
+    AloopCleanRuns {
+        key: String,
+        count: usize,
+        last_at: String,
+        expanded: bool,
+    },
+    /// One clean run inside the expanded fold; opens its run log (AC7).
+    AloopCleanRun {
+        key: String,
+        loop_name: String,
+        run: std::sync::Arc<crate::aloop::RunRecord>,
+    },
+    /// The producer host cannot be read (AC6).
+    AloopUnreachable { host: String, error: Option<String> },
+    /// The producer answered and no finding is pending (AC6).
+    AloopEmpty,
 }
 
 pub(crate) const SNOOZED_SECTION_TITLE: &str = "Snoozed";
@@ -2389,6 +2431,9 @@ pub(crate) const FLEET_SECTION_TITLE: &str = "Fleet";
 /// pane list ever shows them. The section is the only ambient surface they get.
 pub(crate) const SYMPHONY_SECTION_TITLE: &str = "Symphony";
 pub(crate) const RUNS_SECTION_TITLE: &str = "Runs";
+/// Aloops findings and runs from the producer host (MAT-159). The count is
+/// the number of pending findings.
+pub(crate) const ALOOPS_SECTION_TITLE: &str = "Aloops";
 
 pub(crate) const NO_REPO_YET_SECTION_TITLE: &str = "No repo yet";
 pub(crate) const UNASSIGNED_PRS_SECTION_TITLE: &str = "Unassigned PRs";
@@ -2419,6 +2464,7 @@ pub(crate) fn initial_collapsed_sidebar_groups(
             SETTLED_SECTION_TITLE,
             FLEET_SECTION_TITLE,
             RUNS_SECTION_TITLE,
+            ALOOPS_SECTION_TITLE,
             SYMPHONY_SECTION_TITLE,
         ] {
             groups.insert(format!("{namespace}:{title}"));
@@ -2464,7 +2510,13 @@ pub(super) fn section_header_glyph(title: &str) -> &'static str {
 /// must survive that churn.
 pub(crate) fn section_is_collapsed(app: &AppState, title: &str) -> bool {
     let key = format!("{}:{title}", app.sidebar_group_mode.collapse_namespace());
-    app.collapsed_sidebar_groups.contains(&key)
+    if title.starts_with(aloops::ALOOP_CLEAN_KEY_PREFIX) {
+        !app.sidebar_presentation
+            .expanded_remote_host_groups
+            .contains(&key)
+    } else {
+        app.collapsed_sidebar_groups.contains(&key)
+    }
 }
 
 /// Status buckets for the Status group sort: whoever waits on a human first,
@@ -3666,6 +3718,7 @@ fn append_ordered_sidebar_blocks(
             SidebarBlock::Fleet => {}
             SidebarBlock::Ambient => {
                 runs::append_rows(app, &mut block_rows);
+                aloops::append_rows(app, &mut block_rows);
                 append_symphony_rows(app, &mut block_rows);
             }
         }
@@ -4036,6 +4089,9 @@ pub(crate) struct SidebarWorkGroupActivation {
     pub(crate) ticket: Option<crate::app::home::HomeTicketContext>,
     pub(crate) missive: Option<crate::app::home::HomeMissiveContext>,
     pub(crate) work_context_patch: crate::work_context::PaneWorkContextPatch,
+    /// The machine the dispatch targets when it is not the composer's current
+    /// selection (MAT-159: aloop findings target the producer host).
+    pub(crate) machine: Option<String>,
 }
 
 const UNLINKED_GROUP_KEY: &str = "unlinked";
@@ -4162,6 +4218,7 @@ fn ticket_activation(
             work_title: row.ticket.title.clone(),
             ..Default::default()
         },
+        machine: None,
     }
 }
 
@@ -4727,6 +4784,7 @@ pub(crate) fn sidebar_work_groups(
                         work_title: Some(conversation.subject.clone()),
                         ..Default::default()
                     },
+                    machine: None,
                 }),
             });
         }
@@ -4893,6 +4951,7 @@ pub(crate) fn sidebar_work_groups(
                                         work_title: Some(missive_subject(app, group_url)),
                                         ..Default::default()
                                     },
+                                    machine: None,
                                 }),
                             });
                             groups.len() - 1
@@ -5006,6 +5065,7 @@ fn github_activation(
             work_title: item.pr_title.clone(),
             ..Default::default()
         },
+        machine: None,
     })
 }
 
@@ -5133,6 +5193,7 @@ pub(crate) fn sidebar_unassigned_objects(
                                 repo: Some(repo),
                                 ..Default::default()
                             },
+                            machine: None,
                         },
                     },
                 )
@@ -5838,6 +5899,13 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
+        | SidebarRow::AloopLoop { .. }
+        | SidebarRow::AloopRunLine { .. }
+        | SidebarRow::AloopFinding { .. }
+        | SidebarRow::AloopCleanRuns { .. }
+        | SidebarRow::AloopCleanRun { .. }
+        | SidebarRow::AloopUnreachable { .. }
+        | SidebarRow::AloopEmpty
         | SidebarRow::AgentRun { .. } => 1,
     }
 }
@@ -5897,6 +5965,28 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
         (SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty, _)
         | (_, SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty) => 0,
         (SidebarRow::AgentRun { .. }, _) | (_, SidebarRow::AgentRun { .. }) => 0,
+        // Aloops rows are one dense list under their section header, like the
+        // Runs rows above them.
+        (
+            SidebarRow::AloopLoop { .. }
+            | SidebarRow::AloopRunLine { .. }
+            | SidebarRow::AloopFinding { .. }
+            | SidebarRow::AloopCleanRuns { .. }
+            | SidebarRow::AloopCleanRun { .. }
+            | SidebarRow::AloopUnreachable { .. }
+            | SidebarRow::AloopEmpty,
+            _,
+        )
+        | (
+            _,
+            SidebarRow::AloopLoop { .. }
+            | SidebarRow::AloopRunLine { .. }
+            | SidebarRow::AloopFinding { .. }
+            | SidebarRow::AloopCleanRuns { .. }
+            | SidebarRow::AloopCleanRun { .. }
+            | SidebarRow::AloopUnreachable { .. }
+            | SidebarRow::AloopEmpty,
+        ) => 0,
     }
 }
 
@@ -5963,6 +6053,13 @@ pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) 
         // A Symphony workflow runs on a worker, not in a workspace.
         SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
+        | SidebarRow::AloopLoop { .. }
+        | SidebarRow::AloopRunLine { .. }
+        | SidebarRow::AloopFinding { .. }
+        | SidebarRow::AloopCleanRuns { .. }
+        | SidebarRow::AloopCleanRun { .. }
+        | SidebarRow::AloopUnreachable { .. }
+        | SidebarRow::AloopEmpty
         | SidebarRow::AgentRun { .. } => false,
     }
 }
@@ -6105,6 +6202,13 @@ pub(crate) fn compute_sidebar_row_areas(
             | SidebarRow::NestedHeader { .. }
             | SidebarRow::SymphonyJob { .. }
             | SidebarRow::SymphonyEmpty
+            | SidebarRow::AloopLoop { .. }
+            | SidebarRow::AloopRunLine { .. }
+            | SidebarRow::AloopFinding { .. }
+            | SidebarRow::AloopCleanRuns { .. }
+            | SidebarRow::AloopCleanRun { .. }
+            | SidebarRow::AloopUnreachable { .. }
+            | SidebarRow::AloopEmpty
             | SidebarRow::AgentRun { .. } => {}
         }
         row_y = row_y
@@ -6735,6 +6839,14 @@ pub(crate) fn sidebar_agent_run_at(app: &AppState, row: u16) -> Option<(String, 
     runs::target_at(app, row)
 }
 
+pub(crate) fn sidebar_aloop_target_at(
+    app: &AppState,
+    col: u16,
+    row: u16,
+) -> Option<aloops::AloopTarget> {
+    aloops::target_at(app, col, row)
+}
+
 /// The placeholder row. Deliberately dim and dotless: it names no workflow, so
 /// it borrows none of the agent row's state vocabulary.
 fn render_symphony_empty(app: &AppState, frame: &mut Frame, rect: Rect) {
@@ -6835,6 +6947,9 @@ pub(crate) fn sidebar_work_group_activation(
     app: &AppState,
     key: &str,
 ) -> Option<SidebarWorkGroupActivation> {
+    if let Some(rest) = key.strip_prefix(aloops::ALOOP_FINDING_KEY_PREFIX) {
+        return aloop_finding_activation(app, rest);
+    }
     if let Some(url) = key.strip_prefix("github:") {
         let item = app
             .work_index_snapshot
@@ -6855,6 +6970,35 @@ pub(crate) fn sidebar_work_group_activation(
                 .find(|group| group.key == key)
                 .and_then(|group| group.activation)
         })
+}
+
+/// The launch context for an aloop finding (MAT-159 AC4): the composer's
+/// prompt is the finding's prompt plus its evidence, and the dispatch targets
+/// the producer host the finding was read from. Pure lookup — nothing here
+/// starts an agent (AC5).
+fn aloop_finding_activation(app: &AppState, rest: &str) -> Option<SidebarWorkGroupActivation> {
+    let (loop_name, stable_id) = rest.rsplit_once(':')?;
+    let projection = crate::aloop::project(&app.fleet_snapshot)?;
+    let finding = projection
+        .findings
+        .iter()
+        .find(|finding| finding.loop_name == loop_name && finding.stable_id == stable_id)?;
+    let mut prompt = finding.prompt.clone();
+    if !finding.evidence.trim().is_empty() {
+        prompt = format!("{prompt}\n\nEvidence:\n{}", finding.evidence);
+    }
+    let object_link = finding.url.clone().unwrap_or_else(|| finding.title.clone());
+    Some(SidebarWorkGroupActivation {
+        spawn_prompt: prompt,
+        object_link,
+        directory: None,
+        git_ref: None,
+        pr: None,
+        ticket: None,
+        missive: None,
+        work_context_patch: crate::work_context::PaneWorkContextPatch::default(),
+        machine: Some(projection.host.clone()),
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7507,6 +7651,13 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             // above already shows that a Symphony run is open.
             SidebarRow::SymphonyJob { .. }
             | SidebarRow::SymphonyEmpty
+            | SidebarRow::AloopLoop { .. }
+            | SidebarRow::AloopRunLine { .. }
+            | SidebarRow::AloopFinding { .. }
+            | SidebarRow::AloopCleanRuns { .. }
+            | SidebarRow::AloopCleanRun { .. }
+            | SidebarRow::AloopUnreachable { .. }
+            | SidebarRow::AloopEmpty
             | SidebarRow::AgentRun { .. } => {}
         }
     }
@@ -8552,6 +8703,9 @@ fn render_workspace_list(
     }
     for area in runs::areas(app, sidebar_area) {
         runs::render(app, frame, &area, symphony_now);
+    }
+    for area in aloops::areas(app, sidebar_area) {
+        aloops::render(app, frame, &area, symphony_now);
     }
     for card in tab_cards {
         render_tab_card(app, frame, &card, narrow_prefix, &row_entries);
@@ -13492,7 +13646,14 @@ pub(crate) mod tests {
                 | SidebarRow::Divider
                 | SidebarRow::SymphonyJob { .. }
                 | SidebarRow::SymphonyEmpty
-                | SidebarRow::AgentRun { .. } => None,
+                | SidebarRow::AgentRun { .. }
+                | SidebarRow::AloopLoop { .. }
+                | SidebarRow::AloopRunLine { .. }
+                | SidebarRow::AloopFinding { .. }
+                | SidebarRow::AloopCleanRuns { .. }
+                | SidebarRow::AloopCleanRun { .. }
+                | SidebarRow::AloopUnreachable { .. }
+                | SidebarRow::AloopEmpty => None,
             })
             .collect()
     }
@@ -14914,6 +15075,13 @@ pub(crate) mod tests {
                 | SidebarRow::NestedHeader { .. }
                 | SidebarRow::SymphonyJob { .. }
                 | SidebarRow::SymphonyEmpty
+                | SidebarRow::AloopLoop { .. }
+                | SidebarRow::AloopRunLine { .. }
+                | SidebarRow::AloopFinding { .. }
+                | SidebarRow::AloopCleanRuns { .. }
+                | SidebarRow::AloopCleanRun { .. }
+                | SidebarRow::AloopUnreachable { .. }
+                | SidebarRow::AloopEmpty
                 | SidebarRow::AgentRun { .. } => None,
             })
             .collect::<Vec<_>>();
@@ -14965,6 +15133,13 @@ pub(crate) mod tests {
                         ("symphony", 0, None, None)
                     }
                     SidebarRow::AgentRun { .. } => ("run", 0, None, None),
+                    SidebarRow::AloopLoop { .. }
+                    | SidebarRow::AloopRunLine { .. }
+                    | SidebarRow::AloopFinding { .. }
+                    | SidebarRow::AloopCleanRuns { .. }
+                    | SidebarRow::AloopCleanRun { .. }
+                    | SidebarRow::AloopUnreachable { .. }
+                    | SidebarRow::AloopEmpty => ("aloop", 0, None, None),
                 })
                 .collect::<Vec<_>>()
         };
@@ -17082,7 +17257,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 | SidebarRow::Divider
                 | SidebarRow::SymphonyJob { .. }
                 | SidebarRow::SymphonyEmpty
-                | SidebarRow::AgentRun { .. } => None,
+                | SidebarRow::AgentRun { .. }
+                | SidebarRow::AloopLoop { .. }
+                | SidebarRow::AloopRunLine { .. }
+                | SidebarRow::AloopFinding { .. }
+                | SidebarRow::AloopCleanRuns { .. }
+                | SidebarRow::AloopCleanRun { .. }
+                | SidebarRow::AloopUnreachable { .. }
+                | SidebarRow::AloopEmpty => None,
             })
             .collect()
     }
@@ -19711,6 +19893,53 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
     }
 
+    #[test]
+    fn ac4_aloop_finding_activates_with_prompt_evidence_and_producer_host() {
+        let mut app = AppState::test_new();
+        app.fleet_snapshot = crate::fleet::Snapshot {
+            polled: true,
+            aloop: Some(crate::aloop::ProducerSnapshot::read(
+                "ub2".to_string(),
+                crate::aloop::HostData {
+                    findings: vec![std::sync::Arc::new(crate::aloop::Finding {
+                        loop_name: "nightly".to_string(),
+                        source: "sentry".to_string(),
+                        stable_id: "abc-123".to_string(),
+                        title: "worker crashed".to_string(),
+                        url: Some("https://sentry.example/abc-123".to_string()),
+                        evidence: "stacktrace line".to_string(),
+                        prompt: "fix the crash".to_string(),
+                        created_at: "2026-09-18T09:50:00Z".to_string(),
+                        created_at_unix_s: crate::fleet::parse_utc_timestamp(
+                            "2026-09-18T09:50:00Z",
+                        )
+                        .expect("timestamp"),
+                        status: crate::aloop::FindingStatus::Pending,
+                    })],
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+
+        let activation = sidebar_work_group_activation(&app, "aloop:finding:nightly:abc-123")
+            .expect("aloop finding activation");
+        assert_eq!(
+            activation.spawn_prompt,
+            "fix the crash\n\nEvidence:\nstacktrace line"
+        );
+        assert_eq!(activation.machine.as_deref(), Some("ub2"));
+        assert_eq!(activation.object_link, "https://sentry.example/abc-123");
+        assert!(activation.directory.is_none());
+
+        // A launched finding is no longer pending, so it no longer activates.
+        if let Some(snapshot) = app.fleet_snapshot.aloop.as_mut() {
+            let finding = std::sync::Arc::make_mut(&mut snapshot.data.findings[0]);
+            finding.status = crate::aloop::FindingStatus::Launched;
+        }
+        assert!(sidebar_work_group_activation(&app, "aloop:finding:nightly:abc-123").is_none());
+    }
+
     fn sidebar_grouping_fixture() -> AppState {
         let mut workspace = Workspace::test_new("repo");
         workspace.test_add_tab(Some("review"));
@@ -21755,6 +21984,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             SNOOZED_SECTION_TITLE,
             SETTLED_SECTION_TITLE,
             RUNS_SECTION_TITLE,
+            ALOOPS_SECTION_TITLE,
             SYMPHONY_SECTION_TITLE,
         ] {
             assert!(!section_header_glyph(title).is_empty(), "{title}");
@@ -23576,7 +23806,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 | SidebarRow::Divider
                 | SidebarRow::SymphonyJob { .. }
                 | SidebarRow::SymphonyEmpty
-                | SidebarRow::AgentRun { .. } => None,
+                | SidebarRow::AgentRun { .. }
+                | SidebarRow::AloopLoop { .. }
+                | SidebarRow::AloopRunLine { .. }
+                | SidebarRow::AloopFinding { .. }
+                | SidebarRow::AloopCleanRuns { .. }
+                | SidebarRow::AloopCleanRun { .. }
+                | SidebarRow::AloopUnreachable { .. }
+                | SidebarRow::AloopEmpty => None,
             })
             .collect()
     }

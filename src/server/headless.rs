@@ -4479,6 +4479,11 @@ impl HeadlessServer {
                 .get_mut(&client_id)
                 .and_then(|client| client.loop_run_history_detail.take())
         });
+        let mut aloop_run_detail = source_is_full_app.then(|| {
+            self.clients
+                .get_mut(&client_id)
+                .and_then(|client| client.aloop_run_detail.take())
+        });
         let mut symphony_detail = source_is_full_app.then(|| {
             self.clients
                 .get_mut(&client_id)
@@ -4504,6 +4509,9 @@ impl HeadlessServer {
         }
         if let Some(detail) = &mut loop_run_history_detail {
             self.app.state.swap_loop_run_history_detail(detail);
+        }
+        if let Some(detail) = &mut aloop_run_detail {
+            self.app.state.swap_aloop_run_detail(detail);
         }
         if let Some(detail) = &mut symphony_detail {
             self.app.state.swap_symphony_detail(detail);
@@ -4556,6 +4564,9 @@ impl HeadlessServer {
         if let Some(detail) = &mut loop_run_history_detail {
             self.app.state.swap_loop_run_history_detail(detail);
         }
+        if let Some(detail) = &mut aloop_run_detail {
+            self.app.state.swap_aloop_run_detail(detail);
+        }
         if let Some(mut presentation) = sidebar_presentation {
             self.app.state.swap_sidebar_presentation(&mut presentation);
             if let Some(client) = self.clients.get_mut(&client_id) {
@@ -4571,6 +4582,11 @@ impl HeadlessServer {
         if let Some(detail) = loop_run_history_detail {
             if let Some(client) = self.clients.get_mut(&client_id) {
                 client.loop_run_history_detail = detail;
+            }
+        }
+        if let Some(detail) = aloop_run_detail {
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.aloop_run_detail = detail;
             }
         }
         if let Some(detail) = symphony_detail {
@@ -6457,6 +6473,10 @@ impl HeadlessServer {
                         .clients
                         .get_mut(&client_id)
                         .and_then(|client| client.loop_run_history_detail.take());
+                    let mut aloop_run_detail = self
+                        .clients
+                        .get_mut(&client_id)
+                        .and_then(|client| client.aloop_run_detail.take());
                     let mut symphony_detail = self
                         .clients
                         .get_mut(&client_id)
@@ -6483,6 +6503,7 @@ impl HeadlessServer {
                     self.app
                         .state
                         .swap_loop_run_history_detail(&mut loop_run_history_detail);
+                    self.app.state.swap_aloop_run_detail(&mut aloop_run_detail);
                     self.app.state.swap_symphony_detail(&mut symphony_detail);
                     self.app.state.swap_work_view(&mut work_view);
                     self.app.state.swap_usage_view(&mut usage_view);
@@ -6563,6 +6584,7 @@ impl HeadlessServer {
                     self.app
                         .state
                         .swap_loop_run_history_detail(&mut loop_run_history_detail);
+                    self.app.state.swap_aloop_run_detail(&mut aloop_run_detail);
                     self.app.state.swap_symphony_detail(&mut symphony_detail);
                     self.app.state.swap_work_view(&mut work_view);
                     self.app.state.swap_usage_view(&mut usage_view);
@@ -6575,6 +6597,7 @@ impl HeadlessServer {
                         client.sidebar_presentation = sidebar_presentation;
                         client.dock_presentation = dock_presentation;
                         client.loop_run_history_detail = loop_run_history_detail;
+                        client.aloop_run_detail = aloop_run_detail;
                         client.symphony_detail = symphony_detail;
                         client.work_view = work_view;
                         client.usage_view = usage_view;

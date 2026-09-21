@@ -1609,6 +1609,7 @@ impl App {
             Method::LoopRunHistory(params) => {
                 return self.handle_loop_run_history(request.id, params)
             }
+            Method::LoopFindings(_) => return self.handle_loop_findings(request.id),
             Method::SymphonyList(_) => return self.handle_symphony_list(request.id),
             Method::FleetList(_) => return self.handle_fleet_list(request.id),
             Method::GroupHostSnapshot(_) => return self.handle_group_host_snapshot(request.id),

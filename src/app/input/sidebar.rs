@@ -685,6 +685,45 @@ impl AppState {
         let Some(selected) = self.sidebar_selected_work_group.clone() else {
             return SidebarWorkGroupKeyAction::Ignored;
         };
+        // Aloops rows that are not findings have their own verbs (MAT-159):
+        // loop headers open the run-history table (AC8), run lines and the
+        // clean-run fold toggle, and a clean run opens its recorded log (AC7).
+        // None of them dispatch, so `n` is ignored on purpose.
+        use crate::ui::sidebar::aloops as aloop_rows;
+        if let Some(name) = selected.strip_prefix(aloop_rows::ALOOP_LOOP_KEY_PREFIX) {
+            if key.code == KeyCode::Enter && key.modifiers.is_empty() {
+                self.sidebar_selected_work_group = None;
+                self.open_aloop_loop_history(name);
+                return SidebarWorkGroupKeyAction::Consumed;
+            }
+            if key.code == KeyCode::Char('n') && key.modifiers.is_empty() {
+                self.sidebar_selected_work_group = None;
+                return SidebarWorkGroupKeyAction::Consumed;
+            }
+        } else if selected.starts_with(aloop_rows::ALOOP_RUN_KEY_PREFIX)
+            || selected.starts_with(aloop_rows::ALOOP_CLEAN_KEY_PREFIX)
+        {
+            if key.code == KeyCode::Enter && key.modifiers.is_empty() {
+                self.toggle_sidebar_group(&selected);
+                return SidebarWorkGroupKeyAction::Consumed;
+            }
+            if key.code == KeyCode::Char('n') && key.modifiers.is_empty() {
+                self.sidebar_selected_work_group = None;
+                return SidebarWorkGroupKeyAction::Consumed;
+            }
+        } else if let Some(rest) = selected.strip_prefix(aloop_rows::ALOOP_CLEAN_RUN_KEY_PREFIX) {
+            if key.code == KeyCode::Enter && key.modifiers.is_empty() {
+                self.sidebar_selected_work_group = None;
+                if let Some((loop_name, at)) = rest.split_once(':') {
+                    self.open_aloop_run_log(loop_name, at);
+                }
+                return SidebarWorkGroupKeyAction::Consumed;
+            }
+            if key.code == KeyCode::Char('n') && key.modifiers.is_empty() {
+                self.sidebar_selected_work_group = None;
+                return SidebarWorkGroupKeyAction::Consumed;
+            }
+        }
         match key.code {
             KeyCode::Enter if key.modifiers.is_empty() => {
                 self.sidebar_selected_work_group = None;
@@ -984,8 +1023,20 @@ impl AppState {
     /// scroll clamp has to run afterwards.
     pub(crate) fn toggle_sidebar_group(&mut self, title: &str) {
         let key = format!("{}:{title}", self.sidebar_group_mode.collapse_namespace());
-        let collapsed = !self.collapsed_sidebar_groups.contains(&key);
-        self.set_sidebar_group_collapsed(title, collapsed);
+        if title.starts_with(crate::ui::sidebar::aloops::ALOOP_CLEAN_KEY_PREFIX) {
+            if !self
+                .sidebar_presentation
+                .expanded_remote_host_groups
+                .remove(&key)
+            {
+                self.sidebar_presentation
+                    .expanded_remote_host_groups
+                    .insert(key);
+            }
+        } else {
+            let collapsed = !self.collapsed_sidebar_groups.contains(&key);
+            self.set_sidebar_group_collapsed(title, collapsed);
+        }
         self.workspace_scroll = crate::ui::normalized_workspace_scroll(
             self,
             self.view.sidebar_rect,
@@ -1047,6 +1098,13 @@ impl AppState {
                 | crate::ui::SidebarRow::SymphonyJob { .. }
                 | crate::ui::SidebarRow::SymphonyEmpty
                 | crate::ui::SidebarRow::Divider
+                | crate::ui::SidebarRow::AloopLoop { .. }
+                | crate::ui::SidebarRow::AloopRunLine { .. }
+                | crate::ui::SidebarRow::AloopFinding { .. }
+                | crate::ui::SidebarRow::AloopCleanRuns { .. }
+                | crate::ui::SidebarRow::AloopCleanRun { .. }
+                | crate::ui::SidebarRow::AloopUnreachable { .. }
+                | crate::ui::SidebarRow::AloopEmpty
                 | crate::ui::SidebarRow::AgentRun { .. } => None,
             })
     }
@@ -1078,6 +1136,13 @@ impl AppState {
                 | crate::ui::SidebarRow::SymphonyJob { .. }
                 | crate::ui::SidebarRow::SymphonyEmpty
                 | crate::ui::SidebarRow::Divider
+                | crate::ui::SidebarRow::AloopLoop { .. }
+                | crate::ui::SidebarRow::AloopRunLine { .. }
+                | crate::ui::SidebarRow::AloopFinding { .. }
+                | crate::ui::SidebarRow::AloopCleanRuns { .. }
+                | crate::ui::SidebarRow::AloopCleanRun { .. }
+                | crate::ui::SidebarRow::AloopUnreachable { .. }
+                | crate::ui::SidebarRow::AloopEmpty
                 | crate::ui::SidebarRow::AgentRun { .. } => None,
                 crate::ui::SidebarRow::Tab { entry, .. } => entry
                     .local_target()
@@ -2063,6 +2128,13 @@ mod tests {
                     || format!("run:{host}:empty"),
                     |summary| format!("run:{host}:{}", summary.run_id),
                 ),
+                crate::ui::SidebarRow::AloopLoop { name, .. } => format!("aloop:{name}"),
+                crate::ui::SidebarRow::AloopRunLine { key, .. }
+                | crate::ui::SidebarRow::AloopFinding { key, .. }
+                | crate::ui::SidebarRow::AloopCleanRuns { key, .. }
+                | crate::ui::SidebarRow::AloopCleanRun { key, .. } => format!("aloop:row:{key}"),
+                crate::ui::SidebarRow::AloopUnreachable { .. } => "aloop:unreachable".to_string(),
+                crate::ui::SidebarRow::AloopEmpty => "aloop:empty".to_string(),
             })
             .collect()
     }
@@ -4982,5 +5054,204 @@ mod tests {
         assert!(app.state.drag.is_none());
         let snapshot = capture_snapshot(&app.state);
         assert_eq!(snapshot.sidebar_width, Some(26));
+    }
+
+    fn aloop_key_fixture() -> crate::app::state::AppState {
+        let mut app = crate::app::state::AppState::test_new();
+        app.fleet_snapshot = crate::fleet::Snapshot {
+            polled: true,
+            aloop: Some(crate::aloop::ProducerSnapshot::read(
+                "ub2".to_string(),
+                crate::aloop::HostData {
+                    findings: vec![std::sync::Arc::new(crate::aloop::Finding {
+                        loop_name: "nightly".to_string(),
+                        source: "sentry".to_string(),
+                        stable_id: "abc-123".to_string(),
+                        title: "worker crashed".to_string(),
+                        url: None,
+                        evidence: "stacktrace line".to_string(),
+                        prompt: "fix the crash".to_string(),
+                        created_at: "2026-09-18T09:50:00Z".to_string(),
+                        created_at_unix_s: crate::fleet::parse_utc_timestamp(
+                            "2026-09-18T09:50:00Z",
+                        )
+                        .expect("timestamp"),
+                        status: crate::aloop::FindingStatus::Pending,
+                    })],
+                    loops: vec![crate::aloop::LoopRuns {
+                        loop_name: "nightly".to_string(),
+                        runs: vec![std::sync::Arc::new(crate::aloop::RunRecord {
+                            at: "2026-09-18T09:59:00Z".to_string(),
+                            at_unix_s: crate::fleet::parse_utc_timestamp("2026-09-18T09:59:00Z")
+                                .expect("timestamp"),
+                            duration_ms: 1_200,
+                            exit: 0,
+                            findings: 0,
+                            stable_ids: Vec::new(),
+                            log_excerpt: "clean log tail".to_string(),
+                        })],
+                        skipped_lines: 0,
+                    }],
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        app
+    }
+
+    #[test]
+    fn ac5_enter_on_an_aloop_finding_opens_the_composer_without_a_spawn() {
+        let mut app = aloop_key_fixture();
+        app.machines = crate::app::machines::resolve(&crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub2".to_string(),
+                target: "ub2".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        app.sidebar_selected_work_group = Some("aloop:finding:nightly:abc-123".into());
+
+        let action =
+            app.handle_sidebar_work_group_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert!(matches!(
+            action,
+            crate::app::SidebarWorkGroupKeyAction::Consumed
+        ));
+        let home = app.home.as_ref().expect("composer opened");
+        assert_eq!(home.prompt, "fix the crash\n\nEvidence:\nstacktrace line");
+        // AC4: the composer targets the finding's producer host.
+        assert_eq!(
+            home.machine().map(|machine| machine.name.as_str()),
+            Some("ub2")
+        );
+        // AC5: opening the composer never creates a pane.
+        assert!(app.workspaces.is_empty());
+        assert_eq!(app.sidebar_selected_work_group, None);
+    }
+
+    #[test]
+    fn ac4_n_on_an_aloop_finding_dispatches_to_the_producer_host() {
+        let mut app = aloop_key_fixture();
+        app.machines = crate::app::machines::resolve(&crate::config::FleetConfig {
+            hosts: vec![crate::config::FleetHostConfig {
+                name: "ub2".to_string(),
+                target: "ub2".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        app.sidebar_selected_work_group = Some("aloop:finding:nightly:abc-123".into());
+
+        let crate::app::SidebarWorkGroupKeyAction::Dispatch(plan) = app
+            .handle_sidebar_work_group_key(KeyEvent::new(
+                KeyCode::Char('n'),
+                KeyModifiers::empty(),
+            ))
+        else {
+            panic!("n should dispatch the selected finding");
+        };
+
+        assert_eq!(plan.prompt, "fix the crash\n\nEvidence:\nstacktrace line");
+        let remote = plan.remote.expect("producer host machine");
+        assert_eq!(remote.name, "ub2");
+    }
+
+    #[test]
+    fn ac8_enter_on_an_aloop_loop_header_opens_its_run_history() {
+        let mut app = aloop_key_fixture();
+        app.sidebar_selected_work_group = Some("aloop:loop:nightly".into());
+
+        let action =
+            app.handle_sidebar_work_group_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert!(matches!(
+            action,
+            crate::app::SidebarWorkGroupKeyAction::Consumed
+        ));
+        let detail = app
+            .loop_run_history_detail
+            .as_ref()
+            .expect("run history opened");
+        assert_eq!(detail.loop_id, "nightly");
+        assert_eq!(app.sidebar_selected_work_group, None);
+        // A loop header never dispatches.
+        assert!(matches!(
+            {
+                app.sidebar_selected_work_group = Some("aloop:loop:nightly".into());
+                app.handle_sidebar_work_group_key(KeyEvent::new(
+                    KeyCode::Char('n'),
+                    KeyModifiers::empty(),
+                ))
+            },
+            crate::app::SidebarWorkGroupKeyAction::Consumed
+        ));
+        assert!(app.workspaces.is_empty());
+    }
+
+    #[test]
+    fn ac7_enter_on_a_clean_run_opens_its_run_log() {
+        let mut app = aloop_key_fixture();
+        app.sidebar_selected_work_group =
+            Some("aloop:cleanrun:nightly:2026-09-18T09:59:00Z".into());
+
+        let action =
+            app.handle_sidebar_work_group_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert!(matches!(
+            action,
+            crate::app::SidebarWorkGroupKeyAction::Consumed
+        ));
+        let detail = app.aloop_run_detail.expect("run log opened");
+        assert_eq!(detail.loop_name, "nightly");
+        assert_eq!(detail.host, "ub2");
+        assert_eq!(detail.run.log_excerpt, "clean log tail");
+    }
+
+    #[test]
+    fn ac4_dispatch_fails_loudly_when_the_producer_host_is_not_a_machine() {
+        let mut app = aloop_key_fixture();
+        app.sidebar_selected_work_group = Some("aloop:finding:nightly:abc-123".into());
+
+        let action = app.handle_sidebar_work_group_key(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::empty(),
+        ));
+
+        assert!(matches!(
+            action,
+            crate::app::SidebarWorkGroupKeyAction::Consumed
+        ));
+        assert_eq!(
+            app.config_diagnostic.as_deref(),
+            Some("aloop producer host `ub2` is not a configured machine")
+        );
+        assert!(app.workspaces.is_empty());
+    }
+
+    #[test]
+    fn ac7_enter_on_a_run_line_toggles_its_fold_without_dispatching() {
+        let mut app = aloop_key_fixture();
+        let key = "aloop:run:nightly:2026-09-18T09:59:00Z".to_string();
+        app.sidebar_selected_work_group = Some(key.clone());
+
+        let action =
+            app.handle_sidebar_work_group_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert!(matches!(
+            action,
+            crate::app::SidebarWorkGroupKeyAction::Consumed
+        ));
+        assert!(app
+            .collapsed_sidebar_groups
+            .iter()
+            .any(|entry| entry.ends_with(&key)));
+        // The fold keeps the row selected so Enter toggles it back open.
+        assert_eq!(
+            app.sidebar_selected_work_group.as_deref(),
+            Some(key.as_str())
+        );
     }
 }
