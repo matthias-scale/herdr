@@ -297,7 +297,10 @@ fn render_subscription_usage(
             label,
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )];
-        if let Some(balance) = usage.credits {
+        if label == "Claude Code" {
+            header.push(Span::raw("  "));
+            header.push(Span::styled(claude_details_text(usage), style));
+        } else if let Some(balance) = usage.credits {
             let label_width = super::text::display_width(label);
             let available = usize::from(provider_area.width).saturating_sub(label_width + 2);
             header.push(Span::raw("  "));
@@ -316,6 +319,16 @@ fn render_subscription_usage(
             provider_area,
         );
     }
+}
+
+fn claude_details_text(usage: &crate::provider_usage::AccountUsage) -> String {
+    let cost = usage
+        .cost_usd
+        .map_or_else(|| "—".to_string(), |cost| format!("${cost:.2}"));
+    let remaining = usage
+        .remaining_minutes
+        .map_or_else(|| "—".to_string(), |minutes| format!("{minutes}m left"));
+    format!("cost: {cost} · {remaining}")
 }
 
 fn subscription_window_text(label: &str, window: Option<QuotaWindow>, now: i64) -> String {
@@ -1121,6 +1134,47 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected:?}\n{text}");
         }
+    }
+
+    #[test]
+    fn claude_cost_and_remaining_minutes_render_or_keep_placeholders() {
+        let now = 1_787_992_841;
+        let claude = AccountUsage {
+            five_hour: Some(QuotaWindow {
+                used_percent: 31,
+                resets_at: Some(now + 720),
+            }),
+            cost_usd: Some(56.68),
+            remaining_minutes: Some(66),
+            ..AccountUsage::default()
+        };
+        let text = render_snapshot_with_provider_usage_at(
+            120,
+            40,
+            fixture(),
+            ProviderUsageSnapshot {
+                claude,
+                ..ProviderUsageSnapshot::default()
+            },
+        );
+        assert!(text.contains("cost: $56.68 · 66m left"), "{text}");
+
+        let text = render_snapshot_with_provider_usage_at(
+            120,
+            40,
+            fixture(),
+            ProviderUsageSnapshot {
+                claude: AccountUsage {
+                    five_hour: Some(QuotaWindow {
+                        used_percent: 31,
+                        resets_at: Some(now + 720),
+                    }),
+                    ..AccountUsage::default()
+                },
+                ..ProviderUsageSnapshot::default()
+            },
+        );
+        assert!(text.contains("cost: — · —"), "{text}");
     }
 
     #[test]

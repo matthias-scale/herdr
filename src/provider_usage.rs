@@ -18,6 +18,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::OnceLock,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -34,6 +35,11 @@ const MAX_USAGE_DIRECTORIES: usize = 256;
 const MAX_USAGE_ENTRIES: usize = 4096;
 const MAX_USAGE_FILE_BYTES: u64 = 512 * 1024;
 const MAX_CREDIT_BALANCE: f64 = 1_000_000.0;
+const MAX_CCUSAGE_DISCOVERY_ENTRIES: usize = 256;
+const MAX_CCUSAGE_OUTPUT_BYTES: usize = 512 * 1024;
+const CCUSAGE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_CLAUDE_USAGE_AMOUNT: f64 = 1_000_000.0;
+const MAX_CLAUDE_REMAINING_MINUTES: u64 = 24 * 60;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 struct CodexRateLimits {
@@ -65,6 +71,34 @@ struct RawUsageWindow {
 #[derive(Debug, serde::Deserialize)]
 struct RawCredits {
     balance: Option<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawCcusageResponse {
+    blocks: Vec<RawCcusageBlock>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawCcusageBlock {
+    #[serde(rename = "isActive")]
+    is_active: bool,
+    #[serde(rename = "endTime")]
+    end_time: Option<String>,
+    #[serde(rename = "costUSD")]
+    cost_usd: Option<f64>,
+    projection: Option<RawCcusageProjection>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawCcusageProjection {
+    #[serde(rename = "remainingMinutes")]
+    remaining_minutes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ClaudeUsageDetails {
+    cost_usd: f64,
+    remaining_minutes: Option<u64>,
 }
 
 fn parse_codex_record(line: &str) -> Option<CodexRateLimits> {
@@ -173,6 +207,111 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
     era.checked_mul(146_097)?
         .checked_add(day_of_era)?
         .checked_sub(719_468)
+}
+
+fn parse_ccusage_output(output: &str, now: i64) -> Result<Option<ClaudeUsageDetails>, ()> {
+    let response: RawCcusageResponse = serde_json::from_str(output).map_err(|_| ())?;
+    let Some(block) = response.blocks.into_iter().find(|block| block.is_active) else {
+        return Ok(None);
+    };
+    let cost_usd = block
+        .cost_usd
+        .filter(|cost| cost.is_finite() && (0.0..=MAX_CLAUDE_USAGE_AMOUNT).contains(cost))
+        .ok_or(())?;
+    let resets_at = parse_utc_timestamp(block.end_time.as_deref().ok_or(())?).ok_or(())?;
+    if resets_at <= now {
+        return Ok(None);
+    }
+    let remaining_minutes = block.projection.ok_or(())?.remaining_minutes;
+    let remaining_minutes =
+        (remaining_minutes <= MAX_CLAUDE_REMAINING_MINUTES).then_some(remaining_minutes);
+    Ok(Some(ClaudeUsageDetails {
+        cost_usd,
+        remaining_minutes,
+    }))
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn discover_ccusage() -> Option<PathBuf> {
+    let path_candidate = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|directory| directory.join("ccusage"))
+        .find(|path| is_executable_file(path));
+    if path_candidate.is_some() {
+        return path_candidate;
+    }
+
+    if let Some(path) = home_path(".local/bin/ccusage") {
+        if is_executable_file(&path) {
+            return Some(path);
+        }
+    }
+
+    let root = home_path(".local/state/fnm_multishells")?;
+    let Ok(entries) = fs::read_dir(root) else {
+        return None;
+    };
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_CCUSAGE_DISCOVERY_ENTRIES {
+            break;
+        }
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Some(candidate) = entry
+            .file_type()
+            .ok()
+            .is_some_and(|file_type| file_type.is_dir())
+            .then(|| entry.path().join("bin/ccusage"))
+        else {
+            continue;
+        };
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn resolve_ccusage() -> Option<PathBuf> {
+    static CCUSAGE_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    CCUSAGE_PATH.get_or_init(discover_ccusage).clone()
+}
+
+fn load_claude_usage_details(now: i64) -> Option<ClaudeUsageDetails> {
+    let binary = resolve_ccusage()?;
+    let mut command = crate::noninteractive_process::command(binary);
+    command.args(["blocks", "--active", "--json", "--offline"]);
+    let output = crate::noninteractive_process::output_with_deadline_limited(
+        command,
+        Instant::now() + CCUSAGE_TIMEOUT,
+        MAX_CCUSAGE_OUTPUT_BYTES,
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let output = String::from_utf8(output.stdout).ok()?;
+    parse_ccusage_output(&output, now).ok().flatten()
 }
 
 fn recent_jsonl_files(root: &Path, max_files: usize) -> Result<Vec<PathBuf>, ()> {
@@ -370,6 +509,10 @@ pub(crate) struct AccountUsage {
     pub seven_day: Option<QuotaWindow>,
     /// Remaining provider credits, when the provider reports a balance.
     pub credits: Option<f64>,
+    /// Cost of the current Claude five-hour window, when reported by ccusage.
+    pub cost_usd: Option<f64>,
+    /// Minutes remaining in the current Claude five-hour window.
+    pub remaining_minutes: Option<u64>,
     /// The source is older than its freshness budget. Values render dimmed.
     pub stale: bool,
 }
@@ -899,17 +1042,21 @@ pub(crate) fn parse_claude_rate_limits(
         seven_day: window("R7", "R7_RST"),
         credits: None,
         stale: age.is_some_and(|age| age >= CLAUDE_CACHE_STALE_AFTER),
+        ..AccountUsage::default()
     }
 }
 
 fn load_claude_usage(now_unix: Option<i64>, now: Instant) -> AccountUsage {
     let path = statusline_cache_dir().join("rate-limits.env");
-    let Ok(contents) = std::fs::read_to_string(&path) else {
-        return AccountUsage::default();
-    };
-    let age = file_age(&path, now);
-    let mut usage = parse_claude_rate_limits(&contents, now_unix, age);
+    let mut usage = std::fs::read_to_string(&path).map_or_else(
+        |_| AccountUsage::default(),
+        |contents| parse_claude_rate_limits(&contents, now_unix, file_age(&path, now)),
+    );
     usage.account = claude_account_code(active_profile("CLAUDE_CONFIG_DIR", ".claude").as_deref());
+    if let Some(details) = now_unix.and_then(load_claude_usage_details) {
+        usage.cost_usd = Some(details.cost_usd);
+        usage.remaining_minutes = details.remaining_minutes;
+    }
     usage
 }
 
@@ -1054,6 +1201,7 @@ pub(crate) fn parse_kimi_usage(output: &str, now_unix: Option<i64>) -> AccountUs
         seven_day: window(raw.seven_day),
         credits: None,
         stale: false,
+        ..AccountUsage::default()
     }
 }
 
@@ -1168,6 +1316,28 @@ mod tests {
             52.0
         );
         assert_eq!(usage.credits, Some(1927.95));
+    }
+
+    #[test]
+    fn parses_ccusage_cost_and_remaining_minutes_from_active_block() {
+        let usage = parse_ccusage_output(
+            r#"{"blocks":[{"isActive":true,"endTime":"2026-09-21T14:00:00.000Z","costUSD":56.68,"projection":{"remainingMinutes":66}}]}"#,
+            parse_utc_timestamp("2026-09-21T12:00:00Z").expect("valid test timestamp"),
+        )
+        .expect("valid ccusage JSON")
+        .expect("active Claude block");
+
+        assert_eq!(usage.cost_usd, 56.68);
+        assert_eq!(usage.remaining_minutes, Some(66));
+    }
+
+    #[test]
+    fn ccusage_missing_active_block_keeps_claude_details_unavailable() {
+        assert_eq!(
+            parse_ccusage_output(r#"{"blocks":[{"isActive":false}]}"#, NOW,)
+                .expect("valid ccusage JSON"),
+            None
+        );
     }
 
     struct UsageFixture {

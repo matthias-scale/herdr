@@ -1918,6 +1918,7 @@ mod tests {
                 }),
                 credits: None,
                 stale: false,
+                ..AccountUsage::default()
             },
             codex: AccountUsage {
                 account: Some("SHQ".into()),
