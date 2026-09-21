@@ -4743,30 +4743,47 @@ mod tests {
 
         let old_url = "https://old.example/path";
         let expected = format!("X{old_url}");
-        let mut repeated_backspace = format!("aaaa {old_url}").into_bytes();
-        repeated_backspace.extend(std::iter::repeat_n(b'\x08', old_url.len() + 1));
-        repeated_backspace.extend_from_slice(b"X\nvisible-after-repeated-backspace\n");
-        for split in 0..=repeated_backspace.len() {
-            let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
-            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
-            runtime.terminal.install_link_extraction(gate.clone());
-            runtime.test_process_pty_bytes(&repeated_backspace[..split]);
-            runtime.test_process_pty_bytes(&repeated_backspace[split..]);
+        for (label, tail, visible_suffix) in [
+            (
+                "repeated backspace",
+                b"X\nvisible-after-repeated-backspace\n".as_slice(),
+                "visible-after-repeated-backspace",
+            ),
+            (
+                "backspace then carriage return",
+                b"X\rY\nvisible-after-mixed-motion\n".as_slice(),
+                "visible-after-mixed-motion",
+            ),
+        ] {
+            let mut stream = format!("aaaa {old_url}").into_bytes();
+            stream.extend(std::iter::repeat_n(b'\x08', old_url.len() + 1));
+            stream.extend_from_slice(tail);
+            for split in 0..=stream.len() {
+                let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+                let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+                runtime.terminal.install_link_extraction(gate.clone());
+                runtime.test_process_pty_bytes(&stream[..split]);
+                runtime.test_process_pty_bytes(&stream[split..]);
 
-            let rendered = runtime.visible_text();
-            assert!(
-                rendered.contains(&expected),
-                "Ghostty rendered the adjacent repaired URL at split {split}: {rendered:?}"
-            );
-            assert!(
-                rendered.contains("visible-after-repeated-backspace"),
-                "split {split}: {rendered:?}"
-            );
-            let links = gate
-                .take_links()
-                .unwrap_or_else(|| panic!("preserved offset URL at split {split}"));
-            assert_eq!(links.output_urls, [expected.as_str()], "split {split}");
-            assert!(links.osc8_urls.is_empty(), "split {split}");
+                let rendered = runtime.visible_text();
+                assert!(
+                    rendered.contains(&expected),
+                    "Ghostty rendered the adjacent URL after {label} at split {split}: {rendered:?}"
+                );
+                assert!(
+                    rendered.contains(visible_suffix),
+                    "{label} split {split}: {rendered:?}"
+                );
+                let links = gate.take_links().unwrap_or_else(|| {
+                    panic!("preserved offset URL after {label} at split {split}")
+                });
+                assert_eq!(
+                    links.output_urls,
+                    [expected.as_str()],
+                    "{label} split {split}"
+                );
+                assert!(links.osc8_urls.is_empty(), "{label} split {split}");
+            }
         }
     }
 

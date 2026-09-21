@@ -176,11 +176,8 @@ struct LinkStreamScanner {
 /// resulting overwrite so link candidates follow the cells users can see.
 #[derive(Debug)]
 struct RenderedRewrite {
-    leading_bytes: Vec<u8>,
-    leading_start_column: Option<usize>,
-    bytes: Vec<u8>,
-    start_column: usize,
-    cursor_column: usize,
+    known_cells: HashMap<u16, u8>,
+    cursor_column: u16,
     overflowed: bool,
 }
 
@@ -856,7 +853,11 @@ impl LinkStreamScanner {
             // Unwrapped printable ASCII has a one-to-one cell mapping. If a
             // candidate contains wider/combining glyphs or crossed a wrap,
             // do not guess Ghostty's width rules; discard it instead.
-            let overflowed = overflowed || !bytes.is_ascii() || cursor_column < bytes.len();
+            let cursor_column_u16 = u16::try_from(cursor_column).ok();
+            let mut overflowed = overflowed
+                || !bytes.is_ascii()
+                || cursor_column < bytes.len()
+                || cursor_column_u16.is_none();
             let start_column = if !reconcile_existing || bytes.is_empty() {
                 match motion {
                     ParsedCursorMotion::Backspace => cursor_column.saturating_sub(1),
@@ -865,12 +866,20 @@ impl LinkStreamScanner {
             } else {
                 cursor_column.saturating_sub(bytes.len())
             };
+            let mut known_cells = HashMap::with_capacity(bytes.len());
+            if !overflowed {
+                for (offset, byte) in bytes.into_iter().enumerate() {
+                    let Ok(column) = u16::try_from(start_column + offset) else {
+                        known_cells.clear();
+                        overflowed = true;
+                        break;
+                    };
+                    known_cells.insert(column, byte);
+                }
+            }
             RenderedRewrite {
-                leading_bytes: Vec::new(),
-                leading_start_column: None,
-                bytes,
-                start_column,
-                cursor_column,
+                known_cells,
+                cursor_column: cursor_column_u16.unwrap_or_default(),
                 overflowed,
             }
         });
@@ -885,17 +894,14 @@ impl LinkStreamScanner {
             self.visible = VisibleLinkState::DiscardUrl(Vec::new());
             return;
         }
-        let leading_touches_candidate = rewrite
-            .leading_start_column
-            .is_some_and(|start| start + rewrite.leading_bytes.len() == rewrite.start_column);
-        for byte in rewrite.leading_bytes {
+        let mut previous_column = None;
+        for (column, byte) in rewrite.into_sorted_cells() {
+            if previous_column.is_some_and(|previous: u16| previous.checked_add(1) != Some(column))
+            {
+                self.scan_byte(b'\n', links);
+            }
             self.scan_byte(byte, links);
-        }
-        if !leading_touches_candidate && rewrite.leading_start_column.is_some() {
-            self.scan_byte(b'\n', links);
-        }
-        for byte in rewrite.bytes {
-            self.scan_byte(byte, links);
+            previous_column = Some(column);
         }
     }
 
@@ -1003,19 +1009,20 @@ impl LinkStreamScanner {
 
     #[cfg(test)]
     fn retained_byte_count(&self) -> usize {
-        self.rendered_rewrite.as_ref().map_or(0, |rewrite| {
-            rewrite.leading_bytes.len() + rewrite.bytes.len()
-        }) + match &self.visible {
-            VisibleLinkState::Scheme(bytes)
-            | VisibleLinkState::AfterColon(bytes)
-            | VisibleLinkState::AfterSlash(bytes) => bytes.len,
-            VisibleLinkState::Url(url) => {
-                url.bytes.len() + url.trim_suffix.len() + url.pending_utf8.len()
+        self.rendered_rewrite
+            .as_ref()
+            .map_or(0, |rewrite| rewrite.known_cells.len())
+            + match &self.visible {
+                VisibleLinkState::Scheme(bytes)
+                | VisibleLinkState::AfterColon(bytes)
+                | VisibleLinkState::AfterSlash(bytes) => bytes.len,
+                VisibleLinkState::Url(url) => {
+                    url.bytes.len() + url.trim_suffix.len() + url.pending_utf8.len()
+                }
+                VisibleLinkState::Empty
+                | VisibleLinkState::InvalidScheme
+                | VisibleLinkState::DiscardUrl(_) => 0,
             }
-            VisibleLinkState::Empty
-            | VisibleLinkState::InvalidScheme
-            | VisibleLinkState::DiscardUrl(_) => 0,
-        }
     }
 
     #[cfg(test)]
@@ -1026,6 +1033,10 @@ impl LinkStreamScanner {
 
 impl RenderedRewrite {
     fn move_cursor(&mut self, motion: ParsedCursorMotion, cursor_column: usize) {
+        let Ok(cursor_column) = u16::try_from(cursor_column) else {
+            self.fail_closed();
+            return;
+        };
         self.cursor_column = match motion {
             ParsedCursorMotion::Backspace => cursor_column.saturating_sub(1),
             ParsedCursorMotion::CarriageReturn => 0,
@@ -1041,57 +1052,57 @@ impl RenderedRewrite {
             return;
         }
         for byte in bytes.iter().copied() {
-            if self.cursor_column < self.start_column {
-                if !self.write_leading(byte) {
-                    self.fail_closed();
-                    return;
+            let at_capacity = self.known_cells.len() == MAX_URL_BYTES;
+            let retained = match self.known_cells.entry(self.cursor_column) {
+                std::collections::hash_map::Entry::Occupied(mut cell) => {
+                    cell.insert(byte);
+                    true
                 }
-                self.cursor_column += 1;
-                continue;
-            }
-            let cursor = self.cursor_column - self.start_column;
-            if cursor > self.bytes.len() {
+                std::collections::hash_map::Entry::Vacant(cell) if !at_capacity => {
+                    cell.insert(byte);
+                    true
+                }
+                std::collections::hash_map::Entry::Vacant(_) => false,
+            };
+            if !retained {
                 self.fail_closed();
                 return;
             }
-            if cursor == self.bytes.len() {
-                if self.retained_len() == MAX_URL_BYTES {
-                    self.fail_closed();
-                    return;
-                }
-                self.bytes.push(byte);
-            } else {
-                self.bytes[cursor] = byte;
+            let Some(next_column) = self.cursor_column.checked_add(1) else {
+                self.fail_closed();
+                return;
+            };
+            self.cursor_column = next_column;
+        }
+    }
+
+    /// Radix-order known cells in two fixed passes over Ghostty's u16 column
+    /// domain. This keeps final replay linear without ordered insertion.
+    fn into_sorted_cells(self) -> Vec<(u16, u8)> {
+        let mut cells = self.known_cells.into_iter().collect::<Vec<_>>();
+        for shift in [0, 8] {
+            let mut counts = [0_usize; 256];
+            for (column, _) in &cells {
+                counts[usize::from((column >> shift) & 0xff)] += 1;
             }
-            self.cursor_column += 1;
+            let mut offsets = [0_usize; 256];
+            for index in 1..offsets.len() {
+                offsets[index] = offsets[index - 1] + counts[index - 1];
+            }
+            let mut ordered = vec![(0_u16, 0_u8); cells.len()];
+            for cell in cells {
+                let bucket = usize::from((cell.0 >> shift) & 0xff);
+                ordered[offsets[bucket]] = cell;
+                offsets[bucket] += 1;
+            }
+            cells = ordered;
         }
-    }
-
-    fn write_leading(&mut self, byte: u8) -> bool {
-        let start = *self.leading_start_column.get_or_insert(self.cursor_column);
-        let Some(offset) = self.cursor_column.checked_sub(start) else {
-            return false;
-        };
-        if offset < self.leading_bytes.len() {
-            self.leading_bytes[offset] = byte;
-            return true;
-        }
-        if offset != self.leading_bytes.len() || self.retained_len() == MAX_URL_BYTES {
-            return false;
-        }
-        self.leading_bytes.push(byte);
-        true
-    }
-
-    fn retained_len(&self) -> usize {
-        self.leading_bytes.len() + self.bytes.len()
+        cells
     }
 
     fn fail_closed(&mut self) {
         self.overflowed = true;
-        self.leading_bytes.clear();
-        self.leading_start_column = None;
-        self.bytes.clear();
+        self.known_cells.clear();
         self.cursor_column = 0;
     }
 }
