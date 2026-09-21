@@ -1120,7 +1120,7 @@ pub(crate) fn start_poller(
 struct HostEvidence {
     host: FleetHostConfig,
     agents: Result<Vec<AgentInfo>, String>,
-    groups: Result<crate::groups::GroupAuthoritySnapshot, String>,
+    groups: Option<Result<crate::groups::GroupAuthoritySnapshot, String>>,
     runs: Vec<Result<crate::agent_runs::Observation, String>>,
     runtime: HostRuntime,
 }
@@ -1159,7 +1159,7 @@ fn collect_snapshot_with_implicit_local(
                     name,
                     scope.spawn(move || {
                         if runs_only {
-                            fetch_local_run_host(host, timeout)
+                            fetch_local_run_host(host)
                         } else {
                             fetch_host_with(reader, host, timeout)
                         }
@@ -1177,7 +1177,7 @@ fn collect_snapshot_with_implicit_local(
                         ..FleetHostConfig::default()
                     },
                     agents: Err("host reader panicked".into()),
-                    groups: Err("group catalog reader panicked".into()),
+                    groups: Some(Err("group catalog reader panicked".into())),
                     runs: Vec::new(),
                     runtime: HostRuntime::default(),
                 },
@@ -1188,12 +1188,11 @@ fn collect_snapshot_with_implicit_local(
     snapshot_from_evidence(hosts, fleet, evidence, SystemTime::now())
 }
 
-fn fetch_local_run_host(host: FleetHostConfig, timeout: Duration) -> HostEvidence {
-    let groups = fetch_group_catalog(&api_client_for_host(&host), timeout);
+fn fetch_local_run_host(host: FleetHostConfig) -> HostEvidence {
     HostEvidence {
         host,
         agents: Ok(Vec::new()),
-        groups,
+        groups: None,
         runs: local_run_states(),
         runtime: HostRuntime::default(),
     }
@@ -1210,25 +1209,26 @@ fn snapshot_from_evidence(
     let mut hosts = Vec::with_capacity(evidence.len());
     let mut group_catalogs = Vec::with_capacity(evidence.len());
     for evidence in evidence {
-        let group_result = evidence.groups.clone();
-        group_catalogs.push(GroupCatalog {
-            host: evidence.host.name.clone(),
-            target: evidence.host.target.clone(),
-            local: evidence.host.local,
-            session: evidence.host.session.clone(),
-            socket: evidence.host.socket.clone(),
-            state: if group_result.is_ok() {
-                GroupCatalogState::Fresh
-            } else {
-                GroupCatalogState::Unavailable
-            },
-            observed_authority_id: group_result
-                .as_ref()
-                .ok()
-                .map(|snapshot| snapshot.authority_id.clone()),
-            snapshot: group_result.as_ref().ok().cloned(),
-            error: group_result.err(),
-        });
+        if let Some(group_result) = evidence.groups.clone() {
+            group_catalogs.push(GroupCatalog {
+                host: evidence.host.name.clone(),
+                target: evidence.host.target.clone(),
+                local: evidence.host.local,
+                session: evidence.host.session.clone(),
+                socket: evidence.host.socket.clone(),
+                state: if group_result.is_ok() {
+                    GroupCatalogState::Fresh
+                } else {
+                    GroupCatalogState::Unavailable
+                },
+                observed_authority_id: group_result
+                    .as_ref()
+                    .ok()
+                    .map(|snapshot| snapshot.authority_id.clone()),
+                snapshot: group_result.as_ref().ok().cloned(),
+                error: group_result.err(),
+            });
+        }
         let error = evidence.agents.as_ref().err().cloned();
         let remote_identity = (!evidence.host.local)
             .then(|| evidence.agents.as_ref().ok())
@@ -1392,7 +1392,7 @@ fn fetch_local_host(host: FleetHostConfig, timeout: Duration) -> HostEvidence {
     HostEvidence {
         host,
         agents,
-        groups,
+        groups: Some(groups),
         runs,
         runtime,
     }
@@ -1530,7 +1530,7 @@ fn fetch_remote_host(host: FleetHostConfig, timeout: Duration) -> HostEvidence {
     HostEvidence {
         host,
         agents,
-        groups,
+        groups: Some(groups),
         runs,
         runtime,
     }
@@ -2756,7 +2756,7 @@ mod tests {
             HostEvidence {
                 host,
                 agents: self.agents.clone(),
-                groups: Err("group catalog unavailable in fake reader".into()),
+                groups: Some(Err("group catalog unavailable in fake reader".into())),
                 runs: Vec::new(),
                 runtime: self.runtime.clone(),
             }
@@ -2767,7 +2767,7 @@ mod tests {
             HostEvidence {
                 host,
                 agents: self.agents.clone(),
-                groups: Err("group catalog unavailable in fake reader".into()),
+                groups: Some(Err("group catalog unavailable in fake reader".into())),
                 runs: Vec::new(),
                 runtime: self.runtime.clone(),
             }
@@ -3557,6 +3557,7 @@ mod tests {
         );
 
         assert_eq!(snapshot.hosts[0].state, HostState::Reachable);
+        assert!(snapshot.group_catalogs.is_empty());
         assert_eq!(reader.local_calls.load(Ordering::Relaxed), 0);
         assert_eq!(reader.remote_calls.load(Ordering::Relaxed), 0);
     }
@@ -3865,7 +3866,7 @@ mod tests {
             vec![HostEvidence {
                 host: configured_host.clone(),
                 agents: Ok(Vec::new()),
-                groups: Err("group catalog unavailable in run fixture".into()),
+                groups: Some(Err("group catalog unavailable in run fixture".into())),
                 runs: runs.into_iter().map(Ok).collect(),
                 runtime: HostRuntime::default(),
             }],
@@ -3952,7 +3953,7 @@ mod tests {
             vec![HostEvidence {
                 host: configured_host.clone(),
                 agents: Ok(Vec::new()),
-                groups: Err("group catalog unavailable in run fixture".into()),
+                groups: Some(Err("group catalog unavailable in run fixture".into())),
                 runs: vec![rejected],
                 runtime: HostRuntime::default(),
             }],
