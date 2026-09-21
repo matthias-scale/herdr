@@ -176,6 +176,8 @@ struct LinkStreamScanner {
 /// resulting overwrite so link candidates follow the cells users can see.
 #[derive(Debug)]
 struct RenderedRewrite {
+    leading_bytes: Vec<u8>,
+    leading_start_column: Option<usize>,
     bytes: Vec<u8>,
     start_column: usize,
     cursor_column: usize,
@@ -864,6 +866,8 @@ impl LinkStreamScanner {
                 cursor_column.saturating_sub(bytes.len())
             };
             RenderedRewrite {
+                leading_bytes: Vec::new(),
+                leading_start_column: None,
                 bytes,
                 start_column,
                 cursor_column,
@@ -880,6 +884,15 @@ impl LinkStreamScanner {
         if rewrite.overflowed {
             self.visible = VisibleLinkState::DiscardUrl(Vec::new());
             return;
+        }
+        let leading_touches_candidate = rewrite
+            .leading_start_column
+            .is_some_and(|start| start + rewrite.leading_bytes.len() == rewrite.start_column);
+        for byte in rewrite.leading_bytes {
+            self.scan_byte(byte, links);
+        }
+        if !leading_touches_candidate && rewrite.leading_start_column.is_some() {
+            self.scan_byte(b'\n', links);
         }
         for byte in rewrite.bytes {
             self.scan_byte(byte, links);
@@ -990,20 +1003,19 @@ impl LinkStreamScanner {
 
     #[cfg(test)]
     fn retained_byte_count(&self) -> usize {
-        self.rendered_rewrite
-            .as_ref()
-            .map_or(0, |rewrite| rewrite.bytes.len())
-            + match &self.visible {
-                VisibleLinkState::Scheme(bytes)
-                | VisibleLinkState::AfterColon(bytes)
-                | VisibleLinkState::AfterSlash(bytes) => bytes.len,
-                VisibleLinkState::Url(url) => {
-                    url.bytes.len() + url.trim_suffix.len() + url.pending_utf8.len()
-                }
-                VisibleLinkState::Empty
-                | VisibleLinkState::InvalidScheme
-                | VisibleLinkState::DiscardUrl(_) => 0,
+        self.rendered_rewrite.as_ref().map_or(0, |rewrite| {
+            rewrite.leading_bytes.len() + rewrite.bytes.len()
+        }) + match &self.visible {
+            VisibleLinkState::Scheme(bytes)
+            | VisibleLinkState::AfterColon(bytes)
+            | VisibleLinkState::AfterSlash(bytes) => bytes.len,
+            VisibleLinkState::Url(url) => {
+                url.bytes.len() + url.trim_suffix.len() + url.pending_utf8.len()
             }
+            VisibleLinkState::Empty
+            | VisibleLinkState::InvalidScheme
+            | VisibleLinkState::DiscardUrl(_) => 0,
+        }
     }
 
     #[cfg(test)]
@@ -1025,28 +1037,26 @@ impl RenderedRewrite {
             return;
         }
         if !bytes.is_ascii() {
-            self.overflowed = true;
-            self.bytes.clear();
-            self.cursor_column = 0;
+            self.fail_closed();
             return;
         }
         for byte in bytes.iter().copied() {
             if self.cursor_column < self.start_column {
+                if !self.write_leading(byte) {
+                    self.fail_closed();
+                    return;
+                }
                 self.cursor_column += 1;
                 continue;
             }
             let cursor = self.cursor_column - self.start_column;
             if cursor > self.bytes.len() {
-                self.overflowed = true;
-                self.bytes.clear();
-                self.cursor_column = 0;
+                self.fail_closed();
                 return;
             }
             if cursor == self.bytes.len() {
-                if self.bytes.len() == MAX_URL_BYTES {
-                    self.overflowed = true;
-                    self.bytes.clear();
-                    self.cursor_column = 0;
+                if self.retained_len() == MAX_URL_BYTES {
+                    self.fail_closed();
                     return;
                 }
                 self.bytes.push(byte);
@@ -1055,6 +1065,34 @@ impl RenderedRewrite {
             }
             self.cursor_column += 1;
         }
+    }
+
+    fn write_leading(&mut self, byte: u8) -> bool {
+        let start = *self.leading_start_column.get_or_insert(self.cursor_column);
+        let Some(offset) = self.cursor_column.checked_sub(start) else {
+            return false;
+        };
+        if offset < self.leading_bytes.len() {
+            self.leading_bytes[offset] = byte;
+            return true;
+        }
+        if offset != self.leading_bytes.len() || self.retained_len() == MAX_URL_BYTES {
+            return false;
+        }
+        self.leading_bytes.push(byte);
+        true
+    }
+
+    fn retained_len(&self) -> usize {
+        self.leading_bytes.len() + self.bytes.len()
+    }
+
+    fn fail_closed(&mut self) {
+        self.overflowed = true;
+        self.leading_bytes.clear();
+        self.leading_start_column = None;
+        self.bytes.clear();
+        self.cursor_column = 0;
     }
 }
 
@@ -2413,6 +2451,33 @@ mod tests {
         let links = gate.take_links().expect("rewritten URL at cap");
         assert_eq!(links.output_urls.len(), 1);
         assert_eq!(links.output_urls[0].len(), MAX_URL_BYTES);
+
+        let mut offset_url = prefix.to_vec();
+        offset_url.resize(MAX_URL_BYTES - 5, b'b');
+        let offset = LinkExtractionGate::default();
+        offset.observe_parsed_text(&offset_url);
+        offset.observe_parsed_carriage_return(offset_url.len() + 5);
+        offset.observe_parsed_text(b"aaaa ");
+        assert_eq!(offset.retained_byte_count(), MAX_URL_BYTES);
+        assert_eq!(
+            offset
+                .pending
+                .lock()
+                .expect("offset pending link bytes")
+                .scanner
+                .rewrite_operation_count(),
+            5,
+            "known prefix bytes count once toward rewrite work"
+        );
+        offset.observe_parsed_separator();
+        assert_eq!(
+            offset
+                .take_links()
+                .expect("offset URL at total cap")
+                .output_urls[0]
+                .len(),
+            MAX_URL_BYTES - 5
+        );
     }
 
     #[test]
