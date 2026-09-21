@@ -25,6 +25,13 @@ pub(crate) type RenderTarget = (
     ClientConnectionMode,
 );
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ClientTerminalGeometry {
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
+    pub(crate) cell_size: crate::kitty_graphics::HostCellSize,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum DeferredRender {
     #[default]
@@ -76,6 +83,8 @@ pub(crate) struct ClientConnection {
     pub(crate) usage_view: Option<crate::app::state::UsageViewState>,
     /// Last tiled-pane geometry rendered for this client. Capacity is reused across frames.
     pub(crate) retained_pane_infos: std::sync::Arc<Vec<crate::layout::PaneInfo>>,
+    /// Last terminal viewport geometry computed for this client.
+    pub(crate) terminal_geometries: HashMap<crate::terminal::TerminalId, ClientTerminalGeometry>,
     /// Whether pane PTY output owns this client's cursor on its last full frame.
     pub(crate) retained_pane_cursor: bool,
     /// Client-local host Kitty graphics cache.
@@ -161,6 +170,7 @@ impl ClientConnection {
             work_view: None,
             usage_view: None,
             retained_pane_infos: std::sync::Arc::new(Vec::new()),
+            terminal_geometries: HashMap::new(),
             retained_pane_cursor: false,
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
             direct_graphics: false,

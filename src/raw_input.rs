@@ -271,9 +271,17 @@ impl RawInputByteFramer {
 
     /// Same hold window as `host_color_query_sent`, for the XTWINOPS cell size
     /// reply. Only the Unix client sends this query.
-    #[cfg(any(unix, test))]
+    #[cfg(test)]
     pub(crate) fn host_cell_size_query_sent(&mut self) {
-        self.host_cell_size_replies_awaited = HOST_CELL_SIZE_QUERY_REPLIES;
+        self.host_cell_size_queries_sent(1);
+    }
+
+    #[cfg(any(unix, test))]
+    fn host_cell_size_queries_sent(&mut self, query_count: u64) {
+        let query_count = u16::try_from(query_count).unwrap_or(u16::MAX);
+        self.host_cell_size_replies_awaited = self
+            .host_cell_size_replies_awaited
+            .saturating_add(query_count.saturating_mul(HOST_CELL_SIZE_QUERY_REPLIES));
         self.held_pending_host_reply_esc = false;
     }
 
@@ -293,6 +301,19 @@ impl RawInputByteFramer {
         if query_generation != *seen_query_generation {
             self.host_color_query_sent();
             *seen_query_generation = query_generation;
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn sync_host_cell_size_query_generation(
+        &mut self,
+        seen_query_generation: &mut u64,
+        query_generation: &AtomicU64,
+    ) {
+        let generation = query_generation.load(Ordering::Acquire);
+        if generation != *seen_query_generation {
+            self.host_cell_size_queries_sent(generation.wrapping_sub(*seen_query_generation));
+            *seen_query_generation = generation;
         }
     }
 
@@ -1775,6 +1796,45 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_cell_size_query_generation_rearms_split_zoom_reply() {
+        let query_generation = AtomicU64::new(1);
+        let mut seen_query_generation = 0;
+        let mut framer = RawInputByteFramer::for_host_input();
+
+        framer.sync_host_cell_size_query_generation(&mut seen_query_generation, &query_generation);
+        assert!(framer.push(b"\x1b[").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(framer.push(b"6;18;9t"), vec![b"\x1b[6;18;9t".to_vec()]);
+
+        query_generation.fetch_add(1, Ordering::AcqRel);
+        framer.sync_host_cell_size_query_generation(&mut seen_query_generation, &query_generation);
+        assert!(framer.push(b"\x1b[").is_empty());
+        assert!(framer.flush_timeout().is_empty());
+        assert_eq!(framer.push(b"6;24;12t"), vec![b"\x1b[6;24;12t".to_vec()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn burst_cell_size_query_generations_keep_each_reply_armed() {
+        let query_generation = AtomicU64::new(1);
+        let mut seen_query_generation = 0;
+        let mut framer = RawInputByteFramer::for_host_input();
+
+        framer.sync_host_cell_size_query_generation(&mut seen_query_generation, &query_generation);
+        query_generation.fetch_add(1, Ordering::AcqRel);
+        framer.sync_host_cell_size_query_generation(&mut seen_query_generation, &query_generation);
+
+        assert_eq!(framer.push(b"\x1b[6;18;9t"), vec![b"\x1b[6;18;9t".to_vec()]);
+        assert!(framer.push(b"\x1b").is_empty());
+        assert!(
+            framer.flush_timeout().is_empty(),
+            "the second outstanding reply must keep its split ESC introducer armed"
+        );
+        assert_eq!(framer.push(b"[6;24;12t"), vec![b"\x1b[6;24;12t".to_vec()]);
     }
 
     #[test]

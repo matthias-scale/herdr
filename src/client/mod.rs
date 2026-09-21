@@ -1827,10 +1827,14 @@ async fn run_client_loop(
     );
     let host_color_query_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let stdin_host_color_query_generation = host_color_query_generation.clone();
+    let host_cell_size_query_generation = Arc::new(AtomicU64::new(0));
+    let stdin_host_cell_size_query_generation = host_cell_size_query_generation.clone();
     // Terminals behind ConPTY report no pixel size through the ioctl, so ask the
     // host terminal directly instead of falling back to an assumed cell size.
-    let will_query_host_cell_size = state.attach_escape.is_none()
-        && host_cell_size_query_required(state.kitty_graphics_enabled);
+    let host_cell_size_queries_enabled =
+        host_terminal_queries_enabled(state.attach_escape.is_some(), should_query_host_cell_size());
+    let will_query_host_cell_size = host_cell_size_queries_enabled
+        && host_cell_size_query_required(ioctl_cell_size().is_some());
     let stdin_quit = should_quit.clone();
     let stdin_tx = event_tx.clone();
     let stdin_mouse_capture_active = host_mouse_capture_active.clone();
@@ -1849,7 +1853,7 @@ async fn run_client_loop(
             &stdin_quit,
             will_query_host_terminal_theme,
             stdin_host_color_query_generation,
-            will_query_host_cell_size,
+            stdin_host_cell_size_query_generation,
             stdin_mouse_capture_active,
             #[cfg(unix)]
             stdin_sgr_pixels_active,
@@ -1878,17 +1882,14 @@ async fn run_client_loop(
     );
 
     if will_query_host_cell_size {
-        query_host_cell_size();
-    }
-
-    if will_query_host_cell_size {
-        query_host_cell_size();
+        query_host_cell_size(&host_cell_size_query_generation);
     }
 
     // Spawn the resize poller thread.
     let resize_quit = should_quit.clone();
     let resize_tx = event_tx.clone();
     let resize_cell_size = reported_cell_size.clone();
+    let resize_cell_size_query_generation = host_cell_size_query_generation.clone();
     let kitty_graphics_enabled = state.kitty_graphics_enabled;
     std::thread::spawn(move || {
         resize_poll_loop(
@@ -1898,7 +1899,9 @@ async fn run_client_loop(
             initial_cell_width_px,
             initial_cell_height_px,
             kitty_graphics_enabled,
+            host_cell_size_queries_enabled,
             &resize_cell_size,
+            &resize_cell_size_query_generation,
             &resize_quit,
         );
     });
@@ -3077,16 +3080,32 @@ fn unpack_cell_size(packed: u64) -> Option<(u32, u32)> {
     (width_px > 0 && height_px > 0).then_some((width_px, height_px))
 }
 
+fn client_cell_size(
+    kitty_graphics_enabled: bool,
+    ioctl_cell_size: Option<(u32, u32)>,
+    reported_cell_size: u64,
+) -> (u32, u32) {
+    ioctl_cell_size
+        .or_else(|| unpack_cell_size(reported_cell_size))
+        .unwrap_or_else(|| {
+            if kitty_graphics_enabled {
+                cell_size_fallback(0)
+            } else {
+                (0, 0)
+            }
+        })
+}
+
 fn current_terminal_geometry(
     kitty_graphics_enabled: bool,
     reported_cell_size: &AtomicU64,
 ) -> (u16, u16, u32, u32) {
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    if !kitty_graphics_enabled {
-        return (cols, rows, 0, 0);
-    }
-    let (cell_width_px, cell_height_px) = ioctl_cell_size()
-        .unwrap_or_else(|| cell_size_fallback(reported_cell_size.load(Ordering::Acquire)));
+    let (cell_width_px, cell_height_px) = client_cell_size(
+        kitty_graphics_enabled,
+        ioctl_cell_size(),
+        reported_cell_size.load(Ordering::Acquire),
+    );
     (cols, rows, cell_width_px, cell_height_px)
 }
 
@@ -3094,7 +3113,7 @@ fn current_terminal_geometry(
 /// size report can exist.
 fn initial_terminal_geometry(kitty_graphics_enabled: bool) -> (u16, u16, u32, u32, bool) {
     let geometry = current_terminal_geometry(kitty_graphics_enabled, &AtomicU64::new(0));
-    let exact_cell_size = !kitty_graphics_enabled || ioctl_cell_size().is_some();
+    let exact_cell_size = kitty_graphics_enabled && ioctl_cell_size().is_some();
     (
         geometry.0,
         geometry.1,
@@ -3125,7 +3144,9 @@ fn resize_poll_loop(
     initial_cell_width: u32,
     initial_cell_height: u32,
     kitty_graphics_enabled: bool,
+    host_cell_size_queries_enabled: bool,
     reported_cell_size: &AtomicU64,
+    host_cell_size_query_generation: &AtomicU64,
     should_quit: &Arc<AtomicBool>,
 ) {
     crate::platform::watch_terminal_resize_signal();
@@ -3138,6 +3159,13 @@ fn resize_poll_loop(
     while !should_quit.load(Ordering::Acquire) {
         std::thread::sleep(Duration::from_millis(100));
         let signalled = crate::platform::take_terminal_resize_signal();
+        if host_cell_size_query_required_after_resize(
+            signalled,
+            host_cell_size_queries_enabled,
+            ioctl_cell_size().is_some(),
+        ) {
+            query_host_cell_size(host_cell_size_query_generation);
+        }
         let new_size = current_terminal_geometry(kitty_graphics_enabled, reported_cell_size);
         if resize_report_required(signalled, new_size, last_size) {
             last_size = new_size;
@@ -3206,7 +3234,8 @@ fn write_host_terminal_appearance_mode_query(mut writer: impl io::Write) -> io::
 /// XTWINOPS request for the host terminal cell size in pixels.
 const HOST_CELL_SIZE_QUERY: &[u8] = b"\x1b[16t";
 
-fn query_host_cell_size() {
+fn query_host_cell_size(query_generation: &AtomicU64) {
+    query_generation.fetch_add(1, Ordering::AcqRel);
     let _ = write_host_cell_size_query(io::stdout());
 }
 
@@ -3214,10 +3243,17 @@ fn should_query_host_cell_size() -> bool {
     !cfg!(windows)
 }
 
-/// Only pane graphics need pixel dimensions, and only when the ioctl cannot
-/// provide them.
-fn host_cell_size_query_required(kitty_graphics_enabled: bool) -> bool {
-    kitty_graphics_enabled && should_query_host_cell_size() && ioctl_cell_size().is_none()
+/// Pane PTYs need pixel dimensions even when client-side graphics are disabled.
+fn host_cell_size_query_required(ioctl_cell_size_known: bool) -> bool {
+    should_query_host_cell_size() && !ioctl_cell_size_known
+}
+
+fn host_cell_size_query_required_after_resize(
+    signalled: bool,
+    queries_enabled: bool,
+    ioctl_cell_size_known: bool,
+) -> bool {
+    signalled && queries_enabled && !ioctl_cell_size_known
 }
 
 fn write_host_cell_size_query(mut writer: impl io::Write) -> io::Result<()> {
@@ -4036,6 +4072,38 @@ mod tests {
     #[test]
     fn host_cell_size_query_is_disabled_on_windows() {
         assert_eq!(should_query_host_cell_size(), !cfg!(windows));
+    }
+
+    #[test]
+    fn pane_resize_cell_size_is_independent_of_graphics() {
+        assert_eq!(client_cell_size(false, Some((10, 21)), 0), (10, 21));
+        assert_eq!(
+            client_cell_size(false, None, pack_cell_size(9, 18)),
+            (9, 18)
+        );
+        assert_eq!(client_cell_size(false, None, 0), (0, 0));
+    }
+
+    #[test]
+    fn host_cell_size_query_is_required_without_ioctl_geometry() {
+        assert_eq!(host_cell_size_query_required(false), !cfg!(windows));
+        assert!(!host_cell_size_query_required(true));
+    }
+
+    #[test]
+    fn font_zoom_requeries_host_cell_size_without_ioctl_geometry() {
+        assert!(host_cell_size_query_required_after_resize(
+            true, true, false
+        ));
+        assert!(!host_cell_size_query_required_after_resize(
+            false, true, false
+        ));
+        assert!(!host_cell_size_query_required_after_resize(
+            true, false, false
+        ));
+        assert!(!host_cell_size_query_required_after_resize(
+            true, true, true
+        ));
     }
 
     #[test]

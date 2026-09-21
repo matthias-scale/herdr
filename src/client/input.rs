@@ -40,7 +40,7 @@ pub fn stdin_reader_loop(
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
     host_color_query_generation: Arc<std::sync::atomic::AtomicU64>,
-    host_cell_size_query_sent: bool,
+    host_cell_size_query_generation: Arc<std::sync::atomic::AtomicU64>,
     host_mouse_capture_active: Arc<AtomicBool>,
     #[cfg(unix)] host_sgr_pixels_active: Arc<AtomicBool>,
     #[cfg(unix)] direct_response: Arc<std::sync::Mutex<super::direct_graphics::ResponseMatcher>>,
@@ -51,7 +51,7 @@ pub fn stdin_reader_loop(
         let _ = (
             host_color_query_sent,
             host_color_query_generation,
-            host_cell_size_query_sent,
+            host_cell_size_query_generation,
             host_mouse_capture_active,
         );
         windows_stdin_reader_loop(event_tx, should_quit);
@@ -63,7 +63,7 @@ pub fn stdin_reader_loop(
         should_quit,
         host_color_query_sent,
         host_color_query_generation,
-        host_cell_size_query_sent,
+        host_cell_size_query_generation,
         host_mouse_capture_active,
         host_sgr_pixels_active,
         direct_response,
@@ -77,7 +77,7 @@ fn unix_stdin_reader_loop(
     should_quit: &Arc<AtomicBool>,
     host_color_query_sent: bool,
     host_color_query_generation: Arc<std::sync::atomic::AtomicU64>,
-    host_cell_size_query_sent: bool,
+    host_cell_size_query_generation: Arc<std::sync::atomic::AtomicU64>,
     host_mouse_capture_active: Arc<AtomicBool>,
     host_sgr_pixels_active: Arc<AtomicBool>,
     direct_response: Arc<std::sync::Mutex<super::direct_graphics::ResponseMatcher>>,
@@ -92,10 +92,8 @@ fn unix_stdin_reader_loop(
         framer.enable_host_color_scheme_change_tracking();
         framer.enable_host_appearance_query_on_focus();
     }
-    if host_cell_size_query_sent {
-        framer.host_cell_size_query_sent();
-    }
     let mut seen_query_generation = host_color_query_generation.load(Ordering::Acquire);
+    let mut seen_cell_size_query_generation = 0;
     let mut pending_palette = Vec::new();
     let mut pending_mode = None;
     let mut last_geometry = None;
@@ -105,6 +103,10 @@ fn unix_stdin_reader_loop(
         framer.sync_host_color_query_generation(
             &mut seen_query_generation,
             &host_color_query_generation,
+        );
+        framer.sync_host_cell_size_query_generation(
+            &mut seen_cell_size_query_generation,
+            &host_cell_size_query_generation,
         );
         if direct_filter.has_pending()
             && stdin_read_ready(&reader, crate::raw_input::RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS)
@@ -130,6 +132,10 @@ fn unix_stdin_reader_loop(
                 framer.sync_host_color_query_generation(
                     &mut seen_query_generation,
                     &host_color_query_generation,
+                );
+                framer.sync_host_cell_size_query_generation(
+                    &mut seen_cell_size_query_generation,
+                    &host_cell_size_query_generation,
                 );
                 let sgr_pixels = *pending_mode
                     .get_or_insert_with(|| host_sgr_pixels_active.load(Ordering::Acquire));
