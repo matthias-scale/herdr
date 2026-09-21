@@ -93,6 +93,7 @@ install-hooks:
 # The vendored libghostty-vt requires zig 0.15.x (see vendor/libghostty-vt/build.zig).
 # A newer zig on PATH fails the build with a confusing comptime error, so prefer an
 # explicitly installed zig@0.15 when one exists. CI installs the same formula.
+[unix]
 build:
     #!/usr/bin/env bash
     set -euo pipefail
