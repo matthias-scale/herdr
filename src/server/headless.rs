@@ -424,6 +424,65 @@ enum AltScreenReadConflict {
     RestoreFailed,
 }
 
+/// Complete attach-local app presentation installed while one client's input
+/// is resolved. Cell and pixel input share this transaction so hit geometry
+/// cannot be computed from another client's sidebar, dock, or detail state.
+struct ClientInputPresentation {
+    sidebar: crate::app::state::SidebarPresentationState,
+    dock: crate::app::state::DockPresentationState,
+    notepad: crate::notepad::NotepadPresentationState,
+    loop_run_history_detail: Option<crate::app::state::LoopRunHistoryDetail>,
+    symphony_detail: Option<crate::app::state::SymphonyDetail>,
+    work_view: Option<crate::app::state::WorkViewState>,
+    usage_view: Option<crate::app::state::UsageViewState>,
+}
+
+impl ClientInputPresentation {
+    fn take(client: &mut ClientConnection) -> Self {
+        Self {
+            sidebar: std::mem::take(&mut client.sidebar_presentation),
+            dock: std::mem::take(&mut client.dock_presentation),
+            notepad: std::mem::take(&mut client.notepad_presentation),
+            loop_run_history_detail: client.loop_run_history_detail.take(),
+            symphony_detail: client.symphony_detail.take(),
+            work_view: client.work_view.take(),
+            usage_view: client.usage_view.take(),
+        }
+    }
+
+    fn install(&mut self, state: &mut crate::app::state::AppState) {
+        state.swap_sidebar_presentation(&mut self.sidebar);
+        state.reconcile_sidebar_presentation();
+        state.swap_dock_presentation(&mut self.dock);
+        state.reconcile_dock_home_with_focused_pane();
+        state.notepad.swap_presentation(&mut self.notepad);
+        state.swap_loop_run_history_detail(&mut self.loop_run_history_detail);
+        state.swap_symphony_detail(&mut self.symphony_detail);
+        state.swap_work_view(&mut self.work_view);
+        state.swap_usage_view(&mut self.usage_view);
+    }
+
+    fn uninstall(&mut self, state: &mut crate::app::state::AppState) {
+        state.swap_usage_view(&mut self.usage_view);
+        state.swap_work_view(&mut self.work_view);
+        state.swap_symphony_detail(&mut self.symphony_detail);
+        state.swap_loop_run_history_detail(&mut self.loop_run_history_detail);
+        state.swap_sidebar_presentation(&mut self.sidebar);
+        state.swap_dock_presentation(&mut self.dock);
+        state.notepad.swap_presentation(&mut self.notepad);
+    }
+
+    fn store(self, client: &mut ClientConnection) {
+        client.sidebar_presentation = self.sidebar;
+        client.dock_presentation = self.dock;
+        client.notepad_presentation = self.notepad;
+        client.loop_run_history_detail = self.loop_run_history_detail;
+        client.symphony_detail = self.symphony_detail;
+        client.work_view = self.work_view;
+        client.usage_view = self.usage_view;
+    }
+}
+
 /// The headless server — runs the herdr event loop without a real terminal.
 pub struct HeadlessServer {
     app: app::App,
@@ -4270,57 +4329,15 @@ impl HeadlessServer {
         let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
         // Client-local theme reports were applied above; routing them again would update every
         // pane once per palette entry instead of once per captured batch.
-        let mut sidebar_presentation = source_is_full_app.then(|| {
+        let mut input_presentation = if source_is_full_app {
             self.clients
                 .get_mut(&client_id)
-                .map(|client| std::mem::take(&mut client.sidebar_presentation))
-                .unwrap_or_default()
-        });
-        let mut dock_presentation = source_is_full_app.then(|| {
-            self.clients
-                .get_mut(&client_id)
-                .map(|client| std::mem::take(&mut client.dock_presentation))
-                .unwrap_or_default()
-        });
-        let mut loop_run_history_detail = source_is_full_app.then(|| {
-            self.clients
-                .get_mut(&client_id)
-                .and_then(|client| client.loop_run_history_detail.take())
-        });
-        let mut symphony_detail = source_is_full_app.then(|| {
-            self.clients
-                .get_mut(&client_id)
-                .and_then(|client| client.symphony_detail.take())
-        });
-        let mut work_view = source_is_full_app.then(|| {
-            self.clients
-                .get_mut(&client_id)
-                .and_then(|client| client.work_view.take())
-        });
-        let mut usage_view = source_is_full_app.then(|| {
-            self.clients
-                .get_mut(&client_id)
-                .and_then(|client| client.usage_view.take())
-        });
-        if let Some(presentation) = &mut sidebar_presentation {
-            self.app.state.swap_sidebar_presentation(presentation);
-            self.app.state.reconcile_sidebar_presentation();
-        }
-        if let Some(presentation) = &mut dock_presentation {
-            self.app.state.swap_dock_presentation(presentation);
-            self.app.state.reconcile_dock_home_with_focused_pane();
-        }
-        if let Some(detail) = &mut loop_run_history_detail {
-            self.app.state.swap_loop_run_history_detail(detail);
-        }
-        if let Some(detail) = &mut symphony_detail {
-            self.app.state.swap_symphony_detail(detail);
-        }
-        if let Some(view) = &mut work_view {
-            self.app.state.swap_work_view(view);
-        }
-        if let Some(view) = &mut usage_view {
-            self.app.state.swap_usage_view(view);
+                .map(ClientInputPresentation::take)
+        } else {
+            None
+        };
+        if let Some(presentation) = &mut input_presentation {
+            presentation.install(&mut self.app.state);
         }
         self.app.active_overlay_client_id = source_is_full_app.then_some(client_id);
         // Promotion and reconciliation are input transitions. They must see
@@ -4332,8 +4349,20 @@ impl HeadlessServer {
         } else {
             false
         };
-        if foreground_changed {
+        let input_geometry_dirty = source_is_full_app
+            && self
+                .clients
+                .get(&client_id)
+                .is_some_and(|client| client.input_geometry_dirty);
+        if foreground_changed || input_geometry_dirty {
+            // Promotion changes the effective size, but input geometry also
+            // depends on the source client's attach-local presentation. A
+            // resize computes shared runtime geometry before that presentation
+            // is swapped in, so the first input after it must refresh hit areas.
             self.resize_shared_runtime_to_effective_size_before_input();
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.input_geometry_dirty = false;
+            }
         }
         let interaction_reconciled = self
             .app
@@ -4352,48 +4381,10 @@ impl HeadlessServer {
             }
         }
         self.app.start_usage_scan_if_requested();
-        if let Some(view) = &mut usage_view {
-            self.app.state.swap_usage_view(view);
-        }
-        if let Some(view) = &mut work_view {
-            self.app.state.swap_work_view(view);
-        }
-        if let Some(detail) = &mut symphony_detail {
-            self.app.state.swap_symphony_detail(detail);
-        }
-        if let Some(detail) = &mut loop_run_history_detail {
-            self.app.state.swap_loop_run_history_detail(detail);
-        }
-        if let Some(mut presentation) = sidebar_presentation {
-            self.app.state.swap_sidebar_presentation(&mut presentation);
+        if let Some(mut presentation) = input_presentation {
+            presentation.uninstall(&mut self.app.state);
             if let Some(client) = self.clients.get_mut(&client_id) {
-                client.sidebar_presentation = presentation;
-            }
-        }
-        if let Some(mut presentation) = dock_presentation {
-            self.app.state.swap_dock_presentation(&mut presentation);
-            if let Some(client) = self.clients.get_mut(&client_id) {
-                client.dock_presentation = presentation;
-            }
-        }
-        if let Some(detail) = loop_run_history_detail {
-            if let Some(client) = self.clients.get_mut(&client_id) {
-                client.loop_run_history_detail = detail;
-            }
-        }
-        if let Some(detail) = symphony_detail {
-            if let Some(client) = self.clients.get_mut(&client_id) {
-                client.symphony_detail = detail;
-            }
-        }
-        if let Some(view) = work_view {
-            if let Some(client) = self.clients.get_mut(&client_id) {
-                client.work_view = view;
-            }
-        }
-        if let Some(view) = usage_view {
-            if let Some(client) = self.clients.get_mut(&client_id) {
-                client.usage_view = view;
+                presentation.store(client);
             }
         }
         if self.app.take_config_reloaded_from_disk() {
@@ -4947,6 +4938,7 @@ impl HeadlessServer {
                 }
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     client.terminal_size = (cols, rows);
+                    client.input_geometry_dirty = true;
                     let observed = crate::kitty_graphics::HostCellSize {
                         width_px: cell_width_px,
                         height_px: cell_height_px,
@@ -6273,6 +6265,17 @@ impl HeadlessServer {
                     self.app
                         .state
                         .swap_dock_presentation(&mut dock_presentation);
+                    let mut notepad_presentation = self
+                        .clients
+                        .get_mut(&client_id)
+                        .map(|client| std::mem::take(&mut client.notepad_presentation))
+                        .unwrap_or_default();
+                    self.app
+                        .state
+                        .notepad
+                        .swap_presentation(&mut notepad_presentation);
+                    self.app.state.reconcile_dock_home_with_focused_pane();
+                    self.app.state.reconcile_sidebar_presentation();
                     self.app
                         .state
                         .swap_loop_run_history_detail(&mut loop_run_history_detail);
@@ -6337,15 +6340,18 @@ impl HeadlessServer {
                         &self.app.state,
                         &self.app.terminal_runtimes,
                     );
+                    let hyperlink_spans =
+                        crate::server::render_stream::visible_hyperlink_spans(&self.app.state);
                     crate::render_prof::duration_since(
                         "full_render.visible_hyperlinks",
                         hyperlinks_started,
                     );
                     let frame_started = crate::render_prof::timer();
-                    let frame = FrameData::from_ratatui_buffer_with_hyperlinks(
+                    let frame = FrameData::from_ratatui_buffer_with_hyperlinks_and_spans(
                         &buffer,
                         cursor,
                         &hyperlinks,
+                        &hyperlink_spans,
                     );
                     let retained_pane_cursor =
                         !crate::server::render_stream::dock_editor_is_focused(&self.app.state);
@@ -6358,6 +6364,10 @@ impl HeadlessServer {
                         .swap_dock_presentation(&mut dock_presentation);
                     self.app
                         .state
+                        .notepad
+                        .swap_presentation(&mut notepad_presentation);
+                    self.app
+                        .state
                         .swap_loop_run_history_detail(&mut loop_run_history_detail);
                     self.app.state.swap_symphony_detail(&mut symphony_detail);
                     self.app.state.swap_work_view(&mut work_view);
@@ -6368,6 +6378,7 @@ impl HeadlessServer {
                         client.retained_pane_cursor = retained_pane_cursor;
                         client.sidebar_presentation = sidebar_presentation;
                         client.dock_presentation = dock_presentation;
+                        client.notepad_presentation = notepad_presentation;
                         client.loop_run_history_detail = loop_run_history_detail;
                         client.symphony_detail = symphony_detail;
                         client.work_view = work_view;
@@ -7346,6 +7357,7 @@ fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::SystemTime;
 
     use crate::app::remote_focus::RemoteFocusTransport;
     use crate::app::AppState;
@@ -8184,6 +8196,101 @@ esac
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn notepad_projection_is_rendered_from_each_attached_clients_presentation() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("alpha")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.ensure_test_terminals();
+        let pane_id = server.app.state.workspaces[0].focused_pane_id().unwrap();
+        let terminal_id = server.app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .unwrap()
+            .clone();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Codex),
+                crate::detect::AgentState::Working,
+            );
+        for index in 0..30 {
+            server.app.state.agent_states.observe_links(
+                pane_id,
+                [format!("https://github.com/owner/repo/pull/{index}")],
+                crate::agent_state::AgentLinkSource::Output,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_760_000_000 + index),
+            );
+        }
+        server.app.state.notepad.enabled = true;
+        server.app.state.notepad.height = 18;
+        server
+            .app
+            .state
+            .notepad
+            .set_files(vec![crate::notepad::NotepadFile {
+                path: "/notes/todo.md".into(),
+                name: "todo".into(),
+            }]);
+        server.app.state.notepad.set_body("note");
+
+        let (first_writer, _first_control, first_render) = test_client_writer();
+        let (second_writer, _second_control, second_render) = test_client_writer();
+        let mut first = ClientConnection::new(
+            (120, 40),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            Some(true),
+            2,
+            RenderEncoding::SemanticFrame,
+            Some(first_writer),
+        );
+        first.notepad_presentation.agent_tab = true;
+        first.notepad_presentation.agent_collapsed.tasks = true;
+        first.notepad_presentation.agent_scroll = 1;
+        let second = ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            Some(false),
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(second_writer),
+        );
+        server.clients.insert(1, first);
+        server.clients.insert(2, second);
+        server.foreground_client_id = Some(1);
+        server.app.full_redraw_pending = true;
+
+        server.render_and_stream();
+
+        let first_text = frame_text(&read_server_frame(
+            first_render
+                .recv_timeout(Duration::from_secs(1))
+                .expect("first client frame"),
+        ));
+        let second_text = frame_text(&read_server_frame(
+            second_render
+                .recv_timeout(Duration::from_secs(1))
+                .expect("second client frame"),
+        ));
+        assert!(first_text.contains("▸ Tasks"), "{first_text}");
+        assert!(!first_text.contains("note"), "{first_text}");
+        assert!(second_text.contains("note"), "{second_text}");
+        assert!(
+            server.clients[&1]
+                .notepad_presentation
+                .agent_collapsed
+                .tasks
+        );
+        assert!(!server.clients[&2].notepad_presentation.agent_tab);
+        assert_eq!(server.clients[&1].notepad_presentation.agent_scroll, 1);
     }
 
     fn read_server_shutdown_reason(bytes: Vec<u8>) -> Option<String> {

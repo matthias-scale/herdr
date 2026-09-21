@@ -29,8 +29,6 @@
 use std::cmp;
 use std::io::Write;
 
-use unicode_width::UnicodeWidthStr;
-
 use crate::protocol::{underline_style_from_modifier, CellData, FrameData};
 
 const REVERSED_MODIFIER: u16 = 1 << 6;
@@ -522,23 +520,7 @@ fn repeat_ime_anchor_after_sync() -> bool {
 
 /// Writes all cells in the frame (full redraw).
 fn cell_width(cell: &CellData) -> usize {
-    if is_halfwidth_katakana_voiced_grapheme(&cell.symbol) {
-        return 2;
-    }
-    cell.symbol.width()
-}
-
-fn is_halfwidth_katakana_voiced_grapheme(symbol: &str) -> bool {
-    let mut chars = symbol.chars();
-    let Some(base) = chars.next() else {
-        return false;
-    };
-    let Some(mark) = chars.next() else {
-        return false;
-    };
-    chars.next().is_none()
-        && ('\u{ff66}'..='\u{ff9d}').contains(&base)
-        && matches!(mark, '\u{ff9e}' | '\u{ff9f}')
+    crate::protocol::rendered_text_width(&cell.symbol)
 }
 
 #[derive(Clone, Copy)]

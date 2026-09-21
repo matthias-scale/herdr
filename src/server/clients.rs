@@ -66,6 +66,8 @@ pub(crate) struct ClientConnection {
     pub(crate) sidebar_presentation: crate::app::state::SidebarPresentationState,
     /// Dock layout and focus state for this attach; editor PTYs are server-owned.
     pub(crate) dock_presentation: crate::app::state::DockPresentationState,
+    /// Selected notepad projection, folds, and scroll for this attach.
+    pub(crate) notepad_presentation: crate::notepad::NotepadPresentationState,
     /// Client-local run-history detail surface, separate from server-owned receipt facts.
     pub(crate) loop_run_history_detail: Option<crate::app::state::LoopRunHistoryDetail>,
     /// Client-local Symphony dashboard selection over the server-owned snapshot.
@@ -76,6 +78,9 @@ pub(crate) struct ClientConnection {
     pub(crate) usage_view: Option<crate::app::state::UsageViewState>,
     /// Last tiled-pane geometry rendered for this client. Capacity is reused across frames.
     pub(crate) retained_pane_infos: std::sync::Arc<Vec<crate::layout::PaneInfo>>,
+    /// The client resized after its attach-local presentation was last used to
+    /// compute input hit areas.
+    pub(crate) input_geometry_dirty: bool,
     /// Whether pane PTY output owns this client's cursor on its last full frame.
     pub(crate) retained_pane_cursor: bool,
     /// Client-local host Kitty graphics cache.
@@ -156,11 +161,13 @@ impl ClientConnection {
             pending_pomodoro_presentations: VecDeque::new(),
             sidebar_presentation: crate::app::state::SidebarPresentationState::default(),
             dock_presentation: crate::app::state::DockPresentationState::default(),
+            notepad_presentation: crate::notepad::NotepadPresentationState::default(),
             loop_run_history_detail: None,
             symphony_detail: None,
             work_view: None,
             usage_view: None,
             retained_pane_infos: std::sync::Arc::new(Vec::new()),
+            input_geometry_dirty: false,
             retained_pane_cursor: false,
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
             direct_graphics: false,

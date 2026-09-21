@@ -270,7 +270,14 @@ pub(crate) fn next_coarse_change_at(observed_at: Option<Instant>, now: Instant) 
 
 pub(crate) fn next_change_at(observed_at: Option<Instant>, now: Instant) -> Option<Instant> {
     let observed_at = observed_at?;
-    let seconds = now.saturating_duration_since(observed_at).as_secs();
+    next_change_after_elapsed(now.saturating_duration_since(observed_at), now)
+}
+
+/// Compute the next label boundary from an elapsed age. Persisted wall-clock
+/// ages can exceed the platform's monotonic-clock range, so callers must not
+/// need to manufacture an `Instant` before host uptime.
+pub(crate) fn next_change_after_elapsed(elapsed: Duration, now: Instant) -> Option<Instant> {
+    let seconds = elapsed.as_secs();
     let next_elapsed = if seconds < SECONDS_PER_MINUTE {
         seconds.saturating_add(1)
     } else if seconds < SECONDS_PER_HOUR {
@@ -291,7 +298,7 @@ pub(crate) fn next_change_at(observed_at: Option<Instant>, now: Instant) -> Opti
     } else {
         return None;
     };
-    observed_at.checked_add(Duration::from_secs(next_elapsed))
+    now.checked_add(Duration::from_secs(next_elapsed).saturating_sub(elapsed))
 }
 
 #[cfg(test)]
@@ -356,6 +363,19 @@ mod tests {
         assert_eq!(
             next_change_at(Some(started), started + Duration::from_secs(7_200)),
             Some(started + Duration::from_secs(10_800))
+        );
+    }
+
+    #[test]
+    fn r361_9_elapsed_age_without_observed_instant_refreshes_at_bucket_boundary() {
+        let now = Instant::now();
+        assert_eq!(
+            next_change_after_elapsed(Duration::from_secs(75), now),
+            Some(now + Duration::from_secs(45))
+        );
+        assert_eq!(
+            next_change_after_elapsed(Duration::from_millis(75_500), now),
+            Some(now + Duration::from_millis(44_500))
         );
     }
 

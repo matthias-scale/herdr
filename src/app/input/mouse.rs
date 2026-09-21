@@ -216,13 +216,18 @@ impl AppState {
         ) {
             self.remote_agent_presses.remove(&source_id);
         }
-        if owner == InputOwner::Notepad && self.handle_notepad_mouse(&mouse) {
-            return None;
-        }
         let base_owner = matches!(
             owner,
             InputOwner::Dock(_) | InputOwner::Sidebar | InputOwner::Pane | InputOwner::None
         );
+        // The read-only agent tab deliberately does not take editor focus, but
+        // its visible rows still own pointer input over the notepad panel.
+        if (owner == InputOwner::Notepad
+            || (base_owner && rect_contains(self.view.notepad_rect, mouse.column, mouse.row)))
+            && self.handle_notepad_mouse(&mouse)
+        {
+            return None;
+        }
         if base_owner && rect_contains(self.view.pomodoro_hit_area, mouse.column, mouse.row) {
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {

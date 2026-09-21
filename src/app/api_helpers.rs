@@ -118,7 +118,7 @@ pub(super) fn pane_agent_status(
     }
 }
 
-pub(super) fn pane_agent_status_with_stale(
+pub(crate) fn pane_agent_status_with_stale(
     state: crate::detect::AgentState,
     seen: bool,
     stale: bool,

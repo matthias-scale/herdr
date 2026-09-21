@@ -30,6 +30,7 @@ mod menus;
 mod mobile;
 mod navigator;
 pub(crate) mod notepad;
+pub(crate) mod notepad_agent;
 mod onboarding;
 mod panes;
 pub(crate) mod pomodoro;
@@ -327,8 +328,46 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
-    app.view_observed_at = std::time::Instant::now();
-    app.view_observed_unix_s = crate::app::settled::unix_seconds(std::time::SystemTime::now());
+    compute_view_internal_at(
+        app,
+        terminal_runtimes,
+        area,
+        resize_panes,
+        cell_size,
+        std::time::Instant::now(),
+        crate::app::settled::unix_seconds(std::time::SystemTime::now()),
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn compute_view_at(
+    app: &mut AppState,
+    area: Rect,
+    observed_at: std::time::Instant,
+    observed_unix_s: u64,
+) {
+    compute_view_internal_at(
+        app,
+        &TerminalRuntimeRegistry::new(),
+        area,
+        true,
+        crate::kitty_graphics::HostCellSize::default(),
+        observed_at,
+        observed_unix_s,
+    );
+}
+
+fn compute_view_internal_at(
+    app: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    area: Rect,
+    resize_panes: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+    observed_at: std::time::Instant,
+    observed_unix_s: u64,
+) {
+    app.view_observed_at = observed_at;
+    app.view_observed_unix_s = observed_unix_s;
     app.reconcile_sidebar_presentation();
     app.reconcile_dock_context_tabs();
     if !app.dock_collapsed {
@@ -611,6 +650,22 @@ fn compute_view_internal(
     };
     let notepad_rect = sidebar::sidebar_notepad_rect(app, sidebar_area);
     let notepad_tab_hit_areas = notepad::notepad_tab_hit_areas(app, notepad_rect);
+    // The agent tab's rows live on the view so a click resolves to the exact
+    // row the operator saw. Deriving them takes a snapshot of the focused
+    // pane's agent state, so it only happens while the tab is showing.
+    let (notepad_agent_rows, notepad_agent_max_scroll) = if app.notepad.agent_tab
+        && notepad_rect.height > 1
+    {
+        let body = notepad::notepad_body_rect(notepad_rect);
+        let visible = usize::from(body.height).max(1);
+        let (rows, max_scroll) =
+            notepad_agent::agent_rows_window(app, body.width, app.notepad.agent_scroll, visible);
+        app.notepad.agent_scroll = app.notepad.agent_scroll.min(max_scroll);
+        (rows, max_scroll)
+    } else {
+        app.notepad.agent_scroll = 0;
+        (Vec::new(), 0)
+    };
     let pomodoro_hit_area = pomodoro::pomodoro_hit_area(app, sidebar_area);
     let notification_hit_area = pomodoro::notification_hit_area(app, sidebar_area);
     let hyperspace_rect = sidebar::sidebar_animation_rect(app, sidebar_area);
@@ -621,6 +676,25 @@ fn compute_view_internal(
         .sync_scroll(notepad::notepad_body_rect(notepad_rect).height);
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
+    let visible_notepad_agent_ages = if app.notepad.agent_tab {
+        let body = notepad::notepad_body_rect(notepad_rect);
+        notepad_agent_rows
+            .iter()
+            .take(usize::from(body.height))
+            .filter_map(|row| row.observed_at)
+            .filter_map(|observed_at| {
+                let observed_unix_s = observed_at
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .ok()?
+                    .as_secs();
+                Some(std::time::Duration::from_secs(
+                    app.view_observed_unix_s.saturating_sub(observed_unix_s),
+                ))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let DockGeometry {
         handle: dock_handle_rect,
         divider: dock_divider_rect,
@@ -763,6 +837,8 @@ fn compute_view_internal(
         sidebar_footer_missive_hit_area,
         notepad_rect,
         notepad_tab_hit_areas,
+        notepad_agent_rows,
+        notepad_agent_max_scroll,
         pomodoro_hit_area,
         notification_hit_area,
         hyperspace_rect,
@@ -772,6 +848,7 @@ fn compute_view_internal(
         agent_card_areas,
         sidebar_hover_targets,
         visible_agent_activity_instants,
+        visible_notepad_agent_ages,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
@@ -1068,6 +1145,8 @@ fn compute_mobile_view(
         sidebar_footer_missive_hit_area: Rect::default(),
         notepad_rect: Rect::default(),
         notepad_tab_hit_areas: Vec::new(),
+        notepad_agent_rows: Vec::new(),
+        notepad_agent_max_scroll: 0,
         pomodoro_hit_area: Rect::default(),
         notification_hit_area: Rect::default(),
         hyperspace_rect: Rect::default(),
@@ -1077,6 +1156,7 @@ fn compute_mobile_view(
         agent_card_areas: Vec::new(),
         sidebar_hover_targets: Vec::new(),
         visible_agent_activity_instants: Vec::new(),
+        visible_notepad_agent_ages: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
         tab_scroll_left_hit_area: Rect::default(),
