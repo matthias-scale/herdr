@@ -881,11 +881,24 @@ impl Snapshot {
             let Some(retained_authority) = retained.authority_id() else {
                 continue;
             };
-            let Some(current_connection) = self
+            let current_host = self
                 .group_catalogs
                 .iter()
                 .find(|current| current.matches_connection(retained))
-            else {
+                .map(|current| current.host.clone())
+                .or_else(|| {
+                    // Validation failures still materialize the configured
+                    // connections as hosts. Unlike an unpolled snapshot, that
+                    // is enough to retain history when no catalog was produced.
+                    if !self.polled {
+                        return None;
+                    }
+                    self.hosts
+                        .iter()
+                        .find(|host| host.matches_catalog_connection(retained))
+                        .map(|host| host.name.clone())
+                });
+            let Some(current_host) = current_host else {
                 continue;
             };
             if self.group_catalogs.iter().any(|current| {
@@ -895,7 +908,7 @@ impl Snapshot {
                 continue;
             }
             let mut history = retained.clone();
-            history.host.clone_from(&current_connection.host);
+            history.host = current_host;
             history.state = GroupCatalogState::Stale;
             history.observed_authority_id = None;
             history.error = Some("retained accepted authority history".into());
@@ -1020,6 +1033,13 @@ impl HostSnapshot {
             && self.target == configured.target
             && self.socket == configured.socket
             && self.session == configured.session
+    }
+
+    fn matches_catalog_connection(&self, catalog: &GroupCatalog) -> bool {
+        self.local == catalog.local
+            && self.target == catalog.target
+            && self.socket == catalog.socket
+            && self.session == catalog.session
     }
 }
 
@@ -3346,6 +3366,90 @@ mod tests {
             .expect("ignore cache for a different connection")
             .is_empty());
         std::fs::remove_dir_all(dir).expect("remove catalog cache fixture");
+    }
+
+    #[test]
+    fn unusable_poll_cannot_erase_retained_tombstone_history() {
+        let dir = run_fixture_dir("unusable-poll-retains-tombstone");
+        let path = dir.join("remote-group-catalogs.json");
+        let fleet = FleetConfig {
+            hosts: vec![FleetHostConfig {
+                name: "office".into(),
+                target: "machine-a".into(),
+                local: false,
+                session: Some("agents".into()),
+                socket: Some("/tmp/herdr.sock".into()),
+            }],
+            ..FleetConfig::default()
+        };
+        let accepted = Snapshot {
+            polled: true,
+            group_catalogs: vec![group_catalog(
+                "office",
+                "machine-a",
+                1,
+                2,
+                vec![group_record(1, 1, 2, true)],
+            )],
+            ..Snapshot::default()
+        };
+        save_group_catalog_cache(&path, &accepted).expect("persist accepted tombstone history");
+
+        let mut not_polled = Snapshot::unpolled(&fleet.hosts);
+        not_polled.admit_group_catalogs_from(&accepted);
+        assert!(not_polled.group_catalogs.is_empty());
+
+        let mut unusable_config = fleet.clone();
+        unusable_config.timeout_ms = 1;
+        let mut unusable_poll = poll_without_generation(&unusable_config);
+        assert!(unusable_poll.polled);
+        assert!(unusable_poll.group_catalogs.is_empty());
+        assert!(unusable_poll.hosts.iter().any(|host| {
+            host.name == "office"
+                && host.target == "machine-a"
+                && host.session.as_deref() == Some("agents")
+                && host.socket.as_deref() == Some("/tmp/herdr.sock")
+        }));
+
+        unusable_poll.admit_group_catalogs_from(&accepted);
+        save_group_catalog_cache(&path, &unusable_poll)
+            .expect("unusable poll must not erase durable history");
+
+        let retained = load_group_catalog_cache(&path, &fleet)
+            .expect("load retained history after repairing config");
+        let mut rolled_back = Snapshot {
+            polled: true,
+            group_catalogs: vec![group_catalog(
+                "office",
+                "machine-a",
+                1,
+                1,
+                vec![group_record(1, 1, 1, false)],
+            )],
+            ..Snapshot::default()
+        };
+        rolled_back.admit_group_catalogs_from(&Snapshot {
+            group_catalogs: retained,
+            ..Snapshot::default()
+        });
+
+        let catalog = &rolled_back.group_catalogs[0];
+        assert_eq!(catalog.state, GroupCatalogState::Stale);
+        assert!(matches!(
+            catalog
+                .snapshot
+                .as_ref()
+                .expect("retained accepted catalog")
+                .groups[0]
+                .state,
+            crate::groups::GroupState::Deleted
+        ));
+        assert!(catalog
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("rolled back")));
+
+        std::fs::remove_dir_all(dir).expect("remove unusable poll fixture");
     }
 
     #[test]
