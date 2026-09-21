@@ -969,10 +969,6 @@ impl LinkStreamScanner {
             self.observe_separator(links);
             return;
         };
-        if !mutation.moves_slice {
-            self.observe_separator(links);
-            return;
-        }
         let (Ok(cursor), Ok(left), Ok(right)) = (
             u16::try_from(mutation.cursor_before),
             u16::try_from(mutation.left_column),

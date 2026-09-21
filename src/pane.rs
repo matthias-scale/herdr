@@ -5232,6 +5232,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn row_mutation_noops_and_boundaries_match_ghostty_rendered_text() {
+        let prefix = "https://exam";
+        let suffix = "ple.com/path";
+        let joined_url = "https://example.com/path";
+        let noop_cases = [
+            (
+                "insert lines outside margins",
+                "\x1b[?69h\x1b[40;70s",
+                "\x1b[1L",
+            ),
+            (
+                "delete lines outside margins",
+                "\x1b[?69h\x1b[40;70s",
+                "\x1b[1M",
+            ),
+            ("scroll up outside rows", "\x1b[10;20r", "\x1b[1S"),
+            ("scroll down outside rows", "\x1b[10;20r", "\x1b[1T"),
+            (
+                "index at screen bottom",
+                "\x1b[10;20r\x1b[24;1H\t\r",
+                "\x1bD",
+            ),
+            ("reverse index at screen top", "\x1b[10;20r", "\x1bM"),
+        ];
+        for (label, setup, action) in noop_cases {
+            let stream = format!("{setup}{prefix}{action}{suffix}\n");
+            for split in 0..=stream.len() {
+                let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+                let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+                runtime.terminal.install_link_extraction(gate.clone());
+                runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+                runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+                let rendered = runtime.visible_text();
+                assert!(
+                    rendered.lines().any(|line| line.contains(joined_url)),
+                    "Ghostty preserved the continuous URL after {label} at split {split}: {rendered:?}"
+                );
+                let links = gate
+                    .take_links()
+                    .unwrap_or_else(|| panic!("continuous URL after {label} at split {split}"));
+                assert_eq!(links.output_urls, [joined_url], "{label} split {split}");
+            }
+        }
+
+        let before_url = "https://before.example/path";
+        let after_url = "https://after.example/path";
+        let boundary_cases = [
+            ("index", "\x1b[10;20r", "\x1bD"),
+            ("next line", "\x1b[10;20r", "\x1bE"),
+            ("reverse index", "\x1b[10;20r\x1b[2;1H\t\r", "\x1bM"),
+        ];
+        for (label, setup, action) in boundary_cases {
+            let stream = format!("{setup}{before_url}{action}{after_url}\n");
+            for split in 0..=stream.len() {
+                let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+                let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+                runtime.terminal.install_link_extraction(gate.clone());
+                runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+                runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+                let rendered = runtime.visible_text();
+                assert!(
+                    rendered.lines().any(|line| line.contains(before_url))
+                        && rendered.lines().any(|line| line.contains(after_url)),
+                    "Ghostty separated URLs across {label} at split {split}: {rendered:?}"
+                );
+                let links = gate
+                    .take_links()
+                    .unwrap_or_else(|| panic!("separate URLs after {label} at split {split}"));
+                assert_eq!(
+                    links.output_urls,
+                    [after_url, before_url],
+                    "{label} split {split}"
+                );
+            }
+        }
+
+        let old_url = "https://old.example/path";
+        let rewritten_url = "Xttps://old.example/path";
+        let stream = format!("\x1b[10;20r\x1b[24;1H\t\r{old_url}\x1bEX\n");
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+            let rendered = runtime.visible_text();
+            assert!(
+                !rendered.contains(old_url) && rendered.contains(rewritten_url),
+                "Ghostty applied NEL's same-row CR at split {split}: {rendered:?}"
+            );
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("rewritten NEL URL at split {split}"));
+            assert_eq!(links.output_urls, [rewritten_url], "split {split}");
+        }
+    }
+
+    #[tokio::test]
     async fn dec_special_charset_matches_ghostty_rendered_text() {
         let mapped = "https://mapped.example.test/path";
         let visible = "https://visible-after-reset.example.test/path";

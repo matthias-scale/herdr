@@ -126,7 +126,9 @@ Row-moving actions report Ghostty's affected horizontal interval and whether
 the cursor row's slice survives or is discarded. Herdr can therefore split
 known cells at partial-width scrolling margins, preserve unaffected or moved
 slices, and reject URLs whose rendered cells were split without reproducing VT
-action or region semantics in Rust.
+action or region semantics in Rust. When no cursor-row slice moves, Ghostty's
+post-action cursor snapshot distinguishes exact no-ops (continuous text), real
+row boundaries (separator), and same-row cursor changes (cursor transition).
 
 remove when: the vendored source exposes equivalent post-parse text and OSC 8
 events, including confirmed BEL, 8-bit ST, and split `ESC \\` termination, with
@@ -137,8 +139,9 @@ rendered-row identity for non-print actions not already classified as
 separators and render invalidations for all cell-mutating non-print actions,
 including bounded actual-cell mutation facts for protected
 display/line/character erases and insert/delete actions plus affected-interval
-and row-slice-survival facts for partial-width row movement, and the Herdr
-visibility regressions pass without this patch.
+and row-slice-survival facts for partial-width row movement, including exact
+no-op versus row-boundary classification, and the Herdr visibility regressions
+pass without this patch.
 
 verification:
 
@@ -147,6 +150,7 @@ just test-one matches_ghostty_rendered_text
 just test-one c1_introducers_and_st_match_ghostty_rendered_text
 just test-one cursor_overwrite_matches_ghostty_rendered_text
 just test-one partial_width_row_mutations_match_ghostty_rendered_text
+just test-one row_mutation_noops_and_boundaries_match_ghostty_rendered_text
 just test-one row_mutation_payload_requires_exact_interval_and_survival
 just test-one cancelled_osc_capture_matches_ghostty_visible_output
 just test-one osc8_target_bound_excludes_split_and_unsplit_st_bytes

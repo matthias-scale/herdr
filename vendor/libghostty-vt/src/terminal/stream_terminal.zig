@@ -268,7 +268,17 @@ pub const Handler = struct {
                 return;
             },
             .row_mutation => {
-                if (row_mutation) |mutation| self.emitParsedRowMutation(mutation) else callback(self, .render_invalidation, "");
+                if (row_mutation) |mutation| {
+                    self.emitParsedRowMutation(mutation);
+                    return;
+                }
+                const cursor_after = self.parsedCursorSnapshot();
+                if (cursor_before.eql(cursor_after)) return;
+                if (cursor_before.sameRow(cursor_after)) {
+                    self.emitParsedCursorTransition(cursor_before, cursor_after);
+                } else {
+                    callback(self, .separator, "");
+                }
                 return;
             },
         }
@@ -473,7 +483,6 @@ pub const Handler = struct {
         left: usize,
         right: usize,
         slice_survives: bool,
-        moves_slice: bool,
     };
 
     fn parsedRowMutation(
@@ -486,19 +495,11 @@ pub const Handler = struct {
         const row_inside = cursor.y >= region.top and cursor.y <= region.bottom;
         const inside = row_inside and
             cursor.x >= region.left and cursor.x <= region.right;
-        const intact: ParsedRowMutation = .{
-            .cursor_before = cursor.x,
-            .left = 0,
-            .right = 0,
-            .slice_survives = true,
-            .moves_slice = false,
-        };
         const base: ParsedRowMutation = .{
             .cursor_before = cursor.x,
             .left = region.left,
             .right = region.right + 1,
             .slice_survives = false,
-            .moves_slice = true,
         };
         const retains_scrollback = region.top == 0 and
             region.left == 0 and
@@ -506,33 +507,33 @@ pub const Handler = struct {
             !self.terminal.screens.active.no_scrollback;
         switch (action) {
             .index, .next_line => {
-                if (!inside or cursor.y != region.bottom) return intact;
+                if (!inside or cursor.y != region.bottom) return null;
                 var result = base;
                 result.slice_survives = region.top != region.bottom or retains_scrollback;
                 return result;
             },
             .reverse_index => {
-                if (!inside or cursor.y != region.top) return intact;
+                if (!inside or cursor.y != region.top) return null;
                 var result = base;
                 result.slice_survives = region.top != region.bottom;
                 return result;
             },
             .insert_lines => {
-                if (!inside or value == 0) return intact;
+                if (!inside or value == 0) return null;
                 var result = base;
                 result.slice_survives = value <= region.bottom - cursor.y;
                 return result;
             },
-            .delete_lines => return if (!inside or value == 0) intact else base,
+            .delete_lines => return if (!inside or value == 0) null else base,
             .scroll_up => {
-                if (value == 0 or !row_inside) return intact;
+                if (value == 0 or !row_inside) return null;
                 const count = @min(value, region.bottom - region.top + 1);
                 var result = base;
                 result.slice_survives = cursor.y >= region.top + count or retains_scrollback;
                 return result;
             },
             .scroll_down => {
-                if (value == 0 or !row_inside) return intact;
+                if (value == 0 or !row_inside) return null;
                 const count = @min(value, region.bottom - region.top + 1);
                 var result = base;
                 result.slice_survives = cursor.y + count <= region.bottom;
@@ -547,13 +548,12 @@ pub const Handler = struct {
         var buf: [96]u8 = undefined;
         const data = std.fmt.bufPrint(
             &buf,
-            "{d},{d},{d},{d},{d}",
+            "{d},{d},{d},{d}",
             .{
                 mutation.cursor_before,
                 mutation.left,
                 mutation.right,
                 @intFromBool(mutation.slice_survives),
-                @intFromBool(mutation.moves_slice),
             },
         ) catch return;
         callback(self, .row_mutation, data);
