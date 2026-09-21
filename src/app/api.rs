@@ -2208,6 +2208,65 @@ mod tests {
     }
 
     #[test]
+    fn reload_removing_one_connection_alias_keeps_one_catalog_and_emits_once() {
+        let host = |name: &str| crate::config::FleetHostConfig {
+            name: name.into(),
+            target: "machine-a".into(),
+            session: Some("agents".into()),
+            socket: Some("/tmp/herdr.sock".into()),
+            ..Default::default()
+        };
+        let mut config = crate::config::Config::default();
+        config.remote.fleet.hosts = vec![host("office"), host("duplicate")];
+        let hub = crate::api::EventHub::default();
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            hub.clone(),
+        );
+        let authority = crate::groups::AuthorityId::from_random_bytes([12; 16]);
+        let catalog = |name: &str| crate::fleet::GroupCatalog {
+            host: name.into(),
+            target: "machine-a".into(),
+            local: false,
+            session: Some("agents".into()),
+            socket: Some("/tmp/herdr.sock".into()),
+            state: crate::fleet::GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: authority.clone(),
+                revision: 1,
+                groups: Vec::new(),
+                memberships: Vec::new(),
+            }),
+            error: None,
+        };
+        app.state.fleet_snapshot.group_catalogs = vec![catalog("office"), catalog("duplicate")];
+
+        let mut reloaded = config;
+        reloaded.remote.fleet.hosts = vec![host("duplicate")];
+        app.apply_live_config(&reloaded, &[], &[], false);
+        app.apply_live_config(&reloaded, &[], &[], false);
+
+        assert_eq!(app.state.fleet_snapshot.group_catalogs.len(), 1);
+        assert_eq!(app.state.fleet_snapshot.group_catalogs[0].host, "duplicate");
+        let one_catalog_events = hub
+            .events_after(0)
+            .into_iter()
+            .filter(|(_, event)| {
+                matches!(
+                    event.data,
+                    crate::api::schema::EventData::AuthorityCatalogsUpdated { ref catalogs }
+                        if catalogs.len() == 1
+                )
+            })
+            .count();
+        assert_eq!(one_catalog_events, 1);
+    }
+
+    #[test]
     fn unreachable_host_retains_prior_rows_as_unknown() {
         let config = crate::config::Config::default();
         let mut app = App::new(

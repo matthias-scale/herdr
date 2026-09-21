@@ -716,6 +716,26 @@ impl Snapshot {
                     .cloned()
             })
             .collect();
+        let mut group_catalogs = Vec::new();
+        for catalog in &self.group_catalogs {
+            let Some(configured) = fleet.hosts.iter().find(|configured| {
+                catalog.target == configured.target
+                    && catalog.local == configured.local
+                    && catalog.session == configured.session
+                    && catalog.socket == configured.socket
+            }) else {
+                continue;
+            };
+            let mut retained = catalog.clone();
+            retained.host.clone_from(&configured.name);
+            if group_catalogs.iter().any(|current: &GroupCatalog| {
+                current.matches_connection(&retained)
+                    && current.authority_id() == retained.authority_id()
+            }) {
+                continue;
+            }
+            group_catalogs.push(retained);
+        }
 
         Self {
             polled: self.polled,
@@ -724,19 +744,7 @@ impl Snapshot {
             config_generation,
             configured_hosts: fleet.hosts.iter().map(|host| host.name.clone()).collect(),
             hosts,
-            group_catalogs: self
-                .group_catalogs
-                .iter()
-                .filter(|catalog| {
-                    fleet.hosts.iter().any(|configured| {
-                        catalog.target == configured.target
-                            && catalog.local == configured.local
-                            && catalog.session == configured.session
-                            && catalog.socket == configured.socket
-                    })
-                })
-                .cloned()
-                .collect(),
+            group_catalogs,
         }
     }
 
