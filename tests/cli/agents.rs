@@ -42,7 +42,7 @@ fn write_delayed_shell_and_fake_pi(
     fs::create_dir_all(&bin).unwrap();
     fs::write(
         &delayed_shell,
-        format!("#!/bin/sh\n/bin/sleep {shell_delay_seconds}\nexec /bin/sh\n"),
+        format!("#!/bin/sh\n/bin/sleep {shell_delay_seconds} &\nwait\nexec /bin/sh\n"),
     )
     .unwrap();
     fs::write(
