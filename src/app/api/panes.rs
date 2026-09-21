@@ -6574,7 +6574,7 @@ mod tests {
                 external_wait: Some("CI run 4123".into()),
                 parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
                 workers_unknown: Some(false),
-                agents: Some(0),
+                agents: Some(1),
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();

@@ -1549,7 +1549,7 @@ impl TerminalState {
         } else {
             (self.state, seen)
         };
-        if active_subagents.is_some_and(|count| count > 0) {
+        if state != AgentState::Blocked && active_subagents.is_some_and(|count| count > 0) {
             (AgentState::Working, seen)
         } else {
             let state = self
