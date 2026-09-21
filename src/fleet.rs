@@ -837,15 +837,12 @@ fn snapshot_from_evidence(
     let aloop_evidence = evidence
         .iter()
         .position(|evidence| evidence.host.name == aloop_host)
-        .map(|index| {
+        .and_then(|index| {
             let evidence = &evidence[index];
-            (
-                evidence.agents.as_ref().err().cloned(),
-                evidence
-                    .aloop
-                    .as_ref()
-                    .map(|result| result.as_ref().map_err(Clone::clone).cloned()),
-            )
+            evidence
+                .aloop
+                .as_ref()
+                .map(|result| result.as_ref().map_err(Clone::clone).cloned())
         });
     let mut hosts = Vec::with_capacity(evidence.len());
     for evidence in evidence {
@@ -946,12 +943,8 @@ fn snapshot_from_evidence(
 /// When the producer is this machine and no configured host carries its name
 /// (a differently named local host absorbs the implicit one), read the local
 /// store directly (SCH2).
-/// Per-host aloop evidence: the host-level read error (if any) plus the aloop
-/// block the host returned (only the producer host is asked).
-type AloopHostEvidence = Option<(
-    Option<String>,
-    Option<Result<crate::aloop::HostData, String>>,
-)>;
+/// Per-host aloop evidence from its independent producer-store read.
+type AloopHostEvidence = Option<Result<crate::aloop::HostData, String>>;
 
 fn aloop_snapshot_from_evidence(
     fleet: &FleetConfig,
@@ -959,18 +952,9 @@ fn aloop_snapshot_from_evidence(
 ) -> Option<crate::aloop::ProducerSnapshot> {
     let aloop_host = fleet.resolved_aloop_host();
     match evidence {
-        Some((Some(host_error), _)) => Some(crate::aloop::ProducerSnapshot::unreachable(
-            aloop_host, host_error,
-        )),
-        Some((None, Some(Ok(data)))) => {
-            Some(crate::aloop::ProducerSnapshot::read(aloop_host, data))
-        }
-        Some((None, Some(Err(error)))) => Some(crate::aloop::ProducerSnapshot::unreachable(
+        Some(Ok(data)) => Some(crate::aloop::ProducerSnapshot::read(aloop_host, data)),
+        Some(Err(error)) => Some(crate::aloop::ProducerSnapshot::unreachable(
             aloop_host, error,
-        )),
-        Some((None, None)) => Some(crate::aloop::ProducerSnapshot::unreachable(
-            aloop_host,
-            "host did not return aloop data".to_string(),
         )),
         None if aloop_host == fleet.resolved_self_name() => {
             Some(match crate::aloop::read_local_host_data() {
@@ -1176,16 +1160,23 @@ fn fetch_remote_host(
     timeout: Duration,
     include_aloop: bool,
 ) -> HostEvidence {
-    let script = remote_read_script(
-        host.socket.as_deref(),
-        host.session.as_deref(),
-        include_aloop,
-    );
+    let script = remote_read_script(host.socket.as_deref(), host.session.as_deref(), false);
     let output = run_ssh_with_timeout(&host.target, &script, timeout);
-    let (agents, runs, runtime, aloop) = match output {
-        Ok(output) => parse_remote_output(&output, include_aloop),
-        Err(error) => (Err(error), Vec::new(), HostRuntime::default(), None),
+    let (agents, runs, runtime) = match output {
+        Ok(output) => {
+            let (agents, runs, runtime, _) = parse_remote_output(&output, false);
+            (agents, runs, runtime)
+        }
+        Err(error) => (Err(error), Vec::new(), HostRuntime::default()),
     };
+    let aloop = include_aloop.then(|| {
+        run_ssh_with_timeout(
+            &host.target,
+            &remote_aloop_read_script(host.socket.as_deref(), host.session.as_deref()),
+            timeout,
+        )
+        .and_then(|output| parse_remote_aloop_output(&output))
+    });
     HostEvidence {
         host,
         agents,
@@ -1193,6 +1184,28 @@ fn fetch_remote_host(
         runtime,
         aloop,
     }
+}
+
+fn remote_aloop_read_script(socket: Option<&str>, session: Option<&str>) -> String {
+    let socket = socket
+        .map(|path| format!("export HERDR_SOCKET_PATH={}\n", shell_quote(path)))
+        .unwrap_or_default();
+    let session = session
+        .map(|name| format!("export HERDR_SESSION={}\n", shell_quote(name)))
+        .unwrap_or_default();
+    format!("set -u\n{socket}{session}{}", remote_aloop_script())
+}
+
+fn parse_remote_aloop_output(output: &[u8]) -> Result<crate::aloop::HostData, String> {
+    let Some(marker_at) = output
+        .windows(crate::aloop::REMOTE_ALOOP_MARKER.len())
+        .position(|window| window == crate::aloop::REMOTE_ALOOP_MARKER)
+    else {
+        return Err("remote output did not include the aloop marker".to_string());
+    };
+    Ok(crate::aloop::parse_remote_block(
+        &output[marker_at + crate::aloop::REMOTE_ALOOP_MARKER.len()..],
+    ))
 }
 
 fn remote_read_script(socket: Option<&str>, session: Option<&str>, include_aloop: bool) -> String {
@@ -2320,7 +2333,23 @@ fn unix_seconds(now: SystemTime) -> u64 {
 }
 
 pub(crate) fn parse_utc_timestamp(value: &str) -> Option<u64> {
-    let value = value.strip_suffix('Z')?;
+    let (value, offset_seconds) = if let Some(value) = value.strip_suffix('Z') {
+        (value, 0i64)
+    } else {
+        let offset_at = value.rfind(['+', '-'])?;
+        let (value, offset) = value.split_at(offset_at);
+        let sign = if offset.starts_with('+') { 1 } else { -1 };
+        let offset = offset.get(1..)?.split_once(':')?;
+        if offset.0.len() != 2 || offset.1.len() != 2 {
+            return None;
+        }
+        let hours = offset.0.parse::<i64>().ok()?;
+        let minutes = offset.1.parse::<i64>().ok()?;
+        if hours > 23 || minutes > 59 {
+            return None;
+        }
+        (value, sign * (hours * 3_600 + minutes * 60))
+    };
     let (date, time) = value.split_once('T')?;
     let mut date = date.split('-').map(str::parse::<i64>);
     let (year, month, day) = (date.next()?.ok()?, date.next()?.ok()?, date.next()?.ok()?);
@@ -2330,7 +2359,18 @@ pub(crate) fn parse_utc_timestamp(value: &str) -> Option<u64> {
     let mut time = time.split(':');
     let hour = time.next()?.parse::<i64>().ok()?;
     let minute = time.next()?.parse::<i64>().ok()?;
-    let second = time.next()?.split('.').next()?.parse::<i64>().ok()?;
+    let second_part = time.next()?;
+    let (second_text, fraction) = second_part
+        .split_once('.')
+        .map_or((second_part, None), |(second, fraction)| {
+            (second, Some(fraction))
+        });
+    if fraction.is_some_and(|fraction| {
+        fraction.is_empty() || !fraction.chars().all(|ch| ch.is_ascii_digit())
+    }) {
+        return None;
+    }
+    let second = second_text.parse::<i64>().ok()?;
     if time.next().is_some()
         || !(0..=23).contains(&hour)
         || !(0..=59).contains(&minute)
@@ -2354,7 +2394,11 @@ pub(crate) fn parse_utc_timestamp(value: &str) -> Option<u64> {
     let day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     let days = era * 146_097 + day_of_era - 719_468;
-    u64::try_from(days * 86_400 + hour * 3_600 + minute * 60 + second).ok()
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(hour * 3_600 + minute * 60 + second)?
+        .checked_sub(offset_seconds)?;
+    u64::try_from(seconds).ok()
 }
 
 fn format_utc_timestamp(seconds: u64) -> String {
@@ -3676,6 +3720,104 @@ mod tests {
         let timestamp = "2026-08-26T14:05:00Z";
         let seconds = parse_utc_timestamp(timestamp).unwrap();
         assert_eq!(format_utc_timestamp(seconds), timestamp);
+        assert_eq!(
+            parse_utc_timestamp("2026-08-26T16:05:00+02:00"),
+            Some(seconds)
+        );
+        assert_eq!(
+            parse_utc_timestamp("2026-08-26T09:05:00-05:00"),
+            Some(seconds)
+        );
+    }
+
+    #[test]
+    fn aloop_reachability_comes_from_its_own_read() {
+        let configured_host = host("ub2", false);
+        let fleet = FleetConfig {
+            hosts: vec![configured_host.clone()],
+            aloop_host: Some("ub2".to_string()),
+            ..FleetConfig::default()
+        };
+        let snapshot = snapshot_from_evidence(
+            std::slice::from_ref(&configured_host),
+            &fleet,
+            vec![HostEvidence {
+                host: configured_host.clone(),
+                agents: Err("agent list unavailable".to_string()),
+                runs: Vec::new(),
+                runtime: HostRuntime::default(),
+                aloop: Some(Ok(crate::aloop::HostData::default())),
+            }],
+            SystemTime::UNIX_EPOCH,
+        );
+        assert!(snapshot.aloop.expect("aloop snapshot").reachable());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maximum_fleet_and_aloop_payloads_each_fit_the_capture_budget() {
+        let root = run_fixture_dir("aloop-output-budget");
+        let bin = root.join("bin");
+        let agent_runs = root.join(".agents/runs");
+        let findings = root.join(crate::aloop::FINDINGS_RELATIVE_DIR);
+        let aloop_runs = root.join(crate::aloop::RUNS_RELATIVE_DIR);
+        let registry = root.join(crate::loop_runs::LOOP_REGISTRY_RELATIVE_PATH);
+        std::fs::create_dir_all(&bin).expect("create fake bin");
+        std::fs::create_dir_all(&agent_runs).expect("create agent runs");
+        std::fs::create_dir_all(&findings).expect("create findings");
+        std::fs::create_dir_all(&aloop_runs).expect("create aloop runs");
+        std::fs::create_dir_all(registry.parent().expect("registry parent"))
+            .expect("create registry parent");
+        for index in 0..crate::agent_runs::MAX_RUNS_PER_HOST {
+            let run = agent_runs.join(format!("run-{index:02}"));
+            std::fs::create_dir_all(&run).expect("create run directory");
+            std::fs::write(
+                run.join("state.json"),
+                vec![b'x'; crate::agent_runs::MAX_RUN_STATE_BYTES],
+            )
+            .expect("write run state");
+        }
+        for index in 0..crate::aloop::MAX_FINDING_FILES {
+            std::fs::write(
+                findings.join(format!("loop-{index:02}.json")),
+                vec![b'f'; crate::aloop::MAX_FINDING_BYTES],
+            )
+            .expect("write finding");
+        }
+        for index in 0..crate::aloop::MAX_RUN_FILES {
+            std::fs::write(
+                aloop_runs.join(format!("loop-{index:02}.jsonl")),
+                vec![b'r'; crate::aloop::MAX_RUN_FILE_BYTES],
+            )
+            .expect("write aloop run");
+        }
+        std::fs::write(&registry, vec![b'l'; crate::aloop::MAX_REGISTRY_BYTES])
+            .expect("write registry");
+        write_executable(&bin.join("herdr"), "#!/bin/sh\nexit 0\n");
+        let fake_ssh = root.join("ssh");
+        write_executable(
+            &fake_ssh,
+            &format!(
+                "#!/bin/sh\nHOME={} PATH={}:$PATH exec /bin/sh\n",
+                shell_quote(&root.display().to_string()),
+                shell_quote(&bin.display().to_string()),
+            ),
+        );
+        let fleet_read = run_ssh_program_with_timeout(
+            &fake_ssh,
+            "fixture",
+            &remote_read_script(None, None, false),
+            Duration::from_secs(10),
+        );
+        let aloop_read = run_ssh_program_with_timeout(
+            &fake_ssh,
+            "fixture",
+            &remote_aloop_read_script(None, None),
+            Duration::from_secs(10),
+        );
+        assert!(fleet_read.is_ok(), "fleet maximum payload must poll");
+        assert!(aloop_read.is_ok(), "aloop maximum payload must poll");
+        std::fs::remove_dir_all(root).expect("remove output-budget fixture");
     }
 
     #[test]

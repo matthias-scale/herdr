@@ -45,7 +45,7 @@ pub(super) fn append_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
     if !app.fleet_snapshot.polled {
         return;
     }
-    let Some(projection) = crate::aloop::project(&app.fleet_snapshot) else {
+    let Some(projection) = app.aloop_projection() else {
         return;
     };
     let collapsed = section_is_collapsed(app, ALOOPS_SECTION_TITLE);
@@ -59,15 +59,15 @@ pub(super) fn append_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
     }
     if !projection.reachable {
         rows.push(SidebarRow::AloopUnreachable {
-            host: projection.host,
-            error: projection.error,
+            host: projection.host.clone(),
+            error: projection.error.clone(),
         });
         return;
     }
     if projection.pending_count == 0 {
         rows.push(SidebarRow::AloopEmpty);
     }
-    for loop_projection in projection.loops {
+    for loop_projection in &projection.loops {
         let key = format!("{ALOOP_LOOP_KEY_PREFIX}{}", loop_projection.name);
         let collapsed = section_is_collapsed(app, &key);
         let pending = loop_projection.unlinked_findings.len()
@@ -103,7 +103,7 @@ pub(super) fn append_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
             rows.push(SidebarRow::AloopRunLine {
                 key,
                 run: Arc::clone(&run_projection.run),
-                pending: run_projection.pending.len(),
+                pending: run_projection.run.findings as usize,
                 expanded,
             });
             if expanded {
@@ -556,7 +556,7 @@ mod tests {
                     runs: vec![
                         run("2026-09-18T09:59:00Z", 0, &[]),
                         run("2026-09-18T09:58:00Z", 0, &[]),
-                        run("2026-09-18T09:50:00Z", 1, &["a1"]),
+                        run("2026-09-18T09:50:00Z", 3, &["a1"]),
                     ],
                     skipped_lines: 0,
                 }],
@@ -571,7 +571,7 @@ mod tests {
             row,
             SidebarRow::AloopRunLine {
                 expanded: true,
-                pending: 1,
+                pending: 3,
                 ..
             }
         )));

@@ -6978,7 +6978,7 @@ pub(crate) fn sidebar_work_group_activation(
 /// starts an agent (AC5).
 fn aloop_finding_activation(app: &AppState, rest: &str) -> Option<SidebarWorkGroupActivation> {
     let (loop_name, stable_id) = rest.rsplit_once(':')?;
-    let projection = crate::aloop::project(&app.fleet_snapshot)?;
+    let projection = app.aloop_projection()?;
     let finding = projection
         .findings
         .iter()

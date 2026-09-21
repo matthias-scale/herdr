@@ -21,7 +21,7 @@ mod home;
 pub(crate) mod hyperspace;
 mod inbox;
 mod keybind_help;
-mod loop_runs;
+pub(crate) mod loop_runs;
 mod markdown;
 mod menus;
 mod mobile;

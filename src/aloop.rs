@@ -14,14 +14,18 @@ use std::sync::Arc;
 
 /// Pending findings listed in the sidebar, newest first (AC2).
 pub(crate) const MAX_PENDING_FINDINGS: usize = 20;
-/// Newest finding files read per poll. Malformed or already-handled files may
-/// sit among the newest, so the read budget exceeds the display cap.
+/// Newest finding files emitted by the remote wire reader. Local reads inspect
+/// every matching file so malformed or launched files cannot hide a pending
+/// finding before the display cap is applied.
 pub(crate) const MAX_FINDING_FILES: usize = 40;
 pub(crate) const MAX_FINDING_BYTES: usize = 64 * 1024;
 /// Loop run-log files read per poll.
-pub(crate) const MAX_RUN_FILES: usize = 16;
-/// Run records kept per loop file, counted from the end.
-pub(crate) const MAX_RUN_TAIL_LINES: usize = 32;
+/// Thirty-two loop files fit the independent 4 MiB aloop read budget while
+/// covering the producer's normal loop set.
+pub(crate) const MAX_RUN_FILES: usize = 32;
+/// Run records kept per loop file, counted from the end. Sixty-four records
+/// show roughly two months of daily runs without exceeding that same budget.
+pub(crate) const MAX_RUN_TAIL_LINES: usize = 64;
 /// Bytes read from the end of one loop run file.
 pub(crate) const MAX_RUN_FILE_BYTES: usize = 32 * 1024;
 /// SCH3 bounds log_excerpt to 4 KiB; the parser enforces it defensively.
@@ -47,7 +51,7 @@ pub(crate) enum FindingStatus {
     Launched,
 }
 
-/// One finding file (SCH1), validated. `created_at` is RFC3339 UTC with `Z`;
+/// One finding file (SCH1), validated. `created_at` is an RFC3339 timestamp;
 /// the parser rejects anything else so the age column never guesses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Finding {
@@ -174,9 +178,16 @@ pub(crate) fn parse_finding(bytes: &[u8], source_label: &str) -> Result<Finding,
     }
     let source = required_string(&value, "source").map_err(invalid)?;
     let title = required_string(&value, "title").map_err(invalid)?;
+    let evidence = required_string(&value, "evidence").map_err(invalid)?;
+    let prompt = required_string(&value, "prompt").map_err(invalid)?;
+    let url = match value.get("url") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(url)) => Some(url.clone()),
+        Some(_) => return Err(invalid("`url` must be a string or null".into())),
+    };
     let created_at = required_string(&value, "created_at").map_err(invalid)?;
     let Some(created_at_unix_s) = crate::fleet::parse_utc_timestamp(&created_at) else {
-        return Err(invalid("created_at must be RFC3339 UTC with Z".into()));
+        return Err(invalid("created_at must be RFC3339".into()));
     };
     let status = match value.get("status").and_then(serde_json::Value::as_str) {
         Some("pending") => FindingStatus::Pending,
@@ -188,21 +199,9 @@ pub(crate) fn parse_finding(bytes: &[u8], source_label: &str) -> Result<Finding,
         source,
         stable_id,
         title,
-        url: value
-            .get("url")
-            .and_then(serde_json::Value::as_str)
-            .filter(|url| !url.is_empty())
-            .map(str::to_string),
-        evidence: value
-            .get("evidence")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        prompt: value
-            .get("prompt")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        url,
+        evidence,
+        prompt,
         created_at,
         created_at_unix_s,
         status,
@@ -228,7 +227,7 @@ pub(crate) fn parse_run_record(line: &[u8], source_label: &str) -> Result<RunRec
     let invalid = |reason: String| format!("invalid aloop run record {source_label}: {reason}");
     let at = required_string(&value, "at").map_err(invalid)?;
     let Some(at_unix_s) = crate::fleet::parse_utc_timestamp(&at) else {
-        return Err(invalid("at must be RFC3339 UTC with Z".into()));
+        return Err(invalid("at must be RFC3339".into()));
     };
     let duration_ms = value
         .get("duration_ms")
@@ -244,22 +243,23 @@ pub(crate) fn parse_run_record(line: &[u8], source_label: &str) -> Result<RunRec
         .and_then(serde_json::Value::as_u64)
         .and_then(|findings| u32::try_from(findings).ok())
         .ok_or_else(|| invalid("missing or out-of-range `findings`".into()))?;
-    let stable_ids = value
+    let Some(ids) = value
         .get("stable_ids")
         .and_then(serde_json::Value::as_array)
-        .map(|ids| {
-            ids.iter()
-                .filter_map(serde_json::Value::as_str)
-                .filter(|id| valid_name_part(id))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    let log_excerpt = value
-        .get("log_excerpt")
-        .and_then(serde_json::Value::as_str)
-        .map(|text| truncate_bytes_utf8(text, MAX_LOG_EXCERPT_BYTES))
-        .unwrap_or_default();
+    else {
+        return Err(invalid("missing or mistyped `stable_ids`".into()));
+    };
+    let mut stable_ids = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(id) = id.as_str().filter(|id| valid_name_part(id)) else {
+            return Err(invalid("`stable_ids` must contain valid names".into()));
+        };
+        stable_ids.push(id.to_string());
+    }
+    let Some(log_excerpt) = value.get("log_excerpt").and_then(serde_json::Value::as_str) else {
+        return Err(invalid("missing or mistyped `log_excerpt`".into()));
+    };
+    let log_excerpt = truncate_bytes_utf8(log_excerpt, MAX_LOG_EXCERPT_BYTES);
     Ok(RunRecord {
         at,
         at_unix_s,
@@ -371,7 +371,7 @@ fn newest_first_json_files(dir: &Path, extension: &str, cap: usize) -> Vec<PathB
 pub(crate) fn read_findings_dir(dir: &Path) -> (Vec<Arc<Finding>>, u64) {
     let mut findings = Vec::new();
     let mut skipped = 0u64;
-    for path in newest_first_json_files(dir, "json", MAX_FINDING_FILES) {
+    for path in newest_first_json_files(dir, "json", usize::MAX) {
         let label = path.display().to_string();
         match read_capped_file(&path, MAX_FINDING_BYTES)
             .and_then(|bytes| parse_finding(&bytes, &label))
@@ -451,7 +451,16 @@ pub(crate) fn parse_remote_block(bytes: &[u8]) -> HostData {
         .copied()
         .unwrap_or(bytes.len());
 
-    let findings_end = runs_at.or(registry_at).unwrap_or(end_at);
+    let section_end = |start: usize, candidates: &[Option<usize>]| {
+        candidates
+            .iter()
+            .flatten()
+            .copied()
+            .filter(|at| *at >= start)
+            .min()
+            .unwrap_or(bytes.len())
+    };
+    let findings_end = section_end(0, &[runs_at, registry_at, Some(end_at)]);
     let mut findings = Vec::new();
     let mut skipped_findings = 0u64;
     let finding_marks = marker_positions(&bytes[..findings_end], REMOTE_ALOOP_FINDING_MARKER);
@@ -479,8 +488,8 @@ pub(crate) fn parse_remote_block(bytes: &[u8]) -> HostData {
     let mut loops = Vec::new();
     if let Some(runs_at) = runs_at {
         let runs_start = runs_at + REMOTE_ALOOP_RUNS_MARKER.len();
-        let runs_end = registry_at.unwrap_or(end_at);
-        let section = &bytes[runs_start..runs_end.min(bytes.len())];
+        let runs_end = section_end(runs_start, &[registry_at, Some(end_at)]);
+        let section = bytes.get(runs_start..runs_end).unwrap_or_default();
         let run_marks = marker_positions(section, REMOTE_ALOOP_RUN_MARKER);
         for (index, mark) in run_marks.iter().enumerate() {
             let start = mark + REMOTE_ALOOP_RUN_MARKER.len();
@@ -502,7 +511,8 @@ pub(crate) fn parse_remote_block(bytes: &[u8]) -> HostData {
     let registry = registry_at
         .map(|at| {
             let start = at + REMOTE_ALOOP_REGISTRY_MARKER.len();
-            let content = &bytes[start..end_at.max(start).min(bytes.len())];
+            let end = section_end(start, &[Some(end_at)]);
+            let content = bytes.get(start..end).unwrap_or_default();
             crate::loop_runs::parse_loop_registry(&String::from_utf8_lossy(
                 &content[..content.len().min(MAX_REGISTRY_BYTES)],
             ))
@@ -582,8 +592,8 @@ pub(crate) fn project(snapshot: &crate::fleet::Snapshot) -> Option<SectionProjec
             .then_with(|| left.loop_name.cmp(&right.loop_name))
             .then_with(|| left.stable_id.cmp(&right.stable_id))
     });
-    pending.truncate(MAX_PENDING_FINDINGS);
     let pending_count = pending.len();
+    pending.truncate(MAX_PENDING_FINDINGS);
 
     let mut names: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
@@ -774,6 +784,22 @@ mod tests {
         ] {
             assert!(parse_finding(&bytes, label).is_err(), "{label}");
         }
+
+        let valid = serde_json::from_slice::<serde_json::Value>(&finding_json(
+            "loop",
+            "a1",
+            "pending",
+            "2026-09-18T09:50:00Z",
+        ))
+        .expect("finding JSON");
+        for field in ["evidence", "prompt"] {
+            let mut missing = valid.clone();
+            missing.as_object_mut().expect("object").remove(field);
+            assert!(parse_finding(&serde_json::to_vec(&missing).expect("JSON"), field).is_err());
+        }
+        let mut mistyped_url = valid;
+        mistyped_url["url"] = serde_json::json!(42);
+        assert!(parse_finding(&serde_json::to_vec(&mistyped_url).expect("JSON"), "url").is_err());
     }
 
     #[test]
@@ -796,14 +822,31 @@ mod tests {
             .is_err(),
             "missing findings"
         );
+        assert!(parse_run_record(
+            br#"{"at":"2026-09-18T09:59:00Z","duration_ms":1,"exit":0,"findings":0,"log_excerpt":""}"#,
+            "missing stable_ids"
+        )
+        .is_err());
+        assert!(parse_run_record(
+            br#"{"at":"2026-09-18T09:59:00Z","duration_ms":1,"exit":0,"findings":0,"stable_ids":[],"log_excerpt":3}"#,
+            "mistyped log_excerpt"
+        )
+        .is_err());
+        assert!(parse_run_record(
+            br#"{"at":"2026-09-18T09:59:00Z","duration_ms":1,"exit":0,"findings":0,"stable_ids":[3],"log_excerpt":""}"#,
+            "mistyped stable_ids"
+        )
+        .is_err());
     }
 
     #[test]
     fn run_tail_keeps_newest_lines_sorted_and_skips_malformed() {
         let mut content = String::new();
-        for minute in 0..40u32 {
+        for minute in 0..(MAX_RUN_TAIL_LINES as u32 + 8) {
             content.push_str(&format!(
-                "{{\"at\":\"2026-09-18T08:{minute:02}:00Z\",\"duration_ms\":1000,\"exit\":0,\"findings\":0,\"stable_ids\":[],\"log_excerpt\":\"\"}}\n"
+                "{{\"at\":\"2026-09-{:02}T{:02}:00:00Z\",\"duration_ms\":1000,\"exit\":0,\"findings\":0,\"stable_ids\":[],\"log_excerpt\":\"\"}}\n",
+                18 + minute / 24,
+                minute % 24,
             ));
         }
         content.push_str("garbage line\n");
@@ -812,7 +855,7 @@ mod tests {
         // count); the garbage line lands inside the tail and is skipped, so
         // one fewer record survives.
         assert_eq!(tail.runs.len(), MAX_RUN_TAIL_LINES - 1);
-        assert_eq!(tail.runs[0].at, "2026-09-18T08:39:00Z");
+        assert_eq!(tail.runs[0].at, "2026-09-20T23:00:00Z");
         assert_eq!(tail.skipped_lines, 1);
     }
 
@@ -888,7 +931,8 @@ mod tests {
         }))
         .expect("projection");
 
-        assert_eq!(projection.pending_count, MAX_PENDING_FINDINGS);
+        assert_eq!(projection.pending_count, 25);
+        assert_eq!(projection.findings.len(), MAX_PENDING_FINDINGS);
         assert!(projection
             .findings
             .iter()
@@ -1014,6 +1058,21 @@ mod tests {
     }
 
     #[test]
+    fn remote_block_reordered_or_truncated_markers_do_not_panic() {
+        let reordered = [
+            REMOTE_ALOOP_END_MARKER,
+            REMOTE_ALOOP_RUNS_MARKER,
+            REMOTE_ALOOP_RUN_MARKER,
+            REMOTE_ALOOP_REGISTRY_MARKER,
+        ]
+        .concat();
+        let truncated = [REMOTE_ALOOP_RUNS_MARKER, b"\x1eHERDR_FLEET_ALOOP_RUN_V1:"].concat();
+        for bytes in [reordered, truncated] {
+            assert!(std::panic::catch_unwind(|| parse_remote_block(&bytes)).is_ok());
+        }
+    }
+
+    #[test]
     fn local_readers_skip_malformed_and_oversized_files() {
         let dir = std::env::temp_dir().join(format!(
             "herdr-aloop-test-{}",
@@ -1047,5 +1106,43 @@ mod tests {
         assert_eq!(data.loops[0].runs.len(), 1);
         assert_eq!(data.loops[0].skipped_lines, 1);
         std::fs::remove_dir_all(&dir).expect("remove fixture dir");
+    }
+
+    #[test]
+    fn local_findings_filter_before_the_display_cap() {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-aloop-finding-order-{}",
+            crate::config::test_unique_suffix()
+        ));
+        let findings_dir = dir.join(FINDINGS_RELATIVE_DIR);
+        std::fs::create_dir_all(&findings_dir).expect("create findings dir");
+        std::fs::write(
+            findings_dir.join("old-pending.json"),
+            finding_json("loop", "still-pending", "pending", "2026-09-18T09:00:00Z"),
+        )
+        .expect("write pending finding");
+        for index in 0..=MAX_FINDING_FILES {
+            std::fs::write(
+                findings_dir.join(format!("new-launched-{index:02}.json")),
+                finding_json(
+                    "loop",
+                    &format!("launched-{index:02}"),
+                    "launched",
+                    "2026-09-18T10:00:00Z",
+                ),
+            )
+            .expect("write launched finding");
+        }
+        let (findings, skipped) = read_findings_dir(&findings_dir);
+        assert_eq!(skipped, 0);
+        assert_eq!(findings.len(), MAX_FINDING_FILES + 2);
+        let projection = project(&snapshot_with(HostData {
+            findings,
+            ..HostData::default()
+        }))
+        .expect("projection");
+        assert_eq!(projection.pending_count, 1);
+        assert_eq!(projection.findings[0].stable_id, "still-pending");
+        std::fs::remove_dir_all(dir).expect("remove fixture");
     }
 }

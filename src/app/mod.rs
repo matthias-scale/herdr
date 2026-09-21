@@ -900,6 +900,7 @@ impl App {
             agent_host_name,
             local_agent_panel_identities,
             remote_agent_panel_entries: Vec::new(),
+            aloop_projection: None,
             remote_focus_proxy_panes: std::collections::HashSet::new(),
             sidebar_selected_remote_agent: None,
             dock_symphony: None,

@@ -4150,6 +4150,10 @@ pub struct AppState {
         std::collections::HashMap<PaneId, crate::ui::AgentPanelLocalIdentity>,
     /// TUI projection materialized only when the fleet snapshot changes.
     pub(crate) remote_agent_panel_entries: Vec<std::sync::Arc<crate::ui::RemoteAgentPanelEntry>>,
+    /// Producer-derived aloop rows are immutable between fleet refreshes.
+    /// Keeping the projection here prevents layout and render passes from
+    /// repeating the nested run/finding/stable-id scan.
+    pub(crate) aloop_projection: Option<std::sync::Arc<crate::aloop::SectionProjection>>,
     /// Local panes backed by remote-focus operations. Agent identity remains
     /// owned by `RemoteFocusOperations`; this marker only hides proxy chrome.
     pub(crate) remote_focus_proxy_panes: std::collections::HashSet<crate::layout::PaneId>,
@@ -4924,6 +4928,7 @@ pub(crate) struct LoopRunHistoryDetail {
     pub(crate) loop_id: String,
     pub(crate) history: crate::loop_runs::RunHistory,
     pub(crate) observed_at: std::time::SystemTime,
+    pub(crate) producer_host: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -5632,6 +5637,7 @@ impl AppState {
             loop_id,
             history,
             observed_at,
+            producer_host: None,
         });
     }
 
@@ -5655,6 +5661,14 @@ impl AppState {
 
     pub(crate) fn clear_aloop_run_detail(&mut self) {
         self.aloop_run_detail = None;
+    }
+
+    pub(crate) fn aloop_projection(
+        &self,
+    ) -> Option<std::sync::Arc<crate::aloop::SectionProjection>> {
+        self.aloop_projection
+            .clone()
+            .or_else(|| crate::aloop::project(&self.fleet_snapshot).map(std::sync::Arc::new))
     }
 
     /// Reveal the scratchpad without spawning an editor: the dock opens if it was
@@ -5727,14 +5741,66 @@ impl AppState {
     /// existing MAT-126 run-history table filtered to that loop.
     pub(crate) fn open_aloop_loop_history(&mut self, loop_name: &str) {
         self.clear_aloop_run_detail();
-        self.show_loop_run_history(
-            loop_name.to_string(),
-            crate::loop_runs::RunHistory {
-                runs: crate::loop_runs::runs_for_loop(&self.loop_run_history, Some(loop_name)),
-                skipped_lines: self.loop_run_history.skipped_lines,
-            },
-            std::time::SystemTime::now(),
-        );
+        let producer_host = self
+            .fleet_snapshot
+            .aloop
+            .as_ref()
+            .map(|producer| producer.host.clone());
+        let history = self
+            .fleet_snapshot
+            .aloop
+            .as_ref()
+            .map(|producer| {
+                let runs = producer
+                    .data
+                    .loops
+                    .iter()
+                    .find(|loop_runs| loop_runs.loop_name == loop_name)
+                    .map(|loop_runs| {
+                        loop_runs
+                            .runs
+                            .iter()
+                            .map(|run| crate::loop_runs::RunRecord {
+                                run_id: run.at.clone(),
+                                skill: "aloop".to_string(),
+                                session: Some(producer.host.clone()),
+                                pr: None,
+                                ticket: None,
+                                loop_id: Some(loop_name.to_string()),
+                                start: run.at.clone(),
+                                end: None,
+                                wall_min: Some(run.duration_ms as f64 / 60_000.0),
+                                blocked_min: None,
+                                gates: Vec::new(),
+                                human_touches: None,
+                                touches_by_type: std::collections::BTreeMap::new(),
+                                interrupted_focus: None,
+                                review_rounds: None,
+                                out_tokens: None,
+                                outcome: crate::loop_runs::RunOutcome::Terminal(if run.exit == 0 {
+                                    "ok".to_string()
+                                } else {
+                                    format!("exit {}", run.exit)
+                                }),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                crate::loop_runs::RunHistory {
+                    runs,
+                    skipped_lines: producer
+                        .data
+                        .loops
+                        .iter()
+                        .find(|loop_runs| loop_runs.loop_name == loop_name)
+                        .map_or(0, |loop_runs| loop_runs.skipped_lines),
+                }
+            })
+            .unwrap_or_default();
+        self.show_loop_run_history(loop_name.to_string(), history, std::time::SystemTime::now());
+        if let Some(detail) = self.loop_run_history_detail.as_mut() {
+            detail.producer_host = producer_host;
+        }
     }
 
     /// MAT-159 AC7: selecting a run in the Aloops section opens its recorded
@@ -7212,6 +7278,7 @@ impl AppState {
             agent_host_name: "localhost".to_string(),
             local_agent_panel_identities: std::collections::HashMap::new(),
             remote_agent_panel_entries: Vec::new(),
+            aloop_projection: None,
             remote_focus_proxy_panes: std::collections::HashSet::new(),
             sidebar_selected_remote_agent: None,
             symphony_detail: None,

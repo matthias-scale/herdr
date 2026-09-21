@@ -5080,16 +5080,32 @@ mod tests {
                     })],
                     loops: vec![crate::aloop::LoopRuns {
                         loop_name: "nightly".to_string(),
-                        runs: vec![std::sync::Arc::new(crate::aloop::RunRecord {
-                            at: "2026-09-18T09:59:00Z".to_string(),
-                            at_unix_s: crate::fleet::parse_utc_timestamp("2026-09-18T09:59:00Z")
+                        runs: vec![
+                            std::sync::Arc::new(crate::aloop::RunRecord {
+                                at: "2026-09-18T09:59:00Z".to_string(),
+                                at_unix_s: crate::fleet::parse_utc_timestamp(
+                                    "2026-09-18T09:59:00Z",
+                                )
                                 .expect("timestamp"),
-                            duration_ms: 1_200,
-                            exit: 0,
-                            findings: 0,
-                            stable_ids: Vec::new(),
-                            log_excerpt: "clean log tail".to_string(),
-                        })],
+                                duration_ms: 1_200,
+                                exit: 0,
+                                findings: 0,
+                                stable_ids: Vec::new(),
+                                log_excerpt: "clean log tail".to_string(),
+                            }),
+                            std::sync::Arc::new(crate::aloop::RunRecord {
+                                at: "2026-09-18T09:58:00Z".to_string(),
+                                at_unix_s: crate::fleet::parse_utc_timestamp(
+                                    "2026-09-18T09:58:00Z",
+                                )
+                                .expect("timestamp"),
+                                duration_ms: 2_400,
+                                exit: 0,
+                                findings: 2,
+                                stable_ids: vec!["abc-123".to_string()],
+                                log_excerpt: "hit log tail".to_string(),
+                            }),
+                        ],
                         skipped_lines: 0,
                     }],
                     ..Default::default()
@@ -5176,6 +5192,15 @@ mod tests {
             .as_ref()
             .expect("run history opened");
         assert_eq!(detail.loop_id, "nightly");
+        let rendered = crate::ui::loop_runs::project_loop_run_history(
+            &detail.history,
+            &detail.loop_id,
+            std::time::UNIX_EPOCH,
+        );
+        assert_eq!(rendered.rows.len(), 2);
+        assert_eq!(rendered.rows[0].run_id, "2026-09-18T09:59:00Z");
+        assert_eq!(rendered.rows[1].run_id, "2026-09-18T09:58:00Z");
+        assert_eq!(rendered.rows[1].duration, "2s");
         assert_eq!(app.sidebar_selected_work_group, None);
         // A loop header never dispatches.
         assert!(matches!(

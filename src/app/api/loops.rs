@@ -91,7 +91,12 @@ impl App {
         }
         self.state.loop_run_history = reader.history().clone();
         let history = &self.state.loop_run_history;
-        if let Some(detail) = self.state.loop_run_history_detail.as_mut() {
+        if let Some(detail) = self
+            .state
+            .loop_run_history_detail
+            .as_mut()
+            .filter(|detail| detail.producer_host.is_none())
+        {
             detail.history = crate::loop_runs::RunHistory {
                 runs: crate::loop_runs::runs_for_loop(
                     history,
