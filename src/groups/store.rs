@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -5,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use super::model::{AuthorityState, GroupId, GroupRecord, MutationError};
 use super::AuthorityId;
 
-const STORE_SCHEMA_VERSION: u32 = 1;
+const AUTHORITY_SCHEMA_VERSION: u32 = 2;
+const GROUP_STORE_SCHEMA_VERSION: u32 = 1;
 const AUTHORITY_FILE_NAME: &str = "group-authority.json";
 const GROUPS_FILE_NAME: &str = "groups.json";
 
@@ -13,6 +15,21 @@ const GROUPS_FILE_NAME: &str = "groups.json";
 struct AuthorityFile {
     schema_version: u32,
     authority_id: String,
+    next_group_id: u64,
+    retired_groups: Vec<RetiredGroup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RetiredGroup {
+    local: u64,
+    revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthorityLedger {
+    authority_id: AuthorityId,
+    next_group_id: u64,
+    retired_groups: BTreeMap<u64, u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -32,6 +49,7 @@ enum RuntimeState {
 
 #[derive(Debug)]
 pub(crate) struct Runtime {
+    authority_path: PathBuf,
     groups_path: PathBuf,
     state: RuntimeState,
 }
@@ -50,15 +68,18 @@ impl Runtime {
     }
 
     pub(crate) fn load(data_dir: &Path) -> Self {
+        let authority_path = data_dir.join(AUTHORITY_FILE_NAME);
         let groups_path = data_dir.join(GROUPS_FILE_NAME);
         match load_or_initialize(data_dir) {
             Ok(state) => Self {
+                authority_path,
                 groups_path,
                 state: RuntimeState::Ready(state),
             },
             Err(error) => {
                 tracing::warn!(%error, "group authority is unavailable");
                 Self {
+                    authority_path,
                     groups_path,
                     state: RuntimeState::Unavailable(error),
                 }
@@ -69,6 +90,7 @@ impl Runtime {
     #[cfg(test)]
     pub(crate) fn unavailable_for_tests() -> Self {
         Self {
+            authority_path: PathBuf::new(),
             groups_path: PathBuf::new(),
             state: RuntimeState::Unavailable("group test runtime not configured".to_string()),
         }
@@ -125,8 +147,20 @@ impl Runtime {
     }
 
     fn commit(&mut self, candidate: AuthorityState) -> Result<(), RuntimeError> {
+        let current_ledger = AuthorityLedger::from_state(self.authority()?);
+        let candidate_ledger = AuthorityLedger::from_state(&candidate);
+        let ledger_changed = candidate_ledger != current_ledger;
         save_store(&self.groups_path, &candidate)
             .map_err(|error| RuntimeError::Persistence(error.to_string()))?;
+        if ledger_changed {
+            if let Err(error) = save_authority(&self.authority_path, &candidate_ledger) {
+                self.state = RuntimeState::Unavailable(
+                    "group identity ledger persistence failed after the record store advanced"
+                        .to_string(),
+                );
+                return Err(RuntimeError::Persistence(error.to_string()));
+            }
+        }
         self.state = RuntimeState::Ready(candidate);
         Ok(())
     }
@@ -134,6 +168,11 @@ impl Runtime {
     #[cfg(test)]
     pub(crate) fn set_groups_path_for_test(&mut self, path: PathBuf) {
         self.groups_path = path;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_authority_path_for_test(&mut self, path: PathBuf) {
+        self.authority_path = path;
     }
 }
 
@@ -149,16 +188,17 @@ fn load_or_initialize(data_dir: &Path) -> Result<AuthorityState, String> {
 
     match (authority_exists, groups_exist) {
         (true, true) => {
-            let authority_id = load_authority(&authority_path)?;
-            load_store(&groups_path, &authority_id)
+            let authority = load_authority(&authority_path)?;
+            load_store(&groups_path, &authority)
         }
         (true, false) => Err("group store is missing while the authority file exists".to_string()),
         (false, true) => Err("authority file is missing while the group store exists".to_string()),
         (false, false) => {
             let authority_id = generate_authority_id()?;
-            save_authority(&authority_path, &authority_id)
-                .map_err(|error| format!("cannot persist new authority: {error}"))?;
             let state = AuthorityState::empty(authority_id);
+            let authority = AuthorityLedger::from_state(&state);
+            save_authority(&authority_path, &authority)
+                .map_err(|error| format!("cannot persist new authority: {error}"))?;
             save_store(&groups_path, &state)
                 .map_err(|error| format!("cannot persist empty group store: {error}"))?;
             Ok(state)
@@ -173,54 +213,146 @@ fn generate_authority_id() -> Result<AuthorityId, String> {
     Ok(AuthorityId::from_random_bytes(bytes))
 }
 
-fn load_authority(path: &Path) -> Result<AuthorityId, String> {
+impl AuthorityLedger {
+    fn from_state(state: &AuthorityState) -> Self {
+        let retired_groups = state
+            .records()
+            .into_iter()
+            .filter_map(|record| {
+                matches!(record.state, super::GroupState::Deleted)
+                    .then_some((record.id.local, record.revision))
+            })
+            .collect();
+        Self {
+            authority_id: state.authority_id().clone(),
+            next_group_id: state.next_group_id(),
+            retired_groups,
+        }
+    }
+}
+
+fn load_authority(path: &Path) -> Result<AuthorityLedger, String> {
     let json = std::fs::read_to_string(path)
         .map_err(|error| format!("cannot read authority file: {error}"))?;
     let file: AuthorityFile = serde_json::from_str(&json)
         .map_err(|error| format!("cannot parse authority file: {error}"))?;
-    if file.schema_version != STORE_SCHEMA_VERSION {
+    if file.schema_version != AUTHORITY_SCHEMA_VERSION {
         return Err(format!(
             "unsupported authority schema version {}",
             file.schema_version
         ));
     }
-    AuthorityId::parse(&file.authority_id)
+    let authority_id = AuthorityId::parse(&file.authority_id)?;
+    if file.next_group_id == 0 {
+        return Err("authority allocation floor must be positive".to_string());
+    }
+    let mut retired_groups = BTreeMap::new();
+    for retired in file.retired_groups {
+        if retired.local == 0 || retired.local >= file.next_group_id {
+            return Err("retired group id is outside the authority allocation floor".to_string());
+        }
+        if retired.revision == 0 {
+            return Err("retired group revision must be positive".to_string());
+        }
+        if retired_groups
+            .insert(retired.local, retired.revision)
+            .is_some()
+        {
+            return Err("authority file contains a duplicate retired group id".to_string());
+        }
+    }
+    Ok(AuthorityLedger {
+        authority_id,
+        next_group_id: file.next_group_id,
+        retired_groups,
+    })
 }
 
-fn save_authority(path: &Path, authority_id: &AuthorityId) -> std::io::Result<()> {
+fn save_authority(path: &Path, authority: &AuthorityLedger) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(&AuthorityFile {
-        schema_version: STORE_SCHEMA_VERSION,
-        authority_id: authority_id.as_str().to_string(),
+        schema_version: AUTHORITY_SCHEMA_VERSION,
+        authority_id: authority.authority_id.as_str().to_string(),
+        next_group_id: authority.next_group_id,
+        retired_groups: authority
+            .retired_groups
+            .iter()
+            .map(|(&local, &revision)| RetiredGroup { local, revision })
+            .collect(),
     })?;
     crate::persist::commit_json_to_path(path, &json)
 }
 
-fn load_store(path: &Path, authority_id: &AuthorityId) -> Result<AuthorityState, String> {
+fn load_store(path: &Path, authority: &AuthorityLedger) -> Result<AuthorityState, String> {
     let json = std::fs::read_to_string(path)
         .map_err(|error| format!("cannot read group store: {error}"))?;
     let file: GroupStoreFile = serde_json::from_str(&json)
         .map_err(|error| format!("cannot parse group store: {error}"))?;
-    if file.schema_version != STORE_SCHEMA_VERSION {
+    if file.schema_version != GROUP_STORE_SCHEMA_VERSION {
         return Err(format!(
             "unsupported group store schema version {}",
             file.schema_version
         ));
     }
     let stored_authority = AuthorityId::parse(&file.authority_id)?;
-    if &stored_authority != authority_id {
+    if stored_authority != authority.authority_id {
         return Err("group store authority does not match the identity file".to_string());
     }
-    AuthorityState::from_persisted(
-        stored_authority,
+    let stored = AuthorityState::from_persisted(
+        stored_authority.clone(),
         file.revision,
         file.next_group_id,
         file.groups,
-    )
+    )?;
+    if stored.next_group_id() > authority.next_group_id {
+        return Err("group store allocation floor exceeds the authority ledger".to_string());
+    }
+
+    let mut records: BTreeMap<_, _> = stored
+        .records()
+        .into_iter()
+        .map(|record| (record.id.local, record))
+        .collect();
+    for record in records.values() {
+        if matches!(record.state, super::GroupState::Deleted)
+            && authority.retired_groups.get(&record.id.local) != Some(&record.revision)
+        {
+            return Err("group store tombstone is absent from the authority ledger".to_string());
+        }
+    }
+    for (&local, &revision) in &authority.retired_groups {
+        records.insert(
+            local,
+            GroupRecord {
+                id: GroupId {
+                    owner: stored_authority.clone(),
+                    local,
+                },
+                revision,
+                state: super::GroupState::Deleted,
+            },
+        );
+    }
+    let revision = authority
+        .retired_groups
+        .values()
+        .copied()
+        .fold(stored.revision(), u64::max);
+    let reconciled = AuthorityState::from_persisted(
+        stored_authority,
+        revision,
+        authority.next_group_id,
+        records.into_values().collect(),
+    )?;
+    if reconciled != stored {
+        save_store(path, &reconciled)
+            .map_err(|error| format!("cannot repair rolled-back group store: {error}"))?;
+    }
+    Ok(reconciled)
 }
 
 fn save_store(path: &Path, state: &AuthorityState) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(&GroupStoreFile {
-        schema_version: STORE_SCHEMA_VERSION,
+        schema_version: GROUP_STORE_SCHEMA_VERSION,
         authority_id: state.authority_id().as_str().to_string(),
         revision: state.revision(),
         next_group_id: state.next_group_id(),
@@ -281,6 +413,52 @@ mod tests {
         ));
         assert_eq!(std::fs::read_to_string(identity_path).unwrap(), "not json");
         assert!(!dir.0.join(GROUPS_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn legacy_authority_without_identity_ledger_fails_closed() {
+        let dir = TestDir::new("legacy-authority");
+        let runtime = Runtime::load(&dir.0);
+        let authority_id = runtime.authority().unwrap().authority_id().clone();
+        let authority_path = dir.0.join(AUTHORITY_FILE_NAME);
+        let legacy = serde_json::json!({
+            "schema_version": 1,
+            "authority_id": authority_id.as_str(),
+        });
+        std::fs::write(
+            &authority_path,
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let reloaded = Runtime::load(&dir.0);
+
+        assert!(matches!(
+            reloaded.authority(),
+            Err(RuntimeError::Unavailable(_))
+        ));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                &std::fs::read_to_string(authority_path).unwrap()
+            )
+            .unwrap(),
+            legacy
+        );
+    }
+
+    #[test]
+    fn new_authority_uses_the_ledger_schema() {
+        let dir = TestDir::new("ledger-schema");
+        Runtime::load(&dir.0);
+
+        let authority: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.0.join(AUTHORITY_FILE_NAME)).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(authority["schema_version"], AUTHORITY_SCHEMA_VERSION);
+        assert_eq!(authority["next_group_id"], 1);
+        assert_eq!(authority["retired_groups"], serde_json::json!([]));
     }
 
     #[test]
@@ -367,9 +545,67 @@ mod tests {
     }
 
     #[test]
-    fn failed_commit_keeps_previous_memory_and_file() {
+    fn rolled_back_group_store_reconstructs_a_retired_identity() {
+        let dir = TestDir::new("rolled-back-store");
+        let mut runtime = Runtime::load(&dir.0);
+        let (first, _) = runtime.create("First", 0).unwrap();
+        let before_second_group = std::fs::read_to_string(dir.0.join(GROUPS_FILE_NAME)).unwrap();
+        let (second, _) = runtime.create("Second", 1).unwrap();
+        let (deleted, _) = runtime.delete(&second.id, second.revision).unwrap();
+        std::fs::write(dir.0.join(GROUPS_FILE_NAME), before_second_group).unwrap();
+
+        let mut reloaded = Runtime::load(&dir.0);
+        let records = reloaded.authority().unwrap().records();
+        let (replacement, _) = reloaded.create("Replacement", 3).unwrap();
+
+        assert_eq!(records, vec![first, deleted]);
+        assert_eq!(replacement.id.owner, second.id.owner);
+        assert_eq!(replacement.id.local, 3);
+    }
+
+    #[test]
+    fn authority_tombstone_replaces_a_rolled_back_active_record() {
+        let dir = TestDir::new("rolled-back-delete");
+        let mut runtime = Runtime::load(&dir.0);
+        runtime.create("First", 0).unwrap();
+        let (second, _) = runtime.create("Second", 1).unwrap();
+        let before_delete = std::fs::read_to_string(dir.0.join(GROUPS_FILE_NAME)).unwrap();
+        let (deleted, _) = runtime.delete(&second.id, second.revision).unwrap();
+        std::fs::write(dir.0.join(GROUPS_FILE_NAME), before_delete).unwrap();
+
+        let reloaded = Runtime::load(&dir.0);
+        let restored = reloaded.authority().unwrap().record(&second.id).unwrap();
+
+        assert_eq!(restored, &deleted);
+        assert!(matches!(restored.state, GroupState::Deleted));
+    }
+
+    #[test]
+    fn rolled_back_group_store_with_an_unretired_gap_fails_closed() {
+        let dir = TestDir::new("rolled-back-active-store");
+        let mut runtime = Runtime::load(&dir.0);
+        runtime.create("First", 0).unwrap();
+        let before_second_group = std::fs::read_to_string(dir.0.join(GROUPS_FILE_NAME)).unwrap();
+        runtime.create("Second", 1).unwrap();
+        std::fs::write(dir.0.join(GROUPS_FILE_NAME), before_second_group).unwrap();
+
+        let mut reloaded = Runtime::load(&dir.0);
+
+        assert!(matches!(
+            reloaded.authority(),
+            Err(RuntimeError::Unavailable(_))
+        ));
+        assert!(matches!(
+            reloaded.create("Replacement", 1),
+            Err(RuntimeError::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn failed_record_commit_keeps_previous_memory_and_files() {
         let dir = TestDir::new("failed-write");
         let mut runtime = Runtime::load(&dir.0);
+        let authority_json = std::fs::read_to_string(dir.0.join(AUTHORITY_FILE_NAME)).unwrap();
         let blocker = dir.0.join("not-a-directory");
         std::fs::write(&blocker, "block").unwrap();
         runtime.set_groups_path_for_test(blocker.join(GROUPS_FILE_NAME));
@@ -380,11 +616,60 @@ mod tests {
         ));
         assert_eq!(runtime.authority().unwrap().revision(), 0);
         assert!(runtime.authority().unwrap().records().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join(AUTHORITY_FILE_NAME)).unwrap(),
+            authority_json
+        );
         assert!(Runtime::load(&dir.0)
             .authority()
             .unwrap()
             .records()
             .is_empty());
+    }
+
+    #[test]
+    fn failed_authority_commit_makes_the_advanced_store_unavailable() {
+        let dir = TestDir::new("failed-authority-write");
+        let mut runtime = Runtime::load(&dir.0);
+        let blocker = dir.0.join("not-a-directory");
+        std::fs::write(&blocker, "block").unwrap();
+        runtime.set_authority_path_for_test(blocker.join(AUTHORITY_FILE_NAME));
+
+        assert!(matches!(
+            runtime.create("Uncommitted", 0),
+            Err(RuntimeError::Persistence(_))
+        ));
+        assert!(matches!(
+            runtime.authority(),
+            Err(RuntimeError::Unavailable(_))
+        ));
+        assert!(matches!(
+            Runtime::load(&dir.0).authority(),
+            Err(RuntimeError::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn failed_authority_commit_after_delete_makes_the_tombstone_store_unavailable() {
+        let dir = TestDir::new("failed-delete-authority-write");
+        let mut runtime = Runtime::load(&dir.0);
+        let (created, _) = runtime.create("Deleted", 0).unwrap();
+        let blocker = dir.0.join("not-a-directory");
+        std::fs::write(&blocker, "block").unwrap();
+        runtime.set_authority_path_for_test(blocker.join(AUTHORITY_FILE_NAME));
+
+        assert!(matches!(
+            runtime.delete(&created.id, created.revision),
+            Err(RuntimeError::Persistence(_))
+        ));
+        assert!(matches!(
+            runtime.authority(),
+            Err(RuntimeError::Unavailable(_))
+        ));
+        assert!(matches!(
+            Runtime::load(&dir.0).authority(),
+            Err(RuntimeError::Unavailable(_))
+        ));
     }
 
     #[test]
@@ -397,7 +682,7 @@ mod tests {
             local: 1,
         };
         let file = GroupStoreFile {
-            schema_version: STORE_SCHEMA_VERSION,
+            schema_version: GROUP_STORE_SCHEMA_VERSION,
             authority_id: authority_id.as_str().to_string(),
             revision: 2,
             next_group_id: 2,
