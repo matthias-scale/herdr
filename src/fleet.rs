@@ -786,24 +786,39 @@ impl Snapshot {
                     .cloned()
             })
             .collect();
-        let mut group_catalogs = Vec::new();
-        for catalog in &self.group_catalogs {
+        let matches_connection = |catalog: &GroupCatalog, configured: &FleetHostConfig| {
+            catalog.target == configured.target
+                && catalog.local == configured.local
+                && catalog.session == configured.session
+                && catalog.socket == configured.socket
+        };
+        let mut group_catalogs = self
+            .group_catalogs
+            .iter()
+            .filter(|catalog| {
+                fleet.hosts.iter().any(|configured| {
+                    configured.name == catalog.host && matches_connection(catalog, configured)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for catalog in self.group_catalogs.iter().filter(|catalog| {
+            !fleet.hosts.iter().any(|configured| {
+                configured.name == catalog.host && matches_connection(catalog, configured)
+            })
+        }) {
             let Some(configured) = fleet.hosts.iter().find(|configured| {
-                catalog.target == configured.target
-                    && catalog.local == configured.local
-                    && catalog.session == configured.session
-                    && catalog.socket == configured.socket
+                matches_connection(catalog, configured)
+                    && !group_catalogs.iter().any(|current| {
+                        current.host == configured.name
+                            && current.matches_connection(catalog)
+                            && current.authority_id() == catalog.authority_id()
+                    })
             }) else {
                 continue;
             };
             let mut retained = catalog.clone();
             retained.host.clone_from(&configured.name);
-            if group_catalogs.iter().any(|current: &GroupCatalog| {
-                current.matches_connection(&retained)
-                    && current.authority_id() == retained.authority_id()
-            }) {
-                continue;
-            }
             group_catalogs.push(retained);
         }
 
@@ -3183,6 +3198,75 @@ mod tests {
             .fresh_group_catalog(&authority)
             .expect_err("collision cannot be routed")
             .contains("identity conflict"));
+    }
+
+    #[test]
+    fn reload_keeping_both_connection_aliases_preserves_identity_conflict() {
+        let configured_host = |name: &str| FleetHostConfig {
+            name: name.into(),
+            target: "machine-a".into(),
+            session: Some("agents".into()),
+            socket: Some("/tmp/herdr.sock".into()),
+            ..FleetHostConfig::default()
+        };
+        let fleet = FleetConfig {
+            hosts: vec![configured_host("office"), configured_host("duplicate")],
+            ..FleetConfig::default()
+        };
+        let authority = crate::groups::AuthorityId::from_random_bytes([1; 16]);
+        let mut snapshot = Snapshot {
+            group_catalogs: vec![
+                group_catalog("office", "machine-a", 1, 1, Vec::new()),
+                group_catalog("duplicate", "machine-a", 1, 1, Vec::new()),
+            ],
+            ..Snapshot::default()
+        };
+        snapshot.admit_group_catalogs_from(&Snapshot::default());
+
+        let reloaded = snapshot.reconcile_after_config_reload(&fleet, 2);
+
+        assert_eq!(reloaded.group_catalogs.len(), 2);
+        assert!(reloaded.authority_has_identity_conflict(&authority));
+        assert!(reloaded
+            .group_catalogs
+            .iter()
+            .all(|catalog| catalog.state == GroupCatalogState::IdentityConflict));
+    }
+
+    #[test]
+    fn reload_renaming_both_connection_aliases_preserves_identity_conflict() {
+        let configured_host = |name: &str| FleetHostConfig {
+            name: name.into(),
+            target: "machine-a".into(),
+            session: Some("agents".into()),
+            socket: Some("/tmp/herdr.sock".into()),
+            ..FleetHostConfig::default()
+        };
+        let fleet = FleetConfig {
+            hosts: vec![configured_host("work"), configured_host("backup")],
+            ..FleetConfig::default()
+        };
+        let authority = crate::groups::AuthorityId::from_random_bytes([1; 16]);
+        let mut snapshot = Snapshot {
+            group_catalogs: vec![
+                group_catalog("office", "machine-a", 1, 1, Vec::new()),
+                group_catalog("duplicate", "machine-a", 1, 1, Vec::new()),
+            ],
+            ..Snapshot::default()
+        };
+        snapshot.admit_group_catalogs_from(&Snapshot::default());
+
+        let reloaded = snapshot.reconcile_after_config_reload(&fleet, 2);
+
+        assert_eq!(
+            reloaded
+                .group_catalogs
+                .iter()
+                .map(|catalog| catalog.host.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["work", "backup"])
+        );
+        assert!(reloaded.authority_has_identity_conflict(&authority));
     }
 
     #[test]
