@@ -178,9 +178,8 @@ impl AppState {
                     1
                 };
                 if self.notepad.agent_tab {
-                    let visible = usize::from(notepad_body_rect(panel).height).max(1);
-                    let max = self.view.notepad_agent_rows.len().saturating_sub(visible);
-                    self.notepad.agent_scroll_by(delta, max);
+                    self.notepad
+                        .agent_scroll_by(delta, self.view.notepad_agent_max_scroll);
                 } else {
                     self.notepad.scroll_by(delta);
                 }
@@ -231,10 +230,7 @@ impl AppState {
         if !rect_contains(body, mouse.column, mouse.row) {
             return;
         }
-        let index = self
-            .notepad
-            .agent_scroll
-            .saturating_add(usize::from(mouse.row.saturating_sub(body.y)));
+        let index = usize::from(mouse.row.saturating_sub(body.y));
         match self
             .view
             .notepad_agent_rows
@@ -250,7 +246,7 @@ impl AppState {
             Some(NotepadAgentAction::CopyLink(url)) => {
                 self.request_notepad(NotepadRequest::CopyAgentLink(url));
             }
-            Some(NotepadAgentAction::None) | None => {}
+            Some(NotepadAgentAction::CopyLinkIndex(_)) | Some(NotepadAgentAction::None) | None => {}
         }
     }
 
@@ -789,7 +785,7 @@ mod tests {
         let (mut state, _) = state_with_agent_tab();
         state.notepad.height = 6;
         crate::ui::compute_view(&mut state, Rect::new(0, 0, 120, 40));
-        assert!(state.view.notepad_agent_rows.len() > 5);
+        assert!(state.view.notepad_agent_max_scroll > 0);
         let panel = state.view.notepad_rect;
 
         let down = MouseEvent {

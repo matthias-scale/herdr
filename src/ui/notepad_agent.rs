@@ -15,7 +15,7 @@ use ratatui::{
     Frame,
 };
 
-use super::text::{display_width, display_width_u16, truncate_end};
+use super::text::{display_width, truncate_end};
 use crate::agent_state::{AgentLink, AgentStateSnapshot, AgentTaskStatus};
 use crate::api::schema::AgentStatus;
 use crate::app::state::{AppState, Palette};
@@ -34,6 +34,8 @@ pub(crate) enum NotepadAgentAction {
     FocusSubagent(Option<String>),
     /// Copy the link's full URL; the row only shows a short label.
     CopyLink(String),
+    /// Build-time identity, resolved to `CopyLink` only for visible rows.
+    CopyLinkIndex(usize),
 }
 
 /// One body row of the agent tab.
@@ -41,6 +43,8 @@ pub(crate) enum NotepadAgentAction {
 pub(crate) struct NotepadAgentRow {
     pub(crate) line: Line<'static>,
     pub(crate) action: NotepadAgentAction,
+    /// Wall-clock source of a visible age label, registered for self-refresh.
+    pub(crate) observed_at: Option<SystemTime>,
     /// Link rows only: the label's column offset inside the body and its drawn
     /// text, so the OSC 8 cells can be derived without re-laying out the row.
     pub(crate) link_label: Option<(u16, String)>,
@@ -51,6 +55,7 @@ impl NotepadAgentRow {
         Self {
             line,
             action: NotepadAgentAction::None,
+            observed_at: None,
             link_label: None,
         }
     }
@@ -90,8 +95,8 @@ pub(crate) fn status_label(status: AgentStatus) -> &'static str {
 
 /// Ages come from the server-owned wall clock snapshot; render never reads
 /// the clock itself.
-fn age_label(now_unix: Option<i64>, rfc3339: &str) -> Option<String> {
-    let now = now_unix?;
+fn age_label(now_unix: i64, rfc3339: &str) -> Option<String> {
+    let now = now_unix;
     let then = crate::agent_state::parse_rfc3339(rfc3339)?
         .duration_since(SystemTime::UNIX_EPOCH)
         .ok()?;
@@ -132,6 +137,7 @@ fn section_header(
     NotepadAgentRow {
         line: Line::from(spans),
         action: NotepadAgentAction::ToggleSection(section),
+        observed_at: None,
         link_label: None,
     }
 }
@@ -148,7 +154,7 @@ fn push_status_rows(
     palette: &Palette,
     snapshot: &AgentStateSnapshot,
     collapsed: bool,
-    now_unix: Option<i64>,
+    now_unix: i64,
     width: u16,
 ) {
     let mut value = status_label(snapshot.status).to_string();
@@ -159,14 +165,19 @@ fn push_status_rows(
     {
         value = format!("{value} · {age} ago");
     }
-    rows.push(section_header(
+    let mut header = section_header(
         palette,
         AgentSection::Status,
         "Status".to_string(),
         collapsed,
         Some(value),
         width,
-    ));
+    );
+    header.observed_at = snapshot
+        .last_acted_at
+        .as_deref()
+        .and_then(crate::agent_state::parse_rfc3339);
+    rows.push(header);
     if collapsed {
         return;
     }
@@ -234,7 +245,7 @@ fn push_subagent_rows(
     palette: &Palette,
     snapshot: &AgentStateSnapshot,
     collapsed: bool,
-    now_unix: Option<i64>,
+    now_unix: i64,
     width: u16,
 ) {
     rows.push(section_header(
@@ -272,6 +283,10 @@ fn push_subagent_rows(
                 Span::styled(meta_text, Style::default().fg(palette.overlay0)),
             ]),
             action: NotepadAgentAction::FocusSubagent(subagent.pane_id.clone()),
+            observed_at: subagent
+                .last_active_at
+                .as_deref()
+                .and_then(crate::agent_state::parse_rfc3339),
             link_label: None,
         });
     }
@@ -320,7 +335,7 @@ fn push_link_rows(
     palette: &Palette,
     snapshot: &AgentStateSnapshot,
     collapsed: bool,
-    now_unix: Option<i64>,
+    now_unix: i64,
     width: u16,
 ) {
     rows.push(section_header(
@@ -341,30 +356,32 @@ fn push_link_rows(
     // Newest last_seen first, both between groups and inside one. The RFC3339
     // strings are compared as parsed timestamps: fractional digits make a
     // lexical order wrong.
-    let mut links: Vec<(&AgentLink, SystemTime)> = snapshot
+    let mut links: Vec<(usize, &AgentLink, SystemTime)> = snapshot
         .links
         .iter()
+        .enumerate()
         .filter_map(|link| {
-            crate::agent_state::parse_rfc3339(&link.last_seen).map(|seen| (link, seen))
+            crate::agent_state::parse_rfc3339(&link.1.last_seen).map(|seen| (link.0, link.1, seen))
         })
         .collect();
     links.sort_by(|left, right| {
         right
-            .1
-            .cmp(&left.1)
-            .then_with(|| left.0.url.cmp(&right.0.url))
+            .2
+            .cmp(&left.2)
+            .then_with(|| left.1.url.cmp(&right.1.url))
     });
-    let mut by_domain: std::collections::BTreeMap<&str, Vec<(&AgentLink, SystemTime)>> =
+    let mut by_domain: std::collections::BTreeMap<&str, Vec<(usize, &AgentLink, SystemTime)>> =
         std::collections::BTreeMap::new();
     for link in links {
         by_domain
-            .entry(link.0.domain.as_str())
+            .entry(link.1.domain.as_str())
             .or_default()
             .push(link);
     }
     let mut groups: Vec<_> = by_domain.into_iter().collect();
     groups.sort_by(|left, right| {
-        let newest = |group: &Vec<(&AgentLink, SystemTime)>| group.first().map(|link| link.1);
+        let newest =
+            |group: &Vec<(usize, &AgentLink, SystemTime)>| group.first().map(|link| link.2);
         newest(&right.1)
             .cmp(&newest(&left.1))
             .then_with(|| left.0.cmp(right.0))
@@ -374,7 +391,7 @@ fn push_link_rows(
             truncate_end(&format!("  {domain}"), usize::from(width)),
             Style::default().fg(palette.overlay0),
         ))));
-        for (link, _) in group {
+        for (link_index, link, seen) in group {
             let age = age_label(now_unix, &link.last_seen).unwrap_or_default();
             let age_width = display_width(&age);
             let budget = usize::from(width).saturating_sub(4 + 1 + age_width);
@@ -388,7 +405,8 @@ fn push_link_rows(
                     Span::raw(format!("{} ", " ".repeat(pad))),
                     Span::styled(age, Style::default().fg(palette.overlay0)),
                 ]),
-                action: NotepadAgentAction::CopyLink(link.url.clone()),
+                action: NotepadAgentAction::CopyLinkIndex(link_index),
+                observed_at: Some(seen),
                 link_label: Some((4, label)),
             });
         }
@@ -396,15 +414,23 @@ fn push_link_rows(
 }
 
 /// All body rows of the agent tab for the current focus, truncated to `width`.
-pub(crate) fn agent_rows(app: &AppState, width: u16) -> Vec<NotepadAgentRow> {
+fn agent_rows_range(
+    app: &AppState,
+    width: u16,
+    scroll: usize,
+    visible: usize,
+) -> (Vec<NotepadAgentRow>, usize) {
     let palette = &app.palette;
     let Some(snapshot) = focused_agent_snapshot(app) else {
-        return vec![NotepadAgentRow::plain(Line::from(Span::styled(
-            truncate_end("no agent in this pane", usize::from(width)),
-            Style::default().fg(palette.overlay0),
-        )))];
+        return (
+            vec![NotepadAgentRow::plain(Line::from(Span::styled(
+                truncate_end("no agent in this pane", usize::from(width)),
+                Style::default().fg(palette.overlay0),
+            )))],
+            0,
+        );
     };
-    let now_unix = app.status_now_unix;
+    let now_unix = app.view_observed_unix_s.min(i64::MAX as u64) as i64;
     let collapsed = &app.notepad.agent_collapsed;
     let mut rows = Vec::new();
     push_status_rows(
@@ -438,19 +464,42 @@ pub(crate) fn agent_rows(app: &AppState, width: u16) -> Vec<NotepadAgentRow> {
         now_unix,
         width,
     );
-    rows
+    let visible = visible.max(1);
+    let max_scroll = rows.len().saturating_sub(visible);
+    let scroll = scroll.min(max_scroll);
+    let mut rows: Vec<_> = rows.into_iter().skip(scroll).take(visible).collect();
+    for row in &mut rows {
+        if let NotepadAgentAction::CopyLinkIndex(index) = row.action {
+            row.action = snapshot
+                .links
+                .get(index)
+                .map_or(NotepadAgentAction::None, |link| {
+                    NotepadAgentAction::CopyLink(link.url.clone())
+                });
+        }
+    }
+    (rows, max_scroll)
+}
+
+#[cfg(test)]
+pub(crate) fn agent_rows(app: &AppState, width: u16) -> Vec<NotepadAgentRow> {
+    agent_rows_range(app, width, 0, usize::MAX).0
+}
+
+/// Materialize only the rows that can reach this client's frame. The total is
+/// still used to clamp scrolling, but off-screen actions never enter ViewState.
+pub(crate) fn agent_rows_window(
+    app: &AppState,
+    width: u16,
+    scroll: usize,
+    visible: usize,
+) -> (Vec<NotepadAgentRow>, usize) {
+    agent_rows_range(app, width, scroll, visible)
 }
 
 pub(crate) fn render_agent_body(app: &AppState, frame: &mut Frame, body: Rect) {
     let visible = usize::from(body.height);
-    for (offset, row) in app
-        .view
-        .notepad_agent_rows
-        .iter()
-        .skip(app.notepad.agent_scroll)
-        .take(visible)
-        .enumerate()
-    {
+    for (offset, row) in app.view.notepad_agent_rows.iter().take(visible).enumerate() {
         let y = body.y.saturating_add(offset as u16);
         frame.render_widget(
             Paragraph::new(row.line.clone()),
@@ -459,8 +508,8 @@ pub(crate) fn render_agent_body(app: &AppState, frame: &mut Frame, body: Rect) {
     }
 }
 
-/// The visible link labels as `((x, y), cell symbol, url)` triples, merged into
-/// the frame's hyperlink list so the outer terminal makes them OSC 8 links.
+/// The visible link labels as `((x, y), label, url)` spans, merged into the
+/// frame's hyperlink list so one URL allocation covers the whole OSC 8 label.
 pub(crate) fn hyperlink_cells(app: &AppState) -> Vec<((u16, u16), String, String)> {
     if !app.notepad.agent_tab {
         return Vec::new();
@@ -474,7 +523,6 @@ pub(crate) fn hyperlink_cells(app: &AppState) -> Vec<((u16, u16), String, String
         .view
         .notepad_agent_rows
         .iter()
-        .skip(app.notepad.agent_scroll)
         .take(usize::from(body.height))
         .enumerate()
     {
@@ -484,15 +532,9 @@ pub(crate) fn hyperlink_cells(app: &AppState) -> Vec<((u16, u16), String, String
             continue;
         };
         let y = body.y.saturating_add(offset as u16);
-        let mut x = body.x.saturating_add(*rel_x);
-        for ch in label.chars() {
-            if x >= body.right() {
-                break;
-            }
-            let symbol = ch.to_string();
-            let advance = display_width_u16(&symbol).max(1);
-            cells.push(((x, y), symbol, url.clone()));
-            x = x.saturating_add(advance);
+        let x = body.x.saturating_add(*rel_x);
+        if x < body.right() {
+            cells.push(((x, y), label.clone(), url.clone()));
         }
     }
     cells
@@ -531,6 +573,7 @@ mod tests {
         app.notepad.enabled = true;
         app.notepad.height = 18;
         app.status_now_unix = Some(BASE_SECS as i64 + 600);
+        app.view_observed_unix_s = BASE_SECS + 600;
         let pane_id = app.workspaces[0].focused_pane_id().unwrap();
         let terminal_id = app.workspaces[0].terminal_id(pane_id).unwrap().clone();
         app.terminals
@@ -615,6 +658,57 @@ mod tests {
                 .find(|row| row_text(row).contains("Tasks"))
                 .map(|row| &row.action),
             Some(&NotepadAgentAction::ToggleSection(AgentSection::Tasks))
+        );
+    }
+
+    #[test]
+    fn agent_ages_use_the_current_view_clock_instead_of_the_status_clock() {
+        let (mut app, pane_id) = app_with_agent();
+        report(&mut app, pane_id);
+        app.status_now_unix = Some(BASE_SECS as i64 + 60);
+        app.view_observed_unix_s = BASE_SECS + 600;
+
+        let text = agent_rows(&app, 40)
+            .iter()
+            .map(row_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("working · 10m ago"), "{text}");
+        assert!(!text.contains("working · 1m ago"), "{text}");
+    }
+
+    #[test]
+    fn visible_agent_tab_ages_register_a_refresh_deadline() {
+        let (mut app, pane_id) = app_with_agent();
+        app.agent_states
+            .report(
+                pane_id,
+                AgentReportPayload {
+                    status_text: None,
+                    goal: None,
+                    tasks: None,
+                    subagents: Vec::new(),
+                },
+                SystemTime::now() - Duration::from_secs(10),
+            )
+            .expect("valid report");
+        app.notepad.select_agent_tab();
+
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+        assert!(
+            app.view
+                .notepad_agent_rows
+                .iter()
+                .any(|row| row.observed_at.is_some()),
+            "the visible age row must expose its observation instant"
+        );
+        let deadline = app
+            .next_agent_activity_age_change(app.view_observed_at)
+            .expect("visible status age deadline");
+        assert!(
+            deadline.saturating_duration_since(app.view_observed_at) <= Duration::from_secs(2),
+            "the seconds label must self-refresh at its next second: {deadline:?}"
         );
     }
 
@@ -734,7 +828,7 @@ mod tests {
         assert!(header.contains("│ agent"), "{header}");
         let body: Vec<String> = (panel.y + 1..panel.bottom()).map(panel_text).collect();
         let body_text = body.join("\n");
-        assert!(body_text.contains("working · 10m ago"), "{body_text}");
+        assert!(body_text.contains("working ·"), "{body_text}");
         assert!(body_text.contains("goal: ship MAT-160"), "{body_text}");
         assert!(
             !body_text.contains("type a note"),
@@ -764,12 +858,12 @@ mod tests {
         );
     }
 
-    /// The OSC 8 cells track the visible window: each label cell carries the
-    /// full URL, and scrolling moves them with the rows.
+    /// The OSC 8 spans track the visible window: each visible label carries
+    /// one full URL representation, and scrolling moves it with the row.
     #[test]
     fn hyperlink_cells_cover_each_visible_link_label() {
         let (mut app, pane_id) = app_with_agent();
-        app.notepad.height = 16;
+        app.notepad.height = 10;
         for index in 0..6 {
             app.agent_states.observe_links(
                 pane_id,
@@ -782,8 +876,8 @@ mod tests {
         crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
         let body = crate::ui::notepad::notepad_body_rect(app.view.notepad_rect);
 
-        let cells = hyperlink_cells(&app);
-        assert!(!cells.is_empty());
+        let spans = hyperlink_cells(&app);
+        assert!(!spans.is_empty());
         let (link_index, row) = app
             .view
             .notepad_agent_rows
@@ -793,20 +887,49 @@ mod tests {
             .expect("one visible link row");
         let y = body.y + link_index as u16;
         let label = row.link_label.clone().expect("link label").1;
-        let first = cells.iter().find(|((_, cy), _, _)| *cy == y).unwrap();
+        let first = spans.iter().find(|((_, cy), _, _)| *cy == y).unwrap();
         assert_eq!(first.0 .0, body.x + 4);
-        assert_eq!(first.1, label.chars().next().unwrap().to_string());
+        assert_eq!(first.1, label);
         assert!(first.2.starts_with("https://github.com/owner/repo/pull/"));
-        let row_cells = cells.iter().filter(|((_, cy), _, _)| *cy == y).count();
-        assert_eq!(row_cells, label.chars().count());
+        assert_eq!(spans.iter().filter(|((_, cy), _, _)| *cy == y).count(), 1);
 
         app.notepad.agent_scroll_by(1, 10);
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
         let scrolled = hyperlink_cells(&app);
         assert!(
             scrolled
                 .iter()
                 .any(|cell| cell.2 == first.2 && cell.0 .1 == y - 1),
             "scrolling moves the row's hyperlink cells up with it"
+        );
+    }
+
+    #[test]
+    fn view_snapshot_keeps_only_visible_agent_rows_and_link_actions() {
+        let (mut app, pane_id) = app_with_agent();
+        app.notepad.height = 8;
+        for index in 0..40 {
+            app.agent_states.observe_links(
+                pane_id,
+                [format!("https://github.com/owner/repo/pull/{index}")],
+                AgentLinkSource::Output,
+                base() + Duration::from_secs(index),
+            );
+        }
+        app.notepad.select_agent_tab();
+
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
+        let visible =
+            usize::from(crate::ui::notepad::notepad_body_rect(app.view.notepad_rect).height);
+
+        assert!(app.view.notepad_agent_rows.len() <= visible);
+        assert!(
+            app.view
+                .notepad_agent_rows
+                .iter()
+                .filter(|row| matches!(row.action, NotepadAgentAction::CopyLink(_)))
+                .count()
+                <= visible
         );
     }
 }

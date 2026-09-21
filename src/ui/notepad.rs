@@ -81,29 +81,29 @@ pub(crate) fn notepad_tab_hit_areas(app: &AppState, panel: Rect) -> Vec<(Notepad
     let mut areas = Vec::new();
     let mut x = panel.x.saturating_add(2);
     let right = panel.right();
+    let agent_width = display_width_u16(super::notepad_agent::TAB_LABEL);
+    let agent_suffix_width = 2u16.saturating_add(agent_width);
     for (index, file) in app.notepad.files.iter().enumerate() {
         let width = display_width_u16(&file.name);
-        if width == 0 || x.saturating_add(width) > right {
+        let next_x = x.saturating_add(width).saturating_add(1);
+        if width == 0 || next_x.saturating_add(agent_suffix_width) > right {
             break;
         }
         areas.push((
             NotepadTabTarget::Note(index),
             Rect::new(x, panel.y, width, 1),
         ));
-        x = x.saturating_add(width).saturating_add(1);
+        x = next_x;
     }
     if app.notepad.files.is_empty() {
-        x = x
-            .saturating_add(display_width_u16("no notes"))
-            .saturating_add(1);
+        x = x.saturating_add(display_width_u16("no notes"));
     }
     // The agent label follows a "│ " divider, two columns wide.
-    let label_width = display_width_u16(super::notepad_agent::TAB_LABEL);
     let label_x = x.saturating_add(2);
-    if label_x.saturating_add(label_width) <= right {
+    if label_x.saturating_add(agent_width) <= right {
         areas.push((
             NotepadTabTarget::Agent,
-            Rect::new(label_x, panel.y, label_width, 1),
+            Rect::new(label_x, panel.y, agent_width, 1),
         ));
     }
     areas
@@ -120,9 +120,12 @@ fn header_spans<'a>(app: &'a AppState, palette: &Palette, width: u16) -> Line<'a
         }),
     )];
     let mut used = 2u16;
+    let agent_width = display_width_u16(super::notepad_agent::TAB_LABEL);
+    let agent_suffix_width = 2u16.saturating_add(agent_width);
     for (index, file) in app.notepad.files.iter().enumerate() {
         let name_width = display_width_u16(&file.name);
-        if used.saturating_add(name_width) > width {
+        let next_used = used.saturating_add(name_width).saturating_add(1);
+        if next_used.saturating_add(agent_suffix_width) > width {
             break;
         }
         let active = index == app.notepad.active;
@@ -136,11 +139,8 @@ fn header_spans<'a>(app: &'a AppState, palette: &Palette, width: u16) -> Line<'a
             Style::default().fg(palette.overlay0)
         };
         spans.push(Span::styled(file.name.as_str(), style));
-        used = used.saturating_add(name_width);
-        if used < width {
-            spans.push(Span::raw(" "));
-            used = used.saturating_add(1);
-        }
+        spans.push(Span::raw(" "));
+        used = next_used;
     }
     if app.notepad.files.is_empty() {
         spans.push(Span::styled(
@@ -150,7 +150,6 @@ fn header_spans<'a>(app: &'a AppState, palette: &Palette, width: u16) -> Line<'a
         used = used.saturating_add(display_width_u16("no notes"));
     }
     // The agent tab trails the note names, divided by a pipe.
-    let agent_width = display_width_u16(super::notepad_agent::TAB_LABEL);
     if used.saturating_add(2).saturating_add(agent_width) <= width {
         spans.push(Span::styled("│", Style::default().fg(palette.surface_dim)));
         spans.push(Span::raw(" "));
@@ -345,11 +344,8 @@ mod tests {
             areas[0],
             (NotepadTabTarget::Note(0), Rect::new(2, 10, 4, 1))
         );
-        assert_eq!(
-            areas[1],
-            (NotepadTabTarget::Note(1), Rect::new(7, 10, 5, 1))
-        );
-        // "│ agent" needs seven more columns than the fourteen available.
+        assert_eq!(areas[1], (NotepadTabTarget::Agent, Rect::new(9, 10, 5, 1)));
+        // The second note yields because the agent selector owns the suffix.
     }
 
     #[test]
@@ -368,6 +364,49 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn note_tabs_yield_to_the_agent_tab_at_the_minimum_sidebar_width() {
+        let mut app = state();
+        app.notepad.set_files(vec![
+            crate::notepad::NotepadFile {
+                path: "/notes/ideas.md".into(),
+                name: "ideas".into(),
+            },
+            crate::notepad::NotepadFile {
+                path: "/notes/todo.md".into(),
+                name: "todo".into(),
+            },
+        ]);
+
+        let areas = notepad_tab_hit_areas(&app, Rect::new(0, 10, 18, 8));
+        assert_eq!(
+            areas.last().map(|(target, _)| *target),
+            Some(NotepadTabTarget::Agent),
+            "the read-only tab stays reachable after note tabs yield"
+        );
+        assert_eq!(
+            areas.last().map(|(_, area)| *area),
+            Some(Rect::new(10, 10, 5, 1))
+        );
+    }
+
+    #[test]
+    fn empty_notes_agent_hit_area_exactly_matches_the_rendered_label_columns() {
+        let app = state();
+        let panel = Rect::new(0, 10, 18, 8);
+        let areas = notepad_tab_hit_areas(&app, panel);
+        assert_eq!(
+            areas,
+            vec![(NotepadTabTarget::Agent, Rect::new(12, 10, 5, 1))]
+        );
+        let header = header_spans(&app, &app.palette, panel.width)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(header.chars().skip(12).take(5).collect::<String>(), "agent");
+    }
 }
 
 #[cfg(test)]
@@ -383,6 +422,37 @@ mod render_tests {
             .chunks(usize::from(terminal.backend().buffer().area.width))
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect()
+    }
+
+    #[test]
+    fn agent_tab_renders_at_minimum_and_normal_sidebar_widths() {
+        for width in [18, 26] {
+            let mut app = AppState::test_new();
+            app.notepad.enabled = true;
+            app.notepad.set_files(vec![
+                crate::notepad::NotepadFile {
+                    path: "/notes/ideas.md".into(),
+                    name: "ideas".into(),
+                },
+                crate::notepad::NotepadFile {
+                    path: "/notes/todo.md".into(),
+                    name: "todo".into(),
+                },
+            ]);
+            let panel = Rect::new(0, 0, width, 2);
+            let mut terminal = Terminal::new(TestBackend::new(width, 2)).expect("test terminal");
+            terminal
+                .draw(|frame| render_notepad(&app, frame, panel))
+                .expect("render");
+            let header = buffer_text(&terminal)[0].clone();
+            assert!(header.contains("│ agent"), "width {width}: {header}");
+            assert_eq!(
+                notepad_tab_hit_areas(&app, panel)
+                    .last()
+                    .map(|(target, _)| *target),
+                Some(NotepadTabTarget::Agent)
+            );
+        }
     }
 
     /// The panel has to reach a real frame, not just its geometry helpers: a

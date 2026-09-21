@@ -66,6 +66,8 @@ pub(crate) struct ClientConnection {
     pub(crate) sidebar_presentation: crate::app::state::SidebarPresentationState,
     /// Dock layout and focus state for this attach; editor PTYs are server-owned.
     pub(crate) dock_presentation: crate::app::state::DockPresentationState,
+    /// Selected notepad projection, folds, and scroll for this attach.
+    pub(crate) notepad_presentation: crate::notepad::NotepadPresentationState,
     /// Client-local run-history detail surface, separate from server-owned receipt facts.
     pub(crate) loop_run_history_detail: Option<crate::app::state::LoopRunHistoryDetail>,
     /// Client-local Symphony dashboard selection over the server-owned snapshot.
@@ -156,6 +158,7 @@ impl ClientConnection {
             pending_pomodoro_presentations: VecDeque::new(),
             sidebar_presentation: crate::app::state::SidebarPresentationState::default(),
             dock_presentation: crate::app::state::DockPresentationState::default(),
+            notepad_presentation: crate::notepad::NotepadPresentationState::default(),
             loop_run_history_detail: None,
             symphony_detail: None,
             work_view: None,

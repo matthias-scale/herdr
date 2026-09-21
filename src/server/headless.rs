@@ -4159,6 +4159,12 @@ impl HeadlessServer {
                 .map(|client| std::mem::take(&mut client.dock_presentation))
                 .unwrap_or_default()
         });
+        let mut notepad_presentation = source_is_full_app.then(|| {
+            self.clients
+                .get_mut(&client_id)
+                .map(|client| std::mem::take(&mut client.notepad_presentation))
+                .unwrap_or_default()
+        });
         let mut loop_run_history_detail = source_is_full_app.then(|| {
             self.clients
                 .get_mut(&client_id)
@@ -4186,6 +4192,9 @@ impl HeadlessServer {
         if let Some(presentation) = &mut dock_presentation {
             self.app.state.swap_dock_presentation(presentation);
             self.app.state.reconcile_dock_home_with_focused_pane();
+        }
+        if let Some(presentation) = &mut notepad_presentation {
+            self.app.state.notepad.swap_presentation(presentation);
         }
         if let Some(detail) = &mut loop_run_history_detail {
             self.app.state.swap_loop_run_history_detail(detail);
@@ -4230,6 +4239,12 @@ impl HeadlessServer {
             self.app.state.swap_dock_presentation(&mut presentation);
             if let Some(client) = self.clients.get_mut(&client_id) {
                 client.dock_presentation = presentation;
+            }
+        }
+        if let Some(mut presentation) = notepad_presentation {
+            self.app.state.notepad.swap_presentation(&mut presentation);
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.notepad_presentation = presentation;
             }
         }
         if let Some(detail) = loop_run_history_detail {
@@ -4503,14 +4518,28 @@ impl HeadlessServer {
                 }
                 let mut pomodoro_presentation =
                     self.pomodoro_input_presentation_for_input(client_id);
+                let mut notepad_presentation = self
+                    .clients
+                    .get_mut(&client_id)
+                    .map(|client| std::mem::take(&mut client.notepad_presentation))
+                    .unwrap_or_default();
+                self.app
+                    .state
+                    .notepad
+                    .swap_presentation(&mut notepad_presentation);
                 let changed = self.app.route_client_pixel_mouse_with_presentation(
                     client_id,
                     &data,
                     geometry,
                     &mut pomodoro_presentation,
                 );
+                self.app
+                    .state
+                    .notepad
+                    .swap_presentation(&mut notepad_presentation);
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     client.pomodoro_presentation = pomodoro_presentation;
+                    client.notepad_presentation = notepad_presentation;
                 }
                 changed || foreground_changed
             }
@@ -6099,6 +6128,15 @@ impl HeadlessServer {
                     self.app
                         .state
                         .swap_dock_presentation(&mut dock_presentation);
+                    let mut notepad_presentation = self
+                        .clients
+                        .get_mut(&client_id)
+                        .map(|client| std::mem::take(&mut client.notepad_presentation))
+                        .unwrap_or_default();
+                    self.app
+                        .state
+                        .notepad
+                        .swap_presentation(&mut notepad_presentation);
                     self.app.state.reconcile_dock_home_with_focused_pane();
                     self.app.state.reconcile_sidebar_presentation();
                     self.app
@@ -6186,6 +6224,10 @@ impl HeadlessServer {
                         .swap_dock_presentation(&mut dock_presentation);
                     self.app
                         .state
+                        .notepad
+                        .swap_presentation(&mut notepad_presentation);
+                    self.app
+                        .state
                         .swap_loop_run_history_detail(&mut loop_run_history_detail);
                     self.app.state.swap_symphony_detail(&mut symphony_detail);
                     self.app.state.swap_work_view(&mut work_view);
@@ -6197,6 +6239,7 @@ impl HeadlessServer {
                         client.retained_pane_cursor = retained_pane_cursor;
                         client.sidebar_presentation = sidebar_presentation;
                         client.dock_presentation = dock_presentation;
+                        client.notepad_presentation = notepad_presentation;
                         client.loop_run_history_detail = loop_run_history_detail;
                         client.symphony_detail = symphony_detail;
                         client.work_view = work_view;
@@ -7164,6 +7207,7 @@ fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::SystemTime;
 
     use crate::app::remote_focus::RemoteFocusTransport;
     use crate::app::AppState;
@@ -7873,6 +7917,101 @@ esac
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn notepad_projection_is_rendered_from_each_attached_clients_presentation() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("alpha")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.ensure_test_terminals();
+        let pane_id = server.app.state.workspaces[0].focused_pane_id().unwrap();
+        let terminal_id = server.app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .unwrap()
+            .clone();
+        server
+            .app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Codex),
+                crate::detect::AgentState::Working,
+            );
+        for index in 0..30 {
+            server.app.state.agent_states.observe_links(
+                pane_id,
+                [format!("https://github.com/owner/repo/pull/{index}")],
+                crate::agent_state::AgentLinkSource::Output,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_760_000_000 + index),
+            );
+        }
+        server.app.state.notepad.enabled = true;
+        server.app.state.notepad.height = 18;
+        server
+            .app
+            .state
+            .notepad
+            .set_files(vec![crate::notepad::NotepadFile {
+                path: "/notes/todo.md".into(),
+                name: "todo".into(),
+            }]);
+        server.app.state.notepad.set_body("note");
+
+        let (first_writer, _first_control, first_render) = test_client_writer();
+        let (second_writer, _second_control, second_render) = test_client_writer();
+        let mut first = ClientConnection::new(
+            (120, 40),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            Some(true),
+            2,
+            RenderEncoding::SemanticFrame,
+            Some(first_writer),
+        );
+        first.notepad_presentation.agent_tab = true;
+        first.notepad_presentation.agent_collapsed.tasks = true;
+        first.notepad_presentation.agent_scroll = 1;
+        let second = ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            Some(false),
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(second_writer),
+        );
+        server.clients.insert(1, first);
+        server.clients.insert(2, second);
+        server.foreground_client_id = Some(1);
+        server.app.full_redraw_pending = true;
+
+        server.render_and_stream();
+
+        let first_text = frame_text(&read_server_frame(
+            first_render
+                .recv_timeout(Duration::from_secs(1))
+                .expect("first client frame"),
+        ));
+        let second_text = frame_text(&read_server_frame(
+            second_render
+                .recv_timeout(Duration::from_secs(1))
+                .expect("second client frame"),
+        ));
+        assert!(first_text.contains("▸ Tasks"), "{first_text}");
+        assert!(!first_text.contains("note"), "{first_text}");
+        assert!(second_text.contains("note"), "{second_text}");
+        assert!(
+            server.clients[&1]
+                .notepad_presentation
+                .agent_collapsed
+                .tasks
+        );
+        assert!(!server.clients[&2].notepad_presentation.agent_tab);
+        assert_eq!(server.clients[&1].notepad_presentation.agent_scroll, 1);
     }
 
     fn read_server_shutdown_reason(bytes: Vec<u8>) -> Option<String> {

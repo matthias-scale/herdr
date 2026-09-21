@@ -661,8 +661,17 @@ impl FrameData {
         let mut hyperlink_uris = Vec::<String>::new();
         let mut hyperlink_indices = HashMap::<&str, u32>::new();
         let mut hyperlink_by_position = HashMap::<(u16, u16), (&str, &str)>::new();
-        for ((x, y), symbol, uri) in hyperlinks {
-            hyperlink_by_position.insert((*x, *y), (symbol.as_str(), uri.as_str()));
+        for ((x, y), symbols, uri) in hyperlinks {
+            let mut cell_x = *x;
+            let mut chars = symbols.char_indices().peekable();
+            while let Some((start, ch)) = chars.next() {
+                let end = chars.peek().map_or(symbols.len(), |(index, _)| *index);
+                hyperlink_by_position.insert((cell_x, *y), (&symbols[start..end], uri.as_str()));
+                let width = unicode_width::UnicodeWidthChar::width(ch)
+                    .unwrap_or(0)
+                    .max(1);
+                cell_x = cell_x.saturating_add(width.min(u16::MAX as usize) as u16);
+            }
         }
         let mut cells = Vec::with_capacity((width as usize) * (height as usize));
         for row in 0..height {
@@ -2220,6 +2229,26 @@ mod tests {
             with_links.hyperlinks,
             vec!["https://example.com".to_owned()]
         );
+
+        let mut span_buffer =
+            ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 4, 1));
+        for (column, symbol) in ["l", "i", "n", "k"].into_iter().enumerate() {
+            span_buffer
+                .cell_mut((column as u16, 0))
+                .unwrap()
+                .set_symbol(symbol);
+        }
+        let span_link = FrameData::from_ratatui_buffer_with_hyperlinks(
+            &span_buffer,
+            None,
+            &[(
+                (0, 0),
+                "link".to_owned(),
+                "https://example.com/long".to_owned(),
+            )],
+        );
+        assert!(span_link.cells.iter().all(|cell| cell.hyperlink == Some(0)));
+        assert_eq!(span_link.hyperlinks, ["https://example.com/long"]);
 
         // Convert back to ratatui buffer and compare.
         let restored = frame.to_ratatui_buffer().expect("should reconstruct");

@@ -2283,6 +2283,8 @@ pub struct ViewState {
     /// The agent tab's body rows, derived in view computation so clicks
     /// resolve to the exact row the operator saw. Empty on the note tabs.
     pub(crate) notepad_agent_rows: Vec<crate::ui::notepad_agent::NotepadAgentRow>,
+    /// Maximum attach-local agent-tab offset for the last computed geometry.
+    pub(crate) notepad_agent_max_scroll: usize,
     /// The break-timer countdown in the sidebar footer row.
     pub(crate) pomodoro_hit_area: Rect,
     /// Per-machine notification toggle beside the break timer.
@@ -2300,6 +2302,8 @@ pub struct ViewState {
     /// indexes them.
     pub(crate) sidebar_hover_targets: Vec<SidebarHoverTarget>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
+    /// Visible notepad ages use the compact per-second sub-minute label.
+    pub(crate) visible_notepad_agent_age_instants: Vec<Instant>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
     pub tab_scroll_left_hit_area: Rect,
@@ -5800,13 +5804,21 @@ impl AppState {
     }
 
     pub(crate) fn next_agent_activity_age_change(&self, now: Instant) -> Option<Instant> {
-        self.view
+        let sidebar = self
+            .view
             .visible_agent_activity_instants
             .iter()
             .filter_map(|observed_at| {
                 crate::activity_age::next_coarse_change_at(Some(*observed_at), now)
             })
-            .min()
+            .min();
+        let notepad = self
+            .view
+            .visible_notepad_agent_age_instants
+            .iter()
+            .filter_map(|observed_at| crate::activity_age::next_change_at(Some(*observed_at), now))
+            .min();
+        sidebar.into_iter().chain(notepad).min()
     }
 
     pub(crate) fn toggle_workspace_agent_disclosure(&mut self, ws_idx: usize) -> bool {
@@ -6274,6 +6286,7 @@ impl AppState {
                 notepad_rect: Rect::default(),
                 notepad_tab_hit_areas: Vec::new(),
                 notepad_agent_rows: Vec::new(),
+                notepad_agent_max_scroll: 0,
                 pomodoro_hit_area: Rect::default(),
                 notification_hit_area: Rect::default(),
                 hyperspace_rect: Rect::default(),
@@ -6283,6 +6296,7 @@ impl AppState {
                 agent_card_areas: Vec::new(),
                 sidebar_hover_targets: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
+                visible_notepad_agent_age_instants: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),

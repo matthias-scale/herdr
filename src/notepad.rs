@@ -54,6 +54,15 @@ pub(crate) struct AgentSectionCollapse {
     pub(crate) links: bool,
 }
 
+/// Attach-local notepad controls. Note contents remain session-owned, while
+/// each TUI client may select and fold the read-only projection independently.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct NotepadPresentationState {
+    pub(crate) agent_tab: bool,
+    pub(crate) agent_collapsed: AgentSectionCollapse,
+    pub(crate) agent_scroll: usize,
+}
+
 impl AgentSectionCollapse {
     pub(crate) fn collapsed(&self, section: AgentSection) -> bool {
         match section {
@@ -132,6 +141,12 @@ impl Default for NotepadState {
 }
 
 impl NotepadState {
+    pub(crate) fn swap_presentation(&mut self, other: &mut NotepadPresentationState) {
+        std::mem::swap(&mut self.agent_tab, &mut other.agent_tab);
+        std::mem::swap(&mut self.agent_collapsed, &mut other.agent_collapsed);
+        std::mem::swap(&mut self.agent_scroll, &mut other.agent_scroll);
+    }
+
     pub(crate) fn from_config(config: &crate::config::NotepadConfig) -> Self {
         Self {
             enabled: config.enabled,
