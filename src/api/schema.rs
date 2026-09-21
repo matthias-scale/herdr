@@ -5,6 +5,7 @@ pub mod agents;
 pub mod common;
 pub mod events;
 pub mod fleet;
+pub mod groups;
 pub mod integrations;
 pub mod loops;
 pub mod panes;
@@ -22,6 +23,7 @@ pub use agents::*;
 pub use common::*;
 pub use events::*;
 pub use fleet::*;
+pub use groups::*;
 pub use integrations::*;
 pub use loops::*;
 pub use panes::*;
@@ -99,10 +101,20 @@ pub enum Method {
     LoopList(EmptyParams),
     #[serde(rename = "loop.run_history")]
     LoopRunHistory(LoopRunHistoryParams),
+    #[serde(rename = "loop.findings")]
+    LoopFindings(EmptyParams),
     #[serde(rename = "symphony.list")]
     SymphonyList(EmptyParams),
     #[serde(rename = "fleet.list")]
     FleetList(EmptyParams),
+    #[serde(rename = "group.host_snapshot")]
+    GroupHostSnapshot(EmptyParams),
+    #[serde(rename = "group.create")]
+    GroupCreate(GroupCreateParams),
+    #[serde(rename = "group.rename")]
+    GroupRename(GroupRenameParams),
+    #[serde(rename = "group.delete")]
+    GroupDelete(GroupDeleteParams),
     #[serde(rename = "worktree.list")]
     WorktreeList(WorktreeListParams),
     #[serde(rename = "worktree.create")]
@@ -207,6 +219,8 @@ pub enum Method {
     PaneInputSet(PaneInputSetParams),
     #[serde(rename = "pane.rename")]
     PaneRename(PaneRenameParams),
+    #[serde(rename = "pane.group.set")]
+    PaneGroupSet(PaneGroupSetParams),
     #[serde(rename = "pane.work_context.set")]
     PaneWorkContextSet(PaneWorkContextSetParams),
     #[serde(rename = "pane.send_text")]

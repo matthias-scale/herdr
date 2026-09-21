@@ -1006,6 +1006,8 @@ pub struct WorkspaceCardArea {
     pub ws_idx: usize,
     pub rect: Rect,
     pub indented: bool,
+    /// Whether this row renders the repository-header chevron at `rect.x`.
+    pub repo_header: bool,
     /// The settled pane represented by this workspace header, when the header
     /// belongs to the Settled section.
     pub settled_pane_id: Option<PaneId>,
@@ -1052,11 +1054,22 @@ pub struct TabCardArea {
 /// Per-view narrowing for work-item projections. This remains TUI-only state:
 /// provider observations are shared runtime facts, while each attached client
 /// chooses its own filters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SidebarMachineScope {
+    #[serde(rename = "this_machine")]
+    ThisMachine,
+    #[serde(rename = "all_machines")]
+    #[default]
+    AllMachines,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub(crate) struct SidebarWorkFilter {
     /// Persisted row-search query shared by every sidebar view.
     pub(crate) query: String,
+    /// Whether the sidebar includes remote fleet sessions in its body.
+    pub(crate) machine_scope: SidebarMachineScope,
     /// Id of the `[[projects]]` entry the sidebar is scoped to. `None` shows
     /// every project, which is what an unconfigured Herdr always shows.
     pub(crate) project: Option<String>,
@@ -1244,6 +1257,7 @@ impl Default for SidebarWorkFilter {
     fn default() -> Self {
         Self {
             query: String::new(),
+            machine_scope: SidebarMachineScope::default(),
             project: None,
             team: Some("SCA".into()),
             assignee: Some("me".into()),
@@ -1420,7 +1434,6 @@ pub(crate) enum SidebarGroupMode {
 }
 
 impl SidebarGroupMode {
-    #[cfg(test)]
     pub(crate) const ALL: [Self; 6] = [
         Self::Repo,
         Self::Spaces,
@@ -1527,7 +1540,6 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) workspace_scroll: usize,
     pub(crate) mobile_switcher_scroll: usize,
     pub(crate) collapsed_groups: std::collections::HashSet<String>,
-    pub(crate) expanded_remote_host_groups: std::collections::HashSet<String>,
     /// Global projection revision last reconciled into this attach.
     pub(crate) projection_revision: u64,
     pub(crate) group_mode: SidebarGroupMode,
@@ -1772,6 +1784,7 @@ impl ServerInputOwner {
 pub(crate) enum SurfaceInputOwner {
     Symphony,
     LoopRunHistory,
+    AloopRunLog,
     Usage,
     Work,
     EditorPreview,
@@ -1863,14 +1876,14 @@ pub(crate) struct SidebarSnoozeUiState {
 }
 
 impl SidebarPresentationState {
-    pub(crate) fn initialize_group_mode(&mut self, group_mode: SidebarGroupMode) {
+    pub(crate) fn initialize_group_mode(
+        &mut self,
+        group_mode: SidebarGroupMode,
+        collapsed_overrides: &std::collections::HashMap<String, bool>,
+    ) {
         self.group_mode = group_mode;
         self.group_menu_selected = group_mode.view_index();
-        self.collapsed_groups.insert(format!(
-            "{}:{}",
-            group_mode.collapse_namespace(),
-            crate::ui::RECENTLY_DONE_SECTION_TITLE
-        ));
+        self.collapsed_groups = crate::ui::initial_collapsed_sidebar_groups(collapsed_overrides);
     }
 }
 
@@ -2661,8 +2674,7 @@ pub struct ViewState {
     pub pane_toggle_below_hit_area: Rect,
     pub pane_toggle_right_hit_area: Rect,
     pub terminal_area: Rect,
-    pub info_panel_rect: Rect,
-    pub info_panel_link_rows: Vec<InfoPanelLinkRow>,
+    pub work_context_link_rows: Vec<WorkContextLinkRow>,
     pub mobile_header_rect: Rect,
     pub mobile_menu_hit_area: Rect,
     /// Client-side hover and click target for the compact diagnostic marker.
@@ -2748,8 +2760,9 @@ pub(crate) struct StatusWorkLink {
     pub object: DockObjectRef,
 }
 
+/// A work link rendered in the dock's Context tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InfoPanelLinkRow {
+pub(crate) struct WorkContextLinkRow {
     pub rect: Rect,
     pub copy_value: String,
 }
@@ -4112,6 +4125,7 @@ pub(crate) enum TerminalAreaSurface<'a> {
     EditorPreview,
     Symphony(&'a SymphonyDetail),
     LoopRunHistory(&'a LoopRunHistoryDetail),
+    AloopRunLog(&'a AloopRunDetail),
     Usage,
     Work,
     DockObjectPreview,
@@ -4142,6 +4156,10 @@ pub struct AppState {
     pub(crate) loop_run_history: crate::loop_runs::RunHistory,
     pub(crate) loop_registry: crate::loop_runs::LoopRegistry,
     pub(crate) loop_run_history_detail: Option<LoopRunHistoryDetail>,
+    /// Full-screen log of one aloop run selected in the sidebar (MAT-159
+    /// AC7). TUI presentation state: the run record itself is server data in
+    /// the fleet snapshot.
+    pub(crate) aloop_run_detail: Option<AloopRunDetail>,
     pub(crate) symphony_snapshot: crate::symphony::Snapshot,
     /// Server-owned fleet inventory, refreshed off the render thread.
     pub(crate) fleet_snapshot: crate::fleet::Snapshot,
@@ -4152,6 +4170,10 @@ pub struct AppState {
         std::collections::HashMap<PaneId, crate::ui::AgentPanelLocalIdentity>,
     /// TUI projection materialized only when the fleet snapshot changes.
     pub(crate) remote_agent_panel_entries: Vec<std::sync::Arc<crate::ui::RemoteAgentPanelEntry>>,
+    /// Producer-derived aloop rows are immutable between fleet refreshes.
+    /// Keeping the projection here prevents layout and render passes from
+    /// repeating the nested run/finding/stable-id scan.
+    pub(crate) aloop_projection: Option<std::sync::Arc<crate::aloop::SectionProjection>>,
     /// Local panes backed by remote-focus operations. Agent identity remains
     /// owned by `RemoteFocusOperations`; this marker only hides proxy chrome.
     pub(crate) remote_focus_proxy_panes: std::collections::HashSet<crate::layout::PaneId>,
@@ -4318,6 +4340,7 @@ pub struct AppState {
     pub(crate) dock_width_persistence_request: Option<u16>,
     pub(crate) sidebar_group_mode_persistence_request: Option<SidebarGroupMode>,
     pub(crate) sidebar_group_sort_persistence_request: Option<(String, SidebarSortMode)>,
+    pub(crate) sidebar_group_collapsed_persistence_request: Option<(String, bool)>,
     pub(crate) sidebar_view_scan_request: bool,
     pub(crate) sidebar_work_filter_persistence_request: Option<SidebarWorkFilter>,
     /// Set when UI interaction requested a clipboard write that must be
@@ -4619,8 +4642,6 @@ pub struct AppState {
     pub sidebar_collapsed: bool,
     /// Whether the sidebar is showing only rows that require human attention.
     pub blocked_filter: bool,
-    /// Whether the desktop focused-pane work-context panel is expanded.
-    pub info_panel_expanded: bool,
     pub sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig,
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
@@ -4686,7 +4707,6 @@ pub struct AppState {
     pub pane_gaps: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub hide_tab_bar_when_single_tab: bool,
-    pub show_subscription_usage: bool,
     pub tab_bar_position: TabBarPositionConfig,
     pub tab_bar_right: Vec<TabBarStatusSegment>,
     pub tab_bar_right_separator: String,
@@ -4930,6 +4950,15 @@ impl AppState {
 pub(crate) struct LoopRunHistoryDetail {
     pub(crate) loop_id: String,
     pub(crate) history: crate::loop_runs::RunHistory,
+    pub(crate) observed_at: std::time::SystemTime,
+    pub(crate) producer_host: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AloopRunDetail {
+    pub(crate) loop_name: String,
+    pub(crate) host: String,
+    pub(crate) run: std::sync::Arc<crate::aloop::RunRecord>,
     pub(crate) observed_at: std::time::SystemTime,
 }
 
@@ -5617,6 +5646,10 @@ impl AppState {
         std::mem::swap(&mut self.loop_run_history_detail, other);
     }
 
+    pub(crate) fn swap_aloop_run_detail(&mut self, other: &mut Option<AloopRunDetail>) {
+        std::mem::swap(&mut self.aloop_run_detail, other);
+    }
+
     pub(crate) fn show_loop_run_history(
         &mut self,
         loop_id: String,
@@ -5627,11 +5660,38 @@ impl AppState {
             loop_id,
             history,
             observed_at,
+            producer_host: None,
         });
     }
 
     pub(crate) fn clear_loop_run_history(&mut self) {
         self.loop_run_history_detail = None;
+    }
+
+    pub(crate) fn show_aloop_run_detail(
+        &mut self,
+        loop_name: String,
+        host: String,
+        run: std::sync::Arc<crate::aloop::RunRecord>,
+    ) {
+        self.aloop_run_detail = Some(AloopRunDetail {
+            loop_name,
+            host,
+            run,
+            observed_at: std::time::SystemTime::now(),
+        });
+    }
+
+    pub(crate) fn clear_aloop_run_detail(&mut self) {
+        self.aloop_run_detail = None;
+    }
+
+    pub(crate) fn aloop_projection(
+        &self,
+    ) -> Option<std::sync::Arc<crate::aloop::SectionProjection>> {
+        self.aloop_projection
+            .clone()
+            .or_else(|| crate::aloop::project(&self.fleet_snapshot).map(std::sync::Arc::new))
     }
 
     /// Reveal the scratchpad without spawning an editor: the dock opens if it was
@@ -5698,6 +5758,99 @@ impl AppState {
             },
             std::time::SystemTime::now(),
         );
+    }
+
+    /// MAT-159 AC8: a loop header in the Aloops sidebar section opens the
+    /// existing MAT-126 run-history table filtered to that loop.
+    pub(crate) fn open_aloop_loop_history(&mut self, loop_name: &str) {
+        self.clear_aloop_run_detail();
+        let producer_host = self
+            .fleet_snapshot
+            .aloop
+            .as_ref()
+            .map(|producer| producer.host.clone());
+        let history = self
+            .fleet_snapshot
+            .aloop
+            .as_ref()
+            .map(|producer| {
+                let runs = producer
+                    .data
+                    .loops
+                    .iter()
+                    .find(|loop_runs| loop_runs.loop_name == loop_name)
+                    .map(|loop_runs| {
+                        loop_runs
+                            .runs
+                            .iter()
+                            .map(|run| crate::loop_runs::RunRecord {
+                                run_id: run.at.clone(),
+                                skill: "aloop".to_string(),
+                                session: Some(producer.host.clone()),
+                                pr: None,
+                                ticket: None,
+                                loop_id: Some(loop_name.to_string()),
+                                start: run.at.clone(),
+                                end: None,
+                                wall_min: Some(run.duration_ms as f64 / 60_000.0),
+                                blocked_min: None,
+                                gates: Vec::new(),
+                                human_touches: None,
+                                touches_by_type: std::collections::BTreeMap::new(),
+                                interrupted_focus: None,
+                                review_rounds: None,
+                                out_tokens: None,
+                                outcome: crate::loop_runs::RunOutcome::Terminal(if run.exit == 0 {
+                                    "ok".to_string()
+                                } else {
+                                    format!("exit {}", run.exit)
+                                }),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                crate::loop_runs::RunHistory {
+                    runs,
+                    skipped_lines: producer
+                        .data
+                        .loops
+                        .iter()
+                        .find(|loop_runs| loop_runs.loop_name == loop_name)
+                        .map_or(0, |loop_runs| loop_runs.skipped_lines),
+                }
+            })
+            .unwrap_or_default();
+        self.show_loop_run_history(loop_name.to_string(), history, std::time::SystemTime::now());
+        if let Some(detail) = self.loop_run_history_detail.as_mut() {
+            detail.producer_host = producer_host;
+        }
+    }
+
+    /// MAT-159 AC7: selecting a run in the Aloops section opens its recorded
+    /// log excerpt. Resolves the record out of the fleet snapshot so the view
+    /// never reads the producer host from the input path.
+    pub(crate) fn open_aloop_run_log(&mut self, loop_name: &str, at: &str) -> bool {
+        let Some(snapshot) = self.fleet_snapshot.aloop.as_ref() else {
+            return false;
+        };
+        if !snapshot.reachable() {
+            return false;
+        }
+        let Some(run) = snapshot
+            .data
+            .loops
+            .iter()
+            .find(|loop_runs| loop_runs.loop_name == loop_name)
+            .and_then(|loop_runs| loop_runs.runs.iter().find(|run| run.at == at))
+        else {
+            return false;
+        };
+        self.show_aloop_run_detail(
+            loop_name.to_string(),
+            snapshot.host.clone(),
+            std::sync::Arc::clone(run),
+        );
+        true
     }
 }
 
@@ -5797,6 +5950,12 @@ impl AppState {
         self.sidebar_group_sort_persistence_request.take()
     }
 
+    pub(crate) fn take_sidebar_group_collapsed_persistence_request(
+        &mut self,
+    ) -> Option<(String, bool)> {
+        self.sidebar_group_collapsed_persistence_request.take()
+    }
+
     pub(crate) fn request_sidebar_refresh(&mut self) -> bool {
         if self.sidebar_refreshing {
             return false;
@@ -5829,10 +5988,6 @@ impl AppState {
         std::mem::swap(
             &mut self.collapsed_sidebar_groups,
             &mut other.collapsed_groups,
-        );
-        std::mem::swap(
-            &mut self.sidebar_presentation.expanded_remote_host_groups,
-            &mut other.expanded_remote_host_groups,
         );
         std::mem::swap(
             &mut self.sidebar_presentation.projection_revision,
@@ -6003,6 +6158,9 @@ impl AppState {
             }
             TerminalAreaSurface::LoopRunHistory(_) => {
                 return InputOwner::Surface(SurfaceInputOwner::LoopRunHistory)
+            }
+            TerminalAreaSurface::AloopRunLog(_) => {
+                return InputOwner::Surface(SurfaceInputOwner::AloopRunLog)
             }
             TerminalAreaSurface::Usage => return InputOwner::Surface(SurfaceInputOwner::Usage),
             TerminalAreaSurface::Work => return InputOwner::Surface(SurfaceInputOwner::Work),
@@ -6951,6 +7109,8 @@ impl AppState {
             TerminalAreaSurface::Symphony(detail)
         } else if let Some(detail) = self.loop_run_history_detail.as_ref() {
             TerminalAreaSurface::LoopRunHistory(detail)
+        } else if let Some(detail) = self.aloop_run_detail.as_ref() {
+            TerminalAreaSurface::AloopRunLog(detail)
         } else if self.usage_view.is_some() {
             TerminalAreaSurface::Usage
         } else if self.work_view.is_some() {
@@ -7143,11 +7303,13 @@ impl AppState {
             loop_run_history: crate::loop_runs::RunHistory::default(),
             loop_registry: crate::loop_runs::LoopRegistry::default(),
             loop_run_history_detail: None,
+            aloop_run_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             fleet_snapshot: crate::fleet::Snapshot::default(),
             agent_host_name: "localhost".to_string(),
             local_agent_panel_identities: std::collections::HashMap::new(),
             remote_agent_panel_entries: Vec::new(),
+            aloop_projection: None,
             remote_focus_proxy_panes: std::collections::HashSet::new(),
             sidebar_selected_remote_agent: None,
             symphony_detail: None,
@@ -7240,6 +7402,7 @@ impl AppState {
             dock_width_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
             sidebar_group_sort_persistence_request: None,
+            sidebar_group_collapsed_persistence_request: None,
             sidebar_view_scan_request: false,
             sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
@@ -7252,7 +7415,9 @@ impl AppState {
             worktree_remove: None,
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
-            collapsed_sidebar_groups: std::iter::once("repo:Recently done".to_string()).collect(),
+            collapsed_sidebar_groups: crate::ui::initial_collapsed_sidebar_groups(
+                &std::collections::HashMap::new(),
+            ),
             sidebar_group_mode: SidebarGroupMode::Repo,
             sidebar_focused: false,
             client_focus_intent: ClientFocusIntent::FollowShared,
@@ -7345,8 +7510,7 @@ impl AppState {
                 pane_toggle_below_hit_area: Rect::default(),
                 pane_toggle_right_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
-                info_panel_rect: Rect::default(),
-                info_panel_link_rows: Vec::new(),
+                work_context_link_rows: Vec::new(),
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
                 config_diagnostic_hit_area: Rect::default(),
@@ -7498,7 +7662,6 @@ impl AppState {
             // must not silently move every existing sidebar layout assertion.
             // Tests that care about it set `hyperspace.enabled = true`.
             hyperspace: crate::hyperspace::HyperspaceState::new(false, std::time::Instant::now()),
-            info_panel_expanded: false,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,
@@ -7548,7 +7711,6 @@ impl AppState {
             pane_gaps: false,
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
-            show_subscription_usage: true,
             // Deliberately not the shipped default (`Hidden`): the UI tests that
             // exercise tab-row geometry need a tab row to measure.
             tab_bar_position: TabBarPositionConfig::Top,
@@ -8005,6 +8167,22 @@ mod tests {
         state.toggle_loop_run_history();
     }
 
+    fn show_aloop_run_log(state: &mut AppState) {
+        state.show_aloop_run_detail(
+            "nightly".into(),
+            "ub2".into(),
+            std::sync::Arc::new(crate::aloop::RunRecord {
+                at: "2026-09-18T09:59:00Z".into(),
+                at_unix_s: 1_758_186_740,
+                duration_ms: 1_200,
+                exit: 0,
+                findings: 0,
+                stable_ids: Vec::new(),
+                log_excerpt: "clean log tail".into(),
+            }),
+        );
+    }
+
     fn show_usage(state: &mut AppState) {
         state.toggle_usage_view();
     }
@@ -8132,11 +8310,12 @@ mod tests {
         }
     }
 
-    fn replacing_surface_setups() -> [SurfaceSetup; 8] {
+    fn replacing_surface_setups() -> [SurfaceSetup; 9] {
         [
             ("editor preview", show_editor_preview),
             ("symphony", show_symphony),
             ("loop history", show_loop_history),
+            ("aloop run log", show_aloop_run_log),
             ("usage", show_usage),
             ("work", show_work),
             ("dock object preview", show_dock_object_preview),
@@ -8473,18 +8652,35 @@ mod tests {
     }
 
     #[test]
-    fn fresh_sidebar_presentation_collapses_recently_done_for_its_group_mode() {
+    fn fresh_sidebar_presentation_seeds_every_view_and_honors_explicit_expansion() {
         let mut presentation = SidebarPresentationState::default();
-        presentation.initialize_group_mode(SidebarGroupMode::Spaces);
+        let overrides = std::collections::HashMap::from([("repo:Runs".to_string(), false)]);
+        presentation.initialize_group_mode(SidebarGroupMode::Spaces, &overrides);
 
         assert_eq!(presentation.group_mode, SidebarGroupMode::Spaces);
         assert_eq!(
             presentation.group_menu_selected,
             SidebarGroupMode::Spaces.view_index()
         );
-        assert!(presentation
-            .collapsed_groups
-            .contains("spaces:Recently done"));
+        for mode in SidebarGroupMode::ALL {
+            let namespace = mode.collapse_namespace();
+            if let Some(title) = crate::ui::sidebar::unassigned_section_title(mode) {
+                assert!(
+                    presentation
+                        .collapsed_groups
+                        .contains(&format!("{namespace}:{title}")),
+                    "{namespace}:{title}"
+                );
+            }
+            for title in ["Snoozed", "Settled", "Fleet", "Runs", "Aloops", "Symphony"] {
+                let key = format!("{namespace}:{title}");
+                if key == "repo:Runs" {
+                    assert!(!presentation.collapsed_groups.contains(&key));
+                } else {
+                    assert!(presentation.collapsed_groups.contains(&key), "{key}");
+                }
+            }
+        }
     }
 
     #[test]

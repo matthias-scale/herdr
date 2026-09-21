@@ -731,8 +731,7 @@ fn status_segments(
 }
 
 /// Memory as a share of the installed total, the form that needs no arithmetic
-/// from the reader. The GiB figures stay in the info panel for anyone who wants
-/// the absolute numbers.
+/// from the reader.
 pub(crate) fn memory_percent(
     metrics: &crate::platform::status_metrics::StatusMetrics,
 ) -> Option<u8> {
@@ -1070,6 +1069,7 @@ pub(super) fn state_icon_with_stale(
     state_icon(state, seen, indicator_style, p)
 }
 
+#[cfg(test)]
 pub(super) fn state_label(state: AgentState, seen: bool) -> &'static str {
     match (state, seen) {
         (AgentState::Blocked, _) => "blocked",
@@ -1916,7 +1916,9 @@ mod tests {
                     used_percent: 56,
                     resets_at: Some(2_000_100_000),
                 }),
+                credits: None,
                 stale: false,
+                ..AccountUsage::default()
             },
             codex: AccountUsage {
                 account: Some("SHQ".into()),

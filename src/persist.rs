@@ -9,6 +9,9 @@ pub mod plugin_registry;
 mod restore;
 mod snapshot;
 
+pub(crate) use self::io::commit_json_to_path;
+#[cfg(test)]
+pub(crate) use self::io::save_to_paths;
 pub use self::io::{clear, clear_history, load, load_history, save};
 pub use self::restore::restore;
 #[cfg(unix)]

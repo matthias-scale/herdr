@@ -432,6 +432,7 @@ struct ClientInputPresentation {
     dock: crate::app::state::DockPresentationState,
     notepad: crate::notepad::NotepadPresentationState,
     loop_run_history_detail: Option<crate::app::state::LoopRunHistoryDetail>,
+    aloop_run_detail: Option<crate::app::state::AloopRunDetail>,
     symphony_detail: Option<crate::app::state::SymphonyDetail>,
     work_view: Option<crate::app::state::WorkViewState>,
     usage_view: Option<crate::app::state::UsageViewState>,
@@ -444,6 +445,7 @@ impl ClientInputPresentation {
             dock: std::mem::take(&mut client.dock_presentation),
             notepad: std::mem::take(&mut client.notepad_presentation),
             loop_run_history_detail: client.loop_run_history_detail.take(),
+            aloop_run_detail: client.aloop_run_detail.take(),
             symphony_detail: client.symphony_detail.take(),
             work_view: client.work_view.take(),
             usage_view: client.usage_view.take(),
@@ -457,6 +459,7 @@ impl ClientInputPresentation {
         state.reconcile_dock_home_with_focused_pane();
         state.notepad.swap_presentation(&mut self.notepad);
         state.swap_loop_run_history_detail(&mut self.loop_run_history_detail);
+        state.swap_aloop_run_detail(&mut self.aloop_run_detail);
         state.swap_symphony_detail(&mut self.symphony_detail);
         state.swap_work_view(&mut self.work_view);
         state.swap_usage_view(&mut self.usage_view);
@@ -466,6 +469,7 @@ impl ClientInputPresentation {
         state.swap_usage_view(&mut self.usage_view);
         state.swap_work_view(&mut self.work_view);
         state.swap_symphony_detail(&mut self.symphony_detail);
+        state.swap_aloop_run_detail(&mut self.aloop_run_detail);
         state.swap_loop_run_history_detail(&mut self.loop_run_history_detail);
         state.swap_sidebar_presentation(&mut self.sidebar);
         state.swap_dock_presentation(&mut self.dock);
@@ -477,6 +481,7 @@ impl ClientInputPresentation {
         client.dock_presentation = self.dock;
         client.notepad_presentation = self.notepad;
         client.loop_run_history_detail = self.loop_run_history_detail;
+        client.aloop_run_detail = self.aloop_run_detail;
         client.symphony_detail = self.symphony_detail;
         client.work_view = self.work_view;
         client.usage_view = self.usage_view;
@@ -4602,6 +4607,13 @@ impl HeadlessServer {
         if let Some((key, mode)) = self.app.state.take_sidebar_group_sort_persistence_request() {
             crate::client::presentation::save_sidebar_group_sort(&key, mode);
         }
+        if let Some((key, collapsed)) = self
+            .app
+            .state
+            .take_sidebar_group_collapsed_persistence_request()
+        {
+            crate::client::presentation::save_sidebar_group_collapsed(&key, collapsed);
+        }
         if self.app.state.take_sidebar_view_scan_request() {
             self.app.request_sidebar_view_scan(Instant::now());
         }
@@ -4731,9 +4743,10 @@ impl HeadlessServer {
                 self.seed_client_dock_presentation(client_id);
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     let group_mode = crate::client::presentation::load_sidebar_group_mode();
+                    let collapsed = crate::client::presentation::load_sidebar_group_collapsed();
                     client
                         .sidebar_presentation
-                        .initialize_group_mode(group_mode);
+                        .initialize_group_mode(group_mode, &collapsed);
                     client.sidebar_presentation.work_filter =
                         crate::client::presentation::load_sidebar_work_filter();
                     client.sidebar_presentation.group_sorts =
@@ -6405,14 +6418,12 @@ impl HeadlessServer {
             let area = Rect::new(0, 0, cols, rows);
             let resize_panes = self.app.state.view.pane_infos.is_empty();
             let render_started = crate::render_prof::timer();
-            let _ = crate::server::render_stream::render_virtual_with_runtime_registry_and_handles(
+            let _ = crate::server::render_stream::render_virtual_with_runtime_registry(
                 &mut self.app.state,
                 &self.app.terminal_runtimes,
                 area,
                 resize_panes,
                 crate::kitty_graphics::HostCellSize::default(),
-                &self.app.render_notify,
-                &self.app.render_dirty,
             );
             crate::render_prof::duration_since("full_render.render_virtual", render_started);
             self.app.full_redraw_pending = false;
@@ -6443,6 +6454,10 @@ impl HeadlessServer {
                         .clients
                         .get_mut(&client_id)
                         .and_then(|client| client.loop_run_history_detail.take());
+                    let mut aloop_run_detail = self
+                        .clients
+                        .get_mut(&client_id)
+                        .and_then(|client| client.aloop_run_detail.take());
                     let mut symphony_detail = self
                         .clients
                         .get_mut(&client_id)
@@ -6480,6 +6495,7 @@ impl HeadlessServer {
                     self.app
                         .state
                         .swap_loop_run_history_detail(&mut loop_run_history_detail);
+                    self.app.state.swap_aloop_run_detail(&mut aloop_run_detail);
                     self.app.state.swap_symphony_detail(&mut symphony_detail);
                     self.app.state.swap_work_view(&mut work_view);
                     self.app.state.swap_usage_view(&mut usage_view);
@@ -6496,14 +6512,12 @@ impl HeadlessServer {
                         self.app.state.mobile_switcher_scroll,
                     ));
                     let (buffer, cursor) =
-                        crate::server::render_stream::render_virtual_with_runtime_registry_and_handles(
+                        crate::server::render_stream::render_virtual_with_runtime_registry(
                             &mut self.app.state,
                             &self.app.terminal_runtimes,
                             area,
                             is_foreground,
                             render_cell_size,
-                            &self.app.render_notify,
-                            &self.app.render_dirty,
                         );
                     self.app.record_pending_first_frame();
                     // The editor PTY is a shared runtime resource. Its size follows the
@@ -6569,6 +6583,7 @@ impl HeadlessServer {
                     self.app
                         .state
                         .swap_loop_run_history_detail(&mut loop_run_history_detail);
+                    self.app.state.swap_aloop_run_detail(&mut aloop_run_detail);
                     self.app.state.swap_symphony_detail(&mut symphony_detail);
                     self.app.state.swap_work_view(&mut work_view);
                     self.app.state.swap_usage_view(&mut usage_view);
@@ -6582,6 +6597,7 @@ impl HeadlessServer {
                         client.dock_presentation = dock_presentation;
                         client.notepad_presentation = notepad_presentation;
                         client.loop_run_history_detail = loop_run_history_detail;
+                        client.aloop_run_detail = aloop_run_detail;
                         client.symphony_detail = symphony_detail;
                         client.work_view = work_view;
                         client.usage_view = usage_view;

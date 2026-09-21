@@ -8,9 +8,38 @@ use ratatui::{
 
 use super::scrollbar::{release_notes_scrollbar_rect, render_scrollbar};
 use crate::{
-    app::{state::InfoPanelLinkRow, AppState},
+    app::{state::WorkContextLinkRow, AppState},
     terminal::{AgentMetadata, TerminalState},
+    work_context::{work_link_candidates, WorkLinkKind},
 };
+
+fn visible_candidates(terminal: &TerminalState) -> Vec<crate::work_context::WorkLinkCandidate> {
+    let mut preview_seen = false;
+    work_link_candidates(terminal.effective_work_context())
+        .into_iter()
+        .filter(|candidate| {
+            if candidate.kind != WorkLinkKind::Preview {
+                return true;
+            }
+            if preview_seen {
+                false
+            } else {
+                preview_seen = true;
+                true
+            }
+        })
+        .take(9)
+        .collect()
+}
+
+fn link_prefix(kind: WorkLinkKind) -> &'static str {
+    match kind {
+        WorkLinkKind::Ticket => "ticket",
+        WorkLinkKind::PullRequest => "pr",
+        WorkLinkKind::Preview => "preview",
+        WorkLinkKind::Missive => "missive",
+    }
+}
 
 fn field_line(app: &AppState, label: &str, value: impl Into<String>) -> Line<'static> {
     Line::from(vec![
@@ -82,7 +111,7 @@ fn latest_update(terminal: &TerminalState) -> Option<std::time::Instant> {
 
 fn metadata_lines(app: &AppState, terminal: &TerminalState) -> Vec<Line<'static>> {
     let mut metadata = terminal.agent_metadata.values().collect::<Vec<_>>();
-    // Sorted by source so the panel keeps the same shape between frames: the map's
+    // Sorted by source so the tab keeps the same shape between frames: the map's
     // iteration order is arbitrary, and a block that reshuffles under the reader is
     // worse than one whose order nobody chose.
     metadata.sort_by(|left, right| left.source.cmp(&right.source));
@@ -214,20 +243,19 @@ fn link_row_rects(links_area: Rect, link_count: usize) -> Vec<Rect> {
         .collect()
 }
 
-/// Registered with the same click-to-copy path the work-context panel uses, so a
-/// link in the dock copies exactly what the panel's copy would.
-pub(crate) fn context_link_rows(app: &AppState, area: Rect) -> Vec<InfoPanelLinkRow> {
+/// Registers the rendered work-link rows with the click-to-copy path.
+pub(crate) fn context_link_rows(app: &AppState, area: Rect) -> Vec<WorkContextLinkRow> {
     let Some((_, terminal)) = focused_terminal(app) else {
         return Vec::new();
     };
-    let candidates = super::info_panel::visible_candidates(terminal);
+    let candidates = visible_candidates(terminal);
     let (_, Some(links_area)) = split_off_links_area(area, candidates.len()) else {
         return Vec::new();
     };
     candidates
         .into_iter()
         .zip(link_row_rects(links_area, usize::from(links_area.height)))
-        .map(|(candidate, rect)| InfoPanelLinkRow {
+        .map(|(candidate, rect)| WorkContextLinkRow {
             rect,
             copy_value: candidate.copy_value,
         })
@@ -238,7 +266,7 @@ fn render_links(app: &AppState, frame: &mut Frame, links_area: Rect) {
     let Some((_, terminal)) = focused_terminal(app) else {
         return;
     };
-    let candidates = super::info_panel::visible_candidates(terminal);
+    let candidates = visible_candidates(terminal);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             " WORK LINKS",
@@ -255,7 +283,7 @@ fn render_links(app: &AppState, frame: &mut Frame, links_area: Rect) {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
-                    format!(" {}: ", super::info_panel::link_prefix(candidate.kind)),
+                    format!(" {}: ", link_prefix(candidate.kind)),
                     Style::default().fg(app.palette.overlay0),
                 ),
                 Span::styled(
@@ -277,7 +305,7 @@ pub(super) fn render_context(app: &AppState, frame: &mut Frame, area: Rect) {
         return;
     };
     let link_count = focused_terminal(app)
-        .map(|(_, terminal)| super::info_panel::visible_candidates(terminal).len())
+        .map(|(_, terminal)| visible_candidates(terminal).len())
         .unwrap_or(0);
     let (area, links_area) = split_off_links_area(area, link_count);
     if let Some(links_area) = links_area {

@@ -319,6 +319,7 @@ mod tests {
         let mut unreachable = host("ub1", HostState::Unreachable);
         unreachable.error = Some("ssh: connection refused".to_string());
         app.fleet_snapshot = crate::fleet::Snapshot {
+            aloop: None,
             polled: true,
             refreshed_at: Some(SystemTime::UNIX_EPOCH),
             refreshed_at_unix_ms: Some(0),

@@ -2975,6 +2975,78 @@
           ],
           "type": "object"
         },
+        "GroupCreateParams": {
+          "properties": {
+            "expected_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "expected_revision"
+          ],
+          "type": "object"
+        },
+        "GroupDeleteParams": {
+          "properties": {
+            "expected_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "group_id": {
+              "$ref": "#/schemas/request/$defs/GroupId"
+            }
+          },
+          "required": [
+            "group_id",
+            "expected_revision"
+          ],
+          "type": "object"
+        },
+        "GroupId": {
+          "properties": {
+            "local": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "owner",
+            "local"
+          ],
+          "type": "object"
+        },
+        "GroupRenameParams": {
+          "properties": {
+            "expected_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "group_id": {
+              "$ref": "#/schemas/request/$defs/GroupId"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "group_id",
+            "name",
+            "expected_revision"
+          ],
+          "type": "object"
+        },
         "HostAppearanceOverride": {
           "enum": [
             "auto",
@@ -3455,6 +3527,33 @@
             "format",
             "image_width",
             "image_height"
+          ],
+          "type": "object"
+        },
+        "PaneGroupSetParams": {
+          "properties": {
+            "expected_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "group_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/GroupId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "expected_revision"
           ],
           "type": "object"
         },
@@ -6345,6 +6444,22 @@
         {
           "properties": {
             "method": {
+              "const": "loop.findings",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "symphony.list",
               "type": "string"
             },
@@ -6366,6 +6481,70 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "group.host_snapshot",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "group.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/GroupCreateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "group.rename",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/GroupRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "group.delete",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/GroupDeleteParams"
             }
           },
           "required": [
@@ -7198,6 +7377,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneRenameParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.group.set",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneGroupSetParams"
             }
           },
           "required": [
@@ -9627,6 +9822,101 @@
           ],
           "type": "object"
         },
+        "GroupAuthoritySnapshot": {
+          "properties": {
+            "authority_id": {
+              "type": "string"
+            },
+            "groups": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/GroupRecord"
+              },
+              "type": "array"
+            },
+            "memberships": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/OwnedPaneMembership"
+              },
+              "type": "array"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "authority_id",
+            "revision",
+            "groups",
+            "memberships"
+          ],
+          "type": "object"
+        },
+        "GroupId": {
+          "properties": {
+            "local": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "owner",
+            "local"
+          ],
+          "type": "object"
+        },
+        "GroupRecord": {
+          "oneOf": [
+            {
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "state": {
+                  "const": "active",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "name"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "state": {
+                  "const": "deleted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            }
+          ],
+          "properties": {
+            "id": {
+              "$ref": "#/schemas/success_response/$defs/GroupId"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "revision"
+          ],
+          "type": "object"
+        },
         "HostAppearanceOverride": {
           "enum": [
             "auto",
@@ -9889,6 +10179,48 @@
             }
           ]
         },
+        "LoopFindingInfo": {
+          "description": "One pending aloop finding (MAT-159 SCH1), as read from the producer host's\n`~/.agents/aloop/findings` store.",
+          "properties": {
+            "created_at": {
+              "type": "string"
+            },
+            "evidence": {
+              "type": "string"
+            },
+            "loop": {
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "stable_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "loop",
+            "source",
+            "stable_id",
+            "title",
+            "evidence",
+            "prompt",
+            "created_at"
+          ],
+          "type": "object"
+        },
         "LoopGateInfo": {
           "properties": {
             "defaulted": {
@@ -10100,6 +10432,21 @@
           ],
           "type": "string"
         },
+        "OwnedPaneMembership": {
+          "properties": {
+            "membership": {
+              "$ref": "#/schemas/success_response/$defs/PaneGroupMembership"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "membership"
+          ],
+          "type": "object"
+        },
         "PaneDirection": {
           "enum": [
             "left",
@@ -10179,6 +10526,27 @@
             "source_pane_id",
             "layout"
           ],
+          "type": "object"
+        },
+        "PaneGroupMembership": {
+          "properties": {
+            "group_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/GroupId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "revision": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
           "type": "object"
         },
         "PaneInfo": {
@@ -11904,6 +12272,36 @@
             },
             {
               "properties": {
+                "findings": {
+                  "description": "Pending findings, newest first, capped (MAT-159 AC2).",
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/LoopFindingInfo"
+                  },
+                  "type": "array"
+                },
+                "host": {
+                  "description": "The producer host the findings were read from.",
+                  "type": "string"
+                },
+                "reachable": {
+                  "description": "False when the producer host could not be read; findings is empty.",
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "loop_findings",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "host",
+                "reachable",
+                "findings"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "type": {
                   "const": "symphony_list",
                   "type": "string"
@@ -11940,6 +12338,64 @@
               "required": [
                 "type",
                 "snapshot"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "snapshot": {
+                  "$ref": "#/schemas/success_response/$defs/GroupAuthoritySnapshot"
+                },
+                "type": {
+                  "const": "group_host_snapshot",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "snapshot"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "record": {
+                  "$ref": "#/schemas/success_response/$defs/GroupRecord"
+                },
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "group_mutation",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "record",
+                "revision"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "membership": {
+                  "$ref": "#/schemas/success_response/$defs/PaneGroupMembership"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "pane_group_set",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "membership"
               ],
               "type": "object"
             },
@@ -13210,6 +13666,10 @@
         "ServerCapabilities": {
           "properties": {
             "detached_server_daemon": {
+              "default": false,
+              "type": "boolean"
+            },
+            "groups_v1": {
               "default": false,
               "type": "boolean"
             },

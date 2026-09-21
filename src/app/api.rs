@@ -4,6 +4,7 @@ mod agent_view;
 mod agents;
 mod env;
 mod fleet;
+mod groups;
 mod integrations;
 mod layouts;
 mod loops;
@@ -38,6 +39,8 @@ impl App {
     pub(crate) fn refresh_remote_agent_panel_entries(&mut self) {
         self.state.remote_agent_panel_entries =
             crate::ui::remote_agent_panel_entries(&self.state.fleet_snapshot);
+        self.state.aloop_projection =
+            crate::aloop::project(&self.state.fleet_snapshot).map(std::sync::Arc::new);
         if self
             .state
             .sidebar_selected_remote_agent
@@ -1608,8 +1611,13 @@ impl App {
             Method::LoopRunHistory(params) => {
                 return self.handle_loop_run_history(request.id, params)
             }
+            Method::LoopFindings(_) => return self.handle_loop_findings(request.id),
             Method::SymphonyList(_) => return self.handle_symphony_list(request.id),
             Method::FleetList(_) => return self.handle_fleet_list(request.id),
+            Method::GroupHostSnapshot(_) => return self.handle_group_host_snapshot(request.id),
+            Method::GroupCreate(params) => return self.handle_group_create(request.id, params),
+            Method::GroupRename(params) => return self.handle_group_rename(request.id, params),
+            Method::GroupDelete(params) => return self.handle_group_delete(request.id, params),
             Method::WorkspaceCreate(params) => {
                 return self.handle_workspace_create(request.id, params);
             }
@@ -1724,6 +1732,7 @@ impl App {
             Method::PaneFocus(target) => return self.handle_pane_focus(request.id, target),
             Method::PaneInputSet(params) => return self.handle_pane_input_set(request.id, params),
             Method::PaneRename(params) => return self.handle_pane_rename(request.id, params),
+            Method::PaneGroupSet(params) => return self.handle_pane_group_set(request.id, params),
             Method::PaneWorkContextSet(params) => {
                 return self.handle_pane_work_context_set(request.id, params);
             }

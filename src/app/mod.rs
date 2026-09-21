@@ -193,6 +193,10 @@ pub struct App {
     pub(crate) remote_focus_operations: remote_focus::RemoteFocusOperations,
     pub(crate) remote_focus_transport: Box<dyn remote_focus::RemoteFocusTransport>,
     pub(crate) fleet_poller_config: crate::fleet::FleetPollerHandle,
+    /// Server-owned group authority. Persistence is separate from client presentation state.
+    pub(crate) group_runtime: crate::groups::Runtime,
+    #[cfg(test)]
+    pub(crate) group_session_paths_override: Option<(std::path::PathBuf, std::path::PathBuf)>,
     /// Runtime-only markers for shell panes launched by git and user actions.
     pub(crate) git_action_panes: HashMap<crate::layout::PaneId, git_actions::GitActionPaneState>,
     pub event_tx: mpsc::Sender<AppEvent>,
@@ -847,15 +851,16 @@ impl App {
         let sidebar_group_sorts = crate::client::presentation::load_sidebar_group_sorts();
         #[cfg(test)]
         let sidebar_group_sorts = std::collections::HashMap::new();
+        #[cfg(not(test))]
+        let sidebar_group_collapsed = crate::client::presentation::load_sidebar_group_collapsed();
+        #[cfg(test)]
+        let sidebar_group_collapsed = std::collections::HashMap::new();
 
         let mut state = AppState {
             agent_picker: None,
-            collapsed_sidebar_groups: std::iter::once(format!(
-                "{}:{}",
-                sidebar_group_mode.collapse_namespace(),
-                crate::ui::RECENTLY_DONE_SECTION_TITLE
-            ))
-            .collect(),
+            collapsed_sidebar_groups: crate::ui::initial_collapsed_sidebar_groups(
+                &sidebar_group_collapsed,
+            ),
             sidebar_group_mode,
             sidebar_focused: false,
             client_focus_intent: state::ClientFocusIntent::FollowShared,
@@ -889,11 +894,13 @@ impl App {
             loop_run_history: initial_loop_history,
             loop_registry: crate::loop_runs::LoopRegistry::default(),
             loop_run_history_detail: None,
+            aloop_run_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             fleet_snapshot: crate::fleet::Snapshot::unpolled(&config.remote.fleet.hosts),
             agent_host_name,
             local_agent_panel_identities,
             remote_agent_panel_entries: Vec::new(),
+            aloop_projection: None,
             remote_focus_proxy_panes: std::collections::HashSet::new(),
             sidebar_selected_remote_agent: None,
             dock_symphony: None,
@@ -997,6 +1004,7 @@ impl App {
             dock_width_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
             sidebar_group_sort_persistence_request: None,
+            sidebar_group_collapsed_persistence_request: None,
             sidebar_view_scan_request: false,
             sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
@@ -1081,8 +1089,7 @@ impl App {
                 pane_toggle_below_hit_area: Rect::default(),
                 pane_toggle_right_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
-                info_panel_rect: Rect::default(),
-                info_panel_link_rows: Vec::new(),
+                work_context_link_rows: Vec::new(),
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
                 config_diagnostic_hit_area: Rect::default(),
@@ -1235,7 +1242,6 @@ impl App {
                 config.ui.sidebar_animation,
                 Instant::now(),
             ),
-            info_panel_expanded: false,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             sidebar_width_source,
             sidebar_width_auto: false,
@@ -1292,7 +1298,6 @@ impl App {
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
-            show_subscription_usage: config.ui.show_subscription_usage,
             status_bar_expanded: config.ui.status_bar_expanded,
             status_now_unix: crate::provider_usage::now_unix(),
             provider_usage: crate::provider_usage::ProviderUsageSnapshot::default(),
@@ -1401,6 +1406,10 @@ impl App {
         let fleet_poller_config =
             crate::fleet::start_poller(config.remote.fleet.clone(), event_tx.clone());
         crate::symphony::start_poller(fleet_poller_config.clone(), event_tx.clone());
+        #[cfg(not(test))]
+        let group_runtime = crate::groups::Runtime::load_default();
+        #[cfg(test)]
+        let group_runtime = crate::groups::Runtime::unavailable_for_tests();
 
         let last_focus = state.active.and_then(|idx| {
             state
@@ -1442,6 +1451,9 @@ impl App {
                 &config.remote.fleet,
             )),
             fleet_poller_config,
+            group_runtime,
+            #[cfg(test)]
+            group_session_paths_override: None,
             git_action_panes: HashMap::new(),
             event_tx,
             event_rx,
@@ -2086,6 +2098,12 @@ impl App {
             if let Some((key, mode)) = self.state.take_sidebar_group_sort_persistence_request() {
                 crate::client::presentation::save_sidebar_group_sort(&key, mode);
             }
+            if let Some((key, collapsed)) = self
+                .state
+                .take_sidebar_group_collapsed_persistence_request()
+            {
+                crate::client::presentation::save_sidebar_group_collapsed(&key, collapsed);
+            }
             if self.state.take_sidebar_view_scan_request() {
                 self.request_sidebar_view_scan(now);
             }
@@ -2139,12 +2157,10 @@ impl App {
                     self.resize_dock_editor();
                     self.ensure_scratchpad();
                     self.ensure_notepad();
-                    crate::ui::render_with_runtime_registry_and_handles(
+                    crate::ui::render_with_runtime_registry(
                         &self.state,
                         &self.terminal_runtimes,
                         frame,
-                        &self.render_notify,
-                        &self.render_dirty,
                     );
                 })?;
                 self.status_metrics_visible =
@@ -2653,7 +2669,6 @@ impl App {
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
-                self.state.show_subscription_usage = config.ui.show_subscription_usage;
                 self.state.status_bar_expanded = config.ui.status_bar_expanded;
                 let status_bar_was_enabled = self.state.status_bar_enabled;
                 self.state.status_bar_enabled = config.ui.status_bar.enabled;
@@ -2906,6 +2921,7 @@ impl App {
         // to a selected pane, while Symphony and home consume them themselves.
         if self.state.symphony_detail.is_some()
             || self.state.loop_run_history_detail.is_some()
+            || self.state.aloop_run_detail.is_some()
             || self.state.work_view.is_some()
             || self.state.usage_view.is_some()
             || self.state.inbox.is_some()
@@ -3515,6 +3531,9 @@ impl App {
             }
             state::InputOwner::Surface(state::SurfaceInputOwner::LoopRunHistory) => {
                 self.handle_loop_run_history_key(key_event);
+            }
+            state::InputOwner::Surface(state::SurfaceInputOwner::AloopRunLog) => {
+                self.handle_aloop_run_detail_key(key_event);
             }
             state::InputOwner::Surface(state::SurfaceInputOwner::Usage) => {
                 self.handle_usage_view_key(key_event);

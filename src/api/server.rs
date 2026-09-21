@@ -76,6 +76,7 @@ fn default_capabilities() -> Option<ServerCapabilities> {
     Some(ServerCapabilities {
         live_handoff: crate::platform::capabilities().live_handoff,
         detached_server_daemon: crate::platform::current_process_is_detached_server_daemon(),
+        groups_v1: true,
     })
 }
 
@@ -405,8 +406,13 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::WorkspaceClose(_) => "workspace.close",
         Method::LoopList(_) => "loop.list",
         Method::LoopRunHistory(_) => "loop.run_history",
+        Method::LoopFindings(_) => "loop.findings",
         Method::SymphonyList(_) => "symphony.list",
         Method::FleetList(_) => "fleet.list",
+        Method::GroupHostSnapshot(_) => "group.host_snapshot",
+        Method::GroupCreate(_) => "group.create",
+        Method::GroupRename(_) => "group.rename",
+        Method::GroupDelete(_) => "group.delete",
         Method::WorktreeList(_) => "worktree.list",
         Method::WorktreeCreate(_) => "worktree.create",
         Method::WorktreeOpen(_) => "worktree.open",
@@ -459,6 +465,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneFocus(_) => "pane.focus",
         Method::PaneInputSet(_) => "pane.input.set",
         Method::PaneRename(_) => "pane.rename",
+        Method::PaneGroupSet(_) => "pane.group.set",
         Method::PaneWorkContextSet(_) => "pane.work_context.set",
         Method::PaneSendText(_) => "pane.send_text",
         Method::PaneSendTextIf(_) => "pane.send_text_if",
@@ -1133,6 +1140,7 @@ mod tests {
             Some(ServerCapabilities {
                 live_handoff: true,
                 detached_server_daemon: true,
+                groups_v1: true,
             }),
             None,
             None,

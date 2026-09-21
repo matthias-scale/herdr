@@ -237,9 +237,6 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
             built_in("editor_open_repo", "editor.open_repo", |kb| {
                 &kb.editor_open_repo
             }),
-            built_in("toggle_info_panel", "toggle info panel", |kb| {
-                &kb.toggle_info_panel
-            }),
             built_in("toggle_status_detail", "toggle status detail", |kb| {
                 &kb.toggle_status_detail
             }),

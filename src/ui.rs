@@ -1,14 +1,12 @@
-use std::sync::Arc;
-
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::Span,
     Frame,
 };
-use tokio::sync::Notify;
 
 pub(crate) mod add_project;
+mod aloop_run;
 mod command_palette;
 mod dialogs;
 pub(crate) mod dock;
@@ -22,9 +20,8 @@ pub(crate) mod dropdown;
 mod home;
 pub(crate) mod hyperspace;
 mod inbox;
-pub(crate) mod info_panel;
 mod keybind_help;
-mod loop_runs;
+pub(crate) mod loop_runs;
 mod markdown;
 mod menus;
 mod mobile;
@@ -71,7 +68,6 @@ use self::dialogs::{
     render_open_existing_worktree_overlay, render_remove_worktree_overlay, render_rename_overlay,
 };
 use self::dock::render_dock;
-use self::info_panel::{compute_link_rows, panel_width_for_main, render_info_panel};
 use self::keybind_help::render_keybind_help_overlay;
 use self::loop_runs::render_loop_run_history;
 use self::menus::{
@@ -99,17 +95,18 @@ pub(crate) use self::scrollbar::{
     scrollbar_offset_from_row, scrollbar_thumb_grab_offset, should_show_scrollbar,
 };
 use self::settings::render_settings_overlay;
-pub(crate) use self::sidebar::compute_sidebar_section_header_areas;
 pub(crate) use self::sidebar::compute_tab_card_areas;
 #[cfg(test)]
 pub(crate) use self::sidebar::sidebar_object_menu_layout as sidebar_object_menu_layout_for_test;
 #[cfg(test)]
 pub(crate) use self::sidebar::tests::sidebar_work_item_fixture;
-pub(crate) use self::sidebar::RECENTLY_DONE_SECTION_TITLE;
 #[cfg(test)]
 pub(crate) use self::sidebar::SPACES_SECTION_TITLE;
 #[cfg(test)]
 pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};
+pub(crate) use self::sidebar::{
+    compute_sidebar_section_header_areas, initial_collapsed_sidebar_groups,
+};
 use self::sidebar::{
     render_sidebar, render_sidebar_collapsed, render_sidebar_filter_menu,
     render_sidebar_group_menu, render_sidebar_new_menu, render_sidebar_new_thread,
@@ -153,7 +150,7 @@ pub(crate) use self::{
         collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
         compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
         relative_agent_navigation_entry, remote_agent_panel_entries, remote_agent_panel_entries_at,
-        remote_agent_row_at, sidebar_agent_run_at, sidebar_dim_header_at,
+        remote_agent_row_at, sidebar_agent_run_at, sidebar_aloop_target_at, sidebar_dim_header_at,
         sidebar_filter_anchor_rect, sidebar_filter_menu_layout, sidebar_filter_options,
         sidebar_group_menu_layout, sidebar_group_mode_anchor_rect, sidebar_header_new_menu_rect,
         sidebar_header_new_thread_rect, sidebar_header_overflow_rect, sidebar_header_search_rect,
@@ -174,7 +171,6 @@ pub(crate) use self::{
         WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
 };
-use crate::render_signal::RenderSignal;
 
 #[cfg(test)]
 pub(crate) use self::sidebar::compute_remote_agent_row_areas;
@@ -407,6 +403,7 @@ fn compute_view_internal_at(
     let available_after_sidebar = body_area.width.saturating_sub(sidebar_w);
     let main_view_active = app.symphony_detail.is_some()
         || app.loop_run_history_detail.is_some()
+        || app.aloop_run_detail.is_some()
         || app.usage_view.is_some()
         || app.work_view.is_some()
         || app.dock_object_preview.is_some()
@@ -440,24 +437,11 @@ fn compute_view_internal_at(
     ])
     .areas(body_area);
 
-    let (content_area, info_panel_rect) = if app.info_panel_expanded {
-        if let Some(panel_width) = panel_width_for_main(main_area.width) {
-            let [content_area, panel_area] =
-                Layout::horizontal([Constraint::Min(1), Constraint::Length(panel_width)])
-                    .areas(main_area);
-            (content_area, panel_area)
-        } else {
-            (main_area, Rect::default())
-        }
-    } else {
-        (main_area, Rect::default())
-    };
-
     let (tab_bar_rect, terminal_area) = app
         .active
         .and_then(|i| app.workspaces.get(i))
-        .map(|ws| desktop_tab_bar_and_terminal_area(app, ws, content_area))
-        .unwrap_or((Rect::default(), content_area));
+        .map(|ws| desktop_tab_bar_and_terminal_area(app, ws, main_area))
+        .unwrap_or((Rect::default(), main_area));
 
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
@@ -581,7 +565,7 @@ fn compute_view_internal_at(
         cell_size,
     );
     if resize_panes {
-        resize_background_tab_panes_for_desktop(app, terminal_runtimes, content_area, cell_size);
+        resize_background_tab_panes_for_desktop(app, terminal_runtimes, main_area, cell_size);
         resize_popup_pane(app, terminal_runtimes, terminal_area, cell_size);
     }
 
@@ -869,19 +853,12 @@ fn compute_view_internal_at(
         pane_toggle_below_hit_area,
         pane_toggle_right_hit_area,
         terminal_area,
-        info_panel_rect,
-        // Both surfaces feed one list because one click handler serves it: the panel
-        // and the dock's Context tab can be open at once, and each owns its own rows.
-        info_panel_link_rows: {
-            let mut rows = if info_panel_rect.width > 0 {
-                compute_link_rows(app, info_panel_rect)
-            } else {
-                Vec::new()
-            };
-            if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Context) {
-                rows.extend(dock_context::context_link_rows(app, dock_body_rect));
-            }
-            rows
+        work_context_link_rows: if !app.dock_collapsed
+            && app.dock_tab == Some(crate::app::DockSurface::Context)
+        {
+            dock_context::context_link_rows(app, dock_body_rect)
+        } else {
+            Vec::new()
         },
         status_buttons: Vec::new(),
         status_work_links: Vec::new(),
@@ -1180,8 +1157,7 @@ fn compute_mobile_view(
         pane_toggle_below_hit_area: Rect::default(),
         pane_toggle_right_hit_area: Rect::default(),
         terminal_area,
-        info_panel_rect: Rect::default(),
-        info_panel_link_rows: Vec::new(),
+        work_context_link_rows: Vec::new(),
         status_buttons: Vec::new(),
         status_work_links: Vec::new(),
         status_segments: Vec::new(),
@@ -1251,42 +1227,7 @@ pub(crate) fn render_with_runtime_registry_for_owner(
     frame: &mut Frame,
     input_owner: InputOwner,
 ) {
-    render_with_runtime_registry_inner(app, terminal_runtimes, frame, input_owner, None);
-}
-
-pub(crate) fn render_with_runtime_registry_and_handles(
-    app: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-    frame: &mut Frame,
-    render_notify: &Arc<Notify>,
-    render_dirty: &Arc<RenderSignal>,
-) {
-    let input_owner = app.input_owner();
-    render_with_runtime_registry_and_handles_for_owner(
-        app,
-        terminal_runtimes,
-        frame,
-        render_notify,
-        render_dirty,
-        input_owner,
-    );
-}
-
-pub(crate) fn render_with_runtime_registry_and_handles_for_owner(
-    app: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-    frame: &mut Frame,
-    render_notify: &Arc<Notify>,
-    render_dirty: &Arc<RenderSignal>,
-    input_owner: InputOwner,
-) {
-    render_with_runtime_registry_inner(
-        app,
-        terminal_runtimes,
-        frame,
-        input_owner,
-        Some((render_notify, render_dirty)),
-    );
+    render_with_runtime_registry_inner(app, terminal_runtimes, frame, input_owner);
 }
 
 fn render_with_runtime_registry_inner(
@@ -1294,7 +1235,6 @@ fn render_with_runtime_registry_inner(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
     input_owner: InputOwner,
-    render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>,
 ) {
     let tab_bar_area = app.view.tab_bar_rect;
     let terminal_area = app.view.terminal_area;
@@ -1332,6 +1272,16 @@ fn render_with_runtime_registry_inner(
                 frame,
             );
         }
+        crate::app::state::TerminalAreaSurface::AloopRunLog(detail) => {
+            aloop_run::render_aloop_run_log(
+                &app.palette,
+                &detail.loop_name,
+                &detail.host,
+                &detail.run,
+                terminal_area,
+                frame,
+            );
+        }
         crate::app::state::TerminalAreaSurface::Usage => render_usage(app, terminal_area, frame),
         crate::app::state::TerminalAreaSurface::Work => {
             render_work_view(app, terminal_area, frame);
@@ -1362,9 +1312,6 @@ fn render_with_runtime_registry_inner(
         crate::app::state::TerminalAreaSurface::Empty => render_empty(app, frame, terminal_area),
     }
 
-    if app.view.info_panel_rect.width > 0 {
-        render_info_panel(app, frame, app.view.info_panel_rect, render_handles);
-    }
     if app.view.layout != ViewLayout::Mobile {
         render_dock(app, terminal_runtimes, frame);
     }
@@ -1703,7 +1650,6 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
             terminal.draw(|frame| render(&app, frame)).unwrap();
             let buffer = terminal.backend().buffer();
-
             for rect in chrome_rects(&app) {
                 for y in rect.y..rect.y + rect.height {
                     for x in rect.x..rect.x + rect.width {
@@ -1775,6 +1721,11 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
             terminal.draw(|frame| render(&app, frame)).unwrap();
             let buffer = terminal.backend().buffer();
+            let section_header_rows =
+                compute_sidebar_section_header_areas(&app, app.view.sidebar_rect)
+                    .into_iter()
+                    .map(|header| header.rect.y)
+                    .collect::<std::collections::HashSet<_>>();
 
             let active_tab = app
                 .active
@@ -1787,7 +1738,10 @@ mod tests {
                 for y in rect.y..rect.y + rect.height {
                     for x in rect.x..rect.x + rect.width {
                         let cell = &buffer[(x, y)];
-                        if cell.symbol().trim().is_empty() {
+                        if cell.symbol().trim().is_empty()
+                            || cell.symbol() == "─"
+                            || section_header_rows.contains(&y)
+                        {
                             continue;
                         }
                         let (Some(fg), Some(bg)) = (cell.style().fg, cell.style().bg) else {
@@ -1898,26 +1852,6 @@ mod tests {
 
         assert!(screen.contains("nothing is waiting on you"), "{screen}");
         assert!(!screen.contains("nothing is blocked"), "{screen}");
-    }
-
-    #[test]
-    fn info_panel_toggle_reserves_desktop_width_and_hides_on_narrow_layout() {
-        let mut app = crate::app::state::AppState::test_new();
-        app.workspaces = vec![Workspace::test_new("one")];
-        app.active = Some(0);
-        app.selected = 0;
-        app.info_panel_expanded = true;
-
-        compute_view(&mut app, Rect::new(0, 0, 100, 24));
-        assert!(app.view.info_panel_rect.width >= info_panel::INFO_PANEL_MIN_WIDTH);
-        assert!(app.view.terminal_area.width < 74);
-
-        compute_view(&mut app, Rect::new(0, 0, 65, 24));
-        assert_eq!(app.view.info_panel_rect, Rect::default());
-        assert!(
-            app.info_panel_expanded,
-            "narrow layout must not discard the toggle"
-        );
     }
 
     #[test]

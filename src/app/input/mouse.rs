@@ -1302,6 +1302,37 @@ impl AppState {
                     if let Some((host, run_id)) = crate::ui::sidebar_agent_run_at(self, mouse.row) {
                         return Some(MouseAction::OpenAgentRunLog { host, run_id });
                     }
+                    if let Some(target) =
+                        crate::ui::sidebar_aloop_target_at(self, mouse.column, mouse.row)
+                    {
+                        use crate::ui::sidebar::aloops::AloopTarget;
+                        match target {
+                            AloopTarget::Finding { key } => {
+                                self.sidebar_selected_work_group = Some(key.clone());
+                                if !self.open_sidebar_unassigned_object(&key) {
+                                    self.config_diagnostic =
+                                        Some("aloop finding is no longer available".to_string());
+                                }
+                            }
+                            AloopTarget::Loop { key, name, fold } => {
+                                if fold {
+                                    self.toggle_sidebar_group(&key);
+                                } else {
+                                    self.sidebar_selected_work_group = Some(key);
+                                    self.open_aloop_loop_history(&name);
+                                }
+                            }
+                            AloopTarget::RunLine { key } | AloopTarget::CleanFold { key } => {
+                                self.sidebar_selected_work_group = Some(key.clone());
+                                self.toggle_sidebar_group(&key);
+                            }
+                            AloopTarget::CleanRun { key, loop_name, at } => {
+                                self.sidebar_selected_work_group = Some(key);
+                                self.open_aloop_run_log(&loop_name, &at);
+                            }
+                        }
+                        return None;
+                    }
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_presses.insert(
                             source_id,
@@ -3970,8 +4001,8 @@ mod tests {
     use crate::app::input::modal::handle_context_menu_key;
     use crate::{
         app::state::{
-            ContextMenuAction, ContextMenuKind, ContextMenuState, InfoPanelLinkRow, Mode,
-            ViewLayout,
+            ContextMenuAction, ContextMenuKind, ContextMenuState, Mode, ViewLayout,
+            WorkContextLinkRow,
         },
         app::App,
         detect::{Agent, AgentState},
@@ -4139,6 +4170,7 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), entry),
         )];
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let row =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
@@ -4198,6 +4230,7 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), entry),
         )];
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
         app.state.set_server_mode(Mode::Navigate);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
@@ -4294,6 +4327,7 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
         )];
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let row =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
@@ -4359,6 +4393,7 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), entry),
         )];
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
         app.state.sidebar_collapsed = true;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let (content, _, _) = crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);
@@ -4401,6 +4436,7 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
         )];
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let row =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
@@ -4453,7 +4489,8 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
         )];
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 60));
         let row =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
                 .into_iter()
@@ -4518,6 +4555,7 @@ mod tests {
                 ))
             })
             .collect();
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let rows =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect);
@@ -5426,7 +5464,8 @@ mod tests {
         app.state.set_server_mode(Mode::Terminal);
         let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
         assert!(app.state.snooze_pane_at(0, snoozed_pane, deadline));
-        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.collapsed_sidebar_groups.remove("repo:Snoozed");
+        let sidebar = Rect::new(0, 0, 40, 40);
         app.state.view.sidebar_rect = sidebar;
 
         for pane_id in [active_pane, snoozed_pane] {
@@ -5543,7 +5582,8 @@ mod tests {
         app.state.set_server_mode(Mode::Terminal);
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
-        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.collapsed_sidebar_groups.remove("repo:Settled");
+        let sidebar = Rect::new(0, 0, 40, 40);
         app.state.view.sidebar_rect = sidebar;
         let target = crate::ui::compute_tab_card_areas(&app.state, sidebar)
             .into_iter()
@@ -5688,7 +5728,8 @@ mod tests {
             unavailable: None,
             polled: true,
         };
-        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.collapsed_sidebar_groups.remove("repo:Symphony");
+        let sidebar = Rect::new(0, 0, 40, 40);
         app.state.view.sidebar_rect = sidebar;
         let row = (sidebar.y..sidebar.bottom())
             .find(|row| crate::ui::sidebar_symphony_job_at(&app.state, *row) == Some(1))
@@ -5850,10 +5891,6 @@ mod tests {
 
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.workspaces[1].active_tab_index(), 0);
-        assert!(
-            !app.state.info_panel_expanded,
-            "a linked row must not open the info panel from the overview"
-        );
     }
 
     #[test]
@@ -5994,7 +6031,7 @@ mod tests {
     }
 
     #[test]
-    fn a_work_link_in_the_context_tab_copies_the_same_value_the_panel_would() {
+    fn a_work_link_in_the_context_tab_copies_its_value() {
         let mut app = app_for_mouse_test();
         app.state.set_server_mode(Mode::Terminal);
         app.state.workspaces = vec![Workspace::test_new("links")];
@@ -6020,7 +6057,7 @@ mod tests {
         let link = app
             .state
             .view
-            .info_panel_link_rows
+            .work_context_link_rows
             .first()
             .expect("dock context link row")
             .clone();
@@ -6331,10 +6368,10 @@ mod tests {
     }
 
     #[test]
-    fn ac26_info_panel_link_click_copies_without_opening() {
+    fn work_context_link_click_copies_value() {
         let mut app = app_for_mouse_test();
         app.state.set_server_mode(Mode::Terminal);
-        app.state.view.info_panel_link_rows = vec![InfoPanelLinkRow {
+        app.state.view.work_context_link_rows = vec![WorkContextLinkRow {
             rect: Rect::new(60, 5, 30, 1),
             copy_value: "MAT-124".into(),
         }];
@@ -6354,27 +6391,6 @@ mod tests {
                 .map(|feedback| feedback.message.as_str()),
             Some("copied")
         );
-    }
-
-    #[test]
-    fn ac26_narrow_hidden_info_panel_does_not_copy_on_click() {
-        let mut app = app_for_mouse_test();
-        app.state.workspaces = vec![Workspace::test_new("one")];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.ensure_test_terminals();
-        app.state.info_panel_expanded = true;
-        app.state.view.info_panel_link_rows = vec![InfoPanelLinkRow {
-            rect: Rect::new(30, 3, 30, 1),
-            copy_value: "stale".into(),
-        }];
-
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
-
-        assert_eq!(app.state.view.info_panel_rect, Rect::default());
-        assert!(app.state.view.info_panel_link_rows.is_empty());
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 40, 3));
-        assert!(app.event_rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -9187,6 +9203,7 @@ mod tests {
         app.state.set_server_mode(Mode::Terminal);
         let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
         assert!(app.state.snooze_pane_at(0, snoozed_pane, deadline));
+        app.state.collapsed_sidebar_groups.remove("repo:Snoozed");
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         let switch = app.state.view.mobile_menu_hit_area;

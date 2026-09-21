@@ -77,6 +77,9 @@ pub(crate) struct ClientConnection {
     pub(crate) notepad_presentation: crate::notepad::NotepadPresentationState,
     /// Client-local run-history detail surface, separate from server-owned receipt facts.
     pub(crate) loop_run_history_detail: Option<crate::app::state::LoopRunHistoryDetail>,
+    /// Client-local aloop run-log surface (MAT-159 AC7); the run records
+    /// themselves are server-owned in the fleet snapshot.
+    pub(crate) aloop_run_detail: Option<crate::app::state::AloopRunDetail>,
     /// Client-local Symphony dashboard selection over the server-owned snapshot.
     pub(crate) symphony_detail: Option<crate::app::state::SymphonyDetail>,
     /// Client-local work projection view over the server-owned work index snapshot.
@@ -172,6 +175,7 @@ impl ClientConnection {
             dock_presentation: crate::app::state::DockPresentationState::default(),
             notepad_presentation: crate::notepad::NotepadPresentationState::default(),
             loop_run_history_detail: None,
+            aloop_run_detail: None,
             symphony_detail: None,
             work_view: None,
             usage_view: None,
@@ -287,6 +291,7 @@ impl ClientConnection {
         let tab_surface_replaced = (dock.editor_preview.is_some() && !preview_is_in_dock)
             || self.symphony_detail.is_some()
             || self.loop_run_history_detail.is_some()
+            || self.aloop_run_detail.is_some()
             || self.usage_view.is_some()
             || self.work_view.is_some()
             || (dock.collapsed && dock.object_preview.is_some())

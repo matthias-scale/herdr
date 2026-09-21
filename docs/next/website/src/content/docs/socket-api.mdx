@@ -101,11 +101,12 @@ Raw socket method names use dot notation:
 | Notification | `notification.show` |
 | Client | `client.window_title.set`, `client.window_title.clear` |
 | Session | `session.snapshot` |
+| Group | `group.host_snapshot`, `group.create`, `group.rename`, `group.delete` |
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.bind`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Loop | `loop.list`, `loop.run_history` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.work_context.set`, `pane.send_text`, `pane.send_text_if`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.group.set`, `pane.work_context.set`, `pane.send_text`, `pane.send_text_if`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.focus.status`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -155,6 +156,14 @@ install the snapshot, then apply the buffered events in order and continue
 streaming. Call `session.snapshot` again after reconnecting or when the local
 cache may be stale. Attached worktree provenance is included on workspace
 records. Full repo worktree discovery remains `worktree.list`.
+
+`group.host_snapshot` returns the active and deleted group records owned by
+this server, plus its current pane memberships. Group mutations use optimistic
+revisions: `group.create` compares the store revision, while `group.rename`,
+and `group.delete` compare the group record revision. `pane.group.set` compares
+the pane membership revision. A successful mutation is durable before the
+response is sent. Group ids contain the durable server authority, so names and
+configured fleet aliases are not identity.
 
 From the CLI, `herdr api snapshot` prints the live `session.snapshot` response
 as JSON for clients and agents that want a simple bootstrap command.
