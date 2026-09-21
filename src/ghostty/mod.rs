@@ -472,8 +472,14 @@ pub(crate) enum ParsedOutput<'a> {
     Separator,
     Hyperlink(&'a [u8]),
     Boundary,
-    Backspace(Option<(usize, usize)>),
-    CarriageReturn(Option<(usize, usize)>),
+    CursorTransition(Option<ParsedCursorTransition>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParsedCursorTransition {
+    pub(crate) before_column: usize,
+    pub(crate) after_column: usize,
+    pub(crate) same_row: bool,
 }
 
 const MAX_CLIPBOARD_BYTES: usize = 192 * 1024;
@@ -521,19 +527,29 @@ unsafe extern "C" fn parsed_output_trampoline(
         ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_BOUNDARY => {
             callback(ParsedOutput::Boundary);
         }
-        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_BACKSPACE => {
-            callback(ParsedOutput::Backspace(parse_cursor_columns(bytes)));
-        }
-        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_CARRIAGE_RETURN => {
-            callback(ParsedOutput::CarriageReturn(parse_cursor_columns(bytes)));
+        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_CURSOR_TRANSITION => {
+            callback(ParsedOutput::CursorTransition(parse_cursor_transition(
+                bytes,
+            )));
         }
         _ => {}
     }
 }
 
-fn parse_cursor_columns(bytes: &[u8]) -> Option<(usize, usize)> {
-    let (before, after) = std::str::from_utf8(bytes).ok()?.split_once(',')?;
-    Some((before.parse().ok()?, after.parse().ok()?))
+fn parse_cursor_transition(bytes: &[u8]) -> Option<ParsedCursorTransition> {
+    let mut fields = std::str::from_utf8(bytes).ok()?.split(',');
+    let before_column = fields.next()?.parse().ok()?;
+    let after_column = fields.next()?.parse().ok()?;
+    let same_row = match fields.next()? {
+        "0" => false,
+        "1" => true,
+        _ => return None,
+    };
+    (fields.next().is_none()).then_some(ParsedCursorTransition {
+        before_column,
+        after_column,
+        same_row,
+    })
 }
 
 unsafe extern "C" fn bell_trampoline(_terminal: ffi::GhosttyTerminal, userdata: *mut c_void) {
@@ -3326,10 +3342,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cursor_motion_payload_requires_exact_pre_and_post_columns() {
-        assert_eq!(parse_cursor_columns(b"12,5"), Some((12, 5)));
-        for malformed in [b"".as_slice(), b"12", b"12,", b",5", b"12,5,4", b"x,5"] {
-            assert_eq!(parse_cursor_columns(malformed), None, "{malformed:?}");
+    fn cursor_transition_payload_requires_exact_columns_and_row_identity() {
+        assert_eq!(
+            parse_cursor_transition(b"12,5,1"),
+            Some(ParsedCursorTransition {
+                before_column: 12,
+                after_column: 5,
+                same_row: true,
+            })
+        );
+        for malformed in [
+            b"".as_slice(),
+            b"12",
+            b"12,5",
+            b"12,5,",
+            b"12,5,2",
+            b"12,5,1,4",
+            b"x,5,1",
+        ] {
+            assert_eq!(parse_cursor_transition(malformed), None, "{malformed:?}");
         }
     }
 

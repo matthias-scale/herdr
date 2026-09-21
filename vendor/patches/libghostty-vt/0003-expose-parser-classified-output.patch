@@ -1,8 +1,8 @@
 diff --git a/vendor/libghostty-vt/include/ghostty/vt/terminal.h b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
-index 9bb961d3..2257e015 100644
+index 9bb961d3..dd8b0246 100644
 --- a/vendor/libghostty-vt/include/ghostty/vt/terminal.h
 +++ b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
-@@ -467,6 +467,41 @@ typedef GhosttyClipboardWriteResult (*GhosttyTerminalClipboardWriteFn)(
+@@ -467,6 +467,39 @@ typedef GhosttyClipboardWriteResult (*GhosttyTerminalClipboardWriteFn)(
      void* userdata,
      const GhosttyClipboardWrite* write);
  
@@ -20,19 +20,17 @@ index 9bb961d3..2257e015 100644
 +  /** An OSC boundary that separates invalid prefixes but not styled text. */
 +  GHOSTTY_TERMINAL_PARSED_OUTPUT_BOUNDARY = 3,
 +
-+  /** Backspace; data is decimal `pre-motion,post-motion` cursor columns. */
-+  GHOSTTY_TERMINAL_PARSED_OUTPUT_BACKSPACE = 4,
-+
-+  /** Carriage return; data is decimal `pre-motion,post-motion` columns. */
-+  GHOSTTY_TERMINAL_PARSED_OUTPUT_CARRIAGE_RETURN = 5,
++  /** Non-print cursor move not already a separator; `pre,post,same-row`. */
++  GHOSTTY_TERMINAL_PARSED_OUTPUT_CURSOR_TRANSITION = 4,
 +  GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 +} GhosttyTerminalParsedOutputKind;
 +
 +/**
 + * Callback for output already classified by the terminal VT parser.
-+ * Data is borrowed and valid only for the callback duration. Cursor-motion
++ * Data is borrowed and valid only for the callback duration. Cursor-transition
 + * data is the comma-separated decimal zero-based columns before and after the
-+ * control; other non-text events carry zero bytes.
++ * action, followed by 1 when Ghostty identifies the same rendered row or 0
++ * otherwise. Other non-text events carry zero bytes.
 + */
 +typedef void (*GhosttyTerminalParsedOutputFn)(
 +    GhosttyTerminal terminal,
@@ -44,7 +42,7 @@ index 9bb961d3..2257e015 100644
  /**
   * Callback function type for color scheme queries (CSI ? 996 n).
   *
-@@ -887,6 +922,14 @@ typedef enum GHOSTTY_ENUM_TYPED {
+@@ -887,6 +920,14 @@ typedef enum GHOSTTY_ENUM_TYPED {
     * Input type: GhosttyTerminalClipboardWriteFn
     */
    GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE = 26,
@@ -471,10 +469,10 @@ index efb06ecd..6e09a4de 100644
  
          /// Finalize and dispatch a CSI directly from parser state for
 diff --git a/vendor/libghostty-vt/src/terminal/stream_terminal.zig b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
-index 91cfb21c..d037dbe5 100644
+index 91cfb21c..2c00d670 100644
 --- a/vendor/libghostty-vt/src/terminal/stream_terminal.zig
 +++ b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
-@@ -23,6 +23,18 @@ const log = std.log.scoped(.stream_terminal);
+@@ -23,6 +23,17 @@ const log = std.log.scoped(.stream_terminal);
  /// a Terminal and updates the Terminal state.
  pub const Stream = stream.Stream(Handler);
  
@@ -485,15 +483,14 @@ index 91cfb21c..d037dbe5 100644
 +    separator = 1,
 +    hyperlink = 2,
 +    boundary = 3,
-+    backspace = 4,
-+    carriage_return = 5,
++    cursor_transition = 4,
 +    _,
 +};
 +
  /// A stream handler that updates terminal state. By default, it is
  /// readonly in the sense that it only updates terminal state and ignores
  /// all other sequences that require a response or otherwise have side
-@@ -46,6 +58,10 @@ pub const Handler = struct {
+@@ -46,6 +57,10 @@ pub const Handler = struct {
      /// the kitty graphics protocol.
      apc_handler: apc.Handler = .{},
  
@@ -504,7 +501,7 @@ index 91cfb21c..d037dbe5 100644
      /// Default cursor style used by DECSCUSR reset (CSI 0 q).
      default_cursor: bool = true,
      default_cursor_style: Screen.CursorStyle = .block,
-@@ -105,6 +121,10 @@ pub const Handler = struct {
+@@ -105,6 +120,10 @@ pub const Handler = struct {
          /// library has no way to mediate that with user consent.
          clipboard_write: ?*const fn (*Handler, clipboard.Write) clipboard.WriteResult,
  
@@ -515,7 +512,7 @@ index 91cfb21c..d037dbe5 100644
          /// Called in response to an XTVERSION query. Returns the version
          /// string to report (e.g. "ghostty 1.2.3"). The returned memory
          /// must be valid for the lifetime of the call. The maximum length
-@@ -117,6 +137,7 @@ pub const Handler = struct {
+@@ -117,6 +136,7 @@ pub const Handler = struct {
          pub const readonly: Effects = .{
              .bell = null,
              .clipboard_write = null,
@@ -523,23 +520,28 @@ index 91cfb21c..d037dbe5 100644
              .color_scheme = null,
              .device_attributes = null,
              .enquiry = null,
-@@ -143,9 +164,163 @@ pub const Handler = struct {
+@@ -143,9 +163,205 @@ pub const Handler = struct {
          comptime action: Action.Tag,
          value: Action.Value(action),
      ) void {
-+        const cursor_column = self.terminal.screens.active.cursor.x;
 +        if (self.effects.parsed_output != null) {
 +            const handled = self.vtParsedPrint(action, value) catch |err| {
 +                log.warn("error handling VT action action={} err={}", .{ action, err });
 +                return;
 +            };
 +            if (handled) return;
++        } else {
++            self.vtFallible(action, value) catch |err| {
++                log.warn("error handling VT action action={} err={}", .{ action, err });
++            };
++            return;
 +        }
++        const cursor_before = self.parsedCursorSnapshot();
          self.vtFallible(action, value) catch |err| {
              log.warn("error handling VT action action={} err={}", .{ action, err });
 +            return;
          };
-+        self.emitParsedOutput(action, value, cursor_column);
++        self.emitParsedOutput(action, value, cursor_before);
 +    }
 +
 +    /// Finalizes an OSC-derived callback using the parser transition that
@@ -577,33 +579,70 @@ index 91cfb21c..d037dbe5 100644
 +        self: *Handler,
 +        comptime action: Action.Tag,
 +        value: Action.Value(action),
-+        cursor_column: usize,
++        cursor_before: ParsedCursorSnapshot,
 +    ) void {
 +        const callback = self.effects.parsed_output orelse return;
 +        switch (action) {
-+            .backspace => self.emitParsedCursorMotion(.backspace, cursor_column),
-+            .carriage_return => self.emitParsedCursorMotion(.carriage_return, cursor_column),
-+            .horizontal_tab, .linefeed => callback(self, .separator, ""),
-+            .start_hyperlink => self.parsed_hyperlink_pending = value.uri,
++            .horizontal_tab, .linefeed, .full_reset => {
++                callback(self, .separator, "");
++                return;
++            },
++            .start_hyperlink => {
++                self.parsed_hyperlink_pending = value.uri;
++                return;
++            },
 +            else => {},
++        }
++        const cursor_after = self.parsedCursorSnapshot();
++        if (!cursor_before.eql(cursor_after)) {
++            self.emitParsedCursorTransition(cursor_before, cursor_after);
 +        }
 +    }
 +
-+    /// Cursor-motion payloads contain the authoritative zero-based columns
-+    /// before and after Ghostty applies the control, formatted `before,after`.
-+    fn emitParsedCursorMotion(
++    /// Cursor-transition payloads contain the authoritative zero-based columns
++    /// before and after Ghostty applies the action and whether both positions
++    /// refer to the same rendered row, formatted `before,after,same-row`.
++    fn emitParsedCursorTransition(
 +        self: *Handler,
-+        kind: ParsedOutputKind,
-+        cursor_column: usize,
++        before: ParsedCursorSnapshot,
++        after: ParsedCursorSnapshot,
 +    ) void {
 +        const callback = self.effects.parsed_output orelse return;
-+        var buf: [32]u8 = undefined;
++        var buf: [48]u8 = undefined;
 +        const data = std.fmt.bufPrint(
 +            &buf,
-+            "{d},{d}",
-+            .{ cursor_column, self.terminal.screens.active.cursor.x },
++            "{d},{d},{d}",
++            .{ before.column, after.column, @intFromBool(before.sameRow(after)) },
 +        ) catch return;
-+        callback(self, kind, data);
++        callback(self, .cursor_transition, data);
++    }
++
++    const ParsedCursorSnapshot = struct {
++        column: usize,
++        screen: usize,
++        row_node: usize,
++        row_offset: usize,
++
++        fn eql(self: ParsedCursorSnapshot, other: ParsedCursorSnapshot) bool {
++            return self.column == other.column and self.sameRow(other);
++        }
++
++        fn sameRow(self: ParsedCursorSnapshot, other: ParsedCursorSnapshot) bool {
++            return self.screen == other.screen and
++                self.row_node == other.row_node and
++                self.row_offset == other.row_offset;
++        }
++    };
++
++    fn parsedCursorSnapshot(self: *Handler) ParsedCursorSnapshot {
++        const screen = self.terminal.screens.active;
++        const cursor = &screen.cursor;
++        return .{
++            .column = cursor.x,
++            .screen = @intFromPtr(screen),
++            .row_node = @intFromPtr(cursor.page_pin.node),
++            .row_offset = cursor.page_pin.y,
++        };
 +    }
 +
 +    /// Handle printable actions while reporting only codepoints the terminal

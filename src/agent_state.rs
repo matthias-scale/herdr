@@ -171,7 +171,7 @@ struct LinkStreamScanner {
     rewrite_operations: usize,
 }
 
-/// Bounded rendered-line fragment used only after Ghostty reports cursor motion.
+/// Bounded rendered-line fragment used after Ghostty reports a cursor transition.
 /// Ghostty remains the authority for classifying the control; this mirrors the
 /// resulting overwrite so link candidates follow the cells users can see.
 #[derive(Debug)]
@@ -179,12 +179,6 @@ struct RenderedRewrite {
     known_cells: HashMap<u16, u8>,
     cursor_column: u16,
     overflowed: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ParsedCursorMotion {
-    Backspace,
-    CarriageReturn,
 }
 
 #[derive(Debug, Default)]
@@ -553,20 +547,10 @@ impl LinkExtractionGate {
         self.active.store(true, Ordering::Release);
     }
 
-    /// Applies Ghostty's rendered cursor motion to the current link candidate.
-    pub(crate) fn observe_parsed_backspace(&self, columns: Option<(usize, usize)>) {
-        self.observe_parsed_cursor_motion(ParsedCursorMotion::Backspace, columns);
-    }
-
-    /// Applies Ghostty's rendered cursor motion to the current link candidate.
-    pub(crate) fn observe_parsed_carriage_return(&self, columns: Option<(usize, usize)>) {
-        self.observe_parsed_cursor_motion(ParsedCursorMotion::CarriageReturn, columns);
-    }
-
-    fn observe_parsed_cursor_motion(
+    /// Applies Ghostty's authoritative rendered cursor transition.
+    pub(crate) fn observe_parsed_cursor_transition(
         &self,
-        motion: ParsedCursorMotion,
-        columns: Option<(usize, usize)>,
+        transition: Option<crate::ghostty::ParsedCursorTransition>,
     ) {
         self.record_parsed_event(0);
         let Ok(_processing) = self.processing.lock() else {
@@ -580,7 +564,7 @@ impl LinkExtractionGate {
             pending.scanner.restore_prefix(prefix);
             self.marker_tail.store(&[]);
         }
-        pending.scanner.observe_cursor_motion(motion, columns);
+        pending.scanner.observe_cursor_transition(transition);
         pending.dirty = true;
         self.active.store(true, Ordering::Release);
     }
@@ -844,12 +828,11 @@ impl LinkStreamScanner {
         self.scan_byte(b'\n', links);
     }
 
-    fn observe_cursor_motion(
+    fn observe_cursor_transition(
         &mut self,
-        motion: ParsedCursorMotion,
-        columns: Option<(usize, usize)>,
+        transition: Option<crate::ghostty::ParsedCursorTransition>,
     ) {
-        let Some((cursor_before, cursor_after)) = columns else {
+        let Some(transition) = transition else {
             if let Some(rewrite) = self.rendered_rewrite.as_mut() {
                 rewrite.fail_closed();
             } else {
@@ -857,10 +840,28 @@ impl LinkStreamScanner {
             }
             return;
         };
+        if !transition.same_row {
+            if let Some(rewrite) = self.rendered_rewrite.as_mut() {
+                rewrite.fail_closed();
+            } else {
+                self.visible = VisibleLinkState::DiscardUrl(Vec::new());
+            }
+            return;
+        }
+        let cursor_before = transition.before_column;
+        let cursor_after = transition.after_column;
         let validate_modeled_cursor = self.rendered_rewrite.is_some();
         let rewrite = self.rendered_rewrite.get_or_insert_with(|| {
-            let reconcile_existing = matches!(motion, ParsedCursorMotion::Backspace)
-                || matches!(self.visible, VisibleLinkState::Url(_));
+            // Retain every bounded lexical tail whose rendered columns are
+            // known. Ghostty's cursor facts, rather than the VT action, decide
+            // where later text overwrites or separates those cells.
+            let reconcile_existing = matches!(
+                self.visible,
+                VisibleLinkState::Scheme(_)
+                    | VisibleLinkState::AfterColon(_)
+                    | VisibleLinkState::AfterSlash(_)
+                    | VisibleLinkState::Url(_)
+            );
             let (bytes, overflowed) = if reconcile_existing {
                 rendered_bytes_from_visible(std::mem::take(&mut self.visible))
             } else {
@@ -1685,6 +1686,17 @@ mod tests {
         terminal: Mutex<crate::ghostty::Terminal>,
     }
 
+    fn same_row_transition(
+        before_column: usize,
+        after_column: usize,
+    ) -> Option<crate::ghostty::ParsedCursorTransition> {
+        Some(crate::ghostty::ParsedCursorTransition {
+            before_column,
+            after_column,
+            same_row: true,
+        })
+    }
+
     impl Default for ParsedLinkHarness {
         fn default() -> Self {
             let gate = Arc::new(LinkExtractionGate::default());
@@ -1703,11 +1715,8 @@ mod tests {
                 crate::ghostty::ParsedOutput::Boundary => {
                     gate_for_callback.observe_parsed_boundary();
                 }
-                crate::ghostty::ParsedOutput::Backspace(columns) => {
-                    gate_for_callback.observe_parsed_backspace(columns);
-                }
-                crate::ghostty::ParsedOutput::CarriageReturn(columns) => {
-                    gate_for_callback.observe_parsed_carriage_return(columns);
+                crate::ghostty::ParsedOutput::CursorTransition(transition) => {
+                    gate_for_callback.observe_parsed_cursor_transition(transition);
                 }
             });
             Self {
@@ -2467,7 +2476,7 @@ mod tests {
         let gate = LinkExtractionGate::default();
 
         gate.observe_parsed_text(&url);
-        gate.observe_parsed_carriage_return(Some((url.len(), 0)));
+        gate.observe_parsed_cursor_transition(same_row_transition(url.len(), 0));
         gate.observe_parsed_text(&url);
         assert!(gate.retained_byte_count() <= MAX_URL_BYTES);
         assert_eq!(
@@ -2489,7 +2498,7 @@ mod tests {
         offset_url.resize(MAX_URL_BYTES - 5, b'b');
         let offset = LinkExtractionGate::default();
         offset.observe_parsed_text(&offset_url);
-        offset.observe_parsed_carriage_return(Some((offset_url.len() + 5, 0)));
+        offset.observe_parsed_cursor_transition(same_row_transition(offset_url.len() + 5, 0));
         offset.observe_parsed_text(b"aaaa ");
         assert_eq!(offset.retained_byte_count(), MAX_URL_BYTES);
         assert_eq!(
@@ -2518,7 +2527,7 @@ mod tests {
         let gate = LinkExtractionGate::default();
         let unicode = "https://wide.example/界";
         gate.observe_parsed_text(unicode.as_bytes());
-        gate.observe_parsed_carriage_return(Some((unicode.len(), 0)));
+        gate.observe_parsed_cursor_transition(same_row_transition(unicode.len(), 0));
         gate.observe_parsed_text(b"https://wide.example/x");
         gate.observe_parsed_separator();
 
@@ -2541,7 +2550,7 @@ mod tests {
         for prefix in [b"foo".as_slice(), b"https:", b"https:/", b"42"] {
             let partial = LinkExtractionGate::default();
             partial.observe_parsed_text(prefix);
-            partial.observe_parsed_carriage_return(Some((prefix.len(), 0)));
+            partial.observe_parsed_cursor_transition(same_row_transition(prefix.len(), 0));
             partial.observe_parsed_text(expected.as_bytes());
             partial.observe_parsed_separator();
             assert_eq!(
@@ -2558,7 +2567,7 @@ mod tests {
         let mut overlong = b"https://discarded.example/".to_vec();
         overlong.resize(MAX_URL_BYTES + 1, b'a');
         discarded.observe_parsed_text(&overlong);
-        discarded.observe_parsed_carriage_return(Some((overlong.len(), 0)));
+        discarded.observe_parsed_cursor_transition(same_row_transition(overlong.len(), 0));
         discarded.observe_parsed_text(expected.as_bytes());
         discarded.observe_parsed_separator();
         assert_eq!(
@@ -2571,20 +2580,29 @@ mod tests {
     }
 
     #[test]
-    fn malformed_cursor_motion_fails_closed_until_separator() {
-        for columns in [None, Some((usize::MAX, 0)), Some((0, usize::MAX))] {
+    fn malformed_cursor_transition_fails_closed_until_separator() {
+        for transition in [
+            None,
+            same_row_transition(usize::MAX, 0),
+            same_row_transition(0, usize::MAX),
+            Some(crate::ghostty::ParsedCursorTransition {
+                before_column: 12,
+                after_column: 0,
+                same_row: false,
+            }),
+        ] {
             let gate = LinkExtractionGate::default();
             gate.observe_parsed_text(b"https://stale.example/path");
-            gate.observe_parsed_carriage_return(columns);
+            gate.observe_parsed_cursor_transition(transition);
             gate.observe_parsed_text(b"https://not-authoritative.example/path");
             gate.observe_parsed_separator();
-            assert!(gate.take_links().is_none(), "columns={columns:?}");
+            assert!(gate.take_links().is_none(), "transition={transition:?}");
 
             gate.observe_parsed_text(b"https://after-malformed.example/path");
             gate.observe_parsed_separator();
             assert_eq!(
                 gate.take_links()
-                    .expect("recovery after malformed cursor motion")
+                    .expect("recovery after malformed cursor transition")
                     .output_urls,
                 ["https://after-malformed.example/path"]
             );
@@ -2636,7 +2654,7 @@ mod tests {
         let started = std::time::Instant::now();
         for _ in 0..REWRITES {
             gate.observe_parsed_text(&url);
-            gate.observe_parsed_carriage_return(Some((url.len(), 0)));
+            gate.observe_parsed_cursor_transition(same_row_transition(url.len(), 0));
             gate.observe_parsed_text(&url);
             gate.observe_parsed_separator();
             assert!(gate.take_links().is_some());

@@ -108,17 +108,18 @@ same action stream that updates the terminal. OSC 8 capture is bounded at two
 live PTY writes. Printable callbacks use the terminal's own print result so
 discarded codepoints are not exposed and charset-mapped glyphs are reported as
 Ghostty rendered them. Non-rendering C0 controls do not split visible text.
-Backspace and carriage return events include Ghostty's authoritative pre- and
-post-motion cursor columns so Herdr can bound and reconcile overwritten link
-candidates, including terminals with nonzero left margins.
+Every non-print action that changes the cursor and is not already a separator
+emits Ghostty's authoritative pre- and post-action columns plus rendered-row
+identity. Herdr can therefore reconcile same-row overwrites, including CSI
+positioning and nonzero left margins, while failing closed across row changes.
 
 remove when: the vendored source exposes equivalent post-parse text and OSC 8
 events, including confirmed BEL, 8-bit ST, and split `ESC \\` termination, with
 bounded 8 KiB targets and suppression for non-rendered status-display text and
 discarded codepoints, charset-mapped glyph reporting, and continuity across
-non-rendering controls, plus pre- and post-motion cursor-column metadata for
-rendered backspace and carriage-return overwrites, and the Herdr visibility
-regressions pass without this patch.
+non-rendering controls, plus generic post-action cursor transitions with
+rendered-row identity for non-print actions not already classified as
+separators, and the Herdr visibility regressions pass without this patch.
 
 verification:
 

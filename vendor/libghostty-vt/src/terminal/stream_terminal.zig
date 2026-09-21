@@ -30,8 +30,7 @@ pub const ParsedOutputKind = enum(c_int) {
     separator = 1,
     hyperlink = 2,
     boundary = 3,
-    backspace = 4,
-    carriage_return = 5,
+    cursor_transition = 4,
     _,
 };
 
@@ -164,19 +163,24 @@ pub const Handler = struct {
         comptime action: Action.Tag,
         value: Action.Value(action),
     ) void {
-        const cursor_column = self.terminal.screens.active.cursor.x;
         if (self.effects.parsed_output != null) {
             const handled = self.vtParsedPrint(action, value) catch |err| {
                 log.warn("error handling VT action action={} err={}", .{ action, err });
                 return;
             };
             if (handled) return;
+        } else {
+            self.vtFallible(action, value) catch |err| {
+                log.warn("error handling VT action action={} err={}", .{ action, err });
+            };
+            return;
         }
+        const cursor_before = self.parsedCursorSnapshot();
         self.vtFallible(action, value) catch |err| {
             log.warn("error handling VT action action={} err={}", .{ action, err });
             return;
         };
-        self.emitParsedOutput(action, value, cursor_column);
+        self.emitParsedOutput(action, value, cursor_before);
     }
 
     /// Finalizes an OSC-derived callback using the parser transition that
@@ -214,33 +218,70 @@ pub const Handler = struct {
         self: *Handler,
         comptime action: Action.Tag,
         value: Action.Value(action),
-        cursor_column: usize,
+        cursor_before: ParsedCursorSnapshot,
     ) void {
         const callback = self.effects.parsed_output orelse return;
         switch (action) {
-            .backspace => self.emitParsedCursorMotion(.backspace, cursor_column),
-            .carriage_return => self.emitParsedCursorMotion(.carriage_return, cursor_column),
-            .horizontal_tab, .linefeed => callback(self, .separator, ""),
-            .start_hyperlink => self.parsed_hyperlink_pending = value.uri,
+            .horizontal_tab, .linefeed, .full_reset => {
+                callback(self, .separator, "");
+                return;
+            },
+            .start_hyperlink => {
+                self.parsed_hyperlink_pending = value.uri;
+                return;
+            },
             else => {},
+        }
+        const cursor_after = self.parsedCursorSnapshot();
+        if (!cursor_before.eql(cursor_after)) {
+            self.emitParsedCursorTransition(cursor_before, cursor_after);
         }
     }
 
-    /// Cursor-motion payloads contain the authoritative zero-based columns
-    /// before and after Ghostty applies the control, formatted `before,after`.
-    fn emitParsedCursorMotion(
+    /// Cursor-transition payloads contain the authoritative zero-based columns
+    /// before and after Ghostty applies the action and whether both positions
+    /// refer to the same rendered row, formatted `before,after,same-row`.
+    fn emitParsedCursorTransition(
         self: *Handler,
-        kind: ParsedOutputKind,
-        cursor_column: usize,
+        before: ParsedCursorSnapshot,
+        after: ParsedCursorSnapshot,
     ) void {
         const callback = self.effects.parsed_output orelse return;
-        var buf: [32]u8 = undefined;
+        var buf: [48]u8 = undefined;
         const data = std.fmt.bufPrint(
             &buf,
-            "{d},{d}",
-            .{ cursor_column, self.terminal.screens.active.cursor.x },
+            "{d},{d},{d}",
+            .{ before.column, after.column, @intFromBool(before.sameRow(after)) },
         ) catch return;
-        callback(self, kind, data);
+        callback(self, .cursor_transition, data);
+    }
+
+    const ParsedCursorSnapshot = struct {
+        column: usize,
+        screen: usize,
+        row_node: usize,
+        row_offset: usize,
+
+        fn eql(self: ParsedCursorSnapshot, other: ParsedCursorSnapshot) bool {
+            return self.column == other.column and self.sameRow(other);
+        }
+
+        fn sameRow(self: ParsedCursorSnapshot, other: ParsedCursorSnapshot) bool {
+            return self.screen == other.screen and
+                self.row_node == other.row_node and
+                self.row_offset == other.row_offset;
+        }
+    };
+
+    fn parsedCursorSnapshot(self: *Handler) ParsedCursorSnapshot {
+        const screen = self.terminal.screens.active;
+        const cursor = &screen.cursor;
+        return .{
+            .column = cursor.x,
+            .screen = @intFromPtr(screen),
+            .row_node = @intFromPtr(cursor.page_pin.node),
+            .row_offset = cursor.page_pin.y,
+        };
     }
 
     /// Handle printable actions while reporting only codepoints the terminal

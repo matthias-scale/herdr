@@ -4539,7 +4539,9 @@ mod tests {
             runtime.test_process_pty_bytes(&stream);
             assert!(runtime.visible_text().contains(uri), "Ghostty {name}");
 
-            let links = gate.take_links().expect("visible URL after cancelled OSC");
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("visible URL after cancelled OSC {name}"));
             assert_eq!(links.output_urls, vec![uri], "link gate {name}");
             assert!(links.osc8_urls.is_empty(), "link gate {name}");
         }
@@ -4843,6 +4845,58 @@ mod tests {
                 .unwrap_or_else(|| panic!("rendered URL at split {split}"));
             assert_eq!(links.output_urls, [rendered_url], "split {split}");
             assert!(!links.output_urls.iter().any(|url| url == stale_url));
+        }
+
+        let stale_url = "https://old.example/path";
+        let rendered_url = "Xttps://old.example/path";
+        let stream = format!("{stale_url}\x1b[1GX\nvisible-after-csi-column\n");
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+            let rendered = runtime.visible_text();
+            assert!(
+                rendered.contains(rendered_url) && rendered.contains("visible-after-csi-column"),
+                "Ghostty applied CSI 1G at split {split}: {rendered:?}"
+            );
+            assert!(
+                !rendered.contains(stale_url),
+                "Ghostty overwrote the stale CSI URL at split {split}: {rendered:?}"
+            );
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("rendered CSI URL at split {split}"));
+            assert_eq!(links.output_urls, [rendered_url], "split {split}");
+            assert!(!links.output_urls.iter().any(|url| url == stale_url));
+        }
+
+        let stale_url = "https://before-row-motion.example/path";
+        let ignored_url = "https://same-write-after-row-motion.example/path";
+        let recovered_url = "https://after-row-motion.example/path";
+        let stream = format!("{stale_url}\x1b[2B{ignored_url}\n{recovered_url}\n");
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+            let rendered = runtime.visible_text();
+            assert!(
+                rendered.contains(stale_url)
+                    && rendered.contains(ignored_url)
+                    && rendered.contains(recovered_url),
+                "Ghostty rendered the CSI row transition at split {split}: {rendered:?}"
+            );
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("recovery URL after row transition at split {split}"));
+            assert_eq!(links.output_urls, [recovered_url], "split {split}");
+            assert!(!links.output_urls.iter().any(|url| url == stale_url));
+            assert!(!links.output_urls.iter().any(|url| url == ignored_url));
         }
     }
 
