@@ -647,6 +647,39 @@ mod tests {
     }
 
     #[test]
+    fn group_store_tombstones_must_exactly_match_the_authority_ledger() {
+        for mismatch in ["local-id", "revision"] {
+            let dir = TestDir::new(mismatch);
+            let mut runtime = Runtime::load(&dir.0);
+            let (first, _) = runtime.create("First", 0).unwrap();
+            let tombstone = if mismatch == "local-id" {
+                let (second, _) = runtime.create("Second", first.revision).unwrap();
+                runtime.delete(&second.id, second.revision).unwrap().0
+            } else {
+                runtime.delete(&first.id, first.revision).unwrap().0
+            };
+            let store_path = dir.0.join(GROUPS_FILE_NAME);
+            let mut store: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&store_path).unwrap()).unwrap();
+            let groups = store["groups"].as_array_mut().unwrap();
+            if mismatch == "local-id" {
+                groups.swap(0, 1);
+                groups[0]["id"]["local"] = serde_json::json!(1);
+                groups[1]["id"]["local"] = serde_json::json!(2);
+            } else {
+                groups[0]["revision"] = serde_json::json!(tombstone.revision - 1);
+            }
+            std::fs::write(&store_path, serde_json::to_string_pretty(&store).unwrap()).unwrap();
+
+            assert!(matches!(
+                Runtime::load(&dir.0).authority(),
+                Err(RuntimeError::Unavailable(error))
+                    if error.contains("group store tombstone is absent from the authority ledger")
+            ));
+        }
+    }
+
+    #[test]
     fn rolled_back_group_store_with_an_unretired_gap_fails_closed() {
         let dir = TestDir::new("rolled-back-active-store");
         let mut runtime = Runtime::load(&dir.0);

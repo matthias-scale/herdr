@@ -353,6 +353,40 @@ mod tests {
     }
 
     #[test]
+    fn delete_rejects_a_stale_expected_revision() {
+        let (mut app, _dir, _) = app_with_groups("delete-conflict");
+        let created = created_group(&app.handle_group_create(
+            "create".into(),
+            GroupCreateParams {
+                name: "Work".into(),
+                expected_revision: 0,
+            },
+        ));
+        let renamed = created_group(&app.handle_group_rename(
+            "rename".into(),
+            GroupRenameParams {
+                group_id: created.id.clone(),
+                name: "Focus".into(),
+                expected_revision: created.revision,
+            },
+        ));
+
+        let response: serde_json::Value = serde_json::from_str(&app.handle_group_delete(
+            "delete".into(),
+            GroupDeleteParams {
+                group_id: created.id,
+                expected_revision: created.revision,
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(response["error"]["code"], "revision_conflict");
+        assert!(response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(&renamed.revision.to_string())));
+    }
+
+    #[test]
     fn membership_compare_and_set_is_durable_before_live_state_changes() {
         let (mut app, dir, pane_public_id) = app_with_groups("membership");
         let group = created_group(&app.handle_group_create(
