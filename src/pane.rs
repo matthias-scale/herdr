@@ -4535,6 +4535,97 @@ mod tests {
         }
     }
 
+    fn assert_parser_classified_link_capture(
+        label: &str,
+        stream: &[u8],
+        hidden: &str,
+        visible: &str,
+        rendered_fragment: Option<&str>,
+    ) {
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream[..split]);
+            runtime.test_process_pty_bytes(&stream[split..]);
+
+            let rendered = runtime.visible_text();
+            assert!(
+                !rendered.contains(hidden),
+                "Ghostty hid {label} payload at split {split}; rendered={rendered:?}"
+            );
+            if let Some(fragment) = rendered_fragment {
+                assert!(
+                    rendered.contains(fragment),
+                    "Ghostty rendered the post-control fragment for {label} at split {split}; rendered={rendered:?}"
+                );
+            }
+            assert!(
+                rendered.contains(visible),
+                "Ghostty rendered the visible URL after {label} at split {split}; rendered={rendered:?}"
+            );
+
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("visible URL after {label} at split {split}"));
+            assert_eq!(
+                links.output_urls,
+                vec![visible],
+                "link capture must match Ghostty-rendered text for {label} at split {split}"
+            );
+            assert!(links.osc8_urls.is_empty(), "{label} at split {split}");
+        }
+    }
+
+    #[tokio::test]
+    async fn c1_introducers_and_st_match_ghostty_rendered_text() {
+        for (label, introducer, slug) in [
+            ("DCS", 0x90, "dcs"),
+            ("SOS", 0x98, "sos"),
+            ("PM", 0x9e, "pm"),
+            ("APC", 0x9f, "apc"),
+        ] {
+            let hidden = format!("https://hidden-{slug}.example.test/path");
+            let visible = format!("https://visible-{slug}.example.test/path");
+            let mut stream = vec![b'\x1b', introducer];
+            stream.extend_from_slice(hidden.as_bytes());
+            stream.push(0x9c);
+            stream.extend_from_slice(visible.as_bytes());
+            stream.push(b'\n');
+
+            assert_parser_classified_link_capture(
+                label,
+                &stream,
+                &hidden,
+                &visible,
+                None,
+            );
+        }
+
+        let hidden = "https://hidden-dcs-st.example.test/path";
+        let visible = "https://visible-after-st.example.test/path";
+        let mut stream = format!("\x1bP{hidden}").into_bytes();
+        stream.push(0x9c);
+        stream.extend_from_slice(format!("{visible}\n").as_bytes());
+        assert_parser_classified_link_capture("8-bit ST", &stream, hidden, visible, None);
+    }
+
+    #[tokio::test]
+    async fn escape_followed_by_c0_matches_ghostty_rendered_text() {
+        let hidden = "https://hidden-escape-control.example.test/path";
+        let rendered_fragment = "ttps://hidden-escape-control.example.test/path";
+        let visible = "https://visible-escape-control.example.test/path";
+        let stream = format!("\x1b\x07{hidden} {visible}\n");
+
+        assert_parser_classified_link_capture(
+            "ESC plus BEL",
+            stream.as_bytes(),
+            hidden,
+            visible,
+            Some(rendered_fragment),
+        );
+    }
+
     #[tokio::test]
     async fn dirty_link_snapshot_includes_osc8_hyperlink_target() {
         let uri = "https://osc.example.test/target";

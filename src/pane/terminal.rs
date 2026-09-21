@@ -167,6 +167,7 @@ pub(crate) struct GhosttyPaneTerminal {
     pub core: Mutex<GhosttyPaneCore>,
     key_encoder: Mutex<crate::ghostty::KeyEncoder>,
     pending_pty_responses: Arc<Mutex<Vec<Bytes>>>,
+    link_extraction: Mutex<Option<Arc<crate::agent_state::LinkExtractionGate>>>,
     content_revision: AtomicU64,
 }
 
@@ -199,6 +200,13 @@ pub(crate) struct PaneTerminal {
 impl PaneTerminal {
     pub(crate) fn new(ghostty: GhosttyPaneTerminal) -> Self {
         Self { ghostty }
+    }
+
+    pub(crate) fn install_link_extraction(
+        &self,
+        gate: Arc<crate::agent_state::LinkExtractionGate>,
+    ) {
+        self.ghostty.install_link_extraction(gate);
     }
 
     pub fn process_pty_bytes(
@@ -1078,12 +1086,19 @@ impl GhosttyPaneTerminal {
             }),
             key_encoder: Mutex::new(key_encoder),
             pending_pty_responses,
+            link_extraction: Mutex::new(None),
             content_revision: AtomicU64::new(0),
         })
     }
 
     pub fn content_revision(&self) -> u64 {
         self.content_revision.load(Ordering::Acquire)
+    }
+
+    fn install_link_extraction(&self, gate: Arc<crate::agent_state::LinkExtractionGate>) {
+        if let Ok(mut link_extraction) = self.link_extraction.lock() {
+            *link_extraction = Some(gate);
+        }
     }
 
     pub(super) fn set_windows_powershell_prompt_cwd_reporting(&self, enabled: bool) {
@@ -1325,6 +1340,11 @@ impl GhosttyPaneTerminal {
             xtgettcap_responses,
             &mut terminal_responses,
         );
+        if let Ok(link_extraction) = self.link_extraction.lock() {
+            if let Some(gate) = link_extraction.as_ref() {
+                gate.observe_chunk(filtered_bytes.as_ref());
+            }
+        }
         if !filtered_bytes.is_empty() {
             self.content_revision.fetch_add(1, Ordering::Release);
         }
