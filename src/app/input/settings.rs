@@ -458,7 +458,7 @@ pub(crate) fn open_settings_at(state: &mut AppState, section: SettingsSection) {
     state.settings.search.clear();
     state.settings.search_active = false;
     select_section(state, section);
-    state.mode = Mode::Settings;
+    state.set_server_mode(Mode::Settings);
 }
 
 impl AppState {
@@ -659,11 +659,11 @@ mod tests {
         press(&mut state, KeyCode::Esc);
         assert!(!state.settings.search_active);
         assert!(state.settings.search.is_empty());
-        assert_eq!(state.mode, Mode::Settings);
+        assert_eq!(state.server_mode(), Mode::Settings);
 
         // With no query left, Esc closes.
         press(&mut state, KeyCode::Esc);
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -674,9 +674,9 @@ mod tests {
 
         press(&mut state, KeyCode::Esc);
         assert!(state.settings.search.is_empty());
-        assert_eq!(state.mode, Mode::Settings);
+        assert_eq!(state.server_mode(), Mode::Settings);
         press(&mut state, KeyCode::Esc);
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -733,7 +733,7 @@ mod tests {
         };
 
         assert_eq!(state.handle_settings_mouse(click), None);
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -763,7 +763,7 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()),
         );
 
-        assert_eq!(state.mode, Mode::Terminal);
+        assert_eq!(state.server_mode(), Mode::Terminal);
         assert_eq!(state.theme_name, original_theme);
         assert_eq!(state.palette.accent, original_palette.accent);
         assert_eq!(state.palette.panel_bg, original_palette.panel_bg);
@@ -787,7 +787,7 @@ mod tests {
             ))
         );
         assert_eq!(state.status_indicators, StatusIndicatorStyle::Dots);
-        assert_eq!(state.mode, Mode::Settings);
+        assert_eq!(state.server_mode(), Mode::Settings);
     }
 
     #[test]
@@ -804,7 +804,7 @@ mod tests {
 
         assert_eq!(action, Some(SettingsAction::SaveSound(true)));
         assert!(!state.sound.enabled);
-        assert_eq!(state.mode, Mode::Settings);
+        assert_eq!(state.server_mode(), Mode::Settings);
     }
 
     #[test]

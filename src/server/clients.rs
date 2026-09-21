@@ -77,7 +77,7 @@ pub(crate) struct ClientConnection {
     /// Client-local historical provider usage controls and scan snapshot.
     pub(crate) usage_view: Option<crate::app::state::UsageViewState>,
     /// Last tiled-pane geometry rendered for this client. Capacity is reused across frames.
-    pub(crate) retained_pane_infos: Vec<crate::layout::PaneInfo>,
+    pub(crate) retained_pane_infos: std::sync::Arc<Vec<crate::layout::PaneInfo>>,
     /// The client resized after its attach-local presentation was last used to
     /// compute input hit areas.
     pub(crate) input_geometry_dirty: bool,
@@ -166,7 +166,7 @@ impl ClientConnection {
             symphony_detail: None,
             work_view: None,
             usage_view: None,
-            retained_pane_infos: Vec::new(),
+            retained_pane_infos: std::sync::Arc::new(Vec::new()),
             input_geometry_dirty: false,
             retained_pane_cursor: false,
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
@@ -259,11 +259,22 @@ impl ClientConnection {
         matches!(self.mode, ClientConnectionMode::App) && !self.pending_terminal_attach
     }
 
-    pub(crate) fn tab_surface_replaced(&self, app_state: &crate::app::state::AppState) -> bool {
+    pub(crate) fn presentation_policy(
+        &self,
+        app_state: &crate::app::state::AppState,
+    ) -> crate::app::state::ClientPresentationPolicy<'static> {
+        self.presentation_policy_with_pomodoro(app_state, self.pomodoro_presentation.owns_input())
+    }
+
+    pub(crate) fn presentation_policy_with_pomodoro(
+        &self,
+        app_state: &crate::app::state::AppState,
+        pomodoro_owns_input: bool,
+    ) -> crate::app::state::ClientPresentationPolicy<'static> {
         let dock = &self.dock_presentation;
         let preview_is_in_dock =
             !dock.collapsed && dock.tab == Some(crate::app::DockSurface::Editor);
-        (dock.editor_preview.is_some() && !preview_is_in_dock)
+        let tab_surface_replaced = (dock.editor_preview.is_some() && !preview_is_in_dock)
             || self.symphony_detail.is_some()
             || self.loop_run_history_detail.is_some()
             || self.usage_view.is_some()
@@ -274,7 +285,15 @@ impl ClientConnection {
             || app_state
                 .active
                 .and_then(|ws_idx| app_state.workspaces.get(ws_idx))
-                .is_none()
+                .is_none();
+        crate::app::state::ClientPresentationPolicy::from_presentations(
+            app_state.server_mode(),
+            &self.sidebar_presentation,
+            &self.dock_presentation,
+            pomodoro_owns_input,
+            !tab_surface_replaced,
+            std::sync::Arc::clone(&self.retained_pane_infos),
+        )
     }
 
     pub(crate) fn request_semantic_redraw_after_input(&mut self) {

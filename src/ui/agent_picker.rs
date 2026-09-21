@@ -60,3 +60,22 @@ pub(super) fn render_agent_picker(app: &AppState, frame: &mut Frame, area: Rect)
         areas.footer.expect("picker footer is configured"),
     );
 }
+
+pub(crate) fn candidate_at(app: &AppState, area: Rect, column: u16, row: u16) -> Option<usize> {
+    let picker = app.agent_picker.as_ref()?;
+    let popup_h = (picker.candidates.len() as u16).saturating_add(6);
+    let popup = super::widgets::centered_popup_rect(area, 78, popup_h)?;
+    let inner = Rect::new(
+        popup.x.saturating_add(1),
+        popup.y.saturating_add(1),
+        popup.width.saturating_sub(2),
+        popup.height.saturating_sub(2),
+    );
+    let content = modal_stack_areas(inner, 1, 1, 0, 1).content;
+    if column < content.x || column >= content.right() {
+        return None;
+    }
+    row.checked_sub(content.y.saturating_add(1))
+        .map(usize::from)
+        .filter(|index| *index < picker.candidates.len())
+}

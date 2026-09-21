@@ -42,7 +42,7 @@ fn focused_agent_pane(
 
 fn focused_editor_terminal_id(app: &AppState) -> Option<TerminalId> {
     if app.dock_editor_preview.is_some()
-        || app.mode != Mode::Terminal
+        || app.effective_interaction_mode() != Mode::Terminal
         || !app.dock_editor_focused
         || app.dock_collapsed
         || app.dock_tab != Some(DockSurface::Editor)
@@ -94,7 +94,7 @@ pub(super) fn render_editor_body(
     runtime.render(
         frame,
         area,
-        app.mode == Mode::Terminal && app.dock_editor_focused,
+        app.effective_interaction_mode() == Mode::Terminal && app.dock_editor_focused,
     );
 }
 

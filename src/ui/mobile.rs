@@ -9,10 +9,10 @@ use ratatui::{
 #[cfg(test)]
 use super::sidebar::agent_panel_entries;
 use super::sidebar::{
-    mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout, render_compact_agent_row,
-    render_remote_compact_agent_row_with_identity, sidebar_row_belongs_to_workspace,
-    sidebar_space_member_indices, sidebar_thread_entries_from, sidebar_workspace_labels,
-    SidebarRow, RECENTLY_DONE_SECTION_TITLE,
+    dim_inactive_pane_row, mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout,
+    render_compact_agent_row, render_remote_compact_agent_row_with_identity,
+    sidebar_row_belongs_to_workspace, sidebar_space_member_indices, sidebar_thread_entries_from,
+    sidebar_workspace_labels, SidebarRow,
 };
 #[cfg(test)]
 use super::sidebar::{AgentPanelEntry, AgentPanelEntryData};
@@ -49,10 +49,19 @@ pub(crate) enum MobileSwitcherTarget {
     SidebarTab {
         ws_idx: usize,
         tab_idx: usize,
+        pane_id: PaneId,
     },
     Agent {
         ws_idx: usize,
         tab_idx: usize,
+        pane_id: PaneId,
+    },
+    Snooze {
+        ws_idx: usize,
+        pane_id: PaneId,
+    },
+    Settle {
+        ws_idx: usize,
         pane_id: PaneId,
     },
     NestedHeader(String),
@@ -124,6 +133,7 @@ pub(crate) fn mobile_switcher_max_scroll_for_height(app: &AppState, viewport_hei
 }
 
 fn mobile_switcher_target_for_row(
+    app: &AppState,
     content: Rect,
     col: u16,
     doc_row: usize,
@@ -131,6 +141,35 @@ fn mobile_switcher_target_for_row(
     entry: &SidebarRow,
 ) -> Option<MobileSwitcherTarget> {
     let on_title_line = doc_row == cursor;
+    let control = match entry {
+        SidebarRow::Agent { entry, depth } => super::sidebar::selected_row_control_at(
+            app,
+            entry,
+            Rect::new(content.x, content.y, content.width, 1),
+            *depth,
+            false,
+            col,
+        ),
+        SidebarRow::Tab { entry, depth } => super::sidebar::selected_row_control_at(
+            app,
+            entry,
+            Rect::new(content.x, content.y, content.width, 1),
+            *depth,
+            true,
+            col,
+        ),
+        _ => None,
+    };
+    if let Some(control) = control {
+        return Some(match control {
+            crate::app::state::SidebarHoverAction::Snooze { ws_idx, pane_id } => {
+                MobileSwitcherTarget::Snooze { ws_idx, pane_id }
+            }
+            crate::app::state::SidebarHoverAction::Settle { ws_idx, pane_id } => {
+                MobileSwitcherTarget::Settle { ws_idx, pane_id }
+            }
+        });
+    }
     Some(match entry {
         SidebarRow::Workspace { ws_idx, .. } => {
             let on_disclosure = on_title_line
@@ -155,6 +194,7 @@ fn mobile_switcher_target_for_row(
             MobileSwitcherTarget::SidebarTab {
                 ws_idx: target.ws_idx,
                 tab_idx: target.tab_idx,
+                pane_id: target.pane_id,
             }
         }
         SidebarRow::RemoteAgent { entry, .. } => {
@@ -295,10 +335,9 @@ pub(crate) fn mobile_switcher_target_at(
         let row_height = mobile_sidebar_row_height(entry);
         if doc_row >= cursor && doc_row < cursor + row_height {
             if let SidebarRow::SectionHeader { title, .. } = entry {
-                return (*title == RECENTLY_DONE_SECTION_TITLE)
-                    .then_some(MobileSwitcherTarget::Section(title));
+                return Some(MobileSwitcherTarget::Section(title));
             }
-            return mobile_switcher_target_for_row(content, col, doc_row, cursor, entry);
+            return mobile_switcher_target_for_row(app, content, col, doc_row, cursor, entry);
         }
         cursor += row_height;
     }
@@ -779,15 +818,14 @@ fn render_mobile_switcher_content(
                     p,
                 );
                 if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
-                    render_compact_agent_row(
-                        app,
-                        frame,
-                        entry,
-                        Rect::new(content.x, y, content.width, 1),
-                        *depth,
-                        false,
-                        Some(bg),
-                    );
+                    let rect = Rect::new(content.x, y, content.width, 1);
+                    render_compact_agent_row(app, frame, entry, rect, *depth, false, Some(bg));
+                    if target.is_some_and(|target| {
+                        app.pane_is_settled(target.ws_idx, target.pane_id)
+                            || app.pane_is_snoozed(target.ws_idx, target.pane_id)
+                    }) {
+                        dim_inactive_pane_row(frame, rect, p.overlay0);
+                    }
                 }
             }
             SidebarRow::RemoteAgent {
@@ -815,11 +853,7 @@ fn render_mobile_switcher_content(
             SidebarRow::SectionHeader {
                 title, collapsed, ..
             } => {
-                let label = if *title == RECENTLY_DONE_SECTION_TITLE {
-                    format!("  {} {title}", if *collapsed { "▸" } else { "▾" })
-                } else {
-                    format!("  {title}")
-                };
+                let label = format!("  {} {title}", if *collapsed { "▸" } else { "▾" });
                 render_one_line_item(
                     frame,
                     viewport,
@@ -918,15 +952,14 @@ fn render_mobile_switcher_content(
                 });
                 let bg = mobile_item_bg(false, active, p);
                 if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
-                    render_compact_agent_row(
-                        app,
-                        frame,
-                        entry,
-                        Rect::new(content.x, y, content.width, 1),
-                        *depth,
-                        true,
-                        Some(bg),
-                    );
+                    let rect = Rect::new(content.x, y, content.width, 1);
+                    render_compact_agent_row(app, frame, entry, rect, *depth, true, Some(bg));
+                    if entry.local_target().is_some_and(|target| {
+                        app.pane_is_settled(target.ws_idx, target.pane_id)
+                            || app.pane_is_snoozed(target.ws_idx, target.pane_id)
+                    }) {
+                        dim_inactive_pane_row(frame, rect, p.overlay0);
+                    }
                 }
             }
         }
@@ -1574,6 +1607,48 @@ mod tests {
             .all(|cell| cell.fg != app.palette.red && cell.fg != app.palette.peach));
     }
 
+    #[test]
+    fn mobile_switcher_dims_snoozed_panes_like_expanded_rows() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("snoozed")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.ensure_test_terminals();
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0]
+            .terminal_id(pane)
+            .expect("terminal")
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .detected_agent = Some(crate::detect::Agent::Codex);
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.snooze_pane_at(0, pane, deadline));
+
+        let area = Rect::new(0, 0, 50, 20);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
+                .expect("mobile terminal");
+        terminal
+            .draw(|frame| {
+                render_mobile_switcher_content(&app, &TerminalRuntimeRegistry::new(), frame, area)
+            })
+            .expect("mobile render");
+
+        let dots = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .filter(|cell| matches!(cell.symbol(), "●" | "○" | "·"))
+            .collect::<Vec<_>>();
+        assert!(!dots.is_empty());
+        assert!(dots.iter().all(|cell| {
+            cell.fg == app.palette.overlay0 && cell.modifier.contains(Modifier::DIM)
+        }));
+    }
+
     fn agent_entry(primary_tab_label: Option<&str>, agent_label: Option<&str>) -> AgentPanelEntry {
         AgentPanelEntry::new(
             crate::ui::sidebar::AgentPanelIdentity::Local(
@@ -1936,6 +2011,8 @@ mod tests {
         let mut app = crate::app::state::AppState::test_new();
         let mut workspace = crate::workspace::Workspace::test_new("agents-first");
         workspace.test_add_tab(None); // two tabs -> two agent panes
+        let first_pane = workspace.tabs[0].root_pane;
+        let second_pane = workspace.tabs[1].root_pane;
         app.workspaces = vec![workspace];
         app.ensure_test_terminals();
         for terminal in app.terminals.values_mut() {
@@ -1964,14 +2041,16 @@ mod tests {
             mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 4),
             Some(MobileSwitcherTarget::SidebarTab {
                 ws_idx: 0,
-                tab_idx: 0
+                tab_idx: 0,
+                pane_id: first_pane,
             })
         );
         assert_eq!(
             mobile_switcher_target_at(&app, viewport.x + 2, viewport.y + 5),
             Some(MobileSwitcherTarget::SidebarTab {
                 ws_idx: 0,
-                tab_idx: 1
+                tab_idx: 1,
+                pane_id: second_pane,
             })
         );
     }
@@ -1980,10 +2059,11 @@ mod tests {
     fn mobile_tab_row_focuses_the_whole_compact_row() {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("mobile-gutters")];
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
         app.ensure_test_terminals();
         app.active = Some(0);
         app.selected = 0;
-        app.mode = crate::app::Mode::Navigate;
+        app.set_server_mode(crate::app::Mode::Navigate);
         app.view.layout = crate::app::state::ViewLayout::Mobile;
         app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
         app.view.terminal_area = Rect::new(0, 2, 40, 16);
@@ -2018,16 +2098,86 @@ mod tests {
             mobile_switcher_target_at(&app, row_col, tab_row),
             Some(MobileSwitcherTarget::SidebarTab {
                 ws_idx: 0,
-                tab_idx: 0
+                tab_idx: 0,
+                pane_id,
             })
         );
         assert_eq!(
             mobile_switcher_target_at(&app, row_col + 1, tab_row),
             Some(MobileSwitcherTarget::SidebarTab {
                 ws_idx: 0,
-                tab_idx: 0
+                tab_idx: 0,
+                pane_id,
             })
         );
+    }
+
+    #[test]
+    fn mobile_selected_row_controls_yield_to_dot_and_title_at_minimum_width() {
+        for width in [18, 60] {
+            let mut app = crate::app::state::AppState::test_new();
+            app.workspaces = vec![crate::workspace::Workspace::test_new("mobile-snooze")];
+            app.ensure_test_terminals();
+            for terminal in app.terminals.values_mut() {
+                terminal.agent_name = Some("codex".to_string());
+                terminal.set_raw_agent_state_for_test(AgentState::Working);
+            }
+            app.active = Some(0);
+            app.selected = 0;
+            app.set_server_mode(crate::app::Mode::Navigate);
+            app.view.layout = crate::app::state::ViewLayout::Mobile;
+            app.view.mobile_header_rect = Rect::new(0, 0, width, 2);
+            app.view.terminal_area = Rect::new(0, 2, width, 16);
+            app.reconcile_sidebar_presentation();
+
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 18)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_mobile_panel(
+                        &app,
+                        &TerminalRuntimeRegistry::new(),
+                        frame,
+                        Rect::new(0, 0, width, 18),
+                    )
+                })
+                .unwrap();
+
+            let viewport = mobile_switcher_areas(&app).viewport;
+            let content = inset_for_left_scrollbar(viewport);
+            let row = viewport.y
+                + mobile_switcher_workspace_doc_range(&app, 0)
+                    .expect("workspace row")
+                    .start as u16
+                + 1;
+            let rendered = (content.x..content.right())
+                .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+                .collect::<String>();
+            assert!(
+                rendered.contains('●') || rendered.contains('○') || rendered.contains('·'),
+                "width={width}: {rendered:?}"
+            );
+            assert!(rendered.contains("codex"), "width={width}: {rendered:?}");
+            let targets = (content.x..content.right())
+                .filter_map(|column| mobile_switcher_target_at(&app, column, row))
+                .collect::<Vec<_>>();
+            if width == 18 {
+                assert!(!targets.iter().any(|target| matches!(
+                    target,
+                    MobileSwitcherTarget::Snooze { .. } | MobileSwitcherTarget::Settle { .. }
+                )));
+                assert!(!rendered.contains('✓'), "{rendered:?}");
+            } else {
+                assert!(targets
+                    .iter()
+                    .any(|target| matches!(target, MobileSwitcherTarget::Snooze { .. })));
+                assert!(targets
+                    .iter()
+                    .any(|target| matches!(target, MobileSwitcherTarget::Settle { .. })));
+                assert!(rendered.contains('◷'), "{rendered:?}");
+                assert!(rendered.contains('✓'), "{rendered:?}");
+            }
+        }
     }
 
     #[test]
@@ -2045,7 +2195,7 @@ mod tests {
             terminal_state.set_active_subagents(Some(3));
             app.active = Some(0);
             app.selected = 0;
-            app.mode = crate::app::Mode::Navigate;
+            app.set_server_mode(crate::app::Mode::Navigate);
             app.view.layout = crate::app::state::ViewLayout::Mobile;
             app.view.mobile_header_rect = Rect::new(0, 0, width, 2);
             app.view.terminal_area = Rect::new(0, 2, width, 16);
@@ -2099,7 +2249,7 @@ mod tests {
         }
         app.active = Some(0);
         app.selected = 0;
-        app.mode = crate::app::Mode::Navigate;
+        app.set_server_mode(crate::app::Mode::Navigate);
         app.view.layout = crate::app::state::ViewLayout::Mobile;
         app.view.mobile_header_rect = Rect::new(0, 0, 24, 2);
         app.view.terminal_area = Rect::new(0, 2, 24, 16);
@@ -2143,7 +2293,7 @@ mod tests {
         }
         app.active = Some(0);
         app.selected = 0;
-        app.mode = crate::app::Mode::Navigate;
+        app.set_server_mode(crate::app::Mode::Navigate);
         app.view.layout = crate::app::state::ViewLayout::Mobile;
         app.view.mobile_header_rect = Rect::new(0, 0, 6, 2);
         app.view.terminal_area = Rect::new(0, 2, 6, 8);
@@ -2188,6 +2338,7 @@ mod tests {
         app.active = Some(0);
         app.selected = 0;
         app.ensure_test_terminals();
+        let linked_pane = app.workspaces[2].tabs[0].root_pane;
         app.reconcile_sidebar_presentation();
         app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
         app.view.terminal_area = Rect::new(0, 2, 40, 18);
@@ -2213,7 +2364,8 @@ mod tests {
             hit,
             Some(MobileSwitcherTarget::SidebarTab {
                 ws_idx: 2,
-                tab_idx: 0
+                tab_idx: 0,
+                pane_id: linked_pane,
             })
         );
 
@@ -2230,8 +2382,9 @@ mod tests {
             hit,
             Some(MobileSwitcherTarget::SidebarTab {
                 ws_idx: 2,
-                tab_idx: 0
-            })
+                tab_idx: 0,
+                pane_id,
+            }) if pane_id == linked_pane
         ));
     }
 
@@ -2260,7 +2413,14 @@ mod tests {
             collapsed: false,
         };
         assert_eq!(
-            mobile_switcher_target_for_row(Rect::new(0, 0, 20, 1), 0, 0, 0, &entry),
+            mobile_switcher_target_for_row(
+                &AppState::test_new(),
+                Rect::new(0, 0, 20, 1),
+                0,
+                0,
+                0,
+                &entry,
+            ),
             None
         );
     }
@@ -2549,7 +2709,7 @@ mod tests {
             );
         app.active = Some(0);
         app.selected = 0;
-        app.mode = crate::app::Mode::Navigate;
+        app.set_server_mode(crate::app::Mode::Navigate);
         app.status_bar_enabled = false;
         app.mobile_width_threshold = 80;
         let runtimes = TerminalRuntimeRegistry::new();
@@ -2563,7 +2723,7 @@ mod tests {
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 40, 4));
         assert!(app.view.visible_agent_activity_instants.is_empty());
 
-        app.mode = crate::app::Mode::Terminal;
+        app.set_server_mode(crate::app::Mode::Terminal);
         crate::ui::compute_view_with_runtime_registry(&mut app, &runtimes, Rect::new(0, 0, 40, 20));
         assert!(app.view.visible_agent_activity_instants.is_empty());
     }

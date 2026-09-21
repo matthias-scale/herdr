@@ -52,7 +52,7 @@ mod tab_surface;
 mod tabs;
 mod tooltip;
 pub(crate) use tooltip::hovered_control_at;
-mod agent_picker;
+pub(crate) mod agent_picker;
 pub(crate) mod text;
 pub(crate) mod ticket_actions;
 pub(crate) mod usage;
@@ -114,9 +114,8 @@ use self::sidebar::{
     render_sidebar, render_sidebar_collapsed, render_sidebar_filter_menu,
     render_sidebar_group_menu, render_sidebar_new_menu, render_sidebar_new_thread,
     render_sidebar_object_menu, render_sidebar_project_menu, render_sidebar_settled_menu,
-    render_sidebar_sort_menu, render_sidebar_subgroup_picker,
+    render_sidebar_snooze_menu, render_sidebar_sort_menu, render_sidebar_subgroup_picker,
 };
-#[cfg(test)]
 #[cfg(test)]
 pub(crate) use self::status::focused_context as focused_status_context_for_test;
 use self::status::{
@@ -165,13 +164,14 @@ pub(crate) use self::{
         sidebar_project_menu_matches, sidebar_pull_request_actions, sidebar_pull_request_key,
         sidebar_row_index_for_workspace, sidebar_row_scroll_for_target, sidebar_rows,
         sidebar_separator_col, sidebar_settled_menu_layout, sidebar_show_more_at,
-        sidebar_show_more_key, sidebar_symphony_job_at, sidebar_thread_entries,
-        sidebar_ticket_action_entries, sidebar_ticket_target, sidebar_unassigned_spawn_at,
-        sidebar_work_group_activation, workspace_agent_chevron_rect, workspace_drop_slots,
-        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect_for_app,
-        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
-        AgentPanelEntry, AgentPanelLocalIdentity, RemoteAgentPanelEntry, SidebarFilterOption,
-        SidebarObjectMenuItem, SidebarRow, WorkspaceListEntry, SETTLED_MENU_LABELS,
+        sidebar_show_more_key, sidebar_snooze_menu_layout, sidebar_symphony_job_at,
+        sidebar_thread_entries, sidebar_ticket_action_entries, sidebar_ticket_target,
+        sidebar_unassigned_spawn_at, sidebar_work_group_activation, workspace_agent_chevron_rect,
+        workspace_drop_slots, workspace_list_entries, workspace_list_entries_expanded,
+        workspace_list_rect_for_app, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
+        workspace_parent_group_state, AgentPanelEntry, AgentPanelLocalIdentity,
+        RemoteAgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
+        WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
 };
 use crate::render_signal::RenderSignal;
@@ -194,7 +194,9 @@ pub(crate) use self::{
     },
     widgets::{centered_popup_rect, modal_stack_areas},
 };
-use crate::app::state::{Palette, ViewLayout};
+use crate::app::state::{
+    ClientInputOwner, ClientOverlay, InputOwner, Palette, ServerInputOwner, ViewLayout,
+};
 use crate::app::{AppState, Mode};
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -376,14 +378,6 @@ fn compute_view_internal_at(
             app.dock_linear_focused = surface == crate::app::DockSurface::Linear;
         }
     }
-    // The pull button is the git menu's only anchor and its only entry point.
-    // Turning it off while the menu is open, which a live config reload can do,
-    // would otherwise leave the popup stranded. Keyed on the setting rather than
-    // on the button's rect: the rect is this client's geometry, and a narrow
-    // background client must not close a menu another client is looking at.
-    if app.mode == Mode::GitMenu && !app.show_pull_button {
-        app.mode = Mode::Terminal;
-    }
     if uses_mobile_layout(app, area) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
@@ -542,7 +536,7 @@ fn compute_view_internal_at(
         )
     };
 
-    let git_menu_layout = (app.mode == Mode::GitMenu).then(|| {
+    let git_menu_layout = (app.server_mode() == Mode::GitMenu).then(|| {
         let in_git_repo = dock::chooser::focused_in_git_repo(app);
         tabs::git_menu_dropdown_layout(
             git_menu_button_hit_area,
@@ -822,7 +816,7 @@ fn compute_view_internal_at(
             Vec::new()
         };
 
-    let add_action_layout = if app.mode == Mode::AddAction {
+    let add_action_layout = if app.server_mode() == Mode::AddAction {
         user_actions::add_action_layout(area)
     } else {
         user_actions::AddActionLayout::default()
@@ -1096,7 +1090,7 @@ fn compute_mobile_view(
         (area, Rect::default())
     };
 
-    if app.mode == Mode::Navigate {
+    if app.server_mode() == Mode::Navigate {
         let switcher_viewport_h = area.height.saturating_sub(header_h + 1);
         let max_scroll = mobile_switcher_max_scroll_for_height(app, switcher_viewport_h);
         app.mobile_switcher_scroll = app.mobile_switcher_scroll.min(max_scroll);
@@ -1225,7 +1219,7 @@ fn compute_mobile_view(
         dock_host_row_hit_areas: Vec::new(),
         dock_body_rect: Rect::default(),
     };
-    if app.mode == Mode::Navigate {
+    if app.server_mode() == Mode::Navigate {
         if let Some(active) = app.take_pending_workspace_reveal() {
             app.ensure_mobile_workspace_visible(active);
         }
@@ -1248,7 +1242,16 @@ pub fn render_with_runtime_registry(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
 ) {
-    render_with_runtime_registry_inner(app, terminal_runtimes, frame, None);
+    render_with_runtime_registry_for_owner(app, terminal_runtimes, frame, app.input_owner());
+}
+
+pub(crate) fn render_with_runtime_registry_for_owner(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    input_owner: InputOwner,
+) {
+    render_with_runtime_registry_inner(app, terminal_runtimes, frame, input_owner, None);
 }
 
 pub(crate) fn render_with_runtime_registry_and_handles(
@@ -1258,10 +1261,30 @@ pub(crate) fn render_with_runtime_registry_and_handles(
     render_notify: &Arc<Notify>,
     render_dirty: &Arc<RenderSignal>,
 ) {
+    let input_owner = app.input_owner();
+    render_with_runtime_registry_and_handles_for_owner(
+        app,
+        terminal_runtimes,
+        frame,
+        render_notify,
+        render_dirty,
+        input_owner,
+    );
+}
+
+pub(crate) fn render_with_runtime_registry_and_handles_for_owner(
+    app: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    frame: &mut Frame,
+    render_notify: &Arc<Notify>,
+    render_dirty: &Arc<RenderSignal>,
+    input_owner: InputOwner,
+) {
     render_with_runtime_registry_inner(
         app,
         terminal_runtimes,
         frame,
+        input_owner,
         Some((render_notify, render_dirty)),
     );
 }
@@ -1270,6 +1293,7 @@ fn render_with_runtime_registry_inner(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
+    input_owner: InputOwner,
     render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>,
 ) {
     let tab_bar_area = app.view.tab_bar_rect;
@@ -1358,61 +1382,101 @@ fn render_with_runtime_registry_inner(
         terminal_area
     };
 
-    match app.mode {
-        Mode::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
-        Mode::ReleaseNotes => render_release_notes_overlay(app, frame, frame.area()),
-        Mode::ProductAnnouncement => render_product_announcement_overlay(app, frame, frame.area()),
-        Mode::Navigate if app.view.layout == ViewLayout::Mobile => {
-            render_mobile_panel(app, terminal_runtimes, frame, frame.area())
-        }
-        Mode::Navigate => render_navigate_overlay(app, frame, mode_bar_area),
-        Mode::Prefix => render_prefix_overlay(app, frame, mode_bar_area),
-        Mode::Copy => render_copy_mode_overlay(app, frame, mode_bar_area),
-        Mode::Resize => render_resize_overlay(app, frame, mode_bar_area),
-        Mode::ConfirmClose => {
-            render_confirm_close_overlay(app, terminal_runtimes, frame, terminal_area)
-        }
-        Mode::ContextMenu => {
-            render_context_menu(app, frame);
-        }
-        Mode::GitMenu => render_git_menu(app, frame),
-        Mode::AddAction => render_add_action_overlay(app, frame),
-        Mode::Settings => render_settings_overlay(app, frame, frame.area()),
-        Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
+    match input_owner {
+        InputOwner::Client(ClientInputOwner::Overlay(overlay)) => match overlay {
+            ClientOverlay::RenameWorkspace
+            | ClientOverlay::RenameTab
+            | ClientOverlay::RenamePane => render_rename_overlay(app, frame, frame.area()),
+            ClientOverlay::NewLinkedWorktree => {
+                render_new_linked_worktree_overlay(app, frame, frame.area())
+            }
+            ClientOverlay::OpenExistingWorktree => {
+                render_open_existing_worktree_overlay(app, frame, frame.area())
+            }
+            ClientOverlay::ConfirmRemoveWorktree => {
+                render_remove_worktree_overlay(app, frame, frame.area())
+            }
+            ClientOverlay::ConfirmClose => {
+                render_confirm_close_overlay(app, terminal_runtimes, frame, terminal_area)
+            }
+            ClientOverlay::ContextMenu => render_context_menu(app, frame),
+            ClientOverlay::None => {}
+        },
+        InputOwner::Client(ClientInputOwner::SnoozeMenu) => render_sidebar_snooze_menu(app, frame),
+        InputOwner::Client(ClientInputOwner::SnoozeTime) => {
             render_rename_overlay(app, frame, frame.area())
         }
-        Mode::NewLinkedWorktree => render_new_linked_worktree_overlay(app, frame, frame.area()),
-        Mode::OpenExistingWorktree => {
-            render_open_existing_worktree_overlay(app, frame, frame.area())
+        InputOwner::Client(
+            ClientInputOwner::SettledMenu | ClientInputOwner::SettledDeleteConfirm,
+        ) => render_sidebar_settled_menu(app, frame),
+        InputOwner::Client(ClientInputOwner::AgentPicker) => {
+            render_agent_picker(app, frame, frame.area())
         }
-        Mode::ConfirmRemoveWorktree => render_remove_worktree_overlay(app, frame, frame.area()),
-        Mode::GlobalMenu => render_global_launcher_menu(app, frame),
-        Mode::KeybindHelp => render_keybind_help_overlay(app, frame),
-        Mode::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
-        Mode::CommandPalette => render_command_palette(app, frame),
-        Mode::WorkLinkPicker => render_work_link_picker(app, frame, frame.area()),
-        Mode::AgentPicker => render_agent_picker(app, frame, frame.area()),
-        Mode::Terminal => {}
+        InputOwner::Client(ClientInputOwner::SidebarGroupMenu) => {
+            render_sidebar_group_menu(app, frame)
+        }
+        InputOwner::Client(ClientInputOwner::SidebarFilterMenu) => {
+            render_sidebar_filter_menu(app, frame)
+        }
+        InputOwner::Client(ClientInputOwner::SidebarNewMenu) => render_sidebar_new_menu(app, frame),
+        InputOwner::Client(ClientInputOwner::SidebarNewThread) => {
+            render_sidebar_new_thread(app, frame)
+        }
+        InputOwner::Client(ClientInputOwner::SidebarProjectMenu) => {
+            render_sidebar_project_menu(app, frame)
+        }
+        InputOwner::Client(ClientInputOwner::SidebarObjectMenu) => {
+            render_sidebar_object_menu(app, frame)
+        }
+        InputOwner::Client(ClientInputOwner::SidebarSortMenu) => {
+            render_sidebar_sort_menu(app, frame)
+        }
+        InputOwner::Client(ClientInputOwner::SidebarSubgroupPicker) => {
+            render_sidebar_subgroup_picker(app, frame)
+        }
+        InputOwner::Client(ClientInputOwner::PrActionConfirmation) => {
+            pr_actions::render_confirmation(app, frame, frame.area())
+        }
+        // The dock owns this menu and renders it as part of `render_dock`.
+        InputOwner::Client(ClientInputOwner::DockSurfaceMenu) => {}
+        InputOwner::AddProject => render_add_project_overlay(app, frame),
+        InputOwner::Server(owner) => match owner {
+            ServerInputOwner::Onboarding => render_onboarding_overlay(app, frame, frame.area()),
+            ServerInputOwner::ReleaseNotes => {
+                render_release_notes_overlay(app, frame, frame.area())
+            }
+            ServerInputOwner::ProductAnnouncement => {
+                render_product_announcement_overlay(app, frame, frame.area())
+            }
+            ServerInputOwner::Navigate if app.view.layout == ViewLayout::Mobile => {
+                render_mobile_panel(app, terminal_runtimes, frame, frame.area())
+            }
+            ServerInputOwner::Navigate => render_navigate_overlay(app, frame, mode_bar_area),
+            ServerInputOwner::Prefix => render_prefix_overlay(app, frame, mode_bar_area),
+            ServerInputOwner::Copy => render_copy_mode_overlay(app, frame, mode_bar_area),
+            ServerInputOwner::Resize => render_resize_overlay(app, frame, mode_bar_area),
+            ServerInputOwner::GitMenu => render_git_menu(app, frame),
+            ServerInputOwner::AddAction => render_add_action_overlay(app, frame),
+            ServerInputOwner::Settings => render_settings_overlay(app, frame, frame.area()),
+            ServerInputOwner::GlobalMenu => render_global_launcher_menu(app, frame),
+            ServerInputOwner::KeybindHelp => render_keybind_help_overlay(app, frame),
+            ServerInputOwner::Navigator => render_navigator_overlay(app, terminal_runtimes, frame),
+            ServerInputOwner::CommandPalette => render_command_palette(app, frame),
+            ServerInputOwner::WorkLinkPicker => render_work_link_picker(app, frame, frame.area()),
+        },
+        InputOwner::Pomodoro
+        | InputOwner::Popup
+        | InputOwner::Surface(_)
+        | InputOwner::Notepad
+        | InputOwner::Dock(_)
+        | InputOwner::Sidebar
+        | InputOwner::Pane
+        | InputOwner::None => {}
     }
-    if app
-        .home
-        .as_ref()
-        .is_some_and(|home| home.add_project.is_some())
-    {
-        render_add_project_overlay(app, frame);
-    }
-    render_sidebar_group_menu(app, frame);
-    render_sidebar_filter_menu(app, frame);
-    render_sidebar_new_menu(app, frame);
-    render_sidebar_new_thread(app, frame);
-    render_sidebar_project_menu(app, frame);
-    render_sidebar_settled_menu(app, frame);
-    render_sidebar_object_menu(app, frame);
-    render_sidebar_sort_menu(app, frame);
-    render_sidebar_subgroup_picker(app, frame);
-    pr_actions::render_confirmation(app, frame, frame.area());
     render_hover_tooltip(app, frame);
-    notepad::render_notepad_caret(app, frame);
+    if input_owner == InputOwner::Notepad {
+        notepad::render_notepad_caret(app, frame);
+    }
     // Last, and over everything: a due break reminder outranks whatever the
     // operator was looking at, which is the point of it.
     pomodoro::render_overlay(app, frame, frame.area());
@@ -1797,7 +1861,7 @@ mod tests {
     #[test]
     fn workspace_creation_dialog_renders_new_workspace_title() {
         let mut app = crate::app::state::AppState::test_new();
-        app.mode = Mode::RenameWorkspace;
+        app.open_client_overlay(crate::app::state::ClientOverlay::RenameWorkspace);
         app.pending_workspace_create_cwd = Some("/tmp/project".into());
         app.name_input = "project".into();
 
@@ -1861,7 +1925,7 @@ mod tests {
         let mut app = crate::app::state::AppState::test_new();
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         let area = Rect::new(0, 0, 80, 20);
 
         compute_view(&mut app, area);
@@ -1900,7 +1964,7 @@ mod tests {
         app.dock_collapsed = false;
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         compute_view(&mut app, Rect::new(0, 0, 45, 12));
 
@@ -1917,7 +1981,7 @@ mod tests {
         app.dock_tab = open.first().copied();
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         let area = Rect::new(0, 0, width, height);
 
         compute_view(&mut app, area);
@@ -2047,7 +2111,7 @@ mod tests {
         app.dock_collapsed = false;
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         compute_view(&mut app, Rect::new(0, 0, 120, 40));
 
         let key = "https://mail.missiveapp.com/#inbox/conversations/abc".to_string();
@@ -2115,7 +2179,7 @@ mod tests {
         app.dock_tab = Some(DockSurface::Diff);
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         compute_view(&mut app, Rect::new(0, 0, 120, 40));
 
@@ -2138,7 +2202,7 @@ mod tests {
         app.dock_tab = Some(crate::app::DockSurface::Home);
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         compute_view(&mut app, Rect::new(0, 0, 120, 40));
 
@@ -2163,7 +2227,7 @@ mod tests {
         app.dock_chooser_focused = true;
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         let area = Rect::new(0, 0, 120, 40);
 
         compute_view(&mut app, area);
@@ -2203,7 +2267,7 @@ mod tests {
             app.dock_collapsed = false;
             app.workspaces = vec![Workspace::test_new("one")];
             app.active = Some(0);
-            app.mode = Mode::Terminal;
+            app.set_server_mode(Mode::Terminal);
 
             compute_view(&mut app, Rect::new(0, 0, width, height));
             let cards = &app.view.dock_surface_card_hit_areas;
@@ -2219,7 +2283,7 @@ mod tests {
         app.dock_collapsed = false;
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         let area = Rect::new(0, 0, 120, 40);
 
         compute_view(&mut app, area);
@@ -2248,7 +2312,7 @@ mod tests {
         app.dock_tab = Some(crate::app::DockSurface::Editor);
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         let area = Rect::new(0, 0, 120, 20);
 
         compute_view(&mut app, area);
@@ -2285,7 +2349,7 @@ mod tests {
         app.dock_tab = Some(crate::app::DockSurface::Home);
         app.workspaces = vec![Workspace::test_new("review")];
         app.active = Some(0);
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.ensure_test_terminals();
         let pane_id = app.workspaces[0].focused_pane_id().expect("pane");
         let terminal_id = app.workspaces[0]
@@ -2352,7 +2416,7 @@ mod tests {
         app.workspaces = vec![ws];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
         let focused = app
@@ -2377,7 +2441,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         compute_view(&mut app, Rect::new(0, 0, 44, 20));
 
@@ -2399,7 +2463,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.config_diagnostic = Some("config.toml:100:10; herdr config check".into());
 
         let area = Rect::new(0, 0, 44, 20);
@@ -2425,7 +2489,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.config_diagnostic = Some("config.toml:100:10; herdr config check".into());
 
         let area = Rect::new(0, 0, 44, 20);
@@ -2445,7 +2509,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.toast_config.herdr.position = crate::config::ToastHerdrPosition::TopLeft;
         app.toast = Some(crate::app::state::ToastNotification {
             kind: crate::app::state::ToastKind::Finished,
@@ -2469,7 +2533,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.config_diagnostic = Some("config warning".into());
         app.toast_config.herdr.position = crate::config::ToastHerdrPosition::TopLeft;
         app.toast = Some(crate::app::state::ToastNotification {
@@ -2492,7 +2556,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
         assert_eq!(app.view.layout, ViewLayout::Desktop);
@@ -2510,7 +2574,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Prefix;
+        app.set_server_mode(Mode::Prefix);
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
         assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 53, 1));
@@ -2540,7 +2604,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
         let single_tab_terminal_area = app.view.terminal_area;
@@ -2585,7 +2649,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.ensure_test_terminals();
 
         compute_view(&mut app, Rect::new(0, 0, 120, 40));
@@ -2615,7 +2679,7 @@ mod tests {
                 app.workspaces = vec![Workspace::test_new("one")];
                 app.active = Some(0);
                 app.selected = 0;
-                app.mode = Mode::Terminal;
+                app.set_server_mode(Mode::Terminal);
                 app.ensure_test_terminals();
 
                 compute_view(&mut app, Rect::new(0, 0, 120, 40));
@@ -2646,12 +2710,10 @@ mod tests {
         }
     }
 
-    /// Turning the pull button off while its menu is open, which a live config
-    /// reload can do, must close the menu rather than strand the popup. The
-    /// close is keyed on the setting, not on this client's geometry, and it
-    /// happens before the mobile layout takes its early return.
+    /// Rendering a hidden pull button must not repair its now-invalid menu.
+    /// Config application owns that transition before the next frame.
     #[test]
-    fn losing_the_pull_button_closes_an_open_git_menu() {
+    fn losing_the_pull_button_does_not_close_an_open_git_menu_during_render() {
         let mut app = crate::app::state::AppState::test_new();
         app.tab_bar_position = crate::config::TabBarPositionConfig::Top;
         app.mouse_capture = true;
@@ -2659,20 +2721,19 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.ensure_test_terminals();
         compute_view(&mut app, Rect::new(0, 0, 120, 40));
 
-        app.mode = Mode::GitMenu;
+        app.set_server_mode(Mode::GitMenu);
         compute_view(&mut app, Rect::new(0, 0, 120, 40));
-        assert_eq!(app.mode, Mode::GitMenu);
+        assert_eq!(app.server_mode(), Mode::GitMenu);
         assert!(app.view.git_menu_popup_rect.width > 0);
 
         app.show_pull_button = false;
         compute_view(&mut app, Rect::new(0, 0, 120, 40));
 
-        assert_eq!(app.mode, Mode::Terminal);
-        assert_eq!(app.view.git_menu_popup_rect, Rect::default());
+        assert_eq!(app.server_mode(), Mode::GitMenu);
     }
 
     /// A narrow client that cannot fit the button must not close a menu another
@@ -2686,17 +2747,21 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::GitMenu;
+        app.set_server_mode(Mode::GitMenu);
         app.ensure_test_terminals();
 
         // Too narrow for the action row, and narrow enough for mobile layout.
         compute_view(&mut app, Rect::new(0, 0, 40, 20));
         assert_eq!(app.view.git_menu_button_hit_area, Rect::default());
-        assert_eq!(app.mode, Mode::GitMenu, "geometry alone must not close it");
+        assert_eq!(
+            app.server_mode(),
+            Mode::GitMenu,
+            "geometry alone must not close it"
+        );
 
         app.show_pull_button = false;
         compute_view(&mut app, Rect::new(0, 0, 40, 20));
-        assert_eq!(app.mode, Mode::Terminal);
+        assert_eq!(app.server_mode(), Mode::GitMenu);
     }
 
     /// Hiding the two controls must give their columns back to the tabs rather
@@ -2712,7 +2777,7 @@ mod tests {
             app.workspaces = vec![Workspace::test_new("one")];
             app.active = Some(0);
             app.selected = 0;
-            app.mode = Mode::Terminal;
+            app.set_server_mode(Mode::Terminal);
             app.ensure_test_terminals();
             compute_view(&mut app, Rect::new(0, 0, 120, 40));
             app
@@ -2754,7 +2819,7 @@ mod tests {
             app.workspaces = vec![Workspace::test_new("one")];
             app.active = Some(0);
             app.selected = 0;
-            app.mode = Mode::Terminal;
+            app.set_server_mode(Mode::Terminal);
 
             compute_view(&mut app, Rect::new(0, 0, width, height));
 
@@ -2818,7 +2883,7 @@ mod tests {
             compute_view(&mut app, Rect::new(0, 0, width, height));
             app.status_git_cwd = app.status_focused_cwd.clone();
             app.status_git_ahead_behind = Some((0, 1));
-            app.mode = Mode::GitMenu;
+            app.set_server_mode(Mode::GitMenu);
 
             compute_view(&mut app, Rect::new(0, 0, width, height));
 
@@ -2845,7 +2910,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         compute_view(&mut app, Rect::new(0, 0, 120, 40));
 
@@ -2869,7 +2934,7 @@ mod tests {
         app.workspaces[0].test_add_tab(Some("logs"));
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Prefix;
+        app.set_server_mode(Mode::Prefix);
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
 
@@ -2901,7 +2966,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Prefix;
+        app.set_server_mode(Mode::Prefix);
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
         assert_eq!(app.view.tab_bar_rect, Rect::default());
@@ -2940,7 +3005,7 @@ mod tests {
         app.workspaces = vec![one_tab_workspace, two_tab_workspace];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
 
@@ -2967,7 +3032,7 @@ mod tests {
         app.workspaces = vec![workspace];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         compute_view(&mut app, Rect::new(0, 0, 44, 20));
 
@@ -2985,7 +3050,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::ProductAnnouncement;
+        app.set_server_mode(Mode::ProductAnnouncement);
         app.product_announcement = Some(crate::app::state::ProductAnnouncementState {
             version: "0.6.0".into(),
             id: "keybinding-v2".into(),
@@ -3026,7 +3091,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.sidebar_max_width = 120;
         app.sidebar_width = 999;
 
@@ -3041,7 +3106,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.sidebar_min_width = 22;
         app.sidebar_width = 5;
 
@@ -3058,7 +3123,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
 
@@ -3081,7 +3146,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.sidebar_width = 26;
 
         compute_view(&mut app, Rect::new(0, 0, 100, 24));
@@ -3102,7 +3167,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.sidebar_width = 26;
         app.status_bar_enabled = false;
 
@@ -3132,7 +3197,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.sidebar_width = 26;
 
         app.status_focused_cwd = Some(PathBuf::from("/repo"));
@@ -3189,7 +3254,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one")];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         let width = 120;
         compute_view(&mut app, Rect::new(0, 0, width, 24));
@@ -3215,7 +3280,7 @@ mod tests {
         ];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.sidebar_width = 26;
 
         let mut rendered = Vec::new();
@@ -3305,7 +3370,7 @@ mod tests {
         app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
         app.active = Some(1);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
 
@@ -3343,7 +3408,7 @@ mod tests {
             .clone();
         app.terminals.get_mut(&root_terminal_id).unwrap().cwd = repo.clone();
         app.selected = 0;
-        app.mode = Mode::Navigate;
+        app.set_server_mode(Mode::Navigate);
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
 
@@ -3372,7 +3437,7 @@ mod tests {
         app.workspaces = vec![ws];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
 
@@ -3403,7 +3468,7 @@ mod tests {
         app.workspaces = vec![ws];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
 
@@ -3429,7 +3494,7 @@ mod tests {
         app.workspaces = vec![ws];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
 
@@ -3459,7 +3524,7 @@ mod tests {
         app.workspaces = vec![ws];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.tab_scroll_follow_active = false;
         app.tab_scroll = 2;
 
@@ -3504,7 +3569,7 @@ mod tests {
         app.workspaces = vec![ws];
         app.active = Some(0);
         app.selected = 0;
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.tab_scroll_follow_active = false;
         app.tab_scroll = usize::MAX;
 
@@ -3682,7 +3747,7 @@ mod tests {
     #[test]
     fn prefix_mode_renders_prefix_indicator() {
         let mut app = crate::app::state::AppState::test_new();
-        app.mode = Mode::Prefix;
+        app.set_server_mode(Mode::Prefix);
         app.view.terminal_area = ratatui::layout::Rect::new(0, 0, 60, 4);
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 4))
             .expect("test terminal");

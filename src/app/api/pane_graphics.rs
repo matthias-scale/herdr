@@ -608,7 +608,7 @@ mod tests {
     #[test]
     fn info_reports_visibility_for_terminal_surface_workspace_tab_and_zoom() {
         let (mut app, pane_id) = app();
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Terminal);
         app.state.active = Some(0);
         app.state.host_cell_size = crate::kitty_graphics::HostCellSize {
             width_px: 10,
@@ -656,7 +656,7 @@ mod tests {
         assert!(!pane_visible(&zoomed_away));
 
         app.state.workspaces[0].tabs[0].zoomed = false;
-        app.state.mode = crate::app::Mode::Navigate;
+        app.state.set_server_mode(crate::app::Mode::Navigate);
         let short_lived_mode = app.handle_pane_graphics_info(
             "navigate".into(),
             crate::api::schema::PaneTarget { pane_id },

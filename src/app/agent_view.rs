@@ -80,7 +80,7 @@ pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry
 }
 
 pub(crate) fn presented_workspace_idx(app: &AppState) -> Option<usize> {
-    if app.mode == Mode::Navigate {
+    if app.server_mode() == Mode::Navigate {
         app.workspaces.get(app.selected).map(|_| app.selected)
     } else {
         app.active
@@ -480,13 +480,13 @@ mod tests {
             0
         );
 
-        state.mode = Mode::Navigate;
+        state.set_server_mode(Mode::Navigate);
         state.selected = 1;
         let entries = crate::ui::agent_panel_entries(&state);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].local_target().unwrap().ws_idx, 1);
 
-        state.mode = Mode::Settings;
+        state.set_server_mode(Mode::Settings);
         let entries = crate::ui::agent_panel_entries(&state);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].local_target().unwrap().ws_idx, 0);

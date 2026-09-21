@@ -272,7 +272,7 @@ impl AppState {
 
     pub(crate) fn open_command_palette(&mut self) {
         self.command_palette = CommandPaletteState::default();
-        self.mode = Mode::CommandPalette;
+        self.set_server_mode(Mode::CommandPalette);
     }
 
     pub(crate) fn command_palette_visible_rows(&self) -> usize {
@@ -360,7 +360,7 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.state.command_palette = CommandPaletteState::default();
-                self.state.mode = Mode::Terminal;
+                self.state.set_server_mode(Mode::Terminal);
             }
             KeyCode::Enter => self.accept_command_palette_selection(),
             KeyCode::Backspace => {
@@ -418,7 +418,7 @@ impl App {
             return;
         };
 
-        self.state.mode = Mode::Terminal;
+        self.state.set_server_mode(Mode::Terminal);
         self.state.command_palette = CommandPaletteState::default();
 
         match command {
@@ -575,7 +575,7 @@ mod tests {
 
         app.accept_command_palette_selection();
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
         assert_eq!(
             app.state.toast_config.delivery,
             crate::config::ToastDelivery::Terminal
@@ -734,7 +734,7 @@ mod tests {
         state.command_palette.query = "split".to_string();
         state.command_palette.selected = 3;
         state.open_command_palette();
-        assert_eq!(state.mode, Mode::CommandPalette);
+        assert_eq!(state.server_mode(), Mode::CommandPalette);
         assert_eq!(state.command_palette, CommandPaletteState::default());
     }
 
@@ -754,7 +754,7 @@ mod tests {
 
         app.accept_command_palette_selection();
 
-        assert_eq!(app.state.mode, Mode::KeybindHelp);
+        assert_eq!(app.state.server_mode(), Mode::KeybindHelp);
         assert_eq!(app.state.command_palette, CommandPaletteState::default());
         app.state.open_command_palette();
         assert!(app.state.command_palette.query.is_empty());
