@@ -1332,7 +1332,8 @@ impl HeadlessServer {
             return HashMap::new();
         };
 
-        self.app
+        let mut geometries = self
+            .app
             .state
             .view
             .pane_infos
@@ -1350,7 +1351,23 @@ impl HeadlessServer {
                     )
                 })
             })
-            .collect()
+            .collect::<HashMap<_, _>>();
+        if let (Some(popup), Some((_outer, inner))) = (
+            self.app.state.popup_pane.as_ref(),
+            crate::ui::popup_pane_rects(&self.app.state, self.app.state.view.terminal_area),
+        ) {
+            if inner.width > 0 && inner.height > 0 {
+                geometries.insert(
+                    popup.terminal_id.clone(),
+                    ClientTerminalGeometry {
+                        cols: inner.width,
+                        rows: inner.height,
+                        cell_size: client.cell_size,
+                    },
+                );
+            }
+        }
+        geometries
     }
 
     fn update_client_terminal_geometries(
@@ -17867,6 +17884,45 @@ next_tab = ""
                 u32::from(widened_app_size.rows) * 18,
             ))
         );
+
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 2,
+            cols: 305,
+            rows: 100,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::TerminalAnsi,
+            keybindings: None,
+            direct_attach_requested: true,
+            direct_graphics: false,
+            writer,
+        }));
+        assert!(
+            server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                client_id: 2,
+                terminal_id: terminal_id_string,
+                takeover: false,
+            })
+        );
+        assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 1 }));
+        let unknown_only_size = server
+            .app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("runtime")
+            .current_size();
+        assert_eq!(unknown_only_size, (100, 305));
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .expect("runtime")
+                .pixel_size(),
+            Some((305 * 9, 100 * 18)),
+            "an unknown-only client must not erase the last known cell size"
+        );
         drop(server);
         drop(_runtime_guard);
         rt.shutdown_timeout(Duration::from_millis(100));
@@ -18903,6 +18959,129 @@ next_tab = ""
                 .current_size(),
             (13, 50)
         );
+    }
+
+    #[tokio::test]
+    async fn direct_attach_keeps_popup_at_smallest_client_geometry() {
+        let (mut server, _client_rx, _) = retained_test_server(b"tiled");
+        let popup_runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(50, 13, b"");
+        let (_, terminal_id) = server.app.install_test_popup_runtime(popup_runtime);
+
+        server.render_and_stream();
+        let (_, popup_inner) =
+            crate::ui::popup_pane_rects(&server.app.state, server.app.state.view.terminal_area)
+                .expect("popup geometry");
+        let expected = (popup_inner.height, popup_inner.width);
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .expect("popup runtime")
+                .current_size(),
+            expected
+        );
+
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 2,
+            cols: 305,
+            rows: 80,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::TerminalAnsi,
+            keybindings: None,
+            direct_attach_requested: true,
+            direct_graphics: false,
+            writer,
+        }));
+        assert!(
+            server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                client_id: 2,
+                terminal_id: terminal_id.to_string(),
+                takeover: false,
+            })
+        );
+
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .expect("popup runtime")
+                .current_size(),
+            expected,
+            "the wider direct attach must not widen a popup past the GUI layout"
+        );
+    }
+
+    #[test]
+    fn unknown_app_preserves_runtime_pixels_after_known_gui_disconnects() {
+        with_terminal_session_test_server(|server, terminal_id, _, _| {
+            server.app.state.active = Some(0);
+            server.app.state.selected = 0;
+            server.app.state.set_server_mode(crate::app::Mode::Terminal);
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .unwrap()
+                .resize(24, 80, 9, 18);
+
+            server.clients.insert(
+                1,
+                ClientConnection::new(
+                    (200, 50),
+                    crate::kitty_graphics::HostCellSize {
+                        width_px: 9,
+                        height_px: 18,
+                    },
+                    crate::terminal_theme::TerminalTheme::default(),
+                    None,
+                    2,
+                    RenderEncoding::SemanticFrame,
+                    None,
+                ),
+            );
+            server.clients.insert(
+                2,
+                ClientConnection::new(
+                    (100, 30),
+                    crate::kitty_graphics::HostCellSize::default(),
+                    crate::terminal_theme::TerminalTheme::default(),
+                    None,
+                    1,
+                    RenderEncoding::SemanticFrame,
+                    None,
+                ),
+            );
+
+            server.foreground_client_id = Some(1);
+            server.sync_foreground_client_state();
+            server.resize_shared_runtime_to_effective_size();
+            server.foreground_client_id = Some(2);
+            server.sync_foreground_client_state();
+            server.resize_shared_runtime_to_effective_size();
+            let unknown_geometry = server.clients[&2].terminal_geometries[&terminal_id];
+            server.foreground_client_id = Some(1);
+            server.sync_foreground_client_state();
+            server.resize_shared_runtime_to_effective_size();
+
+            assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 1 }));
+            let runtime = server.app.terminal_runtimes.get(&terminal_id).unwrap();
+            assert_eq!(
+                runtime.current_size(),
+                (unknown_geometry.rows, unknown_geometry.cols)
+            );
+            assert_eq!(
+                runtime.pixel_size(),
+                Some((
+                    u32::from(unknown_geometry.cols) * 9,
+                    u32::from(unknown_geometry.rows) * 18,
+                )),
+                "an unknown app client must preserve the runtime's known cell size"
+            );
+        });
     }
 
     #[tokio::test]

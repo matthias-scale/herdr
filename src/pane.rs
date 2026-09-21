@@ -3710,6 +3710,17 @@ impl PaneRuntime {
     fn resize_inner(&self, rows: u16, cols: u16, cell_width_px: u32, cell_height_px: u32) {
         let rows = rows.max(2);
         let cols = cols.max(4);
+        let (_, _, known_cell_width_px, known_cell_height_px) = self.current_size.get();
+        let cell_width_px = if cell_width_px > 0 {
+            cell_width_px
+        } else {
+            known_cell_width_px
+        };
+        let cell_height_px = if cell_height_px > 0 {
+            cell_height_px
+        } else {
+            known_cell_height_px
+        };
         let size = (rows, cols, cell_width_px, cell_height_px);
         if self.current_size.get() == size {
             return;
