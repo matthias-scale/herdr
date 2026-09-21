@@ -2366,6 +2366,53 @@ mod tests {
         (workspaces, text)
     }
 
+    #[tokio::test]
+    async fn session_restore_keeps_pane_payload_with_its_public_identity() {
+        let (mut snapshot, _) = snapshot_with_saved_pane_history();
+        let workspace = &mut snapshot.workspaces[0];
+        workspace.public_pane_numbers = HashMap::from([(0, 7)]);
+        workspace.next_public_pane_number = 8;
+        workspace.tabs[0]
+            .panes
+            .get_mut(&0)
+            .expect("saved pane")
+            .label = Some("identity-marker".into());
+        let (events, _events_rx) = mpsc::channel(8);
+
+        let (workspaces, terminals, mut runtimes) = restore(
+            &snapshot,
+            None,
+            5,
+            40,
+            4096,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+
+        let workspace = &workspaces[0];
+        let (&restored_pane_id, _) = workspace
+            .public_pane_numbers
+            .iter()
+            .find(|(_, number)| **number == 7)
+            .expect("saved public pane identity");
+        assert_ne!(restored_pane_id.raw(), 0, "internal pane id is remapped");
+        let terminal_id = &workspace
+            .pane_state(restored_pane_id)
+            .expect("restored pane")
+            .attached_terminal_id;
+        assert_eq!(
+            terminals[terminal_id].manual_label.as_deref(),
+            Some("identity-marker")
+        );
+        for (_, runtime) in runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
     fn snapshot_with_saved_pane_history() -> (SessionSnapshot, SessionHistorySnapshot) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let mut panes = HashMap::new();

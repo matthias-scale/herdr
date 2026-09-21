@@ -1956,6 +1956,35 @@ mod tests {
         assert!(!target.tabs[0].panes.contains_key(&source_pane));
     }
 
+    #[test]
+    fn moved_pane_keeps_its_identity_across_workspaces() {
+        let mut source = Workspace::test_new("source");
+        let mut target = Workspace::test_new("target");
+        let pane_id = source.tabs[0].root_pane;
+        let terminal_id = source.tabs[0].panes[&pane_id].attached_terminal_id.clone();
+        let target_pane = target.tabs[0].root_pane;
+
+        let taken = source
+            .take_pane_for_move(pane_id)
+            .expect("source pane should be movable");
+        let inserted = match target.insert_moved_pane_into_tab(
+            0,
+            target_pane,
+            taken.moved,
+            ratatui::layout::Direction::Horizontal,
+            0.5,
+            false,
+            false,
+        ) {
+            Ok(pane_id) => pane_id,
+            Err(_) => panic!("target should accept the moved pane"),
+        };
+
+        assert_eq!(inserted, pane_id);
+        assert_eq!(target.public_pane_number(inserted), Some(2));
+        assert_eq!(target.terminal_id(inserted), Some(&terminal_id));
+    }
+
     #[tokio::test]
     async fn new_workspace_retains_discovered_git_metadata() {
         let stamp = std::time::SystemTime::now()
