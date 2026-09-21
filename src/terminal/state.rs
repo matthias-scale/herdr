@@ -1167,7 +1167,7 @@ impl TerminalState {
         state: AgentState,
         has_pending_human_input: bool,
     ) -> (AgentState, &'static str) {
-        if self.closing_external_wait().is_some() {
+        if self.closing_external_wait().is_some() && state != AgentState::Blocked {
             (AgentState::Working, "closing_external_wait")
         } else if state != AgentState::Working && has_pending_human_input {
             (AgentState::Blocked, "closing_human_input")
@@ -1549,7 +1549,7 @@ impl TerminalState {
         } else {
             (self.state, seen)
         };
-        if active_subagents.is_some_and(|count| count > 0) {
+        if state != AgentState::Blocked && active_subagents.is_some_and(|count| count > 0) {
             (AgentState::Working, seen)
         } else {
             let state = self
@@ -7809,6 +7809,32 @@ mod tests {
             .mark_agent_status_stale_at(now + TEST_SUBAGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER)
             .is_none());
         assert!(!terminal.supervisor_stale);
+    }
+
+    #[test]
+    fn blocked_lifecycle_outranks_external_wait_without_structured_gate() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Incomplete),
+            Some("CI run 4123".into()),
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(1000),
+            now,
+        );
+
+        assert_eq!(terminal.raw_agent_state(), AgentState::Blocked);
+        assert_eq!(terminal.sidebar_projection(true).0, AgentState::Blocked);
     }
 
     /// Pins that a stale unverified subagent claim blocks the armed Done auto-settle trigger.
