@@ -64,10 +64,13 @@ pub(crate) fn notepad_body_rect(panel: Rect) -> Rect {
     )
 }
 
-/// Clickable name segments in the header, one per note, left to right. Only the
-/// names that fit are returned, so a click can never resolve to a note the
-/// operator cannot see.
-pub(crate) fn notepad_tab_hit_areas(app: &AppState, panel: Rect) -> Vec<(usize, Rect)> {
+/// Clickable name segments in the header, one per note plus the Context tab,
+/// left to right. Only the names that fit are returned, so a click can never
+/// resolve to a tab the operator cannot see.
+pub(crate) fn notepad_tab_hit_areas(
+    app: &AppState,
+    panel: Rect,
+) -> Vec<(crate::notepad::NotepadTabTarget, Rect)> {
     if panel.width == 0 || panel.height == 0 {
         return Vec::new();
     }
@@ -79,10 +82,32 @@ pub(crate) fn notepad_tab_hit_areas(app: &AppState, panel: Rect) -> Vec<(usize, 
         if width == 0 || x.saturating_add(width) > right {
             break;
         }
-        areas.push((index, Rect::new(x, panel.y, width, 1)));
+        areas.push((
+            crate::notepad::NotepadTabTarget::Note(index),
+            Rect::new(x, panel.y, width, 1),
+        ));
         x = x.saturating_add(width).saturating_add(1);
     }
+    let width = display_width_u16(crate::notepad::NOTEPAD_CONTEXT_TAB_LABEL);
+    if x.saturating_add(width) <= right {
+        areas.push((
+            crate::notepad::NotepadTabTarget::Context,
+            Rect::new(x, panel.y, width, 1),
+        ));
+    }
     areas
+}
+
+fn tab_style(palette: &Palette, active: bool, focused: bool) -> Style {
+    if active && focused {
+        Style::default()
+            .fg(palette.accent)
+            .add_modifier(Modifier::BOLD)
+    } else if active {
+        Style::default().fg(palette.text)
+    } else {
+        Style::default().fg(palette.overlay0)
+    }
 }
 
 fn header_spans<'a>(app: &'a AppState, palette: &Palette, width: u16) -> Line<'a> {
@@ -101,18 +126,24 @@ fn header_spans<'a>(app: &'a AppState, palette: &Palette, width: u16) -> Line<'a
         if used.saturating_add(name_width) > width {
             break;
         }
-        let active = index == app.notepad.active;
-        let style = if active && focused {
-            Style::default()
-                .fg(palette.accent)
-                .add_modifier(Modifier::BOLD)
-        } else if active {
-            Style::default().fg(palette.text)
-        } else {
-            Style::default().fg(palette.overlay0)
-        };
+        let active = !app.notepad.context_active && index == app.notepad.active;
+        let style = tab_style(palette, active, focused);
         spans.push(Span::styled(file.name.as_str(), style));
         used = used.saturating_add(name_width);
+        if used < width {
+            spans.push(Span::raw(" "));
+            used = used.saturating_add(1);
+        }
+    }
+    // The Context tab hosts the focused pane's work context; it rides after
+    // the notes and is always offered, even before the first note exists.
+    let context_width = display_width_u16(crate::notepad::NOTEPAD_CONTEXT_TAB_LABEL);
+    if used.saturating_add(context_width) <= width {
+        spans.push(Span::styled(
+            crate::notepad::NOTEPAD_CONTEXT_TAB_LABEL,
+            tab_style(palette, app.notepad.context_active, focused),
+        ));
+        used = used.saturating_add(context_width);
         if used < width {
             spans.push(Span::raw(" "));
             used = used.saturating_add(1);
@@ -175,6 +206,10 @@ pub(crate) fn render_notepad(app: &AppState, frame: &mut Frame, panel: Rect) {
         );
         return;
     }
+    if app.notepad.context_active {
+        crate::ui::dock_context::render_context(app, frame, body);
+        return;
+    }
 
     let text_style = Style::default().fg(palette.text);
     let empty_style = Style::default().fg(palette.overlay0);
@@ -208,7 +243,7 @@ pub(crate) fn render_notepad(app: &AppState, frame: &mut Frame, panel: Rect) {
 /// not hold it. The caret carries the IME composition preview, so it has to be
 /// a real host cursor rather than a highlighted cell.
 pub(crate) fn notepad_caret_position(app: &AppState, panel: Rect) -> Option<(u16, u16)> {
-    if !app.notepad.focused || app.notepad.error.is_some() {
+    if !app.notepad.focused || app.notepad.error.is_some() || app.notepad.context_active {
         return None;
     }
     let body = notepad_body_rect(panel);
@@ -345,7 +380,8 @@ mod render_tests {
         assert!(sidebar.width > 0, "the wide layout keeps a sidebar");
         assert_eq!(app.view.notepad_rect.height, 6);
         assert_eq!(app.view.notepad_rect.bottom(), sidebar.bottom() - 1);
-        assert_eq!(app.view.notepad_tab_hit_areas.len(), 2);
+        // Two note tabs plus the Context tab.
+        assert_eq!(app.view.notepad_tab_hit_areas.len(), 3);
 
         let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("test terminal");
         terminal
@@ -364,6 +400,84 @@ mod render_tests {
                 .iter()
                 .any(|row| row.contains("- ship the notepad")),
             "body is drawn: {panel_rows:?}"
+        );
+    }
+
+    /// The Context tab hosts the dock's work-context surface in the panel:
+    /// the header offers the tab, and the body draws the focused pane's
+    /// context with its link rows registered for the click-to-copy path.
+    #[test]
+    fn the_context_tab_renders_work_context_with_hittable_link_rows() {
+        const WIDTH: u16 = 120;
+        const HEIGHT: u16 = 40;
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("review-space")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].focused_pane_id().expect("pane");
+        let terminal_id = app.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("terminal");
+        {
+            let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
+            terminal.manual_label = Some("focused worker".into());
+            terminal
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    ticket_ids: Some(vec!["MAT-128".into()]),
+                    ..Default::default()
+                })
+                .expect("work context");
+        }
+        app.notepad.enabled = true;
+        app.notepad.height = 12;
+        app.notepad.set_files(vec![crate::notepad::NotepadFile {
+            path: "/notes/todo.md".into(),
+            name: "todo".into(),
+        }]);
+        app.notepad.context_active = true;
+
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, WIDTH, HEIGHT));
+        let panel = app.view.notepad_rect;
+        assert!(panel.height > 0, "the panel is up");
+        assert!(app
+            .view
+            .notepad_tab_hit_areas
+            .iter()
+            .any(|(target, _)| *target == crate::notepad::NotepadTabTarget::Context));
+        assert!(
+            app.view
+                .work_context_link_rows
+                .iter()
+                .any(|row| row.rect.y >= panel.y),
+            "the tab's link rows register against the panel"
+        );
+        // The read-only tab never claims the host caret.
+        assert!(notepad_caret_position(&app, panel).is_none());
+
+        let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::render(&app, frame))
+            .expect("render");
+        let rows = buffer_text(&terminal);
+        let panel_rows = &rows[usize::from(panel.y)..usize::from(panel.bottom())];
+        assert!(
+            panel_rows[0].contains("Context"),
+            "header carries the Context tab: {:?}",
+            panel_rows[0]
+        );
+        assert!(
+            panel_rows.iter().any(|row| row.contains("CONTEXT")),
+            "body renders the context surface: {panel_rows:?}"
+        );
+        assert!(
+            panel_rows.iter().any(|row| row.contains("focused"))
+                && panel_rows.iter().any(|row| row.contains("review-space")),
+            "body renders the focused pane's fields: {panel_rows:?}"
+        );
+        assert!(
+            panel_rows.iter().any(|row| row.contains("MAT-128")),
+            "body renders the work link: {panel_rows:?}"
         );
     }
 

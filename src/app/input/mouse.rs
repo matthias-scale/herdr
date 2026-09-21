@@ -1205,6 +1205,14 @@ impl AppState {
                         return None;
                     }
 
+                    // The notepad strip claims its own panel even when it is
+                    // not focused yet, so a first click can focus it, switch
+                    // its tabs, or grab its drag handle.
+                    if self.point_in_rect(self.view.notepad_rect, mouse.column, mouse.row) {
+                        self.handle_notepad_mouse(&mouse);
+                        return None;
+                    }
+
                     if let Some(target) =
                         self.workspace_list_scrollbar_target_at(mouse.column, mouse.row)
                     {
@@ -1327,6 +1335,26 @@ impl AppState {
                             }
                         }
                         return None;
+                    }
+                    if let Some(target) = crate::ui::needs_you_row_at(self, mouse.row) {
+                        match target {
+                            crate::ui::NeedsYouTarget::Local(target) => {
+                                self.selected = target.ws_idx;
+                                self.set_server_mode(Mode::Terminal);
+                                return Some(MouseAction::FocusPane {
+                                    ws_idx: target.ws_idx,
+                                    pane_id: target.pane_id,
+                                });
+                            }
+                            crate::ui::NeedsYouTarget::Remote(agent_ref) => {
+                                self.sidebar_selected_work_group = None;
+                                self.select_remote_agent_row(agent_ref.clone());
+                                return Some(MouseAction::OpenFleetHost {
+                                    name: agent_ref.host,
+                                    focus_agent: Some(agent_ref.agent),
+                                });
+                            }
+                        }
                     }
                     if let Some(idx) = self.workspace_at_row(mouse.row) {
                         self.workspace_presses.insert(
@@ -1572,6 +1600,9 @@ impl AppState {
                         }
                         DragTarget::DockDivider => {
                             self.set_manual_dock_width(mouse.column);
+                        }
+                        DragTarget::NotepadDivider => {
+                            self.set_manual_notepad_height(mouse.row);
                         }
                         DragTarget::ReleaseNotesScrollbar { .. }
                         | DragTarget::ProductAnnouncementScrollbar { .. }
@@ -6360,6 +6391,81 @@ mod tests {
             "dock resize must emit the client-local persistence update"
         );
         assert!(!app.state.session_dirty);
+    }
+
+    #[test]
+    fn dragging_the_notepad_top_edge_resizes_and_persists_the_height() {
+        let mut app = app_for_mouse_test();
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.notepad.enabled = true;
+        app.state.notepad.height = 6;
+        app.state.view.notepad_rect = Rect::new(0, 14, 26, 6);
+        app.state.view.notepad_tab_hit_areas = Vec::new();
+
+        // The first click lands on an unfocused panel's top edge: the sidebar
+        // chain hands it to the notepad, and the handle takes the drag.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 3, 14));
+        assert!(matches!(
+            app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::NotepadDivider)
+        ));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 3, 11));
+
+        assert_eq!(app.state.notepad.height, 9);
+        assert_eq!(
+            app.state.take_notepad_height_persistence_request(),
+            Some(9),
+            "notepad resize must emit the host-local persistence update"
+        );
+    }
+
+    #[test]
+    fn a_work_link_in_the_notepad_context_tab_copies_its_value() {
+        let mut app = app_for_mouse_test();
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("links")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].focused_pane_id().expect("pane");
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("terminal");
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                ticket_ids: Some(vec!["MAT-128".into()]),
+                ..Default::default()
+            })
+            .expect("work context");
+        app.state.notepad.enabled = true;
+        app.state.notepad.context_active = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
+        let panel = app.state.view.notepad_rect;
+        assert!(panel.height > 0, "notepad panel is up");
+        let link = app
+            .state
+            .view
+            .work_context_link_rows
+            .iter()
+            .find(|row| row.rect.y >= panel.y)
+            .expect("notepad context link row")
+            .clone();
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            link.rect.x + 1,
+            link.rect.y,
+        ));
+
+        match app.event_rx.try_recv().expect("clipboard event") {
+            crate::events::AppEvent::ClipboardWrite { content } => {
+                assert_eq!(content, b"MAT-128")
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
     }
 
     #[test]

@@ -2627,8 +2627,8 @@ pub struct ViewState {
     pub(crate) sidebar_footer_missive_hit_area: Rect,
     /// The notepad panel at the bottom of the sidebar. Empty when it is off.
     pub(crate) notepad_rect: Rect,
-    /// Clickable note names in the notepad header, paired with their index.
-    pub(crate) notepad_tab_hit_areas: Vec<(usize, Rect)>,
+    /// Clickable tabs in the notepad header: note names and the Context tab.
+    pub(crate) notepad_tab_hit_areas: Vec<(crate::notepad::NotepadTabTarget, Rect)>,
     /// The break-timer countdown in the sidebar footer row.
     pub(crate) pomodoro_hit_area: Rect,
     /// Per-machine notification toggle beside the break timer.
@@ -3377,6 +3377,8 @@ pub(crate) enum DragTarget {
     },
     SidebarDivider,
     DockDivider,
+    /// The notepad strip's top edge, dragged vertically to resize the panel.
+    NotepadDivider,
 }
 
 /// Active mouse drag on a split border or sidebar divider.
@@ -4327,6 +4329,8 @@ pub struct AppState {
     pub(crate) request_client_notification_config: Option<bool>,
     /// Width to persist in the attached client's local presentation state.
     pub(crate) dock_width_persistence_request: Option<u16>,
+    /// Notepad panel height to persist in the host's local presentation state.
+    pub(crate) notepad_height_persistence_request: Option<u16>,
     pub(crate) sidebar_group_mode_persistence_request: Option<SidebarGroupMode>,
     pub(crate) sidebar_group_sort_persistence_request: Option<(String, SidebarSortMode)>,
     pub(crate) sidebar_group_collapsed_persistence_request: Option<(String, bool)>,
@@ -5855,6 +5859,10 @@ impl AppState {
         self.dock_width_persistence_request.take()
     }
 
+    pub(crate) fn take_notepad_height_persistence_request(&mut self) -> Option<u16> {
+        self.notepad_height_persistence_request.take()
+    }
+
     pub(crate) fn set_sidebar_group_mode(&mut self, mode: SidebarGroupMode) {
         if self.sidebar_group_mode == mode {
             self.sidebar_group_menu_open = false;
@@ -7380,6 +7388,7 @@ impl AppState {
             request_client_config_reload: false,
             request_client_notification_config: None,
             dock_width_persistence_request: None,
+            notepad_height_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
             sidebar_group_sort_persistence_request: None,
             sidebar_group_collapsed_persistence_request: None,

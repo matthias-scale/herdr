@@ -1026,6 +1026,8 @@ pub struct KeysConfig {
     pub toggle_sidebar: BindingConfig,
     /// Focus the sidebar and expand it if collapsed. Unset by default.
     pub focus_sidebar: BindingConfig,
+    /// Collapse every repo group except the one owning the focused pane.
+    pub focus_owning_repo_group: BindingConfig,
     /// Cycle the sidebar grouping mode. Unset by default.
     pub sidebar_cycle_group_mode: BindingConfig,
     /// Refresh sidebar work and Git metadata. Unset by default.
@@ -1264,6 +1266,8 @@ pub(crate) struct KeysConfigOverlay {
     toggle_sidebar: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     focus_sidebar: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    focus_owning_repo_group: Option<BindingConfig>,
     sidebar_cycle_group_mode: Option<BindingConfig>,
     sidebar_refresh: Option<BindingConfig>,
     toggle_status_detail: Option<BindingConfig>,
@@ -1427,6 +1431,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(resize_pane_right);
         apply_field!(toggle_sidebar);
         apply_field!(focus_sidebar);
+        apply_field!(focus_owning_repo_group);
         apply_field!(sidebar_cycle_group_mode);
         apply_field!(sidebar_refresh);
         apply_field!(toggle_blocked_filter);
@@ -1586,6 +1591,7 @@ impl KeysConfig {
         copy_effective_action_field!(resize_pane_right, keybinds.resize_pane_right);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
         copy_effective_action_field!(focus_sidebar, keybinds.focus_sidebar);
+        copy_effective_action_field!(focus_owning_repo_group, keybinds.focus_owning_repo_group);
         copy_effective_action_field!(sidebar_cycle_group_mode, keybinds.sidebar_cycle_group_mode);
         copy_effective_action_field!(sidebar_refresh, keybinds.sidebar_refresh);
         copy_effective_action_field!(toggle_blocked_filter, keybinds.toggle_blocked_filter);
@@ -2141,6 +2147,7 @@ impl Default for KeysConfig {
             resize_pane_right: BindingConfig::empty(),
             toggle_sidebar: BindingConfig::one("prefix+shift+b"),
             focus_sidebar: BindingConfig::empty(),
+            focus_owning_repo_group: BindingConfig::one("prefix+i"),
             sidebar_cycle_group_mode: BindingConfig::empty(),
             sidebar_refresh: BindingConfig::empty(),
             toggle_blocked_filter: BindingConfig::one("prefix+f"),
