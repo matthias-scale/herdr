@@ -363,63 +363,59 @@ pub(crate) fn group_catalog_cache_path() -> PathBuf {
     crate::session::data_dir().join(GROUP_CATALOG_CACHE_FILE)
 }
 
-pub(crate) fn load_group_catalog_cache(path: &Path, fleet: &FleetConfig) -> Vec<GroupCatalog> {
+pub(crate) fn load_group_catalog_cache(
+    path: &Path,
+    fleet: &FleetConfig,
+) -> Result<Vec<GroupCatalog>, String> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-        Err(error) => {
-            tracing::warn!(%error, path = %path.display(), "cannot read remote group catalog cache");
-            return Vec::new();
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("cannot read remote group catalog cache: {error}")),
     };
-    let file: GroupCatalogCacheFile = match serde_json::from_slice(&bytes) {
-        Ok(file) => file,
-        Err(error) => {
-            tracing::warn!(%error, path = %path.display(), "cannot parse remote group catalog cache");
-            return Vec::new();
-        }
-    };
+    let file: GroupCatalogCacheFile = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("cannot parse remote group catalog cache: {error}"))?;
     if file.version != GROUP_CATALOG_CACHE_VERSION {
-        tracing::warn!(
-            version = file.version,
-            expected = GROUP_CATALOG_CACHE_VERSION,
-            "ignoring unsupported remote group catalog cache"
-        );
-        return Vec::new();
+        return Err(format!(
+            "unsupported remote group catalog cache version {} (expected {})",
+            file.version, GROUP_CATALOG_CACHE_VERSION
+        ));
     }
 
-    fleet
-        .hosts
-        .iter()
-        .filter_map(|host| {
-            let matching = file
-                .entries
-                .iter()
-                .filter(|entry| entry.matches_config(host))
-                .collect::<Vec<_>>();
-            let [entry] = matching.as_slice() else {
-                return None;
-            };
-            if let Err(error) = crate::groups::admit_authority_snapshot(None, &entry.snapshot) {
-                tracing::warn!(
-                    %error,
-                    host = %host.name,
-                    "ignoring invalid remote group catalog cache entry"
-                );
-                return None;
+    let mut catalogs = Vec::new();
+    for host in &fleet.hosts {
+        let matching = file
+            .entries
+            .iter()
+            .filter(|entry| entry.matches_config(host))
+            .collect::<Vec<_>>();
+        let entry = match matching.as_slice() {
+            [] => continue,
+            [entry] => *entry,
+            _ => {
+                return Err(format!(
+                    "remote group catalog cache has ambiguous history for connection {}",
+                    host.name
+                ));
             }
-            Some(GroupCatalog {
-                host: host.name.clone(),
-                target: host.target.clone(),
-                local: host.local,
-                session: host.session.clone(),
-                socket: host.socket.clone(),
-                state: GroupCatalogState::Stale,
-                snapshot: Some(entry.snapshot.clone()),
-                error: Some("retained from durable cache".into()),
-            })
-        })
-        .collect()
+        };
+        crate::groups::admit_authority_snapshot(None, &entry.snapshot).map_err(|error| {
+            format!(
+                "remote group catalog cache has invalid history for connection {}: {error}",
+                host.name
+            )
+        })?;
+        catalogs.push(GroupCatalog {
+            host: host.name.clone(),
+            target: host.target.clone(),
+            local: host.local,
+            session: host.session.clone(),
+            socket: host.socket.clone(),
+            state: GroupCatalogState::Stale,
+            snapshot: Some(entry.snapshot.clone()),
+            error: Some("retained from durable cache".into()),
+        });
+    }
+    Ok(catalogs)
 }
 
 pub(crate) fn save_group_catalog_cache(path: &Path, snapshot: &Snapshot) -> std::io::Result<()> {
@@ -639,10 +635,10 @@ impl Snapshot {
         }
     }
 
-    pub(crate) fn reject_unpersisted_group_catalogs_from(
+    pub(crate) fn reject_group_catalogs_without_durable_history_from(
         &mut self,
         previous: &Self,
-        error: &std::io::Error,
+        error: &str,
     ) {
         for catalog in &mut self.group_catalogs {
             let authority = catalog.authority_id().cloned();
@@ -660,7 +656,7 @@ impl Snapshot {
                 catalog.snapshot = None;
                 catalog.state = GroupCatalogState::Unavailable;
             }
-            catalog.error = Some(format!("durable cache persistence failed: {error}"));
+            catalog.error = Some(error.to_string());
         }
 
         let mut authority_counts = HashMap::new();
@@ -681,7 +677,7 @@ impl Snapshot {
             {
                 catalog.state = GroupCatalogState::IdentityConflict;
                 catalog.error = Some(format!(
-                    "authority identity conflict after durable cache failure: {authority}"
+                    "authority identity conflict while durable history is unavailable: {authority}"
                 ));
             }
         }
@@ -2986,7 +2982,7 @@ mod tests {
             ..FleetConfig::default()
         };
 
-        let retained = load_group_catalog_cache(&path, &fleet);
+        let retained = load_group_catalog_cache(&path, &fleet).expect("load retained catalog");
         assert_eq!(retained.len(), 1);
         assert_eq!(retained[0].host, "renamed");
         assert_eq!(retained[0].state, GroupCatalogState::Stale);
@@ -3027,7 +3023,55 @@ mod tests {
             }],
             ..FleetConfig::default()
         };
-        assert!(load_group_catalog_cache(&path, &repointed).is_empty());
+        assert!(load_group_catalog_cache(&path, &repointed)
+            .expect("ignore cache for a different connection")
+            .is_empty());
+        std::fs::remove_dir_all(dir).expect("remove catalog cache fixture");
+    }
+
+    #[test]
+    fn durable_catalog_cache_rejects_unreadable_or_ambiguous_history() {
+        let dir = run_fixture_dir("invalid-group-catalog-cache");
+        let path = dir.join("remote-group-catalogs.json");
+        let fleet = FleetConfig {
+            hosts: vec![FleetHostConfig {
+                name: "office".into(),
+                target: "machine-a".into(),
+                session: Some("agents".into()),
+                ..FleetHostConfig::default()
+            }],
+            ..FleetConfig::default()
+        };
+
+        std::fs::write(&path, b"not json").expect("write corrupt cache");
+        assert!(load_group_catalog_cache(&path, &fleet).is_err());
+
+        let snapshot = group_catalog("office", "machine-a", 1, 2, Vec::new());
+        let mut duplicate = snapshot.clone();
+        duplicate.snapshot.as_mut().expect("snapshot").revision = 3;
+        let file = GroupCatalogCacheFile {
+            version: GROUP_CATALOG_CACHE_VERSION,
+            entries: vec![
+                GroupCatalogCacheEntry {
+                    target: "machine-a".into(),
+                    local: false,
+                    session: Some("agents".into()),
+                    socket: None,
+                    snapshot: snapshot.snapshot.expect("first snapshot"),
+                },
+                GroupCatalogCacheEntry {
+                    target: "machine-a".into(),
+                    local: false,
+                    session: Some("agents".into()),
+                    socket: None,
+                    snapshot: duplicate.snapshot.expect("duplicate snapshot"),
+                },
+            ],
+        };
+        std::fs::write(&path, serde_json::to_vec(&file).expect("serialize cache"))
+            .expect("write ambiguous cache");
+        assert!(load_group_catalog_cache(&path, &fleet).is_err());
+
         std::fs::remove_dir_all(dir).expect("remove catalog cache fixture");
     }
 

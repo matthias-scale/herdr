@@ -63,12 +63,19 @@ impl App {
         snapshot.admit_group_catalogs_from(&self.state.fleet_snapshot);
         let candidate_catalogs_changed =
             self.state.fleet_snapshot.group_catalogs != snapshot.group_catalogs;
-        if candidate_catalogs_changed {
+        if let Some(error) = self.group_catalog_cache_error.as_deref() {
+            snapshot.reject_group_catalogs_without_durable_history_from(
+                &self.state.fleet_snapshot,
+                error,
+            );
+        } else if candidate_catalogs_changed {
             if let Some(path) = self.group_catalog_cache_path.as_deref() {
                 if let Err(error) = crate::fleet::save_group_catalog_cache(path, &snapshot) {
                     tracing::warn!(%error, path = %path.display(), "cannot persist remote group catalog cache");
-                    snapshot
-                        .reject_unpersisted_group_catalogs_from(&self.state.fleet_snapshot, &error);
+                    snapshot.reject_group_catalogs_without_durable_history_from(
+                        &self.state.fleet_snapshot,
+                        &format!("durable cache persistence failed: {error}"),
+                    );
                 }
             }
         }
@@ -2302,6 +2309,46 @@ mod tests {
             .as_deref()
             .is_some_and(|error| error.contains("durable cache")));
         std::fs::remove_file(blocker).expect("remove cache blocker");
+    }
+
+    #[test]
+    fn catalog_admission_fails_closed_when_retained_history_cannot_be_loaded() {
+        let config = crate::config::Config::default();
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.group_catalog_cache_error = Some("cannot parse retained history".into());
+        let authority = crate::groups::AuthorityId::from_random_bytes([8; 16]);
+        let mut incoming = fleet_snapshot(Vec::new());
+        incoming.group_catalogs = vec![crate::fleet::GroupCatalog {
+            host: "office".into(),
+            target: "machine-a".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Fresh,
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: authority,
+                revision: 2,
+                groups: Vec::new(),
+                memberships: Vec::new(),
+            }),
+            error: None,
+        }];
+
+        assert!(app.install_fleet_snapshot(incoming));
+
+        let rejected = &app.state.fleet_snapshot.group_catalogs[0];
+        assert_eq!(rejected.state, crate::fleet::GroupCatalogState::Unavailable);
+        assert!(rejected.snapshot.is_none());
+        assert!(rejected
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("cannot parse retained history")));
     }
 
     fn codex_catalog(model: &str) -> crate::app::home_catalog::HomeProviderCatalog {

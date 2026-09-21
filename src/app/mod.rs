@@ -197,6 +197,8 @@ pub struct App {
     pub(crate) group_runtime: crate::groups::Runtime,
     /// Separate versioned admission cache for remote authority snapshots.
     pub(crate) group_catalog_cache_path: Option<std::path::PathBuf>,
+    /// A non-missing cache that could not be trusted quarantines remote catalogs.
+    pub(crate) group_catalog_cache_error: Option<String>,
     /// Owner-only pane memberships maintained at lifecycle boundaries so
     /// fleet snapshot requests never walk the pane tree.
     pub(crate) group_membership_projection:
@@ -1414,9 +1416,15 @@ impl App {
         let group_catalog_cache_path = Some(crate::fleet::group_catalog_cache_path());
         #[cfg(test)]
         let group_catalog_cache_path = None;
+        let mut group_catalog_cache_error = None;
         if let Some(path) = group_catalog_cache_path.as_deref() {
-            state.fleet_snapshot.group_catalogs =
-                crate::fleet::load_group_catalog_cache(path, &config.remote.fleet);
+            match crate::fleet::load_group_catalog_cache(path, &config.remote.fleet) {
+                Ok(catalogs) => state.fleet_snapshot.group_catalogs = catalogs,
+                Err(error) => {
+                    tracing::warn!(%error, path = %path.display(), "remote group catalog history is unavailable");
+                    group_catalog_cache_error = Some(error);
+                }
+            }
         }
 
         let last_focus = state.active.and_then(|idx| {
@@ -1461,6 +1469,7 @@ impl App {
             fleet_poller_config,
             group_runtime,
             group_catalog_cache_path,
+            group_catalog_cache_error,
             group_membership_projection: std::collections::BTreeMap::new(),
             #[cfg(test)]
             group_session_paths_override: None,
