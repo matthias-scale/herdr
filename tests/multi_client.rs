@@ -4,8 +4,10 @@ mod support;
 
 use std::cell::Cell;
 use std::collections::VecDeque;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -445,6 +447,46 @@ fn read_pane_tty_size(socket_path: &Path, pane_id: &str, timeout: Duration) -> (
     );
 }
 
+fn try_read_pane_tty_geometry(socket_path: &Path, pane_id: &str) -> Option<(u16, u16, u16, u16)> {
+    let response = send_json_request(
+        socket_path,
+        &format!(
+            "{{\"id\":\"process_info\",\"method\":\"pane.process_info\",\"params\":{{\"pane_id\":\"{pane_id}\"}}}}"
+        ),
+    );
+    let tty = response
+        .pointer("/result/process_info/tty")
+        .and_then(Value::as_str)?;
+    let tty = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY)
+        .open(tty)
+        .ok()?;
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let status = unsafe { libc::ioctl(tty.as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
+    (status == 0).then_some((size.ws_row, size.ws_col, size.ws_xpixel, size.ws_ypixel))
+}
+
+fn read_pane_tty_geometry(
+    socket_path: &Path,
+    pane_id: &str,
+    timeout: Duration,
+) -> (u16, u16, u16, u16) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Some(geometry) = try_read_pane_tty_geometry(socket_path, pane_id) {
+            return geometry;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("did not read tty geometry for pane {pane_id}");
+}
+
 // ---------------------------------------------------------------------------
 // Minimal bincode v2 varint helpers for protocol tests
 // ---------------------------------------------------------------------------
@@ -561,6 +603,17 @@ fn client_handshake(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    client_handshake_with_geometry(stream, version, cols, rows, 8, 16)
+}
+
+fn client_handshake_with_geometry(
+    stream: &mut UnixStream,
+    version: u32,
+    cols: u16,
+    rows: u16,
+    cell_width_px: u32,
+    cell_height_px: u32,
+) -> Result<(), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| e.to_string())?;
@@ -574,11 +627,11 @@ fn client_handshake(
             &encode_string(&build_version),
             &encode_varint_u16(cols),
             &encode_varint_u16(rows),
-            &encode_varint_u32(8),  // cell_width_px
-            &encode_varint_u32(16), // cell_height_px
-            &encode_varint_u32(0),  // RenderEncoding::SemanticFrame
-            &encode_varint_u32(0),  // ClientKeybindings::Server
-            &encode_varint_u32(0),  // ClientLaunchMode::App
+            &encode_varint_u32(cell_width_px),
+            &encode_varint_u32(cell_height_px),
+            &encode_varint_u32(0), // RenderEncoding::SemanticFrame
+            &encode_varint_u32(0), // ClientKeybindings::Server
+            &encode_varint_u32(0), // ClientLaunchMode::App
         ],
     );
     stream
@@ -633,6 +686,26 @@ fn client_handshake(
 fn connect_raw_client(client_socket: &Path, cols: u16, rows: u16) -> UnixStream {
     let mut stream = UnixStream::connect(client_socket).expect("should connect to client socket");
     client_handshake(&mut stream, CURRENT_PROTOCOL, cols, rows).expect("handshake should succeed");
+    stream
+}
+
+fn connect_raw_client_with_geometry(
+    client_socket: &Path,
+    cols: u16,
+    rows: u16,
+    cell_width_px: u32,
+    cell_height_px: u32,
+) -> UnixStream {
+    let mut stream = UnixStream::connect(client_socket).expect("should connect to client socket");
+    client_handshake_with_geometry(
+        &mut stream,
+        CURRENT_PROTOCOL,
+        cols,
+        rows,
+        cell_width_px,
+        cell_height_px,
+    )
+    .expect("handshake should succeed");
     stream
 }
 
@@ -865,7 +938,7 @@ fn multi_client_allows_multiple_simultaneous_connections() {
 }
 
 #[test]
-fn multi_client_effective_size_shrinks_when_smaller_client_joins() {
+fn multi_client_effective_geometry_uses_smallest_client_and_known_pixels() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -879,33 +952,82 @@ fn multi_client_effective_size_shrinks_when_smaller_client_joins() {
 
     let (_workspace_id, pane_id) = create_workspace_and_root_pane(&api_socket, "size-shrink");
 
-    let mut large = connect_raw_client(&client_socket, 120, 40);
+    let mut large = connect_raw_client_with_geometry(&client_socket, 120, 40, 8, 16);
     assert!(wait_for_frame(&mut large, Duration::from_secs(2)));
-    let large_only_size = read_pane_tty_size(&api_socket, &pane_id, Duration::from_secs(5));
+    let large_only_geometry = read_pane_tty_geometry(&api_socket, &pane_id, Duration::from_secs(5));
 
-    let mut small = connect_raw_client(&client_socket, 80, 24);
+    let mut small = connect_raw_client_with_geometry(&client_socket, 80, 24, 0, 0);
     assert!(wait_for_frame(&mut small, Duration::from_secs(2)));
 
     let deadline = Instant::now() + Duration::from_secs(8);
-    let mut last_seen_size = None;
-    let mut size_with_small_client = None;
+    let mut last_seen_geometry = None;
+    let mut geometry_with_small_client = None;
     while Instant::now() < deadline {
-        if let Some(size) =
-            try_read_pane_tty_size(&api_socket, &pane_id, Duration::from_millis(400))
-        {
-            last_seen_size = Some(size);
-            if size.0 < large_only_size.0 && size.1 < large_only_size.1 {
-                size_with_small_client = Some(size);
+        if let Some(geometry) = try_read_pane_tty_geometry(&api_socket, &pane_id) {
+            last_seen_geometry = Some(geometry);
+            if geometry.0 < large_only_geometry.0 && geometry.1 < large_only_geometry.1 {
+                geometry_with_small_client = Some(geometry);
                 break;
             }
         }
         thread::sleep(Duration::from_millis(60));
     }
 
-    assert!(
-        size_with_small_client.is_some(),
-        "effective pane size should shrink when smaller client joins: before={large_only_size:?}, last_seen={last_seen_size:?}"
+    let geometry = geometry_with_small_client.unwrap_or_else(|| {
+        panic!(
+            "effective pane geometry should shrink when smaller client joins: before={large_only_geometry:?}, last_seen={last_seen_geometry:?}"
+        )
+    });
+    assert_eq!(
+        geometry.2,
+        geometry.1.saturating_mul(8),
+        "the smaller client has no pixel data, so the PTY must retain the known cell width"
     );
+    assert_eq!(
+        geometry.3,
+        geometry.0.saturating_mul(16),
+        "the smaller client has no pixel data, so the PTY must retain the known cell height"
+    );
+
+    cleanup_spawned_herdr(server, base);
+}
+
+#[test]
+fn multi_client_known_pixels_survive_known_client_disconnect() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let server = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_file(&client_socket, Duration::from_secs(10));
+
+    let (_workspace_id, pane_id) = create_workspace_and_root_pane(&api_socket, "pixel-disconnect");
+    let mut known = connect_raw_client_with_geometry(&client_socket, 120, 40, 9, 18);
+    let mut unknown = connect_raw_client_with_geometry(&client_socket, 80, 24, 0, 0);
+    assert!(wait_for_frame(&mut known, Duration::from_secs(2)));
+    assert!(wait_for_frame(&mut unknown, Duration::from_secs(2)));
+
+    send_client_detach(&mut known);
+    drop(known);
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let geometry = loop {
+        let geometry = read_pane_tty_geometry(&api_socket, &pane_id, Duration::from_secs(1));
+        if geometry.2 == geometry.1.saturating_mul(9) && geometry.3 == geometry.0.saturating_mul(18)
+        {
+            break geometry;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the unknown client should retain the runtime's known pixel size after the known client disconnects: last_seen={geometry:?}"
+        );
+        thread::sleep(Duration::from_millis(60));
+    };
+    assert!(geometry.0 > 0 && geometry.1 > 0);
 
     cleanup_spawned_herdr(server, base);
 }
