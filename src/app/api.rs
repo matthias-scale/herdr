@@ -60,10 +60,20 @@ impl App {
             return false;
         }
         snapshot.retain_unreachable_inventory_from(&self.state.fleet_snapshot);
+        snapshot.admit_group_catalogs_from(&self.state.fleet_snapshot);
         self.remote_focus_transport
             .observe_fleet_snapshot(&snapshot);
+        let catalogs_changed = self.state.fleet_snapshot.group_catalogs != snapshot.group_catalogs;
         let changed = self.state.fleet_snapshot != snapshot;
         self.state.fleet_snapshot = snapshot;
+        if catalogs_changed {
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::AuthorityCatalogsUpdated,
+                data: crate::api::schema::EventData::AuthorityCatalogsUpdated {
+                    catalogs: self.authority_catalog_infos(),
+                },
+            });
+        }
         self.state.reconcile_dock_hosts_selection();
         self.refresh_remote_agent_panel_entries();
         changed
@@ -1615,6 +1625,9 @@ impl App {
             Method::GroupCreate(params) => return self.handle_group_create(request.id, params),
             Method::GroupRename(params) => return self.handle_group_rename(request.id, params),
             Method::GroupDelete(params) => return self.handle_group_delete(request.id, params),
+            Method::GroupAuthorityMutate(params) => {
+                return self.handle_group_authority_mutate(request.id, params)
+            }
             Method::WorkspaceCreate(params) => {
                 return self.handle_workspace_create(request.id, params);
             }
@@ -2154,6 +2167,55 @@ mod tests {
         assert_eq!(retained.agent_ref.to_string(), "office::retained-task");
         assert_eq!(retained.state, crate::detect::AgentState::Unknown);
         assert!(retained.stale);
+    }
+
+    #[test]
+    fn admitted_authority_catalogs_emit_on_the_json_event_path() {
+        let config = crate::config::Config::default();
+        let hub = crate::api::EventHub::default();
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            hub.clone(),
+        );
+        let authority = crate::groups::AuthorityId::from_random_bytes([9; 16]);
+        let mut snapshot = fleet_snapshot(Vec::new());
+        snapshot.group_catalogs = vec![crate::fleet::GroupCatalog {
+            host: "office".into(),
+            target: "machine-a".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Fresh,
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: authority.clone(),
+                revision: 0,
+                groups: Vec::new(),
+                memberships: Vec::new(),
+            }),
+            error: None,
+        }];
+
+        assert!(app.install_fleet_snapshot(snapshot));
+
+        let events = hub.events_after(0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].1.event,
+            crate::api::schema::EventKind::AuthorityCatalogsUpdated
+        );
+        let crate::api::schema::EventData::AuthorityCatalogsUpdated { catalogs } =
+            &events[0].1.data
+        else {
+            panic!("expected authority catalog event");
+        };
+        assert_eq!(catalogs[0].authority_id.as_ref(), Some(&authority));
+        assert_eq!(
+            catalogs[0].state,
+            crate::api::schema::AuthorityCatalogStateInfo::Fresh
+        );
     }
 
     fn codex_catalog(model: &str) -> crate::app::home_catalog::HomeProviderCatalog {

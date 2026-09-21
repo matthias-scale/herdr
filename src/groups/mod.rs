@@ -1,7 +1,7 @@
 mod model;
 mod store;
 
-pub(crate) use model::MutationError;
+pub(crate) use model::{admit_authority_snapshot, MutationError};
 pub use model::{
     AuthorityId, GroupAuthoritySnapshot, GroupId, GroupRecord, GroupState, OwnedPaneMembership,
     PaneGroupMembership,

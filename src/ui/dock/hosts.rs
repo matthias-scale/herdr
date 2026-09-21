@@ -325,6 +325,7 @@ mod tests {
             config_generation: 0,
             configured_hosts: vec!["ub2".to_string(), "ub1".to_string()],
             hosts: vec![skewed, unreachable],
+            group_catalogs: Vec::new(),
         };
         let text = render(&app, SystemTime::UNIX_EPOCH + Duration::from_secs(65));
         for expected in [

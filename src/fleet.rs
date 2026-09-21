@@ -15,6 +15,7 @@ use crate::config::{FleetConfig, FleetHostConfig};
 const REMOTE_RUNS_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUNS_V1\x1e\n";
 const REMOTE_RUN_RECORD_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUN_V1:";
 const REMOTE_HOST_MARKER: &[u8] = b"\x1eHERDR_FLEET_HOST_V1\x1e\n";
+const REMOTE_GROUPS_MARKER: &[u8] = b"\x1eHERDR_FLEET_GROUPS_V1\x1e\n";
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const MIN_TIMEOUT_MS: u64 = 100;
 const MAX_TIMEOUT_MS: u64 = 60_000;
@@ -25,6 +26,7 @@ const MAX_RUN_DIRECTORY_ENTRIES: usize = 2_048;
 const MAX_REMOTE_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 type ParsedRemoteOutput = (
     Result<Vec<AgentInfo>, String>,
+    Result<crate::groups::GroupAuthoritySnapshot, String>,
     Vec<Result<crate::agent_runs::Observation, String>>,
     HostRuntime,
 );
@@ -274,6 +276,90 @@ pub(crate) struct Snapshot {
     pub(crate) config_generation: u64,
     pub(crate) configured_hosts: Vec<String>,
     pub(crate) hosts: Vec<HostSnapshot>,
+    /// Complete owner catalogs observed by the periodic fleet poll. Admission
+    /// happens once when the refresh reaches the app event loop.
+    #[serde(skip)]
+    pub(crate) group_catalogs: Vec<GroupCatalog>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GroupCatalogState {
+    Fresh,
+    Stale,
+    IdentityConflict,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct GroupCatalog {
+    pub(crate) host: String,
+    pub(crate) target: String,
+    pub(crate) local: bool,
+    pub(crate) session: Option<String>,
+    #[serde(skip)]
+    pub(crate) socket: Option<String>,
+    pub(crate) state: GroupCatalogState,
+    pub(crate) snapshot: Option<crate::groups::GroupAuthoritySnapshot>,
+    pub(crate) error: Option<String>,
+}
+
+impl GroupCatalog {
+    fn matches_connection(&self, other: &Self) -> bool {
+        self.target == other.target
+            && self.local == other.local
+            && self.session == other.session
+            && self.socket == other.socket
+    }
+
+    pub(crate) fn authority_id(&self) -> Option<&crate::groups::AuthorityId> {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| &snapshot.authority_id)
+    }
+
+    pub(crate) fn is_fresh(&self) -> bool {
+        self.state == GroupCatalogState::Fresh
+    }
+}
+
+pub(crate) fn route_api_request(
+    catalog: &GroupCatalog,
+    request: &Request,
+    timeout: Duration,
+) -> Result<String, String> {
+    let value = if catalog.local {
+        api_client_for_catalog(catalog)
+            .request_value_with_timeout(request, timeout)
+            .map_err(|error| error.to_string())?
+    } else {
+        let request_json = serde_json::to_string(request).map_err(|error| error.to_string())?;
+        let socket = catalog
+            .socket
+            .as_deref()
+            .map(|path| format!("export HERDR_SOCKET_PATH={}\n", shell_quote(path)))
+            .unwrap_or_default();
+        let session = catalog
+            .session
+            .as_deref()
+            .map(|name| format!("export HERDR_SESSION={}\n", shell_quote(name)))
+            .unwrap_or_default();
+        let script = format!(
+            "set -u\n{socket}{session}printf '%s\\n' {} | herdr api relay\n",
+            shell_quote(&request_json)
+        );
+        let output = run_ssh_with_timeout(&catalog.target, &script, timeout)?;
+        serde_json::from_slice(output.trim_ascii())
+            .map_err(|error| format!("invalid authority mutation response: {error}"))?
+    };
+    serde_json::to_string(&value).map_err(|error| error.to_string())
+}
+
+fn api_client_for_catalog(catalog: &GroupCatalog) -> ApiClient {
+    catalog.socket.as_ref().map_or_else(
+        || ApiClient::for_target(ConnectionTarget::LocalSession(catalog.session.clone())),
+        |path| ApiClient::for_target(ConnectionTarget::SocketPath(PathBuf::from(path))),
+    )
 }
 
 impl Snapshot {
@@ -313,6 +399,19 @@ impl Snapshot {
             config_generation,
             configured_hosts: fleet.hosts.iter().map(|host| host.name.clone()).collect(),
             hosts,
+            group_catalogs: self
+                .group_catalogs
+                .iter()
+                .filter(|catalog| {
+                    fleet.hosts.iter().any(|configured| {
+                        catalog.target == configured.target
+                            && catalog.local == configured.local
+                            && catalog.session == configured.session
+                            && catalog.socket == configured.socket
+                    })
+                })
+                .cloned()
+                .collect(),
         }
     }
 
@@ -321,6 +420,92 @@ impl Snapshot {
             .into_iter()
             .flat_map(|host| host.entries)
             .collect()
+    }
+
+    /// Admit complete owner catalogs once per fleet refresh. Retention keys on
+    /// both the reported authority and the full connection tuple, never the
+    /// configured display alias.
+    pub(crate) fn admit_group_catalogs_from(&mut self, previous: &Self) {
+        for catalog in &mut self.group_catalogs {
+            let incoming = catalog.snapshot.as_ref();
+            if let Some(incoming) = incoming {
+                let retained = previous.group_catalogs.iter().find(|old| {
+                    old.matches_connection(catalog)
+                        && old.authority_id() == Some(&incoming.authority_id)
+                });
+                if let Err(error) = crate::groups::admit_authority_snapshot(
+                    retained.and_then(|old| old.snapshot.as_ref()),
+                    incoming,
+                ) {
+                    if let Some(retained) = retained {
+                        catalog.snapshot = retained.snapshot.clone();
+                        catalog.state = GroupCatalogState::Stale;
+                    } else {
+                        catalog.snapshot = None;
+                        catalog.state = GroupCatalogState::Unavailable;
+                    }
+                    catalog.error = Some(format!("catalog rejected: {error}"));
+                }
+                continue;
+            }
+
+            if let Some(retained) = previous
+                .group_catalogs
+                .iter()
+                .find(|old| old.matches_connection(catalog) && old.snapshot.is_some())
+            {
+                catalog.snapshot = retained.snapshot.clone();
+                catalog.state = GroupCatalogState::Stale;
+            }
+        }
+
+        let mut authority_counts = HashMap::new();
+        for catalog in &self.group_catalogs {
+            if let Some(authority) = catalog.authority_id() {
+                *authority_counts.entry(authority.clone()).or_insert(0_usize) += 1;
+            }
+        }
+        for catalog in &mut self.group_catalogs {
+            let Some(authority) = catalog.authority_id().cloned() else {
+                continue;
+            };
+            if authority_counts
+                .get(&authority)
+                .copied()
+                .unwrap_or_default()
+                > 1
+            {
+                catalog.state = GroupCatalogState::IdentityConflict;
+                catalog.error = Some(format!(
+                    "authority identity conflict: {authority} is reported by multiple connections"
+                ));
+            }
+        }
+    }
+
+    pub(crate) fn fresh_group_catalog(
+        &self,
+        authority: &crate::groups::AuthorityId,
+    ) -> Result<&GroupCatalog, String> {
+        let matching = self
+            .group_catalogs
+            .iter()
+            .filter(|catalog| catalog.authority_id() == Some(authority))
+            .collect::<Vec<_>>();
+        if matching.len() > 1
+            || matching
+                .iter()
+                .any(|catalog| catalog.state == GroupCatalogState::IdentityConflict)
+        {
+            return Err(format!("authority {authority} has an identity conflict"));
+        }
+        let Some(catalog) = matching.first().copied() else {
+            return Err(format!("authority {authority} has not been observed"));
+        };
+        if !catalog.is_fresh() {
+            return Err(format!("authority {authority} is not fresh"));
+        }
+        Ok(catalog)
     }
 
     /// Keep the last observed remote inventory when a configured host cannot
@@ -447,6 +632,7 @@ fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
                         entries: Vec::new(),
                     })
                     .collect(),
+                group_catalogs: Vec::new(),
             }
         }
     }
@@ -714,6 +900,7 @@ pub(crate) fn start_poller(
 struct HostEvidence {
     host: FleetHostConfig,
     agents: Result<Vec<AgentInfo>, String>,
+    groups: Result<crate::groups::GroupAuthoritySnapshot, String>,
     runs: Vec<Result<crate::agent_runs::Observation, String>>,
     runtime: HostRuntime,
 }
@@ -752,7 +939,7 @@ fn collect_snapshot_with_implicit_local(
                     name,
                     scope.spawn(move || {
                         if runs_only {
-                            fetch_local_run_host(host)
+                            fetch_local_run_host(host, timeout)
                         } else {
                             fetch_host_with(reader, host, timeout)
                         }
@@ -770,6 +957,7 @@ fn collect_snapshot_with_implicit_local(
                         ..FleetHostConfig::default()
                     },
                     agents: Err("host reader panicked".into()),
+                    groups: Err("group catalog reader panicked".into()),
                     runs: Vec::new(),
                     runtime: HostRuntime::default(),
                 },
@@ -780,10 +968,12 @@ fn collect_snapshot_with_implicit_local(
     snapshot_from_evidence(hosts, fleet, evidence, SystemTime::now())
 }
 
-fn fetch_local_run_host(host: FleetHostConfig) -> HostEvidence {
+fn fetch_local_run_host(host: FleetHostConfig, timeout: Duration) -> HostEvidence {
+    let groups = fetch_group_catalog(&api_client_for_host(&host), timeout);
     HostEvidence {
         host,
         agents: Ok(Vec::new()),
+        groups,
         runs: local_run_states(),
         runtime: HostRuntime::default(),
     }
@@ -798,7 +988,23 @@ fn snapshot_from_evidence(
     let now_s = unix_seconds(refreshed_at);
     let heartbeat_stale_s = fleet.heartbeat_stale_ms.div_ceil(1_000);
     let mut hosts = Vec::with_capacity(evidence.len());
+    let mut group_catalogs = Vec::with_capacity(evidence.len());
     for evidence in evidence {
+        let group_result = evidence.groups.clone();
+        group_catalogs.push(GroupCatalog {
+            host: evidence.host.name.clone(),
+            target: evidence.host.target.clone(),
+            local: evidence.host.local,
+            session: evidence.host.session.clone(),
+            socket: evidence.host.socket.clone(),
+            state: if group_result.is_ok() {
+                GroupCatalogState::Fresh
+            } else {
+                GroupCatalogState::Unavailable
+            },
+            snapshot: group_result.as_ref().ok().cloned(),
+            error: group_result.err(),
+        });
         let error = evidence.agents.as_ref().err().cloned();
         let remote_identity = (!evidence.host.local)
             .then(|| evidence.agents.as_ref().ok())
@@ -888,6 +1094,7 @@ fn snapshot_from_evidence(
             .map(|host| host.name.clone())
             .collect(),
         hosts,
+        group_catalogs,
     }
 }
 
@@ -939,10 +1146,7 @@ fn fetch_host_with(
 }
 
 fn fetch_local_host(host: FleetHostConfig, timeout: Duration) -> HostEvidence {
-    let client = host.socket.as_ref().map_or_else(
-        || ApiClient::for_target(ConnectionTarget::LocalSession(host.session.clone())),
-        |path| ApiClient::for_target(ConnectionTarget::SocketPath(PathBuf::from(path))),
-    );
+    let client = api_client_for_host(&host);
     let request = Request {
         id: "fleet:collect:local".into(),
         method: Method::AgentList(EmptyParams::default()),
@@ -959,13 +1163,43 @@ fn fetch_local_host(host: FleetHostConfig, timeout: Duration) -> HostEvidence {
                 })
         });
     let runtime = fetch_local_runtime(&client, timeout);
+    let groups = fetch_group_catalog(&client, timeout);
     let runs = local_run_states();
     HostEvidence {
         host,
         agents,
+        groups,
         runs,
         runtime,
     }
+}
+
+fn api_client_for_host(host: &FleetHostConfig) -> ApiClient {
+    host.socket.as_ref().map_or_else(
+        || ApiClient::for_target(ConnectionTarget::LocalSession(host.session.clone())),
+        |path| ApiClient::for_target(ConnectionTarget::SocketPath(PathBuf::from(path))),
+    )
+}
+
+fn fetch_group_catalog(
+    client: &ApiClient,
+    timeout: Duration,
+) -> Result<crate::groups::GroupAuthoritySnapshot, String> {
+    let request = Request {
+        id: "fleet:collect:groups".into(),
+        method: Method::GroupHostSnapshot(EmptyParams::default()),
+    };
+    client
+        .request_value_with_timeout(&request, timeout)
+        .map_err(|error| error.to_string())
+        .and_then(|value| {
+            crate::api::client::parse_response_value(value)
+                .map_err(|error| error.to_string())
+                .and_then(|response| match response.result {
+                    ResponseResult::GroupHostSnapshot { snapshot } => Ok(snapshot),
+                    other => Err(format!("unexpected group snapshot response: {other:?}")),
+                })
+        })
 }
 
 fn fetch_local_runtime(client: &ApiClient, timeout: Duration) -> HostRuntime {
@@ -1060,13 +1294,19 @@ fn read_run_state_file(path: &Path) -> Result<crate::agent_runs::Observation, St
 fn fetch_remote_host(host: FleetHostConfig, timeout: Duration) -> HostEvidence {
     let script = remote_read_script(host.socket.as_deref(), host.session.as_deref());
     let output = run_ssh_with_timeout(&host.target, &script, timeout);
-    let (agents, runs, runtime) = match output {
+    let (agents, groups, runs, runtime) = match output {
         Ok(output) => parse_remote_output(&output),
-        Err(error) => (Err(error), Vec::new(), HostRuntime::default()),
+        Err(error) => (
+            Err(error.clone()),
+            Err(error),
+            Vec::new(),
+            HostRuntime::default(),
+        ),
     };
     HostEvidence {
         host,
         agents,
+        groups,
         runs,
         runtime,
     }
@@ -1080,7 +1320,7 @@ fn remote_read_script(socket: Option<&str>, session: Option<&str>) -> String {
         .map(|name| format!("export HERDR_SESSION={}\n", shell_quote(name)))
         .unwrap_or_default();
     format!(
-        "set -u\n{socket}{session}herdr agent list || true\nprintf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  ls -1t \"$HOME\"/.agents/runs/*/state.json 2>/dev/null | sed -n '1,{}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    pid=$(head -c {} \"$file\" | sed -n 's/.*\"pid\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)\n    alive=0\n    if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then alive=1; fi\n    printf '\\036HERDR_FLEET_RUN_V1:%s\\036\\n' \"$alive\"\n    head -c {} \"$file\"\n    printf '\\n'\n  done\nfi\nprintf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n",
+        "set -u\n{socket}{session}herdr agent list || true\nprintf '\\036HERDR_FLEET_GROUPS_V1\\036\\n'\nherdr api authority-snapshot || true\nprintf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  ls -1t \"$HOME\"/.agents/runs/*/state.json 2>/dev/null | sed -n '1,{}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    pid=$(head -c {} \"$file\" | sed -n 's/.*\"pid\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)\n    alive=0\n    if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then alive=1; fi\n    printf '\\036HERDR_FLEET_RUN_V1:%s\\036\\n' \"$alive\"\n    head -c {} \"$file\"\n    printf '\\n'\n  done\nfi\nprintf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n",
         crate::agent_runs::MAX_RUNS_PER_HOST,
         crate::agent_runs::MAX_RUN_STATE_BYTES + 1,
         crate::agent_runs::MAX_RUN_STATE_BYTES + 1,
@@ -1147,11 +1387,22 @@ fn parse_remote_output(output: &[u8]) -> ParsedRemoteOutput {
     else {
         return (
             Err("remote output did not include the fleet read marker".into()),
+            Err("remote output did not include the group catalog marker".into()),
             Vec::new(),
             HostRuntime::default(),
         );
     };
-    let response = serde_json::from_slice(output[..marker_at].trim_ascii())
+    let pre_runs = &output[..marker_at];
+    let (agent_bytes, group_bytes) = pre_runs
+        .windows(REMOTE_GROUPS_MARKER.len())
+        .position(|window| window == REMOTE_GROUPS_MARKER)
+        .map_or((pre_runs, None), |groups_marker_at| {
+            (
+                &pre_runs[..groups_marker_at],
+                Some(&pre_runs[groups_marker_at + REMOTE_GROUPS_MARKER.len()..]),
+            )
+        });
+    let response = serde_json::from_slice(agent_bytes.trim_ascii())
         .map_err(|error| format!("invalid remote agent-list JSON: {error}"))
         .and_then(|value| {
             crate::api::client::parse_response_value(value)
@@ -1159,6 +1410,20 @@ fn parse_remote_output(output: &[u8]) -> ParsedRemoteOutput {
                 .and_then(|response| match response.result {
                     ResponseResult::AgentList { agents } => Ok(agents),
                     other => Err(format!("unexpected agent-list response: {other:?}")),
+                })
+        });
+    let groups = group_bytes
+        .ok_or_else(|| "remote output did not include the group catalog marker".to_string())
+        .and_then(|bytes| {
+            serde_json::from_slice(bytes.trim_ascii())
+                .map_err(|error| format!("invalid remote group-catalog JSON: {error}"))
+        })
+        .and_then(|value| {
+            crate::api::client::parse_response_value(value)
+                .map_err(|error| error.to_string())
+                .and_then(|response| match response.result {
+                    ResponseResult::GroupHostSnapshot { snapshot } => Ok(snapshot),
+                    other => Err(format!("unexpected group snapshot response: {other:?}")),
                 })
         });
     let trailer = &output[marker_at + REMOTE_RUNS_MARKER.len()..];
@@ -1174,7 +1439,7 @@ fn parse_remote_output(output: &[u8]) -> ParsedRemoteOutput {
             )
         });
     let runs = parse_remote_run_records(state_bytes);
-    (response, runs, runtime)
+    (response, groups, runs, runtime)
 }
 
 fn parse_remote_run_records(bytes: &[u8]) -> Vec<Result<crate::agent_runs::Observation, String>> {
@@ -2267,6 +2532,7 @@ mod tests {
             HostEvidence {
                 host,
                 agents: self.agents.clone(),
+                groups: Err("group catalog unavailable in fake reader".into()),
                 runs: Vec::new(),
                 runtime: self.runtime.clone(),
             }
@@ -2277,6 +2543,7 @@ mod tests {
             HostEvidence {
                 host,
                 agents: self.agents.clone(),
+                groups: Err("group catalog unavailable in fake reader".into()),
                 runs: Vec::new(),
                 runtime: self.runtime.clone(),
             }
@@ -2322,6 +2589,150 @@ mod tests {
             "revision": 1
         }))
         .unwrap()
+    }
+
+    fn group_catalog(
+        host: &str,
+        target: &str,
+        seed: u8,
+        revision: u64,
+        groups: Vec<crate::groups::GroupRecord>,
+    ) -> GroupCatalog {
+        GroupCatalog {
+            host: host.into(),
+            target: target.into(),
+            local: false,
+            session: Some("agents".into()),
+            socket: Some("/tmp/herdr.sock".into()),
+            state: GroupCatalogState::Fresh,
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: crate::groups::AuthorityId::from_random_bytes([seed; 16]),
+                revision,
+                groups,
+                memberships: Vec::new(),
+            }),
+            error: None,
+        }
+    }
+
+    fn group_record(
+        seed: u8,
+        local: u64,
+        revision: u64,
+        deleted: bool,
+    ) -> crate::groups::GroupRecord {
+        crate::groups::GroupRecord {
+            id: crate::groups::GroupId {
+                owner: crate::groups::AuthorityId::from_random_bytes([seed; 16]),
+                local,
+            },
+            revision,
+            state: if deleted {
+                crate::groups::GroupState::Deleted
+            } else {
+                crate::groups::GroupState::Active {
+                    name: "Work".into(),
+                }
+            },
+        }
+    }
+
+    #[test]
+    fn rejected_catalog_retains_the_last_accepted_snapshot_as_stale() {
+        let previous_catalog = group_catalog(
+            "office",
+            "machine-a",
+            1,
+            2,
+            vec![group_record(1, 1, 2, true)],
+        );
+        let previous = Snapshot {
+            group_catalogs: vec![previous_catalog.clone()],
+            ..Snapshot::default()
+        };
+        let mut incoming = Snapshot {
+            group_catalogs: vec![group_catalog("office", "machine-a", 1, 3, Vec::new())],
+            ..Snapshot::default()
+        };
+
+        incoming.admit_group_catalogs_from(&previous);
+
+        assert_eq!(
+            incoming.group_catalogs[0].snapshot,
+            previous_catalog.snapshot
+        );
+        assert_eq!(incoming.group_catalogs[0].state, GroupCatalogState::Stale);
+        assert!(incoming.group_catalogs[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("lost observed tombstone")));
+    }
+
+    #[test]
+    fn stale_catalog_retention_keys_on_authority_and_connection_not_alias() {
+        let previous_catalog = group_catalog(
+            "office",
+            "machine-a",
+            1,
+            1,
+            vec![group_record(1, 1, 1, false)],
+        );
+        let previous = Snapshot {
+            group_catalogs: vec![previous_catalog.clone()],
+            ..Snapshot::default()
+        };
+        let mut renamed_alias = previous_catalog.clone();
+        renamed_alias.host = "laptop".into();
+        renamed_alias.snapshot = None;
+        renamed_alias.state = GroupCatalogState::Unavailable;
+        renamed_alias.error = Some("offline".into());
+        let mut same_connection = Snapshot {
+            group_catalogs: vec![renamed_alias],
+            ..Snapshot::default()
+        };
+        same_connection.admit_group_catalogs_from(&previous);
+        assert_eq!(
+            same_connection.group_catalogs[0].state,
+            GroupCatalogState::Stale
+        );
+        assert_eq!(
+            same_connection.group_catalogs[0].snapshot,
+            previous_catalog.snapshot
+        );
+
+        let mut repointed = same_connection.clone();
+        repointed.group_catalogs[0].target = "machine-b".into();
+        repointed.group_catalogs[0].snapshot = None;
+        repointed.group_catalogs[0].state = GroupCatalogState::Unavailable;
+        repointed.admit_group_catalogs_from(&previous);
+        assert!(repointed.group_catalogs[0].snapshot.is_none());
+        assert_eq!(
+            repointed.group_catalogs[0].state,
+            GroupCatalogState::Unavailable
+        );
+    }
+
+    #[test]
+    fn duplicate_authority_observations_are_identity_conflicts() {
+        let mut snapshot = Snapshot {
+            group_catalogs: vec![
+                group_catalog("office", "machine-a", 1, 0, Vec::new()),
+                group_catalog("home", "machine-b", 1, 0, Vec::new()),
+            ],
+            ..Snapshot::default()
+        };
+
+        snapshot.admit_group_catalogs_from(&Snapshot::default());
+
+        assert!(snapshot
+            .group_catalogs
+            .iter()
+            .all(|catalog| catalog.state == GroupCatalogState::IdentityConflict));
+        let authority = crate::groups::AuthorityId::from_random_bytes([1; 16]);
+        assert!(snapshot
+            .fresh_group_catalog(&authority)
+            .expect_err("collision cannot be routed")
+            .contains("identity conflict"));
     }
 
     #[test]
@@ -3080,6 +3491,7 @@ mod tests {
             vec![HostEvidence {
                 host: configured_host.clone(),
                 agents: Ok(Vec::new()),
+                groups: Err("group catalog unavailable in run fixture".into()),
                 runs: runs.into_iter().map(Ok).collect(),
                 runtime: HostRuntime::default(),
             }],
@@ -3166,6 +3578,7 @@ mod tests {
             vec![HostEvidence {
                 host: configured_host.clone(),
                 agents: Ok(Vec::new()),
+                groups: Err("group catalog unavailable in run fixture".into()),
                 runs: vec![rejected],
                 runtime: HostRuntime::default(),
             }],
@@ -3224,8 +3637,9 @@ mod tests {
             serde_json::to_vec(&run).unwrap(),
         ]
         .concat();
-        let (agents, runs, runtime) = parse_remote_output(&output);
+        let (agents, groups, runs, runtime) = parse_remote_output(&output);
         assert!(agents.unwrap().is_empty());
+        assert!(groups.is_err());
         assert_eq!(runs.len(), 1);
         assert_eq!(
             runs[0].as_ref().unwrap().state.run_id,
@@ -3263,8 +3677,9 @@ mod tests {
                 REMOTE_RUNS_MARKER.to_vec(),
             ]
             .concat();
-            let (agents, runs, _) = parse_remote_output(&output);
+            let (agents, groups, runs, _) = parse_remote_output(&output);
             assert!(runs.is_empty());
+            assert!(groups.is_err());
             FleetRow::from_agent(
                 "ub1",
                 false,

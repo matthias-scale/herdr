@@ -11,6 +11,8 @@ pub(super) fn run_api_command(args: &[String]) -> std::io::Result<i32> {
     match subcommand {
         "schema" => api_schema(&args[1..]),
         "snapshot" => api_snapshot(&args[1..]),
+        "authority-snapshot" => api_authority_snapshot(&args[1..]),
+        "relay" => api_relay(&args[1..]),
         "help" | "--help" | "-h" => {
             print_api_help();
             Ok(0)
@@ -65,6 +67,29 @@ fn api_snapshot(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
+fn api_authority_snapshot(args: &[String]) -> std::io::Result<i32> {
+    if !args.is_empty() {
+        eprintln!("usage: herdr api authority-snapshot");
+        return Ok(2);
+    }
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:api:authority-snapshot".into(),
+        method: Method::GroupHostSnapshot(EmptyParams::default()),
+    })?)
+}
+
+fn api_relay(args: &[String]) -> std::io::Result<i32> {
+    if !args.is_empty() {
+        eprintln!("usage: herdr api relay");
+        return Ok(2);
+    }
+    let request: Request = serde_json::from_reader(std::io::stdin())?;
+    let response = super::send_request_unchecked(&request)?;
+    println!("{}", serde_json::to_string(&response)?);
+    Ok(0)
+}
+
 fn write_schema_file(path: &std::path::Path) -> std::io::Result<()> {
     std::fs::write(path, API_SCHEMA_JSON)
 }
@@ -99,6 +124,8 @@ fn schema_summary_text() -> std::io::Result<String> {
 fn print_api_help() {
     eprintln!("herdr api commands:");
     eprintln!("  herdr api snapshot");
+    eprintln!("  herdr api authority-snapshot");
+    eprintln!("  herdr api relay < request.json");
     eprintln!("  herdr api schema [--json | --output PATH]");
 }
 

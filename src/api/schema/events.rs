@@ -88,6 +88,8 @@ pub enum Subscription {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_status: Option<AgentStatus>,
     },
+    #[serde(rename = "authority.catalogs_updated")]
+    AuthorityCatalogsUpdated {},
     #[serde(rename = "pane.scroll_changed")]
     PaneScrollChanged { pane_id: String },
     #[serde(rename = "layout.updated")]
@@ -232,6 +234,8 @@ pub enum EventKind {
     PaneExited,
     PaneAgentDetected,
     PaneAgentStatusChanged,
+    #[serde(rename = "authority.catalogs_updated")]
+    AuthorityCatalogsUpdated,
     LayoutUpdated,
 }
 
@@ -268,6 +272,7 @@ impl EventKind {
             EventKind::PaneExited => "pane.exited",
             EventKind::PaneAgentDetected => "pane.agent_detected",
             EventKind::PaneAgentStatusChanged => "pane.agent_status_changed",
+            EventKind::AuthorityCatalogsUpdated => "authority.catalogs_updated",
             EventKind::LayoutUpdated => "layout.updated",
         }
     }
@@ -305,6 +310,7 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneExited,
     EventKind::PaneAgentDetected,
     EventKind::PaneAgentStatusChanged,
+    EventKind::AuthorityCatalogsUpdated,
     EventKind::LayoutUpdated,
 ];
 
@@ -619,6 +625,9 @@ pub enum EventData {
         display_agent: Option<String>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         state_labels: HashMap<String, String>,
+    },
+    AuthorityCatalogsUpdated {
+        catalogs: Vec<super::fleet::AuthorityCatalogInfo>,
     },
     LayoutUpdated {
         layout: super::panes::PaneLayoutSnapshot,

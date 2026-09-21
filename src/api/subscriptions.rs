@@ -180,6 +180,9 @@ impl ActiveSubscription {
             Subscription::PaneAgentDetected {} => {
                 Ok(event_subscription(EventKind::PaneAgentDetected))
             }
+            Subscription::AuthorityCatalogsUpdated {} => {
+                Ok(event_subscription(EventKind::AuthorityCatalogsUpdated))
+            }
             Subscription::LayoutUpdated {} => Ok(event_subscription(EventKind::LayoutUpdated)),
             Subscription::PaneOutputMatched {
                 pane_id,

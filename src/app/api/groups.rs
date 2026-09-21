@@ -1,5 +1,6 @@
 use crate::api::schema::{
-    GroupCreateParams, GroupDeleteParams, GroupRenameParams, PaneGroupSetParams, ResponseResult,
+    AuthorityMutation, AuthorityMutationParams, GroupCreateParams, GroupDeleteParams,
+    GroupRenameParams, PaneGroupSetParams, Request, ResponseResult,
 };
 use crate::app::App;
 use crate::groups::{
@@ -62,6 +63,14 @@ impl App {
     }
 
     pub(super) fn handle_group_rename(&mut self, id: String, params: GroupRenameParams) -> String {
+        if !self.local_group_owner(&params.group_id.owner) {
+            let authority = params.group_id.owner.clone();
+            return self.route_authority_mutation(id, authority, AuthorityMutation::Rename(params));
+        }
+        self.apply_group_rename(id, params)
+    }
+
+    fn apply_group_rename(&mut self, id: String, params: GroupRenameParams) -> String {
         match self
             .group_runtime
             .rename(&params.group_id, &params.name, params.expected_revision)
@@ -74,6 +83,14 @@ impl App {
     }
 
     pub(super) fn handle_group_delete(&mut self, id: String, params: GroupDeleteParams) -> String {
+        if !self.local_group_owner(&params.group_id.owner) {
+            let authority = params.group_id.owner.clone();
+            return self.route_authority_mutation(id, authority, AuthorityMutation::Delete(params));
+        }
+        self.apply_group_delete(id, params)
+    }
+
+    fn apply_group_delete(&mut self, id: String, params: GroupDeleteParams) -> String {
         match self
             .group_runtime
             .delete(&params.group_id, params.expected_revision)
@@ -90,6 +107,63 @@ impl App {
         id: String,
         params: PaneGroupSetParams,
     ) -> String {
+        let local_pane =
+            self.parse_pane_id(&params.pane_id)
+                .and_then(|(workspace_index, pane_id)| {
+                    self.state.workspaces[workspace_index]
+                        .pane_state(pane_id)
+                        .filter(|pane| {
+                            !self
+                                .terminal_runtimes
+                                .get(&pane.attached_terminal_id)
+                                .is_some_and(crate::terminal::TerminalRuntime::is_remote_proxy)
+                        })
+                        .map(|_| (workspace_index, pane_id))
+                });
+        if local_pane.is_none() {
+            let owners = self
+                .state
+                .fleet_snapshot
+                .group_catalogs
+                .iter()
+                .filter(|catalog| {
+                    catalog.snapshot.as_ref().is_some_and(|snapshot| {
+                        snapshot
+                            .memberships
+                            .iter()
+                            .any(|membership| membership.pane_id == params.pane_id)
+                    })
+                })
+                .filter_map(|catalog| catalog.authority_id().cloned())
+                .collect::<Vec<_>>();
+            if owners.len() != 1 {
+                return encode_error(id, "pane_not_found", "pane owner is not uniquely known");
+            }
+            let pane_owner = owners[0].clone();
+            if let Err(message) = self.state.fleet_snapshot.fresh_group_catalog(&pane_owner) {
+                return encode_error(id, "authority_not_fresh", message);
+            }
+            if let Some(group_id) = params.group_id.as_ref() {
+                if let Err(message) = self.validate_group_target(group_id) {
+                    return encode_error(id, "authority_not_fresh", message);
+                }
+            }
+            return self.route_authority_mutation(
+                id,
+                pane_owner,
+                AuthorityMutation::PaneGroupSet(params),
+            );
+        }
+
+        if let Some(group_id) = params.group_id.as_ref() {
+            if let Err(message) = self.validate_group_target(group_id) {
+                return encode_error(id, "authority_not_fresh", message);
+            }
+        }
+        self.apply_pane_group_set(id, params)
+    }
+
+    fn apply_pane_group_set(&mut self, id: String, params: PaneGroupSetParams) -> String {
         if self.no_session {
             return encode_error(
                 id,
@@ -97,22 +171,6 @@ impl App {
                 "pane membership requires session persistence",
             );
         }
-        if let Some(group_id) = params.group_id.as_ref() {
-            let authority = match self.group_runtime.authority() {
-                Ok(authority) => authority,
-                Err(error) => return encode_runtime_error(id, error),
-            };
-            let record = match authority.record(group_id) {
-                Ok(record) => record,
-                Err(error) => {
-                    return encode_runtime_error(id, RuntimeError::Mutation(error));
-                }
-            };
-            if matches!(record.state, GroupState::Deleted) {
-                return encode_error(id, "group_deleted", "group is deleted");
-            }
-        }
-
         let Some((workspace_index, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
@@ -182,6 +240,121 @@ impl App {
                 membership,
             },
         )
+    }
+
+    pub(super) fn handle_group_authority_mutate(
+        &mut self,
+        id: String,
+        params: AuthorityMutationParams,
+    ) -> String {
+        if !params.forwarded {
+            return encode_error(
+                id,
+                "invalid_authority_route",
+                "authority mutation is receiver-only",
+            );
+        }
+        let actual = match self.group_runtime.authority() {
+            Ok(authority) => authority.authority_id().clone(),
+            Err(error) => return encode_runtime_error(id, error),
+        };
+        if actual != params.expected_authority {
+            return encode_error(
+                id,
+                "authority_mismatch",
+                format!(
+                    "expected authority {}, receiver owns {}",
+                    params.expected_authority, actual
+                ),
+            );
+        }
+        match params.mutation {
+            AuthorityMutation::Rename(params) => self.apply_group_rename(id, params),
+            AuthorityMutation::Delete(params) => self.apply_group_delete(id, params),
+            AuthorityMutation::PaneGroupSet(params) => {
+                if let Some(group_id) = params.group_id.as_ref() {
+                    if let Err(message) = self.validate_group_target(group_id) {
+                        return encode_error(id, "authority_not_fresh", message);
+                    }
+                }
+                self.apply_pane_group_set(id, params)
+            }
+        }
+    }
+
+    fn local_group_owner(&self, authority: &crate::groups::AuthorityId) -> bool {
+        self.group_runtime
+            .authority()
+            .is_ok_and(|local| local.authority_id() == authority)
+    }
+
+    fn validate_group_target(&self, group_id: &crate::groups::GroupId) -> Result<(), String> {
+        if self.local_group_owner(&group_id.owner) {
+            let authority = self.group_runtime.authority().map_err(|error| {
+                format!(
+                    "local authority {} is unavailable: {error:?}",
+                    group_id.owner
+                )
+            })?;
+            let record = authority
+                .record(group_id)
+                .map_err(|_| format!("group {group_id:?} is unavailable"))?;
+            return if matches!(record.state, GroupState::Deleted) {
+                Err(format!(
+                    "group authority {} reports a deleted group",
+                    group_id.owner
+                ))
+            } else {
+                Ok(())
+            };
+        }
+
+        let catalog = self
+            .state
+            .fleet_snapshot
+            .fresh_group_catalog(&group_id.owner)?;
+        let record = catalog
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.groups.iter().find(|record| record.id == *group_id))
+            .ok_or_else(|| {
+                format!(
+                    "authority {} does not report the target group",
+                    group_id.owner
+                )
+            })?;
+        if matches!(record.state, GroupState::Deleted) {
+            return Err(format!(
+                "authority {} reports a deleted group",
+                group_id.owner
+            ));
+        }
+        Ok(())
+    }
+
+    fn route_authority_mutation(
+        &self,
+        id: String,
+        authority: crate::groups::AuthorityId,
+        mutation: AuthorityMutation,
+    ) -> String {
+        let catalog = match self.state.fleet_snapshot.fresh_group_catalog(&authority) {
+            Ok(catalog) => catalog.clone(),
+            Err(message) => return encode_error(id, "authority_not_fresh", message),
+        };
+        let request = Request {
+            id: id.clone(),
+            method: crate::api::schema::Method::GroupAuthorityMutate(AuthorityMutationParams {
+                expected_authority: authority,
+                forwarded: true,
+                mutation,
+            }),
+        };
+        match crate::fleet::route_api_request(&catalog, &request, std::time::Duration::from_secs(5))
+        {
+            Ok(response) => response,
+            Err(error) => encode_error(id, "authority_unreachable", error),
+        }
     }
 }
 
@@ -681,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn local_mutations_reject_a_foreign_group_identity() {
+    fn foreign_mutations_name_the_authority_when_no_fresh_route_exists() {
         let (mut app, _dir, pane_public_id) = app_with_groups("foreign-mutation");
         let other_dir = TestDir::new("foreign-owner");
         let other = crate::groups::Runtime::load(&other_dir.0);
@@ -710,7 +883,7 @@ mod tests {
                 "assign".into(),
                 PaneGroupSetParams {
                     pane_id: pane_public_id,
-                    group_id: Some(foreign_id),
+                    group_id: Some(foreign_id.clone()),
                     expected_revision: 0,
                 },
             ),
@@ -718,7 +891,108 @@ mod tests {
 
         for response in responses {
             let response: serde_json::Value = serde_json::from_str(&response).unwrap();
-            assert_eq!(response["error"]["code"], "group_not_owned");
+            assert_eq!(response["error"]["code"], "authority_not_fresh");
+            assert!(response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(foreign_id.owner.as_str())));
         }
+    }
+
+    #[test]
+    fn receiver_only_mutation_rejects_a_second_forward() {
+        let (mut app, _dir, _) = app_with_groups("receiver-only");
+        let authority = app
+            .group_runtime
+            .authority()
+            .expect("local authority")
+            .authority_id()
+            .clone();
+        let response: serde_json::Value = serde_json::from_str(&app.handle_group_authority_mutate(
+            "forward".into(),
+            AuthorityMutationParams {
+                expected_authority: authority,
+                forwarded: false,
+                mutation: AuthorityMutation::Delete(GroupDeleteParams {
+                    group_id: GroupId {
+                        owner: crate::groups::AuthorityId::from_random_bytes([3; 16]),
+                        local: 1,
+                    },
+                    expected_revision: 1,
+                }),
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(response["error"]["code"], "invalid_authority_route");
+    }
+
+    #[test]
+    fn clearing_a_reachable_local_pane_ignores_foreign_catalog_freshness() {
+        let (mut app, _dir, pane_public_id) = app_with_groups("clear-stale-foreign");
+        let foreign = GroupId {
+            owner: crate::groups::AuthorityId::from_random_bytes([4; 16]),
+            local: 1,
+        };
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.workspaces[0]
+            .pane_state_mut(pane_id)
+            .expect("local pane")
+            .group_membership = PaneGroupMembership {
+            group_id: Some(foreign),
+            revision: 7,
+        };
+
+        let response = app.handle_pane_group_set(
+            "clear".into(),
+            PaneGroupSetParams {
+                pane_id: pane_public_id,
+                group_id: None,
+                expected_revision: 7,
+            },
+        );
+
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+            "clearing a reachable pane must not need the old group owner: {response}"
+        );
+    }
+
+    #[test]
+    fn clearing_a_remote_pane_names_its_stale_owner() {
+        let (mut app, _dir, _) = app_with_groups("clear-stale-pane-owner");
+        let pane_owner = crate::groups::AuthorityId::from_random_bytes([5; 16]);
+        app.state.fleet_snapshot.group_catalogs = vec![crate::fleet::GroupCatalog {
+            host: "remote".into(),
+            target: "remote".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Stale,
+            snapshot: Some(GroupAuthoritySnapshot {
+                authority_id: pane_owner.clone(),
+                revision: 0,
+                groups: Vec::new(),
+                memberships: vec![OwnedPaneMembership {
+                    pane_id: "remote-pane".into(),
+                    membership: PaneGroupMembership::default(),
+                }],
+            }),
+            error: Some("offline".into()),
+        }];
+
+        let response: serde_json::Value = serde_json::from_str(&app.handle_pane_group_set(
+            "clear".into(),
+            PaneGroupSetParams {
+                pane_id: "remote-pane".into(),
+                group_id: None,
+                expected_revision: 0,
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(response["error"]["code"], "authority_not_fresh");
+        assert!(response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(pane_owner.as_str())));
     }
 }
