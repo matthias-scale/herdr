@@ -1154,6 +1154,178 @@ fn url_domain(url: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn collected_links(mut batches: Vec<ExtractedAgentLinks>) -> ExtractedAgentLinks {
+        let mut output_urls = Vec::new();
+        let mut osc8_urls = Vec::new();
+        for batch in &mut batches {
+            output_urls.append(&mut batch.output_urls);
+            osc8_urls.append(&mut batch.osc8_urls);
+        }
+        output_urls.sort_unstable();
+        output_urls.dedup();
+        osc8_urls.sort_unstable();
+        osc8_urls.dedup();
+        ExtractedAgentLinks {
+            output_urls,
+            osc8_urls,
+        }
+    }
+
+    fn reader_visible_link_oracle(bytes: &[u8]) -> ExtractedAgentLinks {
+        #[derive(Default)]
+        enum State {
+            #[default]
+            Visible,
+            Escape,
+            Charset,
+            Csi,
+            Osc {
+                content: Vec<u8>,
+                escaped: bool,
+            },
+        }
+
+        fn finish_osc(content: &[u8], osc8_urls: &mut Vec<String>) {
+            let Some(rest) = content.strip_prefix(b"8;") else {
+                return;
+            };
+            let Some(separator) = rest.iter().position(|byte| *byte == b';') else {
+                return;
+            };
+            osc8_urls.extend(extract_urls(&String::from_utf8_lossy(
+                &rest[separator + 1..],
+            )));
+        }
+
+        let mut state = State::Visible;
+        let mut visible = Vec::new();
+        let mut osc8_urls = Vec::new();
+        for byte in bytes.iter().copied() {
+            state = match state {
+                State::Visible if byte == b'\x1b' => State::Escape,
+                State::Visible => {
+                    visible.push(byte);
+                    State::Visible
+                }
+                State::Escape => match byte {
+                    b'[' => State::Csi,
+                    b']' => State::Osc {
+                        content: Vec::new(),
+                        escaped: false,
+                    },
+                    b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => State::Charset,
+                    _ => State::Visible,
+                },
+                State::Charset => State::Visible,
+                State::Csi if (0x40..=0x7e).contains(&byte) => State::Visible,
+                State::Csi => State::Csi,
+                State::Osc {
+                    content,
+                    escaped: true,
+                } if byte == b'\\' || byte == b'\x07' => {
+                    finish_osc(&content, &mut osc8_urls);
+                    State::Visible
+                }
+                State::Osc {
+                    mut content,
+                    escaped: true,
+                } => {
+                    if byte != b'\x1b' {
+                        content.push(byte);
+                    }
+                    State::Osc {
+                        content,
+                        escaped: byte == b'\x1b',
+                    }
+                }
+                State::Osc {
+                    content,
+                    escaped: false,
+                } if byte == b'\x07' => {
+                    finish_osc(&content, &mut osc8_urls);
+                    State::Visible
+                }
+                State::Osc {
+                    content,
+                    escaped: false,
+                } if byte == b'\x1b' => State::Osc {
+                    content,
+                    escaped: true,
+                },
+                State::Osc {
+                    mut content,
+                    escaped: false,
+                } => {
+                    content.push(byte);
+                    State::Osc {
+                        content,
+                        escaped: false,
+                    }
+                }
+            };
+        }
+
+        let mut output_urls = extract_urls(&String::from_utf8_lossy(&visible));
+        output_urls.sort_unstable();
+        output_urls.dedup();
+        osc8_urls.sort_unstable();
+        osc8_urls.dedup();
+        ExtractedAgentLinks {
+            output_urls,
+            osc8_urls,
+        }
+    }
+
+    fn generated_terminal_stream(seed: u64) -> Vec<u8> {
+        let mut pieces = vec![
+            format!("title-before\x1b]0;ignore https://hidden-{seed}.example/path\x07title-after ")
+                .into_bytes(),
+            format!(
+                "h\x1b[3{}mttps://visible-{seed}.example/pa\x1b(Bth ",
+                seed % 8
+            )
+            .into_bytes(),
+            format!("\x1b]8;;https://osc-{seed}.example/target\x1b\\label-{seed}\x1b]8;;\x1b\\ ")
+                .into_bytes(),
+        ];
+        let mut random = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        for index in (1..pieces.len()).rev() {
+            random = random
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            pieces.swap(index, random as usize % (index + 1));
+        }
+        pieces
+            .into_iter()
+            .flatten()
+            .chain(b"\n".iter().copied())
+            .collect()
+    }
+
+    fn scan_with_generated_splits(bytes: &[u8], seed: u64) -> ExtractedAgentLinks {
+        let gate = LinkExtractionGate::default();
+        let mut batches = Vec::new();
+        let mut offset = 0;
+        let mut random = seed;
+        while offset < bytes.len() {
+            random = random
+                .wrapping_mul(2_862_933_555_777_941_757)
+                .wrapping_add(3_037_000_493);
+            let end = (offset + 1 + random as usize % 17).min(bytes.len());
+            gate.observe_chunk(&bytes[offset..end]);
+            offset = end;
+            if random & 3 == 0 {
+                if let Some(batch) = gate.take_links() {
+                    batches.push(batch);
+                }
+            }
+        }
+        if let Some(batch) = gate.take_links() {
+            batches.push(batch);
+        }
+        collected_links(batches)
+    }
+
     #[test]
     fn report_round_trips_goal_status_tasks_and_subagents() {
         let pane_id = PaneId::from_raw(7);
@@ -1616,6 +1788,147 @@ mod tests {
 
         let links = gate.take_links().expect("styled link extraction");
         assert_eq!(links.output_urls, vec!["https://styled.example.test/path"]);
+    }
+
+    #[test]
+    fn round_10_styled_scheme_preserves_prefix_across_detection_cycle() {
+        let styled = LinkExtractionGate::default();
+        styled.observe_chunk(b"h\x1b[31mttps:");
+        assert!(styled.take_links().is_none());
+        styled.observe_chunk(b"//styled-scheme.example/path\n");
+        assert_eq!(
+            styled.take_links().expect("styled scheme URL").output_urls,
+            vec!["https://styled-scheme.example/path"]
+        );
+    }
+
+    #[test]
+    fn round_10_non_hyperlink_osc_hides_embedded_url() {
+        let hidden = LinkExtractionGate::default();
+        hidden.observe_chunk(
+            b"\x1b]0;title https://hidden.example/path\x07https://visible.example/path\n",
+        );
+        assert_eq!(
+            hidden
+                .take_links()
+                .expect("visible URL after title")
+                .output_urls,
+            vec!["https://visible.example/path"]
+        );
+    }
+
+    #[test]
+    fn round_10_unicode_whitespace_terminates_output_url() {
+        let gate = LinkExtractionGate::default();
+        gate.observe_chunk("https://unicode.example/path\u{00a0}next words\n".as_bytes());
+
+        assert_eq!(
+            gate.take_links()
+                .expect("URL before non-breaking space")
+                .output_urls,
+            vec!["https://unicode.example/path"]
+        );
+    }
+
+    #[test]
+    fn round_10_punctuated_maximum_length_url_is_published() {
+        let prefix = "https://maximum.example/";
+        let url = format!("{prefix}{}", "a".repeat(MAX_URL_BYTES - prefix.len()));
+        let gate = LinkExtractionGate::default();
+        gate.observe_chunk(format!("{url}.\n").as_bytes());
+
+        assert_eq!(
+            gate.take_links()
+                .expect("punctuated maximum-length URL")
+                .output_urls,
+            vec![url]
+        );
+    }
+
+    #[test]
+    fn round_10_link_queue_evicts_oldest_observation_before_store() {
+        let pane_id = PaneId::from_raw(99);
+        let base = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
+        let mut ordered_store = AgentStateStore::default();
+        for index in 0..=MAX_LINKS {
+            ordered_store.observe_links(
+                pane_id,
+                [format!("https://store-order.example/{index:03}")],
+                AgentLinkSource::Output,
+                base + std::time::Duration::from_secs(index as u64),
+            );
+        }
+        let ordered = ordered_store.snapshot(pane_id, AgentStatus::Idle).links;
+        assert_eq!(ordered.len(), MAX_LINKS);
+        assert!(!ordered
+            .iter()
+            .any(|link| link.url == "https://store-order.example/000"));
+        assert!(ordered
+            .iter()
+            .any(|link| link.url == format!("https://store-order.example/{MAX_LINKS:03}")));
+
+        let mut stream = Vec::new();
+        for index in 0..MAX_LINKS {
+            stream.extend_from_slice(format!("https://z-old.example/{index:03}\n").as_bytes());
+        }
+        let newest = "https://a-newest.example/path";
+        stream.extend_from_slice(format!("{newest}\n").as_bytes());
+
+        let gate = LinkExtractionGate::default();
+        gate.observe_chunk(&stream);
+        let extracted = gate.take_links().expect("bounded URL batch");
+        assert_eq!(extracted.output_urls.len(), MAX_LINKS);
+        assert!(extracted.output_urls.iter().any(|url| url == newest));
+        assert!(!extracted
+            .output_urls
+            .iter()
+            .any(|url| url == "https://z-old.example/000"));
+
+        let mut batch_store = AgentStateStore::default();
+        batch_store.observe_links(
+            pane_id,
+            extracted.output_urls,
+            AgentLinkSource::Output,
+            base,
+        );
+        let stored = batch_store.snapshot(pane_id, AgentStatus::Idle).links;
+        assert!(stored.iter().any(|link| link.url == newest));
+        assert!(!stored
+            .iter()
+            .any(|link| link.url == "https://z-old.example/000"));
+    }
+
+    #[test]
+    fn round_10_unmatched_suffix_trimming_is_linear_enough_for_pty_ingest() {
+        let prefix = "https://suffix.example/";
+        let url = format!("{prefix}{}", ")".repeat(MAX_URL_BYTES - prefix.len()));
+        let gate = LinkExtractionGate::default();
+        let started = std::time::Instant::now();
+        gate.observe_chunk(format!("{url}\n").as_bytes());
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "trimming one 8 KiB unmatched suffix took {elapsed:?}"
+        );
+        assert!(gate.take_links().is_some());
+    }
+
+    #[test]
+    fn round_10_generated_terminal_interleavings_match_reader_visible_oracle() {
+        for seed in 0..32 {
+            let stream = generated_terminal_stream(seed);
+            let expected = reader_visible_link_oracle(&stream);
+
+            let one_piece = LinkExtractionGate::default();
+            one_piece.observe_chunk(&stream);
+            let one_piece = collected_links(one_piece.take_links().into_iter().collect());
+            assert_eq!(one_piece, expected, "one-piece input, seed {seed}");
+
+            let chunked = scan_with_generated_splits(&stream, seed + 1);
+            assert_eq!(chunked, one_piece, "chunked detection cycles, seed {seed}");
+            assert_eq!(chunked, expected, "reader-visible oracle, seed {seed}");
+        }
     }
 
     #[test]
