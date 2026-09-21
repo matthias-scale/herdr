@@ -3948,7 +3948,10 @@ mod tests {
             .map(|finding| finding.stable_id.as_str())
             .collect();
         assert_eq!(ids, vec!["keep-1"], "only pending findings cross the wire");
-        assert!(data.loops.is_empty(), "a missing runs directory reads empty");
+        assert!(
+            data.loops.is_empty(),
+            "a missing runs directory reads empty"
+        );
         std::fs::remove_dir_all(root).expect("remove aloop script fixture");
     }
 
