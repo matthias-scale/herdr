@@ -3906,6 +3906,52 @@ mod tests {
         std::fs::remove_dir_all(root).expect("remove output-budget fixture");
     }
 
+    /// The generated producer script is POSIX shell run on the remote host, so
+    /// a hypothetical about `find`, empty globs, or a missing store is only
+    /// settled by running it. This executes the real script against a fixture
+    /// home with no runs directory at all.
+    #[cfg(unix)]
+    #[test]
+    fn remote_aloop_script_filters_launched_findings_and_survives_a_missing_store() {
+        let root = run_fixture_dir("aloop-script-shell");
+        let findings = root.join(crate::aloop::FINDINGS_RELATIVE_DIR);
+        std::fs::create_dir_all(&findings).expect("create findings");
+        std::fs::write(
+            findings.join("nightly-pending.json"),
+            r#"{"loop":"nightly","source":"sentry","stable_id":"keep-1","title":"pending title","url":null,"evidence":"evidence","prompt":"prompt","created_at":"2026-09-18T09:50:00Z","status":"pending"}"#,
+        )
+        .expect("write pending finding");
+        std::fs::write(
+            findings.join("nightly-launched.json"),
+            r#"{"loop":"nightly","source":"sentry","stable_id":"drop-1","title":"launched title","url":null,"evidence":"evidence","prompt":"prompt","created_at":"2026-09-18T09:51:00Z","status":"launched"}"#,
+        )
+        .expect("write launched finding");
+        let fake_ssh = root.join("ssh");
+        write_executable(
+            &fake_ssh,
+            &format!(
+                "#!/bin/sh\nHOME={} exec /bin/sh\n",
+                shell_quote(&root.display().to_string()),
+            ),
+        );
+        let output = run_ssh_program_with_timeout(
+            &fake_ssh,
+            "fixture",
+            &remote_aloop_read_script(None, None),
+            Duration::from_secs(10),
+        )
+        .expect("script must exit cleanly without a runs directory");
+        let data = parse_remote_aloop_output(&output).expect("aloop marker present");
+        let ids: Vec<&str> = data
+            .findings
+            .iter()
+            .map(|finding| finding.stable_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["keep-1"], "only pending findings cross the wire");
+        assert!(data.loops.is_empty(), "a missing runs directory reads empty");
+        std::fs::remove_dir_all(root).expect("remove aloop script fixture");
+    }
+
     #[test]
     fn blocked_rows_sort_before_working_rows() {
         let mut blocked = FleetRow::from_agent(
