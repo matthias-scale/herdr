@@ -1120,6 +1120,10 @@ impl App {
             &plan.directory,
         );
 
+        if plan.remote.is_some() {
+            return self.start_home_checkout(plan);
+        }
+
         match plan.workspace {
             crate::app::home::HomeWorkspace::NewWorktree => self.start_home_worktree_add(plan),
             crate::app::home::HomeWorkspace::CurrentCheckout
@@ -6176,6 +6180,53 @@ async fn wait_for_custom_command_reap(app: &mut App, pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_dispatch_starts_on_the_plans_remote_machine() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.home = Some(crate::app::home::HomeState::default());
+        let plan = crate::app::home::HomeDispatchPlan {
+            agent: crate::detect::Agent::Codex,
+            model: "gpt-5.6-sol".into(),
+            effort: Some("high".into()),
+            directory: std::env::temp_dir(),
+            workspace: crate::app::home::HomeWorkspace::CurrentCheckout,
+            git_ref: None,
+            pr: None,
+            ticket: None,
+            missive: None,
+            work_context_patch: crate::work_context::PaneWorkContextPatch::default(),
+            target: crate::app::home::HomeTarget::NewSpace,
+            prompt: "repair the pending finding".into(),
+            argv: vec!["agent-that-must-not-start-locally".into()],
+            env: Vec::new(),
+            remote: Some(crate::app::machines::Machine {
+                name: "producer".into(),
+                target: Some("--invalid-target".into()),
+                socket: Some("/run/herdr-producer.sock".into()),
+            }),
+        };
+
+        app.dispatch_home_plan(plan.clone())
+            .expect("remote dispatch should start");
+
+        assert!(app.state.workspaces.is_empty(), "must not launch locally");
+        assert_eq!(
+            app.state
+                .home
+                .as_ref()
+                .and_then(|home| home.pending_dispatch.as_ref()),
+            Some(&plan),
+            "the producer-host launch must remain pending"
+        );
+    }
 
     fn hidden_sidebar_config_app() -> App {
         let mut env = crate::config::TestConfigEnvGuard::acquire();
