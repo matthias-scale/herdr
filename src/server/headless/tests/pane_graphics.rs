@@ -381,6 +381,176 @@ async fn p3_pixel_mouse_uses_the_originating_clients_committed_pomodoro_gate() {
     assert!(server.app.state.pomodoro.send_off.is_none());
 }
 
+fn promoted_agent_link_fixture(
+    pixel_mouse: bool,
+) -> (
+    HeadlessServer,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+    (u16, u16),
+    String,
+) {
+    let mut server = test_headless_server();
+    server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("agent-links")];
+    server.app.state.active = Some(0);
+    server.app.state.selected = 0;
+    server.app.state.ensure_test_terminals();
+    let pane_id = server.app.state.workspaces[0].focused_pane_id().unwrap();
+    let terminal_id = server.app.state.workspaces[0]
+        .terminal_id(pane_id)
+        .unwrap()
+        .clone();
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(&terminal_id)
+        .unwrap()
+        .set_detected_state(
+            Some(crate::detect::Agent::Codex),
+            crate::detect::AgentState::Working,
+        );
+    for index in 0..30 {
+        server.app.state.agent_states.observe_links(
+            pane_id,
+            [format!("https://github.com/owner/repo/pull/{index}")],
+            crate::agent_state::AgentLinkSource::Output,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_760_000_000 + index),
+        );
+    }
+    server.app.state.notepad.enabled = true;
+    server.app.state.notepad.height = 12;
+    server.app.state.notepad.agent_tab = true;
+    server.app.state.notepad.agent_collapsed.links = true;
+    server.app.state.notepad.agent_scroll = 0;
+    server.app.state.mouse_capture = true;
+
+    let cell_size = crate::kitty_graphics::HostCellSize {
+        width_px: 10,
+        height_px: 20,
+    };
+    let (first_writer, _first_control, _first_render) = test_client_writer();
+    let mut first = ClientConnection::new(
+        (120, 30),
+        cell_size,
+        crate::terminal_theme::TerminalTheme::default(),
+        Some(true),
+        2,
+        RenderEncoding::SemanticFrame,
+        Some(first_writer),
+    );
+    first.notepad_presentation.agent_tab = true;
+    first.notepad_presentation.agent_collapsed.links = true;
+    let (second_writer, second_control, _second_render) = test_client_writer();
+    let mut second = ClientConnection::new(
+        (80, 30),
+        cell_size,
+        crate::terminal_theme::TerminalTheme::default(),
+        Some(true),
+        1,
+        RenderEncoding::SemanticFrame,
+        Some(second_writer),
+    );
+    second.notepad_presentation.agent_tab = true;
+    second.notepad_presentation.agent_collapsed.status = true;
+    second.notepad_presentation.agent_scroll = 4;
+    second.pixel_mouse = pixel_mouse;
+    second.host_sgr_pixels_active = pixel_mouse.then_some(true);
+    server.clients.insert(1, first);
+    server.clients.insert(2, second);
+    server.foreground_client_id = Some(1);
+    server.sync_foreground_client_state();
+
+    let mut promoted_presentation = server.clients[&2].notepad_presentation.clone();
+    server
+        .app
+        .state
+        .notepad
+        .swap_presentation(&mut promoted_presentation);
+    crate::ui::compute_view(&mut server.app.state, Rect::new(0, 0, 80, 30));
+    let body = crate::ui::notepad::notepad_body_rect(server.app.state.view.notepad_rect);
+    let (row, expected) = server
+        .app
+        .state
+        .view
+        .notepad_agent_rows
+        .iter()
+        .enumerate()
+        .find_map(|(row, item)| match &item.action {
+            crate::ui::notepad_agent::NotepadAgentAction::CopyLink(url) => {
+                Some((row, url.clone()))
+            }
+            _ => None,
+        })
+        .expect("promoted client has a visible link");
+    let click = (body.x, body.y + row as u16);
+    server
+        .app
+        .state
+        .notepad
+        .swap_presentation(&mut promoted_presentation);
+    crate::ui::compute_view(&mut server.app.state, Rect::new(0, 0, 120, 30));
+    assert!(server.app.state.view.notepad_agent_rows.iter().all(|row| {
+        !matches!(
+            row.action,
+            crate::ui::notepad_agent::NotepadAgentAction::CopyLink(_)
+        )
+    }));
+
+    if pixel_mouse {
+        set_graphics_layer(&mut server, pane_id, vec![1]);
+    }
+    (server, second_control, click, expected)
+}
+
+fn assert_promoted_client_first_link_click(pixel_mouse: bool) {
+    let (mut server, control_rx, (column, row), expected) =
+        promoted_agent_link_fixture(pixel_mouse);
+    let changed = if pixel_mouse {
+        let geometry = crate::input::mouse::HostGeometry::new(80, 30, 800, 600).unwrap();
+        let x = u32::from(column) * 10 + 1;
+        let y = u32::from(row) * 20 + 1;
+        server.handle_server_event(ServerEvent::ClientInputPixels {
+            client_id: 2,
+            data: format!("\x1b[<0;{x};{y}M").into_bytes(),
+            geometry,
+        })
+    } else {
+        server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 2,
+            events: vec![crate::protocol::ClientInputEvent::Mouse {
+                kind: crate::protocol::ClientMouseKind::Down(
+                    crate::protocol::ClientMouseButton::Left,
+                ),
+                column,
+                row,
+                modifiers: 0,
+            }],
+        })
+    };
+
+    assert!(changed);
+    assert_eq!(server.foreground_client_id, Some(2));
+    assert!(server.app.apply_notepad_request(), "pixel_mouse={pixel_mouse}");
+    assert!(server.drain_all_internal_events_with_forwarding());
+    match read_server_message(
+        control_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("promoted client clipboard write"),
+    ) {
+        ServerMessage::Clipboard { data } => assert_eq!(
+            data,
+            base64::engine::general_purpose::STANDARD.encode(expected.as_bytes())
+        ),
+        other => panic!("expected clipboard write, got {other:?}"),
+    }
+}
+
+#[test]
+fn first_promoted_client_link_click_uses_its_geometry_on_both_mouse_paths() {
+    assert_promoted_client_first_link_click(false);
+    assert_promoted_client_first_link_click(true);
+}
+
 #[test]
 fn direct_eligibility_is_installed_with_the_client_connection() {
     let mut server = test_headless_server();

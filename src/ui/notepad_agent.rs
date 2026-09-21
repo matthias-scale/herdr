@@ -716,6 +716,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn agent_age_older_than_monotonic_clock_does_not_schedule_refresh() {
+        let (mut app, pane_id) = app_with_agent();
+        app.agent_states
+            .report(
+                pane_id,
+                AgentReportPayload {
+                    status_text: None,
+                    goal: None,
+                    tasks: None,
+                    subagents: Vec::new(),
+                },
+                SystemTime::UNIX_EPOCH,
+            )
+            .expect("valid report");
+        app.notepad.select_agent_tab();
+
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
+        app.view.visible_agent_activity_instants.clear();
+
+        assert_eq!(
+            app.next_agent_activity_age_change(app.view_observed_at),
+            None,
+            "an age older than host uptime cannot use a monotonic refresh deadline"
+        );
+    }
+
     /// UI4: links group by domain, newest last_seen first at both levels, and
     /// each row shows only a short label while the action carries the full URL.
     #[test]
