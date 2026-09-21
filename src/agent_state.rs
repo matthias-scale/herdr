@@ -849,7 +849,14 @@ impl LinkStreamScanner {
             // candidate contains wider/combining glyphs or crossed a wrap,
             // do not guess Ghostty's width rules; discard it instead.
             let overflowed = overflowed || !bytes.is_ascii() || cursor_column < bytes.len();
-            let start_column = cursor_column.saturating_sub(bytes.len());
+            let start_column = if bytes.is_empty() {
+                match motion {
+                    ParsedCursorMotion::Backspace => cursor_column.saturating_sub(1),
+                    ParsedCursorMotion::CarriageReturn => 0,
+                }
+            } else {
+                cursor_column.saturating_sub(bytes.len())
+            };
             RenderedRewrite {
                 bytes,
                 start_column,

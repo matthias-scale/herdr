@@ -4687,6 +4687,13 @@ mod tests {
                 "X",
                 "Xttps://bad.example/path",
             ),
+            (
+                "carriage return after non-candidate text",
+                b"progress 42%\rhttps://example.com/path visible-after-progress\n".as_slice(),
+                "https://example.com/path",
+                "visible-after-progress",
+                "progress 42%",
+            ),
         ] {
             for split in 0..=stream.len() {
                 let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
