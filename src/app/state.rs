@@ -1054,11 +1054,22 @@ pub struct TabCardArea {
 /// Per-view narrowing for work-item projections. This remains TUI-only state:
 /// provider observations are shared runtime facts, while each attached client
 /// chooses its own filters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SidebarMachineScope {
+    #[serde(rename = "this_machine")]
+    ThisMachine,
+    #[serde(rename = "all_machines")]
+    #[default]
+    AllMachines,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub(crate) struct SidebarWorkFilter {
     /// Persisted row-search query shared by every sidebar view.
     pub(crate) query: String,
+    /// Whether the sidebar includes remote fleet sessions in its body.
+    pub(crate) machine_scope: SidebarMachineScope,
     /// Id of the `[[projects]]` entry the sidebar is scoped to. `None` shows
     /// every project, which is what an unconfigured Herdr always shows.
     pub(crate) project: Option<String>,
@@ -1246,6 +1257,7 @@ impl Default for SidebarWorkFilter {
     fn default() -> Self {
         Self {
             query: String::new(),
+            machine_scope: SidebarMachineScope::default(),
             project: None,
             team: Some("SCA".into()),
             assignee: Some("me".into()),

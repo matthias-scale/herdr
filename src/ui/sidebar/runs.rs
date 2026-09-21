@@ -10,9 +10,9 @@ use ratatui::{
 
 use super::{
     compact_dot_for_state, compact_row_widths, pad_left, pad_right, section_is_collapsed,
-    sidebar_row_gap, sidebar_row_height, sidebar_rows, workspace_list_body_rect,
-    workspace_list_rect_for_app, SidebarRow, RUNS_SECTION_TITLE, SIDEBAR_AGE_FIELD_WIDTH,
-    SIDEBAR_DOT_FIELD_WIDTH,
+    short_fleet_host_name, sidebar_row_gap, sidebar_row_height, sidebar_rows,
+    workspace_list_body_rect, workspace_list_rect_for_app, SidebarHostCount, SidebarRow,
+    RUNS_SECTION_TITLE, SIDEBAR_AGE_FIELD_WIDTH, SIDEBAR_DOT_FIELD_WIDTH,
 };
 use crate::app::AppState;
 use crate::detect::AgentState;
@@ -34,6 +34,15 @@ pub(super) fn append_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
     rows.push(SidebarRow::SectionHeader {
         title: RUNS_SECTION_TITLE,
         count: projection.active_count,
+        host_counts: projection
+            .hosts
+            .iter()
+            .filter(|host| host.active_count > 0)
+            .map(|host| SidebarHostCount {
+                host: short_fleet_host_name(&host.name),
+                count: host.active_count,
+            })
+            .collect(),
         collapsed,
     });
     if collapsed {
@@ -47,7 +56,7 @@ pub(super) fn append_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
             action_key: None,
             sort_key: None,
             sort_mode: crate::app::state::SidebarSortMode::Default,
-            title: host.name.clone(),
+            title: short_fleet_host_name(&host.name),
             count: host.active_count,
             collapsed,
             dim: false,

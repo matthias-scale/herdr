@@ -2127,6 +2127,7 @@ fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
     let mut remote = state
         .remote_agent_panel_entries
         .iter()
+        .filter(|entry| entry.snoozed_until.is_none())
         .map(|entry| {
             (
                 BlockedPaneTarget::Remote(entry.agent_ref.clone()),
@@ -4196,6 +4197,7 @@ mod tests {
         let mut state = AppState::test_new();
         state.remote_agent_panel_entries = crate::ui::remote_agent_panel_entries_at(&snapshot, 100);
         state.view_observed_unix_s = 100;
+        state.collapsed_sidebar_groups.remove("repo:Fleet");
 
         let targets = blocked_pane_cycle(&state)
             .into_iter()
@@ -4229,7 +4231,8 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), remote),
         )];
-        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 10));
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 30));
         app.execute_tui_navigate_action(NavigateAction::NextBlockedWindow, ActionContext::Prefix);
 
         assert_eq!(active_window(&app.state), original_window);
