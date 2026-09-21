@@ -52,6 +52,9 @@ pub(super) fn append_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
     rows.push(SidebarRow::SectionHeader {
         title: ALOOPS_SECTION_TITLE,
         count: projection.pending_count,
+        // The Aloops section reads one producer host, so it carries no
+        // per-host breakdown the way the Fleet section does.
+        host_counts: Vec::new(),
         collapsed,
     });
     if collapsed {
@@ -479,6 +482,7 @@ mod tests {
                 title,
                 count,
                 collapsed,
+                ..
             } if title == ALOOPS_SECTION_TITLE => Some((count, collapsed)),
             _ => None,
         })
