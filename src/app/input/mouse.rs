@@ -4134,6 +4134,7 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), entry),
         )];
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let row =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
@@ -4193,6 +4194,7 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), entry),
         )];
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
         app.state.set_server_mode(Mode::Navigate);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
@@ -4289,6 +4291,7 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
         )];
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let row =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
@@ -4354,6 +4357,7 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), entry),
         )];
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
         app.state.sidebar_collapsed = true;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let (content, _, _) = crate::ui::collapsed_sidebar_sections(app.state.view.sidebar_rect);
@@ -4396,6 +4400,7 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
         )];
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let row =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
@@ -4448,7 +4453,8 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref, entry),
         )];
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 60));
         let row =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
                 .into_iter()
@@ -4513,6 +4519,7 @@ mod tests {
                 ))
             })
             .collect();
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
         let rows =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect);
