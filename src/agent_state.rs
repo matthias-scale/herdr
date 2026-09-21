@@ -1231,6 +1231,22 @@ impl RenderedRewrite {
             self.fail_closed();
             return;
         }
+        let clear_mask = match shift.operation {
+            ParsedCellShiftOperation::Erase => match shift.clear_mask.as_deref() {
+                Some(mask) if mask.len() == usize::from(count).div_ceil(8) => Some(mask),
+                _ => {
+                    self.fail_closed();
+                    return;
+                }
+            },
+            ParsedCellShiftOperation::Insert | ParsedCellShiftOperation::Delete => {
+                if shift.clear_mask.is_some() {
+                    self.fail_closed();
+                    return;
+                }
+                None
+            }
+        };
 
         let cells = std::mem::take(&mut self.known_cells);
         for (column, byte) in cells {
@@ -1249,7 +1265,12 @@ impl RenderedRewrite {
                         column.checked_sub(count)
                     }
                 }
-                ParsedCellShiftOperation::Erase if column >= start && column < end => None,
+                ParsedCellShiftOperation::Erase if column >= start && column < end => {
+                    let offset = usize::from(column - start);
+                    let cleared =
+                        clear_mask.is_some_and(|mask| mask[offset / 8] & (1 << (offset % 8)) != 0);
+                    (!cleared).then_some(column)
+                }
                 _ => Some(column),
             };
             if let Some(column) = transformed {

@@ -4995,6 +4995,54 @@ mod tests {
             }
         }
 
+        let protected_url = "https://protected.example/path";
+        let recovery_url = "https://after-protected.example/path";
+        for (label, protection, erase) in [
+            (
+                "protected ECH",
+                true,
+                format!("\x1b[{}X", protected_url.len()),
+            ),
+            (
+                "unprotected ECH",
+                false,
+                format!("\x1b[{}X", protected_url.len()),
+            ),
+            ("protected EL", true, "\x1b[0K".to_owned()),
+            ("unprotected EL", false, "\x1b[0K".to_owned()),
+        ] {
+            let protected_start = if protection { "\x1bV" } else { "" };
+            let protected_end = if protection { "\x1bW" } else { "" };
+            let stream = format!(
+                "{protected_start}{protected_url}{protected_end}\x1b[{}D{erase}\n{recovery_url}\n",
+                protected_url.len()
+            );
+            for split in 0..=stream.len() {
+                let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+                let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+                runtime.terminal.install_link_extraction(gate.clone());
+                runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+                runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+                let rendered = runtime.visible_text();
+                assert_eq!(
+                    rendered.contains(protected_url),
+                    protection,
+                    "Ghostty selective erase result for {label} at split {split}: {rendered:?}"
+                );
+                assert!(rendered.contains(recovery_url), "{label} split {split}");
+                let links = gate
+                    .take_links()
+                    .unwrap_or_else(|| panic!("recovery after {label} at split {split}"));
+                let expected = if protection {
+                    vec![recovery_url, protected_url]
+                } else {
+                    vec![recovery_url]
+                };
+                assert_eq!(links.output_urls, expected, "{label} split {split}");
+            }
+        }
+
         let wrapped_url = "https://wrapped.example/path";
         let after_wrapped_url = "https://after-wrapped.example/path";
         let stream = format!("{wrapped_url}\x1b[1@\r\n{after_wrapped_url}\n");

@@ -256,7 +256,12 @@ pub const Handler = struct {
                 return;
             },
             .cell_shift => {
-                if (cell_shift) |shift| self.emitParsedCellShift(shift);
+                const cursor_after = self.parsedCursorSnapshot();
+                if (!cursor_before.sameRow(cursor_after)) {
+                    callback(self, .render_invalidation, "");
+                } else if (cell_shift) |shift| {
+                    self.emitParsedCellShift(shift);
+                }
                 return;
             },
         }
@@ -318,7 +323,12 @@ pub const Handler = struct {
         count: usize,
         right: usize,
         preserves_prefix: bool,
+        clear_mask: [parsed_cell_limit / 8]u8 = @splat(0),
+        has_clear_mask: bool = false,
+        valid: bool = true,
     };
+
+    const parsed_cell_limit = 8 * 1024;
 
     /// Captures the exact row-local mutation before Ghostty applies it. ECH
     /// can extend over a wide glyph, so its count cannot be reconstructed
@@ -328,56 +338,117 @@ pub const Handler = struct {
         comptime action: Action.Tag,
         value: Action.Value(action),
     ) ?ParsedCellShift {
+        const cursor = self.terminal.screens.active.cursor.x;
         switch (action) {
-            .insert_blanks, .delete_chars, .erase_chars => {},
+            .insert_blanks, .delete_chars => {
+                const right = self.terminal.scrolling_region.right + 1;
+                if (cursor < self.terminal.scrolling_region.left or cursor >= right) return null;
+                const count = @min(value, right - cursor);
+                if (count == 0) return null;
+                return .{
+                    .operation = if (action == .insert_blanks) 'I' else 'D',
+                    .start = cursor,
+                    .count = count,
+                    .right = right,
+                    .preserves_prefix = !self.terminal.screens.active.cursor.pending_wrap and
+                        self.terminal.screens.active.cursor.page_cell.wide != .spacer_tail,
+                };
+            },
+            .erase_chars => {
+                if (cursor >= self.terminal.cols) return null;
+                var count = @min(@max(value, 1), self.terminal.cols - cursor);
+                if (count != self.terminal.cols - cursor and
+                    self.terminal.screens.active.cursorCellRight(count - 1).wide == .wide)
+                {
+                    count += 1;
+                }
+                return self.parsedEraseCells(
+                    cursor,
+                    cursor + count,
+                    self.terminal.screens.active.protected_mode == .iso,
+                );
+            },
+            .erase_line_right,
+            .erase_line_right_unless_pending_wrap,
+            .erase_display_below,
+            => {
+                var start = cursor;
+                if (start > 0 and self.terminal.screens.active.cursor.page_cell.wide == .spacer_tail) start -= 1;
+                return self.parsedEraseCells(
+                    start,
+                    self.terminal.cols,
+                    self.terminal.screens.active.protected_mode == .iso or value,
+                );
+            },
+            .erase_line_left, .erase_display_above => {
+                var end = cursor + 1;
+                if (self.terminal.screens.active.cursor.page_cell.wide == .wide) end += 1;
+                return self.parsedEraseCells(
+                    0,
+                    @min(end, self.terminal.cols),
+                    self.terminal.screens.active.protected_mode == .iso or value,
+                );
+            },
+            .erase_line_complete, .erase_display_complete => return self.parsedEraseCells(
+                0,
+                self.terminal.cols,
+                self.terminal.screens.active.protected_mode == .iso or value,
+            ),
             else => return null,
         }
-        const cursor = self.terminal.screens.active.cursor.x;
-        const operation: u8 = switch (action) {
-            .insert_blanks => 'I',
-            .delete_chars => 'D',
-            .erase_chars => 'E',
-            else => unreachable,
-        };
-        const right = switch (action) {
-            .insert_blanks, .delete_chars => self.terminal.scrolling_region.right + 1,
-            .erase_chars => self.terminal.cols,
-            else => unreachable,
-        };
-        switch (action) {
-            .insert_blanks, .delete_chars => if (cursor < self.terminal.scrolling_region.left or cursor >= right) return null,
-            .erase_chars => if (cursor >= right) return null,
-            else => unreachable,
-        }
-        var count = @min(switch (action) {
-            .erase_chars => @max(value, 1),
-            else => value,
-        }, right - cursor);
-        if (count == 0) return null;
-        if (action == .erase_chars and count != right - cursor and
-            self.terminal.screens.active.cursorCellRight(count - 1).wide == .wide)
-        {
-            count += 1;
-        }
-        return .{
-            .operation = operation,
-            .start = cursor,
+    }
+
+    fn parsedEraseCells(self: *Handler, start: usize, end: usize, protected: bool) ParsedCellShift {
+        const count = end - start;
+        var result: ParsedCellShift = .{
+            .operation = 'E',
+            .start = start,
             .count = count,
-            .right = right,
-            .preserves_prefix = !self.terminal.screens.active.cursor.pending_wrap and
+            .right = self.terminal.cols,
+            .preserves_prefix = start > 0 and
+                !self.terminal.screens.active.cursor.pending_wrap and
                 self.terminal.screens.active.cursor.page_cell.wide != .spacer_tail,
+            .has_clear_mask = true,
         };
+        if (count > parsed_cell_limit) {
+            result.valid = false;
+            return result;
+        }
+        const cells = self.terminal.screens.active.cursor.page_pin.cells(.all);
+        for (cells[start..end], 0..) |cell, offset| {
+            if (!protected or !cell.protected) {
+                result.clear_mask[offset / 8] |= @as(u8, 1) << @intCast(offset % 8);
+            }
+        }
+        return result;
     }
 
     fn emitParsedCellShift(self: *Handler, shift: ParsedCellShift) void {
         const callback = self.effects.parsed_output orelse return;
-        var buf: [72]u8 = undefined;
-        const data = std.fmt.bufPrint(
+        if (!shift.valid) {
+            callback(self, .cell_shift, "");
+            return;
+        }
+        var buf: [parsed_cell_limit / 4 + 96]u8 = undefined;
+        const header = std.fmt.bufPrint(
             &buf,
             "{c},{d},{d},{d},{d}",
             .{ shift.operation, shift.start, shift.count, shift.right, @intFromBool(shift.preserves_prefix) },
         ) catch return;
-        callback(self, .cell_shift, data);
+        if (!shift.has_clear_mask) {
+            callback(self, .cell_shift, header);
+            return;
+        }
+        var len = header.len;
+        buf[len] = ',';
+        len += 1;
+        const digits = "0123456789abcdef";
+        for (shift.clear_mask[0 .. std.math.divCeil(usize, shift.count, 8) catch unreachable]) |byte| {
+            buf[len] = digits[byte >> 4];
+            buf[len + 1] = digits[byte & 0x0f];
+            len += 2;
+        }
+        callback(self, .cell_shift, buf[0..len]);
     }
 
     const ParsedRenderEffect = enum {
@@ -401,12 +472,8 @@ pub const Handler = struct {
 
             // These actions can erase, shift, replace, or scroll cells while
             // leaving the cursor coordinates unchanged.
-            .erase_display_above,
-            .erase_display_complete,
             .erase_display_scrollback,
             .erase_display_scroll_complete,
-            .erase_line_left,
-            .erase_line_complete,
             .insert_lines,
             .delete_lines,
             .scroll_up,
@@ -417,17 +484,19 @@ pub const Handler = struct {
             .decaln,
             => .invalidate,
 
-            // These operations preserve every cell before the cursor. They
-            // form a parser-owned lexical boundary between that prefix and
-            // any cells subsequently rendered in the affected region.
+            // Ghostty supplies the exact cells cleared in the cursor row,
+            // including selective erase protection, so embedders preserve
+            // every unaffected known cell without reproducing erase modes.
+            .erase_display_above,
+            .erase_display_complete,
             .erase_display_below,
+            .erase_line_left,
+            .erase_line_complete,
             .erase_line_right,
-            .erase_line_right_unless_pending_wrap,
-            => .preserved_prefix_boundary,
-
-            // Ghostty supplies the exact cell interval and right boundary for
-            // row-local shifts/erasure so embedders can preserve both sides.
-            .delete_chars, .erase_chars, .insert_blanks => .cell_shift,
+            .delete_chars,
+            .erase_chars,
+            .insert_blanks,
+            => .cell_shift,
 
             // Surface replacement is also a lexical boundary, allowing text
             // rendered on the newly selected surface to recover immediately.
@@ -459,6 +528,7 @@ pub const Handler = struct {
             .carriage_return,
             .enquiry,
             .invoke_charset,
+            .erase_line_right_unless_pending_wrap,
             .cursor_up,
             .cursor_down,
             .cursor_left,

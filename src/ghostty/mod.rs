@@ -466,7 +466,7 @@ impl CellWide {
 type WritePtyCallback = dyn FnMut(&[u8]) + Send;
 type ParsedOutputCallback = dyn for<'a> FnMut(ParsedOutput<'a>) + Send;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum ParsedOutput<'a> {
     Text(&'a [u8]),
     Separator,
@@ -485,13 +485,14 @@ pub(crate) struct ParsedCursorTransition {
     pub(crate) same_row: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedCellShift {
     pub(crate) operation: ParsedCellShiftOperation,
     pub(crate) start_column: usize,
     pub(crate) count: usize,
     pub(crate) right_column: usize,
     pub(crate) preserves_prefix: bool,
+    pub(crate) clear_mask: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -584,6 +585,23 @@ fn parse_cell_shift(bytes: &[u8]) -> Option<ParsedCellShift> {
         "1" => true,
         _ => return None,
     };
+    let clear_mask = match operation {
+        ParsedCellShiftOperation::Erase => {
+            let encoded = fields.next()?;
+            let expected_bytes = count.div_ceil(8);
+            if encoded.len() != expected_bytes.checked_mul(2)? {
+                return None;
+            }
+            let mut bytes = Vec::with_capacity(expected_bytes);
+            for pair in encoded.as_bytes().chunks_exact(2) {
+                let high = hex_nibble(pair[0])?;
+                let low = hex_nibble(pair[1])?;
+                bytes.push((high << 4) | low);
+            }
+            Some(bytes)
+        }
+        ParsedCellShiftOperation::Insert | ParsedCellShiftOperation::Delete => None,
+    };
     let end_column = start_column.checked_add(count)?;
     (fields.next().is_none()
         && count != 0
@@ -595,7 +613,16 @@ fn parse_cell_shift(bytes: &[u8]) -> Option<ParsedCellShift> {
             count,
             right_column,
             preserves_prefix,
+            clear_mask,
         })
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
 }
 
 fn parse_cursor_transition(bytes: &[u8]) -> Option<ParsedCursorTransition> {
@@ -3436,6 +3463,18 @@ mod tests {
                 count: 3,
                 right_column: 80,
                 preserves_prefix: true,
+                clear_mask: None,
+            })
+        );
+        assert_eq!(
+            parse_cell_shift(b"E,12,3,80,1,05"),
+            Some(ParsedCellShift {
+                operation: ParsedCellShiftOperation::Erase,
+                start_column: 12,
+                count: 3,
+                right_column: 80,
+                preserves_prefix: true,
+                clear_mask: Some(vec![0b0000_0101]),
             })
         );
         for malformed in [
@@ -3448,6 +3487,9 @@ mod tests {
             b"D,80,1,80,1",
             b"D,79,2,80,1",
             b"D,12,3,80,2",
+            b"E,12,3,80,1",
+            b"E,12,3,80,1,0",
+            b"E,12,3,80,1,gg",
         ] {
             assert_eq!(parse_cell_shift(malformed), None, "{malformed:?}");
         }

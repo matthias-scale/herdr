@@ -112,13 +112,14 @@ Every non-print action that changes the cursor and is not already a separator
 emits Ghostty's authoritative pre- and post-action columns plus rendered-row
 identity. Herdr can therefore reconcile same-row overwrites, including CSI
 positioning and nonzero left margins, while failing closed across row changes.
-An exhaustive Ghostty-side action classification also invalidates open
-candidates when erase, insert/delete, scrolling, screen/status switching, or
-reset actions can replace cells without moving the cursor. Right-side erasures
-report Ghostty's exact preserved-prefix column. Row-local insert, delete, and
-erase-character actions report their exact operation, start, affected count,
-right boundary, and whether the lexical prefix is untouched, including margin
-no-ops, pending wrap, spacer tails, and wide-glyph erase expansion.
+An exhaustive Ghostty-side action classification also reports or invalidates
+open candidates when erase, insert/delete, scrolling, screen/status switching,
+or reset actions can replace cells without moving the cursor. Row-local insert,
+delete, and erase actions report their operation, row interval, right boundary,
+whether the
+lexical prefix is untouched, and a bounded bitset of the cells Ghostty actually
+clears after ISO/DEC selective-erase protection. This also covers margin no-ops,
+pending wrap, spacer tails, and wide-glyph erase expansion.
 Herdr can therefore preserve known rendered cells on both sides without
 reproducing VT action or region semantics in Rust.
 
@@ -129,8 +130,8 @@ discarded codepoints, charset-mapped glyph reporting, and continuity across
 non-rendering controls, plus generic post-action cursor transitions with
 rendered-row identity for non-print actions not already classified as
 separators and render invalidations for all cell-mutating non-print actions,
-including exact preserved-prefix columns for right-side erasures and bounded
-row-local mutation facts for insert/delete/erase-character actions, and the
+including bounded actual-cell mutation facts for protected
+display/line/character erases and insert/delete actions, and the
 Herdr visibility regressions pass without this patch.
 
 verification:

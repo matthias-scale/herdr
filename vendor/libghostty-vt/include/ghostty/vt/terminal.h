@@ -490,7 +490,7 @@ typedef enum GHOSTTY_ENUM_TYPED {
   /** Cells before the cursor remain rendered; data is its decimal column. */
   GHOSTTY_TERMINAL_PARSED_OUTPUT_PRESERVED_PREFIX_BOUNDARY = 6,
 
-  /** Row mutation; data is `op,start,count,right-exclusive,prefix-preserved`. */
+  /** Row mutation; erase events append a hex bitset of cells actually cleared. */
   GHOSTTY_TERMINAL_PARSED_OUTPUT_CELL_SHIFT = 7,
   GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalParsedOutputKind;
