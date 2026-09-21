@@ -138,9 +138,6 @@ impl App {
     }
 
     fn apply_local_pane_group_set(&mut self, id: String, params: PaneGroupSetParams) -> String {
-        if let Some(message) = self.local_authority_conflict_message() {
-            return encode_error(id, "authority_not_fresh", message);
-        }
         if self.local_pane(&params.pane_id).is_none() {
             let owner = params
                 .expected_pane_authority
@@ -176,9 +173,6 @@ impl App {
     }
 
     fn apply_pane_group_set(&mut self, id: String, params: PaneGroupSetParams) -> String {
-        if let Some(message) = self.local_authority_conflict_message() {
-            return encode_error(id, "authority_not_fresh", message);
-        }
         if self.no_session {
             return encode_error(
                 id,
@@ -1158,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn observed_local_authority_collision_blocks_every_local_mutation() {
+    fn observed_local_authority_collision_blocks_group_and_assignment_mutations() {
         let (mut app, _dir, pane_id) = app_with_groups("local-authority-collision");
         let created = created_group(&app.handle_group_create(
             "before_conflict".into(),
@@ -1227,6 +1221,60 @@ mod tests {
                 .is_some_and(|message| message.contains(authority.as_str())));
         }
         assert!(app.validate_group_target(&created.id).is_err());
+    }
+
+    #[test]
+    fn observed_local_authority_collision_does_not_block_clearing_a_local_pane() {
+        let (mut app, _dir, pane_id) = app_with_groups("clear-local-authority-collision");
+        let created = created_group(&app.handle_group_create(
+            "create".into(),
+            GroupCreateParams {
+                name: "Work".into(),
+                expected_revision: 0,
+            },
+        ));
+        let authority = created.id.owner.clone();
+        let local_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.workspaces[0]
+            .pane_state_mut(local_pane_id)
+            .expect("local pane")
+            .group_membership = PaneGroupMembership {
+            group_id: Some(created.id.clone()),
+            revision: 4,
+        };
+        app.state.fleet_snapshot.group_catalogs = ["one", "two"]
+            .into_iter()
+            .map(|host| crate::fleet::GroupCatalog {
+                host: host.into(),
+                target: host.into(),
+                local: true,
+                session: None,
+                socket: Some(format!("/tmp/{host}.sock")),
+                state: crate::fleet::GroupCatalogState::IdentityConflict,
+                snapshot: Some(GroupAuthoritySnapshot {
+                    authority_id: authority.clone(),
+                    revision: 1,
+                    groups: vec![created.clone()],
+                    memberships: Vec::new(),
+                }),
+                error: Some("identity conflict".into()),
+            })
+            .collect();
+
+        let response = app.handle_pane_group_set(
+            "clear".into(),
+            PaneGroupSetParams {
+                pane_id,
+                group_id: None,
+                expected_revision: 4,
+                expected_pane_authority: Some(authority),
+            },
+        );
+
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+            "clearing a reachable pane must ignore group authority conflicts: {response}"
+        );
     }
 
     #[test]
