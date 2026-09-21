@@ -4969,6 +4969,31 @@ mod tests {
             );
         }
 
+        let active_url = "https://active.example/path";
+        let after_history_url = "https://after.example/path";
+        let stream = format!("{active_url}\x1b[3J\n{after_history_url}\n");
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+            let rendered = runtime.visible_text();
+            assert!(
+                rendered.contains(active_url) && rendered.contains(after_history_url),
+                "Ghostty preserved active rows across CSI 3J at split {split}: {rendered:?}"
+            );
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("active URL after CSI 3J at split {split}"));
+            assert_eq!(
+                links.output_urls,
+                [active_url, after_history_url],
+                "split {split}"
+            );
+        }
+
         let shifted_url = "https://shifted.example/path";
         for (label, initial, mutation) in [
             ("insert blanks", format!("aaaa {shifted_url}"), "\x1b[1@"),

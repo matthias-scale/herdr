@@ -180,11 +180,12 @@ pub const Handler = struct {
         }
         const cursor_before = self.parsedCursorSnapshot();
         const cell_shift = self.parsedCellShift(action, value);
+        const row_mutation_preserves = self.parsedRowMutationPreserves(action, value);
         self.vtFallible(action, value) catch |err| {
             log.warn("error handling VT action action={} err={}", .{ action, err });
             return;
         };
-        self.emitParsedOutput(action, value, cursor_before, cell_shift);
+        self.emitParsedOutput(action, value, cursor_before, cell_shift, row_mutation_preserves);
     }
 
     /// Finalizes an OSC-derived callback using the parser transition that
@@ -224,6 +225,7 @@ pub const Handler = struct {
         value: Action.Value(action),
         cursor_before: ParsedCursorSnapshot,
         cell_shift: ?ParsedCellShift,
+        row_mutation_preserves: ?bool,
     ) void {
         const callback = self.effects.parsed_output orelse return;
         switch (action) {
@@ -262,6 +264,14 @@ pub const Handler = struct {
                 } else if (cell_shift) |shift| {
                     self.emitParsedCellShift(shift);
                 }
+                return;
+            },
+            .row_mutation => {
+                callback(
+                    self,
+                    if (row_mutation_preserves orelse false) .separator else .render_invalidation,
+                    "",
+                );
                 return;
             },
         }
@@ -458,7 +468,50 @@ pub const Handler = struct {
         invalidate_separator,
         preserved_prefix_boundary,
         cell_shift,
+        row_mutation,
     };
+
+    fn parsedRowMutationPreserves(
+        self: *Handler,
+        comptime action: Action.Tag,
+        value: Action.Value(action),
+    ) ?bool {
+        const cursor = self.terminal.screens.active.cursor;
+        const region = self.terminal.scrolling_region;
+        const inside = cursor.y >= region.top and cursor.y <= region.bottom and
+            cursor.x >= region.left and cursor.x <= region.right;
+        switch (action) {
+            .index, .next_line => {
+                if (!inside or cursor.y != region.bottom) return true;
+                if (region.top != region.bottom) return true;
+                return region.top == 0 and
+                    region.left == 0 and
+                    region.right == self.terminal.cols - 1 and
+                    !self.terminal.screens.active.no_scrollback;
+            },
+            .reverse_index => return !inside or cursor.y != region.top or region.top != region.bottom,
+            .insert_lines => {
+                if (!inside or value == 0) return true;
+                return value <= region.bottom - cursor.y;
+            },
+            .delete_lines => return !inside or value == 0,
+            .scroll_up => {
+                if (value == 0 or cursor.y < region.top or cursor.y > region.bottom) return true;
+                const count = @min(value, region.bottom - region.top + 1);
+                if (cursor.y >= region.top + count) return true;
+                return region.top == 0 and
+                    region.left == 0 and
+                    region.right == self.terminal.cols - 1 and
+                    !self.terminal.screens.active.no_scrollback;
+            },
+            .scroll_down => {
+                if (value == 0 or cursor.y < region.top or cursor.y > region.bottom) return true;
+                const count = @min(value, region.bottom - region.top + 1);
+                return cursor.y + count <= region.bottom;
+            },
+            else => return null,
+        }
+    }
 
     /// Classifies post-action rendering effects that cursor comparison alone
     /// cannot represent. This switch is deliberately exhaustive so every new
@@ -472,8 +525,10 @@ pub const Handler = struct {
 
             // These actions can erase, shift, replace, or scroll cells while
             // leaving the cursor coordinates unchanged.
-            .erase_display_scrollback,
             .erase_display_scroll_complete,
+            .decaln,
+            => .invalidate,
+
             .insert_lines,
             .delete_lines,
             .scroll_up,
@@ -481,8 +536,7 @@ pub const Handler = struct {
             .index,
             .next_line,
             .reverse_index,
-            .decaln,
-            => .invalidate,
+            => .row_mutation,
 
             // Ghostty supplies the exact cells cleared in the cursor row,
             // including selective erase protection, so embedders preserve
@@ -528,6 +582,7 @@ pub const Handler = struct {
             .carriage_return,
             .enquiry,
             .invoke_charset,
+            .erase_display_scrollback,
             .erase_line_right_unless_pending_wrap,
             .cursor_up,
             .cursor_down,

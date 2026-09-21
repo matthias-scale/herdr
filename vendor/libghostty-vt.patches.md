@@ -120,6 +120,10 @@ whether the
 lexical prefix is untouched, and a bounded bitset of the cells Ghostty actually
 clears after ISO/DEC selective-erase protection. This also covers margin no-ops,
 pending wrap, spacer tails, and wide-glyph erase expansion.
+Scrollback-only erase remains continuous because Ghostty does not mutate active
+rows; scroll-complete and other active-surface clears still invalidate.
+Row-moving actions publish a boundary only when Ghostty's scrolling-region and
+row-retention facts prove the cursor row survives; otherwise they invalidate.
 Herdr can therefore preserve known rendered cells on both sides without
 reproducing VT action or region semantics in Rust.
 
