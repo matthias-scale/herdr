@@ -6,6 +6,7 @@ use ratatui::{
 };
 
 pub(crate) mod add_project;
+mod aloop_run;
 mod command_palette;
 mod dialogs;
 pub(crate) mod dock;
@@ -20,7 +21,7 @@ mod home;
 pub(crate) mod hyperspace;
 mod inbox;
 mod keybind_help;
-mod loop_runs;
+pub(crate) mod loop_runs;
 mod markdown;
 mod menus;
 mod mobile;
@@ -148,7 +149,7 @@ pub(crate) use self::{
         collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
         compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
         relative_agent_navigation_entry, remote_agent_panel_entries, remote_agent_panel_entries_at,
-        remote_agent_row_at, sidebar_agent_run_at, sidebar_dim_header_at,
+        remote_agent_row_at, sidebar_agent_run_at, sidebar_aloop_target_at, sidebar_dim_header_at,
         sidebar_filter_anchor_rect, sidebar_filter_menu_layout, sidebar_filter_options,
         sidebar_group_menu_layout, sidebar_group_mode_anchor_rect, sidebar_header_new_menu_rect,
         sidebar_header_new_thread_rect, sidebar_header_overflow_rect, sidebar_header_search_rect,
@@ -363,6 +364,7 @@ fn compute_view_internal(
     let available_after_sidebar = body_area.width.saturating_sub(sidebar_w);
     let main_view_active = app.symphony_detail.is_some()
         || app.loop_run_history_detail.is_some()
+        || app.aloop_run_detail.is_some()
         || app.usage_view.is_some()
         || app.work_view.is_some()
         || app.dock_object_preview.is_some()
@@ -1187,6 +1189,16 @@ fn render_with_runtime_registry_inner(
                 &detail.loop_id,
                 terminal_area,
                 detail.observed_at,
+                frame,
+            );
+        }
+        crate::app::state::TerminalAreaSurface::AloopRunLog(detail) => {
+            aloop_run::render_aloop_run_log(
+                &app.palette,
+                &detail.loop_name,
+                &detail.host,
+                &detail.run,
+                terminal_area,
                 frame,
             );
         }

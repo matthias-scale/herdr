@@ -894,11 +894,13 @@ impl App {
             loop_run_history: initial_loop_history,
             loop_registry: crate::loop_runs::LoopRegistry::default(),
             loop_run_history_detail: None,
+            aloop_run_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             fleet_snapshot: crate::fleet::Snapshot::unpolled(&config.remote.fleet.hosts),
             agent_host_name,
             local_agent_panel_identities,
             remote_agent_panel_entries: Vec::new(),
+            aloop_projection: None,
             remote_focus_proxy_panes: std::collections::HashSet::new(),
             sidebar_selected_remote_agent: None,
             dock_symphony: None,
@@ -2915,6 +2917,7 @@ impl App {
         // to a selected pane, while Symphony and home consume them themselves.
         if self.state.symphony_detail.is_some()
             || self.state.loop_run_history_detail.is_some()
+            || self.state.aloop_run_detail.is_some()
             || self.state.work_view.is_some()
             || self.state.usage_view.is_some()
             || self.state.inbox.is_some()
@@ -3524,6 +3527,9 @@ impl App {
             }
             state::InputOwner::Surface(state::SurfaceInputOwner::LoopRunHistory) => {
                 self.handle_loop_run_history_key(key_event);
+            }
+            state::InputOwner::Surface(state::SurfaceInputOwner::AloopRunLog) => {
+                self.handle_aloop_run_detail_key(key_event);
             }
             state::InputOwner::Surface(state::SurfaceInputOwner::Usage) => {
                 self.handle_usage_view_key(key_event);

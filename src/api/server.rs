@@ -406,6 +406,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::WorkspaceClose(_) => "workspace.close",
         Method::LoopList(_) => "loop.list",
         Method::LoopRunHistory(_) => "loop.run_history",
+        Method::LoopFindings(_) => "loop.findings",
         Method::SymphonyList(_) => "symphony.list",
         Method::FleetList(_) => "fleet.list",
         Method::GroupHostSnapshot(_) => "group.host_snapshot",

@@ -1927,6 +1927,10 @@ pub struct FleetConfig {
     pub heartbeat_stale_ms: u64,
     /// Optional configured host whose localhost Temporal service backs Symphony.
     pub symphony_host: Option<String>,
+    /// Host that produces aloop findings and run records. Read over SSH unless
+    /// it names this machine (`self_name`); then the local store is read.
+    /// Default: "ub2".
+    pub aloop_host: Option<String>,
     /// Configured local and SSH hosts. Empty by default.
     pub hosts: Vec<FleetHostConfig>,
 }
@@ -1939,6 +1943,7 @@ impl Default for FleetConfig {
             timeout_ms: 5_000,
             heartbeat_stale_ms: 30 * 60 * 1_000,
             symphony_host: None,
+            aloop_host: Some("ub2".to_string()),
             hosts: Vec::new(),
         }
     }
@@ -1947,6 +1952,17 @@ impl Default for FleetConfig {
 impl FleetConfig {
     pub(crate) fn resolved_self_name(&self) -> String {
         self.resolved_self_name_with_hostname(crate::platform::hostname())
+    }
+
+    /// The producer host for the Aloops sidebar section. An empty or absent
+    /// value falls back to the default rather than disabling the section.
+    pub(crate) fn resolved_aloop_host(&self) -> String {
+        self.aloop_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("ub2")
+            .to_string()
     }
 
     pub(crate) fn resolved_self_name_with_hostname(&self, hostname: Option<String>) -> String {
@@ -2556,6 +2572,8 @@ default_surfaces = ["home", "pull_request", "hosts", "keys", "note"]
         assert!(!defaults.resolved_self_name().is_empty());
         assert_eq!(defaults.refresh_interval_ms, 15_000);
         assert!(defaults.hosts.is_empty());
+        // MAT-159 SCH2: the aloop producer host defaults to ub2.
+        assert_eq!(defaults.resolved_aloop_host(), "ub2");
 
         let config: Config = toml::from_str(
             r#"
@@ -2563,6 +2581,7 @@ default_surfaces = ["home", "pull_request", "hosts", "keys", "note"]
 self_name = "laptop"
 refresh_interval_ms = 30000
 symphony_host = "workbox"
+aloop_host = "buildbox"
 
 [[remote.fleet.hosts]]
 name = "workbox"
@@ -2577,10 +2596,15 @@ session = "agents"
             config.remote.fleet.symphony_host.as_deref(),
             Some("workbox")
         );
+        assert_eq!(config.remote.fleet.aloop_host.as_deref(), Some("buildbox"));
+        assert_eq!(config.remote.fleet.resolved_aloop_host(), "buildbox");
         assert_eq!(
             config.remote.fleet.hosts[0].session.as_deref(),
             Some("agents")
         );
+
+        let blank: FleetConfig = toml::from_str("aloop_host = \"  \"").expect("blank aloop host");
+        assert_eq!(blank.resolved_aloop_host(), "ub2");
     }
 
     #[test]

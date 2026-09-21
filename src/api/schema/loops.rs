@@ -11,6 +11,22 @@ pub struct LoopRunHistoryParams {
     pub loop_id: Option<String>,
 }
 
+/// One pending aloop finding (MAT-159 SCH1), as read from the producer host's
+/// `~/.agents/aloop/findings` store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LoopFindingInfo {
+    #[serde(rename = "loop")]
+    pub loop_name: String,
+    pub source: String,
+    pub stable_id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub evidence: String,
+    pub prompt: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LoopInfo {
     pub loop_id: String,

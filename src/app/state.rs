@@ -1784,6 +1784,7 @@ impl ServerInputOwner {
 pub(crate) enum SurfaceInputOwner {
     Symphony,
     LoopRunHistory,
+    AloopRunLog,
     Usage,
     Work,
     EditorPreview,
@@ -4116,6 +4117,7 @@ pub(crate) enum TerminalAreaSurface<'a> {
     EditorPreview,
     Symphony(&'a SymphonyDetail),
     LoopRunHistory(&'a LoopRunHistoryDetail),
+    AloopRunLog(&'a AloopRunDetail),
     Usage,
     Work,
     DockObjectPreview,
@@ -4146,6 +4148,10 @@ pub struct AppState {
     pub(crate) loop_run_history: crate::loop_runs::RunHistory,
     pub(crate) loop_registry: crate::loop_runs::LoopRegistry,
     pub(crate) loop_run_history_detail: Option<LoopRunHistoryDetail>,
+    /// Full-screen log of one aloop run selected in the sidebar (MAT-159
+    /// AC7). TUI presentation state: the run record itself is server data in
+    /// the fleet snapshot.
+    pub(crate) aloop_run_detail: Option<AloopRunDetail>,
     pub(crate) symphony_snapshot: crate::symphony::Snapshot,
     /// Server-owned fleet inventory, refreshed off the render thread.
     pub(crate) fleet_snapshot: crate::fleet::Snapshot,
@@ -4156,6 +4162,10 @@ pub struct AppState {
         std::collections::HashMap<PaneId, crate::ui::AgentPanelLocalIdentity>,
     /// TUI projection materialized only when the fleet snapshot changes.
     pub(crate) remote_agent_panel_entries: Vec<std::sync::Arc<crate::ui::RemoteAgentPanelEntry>>,
+    /// Producer-derived aloop rows are immutable between fleet refreshes.
+    /// Keeping the projection here prevents layout and render passes from
+    /// repeating the nested run/finding/stable-id scan.
+    pub(crate) aloop_projection: Option<std::sync::Arc<crate::aloop::SectionProjection>>,
     /// Local panes backed by remote-focus operations. Agent identity remains
     /// owned by `RemoteFocusOperations`; this marker only hides proxy chrome.
     pub(crate) remote_focus_proxy_panes: std::collections::HashSet<crate::layout::PaneId>,
@@ -4930,6 +4940,15 @@ pub(crate) struct LoopRunHistoryDetail {
     pub(crate) loop_id: String,
     pub(crate) history: crate::loop_runs::RunHistory,
     pub(crate) observed_at: std::time::SystemTime,
+    pub(crate) producer_host: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AloopRunDetail {
+    pub(crate) loop_name: String,
+    pub(crate) host: String,
+    pub(crate) run: std::sync::Arc<crate::aloop::RunRecord>,
+    pub(crate) observed_at: std::time::SystemTime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5616,6 +5635,10 @@ impl AppState {
         std::mem::swap(&mut self.loop_run_history_detail, other);
     }
 
+    pub(crate) fn swap_aloop_run_detail(&mut self, other: &mut Option<AloopRunDetail>) {
+        std::mem::swap(&mut self.aloop_run_detail, other);
+    }
+
     pub(crate) fn show_loop_run_history(
         &mut self,
         loop_id: String,
@@ -5626,11 +5649,38 @@ impl AppState {
             loop_id,
             history,
             observed_at,
+            producer_host: None,
         });
     }
 
     pub(crate) fn clear_loop_run_history(&mut self) {
         self.loop_run_history_detail = None;
+    }
+
+    pub(crate) fn show_aloop_run_detail(
+        &mut self,
+        loop_name: String,
+        host: String,
+        run: std::sync::Arc<crate::aloop::RunRecord>,
+    ) {
+        self.aloop_run_detail = Some(AloopRunDetail {
+            loop_name,
+            host,
+            run,
+            observed_at: std::time::SystemTime::now(),
+        });
+    }
+
+    pub(crate) fn clear_aloop_run_detail(&mut self) {
+        self.aloop_run_detail = None;
+    }
+
+    pub(crate) fn aloop_projection(
+        &self,
+    ) -> Option<std::sync::Arc<crate::aloop::SectionProjection>> {
+        self.aloop_projection
+            .clone()
+            .or_else(|| crate::aloop::project(&self.fleet_snapshot).map(std::sync::Arc::new))
     }
 
     /// Reveal the scratchpad without spawning an editor: the dock opens if it was
@@ -5697,6 +5747,99 @@ impl AppState {
             },
             std::time::SystemTime::now(),
         );
+    }
+
+    /// MAT-159 AC8: a loop header in the Aloops sidebar section opens the
+    /// existing MAT-126 run-history table filtered to that loop.
+    pub(crate) fn open_aloop_loop_history(&mut self, loop_name: &str) {
+        self.clear_aloop_run_detail();
+        let producer_host = self
+            .fleet_snapshot
+            .aloop
+            .as_ref()
+            .map(|producer| producer.host.clone());
+        let history = self
+            .fleet_snapshot
+            .aloop
+            .as_ref()
+            .map(|producer| {
+                let runs = producer
+                    .data
+                    .loops
+                    .iter()
+                    .find(|loop_runs| loop_runs.loop_name == loop_name)
+                    .map(|loop_runs| {
+                        loop_runs
+                            .runs
+                            .iter()
+                            .map(|run| crate::loop_runs::RunRecord {
+                                run_id: run.at.clone(),
+                                skill: "aloop".to_string(),
+                                session: Some(producer.host.clone()),
+                                pr: None,
+                                ticket: None,
+                                loop_id: Some(loop_name.to_string()),
+                                start: run.at.clone(),
+                                end: None,
+                                wall_min: Some(run.duration_ms as f64 / 60_000.0),
+                                blocked_min: None,
+                                gates: Vec::new(),
+                                human_touches: None,
+                                touches_by_type: std::collections::BTreeMap::new(),
+                                interrupted_focus: None,
+                                review_rounds: None,
+                                out_tokens: None,
+                                outcome: crate::loop_runs::RunOutcome::Terminal(if run.exit == 0 {
+                                    "ok".to_string()
+                                } else {
+                                    format!("exit {}", run.exit)
+                                }),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                crate::loop_runs::RunHistory {
+                    runs,
+                    skipped_lines: producer
+                        .data
+                        .loops
+                        .iter()
+                        .find(|loop_runs| loop_runs.loop_name == loop_name)
+                        .map_or(0, |loop_runs| loop_runs.skipped_lines),
+                }
+            })
+            .unwrap_or_default();
+        self.show_loop_run_history(loop_name.to_string(), history, std::time::SystemTime::now());
+        if let Some(detail) = self.loop_run_history_detail.as_mut() {
+            detail.producer_host = producer_host;
+        }
+    }
+
+    /// MAT-159 AC7: selecting a run in the Aloops section opens its recorded
+    /// log excerpt. Resolves the record out of the fleet snapshot so the view
+    /// never reads the producer host from the input path.
+    pub(crate) fn open_aloop_run_log(&mut self, loop_name: &str, at: &str) -> bool {
+        let Some(snapshot) = self.fleet_snapshot.aloop.as_ref() else {
+            return false;
+        };
+        if !snapshot.reachable() {
+            return false;
+        }
+        let Some(run) = snapshot
+            .data
+            .loops
+            .iter()
+            .find(|loop_runs| loop_runs.loop_name == loop_name)
+            .and_then(|loop_runs| loop_runs.runs.iter().find(|run| run.at == at))
+        else {
+            return false;
+        };
+        self.show_aloop_run_detail(
+            loop_name.to_string(),
+            snapshot.host.clone(),
+            std::sync::Arc::clone(run),
+        );
+        true
     }
 }
 
@@ -6004,6 +6147,9 @@ impl AppState {
             }
             TerminalAreaSurface::LoopRunHistory(_) => {
                 return InputOwner::Surface(SurfaceInputOwner::LoopRunHistory)
+            }
+            TerminalAreaSurface::AloopRunLog(_) => {
+                return InputOwner::Surface(SurfaceInputOwner::AloopRunLog)
             }
             TerminalAreaSurface::Usage => return InputOwner::Surface(SurfaceInputOwner::Usage),
             TerminalAreaSurface::Work => return InputOwner::Surface(SurfaceInputOwner::Work),
@@ -6944,6 +7090,8 @@ impl AppState {
             TerminalAreaSurface::Symphony(detail)
         } else if let Some(detail) = self.loop_run_history_detail.as_ref() {
             TerminalAreaSurface::LoopRunHistory(detail)
+        } else if let Some(detail) = self.aloop_run_detail.as_ref() {
+            TerminalAreaSurface::AloopRunLog(detail)
         } else if self.usage_view.is_some() {
             TerminalAreaSurface::Usage
         } else if self.work_view.is_some() {
@@ -7136,11 +7284,13 @@ impl AppState {
             loop_run_history: crate::loop_runs::RunHistory::default(),
             loop_registry: crate::loop_runs::LoopRegistry::default(),
             loop_run_history_detail: None,
+            aloop_run_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             fleet_snapshot: crate::fleet::Snapshot::default(),
             agent_host_name: "localhost".to_string(),
             local_agent_panel_identities: std::collections::HashMap::new(),
             remote_agent_panel_entries: Vec::new(),
+            aloop_projection: None,
             remote_focus_proxy_panes: std::collections::HashSet::new(),
             sidebar_selected_remote_agent: None,
             symphony_detail: None,
@@ -7994,6 +8144,22 @@ mod tests {
         state.toggle_loop_run_history();
     }
 
+    fn show_aloop_run_log(state: &mut AppState) {
+        state.show_aloop_run_detail(
+            "nightly".into(),
+            "ub2".into(),
+            std::sync::Arc::new(crate::aloop::RunRecord {
+                at: "2026-09-18T09:59:00Z".into(),
+                at_unix_s: 1_758_186_740,
+                duration_ms: 1_200,
+                exit: 0,
+                findings: 0,
+                stable_ids: Vec::new(),
+                log_excerpt: "clean log tail".into(),
+            }),
+        );
+    }
+
     fn show_usage(state: &mut AppState) {
         state.toggle_usage_view();
     }
@@ -8121,11 +8287,12 @@ mod tests {
         }
     }
 
-    fn replacing_surface_setups() -> [SurfaceSetup; 8] {
+    fn replacing_surface_setups() -> [SurfaceSetup; 9] {
         [
             ("editor preview", show_editor_preview),
             ("symphony", show_symphony),
             ("loop history", show_loop_history),
+            ("aloop run log", show_aloop_run_log),
             ("usage", show_usage),
             ("work", show_work),
             ("dock object preview", show_dock_object_preview),
@@ -8482,7 +8649,7 @@ mod tests {
                     "{namespace}:{title}"
                 );
             }
-            for title in ["Snoozed", "Settled", "Fleet", "Runs", "Symphony"] {
+            for title in ["Snoozed", "Settled", "Fleet", "Runs", "Aloops", "Symphony"] {
                 let key = format!("{namespace}:{title}");
                 if key == "repo:Runs" {
                     assert!(!presentation.collapsed_groups.contains(&key));

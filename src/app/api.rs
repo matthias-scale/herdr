@@ -39,6 +39,8 @@ impl App {
     pub(crate) fn refresh_remote_agent_panel_entries(&mut self) {
         self.state.remote_agent_panel_entries =
             crate::ui::remote_agent_panel_entries(&self.state.fleet_snapshot);
+        self.state.aloop_projection =
+            crate::aloop::project(&self.state.fleet_snapshot).map(std::sync::Arc::new);
         if self
             .state
             .sidebar_selected_remote_agent
@@ -1609,6 +1611,7 @@ impl App {
             Method::LoopRunHistory(params) => {
                 return self.handle_loop_run_history(request.id, params)
             }
+            Method::LoopFindings(_) => return self.handle_loop_findings(request.id),
             Method::SymphonyList(_) => return self.handle_symphony_list(request.id),
             Method::FleetList(_) => return self.handle_fleet_list(request.id),
             Method::GroupHostSnapshot(_) => return self.handle_group_host_snapshot(request.id),

@@ -6329,6 +6329,22 @@
         {
           "properties": {
             "method": {
+              "const": "loop.findings",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "symphony.list",
               "type": "string"
             },
@@ -9867,6 +9883,48 @@
             }
           ]
         },
+        "LoopFindingInfo": {
+          "description": "One pending aloop finding (MAT-159 SCH1), as read from the producer host's\n`~/.agents/aloop/findings` store.",
+          "properties": {
+            "created_at": {
+              "type": "string"
+            },
+            "evidence": {
+              "type": "string"
+            },
+            "loop": {
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "stable_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "loop",
+            "source",
+            "stable_id",
+            "title",
+            "evidence",
+            "prompt",
+            "created_at"
+          ],
+          "type": "object"
+        },
         "LoopGateInfo": {
           "properties": {
             "defaulted": {
@@ -11913,6 +11971,36 @@
                 "type",
                 "runs",
                 "skipped_lines"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "findings": {
+                  "description": "Pending findings, newest first, capped (MAT-159 AC2).",
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/LoopFindingInfo"
+                  },
+                  "type": "array"
+                },
+                "host": {
+                  "description": "The producer host the findings were read from.",
+                  "type": "string"
+                },
+                "reachable": {
+                  "description": "False when the producer host could not be read; findings is empty.",
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "loop_findings",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "host",
+                "reachable",
+                "findings"
               ],
               "type": "object"
             },
