@@ -472,6 +472,8 @@ pub(crate) enum ParsedOutput<'a> {
     Separator,
     Hyperlink(&'a [u8]),
     Boundary,
+    Backspace(usize),
+    CarriageReturn(usize),
 }
 
 const MAX_CLIPBOARD_BYTES: usize = 192 * 1024;
@@ -519,8 +521,22 @@ unsafe extern "C" fn parsed_output_trampoline(
         ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_BOUNDARY => {
             callback(ParsedOutput::Boundary);
         }
+        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_BACKSPACE => {
+            if let Some(column) = parse_cursor_column(bytes) {
+                callback(ParsedOutput::Backspace(column));
+            }
+        }
+        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_CARRIAGE_RETURN => {
+            if let Some(column) = parse_cursor_column(bytes) {
+                callback(ParsedOutput::CarriageReturn(column));
+            }
+        }
         _ => {}
     }
+}
+
+fn parse_cursor_column(bytes: &[u8]) -> Option<usize> {
+    std::str::from_utf8(bytes).ok()?.parse().ok()
 }
 
 unsafe extern "C" fn bell_trampoline(_terminal: ffi::GhosttyTerminal, userdata: *mut c_void) {

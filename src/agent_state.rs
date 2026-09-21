@@ -166,6 +166,26 @@ struct PendingLinkBytes {
 #[derive(Debug, Default)]
 struct LinkStreamScanner {
     visible: VisibleLinkState,
+    rendered_rewrite: Option<RenderedRewrite>,
+    #[cfg(test)]
+    rewrite_operations: usize,
+}
+
+/// Bounded rendered-line fragment used only after Ghostty reports cursor motion.
+/// Ghostty remains the authority for classifying the control; this mirrors the
+/// resulting overwrite so link candidates follow the cells users can see.
+#[derive(Debug)]
+struct RenderedRewrite {
+    bytes: Vec<u8>,
+    start_column: usize,
+    cursor_column: usize,
+    overflowed: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ParsedCursorMotion {
+    Backspace,
+    CarriageReturn,
 }
 
 #[derive(Debug, Default)]
@@ -514,7 +534,52 @@ impl LinkExtractionGate {
     /// Separates printable runs without exposing a private terminal parser.
     pub(crate) fn observe_parsed_separator(&self) {
         self.record_parsed_event(0);
-        self.observe_chunk(b"\n");
+        if !self.active.load(Ordering::Acquire) {
+            self.observe_chunk(b"\n");
+            return;
+        }
+        let Ok(_processing) = self.processing.lock() else {
+            return;
+        };
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
+        if !self.active.load(Ordering::Acquire) {
+            let (prefix, _) = self.marker_tail.load();
+            pending.scanner.restore_prefix(prefix);
+            self.marker_tail.store(&[]);
+        }
+        pending.observe_separator();
+        pending.dirty = true;
+        self.active.store(true, Ordering::Release);
+    }
+
+    /// Applies Ghostty's rendered cursor motion to the current link candidate.
+    pub(crate) fn observe_parsed_backspace(&self, cursor_column: usize) {
+        self.observe_parsed_cursor_motion(ParsedCursorMotion::Backspace, cursor_column);
+    }
+
+    /// Applies Ghostty's rendered cursor motion to the current link candidate.
+    pub(crate) fn observe_parsed_carriage_return(&self, cursor_column: usize) {
+        self.observe_parsed_cursor_motion(ParsedCursorMotion::CarriageReturn, cursor_column);
+    }
+
+    fn observe_parsed_cursor_motion(&self, motion: ParsedCursorMotion, cursor_column: usize) {
+        self.record_parsed_event(0);
+        let Ok(_processing) = self.processing.lock() else {
+            return;
+        };
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
+        if !self.active.load(Ordering::Acquire) {
+            let (prefix, _) = self.marker_tail.load();
+            pending.scanner.restore_prefix(prefix);
+            self.marker_tail.store(&[]);
+        }
+        pending.scanner.observe_cursor_motion(motion, cursor_column);
+        pending.dirty = true;
+        self.active.store(true, Ordering::Release);
     }
 
     /// Receives a complete OSC 8 target from Ghostty's parser.
@@ -748,13 +813,66 @@ impl LinkExtractionGate {
 
 impl PendingLinkBytes {
     fn scan(&mut self, bytes: &[u8]) {
-        for byte in bytes.iter().copied() {
-            self.scanner.scan_byte(byte, &mut self.queued_links);
-        }
+        self.scanner.scan(bytes, &mut self.queued_links);
+    }
+
+    fn observe_separator(&mut self) {
+        self.scanner.observe_separator(&mut self.queued_links);
     }
 }
 
 impl LinkStreamScanner {
+    fn scan(&mut self, bytes: &[u8], links: &mut VecDeque<DetectedAgentLink>) {
+        if let Some(rewrite) = self.rendered_rewrite.as_mut() {
+            #[cfg(test)]
+            {
+                self.rewrite_operations += bytes.len();
+            }
+            rewrite.write(bytes);
+            return;
+        }
+        for byte in bytes.iter().copied() {
+            self.scan_byte(byte, links);
+        }
+    }
+
+    fn observe_separator(&mut self, links: &mut VecDeque<DetectedAgentLink>) {
+        self.finish_rendered_rewrite(links);
+        self.scan_byte(b'\n', links);
+    }
+
+    fn observe_cursor_motion(&mut self, motion: ParsedCursorMotion, cursor_column: usize) {
+        let rewrite = self.rendered_rewrite.get_or_insert_with(|| {
+            let (bytes, overflowed) =
+                rendered_bytes_from_visible(std::mem::take(&mut self.visible));
+            // Unwrapped printable ASCII has a one-to-one cell mapping. If a
+            // candidate contains wider/combining glyphs or crossed a wrap,
+            // do not guess Ghostty's width rules; discard it instead.
+            let overflowed = overflowed || !bytes.is_ascii() || cursor_column < bytes.len();
+            let start_column = cursor_column.saturating_sub(bytes.len());
+            RenderedRewrite {
+                bytes,
+                start_column,
+                cursor_column,
+                overflowed,
+            }
+        });
+        rewrite.move_cursor(motion, cursor_column);
+    }
+
+    fn finish_rendered_rewrite(&mut self, links: &mut VecDeque<DetectedAgentLink>) {
+        let Some(rewrite) = self.rendered_rewrite.take() else {
+            return;
+        };
+        if rewrite.overflowed {
+            self.visible = VisibleLinkState::DiscardUrl(Vec::new());
+            return;
+        }
+        for byte in rewrite.bytes {
+            self.scan_byte(byte, links);
+        }
+    }
+
     fn observe_control_boundary(&mut self) {
         if matches!(self.visible, VisibleLinkState::InvalidScheme) {
             self.visible = VisibleLinkState::Empty;
@@ -837,6 +955,9 @@ impl LinkStreamScanner {
     }
 
     fn take_prefix(&mut self) -> Option<ScannerPrefix> {
+        if self.rendered_rewrite.is_some() {
+            return None;
+        }
         if matches!(
             self.visible,
             VisibleLinkState::Url(_) | VisibleLinkState::DiscardUrl(_)
@@ -856,17 +977,94 @@ impl LinkStreamScanner {
 
     #[cfg(test)]
     fn retained_byte_count(&self) -> usize {
-        match &self.visible {
-            VisibleLinkState::Scheme(bytes)
-            | VisibleLinkState::AfterColon(bytes)
-            | VisibleLinkState::AfterSlash(bytes) => bytes.len,
-            VisibleLinkState::Url(url) => {
-                url.bytes.len() + url.trim_suffix.len() + url.pending_utf8.len()
+        self.rendered_rewrite
+            .as_ref()
+            .map_or(0, |rewrite| rewrite.bytes.len())
+            + match &self.visible {
+                VisibleLinkState::Scheme(bytes)
+                | VisibleLinkState::AfterColon(bytes)
+                | VisibleLinkState::AfterSlash(bytes) => bytes.len,
+                VisibleLinkState::Url(url) => {
+                    url.bytes.len() + url.trim_suffix.len() + url.pending_utf8.len()
+                }
+                VisibleLinkState::Empty
+                | VisibleLinkState::InvalidScheme
+                | VisibleLinkState::DiscardUrl(_) => 0,
             }
-            VisibleLinkState::Empty
-            | VisibleLinkState::InvalidScheme
-            | VisibleLinkState::DiscardUrl(_) => 0,
+    }
+
+    #[cfg(test)]
+    fn rewrite_operation_count(&self) -> usize {
+        self.rewrite_operations
+    }
+}
+
+impl RenderedRewrite {
+    fn move_cursor(&mut self, motion: ParsedCursorMotion, cursor_column: usize) {
+        self.cursor_column = match motion {
+            ParsedCursorMotion::Backspace => cursor_column.saturating_sub(1),
+            ParsedCursorMotion::CarriageReturn => 0,
+        };
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        if self.overflowed {
+            return;
         }
+        if !bytes.is_ascii() {
+            self.overflowed = true;
+            self.bytes.clear();
+            self.cursor_column = 0;
+            return;
+        }
+        for byte in bytes.iter().copied() {
+            if self.cursor_column < self.start_column {
+                self.cursor_column += 1;
+                continue;
+            }
+            let cursor = self.cursor_column - self.start_column;
+            if cursor > self.bytes.len() {
+                self.overflowed = true;
+                self.bytes.clear();
+                self.cursor_column = 0;
+                return;
+            }
+            if cursor == self.bytes.len() {
+                if self.bytes.len() == MAX_URL_BYTES {
+                    self.overflowed = true;
+                    self.bytes.clear();
+                    self.cursor_column = 0;
+                    return;
+                }
+                self.bytes.push(byte);
+            } else {
+                self.bytes[cursor] = byte;
+            }
+            self.cursor_column += 1;
+        }
+    }
+}
+
+fn rendered_bytes_from_visible(visible: VisibleLinkState) -> (Vec<u8>, bool) {
+    match visible {
+        VisibleLinkState::Empty | VisibleLinkState::InvalidScheme => (Vec::new(), false),
+        VisibleLinkState::Scheme(candidate)
+        | VisibleLinkState::AfterColon(candidate)
+        | VisibleLinkState::AfterSlash(candidate) => (candidate.into_vec(), false),
+        VisibleLinkState::Url(mut candidate) => {
+            let overflowed = candidate.trim_suffix_overflowed
+                || candidate.bytes.len()
+                    + candidate.trim_suffix.len()
+                    + candidate.pending_utf8.len()
+                    > MAX_URL_BYTES;
+            if overflowed {
+                return (Vec::new(), true);
+            }
+            candidate.bytes.append(&mut candidate.trim_suffix);
+            candidate.bytes.append(&mut candidate.pending_utf8);
+            (candidate.bytes, false)
+        }
+        VisibleLinkState::DiscardUrl(_) => (Vec::new(), true),
     }
 }
 
@@ -1420,6 +1618,12 @@ mod tests {
                 }
                 crate::ghostty::ParsedOutput::Boundary => {
                     gate_for_callback.observe_parsed_boundary();
+                }
+                crate::ghostty::ParsedOutput::Backspace(column) => {
+                    gate_for_callback.observe_parsed_backspace(column);
+                }
+                crate::ghostty::ParsedOutput::CarriageReturn(column) => {
+                    gate_for_callback.observe_parsed_carriage_return(column);
                 }
             });
             Self {
@@ -2172,6 +2376,54 @@ mod tests {
     }
 
     #[test]
+    fn cursor_rewrite_at_cap_is_linear_and_bounded() {
+        let prefix = b"https://rewrite.example/";
+        let mut url = prefix.to_vec();
+        url.resize(MAX_URL_BYTES, b'a');
+        let gate = LinkExtractionGate::default();
+
+        gate.observe_parsed_text(&url);
+        gate.observe_parsed_carriage_return(url.len());
+        gate.observe_parsed_text(&url);
+        assert!(gate.retained_byte_count() <= MAX_URL_BYTES);
+        assert_eq!(
+            gate.pending
+                .lock()
+                .expect("pending link bytes")
+                .scanner
+                .rewrite_operation_count(),
+            MAX_URL_BYTES,
+            "each rewritten input byte is handled once"
+        );
+        gate.observe_parsed_separator();
+
+        let links = gate.take_links().expect("rewritten URL at cap");
+        assert_eq!(links.output_urls.len(), 1);
+        assert_eq!(links.output_urls[0].len(), MAX_URL_BYTES);
+    }
+
+    #[test]
+    fn cursor_rewrite_fails_closed_without_ghostty_glyph_width_metadata() {
+        let gate = LinkExtractionGate::default();
+        let unicode = "https://wide.example/界";
+        gate.observe_parsed_text(unicode.as_bytes());
+        gate.observe_parsed_carriage_return(unicode.len());
+        gate.observe_parsed_text(b"https://wide.example/x");
+        gate.observe_parsed_separator();
+
+        assert!(
+            gate.take_links().is_none(),
+            "do not guess terminal cell widths for rewritten non-ASCII candidates"
+        );
+        gate.observe_parsed_text(b"https://after-wide.example/path");
+        gate.observe_parsed_separator();
+        assert_eq!(
+            gate.take_links().expect("following ASCII URL").output_urls,
+            ["https://after-wide.example/path"]
+        );
+    }
+
+    #[test]
     #[ignore = "manual PTY callback scaling profile"]
     fn short_url_pty_callback_scale_profile() {
         const CALLBACKS_PER_PANE: usize = 25_000;
@@ -2208,6 +2460,25 @@ mod tests {
                     .is_some_and(|links| links.output_urls == ["https://short.example/x"])
             }));
         }
+
+        const REWRITES: usize = 100;
+        let mut url = b"https://rewrite-profile.example/".to_vec();
+        url.resize(MAX_URL_BYTES, b'a');
+        let gate = LinkExtractionGate::default();
+        let started = std::time::Instant::now();
+        for _ in 0..REWRITES {
+            gate.observe_parsed_text(&url);
+            gate.observe_parsed_carriage_return(url.len());
+            gate.observe_parsed_text(&url);
+            gate.observe_parsed_separator();
+            assert!(gate.take_links().is_some());
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "8-KiB cursor rewrite: rewrites={REWRITES} ns/rewrite={:.1} MiB/s={:.1}",
+            elapsed.as_nanos() as f64 / REWRITES as f64,
+            REWRITES as f64 * url.len() as f64 / elapsed.as_secs_f64() / (1024.0 * 1024.0)
+        );
     }
 
     #[test]

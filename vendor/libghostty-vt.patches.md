@@ -108,19 +108,23 @@ same action stream that updates the terminal. OSC 8 capture is bounded at two
 live PTY writes. Printable callbacks use the terminal's own print result so
 discarded codepoints are not exposed and charset-mapped glyphs are reported as
 Ghostty rendered them. Non-rendering C0 controls do not split visible text.
+Backspace and carriage return events include Ghostty's authoritative pre-motion
+cursor column so Herdr can bound and reconcile overwritten link candidates.
 
 remove when: the vendored source exposes equivalent post-parse text and OSC 8
 events, including confirmed BEL, 8-bit ST, and split `ESC \\` termination, with
 bounded 8 KiB targets and suppression for non-rendered status-display text and
 discarded codepoints, charset-mapped glyph reporting, and continuity across
-non-rendering controls, and the Herdr visibility regressions pass without this
-patch.
+non-rendering controls, plus cursor-column metadata for rendered backspace and
+carriage-return overwrites, and the Herdr visibility regressions pass without
+this patch.
 
 verification:
 
 ```sh
 just test-one matches_ghostty_rendered_text
 just test-one c1_introducers_and_st_match_ghostty_rendered_text
+just test-one cursor_overwrite_matches_ghostty_rendered_text
 just test-one cancelled_osc_capture_matches_ghostty_visible_output
 just test-one osc8_target_bound_excludes_split_and_unsplit_st_bytes
 python3 -m unittest scripts.test_vendor_libghostty_vt

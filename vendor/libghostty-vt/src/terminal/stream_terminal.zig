@@ -30,6 +30,8 @@ pub const ParsedOutputKind = enum(c_int) {
     separator = 1,
     hyperlink = 2,
     boundary = 3,
+    backspace = 4,
+    carriage_return = 5,
     _,
 };
 
@@ -162,6 +164,7 @@ pub const Handler = struct {
         comptime action: Action.Tag,
         value: Action.Value(action),
     ) void {
+        const cursor_column = self.terminal.screens.active.cursor.x;
         if (self.effects.parsed_output != null) {
             const handled = self.vtParsedPrint(action, value) catch |err| {
                 log.warn("error handling VT action action={} err={}", .{ action, err });
@@ -173,7 +176,7 @@ pub const Handler = struct {
             log.warn("error handling VT action action={} err={}", .{ action, err });
             return;
         };
-        self.emitParsedOutput(action, value);
+        self.emitParsedOutput(action, value, cursor_column);
     }
 
     /// Finalizes an OSC-derived callback using the parser transition that
@@ -211,13 +214,29 @@ pub const Handler = struct {
         self: *Handler,
         comptime action: Action.Tag,
         value: Action.Value(action),
+        cursor_column: usize,
     ) void {
         const callback = self.effects.parsed_output orelse return;
         switch (action) {
-            .backspace, .horizontal_tab, .linefeed, .carriage_return => callback(self, .separator, ""),
+            .backspace => self.emitParsedCursorMotion(.backspace, cursor_column),
+            .carriage_return => self.emitParsedCursorMotion(.carriage_return, cursor_column),
+            .horizontal_tab, .linefeed => callback(self, .separator, ""),
             .start_hyperlink => self.parsed_hyperlink_pending = value.uri,
             else => {},
         }
+    }
+
+    /// Cursor-motion payloads contain the authoritative zero-based column
+    /// before Ghostty applies the control.
+    fn emitParsedCursorMotion(
+        self: *Handler,
+        kind: ParsedOutputKind,
+        cursor_column: usize,
+    ) void {
+        const callback = self.effects.parsed_output orelse return;
+        var buf: [32]u8 = undefined;
+        const data = std.fmt.bufPrint(&buf, "{d}", .{cursor_column}) catch return;
+        callback(self, kind, data);
     }
 
     /// Handle printable actions while reporting only codepoints the terminal

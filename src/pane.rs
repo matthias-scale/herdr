@@ -4664,6 +4664,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cursor_overwrite_matches_ghostty_rendered_text() {
+        for (label, stream, expected, suffix, absent) in [
+            (
+                "backspace",
+                b"https://examX\x08ple.com/path visible-after-backspace\n".as_slice(),
+                "https://example.com/path",
+                "visible-after-backspace",
+                "https://examX",
+            ),
+            (
+                "carriage return",
+                b"Xttps://example.com/path\rhttps://example.com/path visible-after-cr\n".as_slice(),
+                "https://example.com/path",
+                "visible-after-cr",
+                "Xttps://example.com/path",
+            ),
+            (
+                "carriage return before an offset URL",
+                b"aaaa https://bad.example/path\rX\n".as_slice(),
+                "https://bad.example/path",
+                "X",
+                "Xttps://bad.example/path",
+            ),
+        ] {
+            for split in 0..=stream.len() {
+                let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+                let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+                runtime.terminal.install_link_extraction(gate.clone());
+                runtime.test_process_pty_bytes(&stream[..split]);
+                runtime.test_process_pty_bytes(&stream[split..]);
+
+                let rendered = runtime.visible_text();
+                assert!(
+                    rendered.contains(expected) && rendered.contains(suffix),
+                    "Ghostty rendered the repaired URL and following text after {label} at split {split}; rendered={rendered:?}"
+                );
+                assert!(
+                    !rendered.contains(absent),
+                    "Ghostty overwrote the stale cells after {label} at split {split}; rendered={rendered:?}"
+                );
+                let links = gate
+                    .take_links()
+                    .unwrap_or_else(|| panic!("visible URL after {label} at split {split}"));
+                assert_eq!(links.output_urls, vec![expected], "{label} split {split}");
+                assert!(links.osc8_urls.is_empty(), "{label} split {split}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn dec_special_charset_matches_ghostty_rendered_text() {
         let mapped = "https://mapped.example.test/path";
         let visible = "https://visible-after-reset.example.test/path";

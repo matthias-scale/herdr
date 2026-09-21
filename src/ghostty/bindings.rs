@@ -2390,6 +2390,10 @@ pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_HYPERLI
     GhosttyTerminalParsedOutputKind = 2;
 pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_BOUNDARY:
     GhosttyTerminalParsedOutputKind = 3;
+pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_BACKSPACE:
+    GhosttyTerminalParsedOutputKind = 4;
+pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_CARRIAGE_RETURN:
+    GhosttyTerminalParsedOutputKind = 5;
 pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE:
     GhosttyTerminalParsedOutputKind = 2147483647;
 pub type GhosttyTerminalParsedOutputKind = ::std::os::raw::c_uint;
