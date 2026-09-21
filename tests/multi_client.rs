@@ -614,6 +614,26 @@ fn client_handshake_with_geometry(
     cell_width_px: u32,
     cell_height_px: u32,
 ) -> Result<(), String> {
+    client_handshake_with_geometry_and_launch_mode(
+        stream,
+        version,
+        cols,
+        rows,
+        cell_width_px,
+        cell_height_px,
+        0,
+    )
+}
+
+fn client_handshake_with_geometry_and_launch_mode(
+    stream: &mut UnixStream,
+    version: u32,
+    cols: u16,
+    rows: u16,
+    cell_width_px: u32,
+    cell_height_px: u32,
+    launch_mode: u32,
+) -> Result<(), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| e.to_string())?;
@@ -631,7 +651,7 @@ fn client_handshake_with_geometry(
             &encode_varint_u32(cell_height_px),
             &encode_varint_u32(0), // RenderEncoding::SemanticFrame
             &encode_varint_u32(0), // ClientKeybindings::Server
-            &encode_varint_u32(0), // ClientLaunchMode::App
+            &encode_varint_u32(launch_mode),
         ],
     );
     stream
@@ -709,6 +729,27 @@ fn connect_raw_client_with_geometry(
     stream
 }
 
+fn connect_raw_terminal_client_with_geometry(
+    client_socket: &Path,
+    cols: u16,
+    rows: u16,
+    cell_width_px: u32,
+    cell_height_px: u32,
+) -> UnixStream {
+    let mut stream = UnixStream::connect(client_socket).expect("should connect to client socket");
+    client_handshake_with_geometry_and_launch_mode(
+        &mut stream,
+        CURRENT_PROTOCOL,
+        cols,
+        rows,
+        cell_width_px,
+        cell_height_px,
+        2, // ClientLaunchMode::TerminalAttach
+    )
+    .expect("handshake should succeed");
+    stream
+}
+
 fn send_client_input(stream: &mut UnixStream, data: &[u8]) {
     // ClientMessage::Input = variant 1
     let payload = {
@@ -717,6 +758,34 @@ fn send_client_input(stream: &mut UnixStream, data: &[u8]) {
         buf.extend_from_slice(data);
         buf
     };
+    stream.write_all(&frame_message(&payload)).unwrap();
+    stream.flush().unwrap();
+}
+
+fn send_client_resize(
+    stream: &mut UnixStream,
+    cols: u16,
+    rows: u16,
+    cell_width_px: u32,
+    cell_height_px: u32,
+) {
+    // ClientMessage::Resize = variant 3
+    let payload = encode_varint_enum(
+        3,
+        &[
+            &encode_varint_u16(cols),
+            &encode_varint_u16(rows),
+            &encode_varint_u32(cell_width_px),
+            &encode_varint_u32(cell_height_px),
+        ],
+    );
+    stream.write_all(&frame_message(&payload)).unwrap();
+    stream.flush().unwrap();
+}
+
+fn send_client_observe_terminal(stream: &mut UnixStream, target: &str) {
+    // ClientMessage::ObserveTerminal = variant 8
+    let payload = encode_varint_enum(8, &[&encode_string(target)]);
     stream.write_all(&frame_message(&payload)).unwrap();
     stream.flush().unwrap();
 }
@@ -951,13 +1020,30 @@ fn multi_client_effective_geometry_uses_smallest_client_and_known_pixels() {
     wait_for_file(&client_socket, Duration::from_secs(10));
 
     let (_workspace_id, pane_id) = create_workspace_and_root_pane(&api_socket, "size-shrink");
+    let log_path = server_log_path(&config_home);
 
-    let mut large = connect_raw_client_with_geometry(&client_socket, 120, 40, 8, 16);
-    assert!(wait_for_frame(&mut large, Duration::from_secs(2)));
+    let mut large = connect_raw_terminal_client_with_geometry(&client_socket, 120, 40, 8, 16);
+    let observers_before = count_log_occurrences(&log_path, "terminal observe client connected");
+    send_client_observe_terminal(&mut large, &pane_id);
+    assert!(wait_for_log_occurrence_count(
+        &log_path,
+        "terminal observe client connected",
+        observers_before + 1,
+        Duration::from_secs(5),
+    ));
+    assert!(ping_socket(&api_socket).contains("pong"));
     let large_only_geometry = read_pane_tty_geometry(&api_socket, &pane_id, Duration::from_secs(5));
 
-    let mut small = connect_raw_client_with_geometry(&client_socket, 80, 24, 0, 0);
-    assert!(wait_for_frame(&mut small, Duration::from_secs(2)));
+    let mut small = connect_raw_terminal_client_with_geometry(&client_socket, 80, 24, 0, 0);
+    let observers_before = count_log_occurrences(&log_path, "terminal observe client connected");
+    send_client_observe_terminal(&mut small, &pane_id);
+    assert!(wait_for_log_occurrence_count(
+        &log_path,
+        "terminal observe client connected",
+        observers_before + 1,
+        Duration::from_secs(5),
+    ));
+    assert!(ping_socket(&api_socket).contains("pong"));
 
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut last_seen_geometry = None;
@@ -989,6 +1075,30 @@ fn multi_client_effective_geometry_uses_smallest_client_and_known_pixels() {
         "the smaller client has no pixel data, so the PTY must retain the known cell height"
     );
 
+    // The larger observer is now the most recently resized client. The smaller
+    // passive observer must still constrain the shared PTY.
+    let resizes_before = count_log_occurrences(&log_path, "client resize");
+    send_client_resize(&mut large, 120, 40, 8, 16);
+    assert!(
+        wait_for_log_occurrence_count(
+            &log_path,
+            "client resize",
+            resizes_before + 1,
+            Duration::from_secs(5),
+        ),
+        "server did not process the larger observer's resize; log tail:\n{}",
+        log_tail(&log_path, 80)
+    );
+    assert!(
+        ping_socket(&api_socket).contains("pong"),
+        "an API response after the resize log proves the resize handler completed"
+    );
+    let after_promotion = read_pane_tty_geometry(&api_socket, &pane_id, Duration::from_secs(2));
+    assert_eq!(
+        after_promotion, geometry,
+        "resizing the larger observer must not release the passive smaller observer's PTY constraint"
+    );
+
     cleanup_spawned_herdr(server, base);
 }
 
@@ -1011,7 +1121,23 @@ fn multi_client_known_pixels_survive_known_client_disconnect() {
     assert!(wait_for_frame(&mut known, Duration::from_secs(2)));
     assert!(wait_for_frame(&mut unknown, Duration::from_secs(2)));
 
+    let log_path = server_log_path(&config_home);
+    let detached_before = count_log_occurrences(&log_path, "client detached");
     send_client_detach(&mut known);
+    assert!(
+        wait_for_log_occurrence_count(
+            &log_path,
+            "client detached",
+            detached_before + 1,
+            Duration::from_secs(5),
+        ),
+        "server did not process the known client's detach; log tail:\n{}",
+        log_tail(&log_path, 80)
+    );
+    assert!(
+        ping_socket(&api_socket).contains("pong"),
+        "an API response after the detach log proves the detach handler completed"
+    );
     drop(known);
 
     let deadline = Instant::now() + Duration::from_secs(8);
