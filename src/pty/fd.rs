@@ -239,3 +239,49 @@ pub(crate) fn resize_pty_fd(
     }
     Ok(())
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resize_pty_fd_sets_total_pixel_geometry() {
+        let mut master = -1;
+        let mut slave = -1;
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(
+            opened,
+            0,
+            "openpty failed: {}",
+            std::io::Error::last_os_error()
+        );
+        let master = unsafe { OwnedFd::from_raw_fd(master) };
+        let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+
+        resize_pty_fd(master.as_raw_fd(), 30, 100, 9, 18).expect("resize PTY");
+
+        let mut size = libc::winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let read = unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
+        assert_eq!(
+            read,
+            0,
+            "TIOCGWINSZ failed: {}",
+            std::io::Error::last_os_error()
+        );
+        assert_eq!((size.ws_row, size.ws_col), (30, 100));
+        assert_eq!((size.ws_xpixel, size.ws_ypixel), (900, 540));
+    }
+}

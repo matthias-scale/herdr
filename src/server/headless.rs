@@ -1377,7 +1377,7 @@ impl HeadlessServer {
         };
         let (cols, rows) = self.effective_size;
         let area = Rect::new(0, 0, cols, rows);
-        if self.app.state.kitty_graphics_enabled && client.cell_size.is_known() {
+        if client.cell_size.is_known() {
             crate::ui::compute_view_with_cell_size(
                 &mut self.app.state,
                 &self.app.terminal_runtimes,
@@ -1455,8 +1455,7 @@ impl HeadlessServer {
 
         let terminal_size = client.terminal_size;
         let outer_terminal_focus = client.outer_terminal_focus;
-        let host_cell_size = if self.app.state.kitty_graphics_enabled && client.cell_size.is_known()
-        {
+        let host_cell_size = if client.cell_size.is_known() {
             client.cell_size
         } else {
             crate::kitty_graphics::HostCellSize::default()
@@ -6280,12 +6279,11 @@ impl HeadlessServer {
                     self.app.state.swap_work_view(&mut work_view);
                     self.app.state.swap_usage_view(&mut usage_view);
                     let render_started = crate::render_prof::timer();
-                    let render_cell_size =
-                        if self.app.state.kitty_graphics_enabled && cell_size.is_known() {
-                            cell_size
-                        } else {
-                            crate::kitty_graphics::HostCellSize::default()
-                        };
+                    let render_cell_size = if cell_size.is_known() {
+                        cell_size
+                    } else {
+                        crate::kitty_graphics::HostCellSize::default()
+                    };
                     let preserved_scroll = (!is_foreground).then_some((
                         self.app.state.workspace_scroll,
                         self.app.state.agent_panel_scroll,
@@ -9145,6 +9143,57 @@ esac
             .expect("editor runtime")
             .current_size();
         assert_eq!(after, before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_app_resize_keeps_host_cell_size_when_graphics_are_disabled() {
+        let mut server = test_headless_server();
+        assert!(!server.app.state.kitty_graphics_enabled);
+
+        let mut workspace = crate::workspace::Workspace::test_new("test");
+        let pane_id = workspace.root_pane;
+        let background_tab = workspace.test_add_tab(Some("background"));
+        let background_pane_id = workspace.tabs[background_tab].root_pane;
+        workspace.tabs[0].runtimes.insert(
+            pane_id,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(10, 5, b""),
+        );
+        workspace.tabs[background_tab].runtimes.insert(
+            background_pane_id,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(10, 5, b""),
+        );
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize {
+                    width_px: 10,
+                    height_px: 20,
+                },
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+
+        for (tab, pane_id) in [(0, pane_id), (background_tab, background_pane_id)] {
+            let runtime = &server.app.state.workspaces[0].tabs[tab].runtimes[&pane_id];
+            let (rows, cols) = runtime.current_size();
+            assert_eq!(
+                runtime.pixel_size(),
+                Some((u32::from(cols) * 10, u32::from(rows) * 20))
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
