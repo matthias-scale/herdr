@@ -4635,6 +4635,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bell_inside_url_matches_ghostty_rendered_text() {
+        let visible = "https://example.com/path";
+        for (label, control) in [("BEL", 0x07), ("ENQ", 0x05)] {
+            let mut stream = b"https://exam".to_vec();
+            stream.push(control);
+            stream.extend_from_slice(b"ple.com/path\n");
+
+            for split in 0..=stream.len() {
+                let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+                let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+                runtime.terminal.install_link_extraction(gate.clone());
+                runtime.test_process_pty_bytes(&stream[..split]);
+                runtime.test_process_pty_bytes(&stream[split..]);
+
+                let rendered = runtime.visible_text();
+                assert!(
+                    rendered.contains(visible),
+                    "Ghostty rendered one continuous URL across {label} at split {split}; rendered={rendered:?}"
+                );
+                let links = gate
+                    .take_links()
+                    .unwrap_or_else(|| panic!("visible URL across {label} at split {split}"));
+                assert_eq!(links.output_urls, vec![visible], "{label} split {split}");
+                assert!(links.osc8_urls.is_empty(), "{label} split {split}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dec_special_charset_matches_ghostty_rendered_text() {
+        let mapped = "https://mapped.example.test/path";
+        let visible = "https://visible-after-reset.example.test/path";
+        let stream = format!("\x1b(0{mapped}\x1b(B {visible}\n");
+
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+            let rendered = runtime.visible_text();
+            assert!(
+                !rendered.contains(mapped),
+                "Ghostty mapped DEC-special text at split {split}; rendered={rendered:?}"
+            );
+            assert!(
+                rendered.contains(visible),
+                "Ghostty rendered text after ASCII reset at split {split}; rendered={rendered:?}"
+            );
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("visible URL after charset reset at split {split}"));
+            assert_eq!(links.output_urls, vec![visible], "split {split}");
+            assert!(links.osc8_urls.is_empty(), "split {split}");
+        }
+    }
+
+    #[tokio::test]
     async fn status_display_text_matches_ghostty_rendered_text() {
         let hidden = "https://hidden-status-display.example.test/path";
         let visible = "https://visible-main-display.example.test/path";
