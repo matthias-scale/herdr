@@ -537,6 +537,132 @@ async fn retained_update_sends_only_graphics_message() {
 }
 
 #[tokio::test]
+async fn full_render_hides_uploaded_graphics_behind_client_rename_overlay() {
+    let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+    set_graphics_layer(&mut server, pane_id, vec![1, 2, 3]);
+    let initial = enable_graphics_and_render(&mut server, &client_rx);
+    assert!(String::from_utf8_lossy(&initial.graphics).contains("a=p"));
+    let workspace_id = server.app.state.workspaces[0].id.clone();
+    let tab_id = crate::workspace::public_tab_id_for_number(
+        &workspace_id,
+        server.app.state.workspaces[0].tabs[0].number,
+    );
+    server
+        .clients
+        .get_mut(&1)
+        .unwrap()
+        .sidebar_presentation
+        .overlay = crate::app::state::ClientOverlayState {
+        kind: crate::app::state::ClientOverlay::RenameTab,
+        rename_target: Some(crate::app::state::RenameTarget::Tab {
+            workspace_id,
+            tab_id,
+        }),
+        ..Default::default()
+    };
+
+    server.render_and_stream();
+
+    let frame = read_server_frame(receive_render(&client_rx, Duration::from_millis(100)));
+    let graphics = String::from_utf8_lossy(&frame.graphics);
+    assert!(!graphics.contains("a=p"));
+    assert!(graphics.contains("a=d"), "{graphics:?}");
+}
+
+#[tokio::test]
+async fn full_render_hides_uploaded_graphics_behind_client_pomodoro_prompt() {
+    let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+    set_graphics_layer(&mut server, pane_id, vec![1, 2, 3]);
+    let initial = enable_graphics_and_render(&mut server, &client_rx);
+    assert!(String::from_utf8_lossy(&initial.graphics).contains("a=p"));
+    server.app.state.pomodoro.prompt = Some(crate::pomodoro::PomodoroPrompt {
+        ended: crate::pomodoro::PomodoroPhase::Work,
+        next: crate::pomodoro::PomodoroPhase::ShortBreak,
+        raised_at: std::time::Instant::now(),
+        input: String::new(),
+        error: None,
+    });
+    assert!(!server.clients[&1].pomodoro_presentation.owns_input());
+
+    server.render_and_stream();
+
+    let frame = read_server_frame(receive_render(&client_rx, Duration::from_millis(100)));
+    let graphics = String::from_utf8_lossy(&frame.graphics);
+    assert!(!graphics.contains("a=p"));
+    assert!(graphics.contains("a=d"), "{graphics:?}");
+}
+
+#[tokio::test]
+async fn full_render_hides_uploaded_graphics_behind_client_usage_surface() {
+    let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+    set_graphics_layer(&mut server, pane_id, vec![1, 2, 3]);
+    let initial = enable_graphics_and_render(&mut server, &client_rx);
+    assert!(String::from_utf8_lossy(&initial.graphics).contains("a=p"));
+
+    open_client_usage(&mut server, 1, &client_rx);
+    server.render_and_stream();
+
+    let frame = read_server_frame(receive_render(&client_rx, Duration::from_millis(100)));
+    let graphics = String::from_utf8_lossy(&frame.graphics);
+    assert!(!graphics.contains("a=p"));
+    assert!(graphics.contains("a=d"), "{graphics:?}");
+}
+
+#[tokio::test]
+async fn retained_render_hides_uploaded_graphics_behind_client_context_menu() {
+    let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+    set_graphics_layer(&mut server, pane_id, vec![1, 2, 3]);
+    let initial = enable_graphics_and_render(&mut server, &client_rx);
+    assert!(String::from_utf8_lossy(&initial.graphics).contains("a=p"));
+    server
+        .clients
+        .get_mut(&1)
+        .unwrap()
+        .sidebar_presentation
+        .overlay
+        .kind = crate::app::state::ClientOverlay::ContextMenu;
+
+    assert_eq!(
+        server.render_retained_graphics_update_and_stream(),
+        RetainedGraphicsOutcome::Sent
+    );
+
+    let message = read_server_message(receive_render(&client_rx, Duration::from_millis(100)));
+    let ServerMessage::Graphics { bytes } = message else {
+        panic!("expected graphics-only cleanup, got {message:?}");
+    };
+    let graphics = String::from_utf8_lossy(&bytes);
+    assert!(!graphics.contains("a=p"));
+    assert!(graphics.contains("a=d"), "{graphics:?}");
+}
+
+#[tokio::test]
+async fn retained_render_hides_uploaded_graphics_behind_client_pomodoro_prompt() {
+    let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+    set_graphics_layer(&mut server, pane_id, vec![1, 2, 3]);
+    let initial = enable_graphics_and_render(&mut server, &client_rx);
+    assert!(String::from_utf8_lossy(&initial.graphics).contains("a=p"));
+    server.clients.get_mut(&1).unwrap().pomodoro_presentation =
+        crate::ui::pomodoro::InputPresentation {
+            prompt: Some(ratatui::layout::Rect::new(10, 5, 40, 12)),
+            ..Default::default()
+        };
+
+    assert_eq!(
+        server.render_retained_graphics_update_and_stream(),
+        RetainedGraphicsOutcome::Sent
+    );
+
+    let message = read_server_message(receive_render(&client_rx, Duration::from_millis(100)));
+    let ServerMessage::Graphics { bytes } = message else {
+        panic!("expected graphics-only cleanup, got {message:?}");
+    };
+    let graphics = String::from_utf8_lossy(&bytes);
+    assert!(!graphics.contains("a=p"));
+    assert!(graphics.contains("a=d"), "{graphics:?}");
+}
+
+#[tokio::test]
 async fn retained_graphics_stays_ordered_after_an_older_render() {
     let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
     let _ = enable_graphics_and_render(&mut server, &client_rx);
@@ -583,6 +709,61 @@ async fn retained_update_falls_back_for_mixed_app_geometry() {
     assert_eq!(
         server.render_retained_graphics_update_and_stream(),
         RetainedGraphicsOutcome::Fallback
+    );
+}
+
+#[tokio::test]
+async fn retained_graphics_uses_each_receiving_clients_surface_geometry() {
+    let (mut server, client_1_rx, pane_id) = retained_test_server(b"aaaa");
+    server.app.state.kitty_graphics_enabled = true;
+    let cell_size = crate::kitty_graphics::HostCellSize {
+        width_px: 10,
+        height_px: 20,
+    };
+    let client_1 = server.clients.get_mut(&1).unwrap();
+    client_1.cell_size = cell_size;
+    client_1.dock_presentation.collapsed = false;
+    client_1.dock_presentation.width = 30;
+    client_1.dock_presentation.tab = Some(crate::app::DockSurface::Home);
+    let (client_2_writer, _client_2_control_rx, client_2_rx) = test_client_writer();
+    server.clients.insert(
+        2,
+        ClientConnection::new(
+            (80, 24),
+            cell_size,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            2,
+            RenderEncoding::SemanticFrame,
+            Some(client_2_writer),
+        ),
+    );
+    server.foreground_client_id = Some(1);
+    server.sync_foreground_client_state();
+    server.render_and_stream();
+    let _ = read_server_frame(receive_render(&client_1_rx, Duration::from_millis(100)));
+    let _ = read_server_frame(receive_render(&client_2_rx, Duration::from_millis(100)));
+
+    let client_1_rect = server.clients[&1].retained_pane_infos[0].inner_rect;
+    let client_2_rect = server.clients[&2].retained_pane_infos[0].inner_rect;
+    assert_ne!(client_1_rect, client_2_rect, "fixture layouts must differ");
+    set_graphics_layer(&mut server, pane_id, vec![1, 2, 3]);
+
+    assert_eq!(
+        server.render_retained_graphics_update_and_stream(),
+        RetainedGraphicsOutcome::Sent
+    );
+    let graphics_bytes = |message| match read_server_message(message) {
+        ServerMessage::Graphics { bytes } => bytes,
+        other => panic!("expected graphics-only message, got {other:?}"),
+    };
+    let client_1_graphics =
+        graphics_bytes(receive_render(&client_1_rx, Duration::from_millis(100)));
+    let client_2_graphics =
+        graphics_bytes(receive_render(&client_2_rx, Duration::from_millis(100)));
+    assert_ne!(
+        client_1_graphics, client_2_graphics,
+        "retained placements must reflect each client's own pane rectangle"
     );
 }
 
@@ -938,6 +1119,58 @@ async fn hidden_large_direct_frame_uploads_then_replays_placement_without_closin
     }
     assert!(next_response_rx.try_recv().is_err());
     assert!(server.app.pane_graphics.slots[&graphics_key(pane_id)].stream_is_active());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn direct_frame_while_client_owns_context_menu_uploads_without_placement() {
+    let (mut server, client_rx, pane_id) = retained_test_server(b"active");
+    enable_graphics_and_render(&mut server, &client_rx);
+    let pane_number = server.app.state.workspaces[0]
+        .public_pane_number(pane_id)
+        .unwrap();
+    let public_pane_id = crate::workspace::public_pane_id_for_number(
+        &server.app.state.workspaces[0].id,
+        pane_number,
+    );
+    let client = server.clients.get_mut(&1).unwrap();
+    client.direct_graphics = true;
+    client.sidebar_presentation.overlay.kind = crate::app::state::ClientOverlay::ContextMenu;
+    server.app.direct_graphics_available = true;
+    set_stream_owner(&mut server, pane_id, "browser");
+
+    let image_width = 2_048;
+    let image_height = 2_049;
+    let path = sparse_direct_frame(
+        &server,
+        "context-menu-direct-frame.rgba",
+        image_width,
+        image_height,
+    );
+    let (message, _response_rx) = direct_stream_message(
+        "context-menu-frame",
+        &public_pane_id,
+        "browser",
+        path,
+        image_width,
+        image_height,
+    );
+
+    assert_eq!(
+        server.handle_pane_graphics_stream_frame(message),
+        RenderImpact::None
+    );
+    match read_server_message(
+        client_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("direct upload behind context menu"),
+    ) {
+        ServerMessage::GraphicsFile { control, .. } => {
+            assert!(control.starts_with("a=t,"), "{control}");
+            assert!(!control.contains("p="), "{control}");
+        }
+        other => panic!("expected graphics file, got {other:?}"),
+    }
 }
 
 #[cfg(unix)]

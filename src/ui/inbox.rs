@@ -117,7 +117,11 @@ pub(crate) fn render_inbox(
     match terminal_runtimes.get(&agent.terminal_id) {
         // The cursor is always shown: keystrokes go to this pane, so it owns the
         // caret even though herdr's own focus never moved here.
-        Some(runtime) => runtime.render(frame, body, app.mode == Mode::Terminal),
+        Some(runtime) => runtime.render(
+            frame,
+            body,
+            app.effective_interaction_mode() == Mode::Terminal,
+        ),
         None => frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 " agent terminal unavailable",

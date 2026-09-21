@@ -5,8 +5,7 @@ use ratatui::layout::{Position, Rect, Size};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
-use crate::app::state::AppState;
-use crate::app::Mode;
+use crate::app::state::{AppState, DockInputOwner, InputOwner};
 use crate::protocol::render_ansi::{BlitEncoder, EncodedBlit};
 use crate::protocol::{CursorState, FrameData, RenderEncoding, ServerMessage, TerminalFrame};
 use crate::render_signal::RenderSignal;
@@ -180,8 +179,16 @@ fn focused_agent_pane_id(app_state: &AppState) -> Option<crate::layout::PaneId> 
 }
 
 fn focused_editor_terminal_id(app_state: &AppState) -> Option<crate::terminal::TerminalId> {
-    if app_state.mode != Mode::Terminal
-        || !app_state.dock_editor_focused
+    if app_state.input_owner() != InputOwner::Dock(DockInputOwner::Editor) {
+        return None;
+    }
+    focused_editor_terminal_id_when_owned(app_state)
+}
+
+fn focused_editor_terminal_id_when_owned(
+    app_state: &AppState,
+) -> Option<crate::terminal::TerminalId> {
+    if !app_state.dock_editor_focused
         || app_state.dock_collapsed
         || app_state.dock_tab != Some(crate::app::DockSurface::Editor)
     {
@@ -198,12 +205,20 @@ pub(crate) fn dock_editor_is_focused(app_state: &AppState) -> bool {
     focused_editor_terminal_id(app_state).is_some()
 }
 
-pub(crate) fn dock_editor_cursor_state(
+fn dock_editor_cursor_state_when_owned(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Option<CursorState> {
-    let terminal_id = focused_editor_terminal_id(app_state)?;
-    let runtime = terminal_runtimes.get(&terminal_id)?;
+    let terminal_id = focused_editor_terminal_id_when_owned(app_state)?;
+    dock_editor_cursor_state_for_terminal(app_state, terminal_runtimes, &terminal_id)
+}
+
+fn dock_editor_cursor_state_for_terminal(
+    app_state: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    terminal_id: &crate::terminal::TerminalId,
+) -> Option<CursorState> {
+    let runtime = terminal_runtimes.get(terminal_id)?;
     if runtime.synchronized_output_active() {
         return None;
     }
@@ -393,19 +408,20 @@ fn render_virtual_with_runtime_registry_inner(
     cell_size: crate::kitty_graphics::HostCellSize,
     render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>,
 ) -> (ratatui::buffer::Buffer, Option<CursorState>) {
-    let popup_visible = app_state.popup_pane.is_some();
-    let dock_editor_focused = !popup_visible && dock_editor_is_focused(app_state);
-    let pre_compute_suppresses_focused_terminal_cursor = !dock_editor_focused
-        && focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes);
+    let owner = app_state.input_owner();
+    let popup_visible = owner == InputOwner::Popup;
+    let dock_editor_focused = owner == InputOwner::Dock(DockInputOwner::Editor);
+    let pane_owns_input = owner == InputOwner::Pane;
+    let pre_compute_suppresses_focused_terminal_cursor = pane_owns_input
+        && focused_terminal_suppresses_host_cursor_when_owned(app_state, terminal_runtimes);
     if resize_panes {
         crate::ui::compute_view_with_cell_size(app_state, terminal_runtimes, area, cell_size);
     } else {
         crate::ui::compute_view_without_resizing_panes(app_state, terminal_runtimes, area);
     }
     let suppress_focused_terminal_cursor = pre_compute_suppresses_focused_terminal_cursor
-        || (!popup_visible
-            && !dock_editor_focused
-            && focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes));
+        || (pane_owns_input
+            && focused_terminal_suppresses_host_cursor_when_owned(app_state, terminal_runtimes));
 
     let backend = CursorTrackingBackend::new(area.width, area.height);
     let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend::new should never fail");
@@ -413,15 +429,21 @@ fn render_virtual_with_runtime_registry_inner(
     terminal
         .draw(|frame| {
             if let Some((render_notify, render_dirty)) = render_handles {
-                crate::ui::render_with_runtime_registry_and_handles(
+                crate::ui::render_with_runtime_registry_and_handles_for_owner(
                     app_state,
                     terminal_runtimes,
                     frame,
                     render_notify,
                     render_dirty,
+                    owner,
                 );
             } else {
-                crate::ui::render_with_runtime_registry(app_state, terminal_runtimes, frame);
+                crate::ui::render_with_runtime_registry_for_owner(
+                    app_state,
+                    terminal_runtimes,
+                    frame,
+                    owner,
+                );
             }
         })
         .expect("render to TestBackend should never fail");
@@ -430,15 +452,18 @@ fn render_virtual_with_runtime_registry_inner(
     let cursor = if popup_visible {
         popup_terminal_cursor(app_state, terminal_runtimes)
     } else if dock_editor_focused {
-        dock_editor_cursor_state(app_state, terminal_runtimes)
+        dock_editor_cursor_state_when_owned(app_state, terminal_runtimes)
+    } else if !pane_owns_input {
+        terminal.backend().rendered_cursor()
     } else if suppress_focused_terminal_cursor {
         None
     } else {
-        focused_terminal_cursor(app_state, terminal_runtimes).or_else(|| {
-            (!focused_terminal_owns_host_cursor(app_state, terminal_runtimes))
-                .then(|| terminal.backend().rendered_cursor())
-                .flatten()
-        })
+        crate::ui::tab_surface_cursor(app_state, terminal_runtimes, app_state.view.tab_surface())
+            .or_else(|| {
+                (!focused_terminal_owns_host_cursor_when_owned(app_state, terminal_runtimes))
+                    .then(|| terminal.backend().rendered_cursor())
+                    .flatten()
+            })
     };
 
     (buffer, cursor)
@@ -504,24 +529,10 @@ pub(crate) fn visible_hyperlinks(
     crate::ui::tab_surface_hyperlinks(app_state, terminal_runtimes, app_state.view.tab_surface())
 }
 
-pub(crate) fn focused_terminal_cursor(
-    app_state: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-) -> Option<CursorState> {
-    if dock_editor_is_focused(app_state) {
-        return dock_editor_cursor_state(app_state, terminal_runtimes);
-    }
-    crate::ui::tab_surface_cursor(app_state, terminal_runtimes, app_state.view.tab_surface())
-}
-
-fn focused_terminal_owns_host_cursor(
+fn focused_terminal_owns_host_cursor_when_owned(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> bool {
-    if app_state.mode != Mode::Terminal || dock_editor_is_focused(app_state) {
-        return false;
-    }
-
     let Some(ws_idx) = app_state.active else {
         return false;
     };
@@ -542,14 +553,10 @@ fn focused_terminal_owns_host_cursor(
         .is_some()
 }
 
-fn focused_terminal_suppresses_host_cursor(
+fn focused_terminal_suppresses_host_cursor_when_owned(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> bool {
-    if app_state.mode != Mode::Terminal || dock_editor_is_focused(app_state) {
-        return false;
-    }
-
     let Some(ws_idx) = app_state.active else {
         return false;
     };
@@ -741,13 +748,37 @@ mod render_scale_benchmark {
 
     fn app_with(workspaces: Vec<Workspace>) -> AppState {
         let mut app = AppState::test_new();
-        app.mode = Mode::Terminal;
+        app.set_server_mode(Mode::Terminal);
         app.pane_scrollbars = true;
         app.workspaces = workspaces;
         app.refresh_local_agent_panel_identities();
         app.active = Some(0);
         app.selected = 0;
         app
+    }
+
+    #[tokio::test]
+    async fn client_overlay_caret_owns_the_host_cursor_over_the_terminal() {
+        let mut app = app_with_workspaces(1);
+        let workspace_id = app.workspaces[0].id.clone();
+        let tab_id = crate::workspace::public_tab_id_for_number(
+            &workspace_id,
+            app.workspaces[0].tabs[0].number,
+        );
+        app.open_client_overlay(crate::app::state::ClientOverlay::RenameTab);
+        app.rename_target = Some(crate::app::state::RenameTarget::Tab {
+            workspace_id,
+            tab_id,
+        });
+        app.name_input = "ab".into();
+
+        let (buffer, cursor) = render_virtual(&mut app, AREA, true);
+        let cursor = cursor.expect("rename caret");
+
+        assert!(cursor.visible);
+        assert!(cursor.x > 0);
+        assert_eq!(buffer[(cursor.x - 1, cursor.y)].symbol(), "b");
+        assert_eq!(buffer[(cursor.x, cursor.y)].symbol(), " ");
     }
 
     fn profile(mut app: AppState) -> RenderStats {

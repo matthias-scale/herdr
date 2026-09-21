@@ -16,7 +16,9 @@ APP_SERVER_SOURCES = (
     *sorted((PROJECT_ROOT / "src" / "server").rglob("*.rs")),
 )
 RUST_SOURCES = tuple(sorted((PROJECT_ROOT / "src").rglob("*.rs")))
-TEST_MODULE = re.compile(r"(?m)^#\[cfg\(test\)\]\s*\nmod\s+\w+\s*\{")
+TEST_MODULE = re.compile(
+    r"(?m)^#\[cfg\(test\)\]\s*\n(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+\w+\s*\{"
+)
 INPUT_STATE_CALL = re.compile(r"(?:\.|::)input_state\b")
 KEYBOARD_STATE_ANSI_CALL = re.compile(
     r"(?:\.|::)(?:keyboard_state_ansi|kitty_keyboard_state_ansi)\b"

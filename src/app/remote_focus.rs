@@ -1079,7 +1079,7 @@ mod tests {
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Terminal);
         app.state.agent_host_name = "local".into();
         let recording = std::sync::Arc::new(std::sync::Mutex::new(RecordingState::default()));
         app.remote_focus_transport = Box::new(RecordingTransport {

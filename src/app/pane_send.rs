@@ -104,12 +104,10 @@ impl App {
         use crossterm::event::KeyCode;
 
         let Some(picker) = self.state.agent_picker.clone() else {
-            self.state.mode = crate::app::state::Mode::Terminal;
             return;
         };
         if key.code == KeyCode::Esc {
             self.state.agent_picker = None;
-            self.state.mode = picker.return_mode;
             return;
         }
         let Some(index) = (match key.code {
@@ -124,7 +122,6 @@ impl App {
             return;
         };
         self.state.agent_picker = None;
-        self.state.mode = picker.return_mode;
         let still_live = self
             .state
             .agent_send_candidates(None)
@@ -165,9 +162,7 @@ impl App {
                 self.state.agent_picker = Some(crate::app::state::AgentPickerState {
                     candidates: candidates.into_iter().take(9).collect(),
                     text,
-                    return_mode: crate::app::state::Mode::Terminal,
                 });
-                self.state.mode = crate::app::state::Mode::AgentPicker;
             }
         }
     }
@@ -196,7 +191,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.ensure_test_terminals();
 
         let panes = app.state.window_pane_ids(0, 0);
@@ -228,7 +223,7 @@ mod tests {
             .collect();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = Mode::Terminal;
+        app.state.set_server_mode(Mode::Terminal);
         app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
         app.state.toast_config.delay_seconds = 1;
         app.state.ensure_test_terminals();
@@ -346,24 +341,26 @@ mod tests {
     #[test]
     fn a_single_target_is_sent_to_without_a_picker() {
         let (mut app, panes) = app_with_agents(2);
+        app.state.set_server_mode(Mode::Settings);
 
         app.send_text_to_chosen_agent(0, panes[0], "look at this".into());
 
         assert!(app.state.agent_picker.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
     }
 
     /// Two or more targets earn the second step.
     #[test]
     fn several_targets_open_the_picker() {
         let (mut app, panes) = app_with_agents(3);
+        app.state.set_server_mode(Mode::Settings);
 
         app.send_text_to_chosen_agent(0, panes[0], "look at this".into());
 
         let picker = app.state.agent_picker.as_ref().expect("agent picker");
         assert_eq!(picker.candidates.len(), 2);
         assert_eq!(picker.text, "look at this");
-        assert_eq!(app.state.mode, Mode::AgentPicker);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
     }
 
     /// The only agent is the one you clicked, so there is nowhere to send.
@@ -385,7 +382,7 @@ mod tests {
         app.handle_agent_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
 
         assert!(app.state.agent_picker.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     /// A digit past the last candidate is a miss, not a send to something else.
@@ -397,18 +394,42 @@ mod tests {
         app.handle_agent_picker_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::empty()));
 
         assert!(app.state.agent_picker.is_some());
-        assert_eq!(app.state.mode, Mode::AgentPicker);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
     fn picking_an_agent_closes_the_picker() {
         let (mut app, panes) = app_with_agents(3);
+        app.state.set_server_mode(Mode::Settings);
         app.send_text_to_chosen_agent(0, panes[0], "look at this".into());
 
         app.handle_agent_picker_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::empty()));
 
         assert!(app.state.agent_picker.is_none());
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_to_new_agent_preserves_shared_mode() {
+        let (mut app, _) = app_with_agents(1);
+        app.state.launch_profiles =
+            crate::app::launch_profiles::resolve(&[crate::config::LaunchProfileConfig {
+                id: "claude".into(),
+                agent: "claude".into(),
+                command: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+                ..Default::default()
+            }]);
+        app.state.set_server_mode(Mode::Settings);
+        let tabs_before = app.state.workspaces[0].tabs.len();
+
+        app.send_text_to_new_agent(0, "review this")
+            .expect("new agent should be created");
+
+        assert_eq!(app.state.workspaces[0].tabs.len(), tabs_before + 1);
+        assert_eq!(app.state.server_mode(), Mode::Settings);
+        for (_, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

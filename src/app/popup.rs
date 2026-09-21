@@ -27,11 +27,11 @@ impl App {
             .remove(&popup.terminal_id);
         self.state.terminals.remove(&popup.terminal_id);
         self.shutdown_terminal_runtime(popup.terminal_id);
-        self.state.mode = if self.state.active.is_some() {
+        self.state.set_server_mode(if self.state.active.is_some() {
             Mode::Terminal
         } else {
             Mode::Navigate
-        };
+        });
         self.render_dirty.request_generic();
         self.render_notify.notify_one();
         true
@@ -182,7 +182,7 @@ impl App {
             width: geometry.width,
             height: geometry.height,
         });
-        self.state.mode = Mode::Terminal;
+        self.state.set_server_mode(Mode::Terminal);
         Ok(())
     }
 }
@@ -243,11 +243,11 @@ mod tests {
     #[test]
     fn close_popup_uses_terminal_mode_with_active_workspace() {
         let mut app = app_with_popup();
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
 
         assert!(app.close_popup_pane());
 
-        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -255,11 +255,11 @@ mod tests {
         let mut app = app_with_popup();
         app.state.workspaces.clear();
         app.state.active = None;
-        app.state.mode = Mode::Navigate;
+        app.state.set_server_mode(Mode::Navigate);
 
         assert!(app.close_popup_pane());
 
-        assert_eq!(app.state.mode, Mode::Navigate);
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
     }
 
     #[test]

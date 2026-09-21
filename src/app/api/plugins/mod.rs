@@ -392,7 +392,8 @@ impl App {
                 "width and height are only supported when placement is popup",
             );
         }
-        if placement == PluginPanePlacement::Popup && self.state.mode != crate::app::Mode::Terminal
+        if placement == PluginPanePlacement::Popup
+            && self.state.server_mode() != crate::app::Mode::Terminal
         {
             return encode_error(
                 id,
@@ -457,7 +458,7 @@ impl App {
             return encode_error(id, "plugin_pane_not_found", "plugin pane not found");
         }
         self.state.focus_pane_in_workspace(ws_idx, pane_id);
-        self.state.settle_terminal_mode_after_focus();
+        self.focus_client_on_pane();
         let Some(record) = self.state.plugin_panes.get(&pane_id).cloned() else {
             return encode_error(id, "plugin_pane_not_found", "plugin pane not found");
         };
@@ -1430,12 +1431,12 @@ platforms = ["linux", "macos"]
             })
         };
 
-        app.state.mode = crate::app::Mode::Settings;
+        app.state.set_server_mode(crate::app::Mode::Settings);
         app.state.settings.original_theme = Some("settings-theme".into());
         let settings_response = open_popup(&mut app, "settings-popup");
         let settings_error: serde_json::Value = serde_json::from_str(&settings_response).unwrap();
         assert_eq!(settings_error["error"]["code"], "ui_busy");
-        assert_eq!(app.state.mode, crate::app::Mode::Settings);
+        assert_eq!(app.state.server_mode(), crate::app::Mode::Settings);
         assert_eq!(
             app.state.settings.original_theme.as_deref(),
             Some("settings-theme")
@@ -1450,12 +1451,12 @@ platforms = ["linux", "macos"]
             selection: None,
             search: crate::app::state::CopyModeSearchState::default(),
         };
-        app.state.mode = crate::app::Mode::Copy;
+        app.state.set_server_mode(crate::app::Mode::Copy);
         app.state.copy_mode = Some(copy_mode.clone());
         let copy_response = open_popup(&mut app, "copy-popup");
         let copy_error: serde_json::Value = serde_json::from_str(&copy_response).unwrap();
         assert_eq!(copy_error["error"]["code"], "ui_busy");
-        assert_eq!(app.state.mode, crate::app::Mode::Copy);
+        assert_eq!(app.state.server_mode(), crate::app::Mode::Copy);
         assert_eq!(app.state.copy_mode, Some(copy_mode));
         assert!(app.state.popup_pane.is_none());
 
@@ -1474,7 +1475,7 @@ platforms = ["linux", "macos"]
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Terminal);
         app.state.kitty_graphics_enabled = true;
         app.state.host_cell_size = crate::kitty_graphics::HostCellSize {
             width_px: 11,
@@ -1592,7 +1593,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \"$PWD\" \
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Terminal);
         let root = unique_temp_path("plugin-pane-path-env");
         let capture = root.join("capture.txt");
         write_manifest_content(
@@ -1697,7 +1698,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s\n' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PL
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Prefix);
 
         let root = unique_temp_path("plugin-pane-tab-events");
         write_manifest_content(
@@ -1757,6 +1758,8 @@ command = ["sh", "-c", "sleep 1"]
             .expect("layout.updated should be emitted");
         assert!(tab_created < pane_created);
         assert!(pane_created < layout_updated);
+        assert_eq!(app.state.server_mode(), crate::app::Mode::Prefix);
+        assert!(app.take_pending_client_pane_focus());
 
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
@@ -1780,7 +1783,7 @@ command = ["sh", "-c", "sleep 1"]
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Prefix);
 
         let root = unique_temp_path("plugin-pane-split-layout-event");
         write_manifest_content(
@@ -1813,7 +1816,7 @@ command = ["sh", "-c", "sleep 1"]
                 target_pane_id: None,
                 direction: Some(crate::api::schema::SplitDirection::Right),
                 cwd: None,
-                focus: true,
+                focus: false,
                 env: std::collections::HashMap::new(),
             }),
         });
@@ -1836,6 +1839,8 @@ command = ["sh", "-c", "sleep 1"]
             crate::api::schema::EventData::LayoutUpdated { layout }
                 if layout.zoomed && layout.panes.len() == 2
         ));
+        assert_eq!(app.state.server_mode(), crate::app::Mode::Prefix);
+        assert!(app.take_pending_client_pane_focus());
 
         for (_, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
@@ -1859,7 +1864,7 @@ command = ["sh", "-c", "sleep 1"]
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Terminal);
 
         let root = unique_temp_path("plugin-pane-overlay-layout-event");
         write_manifest_content(
@@ -1938,7 +1943,7 @@ command = ["sh", "-c", "sleep 1"]
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Terminal);
         let root_pane = app.state.workspaces[0].tabs[0].root_pane;
         let root_public = app.public_pane_id(0, root_pane).unwrap();
 
@@ -2434,7 +2439,7 @@ command = ["sh", "-c", "printf '%s\n%s\n%s' \"$HERDR_PLUGIN_ROOT\" \"$HERDR_PLUG
         app.state.ensure_test_terminals();
         app.state.active = Some(0);
         app.state.selected = 0;
-        app.state.mode = crate::app::Mode::Terminal;
+        app.state.set_server_mode(crate::app::Mode::Terminal);
         app.terminal_runtimes.insert(
             terminal_id,
             crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"hello plugin\n"),

@@ -779,7 +779,7 @@ pub(super) fn render_tab_action_buttons(app: &AppState, frame: &mut Frame) {
 
     let add_rect = app.view.add_action_button_hit_area;
     if app.mouse_capture && add_rect.width > 0 {
-        let style = if app.mode == crate::app::Mode::AddAction {
+        let style = if app.server_mode() == crate::app::Mode::AddAction {
             Style::default()
                 .fg(panel_contrast_fg(p))
                 .bg(p.accent)
@@ -811,7 +811,7 @@ pub(super) fn render_tab_action_buttons(app: &AppState, frame: &mut Frame) {
     let menu_rect = app.view.git_menu_button_hit_area;
     if app.mouse_capture && menu_rect.width > 0 {
         let in_git_repo = crate::ui::dock::chooser::focused_in_git_repo(app);
-        let open = app.mode == crate::app::Mode::GitMenu;
+        let open = app.server_mode() == crate::app::Mode::GitMenu;
         let label = if open && app.view.git_menu_popup_rect.width == 0 {
             " no room "
         } else {
@@ -861,7 +861,7 @@ pub(super) fn render_tab_action_buttons(app: &AppState, frame: &mut Frame) {
 }
 
 pub(super) fn render_git_menu(app: &AppState, frame: &mut Frame) {
-    if app.mode != crate::app::Mode::GitMenu || app.view.git_menu_popup_rect.width == 0 {
+    if app.server_mode() != crate::app::Mode::GitMenu || app.view.git_menu_popup_rect.width == 0 {
         return;
     }
 
@@ -1885,7 +1885,7 @@ mod tests {
     fn git_menu_renders_actions_in_order_then_nonselectable_status() {
         let mut app = AppState::test_new();
         set_focused_git_availability(&mut app, true);
-        app.mode = crate::app::Mode::GitMenu;
+        app.set_server_mode(crate::app::Mode::GitMenu);
         app.view.git_menu_popup_rect = Rect::new(0, 1, 34, 5);
         app.view.git_menu_row_hit_areas = (1..=5).map(|y| Rect::new(0, y, 34, 1)).collect();
         app.status_git_ahead_behind = Some((0, 1));
@@ -1910,7 +1910,7 @@ mod tests {
         let mut app = AppState::test_new();
         set_focused_git_availability(&mut app, false);
         app.mouse_capture = true;
-        app.mode = crate::app::Mode::GitMenu;
+        app.set_server_mode(crate::app::Mode::GitMenu);
         app.view.git_menu_button_hit_area = Rect::new(0, 0, GIT_MENU_BUTTON_WIDTH, 1);
         app.view.git_menu_popup_rect = Rect::new(0, 1, 34, 1);
         app.view.git_menu_row_hit_areas = vec![Rect::new(0, 1, 34, 1)];
