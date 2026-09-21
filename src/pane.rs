@@ -39,7 +39,6 @@ mod kitty_keyboard;
 mod osc;
 mod state;
 mod terminal;
-mod xtgettcap;
 
 #[cfg(unix)]
 use self::agent_detection::DetectionPublishState;
@@ -65,7 +64,7 @@ pub use self::{
 };
 
 const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::from_secs(1);
-const PANE_TERM: &str = "xterm-256color";
+pub(crate) const PANE_TERM: &str = "xterm-256color";
 const PANE_COLORTERM: &str = "truecolor";
 
 #[cfg(test)]

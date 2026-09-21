@@ -405,13 +405,13 @@ Verify after installing by comparing `sha256sum` of the installed binary against
 build artifact. `strings | grep` for a new keybinding default is not a reliable check;
 binding literals do not always survive as searchable strings.
 
-The build needs Zig exactly 0.15.2, which is usually not the system Zig:
+The build needs Zig exactly 0.16.0, which is usually not the system Zig:
 
 | host | Zig |
 | --- | --- |
-| air | `~/.local/zig-0.15.2/zig` |
-| mbpro | `$(brew --prefix zig@0.15)/bin/zig` |
-| ub1 | `~/.local/zig-0.15.2/zig` |
+| air | `~/.local/zig-0.16.0/zig` |
+| mbpro | `$(brew --prefix zig@0.16)/bin/zig` |
+| ub1 | `~/.local/zig-0.16.0/zig` |
 | ub2 | `~/.local/bin/zig` |
 
 Pass it as `ZIG=<path>` or put it first on `PATH`; `cargo build` otherwise fails in

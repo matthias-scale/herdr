@@ -36,7 +36,6 @@ use super::{
         AgentOscStateTracker, DefaultColorEvent, DefaultColorEventTracker, DefaultColorOscTracker,
         DefaultColorQuery, DefaultColorTrackedEvent, OscDebugTracker,
     },
-    xtgettcap::{XtgettcapQueryTracker, XtgettcapResponse},
 };
 
 const DEFAULT_DETECTION_ROWS: usize = 24;
@@ -186,7 +185,6 @@ pub(crate) struct GhosttyPaneCore {
     pub child_default_background_changed: bool,
     pub osc_debug_tracker: OscDebugTracker,
     pub agent_osc_state: AgentOscStateTracker,
-    pub xtgettcap_query_tracker: XtgettcapQueryTracker,
     decscusr_tracker: DecscusrTracker,
     cursor_settle_state: CursorPositionSettleState,
     windows_powershell_prompt_cwd_reporting: bool,
@@ -1071,7 +1069,6 @@ impl GhosttyPaneTerminal {
                 child_default_background_changed: false,
                 osc_debug_tracker: OscDebugTracker::default(),
                 agent_osc_state: AgentOscStateTracker::default(),
-                xtgettcap_query_tracker: XtgettcapQueryTracker::default(),
                 decscusr_tracker: DecscusrTracker::default(),
                 cursor_settle_state: CursorPositionSettleState::default(),
                 windows_powershell_prompt_cwd_reporting: false,
@@ -1310,19 +1307,15 @@ impl GhosttyPaneTerminal {
         let mut terminal_responses = Vec::new();
         core.default_color_event_tracker
             .observe(filtered_bytes.as_ref());
-        core.xtgettcap_query_tracker
-            .observe(filtered_bytes.as_ref());
         core.decscusr_tracker.observe(filtered_bytes.as_ref());
         let in_progress_default_color_event = core.default_color_event_tracker.in_progress_event();
         let default_color_events = core.default_color_event_tracker.drain_pending();
-        let xtgettcap_responses = core.xtgettcap_query_tracker.drain_pending();
         let write_started = crate::render_prof::timer();
         self.write_pty_bytes_with_ordered_responses(
             &mut core,
             filtered_bytes.as_ref(),
             default_color_events,
             in_progress_default_color_event,
-            xtgettcap_responses,
             &mut terminal_responses,
         );
         if !filtered_bytes.is_empty() {
@@ -1399,48 +1392,23 @@ impl GhosttyPaneTerminal {
         bytes: &[u8],
         default_color_events: Vec<DefaultColorTrackedEvent>,
         in_progress_default_color_event: Option<DefaultColorEvent>,
-        xtgettcap_responses: Vec<XtgettcapResponse>,
         terminal_responses: &mut Vec<Bytes>,
     ) {
-        let mut events = Vec::with_capacity(default_color_events.len() + xtgettcap_responses.len());
-        events.extend(
-            default_color_events
-                .into_iter()
-                .map(OrderedPtyResponseEvent::DefaultColor),
-        );
-        events.extend(
-            xtgettcap_responses
-                .into_iter()
-                .map(OrderedPtyResponseEvent::Xtgettcap),
-        );
-        events.sort_by_key(OrderedPtyResponseEvent::end_offset);
-
         let mut written = 0;
-        for event in events {
-            let end_offset = event.end_offset().min(bytes.len());
+        for event in default_color_events {
+            let end_offset = event.end_offset.min(bytes.len());
             let mut libghostty_responses = Vec::new();
             if end_offset > written {
                 core.terminal.write(&bytes[written..end_offset]);
                 libghostty_responses = self.drain_pending_pty_responses();
                 written = end_offset;
             }
-            match event {
-                OrderedPtyResponseEvent::DefaultColor(event) => {
-                    let replacement = respond_to_default_color_event(core, event.event);
-                    if replacement.is_some() {
-                        remove_last_matching_libghostty_color_reply(
-                            &mut libghostty_responses,
-                            event.event,
-                        );
-                    }
-                    terminal_responses.extend(libghostty_responses);
-                    terminal_responses.extend(replacement);
-                }
-                OrderedPtyResponseEvent::Xtgettcap(response) => {
-                    terminal_responses.extend(libghostty_responses);
-                    terminal_responses.push(response.bytes);
-                }
+            let replacement = respond_to_default_color_event(core, event.event);
+            if replacement.is_some() {
+                remove_last_matching_libghostty_color_reply(&mut libghostty_responses, event.event);
             }
+            terminal_responses.extend(libghostty_responses);
+            terminal_responses.extend(replacement);
         }
 
         if written < bytes.len() {
@@ -2310,21 +2278,17 @@ fn cursor_state_from_render_state(
     render_state: &mut crate::ghostty::RenderState,
     decscusr_tracker: &DecscusrTracker,
 ) -> Option<TerminalCursorState> {
-    let cursor = render_state.cursor_viewport().ok()??;
+    let cursor = render_state.cursor().ok()?;
+    let viewport = cursor.viewport?;
     let shape = if decscusr_tracker.cursor_shape_overridden() {
-        render_state
-            .cursor_visual_style()
-            .ok()
-            .zip(render_state.cursor_blinking().ok())
-            .map(|(style, blinking)| decscusr_cursor_shape(style, blinking))
-            .unwrap_or(0)
+        decscusr_cursor_shape(cursor.visual_style, cursor.blinking)
     } else {
         0
     };
     Some(TerminalCursorState {
-        x: cursor.x,
-        y: cursor.y,
-        visible: render_state.cursor_visible().ok()?,
+        x: viewport.x,
+        y: viewport.y,
+        visible: cursor.visible,
         shape,
     })
 }
@@ -3047,21 +3011,6 @@ fn ghostty_cell_style(
     }
     modifiers = crate::protocol::modifier_with_underline_style(modifiers, basic.style.underline);
     style.add_modifier(modifiers)
-}
-
-#[derive(Debug)]
-enum OrderedPtyResponseEvent {
-    DefaultColor(DefaultColorTrackedEvent),
-    Xtgettcap(XtgettcapResponse),
-}
-
-impl OrderedPtyResponseEvent {
-    fn end_offset(&self) -> usize {
-        match self {
-            Self::DefaultColor(event) => event.end_offset,
-            Self::Xtgettcap(response) => response.end_offset,
-        }
-    }
 }
 
 fn remove_last_matching_libghostty_color_reply(
@@ -5806,10 +5755,6 @@ mod tests {
         assert!(result.terminal_responses.is_empty());
         assert!(rx.try_recv().is_err());
         let result = pane.process_pty_bytes(pane_id, 0, b"D73\x1b", &tx);
-        assert!(result.terminal_responses.is_empty());
-        assert!(rx.try_recv().is_err());
-        let result = pane.process_pty_bytes(pane_id, 0, b"\\", &tx);
-
         assert_eq!(
             result.terminal_responses,
             vec![expected_xtgettcap_response(
@@ -5817,6 +5762,9 @@ mod tests {
                 Some(b"\\E]52;%p1%s;%p2%s\\007")
             )]
         );
+        assert!(rx.try_recv().is_err());
+        let result = pane.process_pty_bytes(pane_id, 0, b"\\", &tx);
+        assert!(result.terminal_responses.is_empty());
         assert!(rx.try_recv().is_err());
     }
 

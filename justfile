@@ -90,9 +90,9 @@ install-hooks:
 
 # Build release binary
 #
-# The vendored libghostty-vt requires zig 0.15.x (see vendor/libghostty-vt/build.zig).
-# A newer zig on PATH fails the build with a confusing comptime error, so prefer an
-# explicitly installed zig@0.15 when one exists. CI installs the same formula.
+# The vendored libghostty-vt requires Zig 0.16.0 (see vendor/libghostty-vt/build.zig).
+# Another Zig on PATH fails the build, so prefer an explicitly installed zig@0.16
+# when one exists.
 [unix]
 build:
     #!/usr/bin/env bash
@@ -102,10 +102,10 @@ build:
         export PATH="$(dirname "$ZIG"):$PATH"
     else
         for candidate in \
-            "$(brew --prefix zig@0.15 2>/dev/null)/bin/zig" \
-            "$HOME/.local/zig-0.15.2/zig" \
+            "$(brew --prefix zig@0.16 2>/dev/null)/bin/zig" \
+            "$HOME/.local/zig-0.16.0/zig" \
             "$HOME/.local/bin/zig"; do
-            if [ -x "$candidate" ] && "$candidate" version 2>/dev/null | grep -q '^0\.15\.'; then
+            if [ -x "$candidate" ] && "$candidate" version 2>/dev/null | grep -q '^0\.16\.0$'; then
                 export PATH="$(dirname "$candidate"):$PATH"
                 break
             fi
