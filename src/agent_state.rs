@@ -1000,14 +1000,10 @@ impl LinkStreamScanner {
             return;
         }
         let cells = rewrite.into_sorted_cells();
-        let mut component_start = 0;
-        while component_start < cells.len() {
-            let mut component_end = component_start + 1;
-            while component_end < cells.len()
-                && cells[component_end - 1].0.checked_add(1) == Some(cells[component_end].0)
-            {
-                component_end += 1;
-            }
+        let mut offset = 0;
+        while let Some((component, next_offset)) = next_known_lexical_component(&cells, offset) {
+            let component_start = component.start;
+            let component_end = component.end;
             let first = cells[component_start].0;
             let last = cells[component_end - 1].0;
             let crosses_boundary =
@@ -1019,7 +1015,7 @@ impl LinkStreamScanner {
                 }
                 self.scan_byte(b'\n', links);
             }
-            component_start = component_end;
+            offset = next_offset;
         }
         self.scan_byte(b'\n', links);
     }
@@ -1240,6 +1236,27 @@ impl LinkStreamScanner {
     fn rewrite_operation_count(&self) -> usize {
         self.rewrite_operations
     }
+}
+
+fn next_known_lexical_component(
+    cells: &[(u16, u8)],
+    mut offset: usize,
+) -> Option<(std::ops::Range<usize>, usize)> {
+    while offset < cells.len() && is_url_terminator(cells[offset].1) {
+        offset += 1;
+    }
+    if offset == cells.len() {
+        return None;
+    }
+    let start = offset;
+    offset += 1;
+    while offset < cells.len()
+        && !is_url_terminator(cells[offset].1)
+        && cells[offset - 1].0.checked_add(1) == Some(cells[offset].0)
+    {
+        offset += 1;
+    }
+    Some((start..offset, offset))
 }
 
 impl RenderedRewrite {
@@ -2825,6 +2842,54 @@ mod tests {
             gate.take_links().expect("following ASCII URL").output_urls,
             ["https://after-wide.example/path"]
         );
+    }
+
+    #[test]
+    fn row_mutation_lexical_components_use_production_terminators() {
+        let url = b"https://kept.example/x";
+        let component_ranges = |separator: u8| {
+            let mut bytes = url.to_vec();
+            bytes.extend_from_slice(&[separator, b'X']);
+            let cells = bytes
+                .into_iter()
+                .enumerate()
+                .map(|(column, byte)| (u16::try_from(column).expect("test column"), byte))
+                .collect::<Vec<_>>();
+            let mut ranges = Vec::new();
+            let mut offset = 0;
+            while let Some((range, next)) = next_known_lexical_component(&cells, offset) {
+                ranges.push((cells[range.start].0, cells[range.end - 1].0));
+                offset = next;
+            }
+            ranges
+        };
+        let left_margin = u16::try_from(url.len()).expect("left margin");
+        let right_margin = left_margin + 1;
+
+        for boundary in [b' ', b'\t', b'\n', 0x01, b'"', b'\'', b'<', b'>'] {
+            let ranges = component_ranges(boundary);
+            assert_eq!(ranges.len(), 2, "boundary={boundary:#x}");
+            for margin in [left_margin, right_margin] {
+                assert!(
+                    ranges
+                        .iter()
+                        .all(|&(first, last)| !(first < margin && last >= margin)),
+                    "terminator {boundary:#x} joined a component across margin {margin}"
+                );
+            }
+        }
+
+        for punctuation in [b')', b']', b',', b';', b'?', b'!'] {
+            let ranges = component_ranges(punctuation);
+            assert_eq!(ranges.len(), 1, "punctuation={punctuation:#x}");
+            for margin in [left_margin, right_margin] {
+                let (first, last) = ranges[0];
+                assert!(
+                    first < margin && last >= margin,
+                    "punctuation {punctuation:#x} split at margin {margin}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -5338,6 +5338,7 @@ mod tests {
         let crossing_url = "https://crossing.example/x";
         let recovery_url = "https://recovery.example/path";
         let recovery = format!("\x1b[?69l\x1b[r\x1b[20;1H\n{recovery_url}\n");
+        let spaces_to_inside_margin = " ".repeat(27);
         let cases = [
             (
                 "left boundary crossing",
@@ -5347,6 +5348,13 @@ mod tests {
             (
                 "left boundary separated",
                 format!("\x1b[?69h\x1b[40;70s{kept_url}\x1b[50GX\x1b[1L{recovery}"),
+                true,
+            ),
+            (
+                "left boundary terminated",
+                format!(
+                    "\x1b[?69h\x1b[40;70s{kept_url}\x1b[24G\x1b[23G{spaces_to_inside_margin}X\x1b[1L{recovery}"
+                ),
                 true,
             ),
             (
