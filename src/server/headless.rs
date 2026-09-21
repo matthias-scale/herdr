@@ -52,7 +52,7 @@ use crate::server::client_accept::{
 use crate::server::client_transport::ServerEvent;
 use crate::server::clients::{
     events_include_interaction, latest_app_client, render_targets, terminal_stream_client_ids,
-    ClientConnection, ClientConnectionMode, DeferredRender,
+    ClientConnection, ClientConnectionMode, ClientTerminalGeometry, DeferredRender,
 };
 use crate::server::keybindings::{app_keybindings, apply_keybindings};
 use crate::server::notifications::{
@@ -1312,6 +1312,155 @@ impl HeadlessServer {
         self.resize_shared_runtime_to_effective_size_with_pending_agent_resumes(false);
     }
 
+    fn current_client_terminal_geometries(
+        &self,
+        client_id: u64,
+    ) -> HashMap<crate::terminal::TerminalId, ClientTerminalGeometry> {
+        let Some(client) = self
+            .clients
+            .get(&client_id)
+            .filter(|client| client.is_full_app_client())
+        else {
+            return HashMap::new();
+        };
+        let Some(workspace) = self
+            .app
+            .state
+            .active
+            .and_then(|index| self.app.state.workspaces.get(index))
+        else {
+            return HashMap::new();
+        };
+
+        self.app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .filter(|info| info.inner_rect.width > 0 && info.inner_rect.height > 0)
+            .filter_map(|info| {
+                workspace.terminal_id(info.id).cloned().map(|terminal_id| {
+                    (
+                        terminal_id,
+                        ClientTerminalGeometry {
+                            cols: info.inner_rect.width,
+                            rows: info.inner_rect.height,
+                            cell_size: client.cell_size,
+                        },
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn update_client_terminal_geometries(
+        &mut self,
+        client_id: u64,
+    ) -> std::collections::HashSet<crate::terminal::TerminalId> {
+        let next = self.current_client_terminal_geometries(client_id);
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return std::collections::HashSet::new();
+        };
+        if client.terminal_geometries == next {
+            return std::collections::HashSet::new();
+        }
+        let affected = client
+            .terminal_geometries
+            .keys()
+            .chain(next.keys())
+            .cloned()
+            .collect();
+        client.terminal_geometries = next;
+        affected
+    }
+
+    fn client_terminal_ids(
+        &self,
+        client_id: u64,
+    ) -> std::collections::HashSet<crate::terminal::TerminalId> {
+        let Some(client) = self.clients.get(&client_id) else {
+            return std::collections::HashSet::new();
+        };
+        let mut terminal_ids = client
+            .terminal_geometries
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        if let ClientConnectionMode::TerminalAttach { terminal_id, .. }
+        | ClientConnectionMode::TerminalObserve { terminal_id } = &client.mode
+        {
+            if let Some(terminal_id) = self.terminal_id_by_string(terminal_id) {
+                terminal_ids.insert(terminal_id);
+            }
+        }
+        terminal_ids
+    }
+
+    fn reconcile_terminal_geometries(
+        &self,
+        terminal_ids: impl IntoIterator<Item = crate::terminal::TerminalId>,
+    ) {
+        for terminal_id in terminal_ids {
+            let terminal_id_string = terminal_id.to_string();
+            let mut cols = None::<u16>;
+            let mut rows = None::<u16>;
+            let mut cell_width_px = None::<u32>;
+            let mut cell_height_px = None::<u32>;
+
+            for client in self.clients.values() {
+                let geometry = match &client.mode {
+                    ClientConnectionMode::App => {
+                        client.terminal_geometries.get(&terminal_id).copied()
+                    }
+                    ClientConnectionMode::TerminalAttach {
+                        terminal_id: attached,
+                        ..
+                    }
+                    | ClientConnectionMode::TerminalObserve {
+                        terminal_id: attached,
+                    } if attached == &terminal_id_string => Some(ClientTerminalGeometry {
+                        cols: client.terminal_size.0,
+                        rows: client.terminal_size.1,
+                        cell_size: client.cell_size,
+                    }),
+                    ClientConnectionMode::TerminalAttach { .. }
+                    | ClientConnectionMode::TerminalObserve { .. } => None,
+                };
+                let Some(geometry) = geometry else {
+                    continue;
+                };
+                cols = Some(cols.map_or(geometry.cols, |current| current.min(geometry.cols)));
+                rows = Some(rows.map_or(geometry.rows, |current| current.min(geometry.rows)));
+                if geometry.cell_size.width_px > 0 {
+                    cell_width_px = Some(
+                        cell_width_px.map_or(geometry.cell_size.width_px, |current| {
+                            current.min(geometry.cell_size.width_px)
+                        }),
+                    );
+                }
+                if geometry.cell_size.height_px > 0 {
+                    cell_height_px = Some(
+                        cell_height_px.map_or(geometry.cell_size.height_px, |current| {
+                            current.min(geometry.cell_size.height_px)
+                        }),
+                    );
+                }
+            }
+
+            let (Some(cols), Some(rows)) = (cols, rows) else {
+                continue;
+            };
+            if let Some(runtime) = self.app.terminal_runtimes.get(&terminal_id) {
+                runtime.resize(
+                    rows,
+                    cols,
+                    cell_width_px.unwrap_or(0),
+                    cell_height_px.unwrap_or(0),
+                );
+            }
+        }
+    }
+
     fn pomodoro_client_area(client: &ClientConnection) -> Rect {
         Rect::new(0, 0, client.terminal_size.0, client.terminal_size.1)
     }
@@ -1372,17 +1521,17 @@ impl HeadlessServer {
         let Some(client_id) = self.foreground_client_id else {
             return;
         };
-        let Some(client) = self.clients.get(&client_id) else {
+        let Some(cell_size) = self.clients.get(&client_id).map(|client| client.cell_size) else {
             return;
         };
         let (cols, rows) = self.effective_size;
         let area = Rect::new(0, 0, cols, rows);
-        if client.cell_size.is_known() {
+        if cell_size.is_known() {
             crate::ui::compute_view_with_cell_size(
                 &mut self.app.state,
                 &self.app.terminal_runtimes,
                 area,
-                client.cell_size,
+                cell_size,
             );
         } else {
             crate::ui::compute_view_with_runtime_registry(
@@ -1391,6 +1540,8 @@ impl HeadlessServer {
                 area,
             );
         }
+        let affected = self.update_client_terminal_geometries(client_id);
+        self.reconcile_terminal_geometries(affected);
         // Shared runtime size changes affect pane wrapping and foreground-driven
         // rendering semantics. Force one fresh frame to every remaining client
         // even if the next rendered buffer compares equal to its cached frame.
@@ -2155,11 +2306,13 @@ impl HeadlessServer {
     }
 
     fn remove_client_and_resize_if_needed(&mut self, client_id: u64) {
+        let affected = self.client_terminal_ids(client_id);
         let needs_shared_resize = self.client_removal_needs_shared_resize(client_id);
         let foreground_changed = self.remove_client(client_id);
         if needs_shared_resize || foreground_changed {
             self.resize_shared_runtime_to_effective_size();
         }
+        self.reconcile_terminal_geometries(affected);
     }
 
     fn send_client_graphics_cleanup(&mut self, client_id: u64) {
@@ -2675,6 +2828,12 @@ impl HeadlessServer {
             return false;
         };
         let (cols, rows) = client.terminal_size;
+        let mut affected = client
+            .terminal_geometries
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        client.terminal_geometries.clear();
         client.mode = ClientConnectionMode::TerminalObserve {
             terminal_id: terminal_id.clone(),
         };
@@ -2687,6 +2846,10 @@ impl HeadlessServer {
         }
 
         info!(client_id, cols, rows, terminal_id = %terminal_id, "terminal observe client connected");
+        if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
+            affected.insert(terminal_id);
+        }
+        self.reconcile_terminal_geometries(affected);
         true
     }
 
@@ -4083,7 +4246,12 @@ impl HeadlessServer {
             return false;
         };
         let (cols, rows) = client.terminal_size;
-        let cell_size = client.cell_size;
+        let mut affected = client
+            .terminal_geometries
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        client.terminal_geometries.clear();
         client.mode = ClientConnectionMode::TerminalAttach {
             terminal_id: terminal_id.clone(),
             control,
@@ -4103,11 +4271,19 @@ impl HeadlessServer {
             .state
             .direct_attach_resize_locks
             .insert(real_terminal_id.clone());
-        self.app
-            .start_pending_agent_resume_for_terminal(&real_terminal_id, rows, cols, true);
-        if let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) {
-            runtime.resize(rows, cols, cell_size.width_px, cell_size.height_px);
-        }
+        affected.insert(real_terminal_id.clone());
+        self.reconcile_terminal_geometries(affected);
+        let (effective_rows, effective_cols) = self
+            .app
+            .terminal_runtimes
+            .get(&real_terminal_id)
+            .map_or((rows, cols), crate::terminal::TerminalRuntime::current_size);
+        self.app.start_pending_agent_resume_for_terminal(
+            &real_terminal_id,
+            effective_rows,
+            effective_cols,
+            true,
+        );
         true
     }
 
@@ -4884,13 +5060,13 @@ impl HeadlessServer {
                         *cell_size = observed;
                     }
                     render_state.request_repaint();
-                    Some((terminal_id.clone(), *cell_size))
+                    Some(terminal_id.clone())
                 } else {
                     None
                 };
-                if let Some((terminal_id, cell_size)) = controlled_terminal_id {
-                    if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
-                        runtime.resize(rows, cols, cell_size.width_px, cell_size.height_px);
+                if let Some(terminal_id) = controlled_terminal_id {
+                    if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
+                        self.reconcile_terminal_geometries([terminal_id]);
                     }
                     return true;
                 }
@@ -4915,18 +5091,18 @@ impl HeadlessServer {
                         *cell_size = observed;
                     }
                     render_state.request_repaint();
-                    Some((terminal_id.clone(), *cell_size))
+                    Some(terminal_id.clone())
                 } else {
                     None
                 };
-                if let Some((terminal_id, cell_size)) = direct_terminal_id {
-                    if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
-                        runtime.resize(rows, cols, cell_size.width_px, cell_size.height_px);
+                if let Some(terminal_id) = direct_terminal_id {
+                    if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
+                        self.reconcile_terminal_geometries([terminal_id]);
                     }
                     return true;
                 }
-                if let Some(ClientConnection {
-                    mode: ClientConnectionMode::TerminalObserve { .. },
+                let observed_terminal_id = if let Some(ClientConnection {
+                    mode: ClientConnectionMode::TerminalObserve { terminal_id },
                     terminal_size,
                     cell_size,
                     render_state,
@@ -4942,6 +5118,14 @@ impl HeadlessServer {
                         *cell_size = observed;
                     }
                     render_state.request_repaint();
+                    Some(terminal_id.clone())
+                } else {
+                    None
+                };
+                if let Some(terminal_id) = observed_terminal_id {
+                    if let Some(terminal_id) = self.terminal_id_by_string(&terminal_id) {
+                        self.reconcile_terminal_geometries([terminal_id]);
+                    }
                     return true;
                 }
                 if let Some(client) = self.clients.get_mut(&client_id) {
@@ -6235,6 +6419,7 @@ impl HeadlessServer {
         let mut broken_clients: Vec<u64> = Vec::new();
         let mut deferred_frame = false;
         let mut agent_activity_refresh_deadline = None;
+        let mut changed_terminal_geometries = std::collections::HashSet::new();
         for (client_id, (cols, rows), cell_size, is_foreground, mode) in render_targets {
             let area = Rect::new(0, 0, cols, rows);
             let is_app_client = matches!(mode, ClientConnectionMode::App);
@@ -6360,6 +6545,8 @@ impl HeadlessServer {
                     self.app.state.swap_symphony_detail(&mut symphony_detail);
                     self.app.state.swap_work_view(&mut work_view);
                     self.app.state.swap_usage_view(&mut usage_view);
+                    changed_terminal_geometries
+                        .extend(self.update_client_terminal_geometries(client_id));
                     if let Some(client) = self.clients.get_mut(&client_id) {
                         std::sync::Arc::make_mut(&mut client.retained_pane_infos)
                             .clone_from(&self.app.state.view.pane_infos);
@@ -6588,6 +6775,7 @@ impl HeadlessServer {
                 self.remove_client_and_resize_if_needed(client_id);
             }
         }
+        self.reconcile_terminal_geometries(changed_terminal_geometries);
 
         self.app.agent_activity_refresh_deadline = agent_activity_refresh_deadline;
         let (cols, rows) = self.effective_size;
@@ -11255,15 +11443,11 @@ next_tab = ""
     #[test]
     fn terminal_observe_allows_multiple_clients_without_attach_ownership() {
         with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
-            let initial_size = server
-                .app
-                .terminal_runtimes
-                .get(&terminal_id)
-                .expect("runtime")
-                .current_size();
-
             for client_id in [7, 8] {
                 connect_pending_terminal_client(server, client_id);
+                if client_id == 8 {
+                    server.clients.get_mut(&client_id).unwrap().terminal_size = (120, 40);
+                }
                 assert!(
                     server.handle_server_event(ServerEvent::ClientObserveTerminal {
                         client_id,
@@ -11285,7 +11469,7 @@ next_tab = ""
                     .get(&terminal_id)
                     .expect("runtime")
                     .current_size(),
-                initial_size
+                (30, 100)
             );
             assert_eq!(
                 terminal_stream_client_ids(&server.clients, &terminal_id_string).len(),
@@ -17508,7 +17692,7 @@ next_tab = ""
     }
 
     #[test]
-    fn terminal_attach_disconnect_restores_app_pane_size() {
+    fn terminal_attach_uses_smallest_client_geometry_and_preserves_known_pixels() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -17531,8 +17715,11 @@ next_tab = ""
         server.clients.insert(
             1,
             ClientConnection::new(
-                (120, 40),
-                crate::kitty_graphics::HostCellSize::default(),
+                (199, 50),
+                crate::kitty_graphics::HostCellSize {
+                    width_px: 9,
+                    height_px: 18,
+                },
                 crate::terminal_theme::TerminalTheme::default(),
                 None,
                 1,
@@ -17549,13 +17736,13 @@ next_tab = ""
             .get(&terminal_id)
             .expect("runtime")
             .current_size();
-        assert_ne!(expected_app_size, (24, 80));
+        assert_eq!(expected_app_size.1, 171);
 
         let (writer, _control_rx, _render_rx) = test_client_writer();
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
             client_id: 2,
-            cols: 80,
-            rows: 24,
+            cols: 305,
+            rows: 80,
             cell_width_px: 0,
             cell_height_px: 0,
             render_encoding: RenderEncoding::TerminalAnsi,
@@ -17584,8 +17771,73 @@ next_tab = ""
                 .get(&terminal_id)
                 .expect("runtime")
                 .current_size(),
-            (24, 80)
+            expected_app_size
         );
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .expect("runtime")
+                .pixel_size(),
+            Some((
+                u32::from(expected_app_size.1) * 9,
+                u32::from(expected_app_size.0) * 18
+            ))
+        );
+
+        assert!(server.handle_server_event(ServerEvent::ClientResize {
+            client_id: 1,
+            cols: 388,
+            rows: 60,
+            cell_width_px: 9,
+            cell_height_px: 18,
+        }));
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .expect("runtime")
+                .current_size(),
+            (59, 305)
+        );
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .expect("runtime")
+                .pixel_size(),
+            Some((305 * 9, 59 * 18))
+        );
+
+        assert!(server.handle_server_event(ServerEvent::ClientResize {
+            client_id: 2,
+            cols: 305,
+            rows: 100,
+            cell_width_px: 12,
+            cell_height_px: 16,
+        }));
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .expect("runtime")
+                .current_size(),
+            (59, 305)
+        );
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .expect("runtime")
+                .pixel_size(),
+            Some((305 * 9, 59 * 16))
+        );
+        let widened_app_size = server.clients[&1].terminal_geometries[&terminal_id];
 
         assert!(server.handle_server_event(ServerEvent::ClientDisconnected { client_id: 2 }));
 
@@ -17601,7 +17853,19 @@ next_tab = ""
                 .get(&terminal_id)
                 .expect("runtime")
                 .current_size(),
-            expected_app_size
+            (widened_app_size.rows, widened_app_size.cols)
+        );
+        assert_eq!(
+            server
+                .app
+                .terminal_runtimes
+                .get(&terminal_id)
+                .expect("runtime")
+                .pixel_size(),
+            Some((
+                u32::from(widened_app_size.cols) * 9,
+                u32::from(widened_app_size.rows) * 18,
+            ))
         );
         drop(server);
         drop(_runtime_guard);
