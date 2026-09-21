@@ -160,11 +160,20 @@ impl AuthorityState {
                 return Err("group store contains a duplicate group id".to_string());
             }
         }
-        if by_local
-            .last_key_value()
-            .is_some_and(|(local, _)| *local >= next_group_id)
-        {
-            return Err("next group id does not advance past stored records".to_string());
+        let mut expected_local = 1_u64;
+        for local in by_local.keys() {
+            if *local != expected_local {
+                return Err("group store does not account for every allocated id".to_string());
+            }
+            expected_local = expected_local
+                .checked_add(1)
+                .ok_or_else(|| "group local id range is exhausted".to_string())?;
+        }
+        if expected_local != next_group_id {
+            return Err("group store does not account for every allocated id".to_string());
+        }
+        if revision != 0 && by_local.is_empty() {
+            return Err("group store revision has no allocated identity".to_string());
         }
         Ok(Self {
             authority_id,
@@ -374,5 +383,25 @@ mod tests {
                 actual: 1
             })
         ));
+    }
+
+    #[test]
+    fn persisted_state_rejects_an_unaccounted_allocated_identity() {
+        let authority_id = authority(1);
+        let record = GroupRecord {
+            id: GroupId {
+                owner: authority_id.clone(),
+                local: 2,
+            },
+            revision: 2,
+            state: GroupState::Deleted,
+        };
+
+        assert!(AuthorityState::from_persisted(authority_id, 2, 3, vec![record]).is_err());
+    }
+
+    #[test]
+    fn persisted_state_rejects_revision_history_without_an_identity() {
+        assert!(AuthorityState::from_persisted(authority(1), 2, 1, Vec::new()).is_err());
     }
 }
