@@ -1006,6 +1006,8 @@ pub struct WorkspaceCardArea {
     pub ws_idx: usize,
     pub rect: Rect,
     pub indented: bool,
+    /// Whether this row renders the repository-header chevron at `rect.x`.
+    pub repo_header: bool,
     /// The settled pane represented by this workspace header, when the header
     /// belongs to the Settled section.
     pub settled_pane_id: Option<PaneId>,
@@ -1420,7 +1422,6 @@ pub(crate) enum SidebarGroupMode {
 }
 
 impl SidebarGroupMode {
-    #[cfg(test)]
     pub(crate) const ALL: [Self; 6] = [
         Self::Repo,
         Self::Spaces,
@@ -1527,7 +1528,6 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) workspace_scroll: usize,
     pub(crate) mobile_switcher_scroll: usize,
     pub(crate) collapsed_groups: std::collections::HashSet<String>,
-    pub(crate) expanded_remote_host_groups: std::collections::HashSet<String>,
     /// Global projection revision last reconciled into this attach.
     pub(crate) projection_revision: u64,
     pub(crate) group_mode: SidebarGroupMode,
@@ -1863,14 +1863,14 @@ pub(crate) struct SidebarSnoozeUiState {
 }
 
 impl SidebarPresentationState {
-    pub(crate) fn initialize_group_mode(&mut self, group_mode: SidebarGroupMode) {
+    pub(crate) fn initialize_group_mode(
+        &mut self,
+        group_mode: SidebarGroupMode,
+        collapsed_overrides: &std::collections::HashMap<String, bool>,
+    ) {
         self.group_mode = group_mode;
         self.group_menu_selected = group_mode.view_index();
-        self.collapsed_groups.insert(format!(
-            "{}:{}",
-            group_mode.collapse_namespace(),
-            crate::ui::RECENTLY_DONE_SECTION_TITLE
-        ));
+        self.collapsed_groups = crate::ui::initial_collapsed_sidebar_groups(collapsed_overrides);
     }
 }
 
@@ -4307,6 +4307,7 @@ pub struct AppState {
     pub(crate) dock_width_persistence_request: Option<u16>,
     pub(crate) sidebar_group_mode_persistence_request: Option<SidebarGroupMode>,
     pub(crate) sidebar_group_sort_persistence_request: Option<(String, SidebarSortMode)>,
+    pub(crate) sidebar_group_collapsed_persistence_request: Option<(String, bool)>,
     pub(crate) sidebar_view_scan_request: bool,
     pub(crate) sidebar_work_filter_persistence_request: Option<SidebarWorkFilter>,
     /// Set when UI interaction requested a clipboard write that must be
@@ -5783,6 +5784,12 @@ impl AppState {
         self.sidebar_group_sort_persistence_request.take()
     }
 
+    pub(crate) fn take_sidebar_group_collapsed_persistence_request(
+        &mut self,
+    ) -> Option<(String, bool)> {
+        self.sidebar_group_collapsed_persistence_request.take()
+    }
+
     pub(crate) fn request_sidebar_refresh(&mut self) -> bool {
         if self.sidebar_refreshing {
             return false;
@@ -5815,10 +5822,6 @@ impl AppState {
         std::mem::swap(
             &mut self.collapsed_sidebar_groups,
             &mut other.collapsed_groups,
-        );
-        std::mem::swap(
-            &mut self.sidebar_presentation.expanded_remote_host_groups,
-            &mut other.expanded_remote_host_groups,
         );
         std::mem::swap(
             &mut self.sidebar_presentation.projection_revision,
@@ -7217,6 +7220,7 @@ impl AppState {
             dock_width_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
             sidebar_group_sort_persistence_request: None,
+            sidebar_group_collapsed_persistence_request: None,
             sidebar_view_scan_request: false,
             sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
@@ -7229,7 +7233,9 @@ impl AppState {
             worktree_remove: None,
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
-            collapsed_sidebar_groups: std::iter::once("repo:Recently done".to_string()).collect(),
+            collapsed_sidebar_groups: crate::ui::initial_collapsed_sidebar_groups(
+                &std::collections::HashMap::new(),
+            ),
             sidebar_group_mode: SidebarGroupMode::Repo,
             sidebar_focused: false,
             client_focus_intent: ClientFocusIntent::FollowShared,
@@ -8444,18 +8450,35 @@ mod tests {
     }
 
     #[test]
-    fn fresh_sidebar_presentation_collapses_recently_done_for_its_group_mode() {
+    fn fresh_sidebar_presentation_seeds_every_view_and_honors_explicit_expansion() {
         let mut presentation = SidebarPresentationState::default();
-        presentation.initialize_group_mode(SidebarGroupMode::Spaces);
+        let overrides = std::collections::HashMap::from([("repo:Runs".to_string(), false)]);
+        presentation.initialize_group_mode(SidebarGroupMode::Spaces, &overrides);
 
         assert_eq!(presentation.group_mode, SidebarGroupMode::Spaces);
         assert_eq!(
             presentation.group_menu_selected,
             SidebarGroupMode::Spaces.view_index()
         );
-        assert!(presentation
-            .collapsed_groups
-            .contains("spaces:Recently done"));
+        for mode in SidebarGroupMode::ALL {
+            let namespace = mode.collapse_namespace();
+            if let Some(title) = crate::ui::sidebar::unassigned_section_title(mode) {
+                assert!(
+                    presentation
+                        .collapsed_groups
+                        .contains(&format!("{namespace}:{title}")),
+                    "{namespace}:{title}"
+                );
+            }
+            for title in ["Snoozed", "Settled", "Fleet", "Runs", "Symphony"] {
+                let key = format!("{namespace}:{title}");
+                if key == "repo:Runs" {
+                    assert!(!presentation.collapsed_groups.contains(&key));
+                } else {
+                    assert!(presentation.collapsed_groups.contains(&key), "{key}");
+                }
+            }
+        }
     }
 
     #[test]

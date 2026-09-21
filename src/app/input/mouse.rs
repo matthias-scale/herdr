@@ -5421,7 +5421,8 @@ mod tests {
         app.state.set_server_mode(Mode::Terminal);
         let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
         assert!(app.state.snooze_pane_at(0, snoozed_pane, deadline));
-        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.collapsed_sidebar_groups.remove("repo:Snoozed");
+        let sidebar = Rect::new(0, 0, 40, 40);
         app.state.view.sidebar_rect = sidebar;
 
         for pane_id in [active_pane, snoozed_pane] {
@@ -5538,7 +5539,8 @@ mod tests {
         app.state.set_server_mode(Mode::Terminal);
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
-        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.collapsed_sidebar_groups.remove("repo:Settled");
+        let sidebar = Rect::new(0, 0, 40, 40);
         app.state.view.sidebar_rect = sidebar;
         let target = crate::ui::compute_tab_card_areas(&app.state, sidebar)
             .into_iter()
@@ -5683,7 +5685,8 @@ mod tests {
             unavailable: None,
             polled: true,
         };
-        let sidebar = Rect::new(0, 0, 40, 16);
+        app.state.collapsed_sidebar_groups.remove("repo:Symphony");
+        let sidebar = Rect::new(0, 0, 40, 40);
         app.state.view.sidebar_rect = sidebar;
         let row = (sidebar.y..sidebar.bottom())
             .find(|row| crate::ui::sidebar_symphony_job_at(&app.state, *row) == Some(1))
@@ -9157,6 +9160,7 @@ mod tests {
         app.state.set_server_mode(Mode::Terminal);
         let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
         assert!(app.state.snooze_pane_at(0, snoozed_pane, deadline));
+        app.state.collapsed_sidebar_groups.remove("repo:Snoozed");
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
         let switch = app.state.view.mobile_menu_hit_area;

@@ -18,6 +18,8 @@ struct ClientPresentationFile {
     #[serde(default)]
     sidebar_group_sorts:
         Option<std::collections::HashMap<String, crate::app::state::SidebarSortMode>>,
+    #[serde(default)]
+    sidebar_group_collapsed: Option<std::collections::HashMap<String, bool>>,
 }
 
 fn presentation_path() -> PathBuf {
@@ -124,6 +126,29 @@ fn apply_sidebar_group_sort(
 pub(crate) fn save_sidebar_group_sort(key: &str, mode: crate::app::state::SidebarSortMode) {
     let path = presentation_path();
     if let Err(err) = update_path(&path, |state| apply_sidebar_group_sort(state, key, mode)) {
+        warn!(path = %path.display(), err = %err, "failed to save client presentation state");
+    }
+}
+
+pub(crate) fn load_sidebar_group_collapsed() -> std::collections::HashMap<String, bool> {
+    let path = presentation_path();
+    match load_from_path(&path) {
+        Ok(state) => state.sidebar_group_collapsed.unwrap_or_default(),
+        Err(err) => {
+            warn!(path = %path.display(), err = %err, "failed to load client presentation state");
+            std::collections::HashMap::new()
+        }
+    }
+}
+
+pub(crate) fn save_sidebar_group_collapsed(key: &str, collapsed: bool) {
+    let path = presentation_path();
+    if let Err(err) = update_path(&path, |state| {
+        state
+            .sidebar_group_collapsed
+            .get_or_insert_with(Default::default)
+            .insert(key.to_string(), collapsed);
+    }) {
         warn!(path = %path.display(), err = %err, "failed to save client presentation state");
     }
 }
@@ -353,5 +378,40 @@ mod tests {
             serde_json::from_str(r#"{"sidebar_group_mode":"repo_pr"}"#)
                 .expect("legacy presentation state");
         assert!(state.sidebar_group_sorts.is_none());
+    }
+
+    #[test]
+    fn sidebar_collapse_overrides_round_trip_true_and_false_without_erasing_width() {
+        let path = temp_path();
+        update_path(&path, |state| {
+            state.dock_width = Some(29);
+            state.sidebar_group_collapsed = Some(std::collections::HashMap::from([
+                ("repo:Runs".to_string(), true),
+                ("repo:Settled".to_string(), false),
+            ]));
+        })
+        .expect("save sidebar collapse overrides");
+        update_path(&path, |state| {
+            state.sidebar_group_mode = Some(crate::app::state::SidebarGroupMode::Missive);
+        })
+        .expect("save unrelated presentation field");
+
+        let state = load_from_path(&path).expect("load client presentation state");
+        assert_eq!(state.dock_width, Some(29));
+        assert_eq!(
+            state.sidebar_group_collapsed,
+            Some(std::collections::HashMap::from([
+                ("repo:Runs".to_string(), true),
+                ("repo:Settled".to_string(), false),
+            ]))
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_presentation_files_have_no_collapse_overrides() {
+        let state: ClientPresentationFile =
+            serde_json::from_str(r#"{"dock_width":31}"#).expect("legacy presentation state");
+        assert!(state.sidebar_group_collapsed.is_none());
     }
 }

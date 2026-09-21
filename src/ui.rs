@@ -93,17 +93,18 @@ pub(crate) use self::scrollbar::{
     scrollbar_offset_from_row, scrollbar_thumb_grab_offset, should_show_scrollbar,
 };
 use self::settings::render_settings_overlay;
-pub(crate) use self::sidebar::compute_sidebar_section_header_areas;
 pub(crate) use self::sidebar::compute_tab_card_areas;
 #[cfg(test)]
 pub(crate) use self::sidebar::sidebar_object_menu_layout as sidebar_object_menu_layout_for_test;
 #[cfg(test)]
 pub(crate) use self::sidebar::tests::sidebar_work_item_fixture;
-pub(crate) use self::sidebar::RECENTLY_DONE_SECTION_TITLE;
 #[cfg(test)]
 pub(crate) use self::sidebar::SPACES_SECTION_TITLE;
 #[cfg(test)]
 pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};
+pub(crate) use self::sidebar::{
+    compute_sidebar_section_header_areas, initial_collapsed_sidebar_groups,
+};
 use self::sidebar::{
     render_sidebar, render_sidebar_collapsed, render_sidebar_filter_menu,
     render_sidebar_group_menu, render_sidebar_new_menu, render_sidebar_new_thread,
@@ -1557,7 +1558,6 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
             terminal.draw(|frame| render(&app, frame)).unwrap();
             let buffer = terminal.backend().buffer();
-
             for rect in chrome_rects(&app) {
                 for y in rect.y..rect.y + rect.height {
                     for x in rect.x..rect.x + rect.width {
@@ -1629,6 +1629,11 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
             terminal.draw(|frame| render(&app, frame)).unwrap();
             let buffer = terminal.backend().buffer();
+            let section_header_rows =
+                compute_sidebar_section_header_areas(&app, app.view.sidebar_rect)
+                    .into_iter()
+                    .map(|header| header.rect.y)
+                    .collect::<std::collections::HashSet<_>>();
 
             let active_tab = app
                 .active
@@ -1641,7 +1646,10 @@ mod tests {
                 for y in rect.y..rect.y + rect.height {
                     for x in rect.x..rect.x + rect.width {
                         let cell = &buffer[(x, y)];
-                        if cell.symbol().trim().is_empty() {
+                        if cell.symbol().trim().is_empty()
+                            || cell.symbol() == "─"
+                            || section_header_rows.contains(&y)
+                        {
                             continue;
                         }
                         let (Some(fg), Some(bg)) = (cell.style().fg, cell.style().bg) else {

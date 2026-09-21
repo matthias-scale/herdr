@@ -549,7 +549,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Resume supported AI-agent panes into their native conversation sessions after
 # a Herdr server restart. Requires official integrations that report session refs.
 # resume_agents_on_restore = true
-# Move Done panes into the collapsed Recently done section after this many minutes.
+# Move Done panes into the collapsed Settled section after this many minutes.
 # hide_done_after_minutes = 30
 # Close eligible Done panes after this many minutes. Default: 240 (4 hours).
 # reap_done_after_minutes = 240

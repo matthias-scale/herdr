@@ -984,14 +984,23 @@ impl AppState {
     /// scroll clamp has to run afterwards.
     pub(crate) fn toggle_sidebar_group(&mut self, title: &str) {
         let key = format!("{}:{title}", self.sidebar_group_mode.collapse_namespace());
-        if !self.collapsed_sidebar_groups.remove(&key) {
-            self.collapsed_sidebar_groups.insert(key);
-        }
+        let collapsed = !self.collapsed_sidebar_groups.contains(&key);
+        self.set_sidebar_group_collapsed(title, collapsed);
         self.workspace_scroll = crate::ui::normalized_workspace_scroll(
             self,
             self.view.sidebar_rect,
             self.workspace_scroll,
         );
+    }
+
+    pub(crate) fn set_sidebar_group_collapsed(&mut self, title: &str, collapsed: bool) {
+        let key = format!("{}:{title}", self.sidebar_group_mode.collapse_namespace());
+        if collapsed {
+            self.collapsed_sidebar_groups.insert(key.clone());
+        } else {
+            self.collapsed_sidebar_groups.remove(&key);
+        }
+        self.sidebar_group_collapsed_persistence_request = Some((key, collapsed));
     }
 
     /// Select a fleet agent, then keep its row in view.
@@ -1037,6 +1046,7 @@ impl AppState {
                 | crate::ui::SidebarRow::NestedHeader { .. }
                 | crate::ui::SidebarRow::SymphonyJob { .. }
                 | crate::ui::SidebarRow::SymphonyEmpty
+                | crate::ui::SidebarRow::Divider
                 | crate::ui::SidebarRow::AgentRun { .. } => None,
             })
     }
@@ -1067,6 +1077,7 @@ impl AppState {
                 | crate::ui::SidebarRow::NestedHeader { .. }
                 | crate::ui::SidebarRow::SymphonyJob { .. }
                 | crate::ui::SidebarRow::SymphonyEmpty
+                | crate::ui::SidebarRow::Divider
                 | crate::ui::SidebarRow::AgentRun { .. } => None,
                 crate::ui::SidebarRow::Tab { entry, .. } => entry
                     .local_target()
@@ -1991,8 +2002,29 @@ mod tests {
         app.state.selected = 0;
         app.state.set_server_mode(Mode::Terminal);
         app.state.reconcile_sidebar_presentation();
+        app.state.collapsed_sidebar_groups.clear();
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
         app
+    }
+
+    #[test]
+    fn section_toggle_queues_explicit_expand_and_collapse_for_persistence() {
+        let mut app = crate::app::state::AppState::test_new();
+        assert!(app.collapsed_sidebar_groups.contains("repo:Runs"));
+
+        app.toggle_sidebar_group(crate::ui::sidebar::RUNS_SECTION_TITLE);
+        assert!(!app.collapsed_sidebar_groups.contains("repo:Runs"));
+        assert_eq!(
+            app.take_sidebar_group_collapsed_persistence_request(),
+            Some(("repo:Runs".to_string(), false))
+        );
+
+        app.toggle_sidebar_group(crate::ui::sidebar::RUNS_SECTION_TITLE);
+        assert!(app.collapsed_sidebar_groups.contains("repo:Runs"));
+        assert_eq!(
+            app.take_sidebar_group_collapsed_persistence_request(),
+            Some(("repo:Runs".to_string(), true))
+        );
     }
 
     fn sidebar_order_signature(app: &crate::app::state::AppState) -> Vec<String> {
@@ -2023,6 +2055,7 @@ mod tests {
                 crate::ui::SidebarRow::SectionHeader { title, .. } => {
                     format!("section:{title}")
                 }
+                crate::ui::SidebarRow::Divider => "divider".to_string(),
                 crate::ui::SidebarRow::NestedHeader { key, .. } => format!("group:{key}"),
                 crate::ui::SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
                 crate::ui::SidebarRow::SymphonyEmpty => "symphony:empty".to_string(),
@@ -2964,6 +2997,7 @@ mod tests {
         let mut app = app_for_mouse_test();
         app.state = crate::ui::sidebar_work_item_fixture();
         app.state.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        app.state.collapsed_sidebar_groups.clear();
         app.state.sidebar_work_filter.github.assignee = None;
         app.state.dock_collapsed = false;
         app.state
@@ -3209,6 +3243,7 @@ mod tests {
         app.state.selected = 1;
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
+        app.state.collapsed_sidebar_groups.clear();
         let area = Rect::new(0, 0, 120, 40);
         crate::ui::compute_view(&mut app.state, area);
         let row = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
@@ -3258,6 +3293,7 @@ mod tests {
     fn settled_menu_opens_below_its_sidebar_row() {
         let mut app = app_for_mouse_test();
         let target = settled_target(&mut app);
+        app.state.collapsed_sidebar_groups.clear();
         let area = Rect::new(0, 0, 120, 40);
         crate::ui::compute_view(&mut app.state, area);
         app.state.sidebar_settled_menu_target = Some(target.clone());
@@ -3601,6 +3637,7 @@ mod tests {
             ws_idx: 0,
             rect: cards[0].rect,
             indented: false,
+            repo_header: false,
             settled_pane_id: None,
         }];
 
@@ -3974,6 +4011,7 @@ mod tests {
         app.state.view.terminal_area = Rect::new(4, 0, 80, 20);
         let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
         assert!(app.state.snooze_pane_at(0, snoozed_pane, deadline));
+        app.state.collapsed_sidebar_groups.clear();
         app.state.refresh_local_agent_panel_identities();
         app.state.reconcile_sidebar_presentation();
 

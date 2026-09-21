@@ -851,15 +851,16 @@ impl App {
         let sidebar_group_sorts = crate::client::presentation::load_sidebar_group_sorts();
         #[cfg(test)]
         let sidebar_group_sorts = std::collections::HashMap::new();
+        #[cfg(not(test))]
+        let sidebar_group_collapsed = crate::client::presentation::load_sidebar_group_collapsed();
+        #[cfg(test)]
+        let sidebar_group_collapsed = std::collections::HashMap::new();
 
         let mut state = AppState {
             agent_picker: None,
-            collapsed_sidebar_groups: std::iter::once(format!(
-                "{}:{}",
-                sidebar_group_mode.collapse_namespace(),
-                crate::ui::RECENTLY_DONE_SECTION_TITLE
-            ))
-            .collect(),
+            collapsed_sidebar_groups: crate::ui::initial_collapsed_sidebar_groups(
+                &sidebar_group_collapsed,
+            ),
             sidebar_group_mode,
             sidebar_focused: false,
             client_focus_intent: state::ClientFocusIntent::FollowShared,
@@ -1000,6 +1001,7 @@ impl App {
             dock_width_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
             sidebar_group_sort_persistence_request: None,
+            sidebar_group_collapsed_persistence_request: None,
             sidebar_view_scan_request: false,
             sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
@@ -2089,6 +2091,12 @@ impl App {
             }
             if let Some((key, mode)) = self.state.take_sidebar_group_sort_persistence_request() {
                 crate::client::presentation::save_sidebar_group_sort(&key, mode);
+            }
+            if let Some((key, collapsed)) = self
+                .state
+                .take_sidebar_group_collapsed_persistence_request()
+            {
+                crate::client::presentation::save_sidebar_group_collapsed(&key, collapsed);
             }
             if self.state.take_sidebar_view_scan_request() {
                 self.request_sidebar_view_scan(now);

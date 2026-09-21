@@ -307,7 +307,7 @@ pub struct SessionConfig {
     /// Resume supported AI-agent panes into their native conversation sessions
     /// when restoring a Herdr session. Default: true.
     pub resume_agents_on_restore: bool,
-    /// Move Done panes into the collapsed Recently done sidebar section after
+    /// Move Done panes into the collapsed Settled sidebar section after
     /// this many minutes. Default: 30.
     pub hide_done_after_minutes: u64,
     /// Close eligible Done panes after this many minutes. Default: 240 (4 hours).

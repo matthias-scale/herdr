@@ -2361,12 +2361,7 @@ pub(crate) enum NavigateAction {
 
 fn focus_runs_section(state: &mut AppState) {
     state.sidebar_collapsed = false;
-    let key = format!(
-        "{}:{}",
-        state.sidebar_group_mode.collapse_namespace(),
-        crate::ui::sidebar::RUNS_SECTION_TITLE
-    );
-    state.collapsed_sidebar_groups.remove(&key);
+    state.set_sidebar_group_collapsed(crate::ui::sidebar::RUNS_SECTION_TITLE, false);
     if let Some(index) = crate::ui::sidebar_rows(state).iter().position(|row| {
         matches!(row, crate::ui::SidebarRow::SectionHeader { title, .. } if *title == crate::ui::sidebar::RUNS_SECTION_TITLE)
     }) {
