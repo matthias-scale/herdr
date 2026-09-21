@@ -216,6 +216,9 @@ enum PrefixTerminalState {
     Escape,
     Charset,
     Csi,
+    ControlString {
+        escaped: bool,
+    },
     Osc {
         phase: PrefixOscPhase,
         escaped: bool,
@@ -302,6 +305,9 @@ impl ScannerPrefix {
                     phase: PrefixOscPhase::Prefix(0),
                     escaped: false,
                 },
+                byte if is_control_string_introducer(byte) => {
+                    PrefixTerminalState::ControlString { escaped: false }
+                }
                 b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => PrefixTerminalState::Charset,
                 _ => PrefixTerminalState::Visible,
             },
@@ -310,6 +316,23 @@ impl ScannerPrefix {
                 PrefixTerminalState::Visible
             }
             PrefixTerminalState::Csi => PrefixTerminalState::Csi,
+            PrefixTerminalState::ControlString { .. } if byte == b'\x18' || byte == b'\x1a' => {
+                PrefixTerminalState::Visible
+            }
+            PrefixTerminalState::ControlString { escaped: true } if byte == b'\\' => {
+                PrefixTerminalState::Visible
+            }
+            PrefixTerminalState::ControlString { escaped: true } => {
+                self.terminal = PrefixTerminalState::Escape;
+                self.scan_byte(byte);
+                return;
+            }
+            PrefixTerminalState::ControlString { escaped: false } if byte == b'\x1b' => {
+                PrefixTerminalState::ControlString { escaped: true }
+            }
+            PrefixTerminalState::ControlString { escaped: false } => {
+                PrefixTerminalState::ControlString { escaped: false }
+            }
             PrefixTerminalState::Osc { .. } if byte == b'\x18' || byte == b'\x1a' => {
                 PrefixTerminalState::Visible
             }
@@ -381,6 +404,12 @@ fn scan_prefix_osc_content(phase: &mut PrefixOscPhase, byte: u8) {
     };
 }
 
+// R360-35: Ghostty's stream-parser state is not exposed through its Rust FFI.
+// Keep every scanner tier on this one list of Ghostty-hidden string introducers.
+fn is_control_string_introducer(byte: u8) -> bool {
+    matches!(byte, b'P' | b'X' | b'^' | b'_')
+}
+
 fn start_prefix_scheme(byte: u8) -> PrefixVisibleState {
     if byte.is_ascii_alphabetic() {
         PrefixVisibleState::Scheme(SchemeCandidate::new(byte))
@@ -404,6 +433,7 @@ fn encode_scanner_prefix(prefix: &ScannerPrefix) -> (&[u8], u64) {
         PrefixTerminalState::Escape => 1,
         PrefixTerminalState::Charset => 2,
         PrefixTerminalState::Csi => 3,
+        PrefixTerminalState::ControlString { escaped } => 8 | (u64::from(*escaped) << 4),
         PrefixTerminalState::Osc {
             phase: PrefixOscPhase::Prefix(0),
             escaped,
@@ -440,6 +470,9 @@ fn decode_scanner_prefix(bytes: &[u8], state: u64) -> ScannerPrefix {
         1 => PrefixTerminalState::Escape,
         2 => PrefixTerminalState::Charset,
         3 => PrefixTerminalState::Csi,
+        encoded @ (8 | 24) => PrefixTerminalState::ControlString {
+            escaped: encoded & 0b1_0000 != 0,
+        },
         encoded @ 4..=23 => {
             let phase = match encoded & 0b1111 {
                 4 => PrefixOscPhase::Prefix(0),
@@ -631,6 +664,9 @@ enum TerminalScanState {
     Escape,
     Charset,
     Csi,
+    ControlString {
+        escaped: bool,
+    },
     Osc(OscScanState),
 }
 
@@ -873,12 +909,32 @@ impl LinkStreamScanner {
                 b'\x1b' => TerminalScanState::Escape,
                 b'[' => TerminalScanState::Csi,
                 b']' => TerminalScanState::Osc(OscScanState::default()),
+                byte if is_control_string_introducer(byte) => {
+                    TerminalScanState::ControlString { escaped: false }
+                }
                 b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => TerminalScanState::Charset,
                 _ => TerminalScanState::Visible,
             },
             TerminalScanState::Charset => TerminalScanState::Visible,
             TerminalScanState::Csi if (0x40..=0x7e).contains(&byte) => TerminalScanState::Visible,
             TerminalScanState::Csi => TerminalScanState::Csi,
+            TerminalScanState::ControlString { .. } if byte == b'\x18' || byte == b'\x1a' => {
+                TerminalScanState::Visible
+            }
+            TerminalScanState::ControlString { escaped: true } if byte == b'\\' => {
+                TerminalScanState::Visible
+            }
+            TerminalScanState::ControlString { escaped: true } => {
+                self.terminal = TerminalScanState::Escape;
+                self.scan_byte(byte, links);
+                return;
+            }
+            TerminalScanState::ControlString { escaped: false } if byte == b'\x1b' => {
+                TerminalScanState::ControlString { escaped: true }
+            }
+            TerminalScanState::ControlString { escaped: false } => {
+                TerminalScanState::ControlString { escaped: false }
+            }
             TerminalScanState::Osc(mut osc) => match osc.scan_byte(byte, links) {
                 OscScanOutcome::Continue => TerminalScanState::Osc(osc),
                 OscScanOutcome::Terminated | OscScanOutcome::Cancelled => {
@@ -970,6 +1026,9 @@ impl LinkStreamScanner {
             PrefixTerminalState::Escape => TerminalScanState::Escape,
             PrefixTerminalState::Charset => TerminalScanState::Charset,
             PrefixTerminalState::Csi => TerminalScanState::Csi,
+            PrefixTerminalState::ControlString { escaped } => {
+                TerminalScanState::ControlString { escaped }
+            }
             PrefixTerminalState::Osc { phase, escaped } => TerminalScanState::Osc(OscScanState {
                 phase: match phase {
                     PrefixOscPhase::Prefix(value) => OscPhase::Prefix(value),
@@ -1007,6 +1066,9 @@ impl LinkStreamScanner {
             TerminalScanState::Escape => PrefixTerminalState::Escape,
             TerminalScanState::Charset => PrefixTerminalState::Charset,
             TerminalScanState::Csi => PrefixTerminalState::Csi,
+            TerminalScanState::ControlString { escaped } => {
+                PrefixTerminalState::ControlString { escaped }
+            }
             TerminalScanState::Osc(osc) => PrefixTerminalState::Osc {
                 phase: match osc.phase {
                     OscPhase::Prefix(value) => PrefixOscPhase::Prefix(value),
@@ -1649,6 +1711,9 @@ mod tests {
                 content: Vec<u8>,
                 escaped: bool,
             },
+            ControlString {
+                escaped: bool,
+            },
         }
 
         fn finish_osc(content: &[u8], osc8_urls: &mut Vec<String>) {
@@ -1680,6 +1745,9 @@ mod tests {
                         content: Vec::new(),
                         escaped: false,
                     },
+                    byte if is_control_string_introducer(byte) => {
+                        State::ControlString { escaped: false }
+                    }
                     b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => State::Charset,
                     _ => State::Visible,
                 },
@@ -1704,6 +1772,9 @@ mod tests {
                         content: Vec::new(),
                         escaped: false,
                     },
+                    byte if is_control_string_introducer(byte) => {
+                        State::ControlString { escaped: false }
+                    }
                     b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => State::Charset,
                     _ => State::Visible,
                 },
@@ -1735,6 +1806,24 @@ mod tests {
                         escaped: false,
                     }
                 }
+                State::ControlString { .. } if byte == b'\x18' || byte == b'\x1a' => State::Visible,
+                State::ControlString { escaped: true } if byte == b'\\' => State::Visible,
+                State::ControlString { escaped: true } => match byte {
+                    byte if is_control_string_introducer(byte) => {
+                        State::ControlString { escaped: false }
+                    }
+                    b'[' => State::Csi,
+                    b']' => State::Osc {
+                        content: Vec::new(),
+                        escaped: false,
+                    },
+                    b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => State::Charset,
+                    _ => State::Visible,
+                },
+                State::ControlString { escaped: false } if byte == b'\x1b' => {
+                    State::ControlString { escaped: true }
+                }
+                State::ControlString { escaped: false } => State::ControlString { escaped: false },
             };
         }
 
@@ -1770,6 +1859,22 @@ mod tests {
             .into_bytes(),
             format!(
                 "\x1b]8;;https://cancelled-esc-{seed}.example/target\x1bchttps://after-esc-{seed}.example/path\n"
+            )
+            .into_bytes(),
+            format!(
+                "\x1b]0;cancelled title \x1bPhttps://hidden-dcs-{seed}.example/path\x1b\\ "
+            )
+            .into_bytes(),
+            format!(
+                "\x1b]0;cancelled title \x1bXhttps://hidden-sos-{seed}.example/path\x1b\\ "
+            )
+            .into_bytes(),
+            format!(
+                "\x1b]0;cancelled title \x1b^https://hidden-pm-{seed}.example/path\x1b\\ "
+            )
+            .into_bytes(),
+            format!(
+                "\x1b]0;cancelled title \x1b_https://hidden-apc-{seed}.example/path\x1b\\ "
             )
             .into_bytes(),
         ];
