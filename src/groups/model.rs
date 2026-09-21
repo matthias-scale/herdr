@@ -90,6 +90,8 @@ impl PaneGroupMembership {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OwnedPaneMembership {
     pub pane_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pane_incarnation: String,
     pub membership: PaneGroupMembership,
 }
 
@@ -602,6 +604,7 @@ mod tests {
     fn membership(pane_id: &str, revision: u64, group_id: Option<GroupId>) -> OwnedPaneMembership {
         OwnedPaneMembership {
             pane_id: pane_id.into(),
+            pane_incarnation: format!("incarnation-{pane_id}"),
             membership: PaneGroupMembership { group_id, revision },
         }
     }

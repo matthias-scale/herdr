@@ -204,13 +204,16 @@ pub struct App {
     pub(crate) authority_acceptance_ledger_writer: crate::fleet::AuthorityAcceptanceLedgerWriter,
     pub(crate) authority_acceptance_ledger_write_in_flight: bool,
     pub(crate) pending_authority_acceptance_ledger: Option<crate::fleet::AuthorityAcceptanceLedger>,
+    /// Advance-only history admitted while another ledger write is in flight.
+    pub(crate) queued_authority_acceptance_ledger: Option<crate::fleet::AuthorityAcceptanceLedger>,
+    /// Latest raw poll to present after every admitted advance is durable.
     pub(crate) queued_fleet_snapshot: Option<crate::fleet::Snapshot>,
     /// Serial remote mutation transport, kept off the app event loop.
     pub(crate) authority_mutation_router: crate::fleet::AuthorityMutationRouter,
     /// Owner-only pane memberships maintained at lifecycle boundaries so
     /// fleet snapshot requests never walk the pane tree.
     pub(crate) group_membership_projection:
-        std::collections::BTreeMap<String, crate::groups::PaneGroupMembership>,
+        std::collections::BTreeMap<String, crate::groups::OwnedPaneMembership>,
     #[cfg(test)]
     pub(crate) group_session_paths_override: Option<(std::path::PathBuf, std::path::PathBuf)>,
     /// Runtime-only markers for shell panes launched by git and user actions.
@@ -1425,12 +1428,17 @@ impl App {
         #[cfg(not(test))]
         let authority_acceptance_ledger_path =
             Some(crate::fleet::authority_acceptance_ledger_path());
+        #[cfg(not(test))]
+        let legacy_group_catalog_cache_path = Some(crate::fleet::legacy_group_catalog_cache_path());
         #[cfg(test)]
         let authority_acceptance_ledger_path = None;
+        #[cfg(test)]
+        let legacy_group_catalog_cache_path: Option<std::path::PathBuf> = None;
         let mut authority_acceptance_ledger = crate::fleet::AuthorityAcceptanceLedger::default();
         let mut authority_acceptance_ledger_error = None;
         if let Some(path) = authority_acceptance_ledger_path.as_deref() {
-            match crate::fleet::load_authority_acceptance_ledger(path) {
+            let legacy_path = legacy_group_catalog_cache_path.as_deref().unwrap_or(path);
+            match crate::fleet::load_authority_acceptance_ledger_with_legacy(path, legacy_path) {
                 Ok(ledger) => authority_acceptance_ledger = ledger,
                 Err(error) => {
                     tracing::warn!(%error, path = %path.display(), "remote group catalog history is unavailable");
@@ -1486,6 +1494,7 @@ impl App {
             authority_acceptance_ledger_writer,
             authority_acceptance_ledger_write_in_flight: false,
             pending_authority_acceptance_ledger: None,
+            queued_authority_acceptance_ledger: None,
             queued_fleet_snapshot: None,
             authority_mutation_router: crate::fleet::AuthorityMutationRouter::default(),
             group_membership_projection: std::collections::BTreeMap::new(),

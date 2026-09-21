@@ -55,16 +55,24 @@ impl App {
         }
     }
 
-    fn install_fleet_snapshot(&mut self, mut snapshot: crate::fleet::Snapshot) -> bool {
+    fn install_fleet_snapshot(&mut self, snapshot: crate::fleet::Snapshot) -> bool {
+        self.install_fleet_snapshot_against(snapshot, None)
+    }
+
+    fn install_fleet_snapshot_against(
+        &mut self,
+        mut snapshot: crate::fleet::Snapshot,
+        admission_base_override: Option<&crate::fleet::AuthorityAcceptanceLedger>,
+    ) -> bool {
         if snapshot.config_generation != self.fleet_poller_config.generation() {
             return false;
         }
         let raw_snapshot = snapshot.clone();
         snapshot.retain_unreachable_inventory_from(&self.state.fleet_snapshot);
         snapshot.retain_unavailable_group_catalogs_from(&self.state.fleet_snapshot);
-        let admission_base = self
-            .pending_authority_acceptance_ledger
-            .as_ref()
+        let admission_base = admission_base_override
+            .or(self.queued_authority_acceptance_ledger.as_ref())
+            .or(self.pending_authority_acceptance_ledger.as_ref())
             .unwrap_or(&self.authority_acceptance_ledger);
         let candidate_ledger =
             if let Some(error) = self.authority_acceptance_ledger_error.as_deref() {
@@ -75,6 +83,7 @@ impl App {
             };
         self.authority_mutation_router.observe_snapshot(&snapshot);
         if self.authority_acceptance_ledger_write_in_flight {
+            self.queued_authority_acceptance_ledger = Some(candidate_ledger);
             self.queued_fleet_snapshot = Some(raw_snapshot);
             return false;
         }
@@ -138,8 +147,9 @@ impl App {
                 }
             }
         }
+        let queued_ledger = self.queued_authority_acceptance_ledger.take();
         if let Some(queued) = self.queued_fleet_snapshot.take() {
-            changed |= self.install_fleet_snapshot(queued);
+            changed |= self.install_fleet_snapshot_against(queued, queued_ledger.as_ref());
         }
         changed
     }
@@ -2520,6 +2530,112 @@ mod tests {
         assert_eq!(hub.events_after(0).len(), 1);
         assert!(path.is_file());
         std::fs::remove_dir_all(root).expect("remove cache worker fixture");
+    }
+
+    #[test]
+    fn coalesced_polls_keep_an_accepted_tombstone_separate_from_latest_presentation() {
+        let config = crate::config::Config::default();
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let root = std::env::temp_dir().join(format!(
+            "herdr-ledger-coalescing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let path = root.join("authority-acceptance-ledger.json");
+        app.authority_acceptance_ledger_path = Some(path.clone());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
+        let write_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        app.authority_acceptance_ledger_writer =
+            crate::fleet::AuthorityAcceptanceLedgerWriter::with_save(app.event_tx.clone(), {
+                let write_count = std::sync::Arc::clone(&write_count);
+                move |path, ledger| {
+                    if write_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        let _ = started_tx.send(());
+                        release_rx
+                            .lock()
+                            .map_err(|_| std::io::Error::other("ledger release gate poisoned"))?
+                            .recv()
+                            .map_err(|_| std::io::Error::other("ledger release gate closed"))?;
+                    }
+                    crate::fleet::save_authority_acceptance_ledger(path, ledger)
+                }
+            });
+        let authority = crate::groups::AuthorityId::from_random_bytes([19; 16]);
+        let catalog = |revision, state| crate::fleet::GroupCatalog {
+            host: "office".into(),
+            target: "machine-a".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: authority.clone(),
+                revision,
+                groups: vec![crate::groups::GroupRecord {
+                    id: crate::groups::GroupId {
+                        owner: authority.clone(),
+                        local: 1,
+                    },
+                    revision,
+                    state,
+                }],
+                memberships: Vec::new(),
+            }),
+            error: None,
+        };
+        let poll = |catalog| {
+            let mut snapshot = fleet_snapshot(Vec::new());
+            snapshot.group_catalogs = vec![catalog];
+            snapshot
+        };
+
+        assert!(!app.install_fleet_snapshot(poll(catalog(
+            2,
+            crate::groups::GroupState::Active {
+                name: "Work".into(),
+            },
+        ))));
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("revision 2 ledger write started");
+        assert!(!app.install_fleet_snapshot(poll(catalog(3, crate::groups::GroupState::Deleted,))));
+        assert!(!app.install_fleet_snapshot(poll(catalog(
+            2,
+            crate::groups::GroupState::Active {
+                name: "Work".into(),
+            },
+        ))));
+
+        release_tx.send(()).expect("release revision 2 write");
+        let first = wait_for_app_event(&mut app, "revision 2 ledger completion");
+        app.handle_internal_event_with_render_impact(first);
+        let second = wait_for_app_event(&mut app, "revision 3 ledger completion");
+        app.handle_internal_event_with_render_impact(second);
+
+        let durable =
+            crate::fleet::load_authority_acceptance_ledger(&path).expect("reload coalesced ledger");
+        let accepted = durable.accepted(&authority).expect("accepted authority");
+        assert_eq!(accepted.revision, 3);
+        assert!(matches!(
+            accepted.groups[0].state,
+            crate::groups::GroupState::Deleted
+        ));
+        let shown = &app.state.fleet_snapshot.group_catalogs[0];
+        assert_eq!(shown.state, crate::fleet::GroupCatalogState::Stale);
+        assert_eq!(shown.snapshot.as_ref().expect("latest answer").revision, 2);
+        std::fs::remove_dir_all(root).expect("remove coalescing fixture");
     }
 
     #[test]

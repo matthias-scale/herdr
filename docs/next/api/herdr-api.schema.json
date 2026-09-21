@@ -1309,6 +1309,9 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "pane_incarnation": {
+              "type": "string"
             }
           },
           "required": [
@@ -3672,6 +3675,12 @@
         "PaneGroupSetParams": {
           "properties": {
             "expected_pane_authority": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expected_pane_incarnation": {
               "type": [
                 "string",
                 "null"
@@ -10444,6 +10453,9 @@
               "$ref": "#/schemas/success_response/$defs/PaneGroupMembership"
             },
             "pane_id": {
+              "type": "string"
+            },
+            "pane_incarnation": {
               "type": "string"
             }
           },

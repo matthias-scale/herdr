@@ -352,6 +352,7 @@ fn group_mutation_requests_are_typed_and_carry_expected_revisions() {
                 group_id: Some(group_id),
                 expected_revision: 6,
                 expected_pane_authority: None,
+                expected_pane_incarnation: None,
             }),
         },
     ];

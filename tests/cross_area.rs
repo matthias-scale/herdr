@@ -1594,6 +1594,101 @@ fn wait_for_authority_catalog_error(
 }
 
 #[test]
+fn legacy_v1_writer_cannot_narrow_the_v2_authority_ledger() {
+    let _guard = test_lock();
+    let base_a = unique_test_dir();
+    let base_b = unique_test_dir();
+    let config_a = base_a.join("config");
+    let config_b = base_b.join("config");
+    let runtime_a = base_a.join("runtime");
+    let runtime_b = base_b.join("runtime");
+    let socket_a = runtime_a.join("api.sock");
+    let socket_b = runtime_b.join("api.sock");
+    let normal_a = fleet_config("alpha", &socket_a, "beta", &socket_b);
+    let normal_b = fleet_config("beta", &socket_b, "alpha", &socket_a);
+    let server_a = spawn_server_with_config_text(&config_a, &runtime_a, &socket_a, None, &normal_a);
+    let server_b = spawn_server_with_config_text(&config_b, &runtime_b, &socket_b, None, &normal_b);
+    wait_for_socket(&socket_a, Duration::from_secs(5));
+    wait_for_socket(&socket_b, Duration::from_secs(5));
+
+    let created = send_json_request(
+        &socket_a,
+        "create_before_legacy_writer",
+        "group.create",
+        json!({"name": "Work", "expected_revision": 0}),
+    );
+    assert!(created.get("error").is_none(), "create failed: {created}");
+    let group_id = created["result"]["record"]["id"].clone();
+    let authority = group_id["owner"].clone();
+    wait_for_authority_group_state(&socket_b, &authority, "fresh", "active");
+    let active_snapshot = send_json_request(
+        &socket_a,
+        "active_snapshot_for_legacy_writer",
+        "group.host_snapshot",
+        json!({}),
+    )["result"]["snapshot"]
+        .clone();
+
+    let alpha_data = config_a.join("herdr-dev");
+    let beta_data = config_b.join("herdr-dev");
+    let authority_path = alpha_data.join("group-authority.json");
+    let groups_path = alpha_data.join("groups.json");
+    let legacy_path = beta_data.join("remote-group-catalogs-v1.json");
+    let active_authority = fs::read(&authority_path).expect("active authority state");
+    let active_groups = fs::read(&groups_path).expect("active group state");
+    let active_legacy = serde_json::to_vec_pretty(&json!({
+        "version": 1,
+        "entries": [{
+            "target": "legacy-alpha",
+            "local": true,
+            "session": null,
+            "socket": socket_a,
+            "snapshot": active_snapshot
+        }]
+    }))
+    .expect("serialize legacy cache");
+
+    let deleted = send_json_request(
+        &socket_a,
+        "delete_before_legacy_writer",
+        "group.delete",
+        json!({"group_id": group_id, "expected_revision": 1}),
+    );
+    assert_eq!(deleted["result"]["record"]["state"], "deleted", "{deleted}");
+    wait_for_authority_group_state(&socket_b, &authority, "fresh", "deleted");
+
+    drop(server_a);
+    drop(server_b);
+    fs::write(&legacy_path, active_legacy).expect("simulate the old v1 writer");
+    fs::write(&authority_path, active_authority).expect("roll back owner authority");
+    fs::write(&groups_path, active_groups).expect("roll back owner group store");
+
+    let restarted_a =
+        spawn_server_with_config_text(&config_a, &runtime_a, &socket_a, None, &normal_a);
+    let restarted_b =
+        spawn_server_with_config_text(&config_b, &runtime_b, &socket_b, None, &normal_b);
+    wait_for_socket(&socket_a, Duration::from_secs(5));
+    wait_for_socket(&socket_b, Duration::from_secs(5));
+    let rejected = wait_for_authority_catalog_error(
+        &socket_b,
+        &authority,
+        "stale",
+        "snapshot revision rolled back",
+    );
+    let catalog = rejected["result"]["snapshot"]["authority_catalogs"]
+        .as_array()
+        .expect("catalog array")
+        .iter()
+        .find(|catalog| catalog["authority_id"] == authority)
+        .expect("rolled-back authority catalog");
+    assert_eq!(catalog["snapshot"]["groups"][0]["state"], "active");
+
+    drop(restarted_a);
+    cleanup_spawned_herdr(restarted_b, base_b);
+    cleanup_test_base(&base_a);
+}
+
+#[test]
 fn two_servers_share_groups_route_concurrent_mutations_and_recover_stale_catalogs() {
     let _guard = test_lock();
     let base_a = unique_test_dir();

@@ -26,7 +26,9 @@ const MAX_RUN_DIRECTORY_ENTRIES: usize = 2_048;
 const MAX_REMOTE_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const AUTHORITY_ACCEPTANCE_LEDGER_VERSION: u32 = 2;
 #[cfg(not(test))]
-const AUTHORITY_ACCEPTANCE_LEDGER_FILE: &str = "remote-group-catalogs-v1.json";
+const AUTHORITY_ACCEPTANCE_LEDGER_FILE: &str = "authority-acceptance-ledger-v2.json";
+#[cfg(not(test))]
+const LEGACY_GROUP_CATALOG_CACHE_FILE: &str = "remote-group-catalogs-v1.json";
 type ParsedRemoteOutput = (
     Result<Vec<AgentInfo>, String>,
     Result<crate::groups::GroupAuthoritySnapshot, String>,
@@ -442,8 +444,25 @@ impl AuthorityAcceptanceLedger {
 
 #[cfg(not(test))]
 pub(crate) fn authority_acceptance_ledger_path() -> PathBuf {
-    // Keep the slice-2 preview filename so a v1 cache can migrate in place.
     crate::session::data_dir().join(AUTHORITY_ACCEPTANCE_LEDGER_FILE)
+}
+
+#[cfg(not(test))]
+pub(crate) fn legacy_group_catalog_cache_path() -> PathBuf {
+    crate::session::data_dir().join(LEGACY_GROUP_CATALOG_CACHE_FILE)
+}
+
+pub(crate) fn load_authority_acceptance_ledger_with_legacy(
+    path: &Path,
+    legacy_path: &Path,
+) -> Result<AuthorityAcceptanceLedger, String> {
+    match path.try_exists() {
+        Ok(true) => load_authority_acceptance_ledger(path),
+        Ok(false) => load_authority_acceptance_ledger(legacy_path),
+        Err(error) => Err(format!(
+            "cannot inspect authority acceptance ledger: {error}"
+        )),
+    }
 }
 
 pub(crate) fn load_authority_acceptance_ledger(
@@ -499,15 +518,43 @@ pub(crate) fn save_authority_acceptance_ledger(
         .unwrap_or_default()
         .as_nanos();
     let temp = path.with_extension(format!("tmp-{}-{nonce}", std::process::id()));
-    if let Err(error) = std::fs::write(&temp, bytes) {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    if let Err(error) = write_authority_acceptance_ledger_contents(&mut file, &bytes) {
         let _ = std::fs::remove_file(&temp);
         return Err(error);
     }
+    drop(file);
     if let Err(error) = crate::platform::replace_file_durably(&temp, path) {
         let _ = std::fs::remove_file(&temp);
         return Err(error);
     }
     Ok(())
+}
+
+trait AuthorityAcceptanceLedgerTempFile {
+    fn write_contents(&mut self, contents: &[u8]) -> std::io::Result<()>;
+    fn sync_contents(&mut self) -> std::io::Result<()>;
+}
+
+impl AuthorityAcceptanceLedgerTempFile for std::fs::File {
+    fn write_contents(&mut self, contents: &[u8]) -> std::io::Result<()> {
+        self.write_all(contents)
+    }
+
+    fn sync_contents(&mut self) -> std::io::Result<()> {
+        self.sync_all()
+    }
+}
+
+fn write_authority_acceptance_ledger_contents(
+    file: &mut impl AuthorityAcceptanceLedgerTempFile,
+    contents: &[u8],
+) -> std::io::Result<()> {
+    file.write_contents(contents)?;
+    file.sync_contents()
 }
 
 struct AuthorityAcceptanceLedgerWrite {
@@ -608,9 +655,40 @@ struct RoutedApiRequest {
     catalog: GroupCatalog,
     config_generation: u64,
     route: AuthorityRoute,
+    mutation_route: MutationRoute,
     route_lease: u64,
     request: Request,
     respond_to: std::sync::mpsc::Sender<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum MutationRoute {
+    Authority(AuthorityRoute),
+    Pane {
+        route: AuthorityRoute,
+        pane_id: String,
+        pane_incarnation: String,
+    },
+}
+
+impl MutationRoute {
+    fn from_request(route: AuthorityRoute, request: &Request) -> Result<Self, String> {
+        let crate::api::schema::Method::GroupAuthorityMutate(params) = &request.method else {
+            return Ok(Self::Authority(route));
+        };
+        let crate::api::schema::AuthorityMutation::PaneGroupSet(params) = &params.mutation else {
+            return Ok(Self::Authority(route));
+        };
+        let pane_incarnation = params
+            .expected_pane_incarnation
+            .clone()
+            .ok_or_else(|| "remote pane mutation has no expected incarnation".to_string())?;
+        Ok(Self::Pane {
+            route,
+            pane_id: params.pane_id.clone(),
+            pane_incarnation,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -637,7 +715,7 @@ impl AuthorityRoute {
 #[derive(Debug, Default)]
 struct AuthorityRouteLeases {
     next: u64,
-    valid: BTreeMap<AuthorityRoute, u64>,
+    valid: BTreeMap<MutationRoute, u64>,
 }
 
 impl AuthorityRouteLeases {
@@ -650,7 +728,7 @@ impl AuthorityRouteLeases {
         self.next
     }
 
-    fn observe(&mut self, routes: BTreeMap<AuthorityRoute, ()>) {
+    fn observe(&mut self, routes: BTreeMap<MutationRoute, ()>) {
         self.valid.retain(|route, _| routes.contains_key(route));
         for route in routes.into_keys() {
             if self.valid.contains_key(&route) {
@@ -703,19 +781,34 @@ impl AuthorityMutationRouter {
 
     pub(crate) fn observe_snapshot(&self, snapshot: &Snapshot) {
         let conflicts = snapshot.identity_conflicts();
-        let routes = snapshot
-            .group_catalogs
-            .iter()
-            .filter(|catalog| catalog.state == GroupCatalogState::Fresh)
-            .filter(|catalog| {
-                catalog
+        let mut routes = BTreeMap::new();
+        for catalog in snapshot.group_catalogs.iter().filter(|catalog| {
+            catalog.state == GroupCatalogState::Fresh
+                && catalog
                     .observed_authority_id
                     .as_ref()
                     .is_some_and(|authority| !conflicts.contains(authority))
-            })
-            .filter_map(AuthorityRoute::from_catalog)
-            .map(|route| (route, ()))
-            .collect();
+        }) {
+            let Some(route) = AuthorityRoute::from_catalog(catalog) else {
+                continue;
+            };
+            routes.insert(MutationRoute::Authority(route.clone()), ());
+            for membership in catalog
+                .snapshot
+                .iter()
+                .flat_map(|snapshot| &snapshot.memberships)
+                .filter(|membership| !membership.pane_incarnation.is_empty())
+            {
+                routes.insert(
+                    MutationRoute::Pane {
+                        route: route.clone(),
+                        pane_id: membership.pane_id.clone(),
+                        pane_incarnation: membership.pane_incarnation.clone(),
+                    },
+                    (),
+                );
+            }
+        }
         if let Ok(mut leases) = self.route_leases.lock() {
             leases.observe(routes);
         }
@@ -730,12 +823,13 @@ impl AuthorityMutationRouter {
     ) -> Result<(), String> {
         let route = AuthorityRoute::from_catalog(&catalog)
             .ok_or_else(|| "authority route has no observed authority".to_string())?;
+        let mutation_route = MutationRoute::from_request(route.clone(), &request)?;
         let route_lease = self
             .route_leases
             .lock()
             .map_err(|_| "authority route leases are unavailable".to_string())?
             .valid
-            .get(&route)
+            .get(&mutation_route)
             .copied()
             .ok_or_else(|| "authority route is no longer fresh".to_string())?;
         let mut sender = self
@@ -761,7 +855,10 @@ impl AuthorityMutationRouter {
                                     id,
                                     error: crate::api::schema::ErrorBody {
                                         code: "authority_not_fresh".into(),
-                                        message: "fleet configuration changed before the queued mutation could run".into(),
+                                        message: format!(
+                                            "authority {} fleet configuration changed before the queued mutation could run",
+                                            job.route.authority
+                                        ),
                                     },
                                 },
                             )
@@ -772,7 +869,7 @@ impl AuthorityMutationRouter {
                         let route_is_current = current_route_leases
                             .lock()
                             .is_ok_and(|leases| {
-                                leases.valid.get(&job.route) == Some(&job.route_lease)
+                                leases.valid.get(&job.mutation_route) == Some(&job.route_lease)
                             });
                         if !route_is_current {
                             let response = serde_json::to_string(
@@ -780,7 +877,10 @@ impl AuthorityMutationRouter {
                                     id,
                                     error: crate::api::schema::ErrorBody {
                                         code: "authority_not_fresh".into(),
-                                        message: "authority route changed before the queued mutation could run".into(),
+                                        message: format!(
+                                            "authority {} route changed before the queued mutation could run",
+                                            job.route.authority
+                                        ),
                                     },
                                 },
                             )
@@ -820,6 +920,7 @@ impl AuthorityMutationRouter {
                 catalog,
                 config_generation,
                 route,
+                mutation_route,
                 route_lease,
                 request,
                 respond_to,
@@ -3497,6 +3598,32 @@ mod tests {
             repointed.group_catalogs[0].state,
             GroupCatalogState::Unavailable
         );
+    }
+
+    #[test]
+    fn authority_acceptance_ledger_syncs_contents_before_durable_replace() {
+        #[derive(Default)]
+        struct RecordingFile {
+            operations: Vec<&'static str>,
+        }
+
+        impl AuthorityAcceptanceLedgerTempFile for RecordingFile {
+            fn write_contents(&mut self, _contents: &[u8]) -> std::io::Result<()> {
+                self.operations.push("write_all");
+                Ok(())
+            }
+
+            fn sync_contents(&mut self) -> std::io::Result<()> {
+                self.operations.push("sync_all");
+                Ok(())
+            }
+        }
+
+        let mut file = RecordingFile::default();
+        write_authority_acceptance_ledger_contents(&mut file, b"ledger")
+            .expect("write and sync ledger contents");
+
+        assert_eq!(file.operations, ["write_all", "sync_all"]);
     }
 
     #[test]

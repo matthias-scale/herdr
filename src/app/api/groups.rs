@@ -16,14 +16,7 @@ impl App {
             Ok(authority) => authority,
             Err(error) => return encode_runtime_error(id, error),
         };
-        let memberships = self
-            .group_membership_projection
-            .iter()
-            .map(|(pane_id, membership)| OwnedPaneMembership {
-                pane_id: pane_id.clone(),
-                membership: membership.clone(),
-            })
-            .collect();
+        let memberships = self.group_membership_projection.values().cloned().collect();
         encode_success(
             id,
             ResponseResult::GroupHostSnapshot {
@@ -101,7 +94,7 @@ impl App {
     pub(super) fn handle_pane_group_set(
         &mut self,
         id: String,
-        params: PaneGroupSetParams,
+        mut params: PaneGroupSetParams,
     ) -> String {
         let expected_owner = params.expected_pane_authority.clone();
         match expected_owner {
@@ -114,19 +107,27 @@ impl App {
                     Ok(catalog) => catalog,
                     Err(message) => return encode_error(id, "authority_not_fresh", message),
                 };
-                let pane_is_reported = catalog.snapshot.as_ref().is_some_and(|snapshot| {
+                let reported_pane = catalog.snapshot.as_ref().and_then(|snapshot| {
                     snapshot
                         .memberships
                         .iter()
-                        .any(|membership| membership.pane_id == params.pane_id)
+                        .find(|membership| membership.pane_id == params.pane_id)
                 });
-                if !pane_is_reported {
+                let Some(reported_pane) = reported_pane else {
                     return encode_error(
                         id,
                         "pane_not_found",
                         format!("authority {owner} does not report pane {}", params.pane_id),
                     );
+                };
+                if reported_pane.pane_incarnation.is_empty() {
+                    return encode_error(
+                        id,
+                        "authority_not_fresh",
+                        format!("authority {owner} did not report a pane incarnation"),
+                    );
                 }
+                params.expected_pane_incarnation = Some(reported_pane.pane_incarnation.clone());
                 if let Some(group_id) = params.group_id.as_ref() {
                     if let Err(message) = self.validate_group_target(group_id) {
                         return encode_error(id, "authority_not_fresh", message);
@@ -298,6 +299,33 @@ impl App {
                         format!("pane mutation expected {expected}, receiver owns {actual}"),
                     );
                 }
+                let expected_incarnation = match params.expected_pane_incarnation.as_deref() {
+                    Some(incarnation) => incarnation,
+                    None => {
+                        return encode_error(
+                            id,
+                            "authority_not_fresh",
+                            format!("authority {actual} received a pane mutation without an incarnation"),
+                        );
+                    }
+                };
+                let actual_incarnation =
+                    self.local_pane(&params.pane_id)
+                        .and_then(|(workspace_index, pane_id)| {
+                            self.state.workspaces[workspace_index]
+                                .pane_state(pane_id)
+                                .map(|pane| pane.attached_terminal_id.as_str())
+                        });
+                if actual_incarnation != Some(expected_incarnation) {
+                    return encode_error(
+                        id,
+                        "authority_not_fresh",
+                        format!(
+                            "authority {actual} no longer owns pane {} with the expected incarnation",
+                            params.pane_id
+                        ),
+                    );
+                }
                 if let Some(group_id) = params.group_id.as_ref() {
                     if let Err(message) = self.validate_group_target(group_id) {
                         return encode_error(id, "authority_not_fresh", message);
@@ -327,7 +355,14 @@ impl App {
                         continue;
                     }
                     if let Some(public_id) = self.public_pane_id(workspace_index, *pane_id) {
-                        projection.insert(public_id, pane.group_membership.clone());
+                        projection.insert(
+                            public_id.clone(),
+                            OwnedPaneMembership {
+                                pane_id: public_id,
+                                pane_incarnation: pane.attached_terminal_id.to_string(),
+                                membership: pane.group_membership.clone(),
+                            },
+                        );
                     }
                 }
             }
@@ -341,7 +376,11 @@ impl App {
             .and_then(|(workspace_index, pane_id)| {
                 self.state.workspaces[workspace_index]
                     .pane_state(pane_id)
-                    .map(|pane| pane.group_membership.clone())
+                    .map(|pane| OwnedPaneMembership {
+                        pane_id: public_id.to_string(),
+                        pane_incarnation: pane.attached_terminal_id.to_string(),
+                        membership: pane.group_membership.clone(),
+                    })
             });
         match membership {
             Some(membership) => {
@@ -517,7 +556,7 @@ impl App {
                 let authority = params.group_id.owner.clone();
                 self.prepare_authority_mutation(id, authority, AuthorityMutation::Delete(params))
             }
-            crate::api::schema::Method::PaneGroupSet(params) => {
+            crate::api::schema::Method::PaneGroupSet(mut params) => {
                 let Some(owner) = params.expected_pane_authority.clone() else {
                     let _ = respond_to.send(encode_error(
                         id,
@@ -533,20 +572,29 @@ impl App {
                         return;
                     }
                 };
-                let pane_is_reported = catalog.snapshot.as_ref().is_some_and(|snapshot| {
+                let reported_pane = catalog.snapshot.as_ref().and_then(|snapshot| {
                     snapshot
                         .memberships
                         .iter()
-                        .any(|membership| membership.pane_id == params.pane_id)
+                        .find(|membership| membership.pane_id == params.pane_id)
                 });
-                if !pane_is_reported {
+                let Some(reported_pane) = reported_pane else {
                     let _ = respond_to.send(encode_error(
                         id,
                         "pane_not_found",
                         format!("authority {owner} does not report pane {}", params.pane_id),
                     ));
                     return;
+                };
+                if reported_pane.pane_incarnation.is_empty() {
+                    let _ = respond_to.send(encode_error(
+                        id,
+                        "authority_not_fresh",
+                        format!("authority {owner} did not report a pane incarnation"),
+                    ));
+                    return;
                 }
+                params.expected_pane_incarnation = Some(reported_pane.pane_incarnation.clone());
                 if let Some(group_id) = params.group_id.as_ref() {
                     if let Err(message) = self.validate_group_target(group_id) {
                         let _ = respond_to.send(encode_error(id, "authority_not_fresh", message));
@@ -814,6 +862,7 @@ mod tests {
                 group_id: Some(group.id.clone()),
                 expected_revision: 0,
                 expected_pane_authority: None,
+                expected_pane_incarnation: None,
             },
         );
         let first: SuccessResponse = serde_json::from_str(&first).expect("first assignment");
@@ -830,6 +879,7 @@ mod tests {
                 group_id: None,
                 expected_revision: 0,
                 expected_pane_authority: None,
+                expected_pane_incarnation: None,
             },
         ))
         .unwrap();
@@ -896,6 +946,7 @@ mod tests {
                 group_id: None,
                 expected_revision: 0,
                 expected_pane_authority: None,
+                expected_pane_incarnation: None,
             },
         );
         assert!(
@@ -939,6 +990,7 @@ mod tests {
                 group_id: Some(group.id),
                 expected_revision: 0,
                 expected_pane_authority: None,
+                expected_pane_incarnation: None,
             },
         ))
         .unwrap();
@@ -971,6 +1023,7 @@ mod tests {
                 group_id: Some(group.id.clone()),
                 expected_revision: 0,
                 expected_pane_authority: None,
+                expected_pane_incarnation: None,
             },
         );
         assert!(serde_json::from_str::<SuccessResponse>(&response).is_ok());
@@ -1130,6 +1183,7 @@ mod tests {
                     group_id: Some(foreign_id.clone()),
                     expected_revision: 0,
                     expected_pane_authority: None,
+                    expected_pane_incarnation: None,
                 },
             ),
         ];
@@ -1194,6 +1248,7 @@ mod tests {
                 group_id: None,
                 expected_revision: 7,
                 expected_pane_authority: None,
+                expected_pane_incarnation: None,
             },
         );
 
@@ -1221,6 +1276,7 @@ mod tests {
                 groups: Vec::new(),
                 memberships: vec![OwnedPaneMembership {
                     pane_id: "remote-pane".into(),
+                    pane_incarnation: "remote-incarnation".into(),
                     membership: PaneGroupMembership::default(),
                 }],
             }),
@@ -1234,6 +1290,7 @@ mod tests {
                 group_id: None,
                 expected_revision: 0,
                 expected_pane_authority: Some(pane_owner.clone()),
+                expected_pane_incarnation: None,
             },
         ))
         .unwrap();
@@ -1265,6 +1322,7 @@ mod tests {
                     group_id: None,
                     expected_revision: 0,
                     expected_pane_authority: Some(other.clone()),
+                    expected_pane_incarnation: None,
                 }),
             },
         ))
@@ -1335,6 +1393,7 @@ mod tests {
                     group_id: Some(created.id.clone()),
                     expected_revision: 0,
                     expected_pane_authority: Some(authority.clone()),
+                    expected_pane_incarnation: None,
                 },
             ),
         ];
@@ -1395,6 +1454,7 @@ mod tests {
                 group_id: None,
                 expected_revision: 4,
                 expected_pane_authority: Some(authority),
+                expected_pane_incarnation: None,
             },
         );
 
@@ -1468,6 +1528,7 @@ mod tests {
                 group_id: Some(foreign_group.id),
                 expected_revision: 0,
                 expected_pane_authority: Some(local.clone()),
+                expected_pane_incarnation: None,
             },
         ))
         .expect("assignment response");
@@ -1677,6 +1738,180 @@ mod tests {
             serde_json::from_str(&second).expect("queued mutation error response");
         assert_eq!(second.error.code, "authority_not_fresh");
         assert!(!second_started.exists(), "removed connection was contacted");
+    }
+
+    #[cfg(unix)]
+    fn queued_pane_assignment_after_poll(
+        fixture: &str,
+        poll_catalog: impl FnOnce(
+            &crate::groups::AuthorityId,
+            &GroupAuthoritySnapshot,
+        ) -> crate::fleet::GroupCatalog,
+    ) -> (
+        crate::api::schema::ErrorResponse,
+        crate::groups::AuthorityId,
+    ) {
+        let mut config = crate::config::Config::default();
+        config.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "remote".into(),
+            target: "fixture".into(),
+            ..Default::default()
+        }];
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        let dir = TestDir::new(fixture);
+        std::fs::create_dir_all(&dir.0).expect("create pane assignment fixture directory");
+        let fake_ssh = dir.0.join("blocking-ssh");
+        let first_started = dir.0.join("first-started");
+        let release_first = dir.0.join("release-first");
+        let second_started = dir.0.join("second-started");
+        write_executable(
+            &fake_ssh,
+            &format!(
+                "#!/bin/sh\ncat >/dev/null\nif [ ! -e '{}' ]; then\n  touch '{}'\n  while [ ! -e '{}' ]; do sleep 0.01; done\nelse\n  touch '{}'\nfi\nprintf '%s\\n' '{{\"id\":\"ok\",\"result\":{{\"type\":\"ok\"}}}}'\n",
+                first_started.display(),
+                first_started.display(),
+                release_first.display(),
+                second_started.display(),
+            ),
+        );
+        app.authority_mutation_router = crate::fleet::AuthorityMutationRouter::with_ssh_program(
+            fake_ssh,
+            std::time::Duration::from_secs(2),
+        );
+        let authority = crate::groups::AuthorityId::from_random_bytes([20; 16]);
+        let group_id = GroupId {
+            owner: authority.clone(),
+            local: 1,
+        };
+        let accepted = GroupAuthoritySnapshot {
+            authority_id: authority.clone(),
+            revision: 1,
+            groups: vec![GroupRecord {
+                id: group_id.clone(),
+                revision: 1,
+                state: GroupState::Active {
+                    name: "Remote".into(),
+                },
+            }],
+            memberships: vec![OwnedPaneMembership {
+                pane_id: "remote-pane".into(),
+                pane_incarnation: "incarnation-a".into(),
+                membership: PaneGroupMembership::default(),
+            }],
+        };
+        app.state.fleet_snapshot.group_catalogs = vec![crate::fleet::GroupCatalog {
+            host: "remote".into(),
+            target: "fixture".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
+            snapshot: Some(accepted.clone()),
+            error: None,
+        }];
+        app.authority_mutation_router
+            .observe_snapshot(&app.state.fleet_snapshot);
+
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        app.handle_api_request_message(crate::api::ApiRequestMessage {
+            request: Request {
+                id: "blocker".into(),
+                method: Method::GroupDelete(GroupDeleteParams {
+                    group_id,
+                    expected_revision: 1,
+                }),
+            },
+            respond_to: first_tx,
+            response_write_complete: None,
+            stream_active: None,
+        });
+        let (second_tx, second_rx) = std::sync::mpsc::channel();
+        app.handle_api_request_message(crate::api::ApiRequestMessage {
+            request: Request {
+                id: "pane-assignment".into(),
+                method: Method::PaneGroupSet(PaneGroupSetParams {
+                    pane_id: "remote-pane".into(),
+                    group_id: None,
+                    expected_revision: 0,
+                    expected_pane_authority: Some(authority.clone()),
+                    expected_pane_incarnation: None,
+                }),
+            },
+            respond_to: second_tx,
+            response_write_complete: None,
+            stream_active: None,
+        });
+        let transport_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !first_started.exists() && std::time::Instant::now() < transport_deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(first_started.exists(), "blocking mutation did not start");
+
+        app.handle_internal_event_with_render_impact(crate::events::AppEvent::FleetRefreshed {
+            snapshot: crate::fleet::Snapshot {
+                polled: true,
+                configured_hosts: vec!["remote".into()],
+                group_catalogs: vec![poll_catalog(&authority, &accepted)],
+                ..crate::fleet::Snapshot::default()
+            },
+        });
+        std::fs::write(&release_first, b"").expect("release blocking mutation");
+        first_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("blocking mutation response");
+        let response = second_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("queued pane assignment response");
+        let response = serde_json::from_str(&response).expect("pane assignment refusal");
+        assert!(!second_started.exists(), "replacement pane was contacted");
+        (response, authority)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_pane_assignment_is_refused_after_same_address_pane_replacement() {
+        let (response, _) = queued_pane_assignment_after_poll(
+            "pane-incarnation-cancels-assignment",
+            |authority, accepted| {
+                let mut replacement = accepted.clone();
+                replacement.memberships[0].pane_incarnation = "incarnation-b".into();
+                crate::fleet::GroupCatalog {
+                    host: "remote".into(),
+                    target: "fixture".into(),
+                    local: false,
+                    session: None,
+                    socket: None,
+                    state: crate::fleet::GroupCatalogState::Fresh,
+                    observed_authority_id: Some(authority.clone()),
+                    snapshot: Some(replacement),
+                    error: None,
+                }
+            },
+        );
+        assert_eq!(response.error.code, "authority_not_fresh");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queued_remote_pane_assignment_names_failed_authority_when_route_turns_stale() {
+        let (response, authority) =
+            queued_pane_assignment_after_poll("stale-pane-route-names-authority", |_, _| {
+                crate::fleet::GroupCatalog {
+                    host: "remote".into(),
+                    target: "fixture".into(),
+                    local: false,
+                    session: None,
+                    socket: None,
+                    state: crate::fleet::GroupCatalogState::Unavailable,
+                    observed_authority_id: None,
+                    snapshot: None,
+                    error: Some("offline".into()),
+                }
+            });
+        assert_eq!(response.error.code, "authority_not_fresh");
+        assert!(response.error.message.contains(authority.as_str()));
     }
 
     #[cfg(unix)]
