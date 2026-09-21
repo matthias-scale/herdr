@@ -156,8 +156,7 @@ impl AtomicMarkerTail {
 struct PendingLinkBytes {
     scanner: LinkStreamScanner,
     dirty: bool,
-    queued_output_urls: VecDeque<String>,
-    queued_osc8_urls: VecDeque<String>,
+    queued_links: VecDeque<DetectedAgentLink>,
 }
 
 #[derive(Debug, Default)]
@@ -310,20 +309,18 @@ impl ScannerPrefix {
                 PrefixTerminalState::Visible
             }
             PrefixTerminalState::Csi => PrefixTerminalState::Csi,
+            PrefixTerminalState::Osc { .. } if byte == b'\x18' || byte == b'\x1a' => {
+                PrefixTerminalState::Visible
+            }
             PrefixTerminalState::Osc {
-                mut phase,
+                phase: _,
                 escaped: true,
             } => {
-                if byte == b'\\' || byte == b'\x07' {
+                if byte == b'\\' {
                     PrefixTerminalState::Visible
                 } else {
-                    if byte != b'\x1b' {
-                        scan_prefix_osc_content(&mut phase, byte);
-                    }
-                    PrefixTerminalState::Osc {
-                        phase,
-                        escaped: byte == b'\x1b',
-                    }
+                    self.scan_byte(byte);
+                    return;
                 }
             }
             PrefixTerminalState::Osc { .. } if byte == b'\x07' => PrefixTerminalState::Visible,
@@ -658,10 +655,26 @@ enum OscPhase {
     Ignore,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+enum OscScanOutcome {
+    Continue,
+    Terminated,
+    Cancelled,
+    ReplayVisible,
+}
+
+#[derive(Debug)]
 pub(crate) struct ExtractedAgentLinks {
+    pub(crate) ordered_links: Vec<DetectedAgentLink>,
+    #[cfg(test)]
     pub(crate) output_urls: Vec<String>,
+    #[cfg(test)]
     pub(crate) osc8_urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DetectedAgentLink {
+    pub(crate) url: String,
+    pub(crate) source: AgentLinkSource,
 }
 
 impl LinkExtractionGate {
@@ -752,35 +765,47 @@ impl LinkExtractionGate {
             return None;
         }
         let _claim = ExtractionClaim(&self.extracting);
-        let (mut output_urls, mut osc8_urls) = {
+        let ordered_links = {
             let _processing = self.processing.lock().ok()?;
             let mut pending = self.pending.lock().ok()?;
             if !pending.dirty {
                 return None;
             }
             pending.dirty = false;
-            let output_urls = std::mem::take(&mut pending.queued_output_urls);
-            let osc8_urls = std::mem::take(&mut pending.queued_osc8_urls);
+            let links = std::mem::take(&mut pending.queued_links);
             if let Some(prefix) = pending.scanner.take_prefix() {
                 self.marker_tail.store_prefix(&prefix);
                 self.active.store(false, Ordering::Release);
             } else {
                 self.active.store(true, Ordering::Release);
             }
-            (
-                output_urls.into_iter().collect::<Vec<_>>(),
-                osc8_urls.into_iter().collect::<Vec<_>>(),
-            )
+            links.into_iter().collect::<Vec<_>>()
         };
+        #[cfg(test)]
+        let mut output_urls = ordered_links
+            .iter()
+            .filter(|link| link.source == AgentLinkSource::Output)
+            .map(|link| link.url.clone())
+            .collect::<Vec<_>>();
+        #[cfg(test)]
+        let mut osc8_urls = ordered_links
+            .iter()
+            .filter(|link| link.source == AgentLinkSource::Osc8)
+            .map(|link| link.url.clone())
+            .collect::<Vec<_>>();
+        #[cfg(test)]
         output_urls.sort_unstable();
+        #[cfg(test)]
         osc8_urls.sort_unstable();
-        let found_links = !output_urls.is_empty() || !osc8_urls.is_empty();
-        if !found_links {
+        if ordered_links.is_empty() {
             return None;
         }
         self.extractions.fetch_add(1, Ordering::Relaxed);
         Some(ExtractedAgentLinks {
+            ordered_links,
+            #[cfg(test)]
             output_urls,
+            #[cfg(test)]
             osc8_urls,
         })
     }
@@ -821,22 +846,13 @@ impl LinkExtractionGate {
 impl PendingLinkBytes {
     fn scan(&mut self, bytes: &[u8]) {
         for byte in bytes.iter().copied() {
-            self.scanner.scan_byte(
-                byte,
-                &mut self.queued_output_urls,
-                &mut self.queued_osc8_urls,
-            );
+            self.scanner.scan_byte(byte, &mut self.queued_links);
         }
     }
 }
 
 impl LinkStreamScanner {
-    fn scan_byte(
-        &mut self,
-        byte: u8,
-        output_urls: &mut VecDeque<String>,
-        osc8_urls: &mut VecDeque<String>,
-    ) {
+    fn scan_byte(&mut self, byte: u8, links: &mut VecDeque<DetectedAgentLink>) {
         let terminal = std::mem::take(&mut self.terminal);
         self.terminal = match terminal {
             TerminalScanState::Visible if byte == b'\x1b' => {
@@ -848,7 +864,7 @@ impl LinkStreamScanner {
                 TerminalScanState::Escape
             }
             TerminalScanState::Visible => {
-                self.scan_visible(byte, output_urls);
+                self.scan_visible(byte, links);
                 TerminalScanState::Visible
             }
             TerminalScanState::Escape => match byte {
@@ -860,20 +876,24 @@ impl LinkStreamScanner {
             TerminalScanState::Charset => TerminalScanState::Visible,
             TerminalScanState::Csi if (0x40..=0x7e).contains(&byte) => TerminalScanState::Visible,
             TerminalScanState::Csi => TerminalScanState::Csi,
-            TerminalScanState::Osc(mut osc) => {
-                if osc.scan_byte(byte, osc8_urls) {
+            TerminalScanState::Osc(mut osc) => match osc.scan_byte(byte, links) {
+                OscScanOutcome::Continue => TerminalScanState::Osc(osc),
+                OscScanOutcome::Terminated | OscScanOutcome::Cancelled => {
                     if matches!(self.visible, VisibleLinkState::InvalidScheme) {
                         self.visible = VisibleLinkState::Empty;
                     }
                     TerminalScanState::Visible
-                } else {
-                    TerminalScanState::Osc(osc)
                 }
-            }
+                OscScanOutcome::ReplayVisible => {
+                    self.terminal = TerminalScanState::Visible;
+                    self.scan_byte(byte, links);
+                    return;
+                }
+            },
         };
     }
 
-    fn scan_visible(&mut self, byte: u8, output_urls: &mut VecDeque<String>) {
+    fn scan_visible(&mut self, byte: u8, links: &mut VecDeque<DetectedAgentLink>) {
         let state = std::mem::take(&mut self.visible);
         self.visible = match state {
             VisibleLinkState::Empty => start_scheme(byte),
@@ -891,7 +911,7 @@ impl LinkStreamScanner {
             }
             VisibleLinkState::Scheme(_) => {
                 self.visible = VisibleLinkState::Empty;
-                self.scan_visible(byte, output_urls);
+                self.scan_visible(byte, links);
                 return;
             }
             VisibleLinkState::AfterColon(mut scheme) if byte == b'/' => {
@@ -900,7 +920,7 @@ impl LinkStreamScanner {
             }
             VisibleLinkState::AfterColon(_) => {
                 self.visible = VisibleLinkState::Empty;
-                self.scan_visible(byte, output_urls);
+                self.scan_visible(byte, links);
                 return;
             }
             VisibleLinkState::AfterSlash(mut scheme) if byte == b'/' => {
@@ -909,13 +929,13 @@ impl LinkStreamScanner {
             }
             VisibleLinkState::AfterSlash(_) => {
                 self.visible = VisibleLinkState::Empty;
-                self.scan_visible(byte, output_urls);
+                self.scan_visible(byte, links);
                 return;
             }
             VisibleLinkState::Url(mut url) => match url.scan_byte(byte) {
                 UrlScanOutcome::Continue => VisibleLinkState::Url(url),
                 UrlScanOutcome::Terminated => {
-                    publish_output_url(url, output_urls);
+                    publish_output_url(url, links);
                     VisibleLinkState::Empty
                 }
                 UrlScanOutcome::Discard => VisibleLinkState::DiscardUrl(Vec::new()),
@@ -1022,34 +1042,29 @@ impl LinkStreamScanner {
 }
 
 impl OscScanState {
-    fn scan_byte(&mut self, byte: u8, osc8_urls: &mut VecDeque<String>) -> bool {
+    fn scan_byte(&mut self, byte: u8, links: &mut VecDeque<DetectedAgentLink>) -> OscScanOutcome {
+        if byte == b'\x18' || byte == b'\x1a' {
+            return OscScanOutcome::Cancelled;
+        }
         if self.escaped {
-            self.escaped = byte == b'\x1b';
             if byte == b'\\' {
-                self.publish_target(osc8_urls);
-                return true;
+                self.publish_target(links);
+                return OscScanOutcome::Terminated;
             }
-            if byte == b'\x07' {
-                self.publish_target(osc8_urls);
-                return true;
-            }
-            if byte != b'\x1b' {
-                self.scan_content(byte);
-            }
-            return false;
+            return OscScanOutcome::ReplayVisible;
         }
         match byte {
             b'\x07' => {
-                self.publish_target(osc8_urls);
-                true
+                self.publish_target(links);
+                OscScanOutcome::Terminated
             }
             b'\x1b' => {
                 self.escaped = true;
-                false
+                OscScanOutcome::Continue
             }
             _ => {
                 self.scan_content(byte);
-                false
+                OscScanOutcome::Continue
             }
         }
     }
@@ -1069,7 +1084,7 @@ impl OscScanState {
         };
     }
 
-    fn publish_target(&mut self, osc8_urls: &mut VecDeque<String>) {
+    fn publish_target(&mut self, links: &mut VecDeque<DetectedAgentLink>) {
         let OscPhase::Target(target) = std::mem::replace(&mut self.phase, OscPhase::Ignore) else {
             return;
         };
@@ -1077,7 +1092,7 @@ impl OscScanState {
             return;
         };
         for url in extract_urls(&String::from_utf8_lossy(&target)) {
-            queue_link(osc8_urls, url);
+            queue_link(links, url, AgentLinkSource::Osc8);
         }
     }
 }
@@ -1092,13 +1107,13 @@ fn start_scheme(byte: u8) -> VisibleLinkState {
     }
 }
 
-fn publish_output_url(candidate: UrlCandidate, output_urls: &mut VecDeque<String>) {
+fn publish_output_url(candidate: UrlCandidate, links: &mut VecDeque<DetectedAgentLink>) {
     let Some(bytes) = candidate.finish() else {
         return;
     };
     let url = String::from_utf8_lossy(&bytes);
     if url_within_bounds(&url) && url_domain(&url).is_some() {
-        queue_link(output_urls, url.into_owned());
+        queue_link(links, url.into_owned(), AgentLinkSource::Output);
     }
 }
 
@@ -1136,11 +1151,11 @@ fn discarded_url_terminates(pending_utf8: &mut Vec<u8>, byte: u8) -> bool {
     }
 }
 
-fn queue_link(queue: &mut VecDeque<String>, link: String) {
-    if let Some(index) = queue.iter().position(|queued| queued == &link) {
+fn queue_link(queue: &mut VecDeque<DetectedAgentLink>, url: String, source: AgentLinkSource) {
+    if let Some(index) = queue.iter().position(|queued| queued.url == url) {
         queue.remove(index);
     }
-    queue.push_back(link);
+    queue.push_back(DetectedAgentLink { url, source });
     if queue.len() > MAX_LINKS {
         queue.pop_front();
     }
@@ -1399,6 +1414,7 @@ impl AgentStateStore {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn observe_links(
         &mut self,
         pane_id: PaneId,
@@ -1410,6 +1426,19 @@ impl AgentStateStore {
             self.panes.entry(pane_id).or_default(),
             urls,
             source,
+            observed_at,
+        );
+    }
+
+    pub(crate) fn observe_detected_links(
+        &mut self,
+        pane_id: PaneId,
+        links: impl IntoIterator<Item = DetectedAgentLink>,
+        observed_at: SystemTime,
+    ) {
+        let _ = observe_sourced_links_in_pane(
+            self.panes.entry(pane_id).or_default(),
+            links.into_iter().map(|link| (link.url, link.source)),
             observed_at,
         );
     }
@@ -1453,14 +1482,23 @@ pub(crate) fn parse_rfc3339(value: &str) -> Option<SystemTime> {
         .map(SystemTime::from)
 }
 
+#[cfg(test)]
 fn observe_links_in_pane(
     pane: &mut PaneAgentState,
     urls: impl IntoIterator<Item = String>,
     source: AgentLinkSource,
     observed_at: SystemTime,
 ) -> bool {
+    observe_sourced_links_in_pane(pane, urls.into_iter().map(|url| (url, source)), observed_at)
+}
+
+fn observe_sourced_links_in_pane(
+    pane: &mut PaneAgentState,
+    links: impl IntoIterator<Item = (String, AgentLinkSource)>,
+    observed_at: SystemTime,
+) -> bool {
     let before = pane.links.clone();
-    for url in urls {
+    for (url, source) in links {
         let Some(domain) = url_domain(&url) else {
             continue;
         };
@@ -1571,7 +1609,13 @@ fn url_domain(url: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn collected_links(mut batches: Vec<ExtractedAgentLinks>) -> ExtractedAgentLinks {
+    #[derive(Debug, PartialEq, Eq)]
+    struct CollectedLinks {
+        output_urls: Vec<String>,
+        osc8_urls: Vec<String>,
+    }
+
+    fn collected_links(mut batches: Vec<ExtractedAgentLinks>) -> CollectedLinks {
         let mut output_urls = Vec::new();
         let mut osc8_urls = Vec::new();
         for batch in &mut batches {
@@ -1582,13 +1626,13 @@ mod tests {
         output_urls.dedup();
         osc8_urls.sort_unstable();
         osc8_urls.dedup();
-        ExtractedAgentLinks {
+        CollectedLinks {
             output_urls,
             osc8_urls,
         }
     }
 
-    fn reader_visible_link_oracle(bytes: &[u8]) -> ExtractedAgentLinks {
+    fn reader_visible_link_oracle(bytes: &[u8]) -> CollectedLinks {
         #[derive(Default)]
         enum State {
             #[default]
@@ -1639,22 +1683,21 @@ mod tests {
                 State::Osc {
                     content,
                     escaped: true,
-                } if byte == b'\\' || byte == b'\x07' => {
+                } if byte == b'\\' => {
                     finish_osc(&content, &mut osc8_urls);
                     State::Visible
                 }
                 State::Osc {
-                    mut content,
+                    content: _,
                     escaped: true,
-                } => {
-                    if byte != b'\x1b' {
-                        content.push(byte);
+                } => match byte {
+                    b'\x18' | b'\x1a' => State::Visible,
+                    b'\x1b' => State::Escape,
+                    _ => {
+                        visible.push(byte);
+                        State::Visible
                     }
-                    State::Osc {
-                        content,
-                        escaped: byte == b'\x1b',
-                    }
-                }
+                },
                 State::Osc {
                     content,
                     escaped: false,
@@ -1662,6 +1705,10 @@ mod tests {
                     finish_osc(&content, &mut osc8_urls);
                     State::Visible
                 }
+                State::Osc {
+                    content: _,
+                    escaped: false,
+                } if byte == b'\x18' || byte == b'\x1a' => State::Visible,
                 State::Osc {
                     content,
                     escaped: false,
@@ -1687,7 +1734,7 @@ mod tests {
         output_urls.dedup();
         osc8_urls.sort_unstable();
         osc8_urls.dedup();
-        ExtractedAgentLinks {
+        CollectedLinks {
             output_urls,
             osc8_urls,
         }
@@ -1704,6 +1751,18 @@ mod tests {
             .into_bytes(),
             format!("\x1b]8;;https://osc-{seed}.example/target\x1b\\label-{seed}\x1b]8;;\x1b\\ ")
                 .into_bytes(),
+            format!(
+                "\x1b]8;;https://cancelled-can-{seed}.example/target\x18https://after-can-{seed}.example/path\n"
+            )
+            .into_bytes(),
+            format!(
+                "\x1b]8;;https://cancelled-sub-{seed}.example/target\x1ahttps://after-sub-{seed}.example/path\n"
+            )
+            .into_bytes(),
+            format!(
+                "\x1b]8;;https://cancelled-esc-{seed}.example/target\x1bhttps://after-esc-{seed}.example/path\n"
+            )
+            .into_bytes(),
         ];
         let mut random = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
         for index in (1..pieces.len()).rev() {
@@ -1719,7 +1778,7 @@ mod tests {
             .collect()
     }
 
-    fn scan_with_generated_splits(bytes: &[u8], seed: u64) -> ExtractedAgentLinks {
+    fn scan_with_generated_splits(bytes: &[u8], seed: u64) -> CollectedLinks {
         let gate = LinkExtractionGate::default();
         let mut batches = Vec::new();
         let mut offset = 0;
@@ -1912,13 +1971,9 @@ mod tests {
         assert!(gate.take_links().is_none());
 
         gate.observe_chunk(b"\n");
-        assert_eq!(
-            gate.take_links(),
-            Some(ExtractedAgentLinks {
-                output_urls: vec!["https://quiet.example.test/path".into()],
-                osc8_urls: Vec::new(),
-            })
-        );
+        let links = gate.take_links().expect("terminated link extraction");
+        assert_eq!(links.output_urls, vec!["https://quiet.example.test/path"]);
+        assert!(links.osc8_urls.is_empty());
     }
 
     #[test]
@@ -2313,6 +2368,39 @@ mod tests {
         assert!(!stored
             .iter()
             .any(|link| link.url == "https://z-old.example/000"));
+
+        let mut mixed_stream = Vec::new();
+        for index in 0..=MAX_LINKS {
+            if index % 2 == 0 {
+                mixed_stream.extend_from_slice(
+                    format!("https://mixed-output.example/{index:03}\n").as_bytes(),
+                );
+            } else {
+                mixed_stream.extend_from_slice(
+                    format!(
+                        "\x1b]8;;https://mixed-osc.example/{index:03}\x1b\\label\x1b]8;;\x1b\\\n"
+                    )
+                    .as_bytes(),
+                );
+            }
+        }
+
+        let mixed_gate = LinkExtractionGate::default();
+        mixed_gate.observe_chunk(&mixed_stream);
+        let mixed = mixed_gate.take_links().expect("mixed-source URL batch");
+        assert_eq!(
+            mixed.output_urls.len() + mixed.osc8_urls.len(),
+            MAX_LINKS,
+            "one shared queue must cap the mixed-source detection cycle"
+        );
+        assert!(!mixed
+            .output_urls
+            .iter()
+            .any(|url| url == "https://mixed-output.example/000"));
+        assert!(mixed
+            .output_urls
+            .iter()
+            .any(|url| { url == &format!("https://mixed-output.example/{MAX_LINKS:03}") }));
     }
 
     #[test]
@@ -2376,6 +2464,8 @@ mod tests {
             let chunked = scan_with_generated_splits(&stream, seed + 1);
             assert_eq!(chunked, one_piece, "chunked detection cycles, seed {seed}");
             assert_eq!(chunked, expected, "reader-visible oracle, seed {seed}");
+            assert_eq!(chunked.output_urls.len(), 4, "visible sources, seed {seed}");
+            assert_eq!(chunked.osc8_urls.len(), 1, "OSC 8 sources, seed {seed}");
         }
     }
 

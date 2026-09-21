@@ -3486,6 +3486,23 @@ impl AppState {
                 .apply_pane_process_state(pane_id, holds_shell, stale_resolution, observed_at)
                 .into_iter()
                 .collect(),
+            AppEvent::OrderedAgentLinksDetected {
+                pane_id,
+                links,
+                observed_at,
+            } => {
+                if !self
+                    .workspaces
+                    .iter()
+                    .any(|workspace| workspace.pane_state(pane_id).is_some())
+                {
+                    return Vec::new();
+                }
+                self.agent_states
+                    .observe_detected_links(pane_id, links, observed_at);
+                Vec::new()
+            }
+            #[cfg(test)]
             AppEvent::AgentLinksDetected {
                 pane_id,
                 output_urls,
@@ -6279,10 +6296,12 @@ mod tests {
             .goal
             .is_none());
 
-        state.handle_app_event(AppEvent::AgentLinksDetected {
+        state.handle_app_event(AppEvent::OrderedAgentLinksDetected {
             pane_id,
-            output_urls: vec!["https://late.example.test/stale".into()],
-            osc8_urls: Vec::new(),
+            links: vec![crate::agent_state::DetectedAgentLink {
+                url: "https://late.example.test/stale".into(),
+                source: crate::agent_state::AgentLinkSource::Output,
+            }],
             observed_at: std::time::SystemTime::now(),
         });
         assert!(state
@@ -6299,16 +6318,20 @@ mod tests {
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
         let first_seen =
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
-        state.handle_app_event(AppEvent::AgentLinksDetected {
+        state.handle_app_event(AppEvent::OrderedAgentLinksDetected {
             pane_id,
-            output_urls: vec!["https://same.example.test/path".into()],
-            osc8_urls: Vec::new(),
+            links: vec![crate::agent_state::DetectedAgentLink {
+                url: "https://same.example.test/path".into(),
+                source: crate::agent_state::AgentLinkSource::Output,
+            }],
             observed_at: first_seen,
         });
-        state.handle_app_event(AppEvent::AgentLinksDetected {
+        state.handle_app_event(AppEvent::OrderedAgentLinksDetected {
             pane_id,
-            output_urls: vec!["https://same.example.test/path".into()],
-            osc8_urls: Vec::new(),
+            links: vec![crate::agent_state::DetectedAgentLink {
+                url: "https://same.example.test/path".into(),
+                source: crate::agent_state::AgentLinkSource::Output,
+            }],
             observed_at: first_seen + std::time::Duration::from_secs(3),
         });
 

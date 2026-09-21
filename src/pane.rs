@@ -798,10 +798,9 @@ async fn publish_agent_links_if_dirty(
         return;
     };
     let _ = state_events
-        .send(AppEvent::AgentLinksDetected {
+        .send(AppEvent::OrderedAgentLinksDetected {
             pane_id,
-            output_urls: links.output_urls,
-            osc8_urls: links.osc8_urls,
+            links: links.ordered_links,
             observed_at: std::time::SystemTime::now(),
         })
         .await;
@@ -4501,6 +4500,17 @@ mod tests {
     use self::agent_detection::FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE;
     use super::*;
 
+    fn detected_urls(
+        links: &[crate::agent_state::DetectedAgentLink],
+        source: crate::agent_state::AgentLinkSource,
+    ) -> Vec<&str> {
+        links
+            .iter()
+            .filter(|link| link.source == source)
+            .map(|link| link.url.as_str())
+            .collect()
+    }
+
     #[tokio::test]
     async fn dirty_link_snapshot_includes_osc8_hyperlink_target() {
         let uri = "https://osc.example.test/target";
@@ -4513,16 +4523,14 @@ mod tests {
         publish_agent_links_if_dirty(PaneId::from_raw(71), &gate, &tx).await;
 
         let event = rx.recv().await.expect("link event");
-        let AppEvent::AgentLinksDetected {
-            output_urls,
-            osc8_urls,
-            ..
-        } = event
-        else {
+        let AppEvent::OrderedAgentLinksDetected { links, .. } = event else {
             panic!("expected agent link event");
         };
-        assert!(output_urls.is_empty());
-        assert_eq!(osc8_urls, vec![uri]);
+        assert!(detected_urls(&links, crate::agent_state::AgentLinkSource::Output).is_empty());
+        assert_eq!(
+            detected_urls(&links, crate::agent_state::AgentLinkSource::Osc8),
+            vec![uri]
+        );
     }
 
     #[tokio::test]
@@ -4541,10 +4549,10 @@ mod tests {
         publish_agent_links_if_dirty(PaneId::from_raw(72), &gate, &tx).await;
 
         let event = rx.recv().await.expect("link event");
-        let AppEvent::AgentLinksDetected { output_urls, .. } = event else {
+        let AppEvent::OrderedAgentLinksDetected { links, .. } = event else {
             panic!("expected agent link event");
         };
-        assert!(output_urls.iter().any(|url| url == uri));
+        assert!(detected_urls(&links, crate::agent_state::AgentLinkSource::Output).contains(&uri));
     }
 
     #[tokio::test]
@@ -4571,20 +4579,15 @@ mod tests {
 
         let mut store = crate::agent_state::AgentStateStore::default();
         for event in [first_event, second_event] {
-            let AppEvent::AgentLinksDetected {
-                output_urls,
-                observed_at,
-                ..
+            let AppEvent::OrderedAgentLinksDetected {
+                links, observed_at, ..
             } = event
             else {
                 panic!("expected agent link event");
             };
-            store.observe_links(
-                pane_id,
-                output_urls,
-                crate::agent_state::AgentLinkSource::Output,
-                observed_at,
-            );
+            for link in links {
+                store.observe_links(pane_id, [link.url], link.source, observed_at);
+            }
         }
         let links = store
             .snapshot(pane_id, crate::api::schema::AgentStatus::Idle)
@@ -4611,11 +4614,15 @@ mod tests {
 
         publish_agent_links_if_dirty(PaneId::from_raw(74), &gate, &tx).await;
 
-        let AppEvent::AgentLinksDetected { output_urls, .. } = rx.recv().await.expect("link event")
+        let AppEvent::OrderedAgentLinksDetected { links, .. } =
+            rx.recv().await.expect("link event")
         else {
             panic!("expected agent link event");
         };
-        assert_eq!(output_urls, vec![uri]);
+        assert_eq!(
+            detected_urls(&links, crate::agent_state::AgentLinkSource::Output),
+            vec![uri]
+        );
     }
 
     #[tokio::test]
@@ -4630,11 +4637,15 @@ mod tests {
 
         publish_agent_links_if_dirty(PaneId::from_raw(75), &gate, &tx).await;
 
-        let AppEvent::AgentLinksDetected { output_urls, .. } = rx.recv().await.expect("link event")
+        let AppEvent::OrderedAgentLinksDetected { links, .. } =
+            rx.recv().await.expect("link event")
         else {
             panic!("expected agent link event");
         };
-        assert_eq!(output_urls, vec![uri]);
+        assert_eq!(
+            detected_urls(&links, crate::agent_state::AgentLinkSource::Output),
+            vec![uri]
+        );
     }
 
     #[tokio::test]
@@ -4652,16 +4663,16 @@ mod tests {
 
         publish_agent_links_if_dirty(PaneId::from_raw(76), &gate, &tx).await;
 
-        let AppEvent::AgentLinksDetected {
-            output_urls,
-            osc8_urls,
-            ..
-        } = rx.recv().await.expect("link event")
+        let AppEvent::OrderedAgentLinksDetected { links, .. } =
+            rx.recv().await.expect("link event")
         else {
             panic!("expected agent link event");
         };
-        assert!(output_urls.is_empty());
-        assert_eq!(osc8_urls, vec![uri]);
+        assert!(detected_urls(&links, crate::agent_state::AgentLinkSource::Output).is_empty());
+        assert_eq!(
+            detected_urls(&links, crate::agent_state::AgentLinkSource::Osc8),
+            vec![uri]
+        );
     }
 
     #[tokio::test]
@@ -4674,11 +4685,15 @@ mod tests {
 
         publish_agent_links_if_dirty(PaneId::from_raw(77), &gate, &tx).await;
 
-        let AppEvent::AgentLinksDetected { output_urls, .. } = rx.recv().await.expect("link event")
+        let AppEvent::OrderedAgentLinksDetected { links, .. } =
+            rx.recv().await.expect("link event")
         else {
             panic!("expected agent link event");
         };
-        assert_eq!(output_urls, vec![uri]);
+        assert_eq!(
+            detected_urls(&links, crate::agent_state::AgentLinkSource::Output),
+            vec![uri]
+        );
     }
 
     #[tokio::test]
