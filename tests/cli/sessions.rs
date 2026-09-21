@@ -462,6 +462,7 @@ fn status_commands_report_client_and_server_versions() {
     assert_eq!(full_json["server"]["status"], "running");
     assert_eq!(full_json["server"]["running"], true);
     assert_eq!(full_json["server"]["compatible"], true);
+    assert_eq!(full_json["server"]["capabilities"]["groups_v1"], true);
     assert_eq!(
         full_json["server"]["socket"],
         socket_path.display().to_string()
@@ -474,6 +475,7 @@ fn status_commands_report_client_and_server_versions() {
     assert_eq!(server_json["version"], expected_version().as_str());
     assert_eq!(server_json["protocol"], 22);
     assert_eq!(server_json["compatible"], true);
+    assert_eq!(server_json["capabilities"]["groups_v1"], true);
 
     let client_json = run_cli_json(&socket_path, &["status", "client", "--json"]);
     assert_eq!(client_json["version"], expected_version().as_str());

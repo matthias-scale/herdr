@@ -1162,3 +1162,303 @@ fn cross_area_server_kill_then_restart_and_reconnect() {
 
     cleanup_spawned_herdr(server2, base);
 }
+
+#[test]
+fn pane_group_clear_survives_missing_and_corrupt_group_store_after_restart() {
+    let _lock = test_lock();
+
+    for damage in ["missing", "corrupt"] {
+        let base = unique_test_dir();
+        let config_home = base.join("config");
+        let runtime_dir = base.join("runtime");
+        let api_socket = runtime_dir.join("herdr.sock");
+
+        let server = spawn_server(&config_home, &runtime_dir, &api_socket);
+        wait_for_socket(&api_socket, Duration::from_secs(10));
+        let created = workspace_create(&api_socket, damage);
+        let pane_id = created["result"]["root_pane"]["pane_id"]
+            .as_str()
+            .expect("created pane id")
+            .to_string();
+        let group = send_json_request(
+            &api_socket,
+            "group_create",
+            "group.create",
+            json!({"name": "Work", "expected_revision": 0}),
+        );
+        let group_id = group["result"]["record"]["id"].clone();
+        assert!(!group_id.is_null(), "group.create should succeed: {group}");
+        let assigned = send_json_request(
+            &api_socket,
+            "group_assign",
+            "pane.group.set",
+            json!({
+                "pane_id": pane_id,
+                "group_id": group_id,
+                "expected_revision": 0
+            }),
+        );
+        assert!(
+            assigned.get("error").is_none(),
+            "initial pane.group.set should succeed: {assigned}"
+        );
+        drop(server);
+
+        let data_dir = config_home.join("herdr-dev");
+        let groups_path = data_dir.join("groups.json");
+        if damage == "missing" {
+            fs::remove_file(&groups_path).unwrap();
+        } else {
+            fs::write(&groups_path, "not json").unwrap();
+        }
+
+        let restarted = spawn_server(&config_home, &runtime_dir, &api_socket);
+        wait_for_socket(&api_socket, Duration::from_secs(10));
+        let cleared = send_json_request(
+            &api_socket,
+            "group_clear",
+            "pane.group.set",
+            json!({"pane_id": pane_id, "expected_revision": 1}),
+        );
+        assert!(
+            cleared.get("error").is_none(),
+            "clearing with a {damage} group store should succeed: {cleared}"
+        );
+        assert_eq!(cleared["result"]["membership"], json!({"revision": 2}));
+
+        let session: Value = serde_json::from_str(
+            &fs::read_to_string(data_dir.join("session.json")).expect("persisted session"),
+        )
+        .expect("valid persisted session");
+        let saved_membership = session["workspaces"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|workspace| {
+                workspace["tabs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|tab| {
+                        tab["panes"]
+                            .as_object()
+                            .into_iter()
+                            .flat_map(|panes| panes.values())
+                    })
+            })
+            .find_map(|pane| pane.get("group_membership"))
+            .expect("cleared membership remains durable");
+        assert_eq!(saved_membership, &json!({"revision": 2}));
+
+        cleanup_spawned_herdr(restarted, base);
+    }
+}
+
+#[test]
+fn rolled_back_group_store_rejects_a_stale_revision_after_restart() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let server = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    let created = send_json_request(
+        &api_socket,
+        "group_create_before_rollback",
+        "group.create",
+        json!({"name": "Before", "expected_revision": 0}),
+    );
+    assert!(created.get("error").is_none(), "create failed: {created}");
+    let group_id = created["result"]["record"]["id"].clone();
+    let pre_rename_revision = created["result"]["revision"]
+        .as_u64()
+        .expect("created authority revision");
+    let data_dir = config_home.join("herdr-dev");
+    let groups_path = data_dir.join("groups.json");
+    let before_rename = fs::read_to_string(&groups_path).expect("pre-rename group store");
+
+    let renamed = send_json_request(
+        &api_socket,
+        "group_rename_before_rollback",
+        "group.rename",
+        json!({
+            "group_id": group_id,
+            "name": "After",
+            "expected_revision": pre_rename_revision
+        }),
+    );
+    assert!(renamed.get("error").is_none(), "rename failed: {renamed}");
+    let post_rename_revision = renamed["result"]["revision"]
+        .as_u64()
+        .expect("renamed authority revision");
+    assert!(post_rename_revision > pre_rename_revision);
+    drop(server);
+    fs::write(&groups_path, before_rename).unwrap();
+
+    let restarted = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    let snapshot = send_json_request(
+        &api_socket,
+        "group_snapshot_after_revision_rollback",
+        "group.host_snapshot",
+        json!({}),
+    );
+    let repaired_revision = snapshot["result"]["snapshot"]["revision"]
+        .as_u64()
+        .expect("repaired authority revision");
+    assert!(repaired_revision > post_rename_revision);
+    let stale = send_json_request(
+        &api_socket,
+        "group_rename_with_stale_revision",
+        "group.rename",
+        json!({
+            "group_id": group_id,
+            "name": "Stale",
+            "expected_revision": pre_rename_revision
+        }),
+    );
+    assert_eq!(stale["error"]["code"], "revision_conflict");
+    assert!(stale["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains(&repaired_revision.to_string())));
+
+    cleanup_spawned_herdr(restarted, base);
+}
+
+#[test]
+fn rolled_back_group_store_never_reissues_a_retired_identity_after_restart() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+
+    let server = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    let workspace = workspace_create(&api_socket, "rollback-membership");
+    let pane_id = workspace["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("root pane id")
+        .to_string();
+    let first = send_json_request(
+        &api_socket,
+        "group_create_first",
+        "group.create",
+        json!({"name": "First", "expected_revision": 0}),
+    );
+    assert!(first.get("error").is_none(), "first create failed: {first}");
+    let data_dir = config_home.join("herdr-dev");
+    let groups_path = data_dir.join("groups.json");
+    let before_second_group = fs::read_to_string(&groups_path).expect("first group store");
+
+    let second = send_json_request(
+        &api_socket,
+        "group_create_second",
+        "group.create",
+        json!({"name": "Second", "expected_revision": 1}),
+    );
+    let second_id = second["result"]["record"]["id"].clone();
+    let second_revision = second["result"]["record"]["revision"]
+        .as_u64()
+        .expect("second group revision");
+    let assigned = send_json_request(
+        &api_socket,
+        "group_assign_second",
+        "pane.group.set",
+        json!({
+            "pane_id": pane_id,
+            "group_id": second_id,
+            "expected_revision": 0
+        }),
+    );
+    assert!(
+        assigned.get("error").is_none(),
+        "group assignment failed: {assigned}"
+    );
+    let deleted = send_json_request(
+        &api_socket,
+        "group_delete_second",
+        "group.delete",
+        json!({
+            "group_id": second_id,
+            "expected_revision": second_revision
+        }),
+    );
+    assert!(
+        deleted.get("error").is_none(),
+        "group delete failed: {deleted}"
+    );
+    drop(server);
+    fs::write(&groups_path, before_second_group).unwrap();
+
+    let restarted = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    let snapshot = send_json_request(
+        &api_socket,
+        "group_snapshot_after_rollback",
+        "group.host_snapshot",
+        json!({}),
+    );
+    assert!(
+        snapshot.get("error").is_none(),
+        "rolled-back store should be repaired from the authority ledger: {snapshot}"
+    );
+    assert!(snapshot["result"]["snapshot"]["groups"]
+        .as_array()
+        .expect("snapshot groups")
+        .iter()
+        .any(|record| record["id"] == second_id && record["state"] == "deleted"));
+    let membership = snapshot["result"]["snapshot"]["memberships"]
+        .as_array()
+        .expect("snapshot memberships")
+        .iter()
+        .find(|membership| membership["pane_id"] == pane_id)
+        .expect("restored pane membership");
+    assert_eq!(membership["membership"]["group_id"], second_id);
+    assert_eq!(membership["membership"]["revision"], 1);
+
+    let revision = snapshot["result"]["snapshot"]["revision"]
+        .as_u64()
+        .expect("reconstructed authority revision");
+    let replacement = send_json_request(
+        &api_socket,
+        "group_create_after_rollback",
+        "group.create",
+        json!({"name": "Replacement", "expected_revision": revision}),
+    );
+    assert!(
+        replacement.get("error").is_none(),
+        "create after rollback failed: {replacement}"
+    );
+    assert_eq!(
+        replacement["result"]["record"]["id"]["owner"],
+        second_id["owner"]
+    );
+    assert_eq!(replacement["result"]["record"]["id"]["local"], 3);
+    assert_ne!(replacement["result"]["record"]["id"], second_id);
+
+    let after_create = send_json_request(
+        &api_socket,
+        "group_snapshot_after_replacement",
+        "group.host_snapshot",
+        json!({}),
+    );
+    let groups = after_create["result"]["snapshot"]["groups"]
+        .as_array()
+        .expect("snapshot groups after replacement");
+    assert!(groups
+        .iter()
+        .any(|record| record["id"] == second_id && record["state"] == "deleted"));
+    let membership = after_create["result"]["snapshot"]["memberships"]
+        .as_array()
+        .expect("snapshot memberships after replacement")
+        .iter()
+        .find(|membership| membership["pane_id"] == pane_id)
+        .expect("pane membership after replacement");
+    assert_eq!(membership["membership"]["group_id"], second_id);
+    assert_eq!(membership["membership"]["revision"], 1);
+
+    cleanup_spawned_herdr(restarted, base);
+}

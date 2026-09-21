@@ -20,6 +20,55 @@ pub(crate) struct SessionSaveResult {
 }
 
 impl App {
+    pub(super) fn persist_session_candidate(
+        &mut self,
+        snapshot: crate::persist::SessionSnapshot,
+        history: Option<crate::persist::SessionHistorySnapshot>,
+    ) -> std::io::Result<()> {
+        if let Some(thread) = self.session_save_thread.take() {
+            match thread.join() {
+                Ok(result) => self.apply_session_save_result(result),
+                Err(_) => self.apply_session_save_result(SessionSaveResult {
+                    revision: self.state.session_dirty_revision,
+                    result: Err(std::io::Error::other("session save thread panicked")),
+                }),
+            }
+        }
+        if self.no_session {
+            return Err(std::io::Error::other("session persistence is disabled"));
+        }
+
+        let revision = self.state.session_dirty_revision;
+        #[cfg(test)]
+        let result = if let Some((session_path, history_path)) =
+            self.group_session_paths_override.as_ref()
+        {
+            crate::persist::save_to_paths(session_path, history_path, &snapshot, history.as_ref())
+        } else {
+            crate::persist::save(&snapshot, history.as_ref())
+        };
+        #[cfg(not(test))]
+        let result = crate::persist::save(&snapshot, history.as_ref());
+
+        match result {
+            Ok(()) => {
+                self.apply_session_save_result(SessionSaveResult {
+                    revision,
+                    result: Ok(()),
+                });
+                Ok(())
+            }
+            Err(error) => {
+                let returned = std::io::Error::new(error.kind(), error.to_string());
+                self.apply_session_save_result(SessionSaveResult {
+                    revision,
+                    result: Err(error),
+                });
+                Err(returned)
+            }
+        }
+    }
+
     pub(super) fn schedule_session_save(&mut self) {
         if self.no_session {
             return;

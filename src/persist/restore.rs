@@ -627,6 +627,9 @@ fn restore_tab(
             terminal.settled_auto_label =
                 saved_pane.and_then(|pane| pane.settled_auto_label.clone());
             let mut pane = PaneState::new(terminal_id);
+            pane.group_membership = saved_pane
+                .map(|pane| pane.group_membership.clone())
+                .unwrap_or_default();
             pane.settled_at = saved_pane.and_then(|pane| pane.settled_at);
             pane.set_snoozed_until(saved_pane.and_then(|pane| pane.snoozed_until));
             pane.settled_work_key = saved_pane.and_then(|pane| pane.settled_work_key.clone());
@@ -758,6 +761,9 @@ fn restore_tab(
                     }
                 }
                 let mut pane = PaneState::new(terminal_id.clone());
+                pane.group_membership = saved_pane
+                    .map(|pane| pane.group_membership.clone())
+                    .unwrap_or_default();
                 pane.settled_at = saved_pane.and_then(|pane| pane.settled_at);
                 pane.set_snoozed_until(saved_pane.and_then(|pane| pane.snoozed_until));
                 pane.settled_work_key = saved_pane.and_then(|pane| pane.settled_work_key.clone());
@@ -1155,6 +1161,7 @@ mod tests {
             agent_name: None,
             managed_agent_kind: None,
             agent_session: None,
+            group_membership: Default::default(),
             launch_argv: None,
         };
         let mut pane = PaneState::new(TerminalId::alloc());
@@ -1700,6 +1707,7 @@ mod tests {
                                 value: "opencode-session".into(),
                                 blocked: None,
                             }),
+                            group_membership: Default::default(),
                             launch_argv: None,
                         },
                     )]),
@@ -1828,6 +1836,7 @@ mod tests {
                                 agent_name: None,
                                 managed_agent_kind: None,
                                 agent_session: None,
+                                group_membership: Default::default(),
                                 launch_argv: None,
                             },
                         ),
@@ -1848,6 +1857,7 @@ mod tests {
                                 agent_name: None,
                                 managed_agent_kind: None,
                                 agent_session: None,
+                                group_membership: Default::default(),
                                 launch_argv: None,
                             },
                         ),
@@ -1915,6 +1925,7 @@ mod tests {
                     agent_name: None,
                     managed_agent_kind: None,
                     agent_session: None,
+                    group_membership: Default::default(),
                     launch_argv: None,
                 },
             )
@@ -1940,6 +1951,7 @@ mod tests {
                 value: "codex-session".into(),
                 blocked: None,
             }),
+            group_membership: Default::default(),
             launch_argv: None,
         };
         let snapshot = SessionSnapshot {
@@ -2139,6 +2151,7 @@ mod tests {
                                 value: "codex-session".into(),
                                 blocked: None,
                             }),
+                            group_membership: Default::default(),
                             launch_argv: None,
                         },
                     )]),
@@ -2366,6 +2379,76 @@ mod tests {
         (workspaces, text)
     }
 
+    #[tokio::test]
+    async fn session_restore_keeps_pane_payload_with_its_public_identity() {
+        let (mut snapshot, _) = snapshot_with_saved_pane_history();
+        let workspace = &mut snapshot.workspaces[0];
+        workspace.public_pane_numbers = HashMap::from([(0, 7)]);
+        workspace.next_public_pane_number = 8;
+        workspace.tabs[0]
+            .panes
+            .get_mut(&0)
+            .expect("saved pane")
+            .label = Some("identity-marker".into());
+        let group_id: crate::groups::GroupId = serde_json::from_value(serde_json::json!({
+            "owner": "AQEBAQEBAQEBAQEBAQEBAQ",
+            "local": 7
+        }))
+        .expect("group id");
+        workspace.tabs[0]
+            .panes
+            .get_mut(&0)
+            .expect("saved pane")
+            .group_membership = crate::groups::PaneGroupMembership {
+            group_id: Some(group_id.clone()),
+            revision: 3,
+        };
+        let (events, _events_rx) = mpsc::channel(8);
+
+        let (workspaces, terminals, mut runtimes) = restore(
+            &snapshot,
+            None,
+            5,
+            40,
+            4096,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+
+        let workspace = &workspaces[0];
+        let (&restored_pane_id, _) = workspace
+            .public_pane_numbers
+            .iter()
+            .find(|(_, number)| **number == 7)
+            .expect("saved public pane identity");
+        assert_ne!(restored_pane_id.raw(), 0, "internal pane id is remapped");
+        let terminal_id = &workspace
+            .pane_state(restored_pane_id)
+            .expect("restored pane")
+            .attached_terminal_id;
+        assert_eq!(
+            terminals[terminal_id].manual_label.as_deref(),
+            Some("identity-marker")
+        );
+        assert_eq!(
+            workspace
+                .pane_state(restored_pane_id)
+                .expect("restored pane")
+                .group_membership,
+            crate::groups::PaneGroupMembership {
+                group_id: Some(group_id),
+                revision: 3,
+            }
+        );
+        for (_, runtime) in runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
     fn snapshot_with_saved_pane_history() -> (SessionSnapshot, SessionHistorySnapshot) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let mut panes = HashMap::new();
@@ -2386,6 +2469,7 @@ mod tests {
                 agent_name: None,
                 managed_agent_kind: None,
                 agent_session: None,
+                group_membership: Default::default(),
                 launch_argv: None,
             },
         );
