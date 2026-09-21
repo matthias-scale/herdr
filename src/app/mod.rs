@@ -195,6 +195,12 @@ pub struct App {
     pub(crate) fleet_poller_config: crate::fleet::FleetPollerHandle,
     /// Server-owned group authority. Persistence is separate from client presentation state.
     pub(crate) group_runtime: crate::groups::Runtime,
+    /// Separate versioned admission cache for remote authority snapshots.
+    pub(crate) group_catalog_cache_path: Option<std::path::PathBuf>,
+    /// Owner-only pane memberships maintained at lifecycle boundaries so
+    /// fleet snapshot requests never walk the pane tree.
+    pub(crate) group_membership_projection:
+        std::collections::BTreeMap<String, crate::groups::PaneGroupMembership>,
     #[cfg(test)]
     pub(crate) group_session_paths_override: Option<(std::path::PathBuf, std::path::PathBuf)>,
     /// Runtime-only markers for shell panes launched by git and user actions.
@@ -1404,6 +1410,14 @@ impl App {
         let group_runtime = crate::groups::Runtime::load_default();
         #[cfg(test)]
         let group_runtime = crate::groups::Runtime::unavailable_for_tests();
+        #[cfg(not(test))]
+        let group_catalog_cache_path = Some(crate::fleet::group_catalog_cache_path());
+        #[cfg(test)]
+        let group_catalog_cache_path = None;
+        if let Some(path) = group_catalog_cache_path.as_deref() {
+            state.fleet_snapshot.group_catalogs =
+                crate::fleet::load_group_catalog_cache(path, &config.remote.fleet);
+        }
 
         let last_focus = state.active.and_then(|idx| {
             state
@@ -1446,6 +1460,8 @@ impl App {
             )),
             fleet_poller_config,
             group_runtime,
+            group_catalog_cache_path,
+            group_membership_projection: std::collections::BTreeMap::new(),
             #[cfg(test)]
             group_session_paths_override: None,
             git_action_panes: HashMap::new(),
@@ -1587,6 +1603,7 @@ impl App {
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
+        app.rebuild_group_membership_projection();
         app
     }
 
@@ -1696,6 +1713,7 @@ impl App {
                 .and_then(|ws| ws.focused_pane_id().map(|pane_id| (idx, pane_id)))
         });
         app.restore_handoff_dock_editors(config, editor_imports);
+        app.rebuild_group_membership_projection();
         app.sync_agent_metadata_deadline();
         app.sync_agent_activity_refresh_deadline(now);
         Ok(app)

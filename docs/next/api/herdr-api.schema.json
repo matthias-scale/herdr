@@ -3671,6 +3671,12 @@
         },
         "PaneGroupSetParams": {
           "properties": {
+            "expected_pane_authority": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "expected_revision": {
               "format": "uint64",
               "minimum": 0,

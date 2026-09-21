@@ -67,6 +67,13 @@ impl App {
         let changed = self.state.fleet_snapshot != snapshot;
         self.state.fleet_snapshot = snapshot;
         if catalogs_changed {
+            if let Some(path) = self.group_catalog_cache_path.as_deref() {
+                if let Err(error) =
+                    crate::fleet::save_group_catalog_cache(path, &self.state.fleet_snapshot)
+                {
+                    tracing::warn!(%error, path = %path.display(), "cannot persist remote group catalog cache");
+                }
+            }
             self.emit_event(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::AuthorityCatalogsUpdated,
                 data: crate::api::schema::EventData::AuthorityCatalogsUpdated {
@@ -1380,6 +1387,7 @@ impl App {
     }
 
     pub(super) fn emit_event(&mut self, event: crate::api::schema::EventEnvelope) {
+        self.observe_group_membership_lifecycle_event(&event.data);
         self.run_plugin_event_hooks(&event);
         self.event_hub.push(event);
     }

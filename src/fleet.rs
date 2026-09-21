@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::api::client::{ApiClient, ConnectionTarget};
 use crate::api::schema::{AgentInfo, AgentStatus, EmptyParams, Method, Request, ResponseResult};
@@ -24,6 +24,9 @@ const MIN_REFRESH_INTERVAL_MS: u64 = 100;
 // select its newest records while keeping malformed or unbounded stores capped.
 const MAX_RUN_DIRECTORY_ENTRIES: usize = 2_048;
 const MAX_REMOTE_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+const GROUP_CATALOG_CACHE_VERSION: u32 = 1;
+#[cfg(not(test))]
+const GROUP_CATALOG_CACHE_FILE: &str = "remote-group-catalogs-v1.json";
 type ParsedRemoteOutput = (
     Result<Vec<AgentInfo>, String>,
     Result<crate::groups::GroupAuthoritySnapshot, String>,
@@ -323,6 +326,135 @@ impl GroupCatalog {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct GroupCatalogCacheFile {
+    version: u32,
+    entries: Vec<GroupCatalogCacheEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GroupCatalogCacheEntry {
+    target: String,
+    local: bool,
+    session: Option<String>,
+    socket: Option<String>,
+    snapshot: crate::groups::GroupAuthoritySnapshot,
+}
+
+impl GroupCatalogCacheEntry {
+    fn matches_config(&self, host: &FleetHostConfig) -> bool {
+        self.target == host.target
+            && self.local == host.local
+            && self.session == host.session
+            && self.socket == host.socket
+    }
+}
+
+#[cfg(not(test))]
+pub(crate) fn group_catalog_cache_path() -> PathBuf {
+    crate::session::data_dir().join(GROUP_CATALOG_CACHE_FILE)
+}
+
+pub(crate) fn load_group_catalog_cache(path: &Path, fleet: &FleetConfig) -> Vec<GroupCatalog> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "cannot read remote group catalog cache");
+            return Vec::new();
+        }
+    };
+    let file: GroupCatalogCacheFile = match serde_json::from_slice(&bytes) {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "cannot parse remote group catalog cache");
+            return Vec::new();
+        }
+    };
+    if file.version != GROUP_CATALOG_CACHE_VERSION {
+        tracing::warn!(
+            version = file.version,
+            expected = GROUP_CATALOG_CACHE_VERSION,
+            "ignoring unsupported remote group catalog cache"
+        );
+        return Vec::new();
+    }
+
+    fleet
+        .hosts
+        .iter()
+        .filter_map(|host| {
+            let matching = file
+                .entries
+                .iter()
+                .filter(|entry| entry.matches_config(host))
+                .collect::<Vec<_>>();
+            let [entry] = matching.as_slice() else {
+                return None;
+            };
+            if let Err(error) = crate::groups::admit_authority_snapshot(None, &entry.snapshot) {
+                tracing::warn!(
+                    %error,
+                    host = %host.name,
+                    "ignoring invalid remote group catalog cache entry"
+                );
+                return None;
+            }
+            Some(GroupCatalog {
+                host: host.name.clone(),
+                target: host.target.clone(),
+                local: host.local,
+                session: host.session.clone(),
+                socket: host.socket.clone(),
+                state: GroupCatalogState::Stale,
+                snapshot: Some(entry.snapshot.clone()),
+                error: Some("retained from durable cache".into()),
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn save_group_catalog_cache(path: &Path, snapshot: &Snapshot) -> std::io::Result<()> {
+    let entries = snapshot
+        .group_catalogs
+        .iter()
+        .filter_map(|catalog| {
+            catalog
+                .snapshot
+                .as_ref()
+                .map(|accepted| GroupCatalogCacheEntry {
+                    target: catalog.target.clone(),
+                    local: catalog.local,
+                    session: catalog.session.clone(),
+                    socket: catalog.socket.clone(),
+                    snapshot: accepted.clone(),
+                })
+        })
+        .collect();
+    let file = GroupCatalogCacheFile {
+        version: GROUP_CATALOG_CACHE_VERSION,
+        entries,
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec_pretty(&file).map_err(std::io::Error::other)?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp = path.with_extension(format!("tmp-{}-{nonce}", std::process::id()));
+    if let Err(error) = std::fs::write(&temp, bytes) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    if let Err(error) = crate::platform::replace_file_durably(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub(crate) fn route_api_request(
     catalog: &GroupCatalog,
     request: &Request,
@@ -506,6 +638,21 @@ impl Snapshot {
             return Err(format!("authority {authority} is not fresh"));
         }
         Ok(catalog)
+    }
+
+    pub(crate) fn authority_has_identity_conflict(
+        &self,
+        authority: &crate::groups::AuthorityId,
+    ) -> bool {
+        let matching = self
+            .group_catalogs
+            .iter()
+            .filter(|catalog| catalog.authority_id() == Some(authority))
+            .collect::<Vec<_>>();
+        matching.len() > 1
+            || matching
+                .iter()
+                .any(|catalog| catalog.state == GroupCatalogState::IdentityConflict)
     }
 
     /// Keep the last observed remote inventory when a configured host cannot
@@ -2733,6 +2880,81 @@ mod tests {
             .fresh_group_catalog(&authority)
             .expect_err("collision cannot be routed")
             .contains("identity conflict"));
+    }
+
+    #[test]
+    fn durable_catalog_cache_retains_tombstones_only_for_the_same_connection_tuple() {
+        let dir = run_fixture_dir("group-catalog-cache");
+        let path = dir.join("remote-group-catalogs.json");
+        let accepted = group_catalog(
+            "office",
+            "machine-a",
+            1,
+            2,
+            vec![group_record(1, 1, 2, true)],
+        );
+        save_group_catalog_cache(
+            &path,
+            &Snapshot {
+                group_catalogs: vec![accepted.clone()],
+                ..Snapshot::default()
+            },
+        )
+        .expect("persist catalog cache");
+        let fleet = FleetConfig {
+            hosts: vec![FleetHostConfig {
+                name: "renamed".into(),
+                target: "machine-a".into(),
+                local: false,
+                session: Some("agents".into()),
+                socket: Some("/tmp/herdr.sock".into()),
+            }],
+            ..FleetConfig::default()
+        };
+
+        let retained = load_group_catalog_cache(&path, &fleet);
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].host, "renamed");
+        assert_eq!(retained[0].state, GroupCatalogState::Stale);
+        assert_eq!(retained[0].snapshot, accepted.snapshot);
+
+        let mut rolled_back = Snapshot {
+            group_catalogs: vec![group_catalog(
+                "renamed",
+                "machine-a",
+                1,
+                1,
+                vec![group_record(1, 1, 1, false)],
+            )],
+            ..Snapshot::default()
+        };
+        rolled_back.admit_group_catalogs_from(&Snapshot {
+            group_catalogs: retained,
+            ..Snapshot::default()
+        });
+        assert_eq!(
+            rolled_back.group_catalogs[0].state,
+            GroupCatalogState::Stale
+        );
+        assert!(matches!(
+            rolled_back.group_catalogs[0]
+                .snapshot
+                .as_ref()
+                .expect("retained snapshot")
+                .groups[0]
+                .state,
+            crate::groups::GroupState::Deleted
+        ));
+
+        let repointed = FleetConfig {
+            hosts: vec![FleetHostConfig {
+                target: "machine-b".into(),
+                ..fleet.hosts[0].clone()
+            }],
+            ..FleetConfig::default()
+        };
+        assert!(load_group_catalog_cache(&path, &repointed).is_empty());
+        std::fs::remove_dir_all(dir).expect("remove catalog cache fixture");
     }
 
     #[test]

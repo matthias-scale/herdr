@@ -1538,6 +1538,61 @@ fn wait_for_authority_group_state(
     panic!("authority group did not reach {catalog_state}/{group_state}: {last}");
 }
 
+fn wait_for_authority_pane(socket: &Path, authority: &Value, pane_id: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last = Value::Null;
+    while Instant::now() < deadline {
+        last = send_json_request(socket, "fleet_pane", "fleet.list", json!({}));
+        if last["result"]["snapshot"]["authority_catalogs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|catalog| {
+                catalog["authority_id"] == *authority
+                    && catalog["state"] == "fresh"
+                    && catalog["snapshot"]["memberships"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|membership| membership["pane_id"] == pane_id)
+            })
+        {
+            return last;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("authority pane did not become fresh for {pane_id}: {last}");
+}
+
+fn wait_for_authority_catalog_error(
+    socket: &Path,
+    authority: &Value,
+    state: &str,
+    error_fragment: &str,
+) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last = Value::Null;
+    while Instant::now() < deadline {
+        last = send_json_request(socket, "fleet_error", "fleet.list", json!({}));
+        if last["result"]["snapshot"]["authority_catalogs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|catalog| {
+                catalog["authority_id"] == *authority
+                    && catalog["state"] == state
+                    && catalog["error"]
+                        .as_str()
+                        .is_some_and(|error| error.contains(error_fragment))
+            })
+        {
+            return last;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("authority catalog did not reach {state}/{error_fragment}: {last}");
+}
+
 #[test]
 fn two_servers_share_groups_route_concurrent_mutations_and_recover_stale_catalogs() {
     let _guard = test_lock();
@@ -1554,7 +1609,9 @@ fn two_servers_share_groups_route_concurrent_mutations_and_recover_stale_catalog
     let mut server_a = Some(spawn_server_with_config_text(
         &config_a, &runtime_a, &socket_a, None, &normal_a,
     ));
-    let server_b = spawn_server_with_config_text(&config_b, &runtime_b, &socket_b, None, &normal_b);
+    let mut server_b = Some(spawn_server_with_config_text(
+        &config_b, &runtime_b, &socket_b, None, &normal_b,
+    ));
     wait_for_socket(&socket_a, Duration::from_secs(5));
     wait_for_socket(&socket_b, Duration::from_secs(5));
 
@@ -1577,6 +1634,65 @@ fn two_servers_share_groups_route_concurrent_mutations_and_recover_stale_catalog
         .as_array()
         .is_some_and(Vec::is_empty));
     wait_for_authority_catalog(&socket_b, &authority_a, "fresh", 1);
+
+    let workspace_a = workspace_create(&socket_a, "alpha-pane");
+    let workspace_b = workspace_create(&socket_b, "beta-pane");
+    let pane_a = workspace_a["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("alpha root pane")
+        .to_string();
+    let pane_b = workspace_b["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("beta root pane")
+        .to_string();
+    assert_eq!(
+        pane_a, pane_b,
+        "independent servers should reproduce the collision"
+    );
+    wait_for_authority_pane(&socket_b, &authority_a, &pane_a);
+    let assigned = send_json_request(
+        &socket_b,
+        "assign_routed",
+        "pane.group.set",
+        json!({
+            "pane_id": pane_a,
+            "group_id": group_id,
+            "expected_revision": 0,
+            "expected_pane_authority": authority_a
+        }),
+    );
+    assert_eq!(
+        assigned["result"]["membership"]["revision"], 1,
+        "{assigned}"
+    );
+    let alpha_after_assignment = send_json_request(
+        &socket_a,
+        "alpha_after_assignment",
+        "group.host_snapshot",
+        json!({}),
+    );
+    let beta_after_assignment = send_json_request(
+        &socket_b,
+        "beta_after_assignment",
+        "group.host_snapshot",
+        json!({}),
+    );
+    let alpha_membership = alpha_after_assignment["result"]["snapshot"]["memberships"]
+        .as_array()
+        .expect("alpha memberships")
+        .iter()
+        .find(|membership| membership["pane_id"] == pane_a)
+        .expect("alpha pane membership");
+    let beta_membership = beta_after_assignment["result"]["snapshot"]["memberships"]
+        .as_array()
+        .expect("beta memberships")
+        .iter()
+        .find(|membership| membership["pane_id"] == pane_b)
+        .expect("beta pane membership");
+    assert_eq!(alpha_membership["membership"]["group_id"], group_id);
+    assert_eq!(alpha_membership["membership"]["revision"], 1);
+    assert!(beta_membership["membership"].get("group_id").is_none());
+    assert_eq!(beta_membership["membership"]["revision"], 0);
 
     let a_socket = socket_a.clone();
     let b_socket = socket_b.clone();
@@ -1614,6 +1730,11 @@ fn two_servers_share_groups_route_concurrent_mutations_and_recover_stale_catalog
     let winning_record = after_race["result"]["snapshot"]["groups"][0].clone();
     assert_eq!(winning_record["revision"], 2);
     wait_for_authority_catalog(&socket_b, &authority_a, "fresh", 1);
+    let alpha_data = config_a.join("herdr-dev");
+    let authority_path = alpha_data.join("group-authority.json");
+    let groups_path = alpha_data.join("groups.json");
+    let rolled_back_authority = fs::read(&authority_path).expect("authority rollback fixture");
+    let rolled_back_groups = fs::read(&groups_path).expect("group rollback fixture");
 
     let collision_b = format!(
         "onboarding = false\n[ui]\nshow_home_on_start = false\n[remote.fleet]\nself_name = \"beta\"\ntimeout_ms = 500\nrefresh_interval_ms = 100\nheartbeat_stale_ms = 500\n[[remote.fleet.hosts]]\nname = \"beta\"\nlocal = true\nsocket = \"{}\"\n[[remote.fleet.hosts]]\nname = \"alpha-primary\"\nlocal = true\nsocket = \"{}\"\n[[remote.fleet.hosts]]\nname = \"alpha-duplicate\"\nlocal = true\nsocket = \"{}\"\n",
@@ -1649,6 +1770,40 @@ fn two_servers_share_groups_route_concurrent_mutations_and_recover_stale_catalog
         json!({}),
     );
     wait_for_authority_catalog(&socket_b, &authority_a, "fresh", 1);
+
+    let collision_a = format!(
+        "onboarding = false\n[ui]\nshow_home_on_start = false\n[remote.fleet]\nself_name = \"alpha\"\ntimeout_ms = 500\nrefresh_interval_ms = 100\nheartbeat_stale_ms = 500\n[[remote.fleet.hosts]]\nname = \"alpha-primary\"\nlocal = true\nsocket = \"{}\"\n[[remote.fleet.hosts]]\nname = \"alpha-duplicate\"\nlocal = true\nsocket = \"{}\"\n[[remote.fleet.hosts]]\nname = \"beta\"\nlocal = true\nsocket = \"{}\"\n",
+        socket_a.display(),
+        socket_a.display(),
+        socket_b.display(),
+    );
+    fs::write(config_a.join("herdr/config.toml"), collision_a).unwrap();
+    send_json_request(
+        &socket_a,
+        "reload_local_collision",
+        "server.reload_config",
+        json!({}),
+    );
+    wait_for_authority_catalog(&socket_a, &authority_a, "identity_conflict", 2);
+    let local_collision = send_json_request(
+        &socket_a,
+        "local_collision_create",
+        "group.create",
+        json!({"name": "Blocked locally", "expected_revision": 2}),
+    );
+    assert_eq!(local_collision["error"]["code"], "authority_not_fresh");
+    assert!(local_collision["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains(authority_a.as_str().unwrap_or_default())));
+    fs::write(config_a.join("herdr/config.toml"), &normal_a).unwrap();
+    send_json_request(
+        &socket_a,
+        "reload_local_normal",
+        "server.reload_config",
+        json!({}),
+    );
+    wait_for_authority_catalog(&socket_a, &authority_a, "fresh", 1);
+
     let deleted = send_json_request(
         &socket_b,
         "delete_routed",
@@ -1657,6 +1812,8 @@ fn two_servers_share_groups_route_concurrent_mutations_and_recover_stale_catalog
     );
     assert_eq!(deleted["result"]["record"]["state"], "deleted", "{deleted}");
     wait_for_authority_group_state(&socket_b, &authority_a, "fresh", "deleted");
+    let deleted_authority = fs::read(&authority_path).expect("deleted authority state");
+    let deleted_groups = fs::read(&groups_path).expect("deleted group state");
 
     drop(server_a.take());
     let stale = wait_for_authority_catalog(&socket_b, &authority_a, "stale", 1);
@@ -1668,6 +1825,48 @@ fn two_servers_share_groups_route_concurrent_mutations_and_recover_stale_catalog
         .expect("retained alpha catalog");
     assert_eq!(retained["snapshot"]["groups"][0]["state"], "deleted");
 
+    drop(server_b.take());
+    fs::write(&authority_path, &rolled_back_authority).expect("restore older authority ledger");
+    fs::write(&groups_path, &rolled_back_groups).expect("restore older group store");
+    server_a = Some(spawn_server_with_config_text(
+        &config_a, &runtime_a, &socket_a, None, &normal_a,
+    ));
+    wait_for_socket(&socket_a, Duration::from_secs(5));
+    let rolled_back_owner = send_json_request(
+        &socket_a,
+        "rolled_back_owner",
+        "group.host_snapshot",
+        json!({}),
+    );
+    assert_eq!(rolled_back_owner["result"]["snapshot"]["revision"], 2);
+    assert_eq!(
+        rolled_back_owner["result"]["snapshot"]["groups"][0]["state"],
+        "active"
+    );
+    server_b = Some(spawn_server_with_config_text(
+        &config_b, &runtime_b, &socket_b, None, &normal_b,
+    ));
+    wait_for_socket(&socket_b, Duration::from_secs(5));
+    let rejected = wait_for_authority_catalog_error(
+        &socket_b,
+        &authority_a,
+        "stale",
+        "snapshot revision rolled back",
+    );
+    let rejected_catalog = rejected["result"]["snapshot"]["authority_catalogs"]
+        .as_array()
+        .expect("restarted beta catalogs")
+        .iter()
+        .find(|catalog| catalog["authority_id"] == authority_a)
+        .expect("retained catalog after beta restart");
+    assert_eq!(
+        rejected_catalog["snapshot"]["groups"][0]["state"],
+        "deleted"
+    );
+
+    drop(server_a.take());
+    fs::write(&authority_path, deleted_authority).expect("restore deleted authority ledger");
+    fs::write(&groups_path, deleted_groups).expect("restore deleted group store");
     server_a = Some(spawn_server_with_config_text(
         &config_a, &runtime_a, &socket_a, None, &normal_a,
     ));
@@ -1684,6 +1883,6 @@ fn two_servers_share_groups_route_concurrent_mutations_and_recover_stale_catalog
     );
 
     drop(server_a.take());
-    cleanup_spawned_herdr(server_b, base_b);
+    cleanup_spawned_herdr(server_b.take().expect("beta server"), base_b);
     cleanup_test_base(&base_a);
 }

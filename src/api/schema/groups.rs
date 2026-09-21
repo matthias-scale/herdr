@@ -25,6 +25,8 @@ pub struct PaneGroupSetParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<crate::groups::GroupId>,
     pub expected_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_pane_authority: Option<crate::groups::AuthorityId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
