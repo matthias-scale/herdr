@@ -353,6 +353,8 @@ type GroupCatalogCacheKey = (
     crate::groups::AuthorityId,
 );
 
+type FleetConnectionKey = (String, bool, Option<String>, Option<String>);
+
 impl GroupCatalogCacheEntry {
     fn matches_config(&self, host: &FleetHostConfig) -> bool {
         self.target == host.target
@@ -417,7 +419,7 @@ pub(crate) fn load_group_catalog_cache(
                 session: host.session.clone(),
                 socket: host.socket.clone(),
                 state: GroupCatalogState::Stale,
-                observed_authority_id: Some(entry.snapshot.authority_id.clone()),
+                observed_authority_id: None,
                 snapshot: Some(entry.snapshot.clone()),
                 error: Some("retained from durable cache".into()),
             });
@@ -642,6 +644,50 @@ fn api_client_for_catalog(catalog: &GroupCatalog) -> ApiClient {
 }
 
 impl Snapshot {
+    fn identity_conflicts(&self) -> HashSet<crate::groups::AuthorityId> {
+        let mut connections_by_authority =
+            HashMap::<crate::groups::AuthorityId, HashSet<FleetConnectionKey>>::new();
+        for catalog in &self.group_catalogs {
+            let Some(authority) = catalog.observed_authority_id.as_ref() else {
+                continue;
+            };
+            connections_by_authority
+                .entry(authority.clone())
+                .or_default()
+                .insert((
+                    catalog.target.clone(),
+                    catalog.local,
+                    catalog.session.clone(),
+                    catalog.socket.clone(),
+                ));
+        }
+        connections_by_authority
+            .into_iter()
+            .filter_map(|(authority, connections)| (connections.len() > 1).then_some(authority))
+            .collect()
+    }
+
+    fn mark_identity_conflicts(&mut self, durable_history_available: bool) {
+        let conflicts = self.identity_conflicts();
+        for catalog in &mut self.group_catalogs {
+            let Some(authority) = catalog.observed_authority_id.as_ref() else {
+                continue;
+            };
+            if conflicts.contains(authority) {
+                catalog.state = GroupCatalogState::IdentityConflict;
+                catalog.error = Some(if durable_history_available {
+                    format!(
+                        "authority identity conflict: {authority} is reported by multiple connections"
+                    )
+                } else {
+                    format!(
+                        "authority identity conflict while durable history is unavailable: {authority}"
+                    )
+                });
+            }
+        }
+    }
+
     pub(crate) fn unpolled(hosts: &[FleetHostConfig]) -> Self {
         Self {
             configured_hosts: hosts.iter().map(|host| host.name.clone()).collect(),
@@ -758,32 +804,12 @@ impl Snapshot {
             let mut history = retained.clone();
             history.host.clone_from(&current_connection.host);
             history.state = GroupCatalogState::Stale;
+            history.observed_authority_id = None;
             history.error = Some("retained accepted authority history".into());
             self.group_catalogs.push(history);
         }
 
-        let mut authority_counts = HashMap::new();
-        for catalog in &self.group_catalogs {
-            if let Some(authority) = catalog.authority_id() {
-                *authority_counts.entry(authority.clone()).or_insert(0_usize) += 1;
-            }
-        }
-        for catalog in &mut self.group_catalogs {
-            let Some(authority) = catalog.authority_id().cloned() else {
-                continue;
-            };
-            if authority_counts
-                .get(&authority)
-                .copied()
-                .unwrap_or_default()
-                > 1
-            {
-                catalog.state = GroupCatalogState::IdentityConflict;
-                catalog.error = Some(format!(
-                    "authority identity conflict: {authority} is reported by multiple connections"
-                ));
-            }
-        }
+        self.mark_identity_conflicts(true);
     }
 
     pub(crate) fn reject_group_catalogs_without_durable_history_from(
@@ -810,28 +836,7 @@ impl Snapshot {
             catalog.error = Some(error.to_string());
         }
 
-        let mut authority_counts = HashMap::new();
-        for catalog in &self.group_catalogs {
-            if let Some(authority) = catalog.authority_id() {
-                *authority_counts.entry(authority.clone()).or_insert(0_usize) += 1;
-            }
-        }
-        for catalog in &mut self.group_catalogs {
-            let Some(authority) = catalog.authority_id().cloned() else {
-                continue;
-            };
-            if authority_counts
-                .get(&authority)
-                .copied()
-                .unwrap_or_default()
-                > 1
-            {
-                catalog.state = GroupCatalogState::IdentityConflict;
-                catalog.error = Some(format!(
-                    "authority identity conflict while durable history is unavailable: {authority}"
-                ));
-            }
-        }
+        self.mark_identity_conflicts(false);
     }
 
     pub(crate) fn fresh_group_catalog(
@@ -841,9 +846,9 @@ impl Snapshot {
         let matching = self
             .group_catalogs
             .iter()
-            .filter(|catalog| catalog.authority_id() == Some(authority))
+            .filter(|catalog| catalog.observed_authority_id.as_ref() == Some(authority))
             .collect::<Vec<_>>();
-        if matching.len() > 1
+        if self.identity_conflicts().contains(authority)
             || matching
                 .iter()
                 .any(|catalog| catalog.state == GroupCatalogState::IdentityConflict)
@@ -863,15 +868,11 @@ impl Snapshot {
         &self,
         authority: &crate::groups::AuthorityId,
     ) -> bool {
-        let matching = self
-            .group_catalogs
-            .iter()
-            .filter(|catalog| catalog.authority_id() == Some(authority))
-            .collect::<Vec<_>>();
-        matching.len() > 1
-            || matching
-                .iter()
-                .any(|catalog| catalog.state == GroupCatalogState::IdentityConflict)
+        self.identity_conflicts().contains(authority)
+            || self.group_catalogs.iter().any(|catalog| {
+                catalog.observed_authority_id.as_ref() == Some(authority)
+                    && catalog.state == GroupCatalogState::IdentityConflict
+            })
     }
 
     /// Keep the last observed remote inventory when a configured host cannot
@@ -3258,6 +3259,61 @@ mod tests {
             crate::groups::GroupState::Deleted
         ));
         std::fs::remove_dir_all(dir).expect("remove authority switch cache fixture");
+    }
+
+    #[test]
+    fn retained_history_does_not_conflict_with_a_current_authority_report() {
+        let authority_a = crate::groups::AuthorityId::from_random_bytes([1; 16]);
+        let authority_b = crate::groups::AuthorityId::from_random_bytes([2; 16]);
+        let x_reports_a = Snapshot {
+            group_catalogs: vec![group_catalog(
+                "x",
+                "machine-x",
+                1,
+                1,
+                vec![group_record(1, 1, 1, false)],
+            )],
+            ..Snapshot::default()
+        };
+        let mut x_reports_b = Snapshot {
+            group_catalogs: vec![group_catalog(
+                "x",
+                "machine-x",
+                2,
+                1,
+                vec![group_record(2, 1, 1, false)],
+            )],
+            ..Snapshot::default()
+        };
+        x_reports_b.admit_group_catalogs_from(&x_reports_a);
+
+        let mut y_reports_a = Snapshot {
+            group_catalogs: vec![
+                group_catalog("x", "machine-x", 2, 2, vec![group_record(2, 1, 2, false)]),
+                group_catalog("y", "machine-y", 1, 2, vec![group_record(1, 1, 2, false)]),
+            ],
+            ..Snapshot::default()
+        };
+        y_reports_a.admit_group_catalogs_from(&x_reports_b);
+
+        let current_a = y_reports_a
+            .fresh_group_catalog(&authority_a)
+            .expect("Y currently reports authority A");
+        assert_eq!(current_a.host, "y");
+        let current_b = y_reports_a
+            .fresh_group_catalog(&authority_b)
+            .expect("X currently reports authority B");
+        assert_eq!(current_b.host, "x");
+        assert!(!y_reports_a.authority_has_identity_conflict(&authority_a));
+        assert_eq!(
+            y_reports_a
+                .group_catalogs
+                .iter()
+                .filter(|catalog| catalog.authority_id() == Some(&authority_a))
+                .count(),
+            2,
+            "A history remains available for rollback admission"
+        );
     }
 
     #[test]
