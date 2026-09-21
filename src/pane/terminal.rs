@@ -1111,8 +1111,11 @@ impl GhosttyPaneTerminal {
                 crate::ghostty::ParsedOutput::RenderInvalidation => {
                     gate.observe_parsed_render_invalidation();
                 }
-                crate::ghostty::ParsedOutput::PreservedPrefixBoundary => {
-                    gate.observe_parsed_preserved_prefix_boundary();
+                crate::ghostty::ParsedOutput::PreservedPrefixBoundary(column) => {
+                    gate.observe_parsed_preserved_prefix_boundary(column);
+                }
+                crate::ghostty::ParsedOutput::CellShift(shift) => {
+                    gate.observe_parsed_cell_shift(shift);
                 }
             });
     }

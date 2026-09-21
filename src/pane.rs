@@ -4945,6 +4945,82 @@ mod tests {
                 "split {split}"
             );
         }
+
+        let stream = format!("{preserved_url}\x1b[1C\x1b[0J\n{recovered_url}\n");
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+            let rendered = runtime.visible_text();
+            assert!(
+                rendered.contains(preserved_url) && rendered.contains(recovered_url),
+                "Ghostty preserved sparse text before CSI 0J at split {split}: {rendered:?}"
+            );
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("preserved sparse CSI 0J URL at split {split}"));
+            assert_eq!(
+                links.output_urls,
+                [recovered_url, preserved_url],
+                "split {split}"
+            );
+        }
+
+        let shifted_url = "https://shifted.example/path";
+        for (label, initial, mutation) in [
+            ("insert blanks", format!("aaaa {shifted_url}"), "\x1b[1@"),
+            ("delete chars", format!("XX{shifted_url}"), "\x1b[2P"),
+            ("erase chars", format!("XX{shifted_url}"), "\x1b[2X"),
+        ] {
+            let stream = format!("{initial}\x1b[{}D{mutation}\n", initial.len());
+            for split in 0..=stream.len() {
+                let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+                let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+                runtime.terminal.install_link_extraction(gate.clone());
+                runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+                runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+                let rendered = runtime.visible_text();
+                assert!(
+                    rendered.contains(shifted_url),
+                    "Ghostty preserved the URL across {label} at split {split}: {rendered:?}"
+                );
+                let links = gate
+                    .take_links()
+                    .unwrap_or_else(|| panic!("preserved URL across {label} at split {split}"));
+                assert_eq!(links.output_urls, [shifted_url], "{label} split {split}");
+            }
+        }
+
+        let wrapped_url = "https://wrapped.example/path";
+        let after_wrapped_url = "https://after-wrapped.example/path";
+        let stream = format!("{wrapped_url}\x1b[1@\r\n{after_wrapped_url}\n");
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(
+                u16::try_from(wrapped_url.len()).expect("test URL width"),
+                24,
+                b"",
+            );
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+            let rendered = runtime.visible_text();
+            let flattened = rendered.replace('\n', "");
+            assert!(
+                !rendered.lines().any(|line| line.contains(wrapped_url))
+                    && flattened.contains(after_wrapped_url),
+                "Ghostty erased the pending-wrap URL suffix at split {split}: {rendered:?}"
+            );
+            let links = gate.take_links().unwrap_or_else(|| {
+                panic!("recovery URL after pending-wrap insert at split {split}")
+            });
+            assert_eq!(links.output_urls, [after_wrapped_url], "split {split}");
+        }
     }
 
     #[tokio::test]

@@ -589,7 +589,7 @@ impl LinkExtractionGate {
     }
 
     /// Publishes an untouched rendered prefix before Ghostty mutates later cells.
-    pub(crate) fn observe_parsed_preserved_prefix_boundary(&self) {
+    pub(crate) fn observe_parsed_preserved_prefix_boundary(&self, column: Option<usize>) {
         self.record_parsed_event(0);
         let Ok(_processing) = self.processing.lock() else {
             return;
@@ -602,7 +602,26 @@ impl LinkExtractionGate {
             pending.scanner.restore_prefix(prefix);
             self.marker_tail.store(&[]);
         }
-        pending.observe_preserved_prefix_boundary();
+        pending.observe_preserved_prefix_boundary(column);
+        pending.dirty = true;
+        self.active.store(true, Ordering::Release);
+    }
+
+    /// Applies a bounded row-local mutation described by Ghostty.
+    pub(crate) fn observe_parsed_cell_shift(&self, shift: Option<crate::ghostty::ParsedCellShift>) {
+        self.record_parsed_event(0);
+        let Ok(_processing) = self.processing.lock() else {
+            return;
+        };
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
+        if !self.active.load(Ordering::Acquire) {
+            let (prefix, _) = self.marker_tail.load();
+            pending.scanner.restore_prefix(prefix);
+            self.marker_tail.store(&[]);
+        }
+        pending.observe_cell_shift(shift);
         pending.dirty = true;
         self.active.store(true, Ordering::Release);
     }
@@ -845,9 +864,14 @@ impl PendingLinkBytes {
         self.scanner.observe_separator(&mut self.queued_links);
     }
 
-    fn observe_preserved_prefix_boundary(&mut self) {
+    fn observe_preserved_prefix_boundary(&mut self, column: Option<usize>) {
         self.scanner
-            .observe_preserved_prefix_boundary(&mut self.queued_links);
+            .observe_preserved_prefix_boundary(column, &mut self.queued_links);
+    }
+
+    fn observe_cell_shift(&mut self, shift: Option<crate::ghostty::ParsedCellShift>) {
+        self.scanner
+            .observe_cell_shift(shift, &mut self.queued_links);
     }
 }
 
@@ -871,11 +895,39 @@ impl LinkStreamScanner {
         self.scan_byte(b'\n', links);
     }
 
-    fn observe_preserved_prefix_boundary(&mut self, links: &mut VecDeque<DetectedAgentLink>) {
-        // A sparse rewrite may include cells on both sides of Ghostty's cursor;
-        // discard it rather than applying terminal-width rules locally.
-        if self.rendered_rewrite.is_some() {
+    fn observe_preserved_prefix_boundary(
+        &mut self,
+        column: Option<usize>,
+        links: &mut VecDeque<DetectedAgentLink>,
+    ) {
+        let boundary = column.and_then(|column| u16::try_from(column).ok());
+        if let Some(rewrite) = self.rendered_rewrite.as_mut() {
+            match boundary {
+                Some(boundary) if boundary == rewrite.cursor_column => {
+                    rewrite
+                        .known_cells
+                        .retain(|known_column, _| *known_column < boundary);
+                }
+                _ => rewrite.fail_closed(),
+            }
+        } else if boundary.is_none() {
             self.fail_closed_until_separator();
+        }
+        self.observe_separator(links);
+    }
+
+    fn observe_cell_shift(
+        &mut self,
+        shift: Option<crate::ghostty::ParsedCellShift>,
+        links: &mut VecDeque<DetectedAgentLink>,
+    ) {
+        if let Some(rewrite) = self.rendered_rewrite.as_mut() {
+            rewrite.apply_cell_shift(shift);
+            return;
+        }
+        match shift {
+            Some(shift) if shift.preserves_prefix => {}
+            _ => self.fail_closed_until_separator(),
         }
         self.observe_separator(links);
     }
@@ -1148,6 +1200,61 @@ impl RenderedRewrite {
                 return;
             };
             self.cursor_column = next_column;
+        }
+    }
+
+    fn apply_cell_shift(&mut self, shift: Option<crate::ghostty::ParsedCellShift>) {
+        use crate::ghostty::ParsedCellShiftOperation;
+
+        let Some(shift) = shift else {
+            self.fail_closed();
+            return;
+        };
+        let (Ok(start), Ok(count), Ok(right)) = (
+            u16::try_from(shift.start_column),
+            u16::try_from(shift.count),
+            u16::try_from(shift.right_column),
+        ) else {
+            self.fail_closed();
+            return;
+        };
+        let Some(end) = start.checked_add(count) else {
+            self.fail_closed();
+            return;
+        };
+        if self.overflowed
+            || start != self.cursor_column
+            || count == 0
+            || start >= right
+            || end > right
+        {
+            self.fail_closed();
+            return;
+        }
+
+        let cells = std::mem::take(&mut self.known_cells);
+        for (column, byte) in cells {
+            let transformed = match shift.operation {
+                ParsedCellShiftOperation::Insert if column >= start && column < right => {
+                    if column >= right - count {
+                        None
+                    } else {
+                        column.checked_add(count)
+                    }
+                }
+                ParsedCellShiftOperation::Delete if column >= start && column < right => {
+                    if column < end {
+                        None
+                    } else {
+                        column.checked_sub(count)
+                    }
+                }
+                ParsedCellShiftOperation::Erase if column >= start && column < end => None,
+                _ => Some(column),
+            };
+            if let Some(column) = transformed {
+                self.known_cells.insert(column, byte);
+            }
         }
     }
 
@@ -1773,8 +1880,11 @@ mod tests {
                 crate::ghostty::ParsedOutput::RenderInvalidation => {
                     gate_for_callback.observe_parsed_render_invalidation();
                 }
-                crate::ghostty::ParsedOutput::PreservedPrefixBoundary => {
-                    gate_for_callback.observe_parsed_preserved_prefix_boundary();
+                crate::ghostty::ParsedOutput::PreservedPrefixBoundary(column) => {
+                    gate_for_callback.observe_parsed_preserved_prefix_boundary(column);
+                }
+                crate::ghostty::ParsedOutput::CellShift(shift) => {
+                    gate_for_callback.observe_parsed_cell_shift(shift);
                 }
             });
             Self {

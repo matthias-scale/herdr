@@ -33,6 +33,7 @@ pub const ParsedOutputKind = enum(c_int) {
     cursor_transition = 4,
     render_invalidation = 5,
     preserved_prefix_boundary = 6,
+    cell_shift = 7,
     _,
 };
 
@@ -178,11 +179,12 @@ pub const Handler = struct {
             return;
         }
         const cursor_before = self.parsedCursorSnapshot();
+        const cell_shift = self.parsedCellShift(action, value);
         self.vtFallible(action, value) catch |err| {
             log.warn("error handling VT action action={} err={}", .{ action, err });
             return;
         };
-        self.emitParsedOutput(action, value, cursor_before);
+        self.emitParsedOutput(action, value, cursor_before, cell_shift);
     }
 
     /// Finalizes an OSC-derived callback using the parser transition that
@@ -221,6 +223,7 @@ pub const Handler = struct {
         comptime action: Action.Tag,
         value: Action.Value(action),
         cursor_before: ParsedCursorSnapshot,
+        cell_shift: ?ParsedCellShift,
     ) void {
         const callback = self.effects.parsed_output orelse return;
         switch (action) {
@@ -246,7 +249,14 @@ pub const Handler = struct {
                 return;
             },
             .preserved_prefix_boundary => {
-                callback(self, .preserved_prefix_boundary, "");
+                var buf: [32]u8 = undefined;
+                const cursor_after = self.parsedCursorSnapshot();
+                const data = std.fmt.bufPrint(&buf, "{d}", .{cursor_after.column}) catch return;
+                callback(self, .preserved_prefix_boundary, data);
+                return;
+            },
+            .cell_shift => {
+                if (cell_shift) |shift| self.emitParsedCellShift(shift);
                 return;
             },
         }
@@ -302,12 +312,81 @@ pub const Handler = struct {
         };
     }
 
+    const ParsedCellShift = struct {
+        operation: u8,
+        start: usize,
+        count: usize,
+        right: usize,
+        preserves_prefix: bool,
+    };
+
+    /// Captures the exact row-local mutation before Ghostty applies it. ECH
+    /// can extend over a wide glyph, so its count cannot be reconstructed
+    /// from the post-action row.
+    fn parsedCellShift(
+        self: *Handler,
+        comptime action: Action.Tag,
+        value: Action.Value(action),
+    ) ?ParsedCellShift {
+        switch (action) {
+            .insert_blanks, .delete_chars, .erase_chars => {},
+            else => return null,
+        }
+        const cursor = self.terminal.screens.active.cursor.x;
+        const operation: u8 = switch (action) {
+            .insert_blanks => 'I',
+            .delete_chars => 'D',
+            .erase_chars => 'E',
+            else => unreachable,
+        };
+        const right = switch (action) {
+            .insert_blanks, .delete_chars => self.terminal.scrolling_region.right + 1,
+            .erase_chars => self.terminal.cols,
+            else => unreachable,
+        };
+        switch (action) {
+            .insert_blanks, .delete_chars => if (cursor < self.terminal.scrolling_region.left or cursor >= right) return null,
+            .erase_chars => if (cursor >= right) return null,
+            else => unreachable,
+        }
+        var count = @min(switch (action) {
+            .erase_chars => @max(value, 1),
+            else => value,
+        }, right - cursor);
+        if (count == 0) return null;
+        if (action == .erase_chars and count != right - cursor and
+            self.terminal.screens.active.cursorCellRight(count - 1).wide == .wide)
+        {
+            count += 1;
+        }
+        return .{
+            .operation = operation,
+            .start = cursor,
+            .count = count,
+            .right = right,
+            .preserves_prefix = !self.terminal.screens.active.cursor.pending_wrap and
+                self.terminal.screens.active.cursor.page_cell.wide != .spacer_tail,
+        };
+    }
+
+    fn emitParsedCellShift(self: *Handler, shift: ParsedCellShift) void {
+        const callback = self.effects.parsed_output orelse return;
+        var buf: [72]u8 = undefined;
+        const data = std.fmt.bufPrint(
+            &buf,
+            "{c},{d},{d},{d},{d}",
+            .{ shift.operation, shift.start, shift.count, shift.right, @intFromBool(shift.preserves_prefix) },
+        ) catch return;
+        callback(self, .cell_shift, data);
+    }
+
     const ParsedRenderEffect = enum {
         none,
         separator,
         invalidate,
         invalidate_separator,
         preserved_prefix_boundary,
+        cell_shift,
     };
 
     /// Classifies post-action rendering effects that cursor comparison alone
@@ -344,10 +423,11 @@ pub const Handler = struct {
             .erase_display_below,
             .erase_line_right,
             .erase_line_right_unless_pending_wrap,
-            .delete_chars,
-            .erase_chars,
-            .insert_blanks,
             => .preserved_prefix_boundary,
+
+            // Ghostty supplies the exact cell interval and right boundary for
+            // row-local shifts/erasure so embedders can preserve both sides.
+            .delete_chars, .erase_chars, .insert_blanks => .cell_shift,
 
             // Surface replacement is also a lexical boundary, allowing text
             // rendered on the newly selected surface to recover immediately.

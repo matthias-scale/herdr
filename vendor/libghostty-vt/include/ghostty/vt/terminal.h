@@ -487,17 +487,19 @@ typedef enum GHOSTTY_ENUM_TYPED {
   /** A non-print action may have replaced or removed rendered cells. */
   GHOSTTY_TERMINAL_PARSED_OUTPUT_RENDER_INVALIDATION = 5,
 
-  /** Cells before the cursor remain rendered; later cells may have changed. */
+  /** Cells before the cursor remain rendered; data is its decimal column. */
   GHOSTTY_TERMINAL_PARSED_OUTPUT_PRESERVED_PREFIX_BOUNDARY = 6,
+
+  /** Row mutation; data is `op,start,count,right-exclusive,prefix-preserved`. */
+  GHOSTTY_TERMINAL_PARSED_OUTPUT_CELL_SHIFT = 7,
   GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalParsedOutputKind;
 
 /**
  * Callback for output already classified by the terminal VT parser.
- * Data is borrowed and valid only for the callback duration. Cursor-transition
- * data is the comma-separated decimal zero-based columns before and after the
- * action, followed by 1 when Ghostty identifies the same rendered row or 0
- * otherwise. Other non-text events carry zero bytes.
+ * Data is borrowed and valid only for the callback duration. Payload formats
+ * are documented by each event kind; separator, boundary, and invalidation
+ * events carry zero bytes.
  */
 typedef void (*GhosttyTerminalParsedOutputFn)(
     GhosttyTerminal terminal,

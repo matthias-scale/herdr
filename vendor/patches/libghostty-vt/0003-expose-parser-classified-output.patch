@@ -1,8 +1,8 @@
 diff --git a/vendor/libghostty-vt/include/ghostty/vt/terminal.h b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
-index 9bb961d3..647ac9cc 100644
+index 9bb961d3..d8d33dc2 100644
 --- a/vendor/libghostty-vt/include/ghostty/vt/terminal.h
 +++ b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
-@@ -467,6 +467,45 @@ typedef GhosttyClipboardWriteResult (*GhosttyTerminalClipboardWriteFn)(
+@@ -467,6 +467,47 @@ typedef GhosttyClipboardWriteResult (*GhosttyTerminalClipboardWriteFn)(
      void* userdata,
      const GhosttyClipboardWrite* write);
  
@@ -26,17 +26,19 @@ index 9bb961d3..647ac9cc 100644
 +  /** A non-print action may have replaced or removed rendered cells. */
 +  GHOSTTY_TERMINAL_PARSED_OUTPUT_RENDER_INVALIDATION = 5,
 +
-+  /** Cells before the cursor remain rendered; later cells may have changed. */
++  /** Cells before the cursor remain rendered; data is its decimal column. */
 +  GHOSTTY_TERMINAL_PARSED_OUTPUT_PRESERVED_PREFIX_BOUNDARY = 6,
++
++  /** Row mutation; data is `op,start,count,right-exclusive,prefix-preserved`. */
++  GHOSTTY_TERMINAL_PARSED_OUTPUT_CELL_SHIFT = 7,
 +  GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 +} GhosttyTerminalParsedOutputKind;
 +
 +/**
 + * Callback for output already classified by the terminal VT parser.
-+ * Data is borrowed and valid only for the callback duration. Cursor-transition
-+ * data is the comma-separated decimal zero-based columns before and after the
-+ * action, followed by 1 when Ghostty identifies the same rendered row or 0
-+ * otherwise. Other non-text events carry zero bytes.
++ * Data is borrowed and valid only for the callback duration. Payload formats
++ * are documented by each event kind; separator, boundary, and invalidation
++ * events carry zero bytes.
 + */
 +typedef void (*GhosttyTerminalParsedOutputFn)(
 +    GhosttyTerminal terminal,
@@ -48,7 +50,7 @@ index 9bb961d3..647ac9cc 100644
  /**
   * Callback function type for color scheme queries (CSI ? 996 n).
   *
-@@ -887,6 +926,14 @@ typedef enum GHOSTTY_ENUM_TYPED {
+@@ -887,6 +928,14 @@ typedef enum GHOSTTY_ENUM_TYPED {
     * Input type: GhosttyTerminalClipboardWriteFn
     */
    GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE = 26,
@@ -475,10 +477,10 @@ index efb06ecd..6e09a4de 100644
  
          /// Finalize and dispatch a CSI directly from parser state for
 diff --git a/vendor/libghostty-vt/src/terminal/stream_terminal.zig b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
-index 91cfb21c..98a16027 100644
+index 91cfb21c..19f92719 100644
 --- a/vendor/libghostty-vt/src/terminal/stream_terminal.zig
 +++ b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
-@@ -23,6 +23,19 @@ const log = std.log.scoped(.stream_terminal);
+@@ -23,6 +23,20 @@ const log = std.log.scoped(.stream_terminal);
  /// a Terminal and updates the Terminal state.
  pub const Stream = stream.Stream(Handler);
  
@@ -492,13 +494,14 @@ index 91cfb21c..98a16027 100644
 +    cursor_transition = 4,
 +    render_invalidation = 5,
 +    preserved_prefix_boundary = 6,
++    cell_shift = 7,
 +    _,
 +};
 +
  /// A stream handler that updates terminal state. By default, it is
  /// readonly in the sense that it only updates terminal state and ignores
  /// all other sequences that require a response or otherwise have side
-@@ -46,6 +59,10 @@ pub const Handler = struct {
+@@ -46,6 +60,10 @@ pub const Handler = struct {
      /// the kitty graphics protocol.
      apc_handler: apc.Handler = .{},
  
@@ -509,7 +512,7 @@ index 91cfb21c..98a16027 100644
      /// Default cursor style used by DECSCUSR reset (CSI 0 q).
      default_cursor: bool = true,
      default_cursor_style: Screen.CursorStyle = .block,
-@@ -105,6 +122,10 @@ pub const Handler = struct {
+@@ -105,6 +123,10 @@ pub const Handler = struct {
          /// library has no way to mediate that with user consent.
          clipboard_write: ?*const fn (*Handler, clipboard.Write) clipboard.WriteResult,
  
@@ -520,7 +523,7 @@ index 91cfb21c..98a16027 100644
          /// Called in response to an XTVERSION query. Returns the version
          /// string to report (e.g. "ghostty 1.2.3"). The returned memory
          /// must be valid for the lifetime of the call. The maximum length
-@@ -117,6 +138,7 @@ pub const Handler = struct {
+@@ -117,6 +139,7 @@ pub const Handler = struct {
          pub const readonly: Effects = .{
              .bell = null,
              .clipboard_write = null,
@@ -528,7 +531,7 @@ index 91cfb21c..98a16027 100644
              .color_scheme = null,
              .device_attributes = null,
              .enquiry = null,
-@@ -143,9 +165,361 @@ pub const Handler = struct {
+@@ -143,11 +166,442 @@ pub const Handler = struct {
          comptime action: Action.Tag,
          value: Action.Value(action),
      ) void {
@@ -545,11 +548,12 @@ index 91cfb21c..98a16027 100644
 +            return;
 +        }
 +        const cursor_before = self.parsedCursorSnapshot();
++        const cell_shift = self.parsedCellShift(action, value);
          self.vtFallible(action, value) catch |err| {
              log.warn("error handling VT action action={} err={}", .{ action, err });
 +            return;
-         };
-+        self.emitParsedOutput(action, value, cursor_before);
++        };
++        self.emitParsedOutput(action, value, cursor_before, cell_shift);
 +    }
 +
 +    /// Finalizes an OSC-derived callback using the parser transition that
@@ -588,6 +592,7 @@ index 91cfb21c..98a16027 100644
 +        comptime action: Action.Tag,
 +        value: Action.Value(action),
 +        cursor_before: ParsedCursorSnapshot,
++        cell_shift: ?ParsedCellShift,
 +    ) void {
 +        const callback = self.effects.parsed_output orelse return;
 +        switch (action) {
@@ -613,7 +618,14 @@ index 91cfb21c..98a16027 100644
 +                return;
 +            },
 +            .preserved_prefix_boundary => {
-+                callback(self, .preserved_prefix_boundary, "");
++                var buf: [32]u8 = undefined;
++                const cursor_after = self.parsedCursorSnapshot();
++                const data = std.fmt.bufPrint(&buf, "{d}", .{cursor_after.column}) catch return;
++                callback(self, .preserved_prefix_boundary, data);
++                return;
++            },
++            .cell_shift => {
++                if (cell_shift) |shift| self.emitParsedCellShift(shift);
 +                return;
 +            },
 +        }
@@ -666,7 +678,75 @@ index 91cfb21c..98a16027 100644
 +            .screen = @intFromPtr(screen),
 +            .row_node = @intFromPtr(cursor.page_pin.node),
 +            .row_offset = cursor.page_pin.y,
+         };
+     }
+
++    const ParsedCellShift = struct {
++        operation: u8,
++        start: usize,
++        count: usize,
++        right: usize,
++        preserves_prefix: bool,
++    };
++
++    /// Captures the exact row-local mutation before Ghostty applies it. ECH
++    /// can extend over a wide glyph, so its count cannot be reconstructed
++    /// from the post-action row.
++    fn parsedCellShift(
++        self: *Handler,
++        comptime action: Action.Tag,
++        value: Action.Value(action),
++    ) ?ParsedCellShift {
++        switch (action) {
++            .insert_blanks, .delete_chars, .erase_chars => {},
++            else => return null,
++        }
++        const cursor = self.terminal.screens.active.cursor.x;
++        const operation: u8 = switch (action) {
++            .insert_blanks => 'I',
++            .delete_chars => 'D',
++            .erase_chars => 'E',
++            else => unreachable,
 +        };
++        const right = switch (action) {
++            .insert_blanks, .delete_chars => self.terminal.scrolling_region.right + 1,
++            .erase_chars => self.terminal.cols,
++            else => unreachable,
++        };
++        switch (action) {
++            .insert_blanks, .delete_chars => if (cursor < self.terminal.scrolling_region.left or cursor >= right) return null,
++            .erase_chars => if (cursor >= right) return null,
++            else => unreachable,
++        }
++        var count = @min(switch (action) {
++            .erase_chars => @max(value, 1),
++            else => value,
++        }, right - cursor);
++        if (count == 0) return null;
++        if (action == .erase_chars and count != right - cursor and
++            self.terminal.screens.active.cursorCellRight(count - 1).wide == .wide)
++        {
++            count += 1;
++        }
++        return .{
++            .operation = operation,
++            .start = cursor,
++            .count = count,
++            .right = right,
++            .preserves_prefix = !self.terminal.screens.active.cursor.pending_wrap and
++                self.terminal.screens.active.cursor.page_cell.wide != .spacer_tail,
++        };
++    }
++
++    fn emitParsedCellShift(self: *Handler, shift: ParsedCellShift) void {
++        const callback = self.effects.parsed_output orelse return;
++        var buf: [72]u8 = undefined;
++        const data = std.fmt.bufPrint(
++            &buf,
++            "{c},{d},{d},{d},{d}",
++            .{ shift.operation, shift.start, shift.count, shift.right, @intFromBool(shift.preserves_prefix) },
++        ) catch return;
++        callback(self, .cell_shift, data);
 +    }
 +
 +    const ParsedRenderEffect = enum {
@@ -675,6 +755,7 @@ index 91cfb21c..98a16027 100644
 +        invalidate,
 +        invalidate_separator,
 +        preserved_prefix_boundary,
++        cell_shift,
 +    };
 +
 +    /// Classifies post-action rendering effects that cursor comparison alone
@@ -711,10 +792,11 @@ index 91cfb21c..98a16027 100644
 +            .erase_display_below,
 +            .erase_line_right,
 +            .erase_line_right_unless_pending_wrap,
-+            .delete_chars,
-+            .erase_chars,
-+            .insert_blanks,
 +            => .preserved_prefix_boundary,
++
++            // Ghostty supplies the exact cell interval and right boundary for
++            // row-local shifts/erasure so embedders can preserve both sides.
++            .delete_chars, .erase_chars, .insert_blanks => .cell_shift,
 +
 +            // Surface replacement is also a lexical boundary, allowing text
 +            // rendered on the newly selected surface to recover immediately.
@@ -887,6 +969,8 @@ index 91cfb21c..98a16027 100644
 +            if (len == 0) return;
 +            callback(self, .text, buf[0..len]);
 +        }
-     }
-
++    }
++
      inline fn vtFallible(
+         self: *Handler,
+         comptime action: Action.Tag,

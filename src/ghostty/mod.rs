@@ -474,7 +474,8 @@ pub(crate) enum ParsedOutput<'a> {
     Boundary,
     CursorTransition(Option<ParsedCursorTransition>),
     RenderInvalidation,
-    PreservedPrefixBoundary,
+    PreservedPrefixBoundary(Option<usize>),
+    CellShift(Option<ParsedCellShift>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,6 +483,22 @@ pub(crate) struct ParsedCursorTransition {
     pub(crate) before_column: usize,
     pub(crate) after_column: usize,
     pub(crate) same_row: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ParsedCellShift {
+    pub(crate) operation: ParsedCellShiftOperation,
+    pub(crate) start_column: usize,
+    pub(crate) count: usize,
+    pub(crate) right_column: usize,
+    pub(crate) preserves_prefix: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParsedCellShiftOperation {
+    Insert,
+    Delete,
+    Erase,
 }
 
 const MAX_CLIPBOARD_BYTES: usize = 192 * 1024;
@@ -538,10 +555,47 @@ unsafe extern "C" fn parsed_output_trampoline(
             callback(ParsedOutput::RenderInvalidation);
         }
         ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_PRESERVED_PREFIX_BOUNDARY => {
-            callback(ParsedOutput::PreservedPrefixBoundary);
+            callback(ParsedOutput::PreservedPrefixBoundary(parse_cursor_column(bytes)));
+        }
+        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_CELL_SHIFT => {
+            callback(ParsedOutput::CellShift(parse_cell_shift(bytes)));
         }
         _ => {}
     }
+}
+
+fn parse_cursor_column(bytes: &[u8]) -> Option<usize> {
+    std::str::from_utf8(bytes).ok()?.parse().ok()
+}
+
+fn parse_cell_shift(bytes: &[u8]) -> Option<ParsedCellShift> {
+    let mut fields = std::str::from_utf8(bytes).ok()?.split(',');
+    let operation = match fields.next()? {
+        "I" => ParsedCellShiftOperation::Insert,
+        "D" => ParsedCellShiftOperation::Delete,
+        "E" => ParsedCellShiftOperation::Erase,
+        _ => return None,
+    };
+    let start_column: usize = fields.next()?.parse().ok()?;
+    let count: usize = fields.next()?.parse().ok()?;
+    let right_column: usize = fields.next()?.parse().ok()?;
+    let preserves_prefix = match fields.next()? {
+        "0" => false,
+        "1" => true,
+        _ => return None,
+    };
+    let end_column = start_column.checked_add(count)?;
+    (fields.next().is_none()
+        && count != 0
+        && start_column < right_column
+        && end_column <= right_column)
+        .then_some(ParsedCellShift {
+            operation,
+            start_column,
+            count,
+            right_column,
+            preserves_prefix,
+        })
 }
 
 fn parse_cursor_transition(bytes: &[u8]) -> Option<ParsedCursorTransition> {
@@ -3369,6 +3423,33 @@ mod tests {
             b"x,5,1",
         ] {
             assert_eq!(parse_cursor_transition(malformed), None, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn cell_shift_payload_requires_exact_operation_and_bounds() {
+        assert_eq!(
+            parse_cell_shift(b"D,12,3,80,1"),
+            Some(ParsedCellShift {
+                operation: ParsedCellShiftOperation::Delete,
+                start_column: 12,
+                count: 3,
+                right_column: 80,
+                preserves_prefix: true,
+            })
+        );
+        for malformed in [
+            b"".as_slice(),
+            b"D,12,3,80",
+            b"D,12,3,80,1,4",
+            b"X,12,3,80,1",
+            b"D,x,3,80,1",
+            b"D,12,0,80,1",
+            b"D,80,1,80,1",
+            b"D,79,2,80,1",
+            b"D,12,3,80,2",
+        ] {
+            assert_eq!(parse_cell_shift(malformed), None, "{malformed:?}");
         }
     }
 
