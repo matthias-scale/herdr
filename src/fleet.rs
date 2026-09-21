@@ -353,8 +353,6 @@ type GroupCatalogCacheKey = (
     crate::groups::AuthorityId,
 );
 
-type FleetConnectionKey = (String, bool, Option<String>, Option<String>);
-
 impl GroupCatalogCacheEntry {
     fn matches_config(&self, host: &FleetHostConfig) -> bool {
         self.target == host.target
@@ -724,25 +722,18 @@ fn api_client_for_catalog(catalog: &GroupCatalog) -> ApiClient {
 
 impl Snapshot {
     fn identity_conflicts(&self) -> HashSet<crate::groups::AuthorityId> {
-        let mut connections_by_authority =
-            HashMap::<crate::groups::AuthorityId, HashSet<FleetConnectionKey>>::new();
+        let mut reports_by_authority = HashMap::new();
         for catalog in &self.group_catalogs {
             let Some(authority) = catalog.observed_authority_id.as_ref() else {
                 continue;
             };
-            connections_by_authority
+            *reports_by_authority
                 .entry(authority.clone())
-                .or_default()
-                .insert((
-                    catalog.target.clone(),
-                    catalog.local,
-                    catalog.session.clone(),
-                    catalog.socket.clone(),
-                ));
+                .or_insert(0_usize) += 1;
         }
-        connections_by_authority
+        reports_by_authority
             .into_iter()
-            .filter_map(|(authority, connections)| (connections.len() > 1).then_some(authority))
+            .filter_map(|(authority, reports)| (reports > 1).then_some(authority))
             .collect()
     }
 
