@@ -2208,6 +2208,7 @@ mod tests {
             session: None,
             socket: None,
             state: crate::fleet::GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
             snapshot: Some(crate::groups::GroupAuthoritySnapshot {
                 authority_id: authority.clone(),
                 revision: 0,
@@ -2263,6 +2264,7 @@ mod tests {
             session: None,
             socket: None,
             state: crate::fleet::GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
             snapshot: Some(crate::groups::GroupAuthoritySnapshot {
                 authority_id: authority.clone(),
                 revision,
@@ -2331,6 +2333,7 @@ mod tests {
             session: None,
             socket: None,
             state: crate::fleet::GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
             snapshot: Some(crate::groups::GroupAuthoritySnapshot {
                 authority_id: authority,
                 revision: 2,

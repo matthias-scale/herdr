@@ -173,6 +173,11 @@ impl App {
     }
 
     fn apply_pane_group_set(&mut self, id: String, params: PaneGroupSetParams) -> String {
+        if params.group_id.is_some() {
+            if let Some(message) = self.local_authority_conflict_message() {
+                return encode_error(id, "authority_not_fresh", message);
+            }
+        }
         if self.no_session {
             return encode_error(
                 id,
@@ -1090,6 +1095,7 @@ mod tests {
             session: None,
             socket: None,
             state: crate::fleet::GroupCatalogState::Stale,
+            observed_authority_id: Some(pane_owner.clone()),
             snapshot: Some(GroupAuthoritySnapshot {
                 authority_id: pane_owner.clone(),
                 revision: 0,
@@ -1169,6 +1175,7 @@ mod tests {
             session: None,
             socket: Some(format!("/tmp/{host}.sock")),
             state: crate::fleet::GroupCatalogState::IdentityConflict,
+            observed_authority_id: Some(authority.clone()),
             snapshot: Some(GroupAuthoritySnapshot {
                 authority_id: authority.clone(),
                 revision: 1,
@@ -1251,6 +1258,7 @@ mod tests {
                 session: None,
                 socket: Some(format!("/tmp/{host}.sock")),
                 state: crate::fleet::GroupCatalogState::IdentityConflict,
+                observed_authority_id: Some(authority.clone()),
                 snapshot: Some(GroupAuthoritySnapshot {
                     authority_id: authority.clone(),
                     revision: 1,
@@ -1275,6 +1283,80 @@ mod tests {
             serde_json::from_str::<SuccessResponse>(&response).is_ok(),
             "clearing a reachable pane must ignore group authority conflicts: {response}"
         );
+    }
+
+    #[test]
+    fn observed_local_authority_collision_blocks_assignment_to_a_foreign_group() {
+        let (mut app, _dir, pane_id) = app_with_groups("foreign-assignment-local-collision");
+        let local = app
+            .group_runtime
+            .authority()
+            .expect("local authority")
+            .authority_id()
+            .clone();
+        let foreign = crate::groups::AuthorityId::from_random_bytes([12; 16]);
+        let foreign_group = GroupRecord {
+            id: GroupId {
+                owner: foreign.clone(),
+                local: 1,
+            },
+            revision: 1,
+            state: GroupState::Active {
+                name: "Foreign".into(),
+            },
+        };
+        let local_collision = |host: &str| crate::fleet::GroupCatalog {
+            host: host.into(),
+            target: host.into(),
+            local: true,
+            session: None,
+            socket: Some(format!("/tmp/{host}.sock")),
+            state: crate::fleet::GroupCatalogState::IdentityConflict,
+            observed_authority_id: Some(local.clone()),
+            snapshot: Some(GroupAuthoritySnapshot {
+                authority_id: local.clone(),
+                revision: 0,
+                groups: Vec::new(),
+                memberships: Vec::new(),
+            }),
+            error: Some("identity conflict".into()),
+        };
+        app.state.fleet_snapshot.group_catalogs = vec![
+            local_collision("one"),
+            local_collision("two"),
+            crate::fleet::GroupCatalog {
+                host: "foreign".into(),
+                target: "foreign".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: crate::fleet::GroupCatalogState::Fresh,
+                observed_authority_id: Some(foreign.clone()),
+                snapshot: Some(GroupAuthoritySnapshot {
+                    authority_id: foreign,
+                    revision: 1,
+                    groups: vec![foreign_group.clone()],
+                    memberships: Vec::new(),
+                }),
+                error: None,
+            },
+        ];
+
+        let response: serde_json::Value = serde_json::from_str(&app.handle_pane_group_set(
+            "assign".into(),
+            PaneGroupSetParams {
+                pane_id,
+                group_id: Some(foreign_group.id),
+                expected_revision: 0,
+                expected_pane_authority: Some(local.clone()),
+            },
+        ))
+        .expect("assignment response");
+
+        assert_eq!(response["error"]["code"], "authority_not_fresh");
+        assert!(response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(local.as_str())));
     }
 
     #[test]

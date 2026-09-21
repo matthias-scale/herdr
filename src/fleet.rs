@@ -303,6 +303,8 @@ pub(crate) struct GroupCatalog {
     #[serde(skip)]
     pub(crate) socket: Option<String>,
     pub(crate) state: GroupCatalogState,
+    #[serde(skip)]
+    pub(crate) observed_authority_id: Option<crate::groups::AuthorityId>,
     pub(crate) snapshot: Option<crate::groups::GroupAuthoritySnapshot>,
     pub(crate) error: Option<String>,
 }
@@ -316,9 +318,11 @@ impl GroupCatalog {
     }
 
     pub(crate) fn authority_id(&self) -> Option<&crate::groups::AuthorityId> {
-        self.snapshot
-            .as_ref()
-            .map(|snapshot| &snapshot.authority_id)
+        self.observed_authority_id.as_ref().or_else(|| {
+            self.snapshot
+                .as_ref()
+                .map(|snapshot| &snapshot.authority_id)
+        })
     }
 
     pub(crate) fn is_fresh(&self) -> bool {
@@ -411,6 +415,7 @@ pub(crate) fn load_group_catalog_cache(
             session: host.session.clone(),
             socket: host.socket.clone(),
             state: GroupCatalogState::Stale,
+            observed_authority_id: Some(entry.snapshot.authority_id.clone()),
             snapshot: Some(entry.snapshot.clone()),
             error: Some("retained from durable cache".into()),
         });
@@ -1217,6 +1222,10 @@ fn snapshot_from_evidence(
             } else {
                 GroupCatalogState::Unavailable
             },
+            observed_authority_id: group_result
+                .as_ref()
+                .ok()
+                .map(|snapshot| snapshot.authority_id.clone()),
             snapshot: group_result.as_ref().ok().cloned(),
             error: group_result.err(),
         });
@@ -2820,6 +2829,7 @@ mod tests {
             session: Some("agents".into()),
             socket: Some("/tmp/herdr.sock".into()),
             state: GroupCatalogState::Fresh,
+            observed_authority_id: Some(crate::groups::AuthorityId::from_random_bytes([seed; 16])),
             snapshot: Some(crate::groups::GroupAuthoritySnapshot {
                 authority_id: crate::groups::AuthorityId::from_random_bytes([seed; 16]),
                 revision,
@@ -3073,6 +3083,30 @@ mod tests {
         assert!(load_group_catalog_cache(&path, &fleet).is_err());
 
         std::fs::remove_dir_all(dir).expect("remove catalog cache fixture");
+    }
+
+    #[test]
+    fn durable_history_quarantine_preserves_observed_identity_conflicts() {
+        let mut snapshot = Snapshot {
+            group_catalogs: vec![
+                group_catalog("one", "machine-a", 1, 2, Vec::new()),
+                group_catalog("two", "machine-b", 1, 2, Vec::new()),
+            ],
+            ..Snapshot::default()
+        };
+        snapshot.admit_group_catalogs_from(&Snapshot::default());
+        snapshot.reject_group_catalogs_without_durable_history_from(
+            &Snapshot::default(),
+            "retained history is unreadable",
+        );
+
+        let authority = crate::groups::AuthorityId::from_random_bytes([1; 16]);
+        assert!(snapshot.authority_has_identity_conflict(&authority));
+        assert!(snapshot.group_catalogs.iter().all(|catalog| {
+            catalog.state == GroupCatalogState::IdentityConflict
+                && catalog.authority_id() == Some(&authority)
+                && catalog.snapshot.is_none()
+        }));
     }
 
     #[test]
