@@ -1226,11 +1226,14 @@ fn remote_read_script(socket: Option<&str>, session: Option<&str>, include_aloop
 
 /// The producer-only block of the read script (MAT-159). Every file read is
 /// capped in count, bytes, and lines here; the parser re-applies the same caps
-/// so a hostile store cannot grow the snapshot past them.
+/// so a hostile store cannot grow the snapshot past them. Findings are filtered
+/// to pending before the count cap, like the local reader, so any number of
+/// newer launched or malformed files cannot hide a pending finding.
 fn remote_aloop_script() -> String {
     format!(
-        "printf '\\036HERDR_FLEET_ALOOP_V1\\036\\n'\nadir=\"$HOME/.agents/aloop\"\nif [ -d \"$adir/findings\" ]; then\n  ls -1t \"$adir\"/findings/*.json 2>/dev/null | sed -n '1,{findings_cap}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    printf '\\036HERDR_FLEET_ALOOP_FINDING_V1\\036\\n'\n    head -c {finding_bytes} \"$file\"\n    printf '\\n'\n  done\nfi\nprintf '\\036HERDR_FLEET_ALOOP_RUNS_V1\\036\\n'\nif [ -d \"$adir/runs\" ]; then\n  ls -1t \"$adir\"/runs/*.jsonl 2>/dev/null | sed -n '1,{run_files_cap}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    name=${{file##*/}}\n    name=${{name%.jsonl}}\n    printf '\\036HERDR_FLEET_ALOOP_RUN_V1:%s\\036\\n' \"$name\"\n    tail -c {run_bytes} \"$file\" | tail -n {run_lines}\n  done\nfi\nprintf '\\036HERDR_FLEET_ALOOP_REGISTRY_V1\\036\\n'\nif [ -f \"$HOME/{registry_path}\" ]; then\n  head -c {registry_bytes} \"$HOME/{registry_path}\"\nfi\nprintf '\\036HERDR_FLEET_ALOOP_END_V1\\036\\n'\n",
+        "printf '\\036HERDR_FLEET_ALOOP_V1\\036\\n'\nadir=\"$HOME/.agents/aloop\"\nif [ -d \"$adir/findings\" ]; then\n  finding_count=0\n  ls -1t \"$adir\"/findings/*.json 2>/dev/null | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    finding_size=$(wc -c < \"$file\")\n    [ \"$finding_size\" -le {finding_bytes_max} ] || continue\n    head -c {finding_bytes} \"$file\" | grep -Eq '\"status\"[[:space:]]*:[[:space:]]*\"pending\"' || continue\n    printf '\\036HERDR_FLEET_ALOOP_FINDING_V1\\036\\n'\n    head -c {finding_bytes} \"$file\"\n    printf '\\n'\n    finding_count=$((finding_count + 1))\n    [ \"$finding_count\" -lt {findings_cap} ] || break\n  done\nfi\nprintf '\\036HERDR_FLEET_ALOOP_RUNS_V1\\036\\n'\nif [ -d \"$adir/runs\" ]; then\n  ls -1t \"$adir\"/runs/*.jsonl 2>/dev/null | sed -n '1,{run_files_cap}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    name=${{file##*/}}\n    name=${{name%.jsonl}}\n    printf '\\036HERDR_FLEET_ALOOP_RUN_V1:%s\\036\\n' \"$name\"\n    tail -c {run_bytes} \"$file\" | tail -n {run_lines}\n  done\nfi\nprintf '\\036HERDR_FLEET_ALOOP_REGISTRY_V1\\036\\n'\nif [ -f \"$HOME/{registry_path}\" ]; then\n  head -c {registry_bytes} \"$HOME/{registry_path}\"\nfi\nprintf '\\036HERDR_FLEET_ALOOP_END_V1\\036\\n'\n",
         findings_cap = crate::aloop::MAX_FINDING_FILES,
+        finding_bytes_max = crate::aloop::MAX_FINDING_BYTES,
         finding_bytes = crate::aloop::MAX_FINDING_BYTES + 1,
         run_files_cap = crate::aloop::MAX_RUN_FILES,
         run_bytes = crate::aloop::MAX_RUN_FILE_BYTES + 1,
@@ -3520,8 +3523,89 @@ mod tests {
         let with_aloop = remote_read_script(None, None, true);
         assert!(with_aloop.contains("HERDR_FLEET_ALOOP_V1"));
         assert!(with_aloop.contains(".agents/aloop"));
-        assert!(with_aloop.contains(&format!("sed -n '1,{}p'", crate::aloop::MAX_FINDING_FILES)));
+        assert!(with_aloop.contains(&format!(
+            "[ \"$finding_count\" -lt {} ] || break",
+            crate::aloop::MAX_FINDING_FILES
+        )));
+        assert!(with_aloop.contains("\"status\"[[:space:]]*:[[:space:]]*\"pending\""));
         assert!(with_aloop.contains(crate::loop_runs::LOOP_REGISTRY_RELATIVE_PATH));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_aloop_filters_non_pending_findings_before_the_wire_cap() {
+        let root = run_fixture_dir("aloop-filter-before-cap");
+        let findings = root.join(crate::aloop::FINDINGS_RELATIVE_DIR);
+        std::fs::create_dir_all(&findings).expect("create findings");
+        let finding_json = |stable_id: &str, status: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "loop": "loop-a",
+                "source": "sentry",
+                "stable_id": stable_id,
+                "title": "boom",
+                "url": null,
+                "evidence": "trace",
+                "prompt": "fix",
+                "created_at": "2026-09-18T09:50:00Z",
+                "status": status,
+            }))
+            .expect("finding JSON")
+        };
+        let pending = findings.join("old-pending.json");
+        std::fs::write(&pending, finding_json("still-pending", "pending"))
+            .expect("write pending finding");
+        std::fs::File::options()
+            .write(true)
+            .open(&pending)
+            .expect("open pending finding")
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+            )
+            .expect("set old pending mtime");
+        for index in 0..=crate::aloop::MAX_FINDING_FILES {
+            let path = findings.join(format!("newer-{index:02}.json"));
+            let contents = if index % 2 == 0 {
+                finding_json(&format!("launched-{index:02}"), "launched")
+            } else {
+                b"not json".to_vec()
+            };
+            std::fs::write(&path, contents).expect("write non-pending finding");
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .expect("open non-pending finding")
+                .set_times(
+                    std::fs::FileTimes::new()
+                        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2)),
+                )
+                .expect("set newer mtime");
+        }
+        let fake_ssh = root.join("ssh");
+        write_executable(
+            &fake_ssh,
+            &format!(
+                "#!/bin/sh\nHOME={} exec /bin/sh\n",
+                shell_quote(&root.display().to_string()),
+            ),
+        );
+
+        let output = run_ssh_program_with_timeout(
+            &fake_ssh,
+            "fixture",
+            &remote_aloop_read_script(None, None),
+            Duration::from_secs(10),
+        )
+        .expect("remote aloop read");
+        let data = parse_remote_aloop_output(&output).expect("parse remote aloop output");
+
+        assert_eq!(data.findings.len(), 1);
+        assert_eq!(data.findings[0].stable_id, "still-pending");
+        assert_eq!(
+            data.findings[0].status,
+            crate::aloop::FindingStatus::Pending
+        );
+        std::fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[test]
@@ -3778,11 +3862,13 @@ mod tests {
             .expect("write run state");
         }
         for index in 0..crate::aloop::MAX_FINDING_FILES {
-            std::fs::write(
-                findings.join(format!("loop-{index:02}.json")),
-                vec![b'f'; crate::aloop::MAX_FINDING_BYTES],
+            let mut finding = format!(
+                r#"{{"loop":"loop","source":"fixture","stable_id":"finding-{index}","title":"title","url":null,"evidence":"evidence","prompt":"prompt","created_at":"2026-09-18T09:50:00Z","status":"pending"}}"#
             )
-            .expect("write finding");
+            .into_bytes();
+            finding.resize(crate::aloop::MAX_FINDING_BYTES, b' ');
+            std::fs::write(findings.join(format!("loop-{index:02}.json")), finding)
+                .expect("write finding");
         }
         for index in 0..crate::aloop::MAX_RUN_FILES {
             std::fs::write(
