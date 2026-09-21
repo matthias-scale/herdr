@@ -896,10 +896,15 @@ fn render_mobile_switcher_content(
             SidebarRow::SectionHeader {
                 title,
                 count,
+                host_counts,
                 collapsed,
             } => {
+                let host_counts = host_counts
+                    .iter()
+                    .map(|count| format!(" {}:{}", count.host, count.count))
+                    .collect::<String>();
                 let label = format!(
-                    "  {} {} {title} ({count})",
+                    "  {} {} {title} ({count}){host_counts}",
                     if *collapsed { "▸" } else { "▾" },
                     section_header_glyph(title)
                 );
@@ -2588,6 +2593,7 @@ mod tests {
         let entry = SidebarRow::SectionHeader {
             title: "Agents",
             count: 1,
+            host_counts: Vec::new(),
             collapsed: false,
         };
         assert_eq!(

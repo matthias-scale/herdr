@@ -606,6 +606,9 @@ impl AppState {
         let mut filter = self.sidebar_work_filter.clone();
         let mut keep_open = false;
         match option {
+            crate::ui::SidebarFilterOption::MachineScope(scope) => {
+                filter.machine_scope = scope;
+            }
             crate::ui::SidebarFilterOption::LinearTeam(team) => filter.team = team,
             crate::ui::SidebarFilterOption::LinearOwnership(ownership) => {
                 filter.linear_ownership = ownership;
