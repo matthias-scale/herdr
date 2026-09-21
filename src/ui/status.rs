@@ -1916,6 +1916,7 @@ mod tests {
                     used_percent: 56,
                     resets_at: Some(2_000_100_000),
                 }),
+                credits: None,
                 stale: false,
             },
             codex: AccountUsage {

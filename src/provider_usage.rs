@@ -33,10 +33,12 @@ const MAX_USAGE_FILES: usize = 64;
 const MAX_USAGE_DIRECTORIES: usize = 256;
 const MAX_USAGE_ENTRIES: usize = 4096;
 const MAX_USAGE_FILE_BYTES: u64 = 512 * 1024;
+const MAX_CREDIT_BALANCE: f64 = 1_000_000.0;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 struct CodexRateLimits {
     windows: Vec<CodexUsageWindow>,
+    credits: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +52,7 @@ struct CodexUsageWindow {
 struct RawRateLimits {
     primary: Option<RawUsageWindow>,
     secondary: Option<RawUsageWindow>,
+    credits: Option<RawCredits>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -57,6 +60,11 @@ struct RawUsageWindow {
     used_percent: f64,
     window_minutes: u64,
     resets_at: i64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawCredits {
+    balance: Option<serde_json::Value>,
 }
 
 fn parse_codex_record(line: &str) -> Option<CodexRateLimits> {
@@ -72,7 +80,20 @@ fn parse_codex_record(line: &str) -> Option<CodexRateLimits> {
         .collect::<Vec<_>>();
     windows.sort_unstable_by_key(|window| window.window_minutes);
     windows.dedup_by_key(|window| window.window_minutes);
-    (!windows.is_empty()).then_some(CodexRateLimits { windows })
+    let credits = raw
+        .credits
+        .and_then(|credits| credits.balance)
+        .and_then(parse_credit_balance);
+    (!windows.is_empty()).then_some(CodexRateLimits { windows, credits })
+}
+
+fn parse_credit_balance(value: serde_json::Value) -> Option<f64> {
+    let balance = match value {
+        serde_json::Value::Number(number) => number.as_f64()?,
+        serde_json::Value::String(value) => value.parse().ok()?,
+        _ => return None,
+    };
+    (balance.is_finite() && (0.0..=MAX_CREDIT_BALANCE).contains(&balance)).then_some(balance)
 }
 
 fn parse_usage_window(raw: RawUsageWindow) -> Option<CodexUsageWindow> {
@@ -341,12 +362,14 @@ pub(crate) struct QuotaWindow {
 }
 
 /// A single provider account: its short label and its windows.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct AccountUsage {
     /// Short account code, e.g. `SHQ`. `None` when the account cannot be named.
     pub account: Option<String>,
     pub five_hour: Option<QuotaWindow>,
     pub seven_day: Option<QuotaWindow>,
+    /// Remaining provider credits, when the provider reports a balance.
+    pub credits: Option<f64>,
     /// The source is older than its freshness budget. Values render dimmed.
     pub stale: bool,
 }
@@ -366,7 +389,7 @@ impl AccountUsage {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ProviderUsageSnapshot {
     pub claude: AccountUsage,
     pub codex: AccountUsage,
@@ -874,6 +897,7 @@ pub(crate) fn parse_claude_rate_limits(
         account: None,
         five_hour: window("R5", "R5_RST"),
         seven_day: window("R7", "R7_RST"),
+        credits: None,
         stale: age.is_some_and(|age| age >= CLAUDE_CACHE_STALE_AFTER),
     }
 }
@@ -973,6 +997,7 @@ fn load_codex_usage(now_unix: Option<i64>) -> AccountUsage {
         };
         usage.five_hour = window(FIVE_HOUR_MINUTES);
         usage.seven_day = window(SEVEN_DAY_MINUTES);
+        usage.credits = record.credits;
         usage.stale = [usage.five_hour, usage.seven_day]
             .into_iter()
             .flatten()
@@ -1027,6 +1052,7 @@ pub(crate) fn parse_kimi_usage(output: &str, now_unix: Option<i64>) -> AccountUs
         account: None,
         five_hour: window(raw.five_hour),
         seven_day: window(raw.seven_day),
+        credits: None,
         stale: false,
     }
 }
@@ -1125,7 +1151,7 @@ mod tests {
     #[test]
     fn codex_rate_limit_record_keeps_both_supported_windows() {
         let usage = parse_codex_record(
-            r#"{"payload":{"rate_limits":{"primary":{"used_percent":31.0,"window_minutes":300,"resets_at":1788003000},"secondary":{"used_percent":52.0,"window_minutes":10080,"resets_at":1788307200}}}}"#,
+            r#"{"payload":{"rate_limits":{"primary":{"used_percent":31.0,"window_minutes":300,"resets_at":1788003000},"secondary":{"used_percent":52.0,"window_minutes":10080,"resets_at":1788307200},"credits":{"balance":"1927.95"}}}}"#,
         )
         .expect("rate limits");
 
@@ -1141,6 +1167,7 @@ mod tests {
                 .used_percent,
             52.0
         );
+        assert_eq!(usage.credits, Some(1927.95));
     }
 
     struct UsageFixture {
