@@ -135,15 +135,6 @@ pub(crate) enum SnapshotAdmissionError {
         local: u64,
         revision: u64,
     },
-    MembershipRollback {
-        pane_id: String,
-        retained_revision: u64,
-        incoming_revision: u64,
-    },
-    MembershipConflict {
-        pane_id: String,
-        revision: u64,
-    },
     TombstoneRevival {
         local: u64,
     },
@@ -184,17 +175,6 @@ impl fmt::Display for SnapshotAdmissionError {
             ),
             Self::RecordConflict { local, revision } => {
                 write!(f, "group {local} conflicts at revision {revision}")
-            }
-            Self::MembershipRollback {
-                pane_id,
-                retained_revision,
-                incoming_revision,
-            } => write!(
-                f,
-                "pane {pane_id} membership revision rolled back from {retained_revision} to {incoming_revision}"
-            ),
-            Self::MembershipConflict { pane_id, revision } => {
-                write!(f, "pane {pane_id} membership conflicts at revision {revision}")
             }
             Self::TombstoneRevival { local } => {
                 write!(f, "group {local} attempts to replace an observed tombstone")
@@ -291,24 +271,6 @@ pub(crate) fn admit_authority_snapshot(
         return Err(SnapshotAdmissionError::SnapshotConflict {
             revision: incoming.revision,
         });
-    }
-    for previous in &retained.memberships {
-        let Some(next) = incoming_memberships.get(previous.pane_id.as_str()).copied() else {
-            continue;
-        };
-        if next.membership.revision < previous.membership.revision {
-            return Err(SnapshotAdmissionError::MembershipRollback {
-                pane_id: previous.pane_id.clone(),
-                retained_revision: previous.membership.revision,
-                incoming_revision: next.membership.revision,
-            });
-        }
-        if next.membership.revision == previous.membership.revision && next != previous {
-            return Err(SnapshotAdmissionError::MembershipConflict {
-                pane_id: previous.pane_id.clone(),
-                revision: next.membership.revision,
-            });
-        }
     }
     Ok(())
 }
@@ -796,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_rejects_membership_rollback_and_equal_revision_conflict() {
+    fn admission_treats_reused_pane_addresses_as_new_membership_observations() {
         let group_a = GroupId {
             owner: authority(1),
             local: 1,
@@ -812,21 +774,8 @@ mod tests {
         let mut conflict = retained.clone();
         conflict.memberships = vec![membership("w1:p1", 5, Some(group_b))];
 
-        assert_eq!(
-            admit_authority_snapshot(Some(&retained), &rollback),
-            Err(SnapshotAdmissionError::MembershipRollback {
-                pane_id: "w1:p1".into(),
-                retained_revision: 5,
-                incoming_revision: 4,
-            })
-        );
-        assert_eq!(
-            admit_authority_snapshot(Some(&retained), &conflict),
-            Err(SnapshotAdmissionError::MembershipConflict {
-                pane_id: "w1:p1".into(),
-                revision: 5,
-            })
-        );
+        assert_eq!(admit_authority_snapshot(Some(&retained), &rollback), Ok(()));
+        assert_eq!(admit_authority_snapshot(Some(&retained), &conflict), Ok(()));
     }
 
     #[test]
