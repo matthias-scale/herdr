@@ -5734,6 +5734,17 @@ impl AppState {
         self.sidebar_settled_menu_delete_armed = false;
     }
 
+    /// Hand the keyboard to a terminal-area surface the sidebar just opened.
+    ///
+    /// `input_owner` answers `Sidebar` ahead of every terminal-area surface, so
+    /// a view opened from a sidebar row inherits a sidebar that still owns the
+    /// keyboard. The sidebar arm consumes Esc and returns, the view's own key
+    /// handler never runs, and the operator has no way to close what they just
+    /// opened.
+    pub(crate) fn release_sidebar_focus_to_surface(&mut self) {
+        self.sidebar_focused = false;
+    }
+
     pub(crate) fn toggle_loop_run_history(&mut self) {
         if self.loop_run_history_detail.is_some() {
             self.clear_loop_run_history();
@@ -5753,6 +5764,7 @@ impl AppState {
     /// existing MAT-126 run-history table filtered to that loop.
     pub(crate) fn open_aloop_loop_history(&mut self, loop_name: &str) {
         self.clear_aloop_run_detail();
+        self.release_sidebar_focus_to_surface();
         let producer_host = self
             .fleet_snapshot
             .aloop
@@ -5834,11 +5846,10 @@ impl AppState {
         else {
             return false;
         };
-        self.show_aloop_run_detail(
-            loop_name.to_string(),
-            snapshot.host.clone(),
-            std::sync::Arc::clone(run),
-        );
+        let host = snapshot.host.clone();
+        let run = std::sync::Arc::clone(run);
+        self.release_sidebar_focus_to_surface();
+        self.show_aloop_run_detail(loop_name.to_string(), host, run);
         true
     }
 }
