@@ -5073,7 +5073,7 @@ impl App {
             if let Some(copy_value) = self
                 .state
                 .view
-                .info_panel_link_rows
+                .work_context_link_rows
                 .iter()
                 .find(|row| {
                     mouse.column >= row.rect.x

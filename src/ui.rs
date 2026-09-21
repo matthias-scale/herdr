@@ -1,12 +1,9 @@
-use std::sync::Arc;
-
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::Span,
     Frame,
 };
-use tokio::sync::Notify;
 
 pub(crate) mod add_project;
 mod command_palette;
@@ -22,7 +19,6 @@ pub(crate) mod dropdown;
 mod home;
 pub(crate) mod hyperspace;
 mod inbox;
-pub(crate) mod info_panel;
 mod keybind_help;
 mod loop_runs;
 mod markdown;
@@ -70,7 +66,6 @@ use self::dialogs::{
     render_open_existing_worktree_overlay, render_remove_worktree_overlay, render_rename_overlay,
 };
 use self::dock::render_dock;
-use self::info_panel::{compute_link_rows, panel_width_for_main, render_info_panel};
 use self::keybind_help::render_keybind_help_overlay;
 use self::loop_runs::render_loop_run_history;
 use self::menus::{
@@ -173,7 +168,6 @@ pub(crate) use self::{
         WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
 };
-use crate::render_signal::RenderSignal;
 
 #[cfg(test)]
 pub(crate) use self::sidebar::compute_remote_agent_row_areas;
@@ -401,24 +395,11 @@ fn compute_view_internal(
     ])
     .areas(body_area);
 
-    let (content_area, info_panel_rect) = if app.info_panel_expanded {
-        if let Some(panel_width) = panel_width_for_main(main_area.width) {
-            let [content_area, panel_area] =
-                Layout::horizontal([Constraint::Min(1), Constraint::Length(panel_width)])
-                    .areas(main_area);
-            (content_area, panel_area)
-        } else {
-            (main_area, Rect::default())
-        }
-    } else {
-        (main_area, Rect::default())
-    };
-
     let (tab_bar_rect, terminal_area) = app
         .active
         .and_then(|i| app.workspaces.get(i))
-        .map(|ws| desktop_tab_bar_and_terminal_area(app, ws, content_area))
-        .unwrap_or((Rect::default(), content_area));
+        .map(|ws| desktop_tab_bar_and_terminal_area(app, ws, main_area))
+        .unwrap_or((Rect::default(), main_area));
 
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
@@ -542,7 +523,7 @@ fn compute_view_internal(
         cell_size,
     );
     if resize_panes {
-        resize_background_tab_panes_for_desktop(app, terminal_runtimes, content_area, cell_size);
+        resize_background_tab_panes_for_desktop(app, terminal_runtimes, main_area, cell_size);
         resize_popup_pane(app, terminal_runtimes, terminal_area, cell_size);
     }
 
@@ -792,19 +773,12 @@ fn compute_view_internal(
         pane_toggle_below_hit_area,
         pane_toggle_right_hit_area,
         terminal_area,
-        info_panel_rect,
-        // Both surfaces feed one list because one click handler serves it: the panel
-        // and the dock's Context tab can be open at once, and each owns its own rows.
-        info_panel_link_rows: {
-            let mut rows = if info_panel_rect.width > 0 {
-                compute_link_rows(app, info_panel_rect)
-            } else {
-                Vec::new()
-            };
-            if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Context) {
-                rows.extend(dock_context::context_link_rows(app, dock_body_rect));
-            }
-            rows
+        work_context_link_rows: if !app.dock_collapsed
+            && app.dock_tab == Some(crate::app::DockSurface::Context)
+        {
+            dock_context::context_link_rows(app, dock_body_rect)
+        } else {
+            Vec::new()
         },
         status_buttons: Vec::new(),
         status_work_links: Vec::new(),
@@ -1100,8 +1074,7 @@ fn compute_mobile_view(
         pane_toggle_below_hit_area: Rect::default(),
         pane_toggle_right_hit_area: Rect::default(),
         terminal_area,
-        info_panel_rect: Rect::default(),
-        info_panel_link_rows: Vec::new(),
+        work_context_link_rows: Vec::new(),
         status_buttons: Vec::new(),
         status_work_links: Vec::new(),
         status_segments: Vec::new(),
@@ -1171,42 +1144,7 @@ pub(crate) fn render_with_runtime_registry_for_owner(
     frame: &mut Frame,
     input_owner: InputOwner,
 ) {
-    render_with_runtime_registry_inner(app, terminal_runtimes, frame, input_owner, None);
-}
-
-pub(crate) fn render_with_runtime_registry_and_handles(
-    app: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-    frame: &mut Frame,
-    render_notify: &Arc<Notify>,
-    render_dirty: &Arc<RenderSignal>,
-) {
-    let input_owner = app.input_owner();
-    render_with_runtime_registry_and_handles_for_owner(
-        app,
-        terminal_runtimes,
-        frame,
-        render_notify,
-        render_dirty,
-        input_owner,
-    );
-}
-
-pub(crate) fn render_with_runtime_registry_and_handles_for_owner(
-    app: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-    frame: &mut Frame,
-    render_notify: &Arc<Notify>,
-    render_dirty: &Arc<RenderSignal>,
-    input_owner: InputOwner,
-) {
-    render_with_runtime_registry_inner(
-        app,
-        terminal_runtimes,
-        frame,
-        input_owner,
-        Some((render_notify, render_dirty)),
-    );
+    render_with_runtime_registry_inner(app, terminal_runtimes, frame, input_owner);
 }
 
 fn render_with_runtime_registry_inner(
@@ -1214,7 +1152,6 @@ fn render_with_runtime_registry_inner(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
     input_owner: InputOwner,
-    render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>,
 ) {
     let tab_bar_area = app.view.tab_bar_rect;
     let terminal_area = app.view.terminal_area;
@@ -1282,9 +1219,6 @@ fn render_with_runtime_registry_inner(
         crate::app::state::TerminalAreaSurface::Empty => render_empty(app, frame, terminal_area),
     }
 
-    if app.view.info_panel_rect.width > 0 {
-        render_info_panel(app, frame, app.view.info_panel_rect, render_handles);
-    }
     if app.view.layout != ViewLayout::Mobile {
         render_dock(app, terminal_runtimes, frame);
     }
@@ -1818,26 +1752,6 @@ mod tests {
 
         assert!(screen.contains("nothing is waiting on you"), "{screen}");
         assert!(!screen.contains("nothing is blocked"), "{screen}");
-    }
-
-    #[test]
-    fn info_panel_toggle_reserves_desktop_width_and_hides_on_narrow_layout() {
-        let mut app = crate::app::state::AppState::test_new();
-        app.workspaces = vec![Workspace::test_new("one")];
-        app.active = Some(0);
-        app.selected = 0;
-        app.info_panel_expanded = true;
-
-        compute_view(&mut app, Rect::new(0, 0, 100, 24));
-        assert!(app.view.info_panel_rect.width >= info_panel::INFO_PANEL_MIN_WIDTH);
-        assert!(app.view.terminal_area.width < 74);
-
-        compute_view(&mut app, Rect::new(0, 0, 65, 24));
-        assert_eq!(app.view.info_panel_rect, Rect::default());
-        assert!(
-            app.info_panel_expanded,
-            "narrow layout must not discard the toggle"
-        );
     }
 
     #[test]

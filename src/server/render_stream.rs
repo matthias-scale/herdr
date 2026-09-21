@@ -2,13 +2,10 @@
 
 use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
 use ratatui::layout::{Position, Rect, Size};
-use std::sync::Arc;
-use tokio::sync::Notify;
 
 use crate::app::state::{AppState, DockInputOwner, InputOwner};
 use crate::protocol::render_ansi::{BlitEncoder, EncodedBlit};
 use crate::protocol::{CursorState, FrameData, RenderEncoding, ServerMessage, TerminalFrame};
-use crate::render_signal::RenderSignal;
 use crate::terminal::TerminalRuntimeRegistry;
 
 /// Per-client render baseline for the negotiated render encoding.
@@ -377,26 +374,6 @@ pub(crate) fn render_virtual_with_runtime_registry(
         area,
         resize_panes,
         cell_size,
-        None,
-    )
-}
-
-pub(crate) fn render_virtual_with_runtime_registry_and_handles(
-    app_state: &mut AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-    area: Rect,
-    resize_panes: bool,
-    cell_size: crate::kitty_graphics::HostCellSize,
-    render_notify: &Arc<Notify>,
-    render_dirty: &Arc<RenderSignal>,
-) -> (ratatui::buffer::Buffer, Option<CursorState>) {
-    render_virtual_with_runtime_registry_inner(
-        app_state,
-        terminal_runtimes,
-        area,
-        resize_panes,
-        cell_size,
-        Some((render_notify, render_dirty)),
     )
 }
 
@@ -406,7 +383,6 @@ fn render_virtual_with_runtime_registry_inner(
     area: Rect,
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
-    render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>,
 ) -> (ratatui::buffer::Buffer, Option<CursorState>) {
     let owner = app_state.input_owner();
     let popup_visible = owner == InputOwner::Popup;
@@ -428,23 +404,12 @@ fn render_virtual_with_runtime_registry_inner(
 
     terminal
         .draw(|frame| {
-            if let Some((render_notify, render_dirty)) = render_handles {
-                crate::ui::render_with_runtime_registry_and_handles_for_owner(
-                    app_state,
-                    terminal_runtimes,
-                    frame,
-                    render_notify,
-                    render_dirty,
-                    owner,
-                );
-            } else {
-                crate::ui::render_with_runtime_registry_for_owner(
-                    app_state,
-                    terminal_runtimes,
-                    frame,
-                    owner,
-                );
-            }
+            crate::ui::render_with_runtime_registry_for_owner(
+                app_state,
+                terminal_runtimes,
+                frame,
+                owner,
+            );
         })
         .expect("render to TestBackend should never fail");
 

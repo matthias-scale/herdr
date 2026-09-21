@@ -2653,8 +2653,7 @@ pub struct ViewState {
     pub pane_toggle_below_hit_area: Rect,
     pub pane_toggle_right_hit_area: Rect,
     pub terminal_area: Rect,
-    pub info_panel_rect: Rect,
-    pub info_panel_link_rows: Vec<InfoPanelLinkRow>,
+    pub work_context_link_rows: Vec<WorkContextLinkRow>,
     pub mobile_header_rect: Rect,
     pub mobile_menu_hit_area: Rect,
     /// Client-side hover and click target for the compact diagnostic marker.
@@ -2740,8 +2739,9 @@ pub(crate) struct StatusWorkLink {
     pub object: DockObjectRef,
 }
 
+/// A work link rendered in the dock's Context tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InfoPanelLinkRow {
+pub(crate) struct WorkContextLinkRow {
     pub rect: Rect,
     pub copy_value: String,
 }
@@ -4608,8 +4608,6 @@ pub struct AppState {
     pub sidebar_collapsed: bool,
     /// Whether the sidebar is showing only rows that require human attention.
     pub blocked_filter: bool,
-    /// Whether the desktop focused-pane work-context panel is expanded.
-    pub info_panel_expanded: bool,
     pub sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig,
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
@@ -4675,7 +4673,6 @@ pub struct AppState {
     pub pane_gaps: bool,
     pub show_agent_labels_on_pane_borders: bool,
     pub hide_tab_bar_when_single_tab: bool,
-    pub show_subscription_usage: bool,
     pub tab_bar_position: TabBarPositionConfig,
     pub tab_bar_right: Vec<TabBarStatusSegment>,
     pub tab_bar_right_separator: String,
@@ -7322,8 +7319,7 @@ impl AppState {
                 pane_toggle_below_hit_area: Rect::default(),
                 pane_toggle_right_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
-                info_panel_rect: Rect::default(),
-                info_panel_link_rows: Vec::new(),
+                work_context_link_rows: Vec::new(),
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
                 config_diagnostic_hit_area: Rect::default(),
@@ -7475,7 +7471,6 @@ impl AppState {
             // must not silently move every existing sidebar layout assertion.
             // Tests that care about it set `hyperspace.enabled = true`.
             hyperspace: crate::hyperspace::HyperspaceState::new(false, std::time::Instant::now()),
-            info_panel_expanded: false,
             mobile_width_threshold: crate::config::DEFAULT_MOBILE_WIDTH_THRESHOLD,
             sidebar_width_source: SidebarWidthSource::ConfigDefault,
             sidebar_width_auto: false,
@@ -7525,7 +7520,6 @@ impl AppState {
             pane_gaps: false,
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
-            show_subscription_usage: true,
             // Deliberately not the shipped default (`Hidden`): the UI tests that
             // exercise tab-row geometry need a tab row to measure.
             tab_bar_position: TabBarPositionConfig::Top,

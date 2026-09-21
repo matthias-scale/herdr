@@ -1048,8 +1048,6 @@ pub struct KeysConfig {
     pub toggle_notepad: BindingConfig,
     /// Pause or resume the break timer, or dismiss a due reminder. Default: "ctrl+alt+b"
     pub toggle_pomodoro: BindingConfig,
-    /// Toggle the focused pane's right-side work-context panel. Default: "prefix+i"
-    pub toggle_info_panel: BindingConfig,
     /// Open the read-only Symphony workflow dashboard. Default: "prefix+shift+s"
     pub symphony: BindingConfig,
     /// Expand and focus the read-only fleet Runs section. Default: "prefix+alt+r"
@@ -1286,8 +1284,6 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_pomodoro: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    toggle_info_panel: Option<BindingConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     symphony: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     runs: Option<BindingConfig>,
@@ -1442,7 +1438,6 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(show_scratchpad);
         apply_field!(toggle_notepad);
         apply_field!(toggle_pomodoro);
-        apply_field!(toggle_info_panel);
         apply_field!(symphony);
         apply_field!(runs);
         apply_field!(work);
@@ -1602,7 +1597,6 @@ impl KeysConfig {
         copy_effective_action_field!(show_scratchpad, keybinds.show_scratchpad);
         copy_effective_action_field!(toggle_notepad, keybinds.toggle_notepad);
         copy_effective_action_field!(toggle_pomodoro, keybinds.toggle_pomodoro);
-        copy_effective_action_field!(toggle_info_panel, keybinds.toggle_info_panel);
         copy_effective_action_field!(symphony, keybinds.symphony);
         copy_effective_action_field!(runs, keybinds.runs);
         copy_effective_action_field!(work, keybinds.work);
@@ -1823,8 +1817,6 @@ pub struct UiConfig {
     /// times. Toggled at runtime; this is only the starting state. Default: false.
     #[serde(default)]
     pub status_bar_expanded: bool,
-    /// Show local Codex and Claude Code subscription usage in the info panel. Default: true.
-    pub show_subscription_usage: bool,
     /// Full-width top status row.
     pub status_bar: StatusBarConfig,
     /// Legacy indexed-Agent projection ordering. The visible sidebar remains canonical.
@@ -2144,7 +2136,6 @@ impl Default for KeysConfig {
             show_scratchpad: BindingConfig::one("ctrl+alt+n"),
             toggle_notepad: BindingConfig::one("ctrl+alt+m"),
             toggle_pomodoro: BindingConfig::one("ctrl+alt+b"),
-            toggle_info_panel: BindingConfig::one("prefix+i"),
             symphony: BindingConfig::one("prefix+shift+s"),
             runs: BindingConfig::one("prefix+alt+r"),
             work: BindingConfig::one("prefix+ctrl+w"),
@@ -2219,7 +2210,6 @@ impl Default for UiConfig {
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
             status_bar_expanded: false,
-            show_subscription_usage: true,
             status_bar: StatusBarConfig::default(),
             tab_bar_position: TabBarPositionConfig::Hidden,
             tab_bar_right: Vec::new(),
@@ -2636,7 +2626,6 @@ status_indicators = "symbols"
         assert!(!default_config.ui.hide_tab_bar_when_single_tab);
         assert!(!default_config.ui.show_pull_button);
         assert!(!default_config.ui.show_pane_toggle_buttons);
-        assert!(default_config.ui.show_subscription_usage);
         assert_eq!(
             default_config.ui.tab_bar_position,
             TabBarPositionConfig::Hidden
@@ -2651,7 +2640,6 @@ show_agent_labels_on_pane_borders = true
 hide_tab_bar_when_single_tab = true
 show_pull_button = true
 show_pane_toggle_buttons = true
-show_subscription_usage = false
 tab_bar_position = "bottom"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
@@ -2662,7 +2650,6 @@ tab_bar_position = "bottom"
         assert!(config.ui.pane_gaps);
         assert!(config.ui.show_agent_labels_on_pane_borders);
         assert!(config.ui.hide_tab_bar_when_single_tab);
-        assert!(!config.ui.show_subscription_usage);
         assert_eq!(config.ui.tab_bar_position, TabBarPositionConfig::Bottom);
 
         // The default is also nameable, so a config that opted into a row can

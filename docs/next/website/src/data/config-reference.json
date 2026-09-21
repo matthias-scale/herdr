@@ -1135,12 +1135,6 @@
           "description": "Pin or unpin the active tab into the sidebar's Pinned group. Unset by default."
         },
         {
-          "key": "keys.toggle_info_panel",
-          "type": "keybinding",
-          "default": "\"prefix+i\"",
-          "description": "Toggle the focused pane's right-side work-context panel."
-        },
-        {
           "key": "keys.symphony",
           "type": "keybinding",
           "default": "\"prefix+shift+s\"",
@@ -1440,12 +1434,6 @@
           "type": "boolean",
           "default": "false",
           "description": "Show the split-below and split-right buttons in the top-right action row. Off by default; both splits have keybindings."
-        },
-        {
-          "key": "ui.show_subscription_usage",
-          "type": "boolean",
-          "default": "true",
-          "description": "Show local Codex and Claude Code subscription usage in the info panel."
         },
         {
           "key": "ui.tab_bar_right",

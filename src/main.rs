@@ -306,7 +306,6 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # sidebar_cycle_group_mode = ""
 # sidebar_refresh = ""
 # toggle_blocked_filter = "prefix+f"
-# toggle_info_panel = "prefix+i"
 # symphony = "prefix+shift+s"
 # runs = "prefix+alt+r"
 # work = "prefix+ctrl+w"         # work projection view: PRs / tickets / agents / review
@@ -458,8 +457,6 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Off by default: both splits have keybindings, and the buttons crowd the tab titles.
 # show_pane_toggle_buttons = false
 
-# Show local Codex and Claude Code subscription usage in the info panel.
-# show_subscription_usage = true
 # Open the home view on launch. Esc dismisses it. Off by default: the launch
 # screen hides the panes you asked for.
 # show_home_on_start = false

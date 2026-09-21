@@ -3965,8 +3965,8 @@ mod tests {
     use crate::app::input::modal::handle_context_menu_key;
     use crate::{
         app::state::{
-            ContextMenuAction, ContextMenuKind, ContextMenuState, InfoPanelLinkRow, Mode,
-            ViewLayout,
+            ContextMenuAction, ContextMenuKind, ContextMenuState, Mode, ViewLayout,
+            WorkContextLinkRow,
         },
         app::App,
         detect::{Agent, AgentState},
@@ -5845,10 +5845,6 @@ mod tests {
 
         assert_eq!(app.state.active, Some(1));
         assert_eq!(app.state.workspaces[1].active_tab_index(), 0);
-        assert!(
-            !app.state.info_panel_expanded,
-            "a linked row must not open the info panel from the overview"
-        );
     }
 
     #[test]
@@ -5989,7 +5985,7 @@ mod tests {
     }
 
     #[test]
-    fn a_work_link_in_the_context_tab_copies_the_same_value_the_panel_would() {
+    fn a_work_link_in_the_context_tab_copies_its_value() {
         let mut app = app_for_mouse_test();
         app.state.set_server_mode(Mode::Terminal);
         app.state.workspaces = vec![Workspace::test_new("links")];
@@ -6015,7 +6011,7 @@ mod tests {
         let link = app
             .state
             .view
-            .info_panel_link_rows
+            .work_context_link_rows
             .first()
             .expect("dock context link row")
             .clone();
@@ -6326,10 +6322,10 @@ mod tests {
     }
 
     #[test]
-    fn ac26_info_panel_link_click_copies_without_opening() {
+    fn work_context_link_click_copies_value() {
         let mut app = app_for_mouse_test();
         app.state.set_server_mode(Mode::Terminal);
-        app.state.view.info_panel_link_rows = vec![InfoPanelLinkRow {
+        app.state.view.work_context_link_rows = vec![WorkContextLinkRow {
             rect: Rect::new(60, 5, 30, 1),
             copy_value: "MAT-124".into(),
         }];
@@ -6349,27 +6345,6 @@ mod tests {
                 .map(|feedback| feedback.message.as_str()),
             Some("copied")
         );
-    }
-
-    #[test]
-    fn ac26_narrow_hidden_info_panel_does_not_copy_on_click() {
-        let mut app = app_for_mouse_test();
-        app.state.workspaces = vec![Workspace::test_new("one")];
-        app.state.active = Some(0);
-        app.state.selected = 0;
-        app.state.ensure_test_terminals();
-        app.state.info_panel_expanded = true;
-        app.state.view.info_panel_link_rows = vec![InfoPanelLinkRow {
-            rect: Rect::new(30, 3, 30, 1),
-            copy_value: "stale".into(),
-        }];
-
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 65, 20));
-
-        assert_eq!(app.state.view.info_panel_rect, Rect::default());
-        assert!(app.state.view.info_panel_link_rows.is_empty());
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 40, 3));
-        assert!(app.event_rx.try_recv().is_err());
     }
 
     #[tokio::test]

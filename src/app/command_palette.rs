@@ -98,7 +98,6 @@ pub(crate) fn action_for_field(field: &str) -> Option<NavigateAction> {
         "previous_dock_tab" => NavigateAction::PreviousDockTab,
         "next_dock_tab" => NavigateAction::NextDockTab,
         "editor_open_repo" => NavigateAction::OpenRepoEditor,
-        "toggle_info_panel" => NavigateAction::ToggleInfoPanel,
         "toggle_status_detail" => NavigateAction::ToggleStatusDetail,
         "edit_scratchpad" => NavigateAction::EditScratchpad,
         "show_scratchpad" => NavigateAction::ShowScratchpad,
