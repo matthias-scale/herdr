@@ -843,13 +843,19 @@ impl LinkStreamScanner {
 
     fn observe_cursor_motion(&mut self, motion: ParsedCursorMotion, cursor_column: usize) {
         let rewrite = self.rendered_rewrite.get_or_insert_with(|| {
-            let (bytes, overflowed) =
-                rendered_bytes_from_visible(std::mem::take(&mut self.visible));
+            let reconcile_existing = matches!(motion, ParsedCursorMotion::Backspace)
+                || matches!(self.visible, VisibleLinkState::Url(_));
+            let (bytes, overflowed) = if reconcile_existing {
+                rendered_bytes_from_visible(std::mem::take(&mut self.visible))
+            } else {
+                self.visible = VisibleLinkState::Empty;
+                (Vec::new(), false)
+            };
             // Unwrapped printable ASCII has a one-to-one cell mapping. If a
             // candidate contains wider/combining glyphs or crossed a wrap,
             // do not guess Ghostty's width rules; discard it instead.
             let overflowed = overflowed || !bytes.is_ascii() || cursor_column < bytes.len();
-            let start_column = if bytes.is_empty() {
+            let start_column = if !reconcile_existing || bytes.is_empty() {
                 match motion {
                     ParsedCursorMotion::Backspace => cursor_column.saturating_sub(1),
                     ParsedCursorMotion::CarriageReturn => 0,
@@ -2427,6 +2433,42 @@ mod tests {
         assert_eq!(
             gate.take_links().expect("following ASCII URL").output_urls,
             ["https://after-wide.example/path"]
+        );
+    }
+
+    #[test]
+    fn carriage_return_resets_non_url_lexical_states() {
+        let expected = "https://after-reset.example/path";
+
+        for prefix in [b"foo".as_slice(), b"https:", b"https:/", b"42"] {
+            let partial = LinkExtractionGate::default();
+            partial.observe_parsed_text(prefix);
+            partial.observe_parsed_carriage_return(prefix.len());
+            partial.observe_parsed_text(expected.as_bytes());
+            partial.observe_parsed_separator();
+            assert_eq!(
+                partial
+                    .take_links()
+                    .expect("URL replacing partial or invalid prefix")
+                    .output_urls,
+                [expected],
+                "prefix={prefix:?}"
+            );
+        }
+
+        let discarded = LinkExtractionGate::default();
+        let mut overlong = b"https://discarded.example/".to_vec();
+        overlong.resize(MAX_URL_BYTES + 1, b'a');
+        discarded.observe_parsed_text(&overlong);
+        discarded.observe_parsed_carriage_return(overlong.len());
+        discarded.observe_parsed_text(expected.as_bytes());
+        discarded.observe_parsed_separator();
+        assert_eq!(
+            discarded
+                .take_links()
+                .expect("URL replacing discarded candidate")
+                .output_urls,
+            [expected]
         );
     }
 

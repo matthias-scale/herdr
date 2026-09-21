@@ -4694,6 +4694,13 @@ mod tests {
                 "visible-after-progress",
                 "progress 42%",
             ),
+            (
+                "carriage return after a scheme-like tail",
+                b"progress foo\rhttps://example.com/path visible-after-scheme-tail\n".as_slice(),
+                "https://example.com/path",
+                "visible-after-scheme-tail",
+                "progress foo",
+            ),
         ] {
             for split in 0..=stream.len() {
                 let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
