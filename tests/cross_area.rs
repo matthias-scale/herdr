@@ -1162,3 +1162,94 @@ fn cross_area_server_kill_then_restart_and_reconnect() {
 
     cleanup_spawned_herdr(server2, base);
 }
+
+#[test]
+fn pane_group_clear_survives_missing_and_corrupt_group_store_after_restart() {
+    let _lock = test_lock();
+
+    for damage in ["missing", "corrupt"] {
+        let base = unique_test_dir();
+        let config_home = base.join("config");
+        let runtime_dir = base.join("runtime");
+        let api_socket = runtime_dir.join("herdr.sock");
+
+        let server = spawn_server(&config_home, &runtime_dir, &api_socket);
+        wait_for_socket(&api_socket, Duration::from_secs(10));
+        let created = workspace_create(&api_socket, damage);
+        let pane_id = created["result"]["root_pane"]["pane_id"]
+            .as_str()
+            .expect("created pane id")
+            .to_string();
+        let group = send_json_request(
+            &api_socket,
+            "group_create",
+            "group.create",
+            json!({"name": "Work", "expected_revision": 0}),
+        );
+        let group_id = group["result"]["record"]["id"].clone();
+        assert!(!group_id.is_null(), "group.create should succeed: {group}");
+        let assigned = send_json_request(
+            &api_socket,
+            "group_assign",
+            "pane.group.set",
+            json!({
+                "pane_id": pane_id,
+                "group_id": group_id,
+                "expected_revision": 0
+            }),
+        );
+        assert!(
+            assigned.get("error").is_none(),
+            "initial pane.group.set should succeed: {assigned}"
+        );
+        drop(server);
+
+        let data_dir = config_home.join("herdr-dev");
+        let groups_path = data_dir.join("groups.json");
+        if damage == "missing" {
+            fs::remove_file(&groups_path).unwrap();
+        } else {
+            fs::write(&groups_path, "not json").unwrap();
+        }
+
+        let restarted = spawn_server(&config_home, &runtime_dir, &api_socket);
+        wait_for_socket(&api_socket, Duration::from_secs(10));
+        let cleared = send_json_request(
+            &api_socket,
+            "group_clear",
+            "pane.group.set",
+            json!({"pane_id": pane_id, "expected_revision": 1}),
+        );
+        assert!(
+            cleared.get("error").is_none(),
+            "clearing with a {damage} group store should succeed: {cleared}"
+        );
+        assert_eq!(cleared["result"]["membership"], json!({"revision": 2}));
+
+        let session: Value = serde_json::from_str(
+            &fs::read_to_string(data_dir.join("session.json")).expect("persisted session"),
+        )
+        .expect("valid persisted session");
+        let saved_membership = session["workspaces"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|workspace| {
+                workspace["tabs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|tab| {
+                        tab["panes"]
+                            .as_object()
+                            .into_iter()
+                            .flat_map(|panes| panes.values())
+                    })
+            })
+            .find_map(|pane| pane.get("group_membership"))
+            .expect("cleared membership remains durable");
+        assert_eq!(saved_membership, &json!({"revision": 2}));
+
+        cleanup_spawned_herdr(restarted, base);
+    }
+}

@@ -97,11 +97,11 @@ impl App {
                 "pane membership requires session persistence",
             );
         }
-        let authority = match self.group_runtime.authority() {
-            Ok(authority) => authority,
-            Err(error) => return encode_runtime_error(id, error),
-        };
         if let Some(group_id) = params.group_id.as_ref() {
+            let authority = match self.group_runtime.authority() {
+                Ok(authority) => authority,
+                Err(error) => return encode_runtime_error(id, error),
+            };
             let record = match authority.record(group_id) {
                 Ok(record) => record,
                 Err(error) => {
