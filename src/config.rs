@@ -8,6 +8,7 @@ mod sound;
 mod tab_bar;
 mod theme;
 mod window_title;
+mod write;
 
 pub(crate) use self::model::MAX_NUDGE_AFTER_MINUTES;
 pub use self::{
@@ -51,6 +52,7 @@ pub(crate) use self::keybinds::parse_key_combo;
 pub(crate) use self::model::DEFAULT_BRANCH_PREFIX;
 #[cfg(test)]
 pub(crate) use self::sidebar::SidebarTokenStyle;
+pub(crate) use self::write::update_file_at;
 pub(crate) use self::{
     io::upsert_top_level_bool,
     tab_bar::{
