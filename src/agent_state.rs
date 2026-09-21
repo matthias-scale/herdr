@@ -1000,47 +1000,26 @@ impl LinkStreamScanner {
             return;
         }
         let cells = rewrite.into_sorted_cells();
-        let mut occupied_segments = [false; 3];
-        for &(column, _) in &cells {
-            occupied_segments[if column < left {
-                0
-            } else if column >= right {
-                1
-            } else {
-                2
-            }] = true;
-        }
-        let original_crosses_boundary =
-            occupied_segments[2] && (occupied_segments[0] || occupied_segments[1]);
-        if original_crosses_boundary {
-            self.scan_byte(b'\n', links);
-            return;
-        }
-        occupied_segments[2] &= mutation.slice_survives;
-        for segment in 0..3 {
-            if !occupied_segments[segment] {
-                continue;
+        let mut component_start = 0;
+        while component_start < cells.len() {
+            let mut component_end = component_start + 1;
+            while component_end < cells.len()
+                && cells[component_end - 1].0.checked_add(1) == Some(cells[component_end].0)
+            {
+                component_end += 1;
             }
-            let mut previous = None;
-            for &(column, byte) in &cells {
-                let belongs = match segment {
-                    0 => column < left,
-                    1 => column >= right,
-                    2 => column >= left && column < right,
-                    _ => unreachable!(),
-                };
-                if !belongs {
-                    continue;
+            let first = cells[component_start].0;
+            let last = cells[component_end - 1].0;
+            let crosses_boundary =
+                (first < left && last >= left) || (first < right && last >= right);
+            let inside_affected_slice = first >= left && last < right;
+            if !crosses_boundary && (!inside_affected_slice || mutation.slice_survives) {
+                for &(_, byte) in &cells[component_start..component_end] {
+                    self.scan_byte(byte, links);
                 }
-                if previous.is_some_and(|previous: u16| previous.checked_add(1) != Some(column)) {
-                    self.scan_byte(b'\n', links);
-                }
-                self.scan_byte(byte, links);
-                previous = Some(column);
-            }
-            if previous.is_some() {
                 self.scan_byte(b'\n', links);
             }
+            component_start = component_end;
         }
         self.scan_byte(b'\n', links);
     }

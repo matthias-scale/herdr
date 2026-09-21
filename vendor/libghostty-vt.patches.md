@@ -129,6 +129,8 @@ slices, and reject URLs whose rendered cells were split without reproducing VT
 action or region semantics in Rust. When no cursor-row slice moves, Ghostty's
 post-action cursor snapshot distinguishes exact no-ops (continuous text), real
 row boundaries (separator), and same-row cursor changes (cursor transition).
+Herdr reconciles sparse known cells as contiguous components, so unknown gaps
+remain lexical boundaries and only a component spanning a margin is rejected.
 
 remove when: the vendored source exposes equivalent post-parse text and OSC 8
 events, including confirmed BEL, 8-bit ST, and split `ESC \\` termination, with
@@ -150,6 +152,7 @@ just test-one matches_ghostty_rendered_text
 just test-one c1_introducers_and_st_match_ghostty_rendered_text
 just test-one cursor_overwrite_matches_ghostty_rendered_text
 just test-one partial_width_row_mutations_match_ghostty_rendered_text
+just test-one row_mutation_components_match_ghostty_rendered_text
 just test-one row_mutation_noops_and_boundaries_match_ghostty_rendered_text
 just test-one row_mutation_payload_requires_exact_interval_and_survival
 just test-one cancelled_osc_capture_matches_ghostty_visible_output

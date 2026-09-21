@@ -5333,6 +5333,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn row_mutation_components_match_ghostty_rendered_text() {
+        let kept_url = "https://kept.example/x";
+        let crossing_url = "https://crossing.example/x";
+        let recovery_url = "https://recovery.example/path";
+        let recovery = format!("\x1b[?69l\x1b[r\x1b[20;1H\n{recovery_url}\n");
+        let cases = [
+            (
+                "left boundary crossing",
+                format!("\x1b[?69h\x1b[10;40s{crossing_url}\x1b[1L{recovery}"),
+                false,
+            ),
+            (
+                "left boundary separated",
+                format!("\x1b[?69h\x1b[40;70s{kept_url}\x1b[50GX\x1b[1L{recovery}"),
+                true,
+            ),
+            (
+                "right boundary crossing",
+                format!("\x1b[?69h\x1b[10;30s\x1b[20G{crossing_url}\x1b[20G\x1b[1L{recovery}"),
+                false,
+            ),
+            (
+                "right boundary separated",
+                format!("\x1b[?69h\x1b[10;30s\x1b[40G{kept_url}\x1b[20GX\x1b[1L{recovery}"),
+                true,
+            ),
+        ];
+        for (label, stream, keeps_url) in cases {
+            for split in 0..=stream.len() {
+                let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+                let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+                runtime.terminal.install_link_extraction(gate.clone());
+                runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+                runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+                let rendered = runtime.visible_text();
+                assert!(
+                    rendered.contains(recovery_url)
+                        && rendered.contains(kept_url) == keeps_url
+                        && !rendered.contains(crossing_url),
+                    "Ghostty component result after {label} at split {split}: {rendered:?}"
+                );
+                let links = gate
+                    .take_links()
+                    .unwrap_or_else(|| panic!("component links after {label} at split {split}"));
+                let expected = if keeps_url {
+                    vec![kept_url, recovery_url]
+                } else {
+                    vec![recovery_url]
+                };
+                assert_eq!(links.output_urls, expected, "{label} split {split}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn dec_special_charset_matches_ghostty_rendered_text() {
         let mapped = "https://mapped.example.test/path";
         let visible = "https://visible-after-reset.example.test/path";
