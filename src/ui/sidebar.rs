@@ -2418,7 +2418,10 @@ pub(crate) enum SidebarRow {
         run: std::sync::Arc<crate::aloop::RunRecord>,
     },
     /// The producer host cannot be read (AC6).
-    AloopUnreachable { host: String, error: Option<String> },
+    AloopUnreachable {
+        host: String,
+        error: Option<String>,
+    },
     /// The producer answered and no finding is pending (AC6).
     AloopEmpty,
 }
@@ -2511,9 +2514,7 @@ pub(super) fn section_header_glyph(title: &str) -> &'static str {
 pub(crate) fn section_is_collapsed(app: &AppState, title: &str) -> bool {
     let key = format!("{}:{title}", app.sidebar_group_mode.collapse_namespace());
     if title.starts_with(aloops::ALOOP_CLEAN_KEY_PREFIX) {
-        !app.sidebar_presentation
-            .expanded_remote_host_groups
-            .contains(&key)
+        !app.collapsed_sidebar_groups.contains(&key)
     } else {
         app.collapsed_sidebar_groups.contains(&key)
     }

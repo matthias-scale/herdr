@@ -1024,14 +1024,10 @@ impl AppState {
     pub(crate) fn toggle_sidebar_group(&mut self, title: &str) {
         let key = format!("{}:{title}", self.sidebar_group_mode.collapse_namespace());
         if title.starts_with(crate::ui::sidebar::aloops::ALOOP_CLEAN_KEY_PREFIX) {
-            if !self
-                .sidebar_presentation
-                .expanded_remote_host_groups
-                .remove(&key)
-            {
-                self.sidebar_presentation
-                    .expanded_remote_host_groups
-                    .insert(key);
+            // Clean runs are folded by default, so membership represents the
+            // inverse state for this one row kind: an explicit expansion.
+            if !self.collapsed_sidebar_groups.remove(&key) {
+                self.collapsed_sidebar_groups.insert(key);
             }
         } else {
             let collapsed = !self.collapsed_sidebar_groups.contains(&key);

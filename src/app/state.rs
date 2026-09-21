@@ -8637,14 +8637,7 @@ mod tests {
                     "{namespace}:{title}"
                 );
             }
-            for title in [
-                "Snoozed",
-                "Settled",
-                "Fleet",
-                "Runs",
-                "Aloops",
-                "Symphony",
-            ] {
+            for title in ["Snoozed", "Settled", "Fleet", "Runs", "Aloops", "Symphony"] {
                 let key = format!("{namespace}:{title}");
                 if key == "repo:Runs" {
                     assert!(!presentation.collapsed_groups.contains(&key));
