@@ -78,6 +78,9 @@ pub(crate) struct ClientConnection {
     pub(crate) usage_view: Option<crate::app::state::UsageViewState>,
     /// Last tiled-pane geometry rendered for this client. Capacity is reused across frames.
     pub(crate) retained_pane_infos: Vec<crate::layout::PaneInfo>,
+    /// The client resized after its attach-local presentation was last used to
+    /// compute input hit areas.
+    pub(crate) input_geometry_dirty: bool,
     /// Whether pane PTY output owns this client's cursor on its last full frame.
     pub(crate) retained_pane_cursor: bool,
     /// Client-local host Kitty graphics cache.
@@ -164,6 +167,7 @@ impl ClientConnection {
             work_view: None,
             usage_view: None,
             retained_pane_infos: Vec::new(),
+            input_geometry_dirty: false,
             retained_pane_cursor: false,
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
             direct_graphics: false,

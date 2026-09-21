@@ -552,6 +552,65 @@ fn r361_2_first_promoted_client_link_click_uses_its_geometry_on_both_mouse_paths
     assert_promoted_client_first_link_click(true);
 }
 
+fn assert_resized_client_first_link_click(pixel_mouse: bool) {
+    let (mut server, control_rx, (column, row), expected) =
+        promoted_agent_link_fixture(pixel_mouse);
+    assert!(server.handle_server_event(ServerEvent::ClientResize {
+        client_id: 2,
+        cols: 80,
+        rows: 30,
+        cell_width_px: 10,
+        cell_height_px: 20,
+    }));
+
+    let changed = if pixel_mouse {
+        let geometry = crate::input::mouse::HostGeometry::new(80, 30, 800, 600).unwrap();
+        let x = u32::from(column) * 10 + 1;
+        let y = u32::from(row) * 20 + 1;
+        server.handle_server_event(ServerEvent::ClientInputPixels {
+            client_id: 2,
+            data: format!("\x1b[<0;{x};{y}M").into_bytes(),
+            geometry,
+        })
+    } else {
+        server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 2,
+            events: vec![crate::protocol::ClientInputEvent::Mouse {
+                kind: crate::protocol::ClientMouseKind::Down(
+                    crate::protocol::ClientMouseButton::Left,
+                ),
+                column,
+                row,
+                modifiers: 0,
+            }],
+        })
+    };
+
+    assert!(changed);
+    assert!(
+        server.app.apply_notepad_request(),
+        "pixel_mouse={pixel_mouse}"
+    );
+    assert!(server.drain_all_internal_events_with_forwarding());
+    match read_server_message(
+        control_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("resized client clipboard write"),
+    ) {
+        ServerMessage::Clipboard { data } => assert_eq!(
+            data,
+            base64::engine::general_purpose::STANDARD.encode(expected.as_bytes())
+        ),
+        other => panic!("expected clipboard write, got {other:?}"),
+    }
+}
+
+#[test]
+fn r361_2_resize_then_link_click_uses_new_geometry_on_both_mouse_paths() {
+    assert_resized_client_first_link_click(false);
+    assert_resized_client_first_link_click(true);
+}
+
 #[test]
 fn direct_eligibility_is_installed_with_the_client_connection() {
     let mut server = test_headless_server();

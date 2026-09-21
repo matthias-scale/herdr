@@ -326,8 +326,46 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
-    app.view_observed_at = std::time::Instant::now();
-    app.view_observed_unix_s = crate::app::settled::unix_seconds(std::time::SystemTime::now());
+    compute_view_internal_at(
+        app,
+        terminal_runtimes,
+        area,
+        resize_panes,
+        cell_size,
+        std::time::Instant::now(),
+        crate::app::settled::unix_seconds(std::time::SystemTime::now()),
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn compute_view_at(
+    app: &mut AppState,
+    area: Rect,
+    observed_at: std::time::Instant,
+    observed_unix_s: u64,
+) {
+    compute_view_internal_at(
+        app,
+        &TerminalRuntimeRegistry::new(),
+        area,
+        true,
+        crate::kitty_graphics::HostCellSize::default(),
+        observed_at,
+        observed_unix_s,
+    );
+}
+
+fn compute_view_internal_at(
+    app: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    area: Rect,
+    resize_panes: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+    observed_at: std::time::Instant,
+    observed_unix_s: u64,
+) {
+    app.view_observed_at = observed_at;
+    app.view_observed_unix_s = observed_unix_s;
     app.reconcile_sidebar_presentation();
     app.reconcile_dock_context_tabs();
     if !app.dock_collapsed {
@@ -644,7 +682,7 @@ fn compute_view_internal(
         .sync_scroll(notepad::notepad_body_rect(notepad_rect).height);
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
-    let visible_notepad_agent_age_instants = if app.notepad.agent_tab {
+    let visible_notepad_agent_ages = if app.notepad.agent_tab {
         let body = notepad::notepad_body_rect(notepad_rect);
         notepad_agent_rows
             .iter()
@@ -655,10 +693,9 @@ fn compute_view_internal(
                     .duration_since(std::time::SystemTime::UNIX_EPOCH)
                     .ok()?
                     .as_secs();
-                app.view_observed_at
-                    .checked_sub(std::time::Duration::from_secs(
-                        app.view_observed_unix_s.saturating_sub(observed_unix_s),
-                    ))
+                Some(std::time::Duration::from_secs(
+                    app.view_observed_unix_s.saturating_sub(observed_unix_s),
+                ))
             })
             .collect()
     } else {
@@ -817,7 +854,7 @@ fn compute_view_internal(
         agent_card_areas,
         sidebar_hover_targets,
         visible_agent_activity_instants,
-        visible_notepad_agent_age_instants,
+        visible_notepad_agent_ages,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
@@ -1125,7 +1162,7 @@ fn compute_mobile_view(
         agent_card_areas: Vec::new(),
         sidebar_hover_targets: Vec::new(),
         visible_agent_activity_instants: Vec::new(),
-        visible_notepad_agent_age_instants: Vec::new(),
+        visible_notepad_agent_ages: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
         tab_scroll_left_hit_area: Rect::default(),

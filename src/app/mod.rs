@@ -1032,7 +1032,7 @@ impl App {
                 agent_card_areas: Vec::new(),
                 sidebar_hover_targets: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
-                visible_notepad_agent_age_instants: Vec::new(),
+                visible_notepad_agent_ages: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),

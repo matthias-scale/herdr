@@ -645,14 +645,18 @@ pub(crate) struct HyperlinkSpan {
     pub(crate) uri: String,
 }
 
-// Keep span traversal in step with Ratatui's cell-width policy and Herdr's
-// terminal encoder, which render halfwidth sound marks as their own cells.
-fn rendered_cell_width(text: &str) -> usize {
-    unicode_width::UnicodeWidthStr::width(text).saturating_add(
-        text.chars()
-            .filter(|ch| matches!(ch, '\u{ff9e}' | '\u{ff9f}'))
-            .count(),
-    )
+/// Width used by both semantic hyperlink traversal and terminal ANSI output.
+/// Ratatui groups a halfwidth kana and its voiced mark into one symbol while
+/// terminals advance once for each halfwidth codepoint.
+pub(crate) fn rendered_text_width(text: &str) -> usize {
+    let voiced_kana_pairs = text
+        .chars()
+        .zip(text.chars().skip(1))
+        .filter(|(base, mark)| {
+            ('\u{ff66}'..='\u{ff9d}').contains(base) && matches!(mark, '\u{ff9e}' | '\u{ff9f}')
+        })
+        .count();
+    unicode_width::UnicodeWidthStr::width(text).saturating_add(voiced_kana_pairs)
 }
 
 impl FrameData {
@@ -695,7 +699,7 @@ impl FrameData {
         }
         for span in spans {
             let (mut x, y) = span.position;
-            let label_width = rendered_cell_width(span.label.as_str());
+            let label_width = rendered_text_width(span.label.as_str());
             let right = x.saturating_add(label_width.min(u16::MAX as usize) as u16);
             while x < right {
                 let Some(cell) = buffer.cell((x, y)) else {
@@ -703,7 +707,7 @@ impl FrameData {
                 };
                 let symbol = cell.symbol();
                 hyperlink_by_position.insert((x, y), (symbol, span.uri.as_str()));
-                let cell_width = rendered_cell_width(symbol).max(1);
+                let cell_width = rendered_text_width(symbol).max(1);
                 x = x.saturating_add(cell_width.min(u16::MAX as usize) as u16);
             }
         }

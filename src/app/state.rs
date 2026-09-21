@@ -4,7 +4,7 @@ use crate::config::{
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::detect::AgentState;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
@@ -2302,8 +2302,9 @@ pub struct ViewState {
     /// indexes them.
     pub(crate) sidebar_hover_targets: Vec<SidebarHoverTarget>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
-    /// Visible notepad ages use the compact per-second sub-minute label.
-    pub(crate) visible_notepad_agent_age_instants: Vec<Instant>,
+    /// Elapsed wall-clock ages for visible notepad rows. Keeping the elapsed
+    /// value avoids constructing an `Instant` before host uptime on Windows.
+    pub(crate) visible_notepad_agent_ages: Vec<Duration>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
     pub tab_scroll_left_hit_area: Rect,
@@ -5814,9 +5815,9 @@ impl AppState {
             .min();
         let notepad = self
             .view
-            .visible_notepad_agent_age_instants
+            .visible_notepad_agent_ages
             .iter()
-            .filter_map(|observed_at| crate::activity_age::next_change_at(Some(*observed_at), now))
+            .filter_map(|age| crate::activity_age::next_change_after_elapsed(*age, now))
             .min();
         sidebar.into_iter().chain(notepad).min()
     }
@@ -6296,7 +6297,7 @@ impl AppState {
                 agent_card_areas: Vec::new(),
                 sidebar_hover_targets: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
-                visible_notepad_agent_age_instants: Vec::new(),
+                visible_notepad_agent_ages: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),

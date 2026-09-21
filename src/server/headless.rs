@@ -4205,10 +4205,20 @@ impl HeadlessServer {
         if let Some(view) = &mut usage_view {
             self.app.state.swap_usage_view(view);
         }
-        if foreground_changed {
+        let input_geometry_dirty = source_is_full_app
+            && self
+                .clients
+                .get(&client_id)
+                .is_some_and(|client| client.input_geometry_dirty);
+        if foreground_changed || input_geometry_dirty {
             // Promotion changes the effective size, but input geometry also
-            // depends on the source client's attach-local presentation.
+            // depends on the source client's attach-local presentation. A
+            // resize computes shared runtime geometry before that presentation
+            // is swapped in, so the first input after it must refresh hit areas.
             self.resize_shared_runtime_to_effective_size_before_input();
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.input_geometry_dirty = false;
+            }
         }
         pomodoro_changed |= self.route_full_app_human_events(client_id, events, false);
         if pomodoro_changed {
@@ -4526,8 +4536,15 @@ impl HeadlessServer {
                     .state
                     .notepad
                     .swap_presentation(&mut notepad_presentation);
-                if foreground_changed {
+                let input_geometry_dirty = self
+                    .clients
+                    .get(&client_id)
+                    .is_some_and(|client| client.input_geometry_dirty);
+                if foreground_changed || input_geometry_dirty {
                     self.resize_shared_runtime_to_effective_size_before_input();
+                    if let Some(client) = self.clients.get_mut(&client_id) {
+                        client.input_geometry_dirty = false;
+                    }
                 }
                 let changed = self.app.route_client_pixel_mouse_with_presentation(
                     client_id,
@@ -4821,6 +4838,7 @@ impl HeadlessServer {
                 }
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     client.terminal_size = (cols, rows);
+                    client.input_geometry_dirty = true;
                     let observed = crate::kitty_graphics::HostCellSize {
                         width_px: cell_width_px,
                         height_px: cell_height_px,

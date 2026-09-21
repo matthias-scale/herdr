@@ -553,7 +553,7 @@ mod tests {
     use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
     use ratatui::{backend::TestBackend, Terminal};
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, Instant, SystemTime};
 
     const BASE_SECS: u64 = 1_760_000_000;
 
@@ -717,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn r361_8_agent_age_older_than_monotonic_clock_does_not_schedule_refresh() {
+    fn r361_9_agent_age_without_monotonic_instant_still_schedules_refresh() {
         let (mut app, pane_id) = app_with_agent();
         app.agent_states
             .report(
@@ -728,25 +728,36 @@ mod tests {
                     tasks: None,
                     subagents: Vec::new(),
                 },
-                SystemTime::UNIX_EPOCH - Duration::from_secs(1),
+                base(),
             )
             .expect("valid report");
         app.notepad.select_agent_tab();
 
-        crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
+        let observed_at = Instant::now();
+        crate::ui::compute_view_at(
+            &mut app,
+            Rect::new(0, 0, 120, 40),
+            observed_at,
+            BASE_SECS + 75,
+        );
         app.view.visible_agent_activity_instants.clear();
         assert!(
             app.view
                 .notepad_agent_rows
                 .iter()
                 .any(|row| row.observed_at.is_some()),
-            "the old status age must still render"
+            "the status age must still render"
+        );
+        assert_eq!(
+            app.view.visible_notepad_agent_ages,
+            vec![Duration::from_secs(75)],
+            "view computation keeps the wall-clock age without backdating an Instant"
         );
 
         assert_eq!(
-            app.next_agent_activity_age_change(app.view_observed_at),
-            None,
-            "an age older than host uptime cannot use a monotonic refresh deadline"
+            app.next_agent_activity_age_change(observed_at),
+            Some(observed_at + Duration::from_secs(45)),
+            "an elapsed wall-clock age does not need an Instant before host uptime"
         );
     }
 
@@ -955,6 +966,83 @@ mod tests {
                 .any(|span| span.uri == first.uri && span.position.1 == y - 1),
             "scrolling moves the row's hyperlink cells up with it"
         );
+    }
+
+    #[test]
+    fn r361_7_rendered_kana_link_spans_match_ansi_cell_width() {
+        let (mut app, pane_id) = app_with_agent();
+        let links = [
+            "https://example.com/ｶx".to_owned(),
+            "https://example.com/ｶ\u{ff9e}x".to_owned(),
+        ];
+        app.agent_states
+            .observe_links(pane_id, links.clone(), AgentLinkSource::Output, base());
+        app.notepad.height = 12;
+        app.notepad.select_agent_tab();
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+        let spans = hyperlink_spans(&app);
+        assert!(spans.iter().any(|span| span.label == "ｶx"));
+        assert!(spans.iter().any(|span| span.label == "ｶ\u{ff9e}x"));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::render(&app, frame))
+            .expect("render");
+        let frame = crate::protocol::FrameData::from_ratatui_buffer_with_hyperlinks_and_spans(
+            terminal.backend().buffer(),
+            None,
+            &[],
+            &spans,
+        );
+        let ansi = crate::protocol::render_ansi::BlitEncoder::new()
+            .encode(&frame, true)
+            .bytes;
+
+        for span in spans.iter().filter(|span| links.contains(&span.uri)) {
+            let width = crate::protocol::rendered_text_width(&span.label);
+            let right = span.position.0 + u16::try_from(width).expect("short rendered label");
+            let hyperlink = frame.cells[usize::from(span.position.1) * usize::from(frame.width)
+                + usize::from(span.position.0)]
+            .hyperlink;
+            let mut x = span.position.0;
+            let mut rendered_symbols = Vec::new();
+            while x < right {
+                let cell = &frame.cells
+                    [usize::from(span.position.1) * usize::from(frame.width) + usize::from(x)];
+                assert_eq!(cell.hyperlink, hyperlink, "linked symbol at column {x}");
+                rendered_symbols.push(cell.symbol.as_bytes());
+                x += u16::try_from(crate::protocol::rendered_text_width(&cell.symbol).max(1))
+                    .expect("cell width");
+            }
+            assert_eq!(x, right, "span and rendered cells must end together");
+            let after = &frame.cells
+                [usize::from(span.position.1) * usize::from(frame.width) + usize::from(right)];
+            assert_eq!(
+                after.hyperlink, None,
+                "the padding after the label is unlinked"
+            );
+
+            let open = format!("\x1b]8;;{}\x1b\\", span.uri);
+            let open_at = ansi
+                .windows(open.len())
+                .position(|window| window == open.as_bytes())
+                .expect("ANSI output opens the rendered link");
+            let linked_output = &ansi[open_at + open.len()..];
+            let close_at = linked_output
+                .windows(b"\x1b]8;;\x1b\\".len())
+                .position(|window| window == b"\x1b]8;;\x1b\\")
+                .expect("ANSI output closes the link");
+            let linked_output = &linked_output[..close_at];
+            let mut written = 0;
+            for symbol in rendered_symbols {
+                let symbol_at = linked_output[written..]
+                    .windows(symbol.len())
+                    .position(|window| window == symbol)
+                    .expect("ANSI output writes every linked rendered symbol");
+                written += symbol_at + symbol.len();
+            }
+        }
     }
 
     #[test]
