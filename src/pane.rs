@@ -4650,6 +4650,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ignored_zero_width_text_matches_ghostty_rendered_text() {
+        let rendered_uri = "https://zero-width.example.test/path";
+        let stream = "https://zero-\u{200b}width.example.test/path\n";
+
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+            let rendered = runtime.visible_text();
+            assert!(
+                rendered.contains(rendered_uri),
+                "Ghostty omitted the zero-width codepoint at split {split}; rendered={rendered:?}"
+            );
+            assert!(
+                !rendered.contains('\u{200b}'),
+                "Ghostty rendered the zero-width codepoint at split {split}; rendered={rendered:?}"
+            );
+
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("rendered URL at split {split}"));
+            assert_eq!(
+                links.output_urls,
+                vec![rendered_uri],
+                "link capture must match Ghostty-rendered text at split {split}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn dirty_link_snapshot_includes_osc8_hyperlink_target() {
         let uri = "https://osc.example.test/target";
         let screen = format!("\x1b]8;;{uri}\x1b\\label\x1b]8;;\x1b\\");
