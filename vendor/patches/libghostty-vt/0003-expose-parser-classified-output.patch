@@ -1,8 +1,8 @@
 diff --git a/vendor/libghostty-vt/include/ghostty/vt/terminal.h b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
-index 9bb961d3..dd8b0246 100644
+index 9bb961d3..7dedbc3d 100644
 --- a/vendor/libghostty-vt/include/ghostty/vt/terminal.h
 +++ b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
-@@ -467,6 +467,39 @@ typedef GhosttyClipboardWriteResult (*GhosttyTerminalClipboardWriteFn)(
+@@ -467,6 +467,42 @@ typedef GhosttyClipboardWriteResult (*GhosttyTerminalClipboardWriteFn)(
      void* userdata,
      const GhosttyClipboardWrite* write);
  
@@ -22,6 +22,9 @@ index 9bb961d3..dd8b0246 100644
 +
 +  /** Non-print cursor move not already a separator; `pre,post,same-row`. */
 +  GHOSTTY_TERMINAL_PARSED_OUTPUT_CURSOR_TRANSITION = 4,
++
++  /** A non-print action may have replaced or removed rendered cells. */
++  GHOSTTY_TERMINAL_PARSED_OUTPUT_RENDER_INVALIDATION = 5,
 +  GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 +} GhosttyTerminalParsedOutputKind;
 +
@@ -42,7 +45,7 @@ index 9bb961d3..dd8b0246 100644
  /**
   * Callback function type for color scheme queries (CSI ? 996 n).
   *
-@@ -887,6 +920,14 @@ typedef enum GHOSTTY_ENUM_TYPED {
+@@ -887,6 +923,14 @@ typedef enum GHOSTTY_ENUM_TYPED {
     * Input type: GhosttyTerminalClipboardWriteFn
     */
    GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE = 26,
@@ -469,10 +472,10 @@ index efb06ecd..6e09a4de 100644
  
          /// Finalize and dispatch a CSI directly from parser state for
 diff --git a/vendor/libghostty-vt/src/terminal/stream_terminal.zig b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
-index 91cfb21c..2c00d670 100644
+index 91cfb21c..00075a1a 100644
 --- a/vendor/libghostty-vt/src/terminal/stream_terminal.zig
 +++ b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
-@@ -23,6 +23,17 @@ const log = std.log.scoped(.stream_terminal);
+@@ -23,6 +23,18 @@ const log = std.log.scoped(.stream_terminal);
  /// a Terminal and updates the Terminal state.
  pub const Stream = stream.Stream(Handler);
  
@@ -484,13 +487,14 @@ index 91cfb21c..2c00d670 100644
 +    hyperlink = 2,
 +    boundary = 3,
 +    cursor_transition = 4,
++    render_invalidation = 5,
 +    _,
 +};
 +
  /// A stream handler that updates terminal state. By default, it is
  /// readonly in the sense that it only updates terminal state and ignores
  /// all other sequences that require a response or otherwise have side
-@@ -46,6 +57,10 @@ pub const Handler = struct {
+@@ -46,6 +58,10 @@ pub const Handler = struct {
      /// the kitty graphics protocol.
      apc_handler: apc.Handler = .{},
  
@@ -501,7 +505,7 @@ index 91cfb21c..2c00d670 100644
      /// Default cursor style used by DECSCUSR reset (CSI 0 q).
      default_cursor: bool = true,
      default_cursor_style: Screen.CursorStyle = .block,
-@@ -105,6 +120,10 @@ pub const Handler = struct {
+@@ -105,6 +121,10 @@ pub const Handler = struct {
          /// library has no way to mediate that with user consent.
          clipboard_write: ?*const fn (*Handler, clipboard.Write) clipboard.WriteResult,
  
@@ -512,7 +516,7 @@ index 91cfb21c..2c00d670 100644
          /// Called in response to an XTVERSION query. Returns the version
          /// string to report (e.g. "ghostty 1.2.3"). The returned memory
          /// must be valid for the lifetime of the call. The maximum length
-@@ -117,6 +136,7 @@ pub const Handler = struct {
+@@ -117,6 +137,7 @@ pub const Handler = struct {
          pub const readonly: Effects = .{
              .bell = null,
              .clipboard_write = null,
@@ -520,7 +524,7 @@ index 91cfb21c..2c00d670 100644
              .color_scheme = null,
              .device_attributes = null,
              .enquiry = null,
-@@ -143,9 +163,205 @@ pub const Handler = struct {
+@@ -143,11 +164,353 @@ pub const Handler = struct {
          comptime action: Action.Tag,
          value: Action.Value(action),
      ) void {
@@ -540,7 +544,7 @@ index 91cfb21c..2c00d670 100644
          self.vtFallible(action, value) catch |err| {
              log.warn("error handling VT action action={} err={}", .{ action, err });
 +            return;
-         };
++        };
 +        self.emitParsedOutput(action, value, cursor_before);
 +    }
 +
@@ -583,15 +587,27 @@ index 91cfb21c..2c00d670 100644
 +    ) void {
 +        const callback = self.effects.parsed_output orelse return;
 +        switch (action) {
-+            .horizontal_tab, .linefeed, .full_reset => {
-+                callback(self, .separator, "");
-+                return;
-+            },
 +            .start_hyperlink => {
 +                self.parsed_hyperlink_pending = value.uri;
 +                return;
 +            },
 +            else => {},
++        }
++        switch (parsedRenderEffect(action, value)) {
++            .none => {},
++            .separator => {
++                callback(self, .separator, "");
++                return;
++            },
++            .invalidate => {
++                callback(self, .render_invalidation, "");
++                return;
++            },
++            .invalidate_separator => {
++                callback(self, .render_invalidation, "");
++                callback(self, .separator, "");
++                return;
++            },
 +        }
 +        const cursor_after = self.parsedCursorSnapshot();
 +        if (!cursor_before.eql(cursor_after)) {
@@ -645,6 +661,140 @@ index 91cfb21c..2c00d670 100644
 +        };
 +    }
 +
++    const ParsedRenderEffect = enum {
++        none,
++        separator,
++        invalidate,
++        invalidate_separator,
++    };
++
++    /// Classifies post-action rendering effects that cursor comparison alone
++    /// cannot represent. This switch is deliberately exhaustive so every new
++    /// parser action must declare whether it can invalidate rendered cells.
++    fn parsedRenderEffect(
++        comptime action: Action.Tag,
++        value: Action.Value(action),
++    ) ParsedRenderEffect {
++        return switch (action) {
++            .horizontal_tab, .linefeed => .separator,
++
++            // These actions can erase, shift, replace, or scroll cells while
++            // leaving the cursor coordinates unchanged.
++            .erase_display_below,
++            .erase_display_above,
++            .erase_display_complete,
++            .erase_display_scrollback,
++            .erase_display_scroll_complete,
++            .erase_line_right,
++            .erase_line_left,
++            .erase_line_complete,
++            .erase_line_right_unless_pending_wrap,
++            .delete_chars,
++            .erase_chars,
++            .insert_lines,
++            .insert_blanks,
++            .delete_lines,
++            .scroll_up,
++            .scroll_down,
++            .index,
++            .next_line,
++            .reverse_index,
++            .decaln,
++            => .invalidate,
++
++            // Surface replacement is also a lexical boundary, allowing text
++            // rendered on the newly selected surface to recover immediately.
++            .active_status_display, .full_reset => .invalidate_separator,
++
++            // Only screen switches and DECCOLM can replace the rendered cells;
++            // other mode changes affect future input or presentation styling.
++            .set_mode,
++            .reset_mode,
++            .restore_mode,
++            => switch (value.mode) {
++                .alt_screen_legacy,
++                .alt_screen,
++                .alt_screen_save_cursor_clear_enter,
++                .@"132_column",
++                => .invalidate_separator,
++                else => .none,
++            },
++
++            // Printable actions are handled before this function. The rest do
++            // not replace or remove text cells; cursor changes are compared
++            // from Ghostty snapshots after the action executes.
++            .print,
++            .print_slice,
++            .print_repeat,
++            .bell,
++            .backspace,
++            .horizontal_tab_back,
++            .carriage_return,
++            .enquiry,
++            .invoke_charset,
++            .cursor_up,
++            .cursor_down,
++            .cursor_left,
++            .cursor_right,
++            .cursor_col,
++            .cursor_row,
++            .cursor_col_relative,
++            .cursor_row_relative,
++            .cursor_pos,
++            .cursor_style,
++            .tab_clear_current,
++            .tab_clear_all,
++            .tab_set,
++            .tab_reset,
++            .save_mode,
++            .request_mode,
++            .request_mode_unknown,
++            .top_and_bottom_margin,
++            .left_and_right_margin,
++            .left_and_right_margin_ambiguous,
++            .save_cursor,
++            .restore_cursor,
++            .modify_key_format,
++            .mouse_shift_capture,
++            .protected_mode_off,
++            .protected_mode_iso,
++            .protected_mode_dec,
++            .size_report,
++            .title_push,
++            .title_pop,
++            .xtversion,
++            .device_attributes,
++            .device_status,
++            .kitty_keyboard_query,
++            .kitty_keyboard_push,
++            .kitty_keyboard_pop,
++            .kitty_keyboard_set,
++            .kitty_keyboard_set_or,
++            .kitty_keyboard_set_not,
++            .dcs_hook,
++            .dcs_put,
++            .dcs_unhook,
++            .apc_start,
++            .apc_end,
++            .apc_put,
++            .apc_put_slice,
++            .end_hyperlink,
++            .window_title,
++            .report_pwd,
++            .show_desktop_notification,
++            .progress_report,
++            .start_hyperlink,
++            .clipboard_contents,
++            .mouse_shape,
++            .configure_charset,
++            .set_attribute,
++            .kitty_color_report,
++            .color_operation,
++            .semantic_prompt,
++            => .none,
+         };
+     }
+
 +    /// Handle printable actions while reporting only codepoints the terminal
 +    /// accepted into its rendered text. Ghostty's normal slice fast path is
 +    /// preserved; its tracked fallback owns every suppression decision.
@@ -723,6 +873,8 @@ index 91cfb21c..2c00d670 100644
 +            if (len == 0) return;
 +            callback(self, .text, buf[0..len]);
 +        }
-     }
- 
++    }
++
      inline fn vtFallible(
+         self: *Handler,
+         comptime action: Action.Tag,

@@ -569,6 +569,25 @@ impl LinkExtractionGate {
         self.active.store(true, Ordering::Release);
     }
 
+    /// Fails the open candidate closed after Ghostty mutates rendered cells.
+    pub(crate) fn observe_parsed_render_invalidation(&self) {
+        self.record_parsed_event(0);
+        let Ok(_processing) = self.processing.lock() else {
+            return;
+        };
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
+        if !self.active.load(Ordering::Acquire) {
+            let (prefix, _) = self.marker_tail.load();
+            pending.scanner.restore_prefix(prefix);
+            self.marker_tail.store(&[]);
+        }
+        pending.scanner.fail_closed_until_separator();
+        pending.dirty = true;
+        self.active.store(true, Ordering::Release);
+    }
+
     /// Receives a complete OSC 8 target from Ghostty's parser.
     pub(crate) fn observe_parsed_hyperlink(&self, bytes: &[u8]) {
         self.record_parsed_event(bytes.len());
@@ -833,19 +852,11 @@ impl LinkStreamScanner {
         transition: Option<crate::ghostty::ParsedCursorTransition>,
     ) {
         let Some(transition) = transition else {
-            if let Some(rewrite) = self.rendered_rewrite.as_mut() {
-                rewrite.fail_closed();
-            } else {
-                self.visible = VisibleLinkState::DiscardUrl(Vec::new());
-            }
+            self.fail_closed_until_separator();
             return;
         };
         if !transition.same_row {
-            if let Some(rewrite) = self.rendered_rewrite.as_mut() {
-                rewrite.fail_closed();
-            } else {
-                self.visible = VisibleLinkState::DiscardUrl(Vec::new());
-            }
+            self.fail_closed_until_separator();
             return;
         }
         let cursor_before = transition.before_column;
@@ -899,6 +910,14 @@ impl LinkStreamScanner {
             }
         });
         rewrite.move_cursor(cursor_before, cursor_after, validate_modeled_cursor);
+    }
+
+    fn fail_closed_until_separator(&mut self) {
+        if let Some(rewrite) = self.rendered_rewrite.as_mut() {
+            rewrite.fail_closed();
+        } else {
+            self.visible = VisibleLinkState::DiscardUrl(Vec::new());
+        }
     }
 
     fn finish_rendered_rewrite(&mut self, links: &mut VecDeque<DetectedAgentLink>) {
@@ -1717,6 +1736,9 @@ mod tests {
                 }
                 crate::ghostty::ParsedOutput::CursorTransition(transition) => {
                     gate_for_callback.observe_parsed_cursor_transition(transition);
+                }
+                crate::ghostty::ParsedOutput::RenderInvalidation => {
+                    gate_for_callback.observe_parsed_render_invalidation();
                 }
             });
             Self {

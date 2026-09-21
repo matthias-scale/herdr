@@ -473,6 +473,7 @@ pub(crate) enum ParsedOutput<'a> {
     Hyperlink(&'a [u8]),
     Boundary,
     CursorTransition(Option<ParsedCursorTransition>),
+    RenderInvalidation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -531,6 +532,9 @@ unsafe extern "C" fn parsed_output_trampoline(
             callback(ParsedOutput::CursorTransition(parse_cursor_transition(
                 bytes,
             )));
+        }
+        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_RENDER_INVALIDATION => {
+            callback(ParsedOutput::RenderInvalidation);
         }
         _ => {}
     }

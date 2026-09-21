@@ -31,6 +31,7 @@ pub const ParsedOutputKind = enum(c_int) {
     hyperlink = 2,
     boundary = 3,
     cursor_transition = 4,
+    render_invalidation = 5,
     _,
 };
 
@@ -222,15 +223,27 @@ pub const Handler = struct {
     ) void {
         const callback = self.effects.parsed_output orelse return;
         switch (action) {
-            .horizontal_tab, .linefeed, .full_reset => {
-                callback(self, .separator, "");
-                return;
-            },
             .start_hyperlink => {
                 self.parsed_hyperlink_pending = value.uri;
                 return;
             },
             else => {},
+        }
+        switch (parsedRenderEffect(action, value)) {
+            .none => {},
+            .separator => {
+                callback(self, .separator, "");
+                return;
+            },
+            .invalidate => {
+                callback(self, .render_invalidation, "");
+                return;
+            },
+            .invalidate_separator => {
+                callback(self, .render_invalidation, "");
+                callback(self, .separator, "");
+                return;
+            },
         }
         const cursor_after = self.parsedCursorSnapshot();
         if (!cursor_before.eql(cursor_after)) {
@@ -281,6 +294,140 @@ pub const Handler = struct {
             .screen = @intFromPtr(screen),
             .row_node = @intFromPtr(cursor.page_pin.node),
             .row_offset = cursor.page_pin.y,
+        };
+    }
+
+    const ParsedRenderEffect = enum {
+        none,
+        separator,
+        invalidate,
+        invalidate_separator,
+    };
+
+    /// Classifies post-action rendering effects that cursor comparison alone
+    /// cannot represent. This switch is deliberately exhaustive so every new
+    /// parser action must declare whether it can invalidate rendered cells.
+    fn parsedRenderEffect(
+        comptime action: Action.Tag,
+        value: Action.Value(action),
+    ) ParsedRenderEffect {
+        return switch (action) {
+            .horizontal_tab, .linefeed => .separator,
+
+            // These actions can erase, shift, replace, or scroll cells while
+            // leaving the cursor coordinates unchanged.
+            .erase_display_below,
+            .erase_display_above,
+            .erase_display_complete,
+            .erase_display_scrollback,
+            .erase_display_scroll_complete,
+            .erase_line_right,
+            .erase_line_left,
+            .erase_line_complete,
+            .erase_line_right_unless_pending_wrap,
+            .delete_chars,
+            .erase_chars,
+            .insert_lines,
+            .insert_blanks,
+            .delete_lines,
+            .scroll_up,
+            .scroll_down,
+            .index,
+            .next_line,
+            .reverse_index,
+            .decaln,
+            => .invalidate,
+
+            // Surface replacement is also a lexical boundary, allowing text
+            // rendered on the newly selected surface to recover immediately.
+            .active_status_display, .full_reset => .invalidate_separator,
+
+            // Only screen switches and DECCOLM can replace the rendered cells;
+            // other mode changes affect future input or presentation styling.
+            .set_mode,
+            .reset_mode,
+            .restore_mode,
+            => switch (value.mode) {
+                .alt_screen_legacy,
+                .alt_screen,
+                .alt_screen_save_cursor_clear_enter,
+                .@"132_column",
+                => .invalidate_separator,
+                else => .none,
+            },
+
+            // Printable actions are handled before this function. The rest do
+            // not replace or remove text cells; cursor changes are compared
+            // from Ghostty snapshots after the action executes.
+            .print,
+            .print_slice,
+            .print_repeat,
+            .bell,
+            .backspace,
+            .horizontal_tab_back,
+            .carriage_return,
+            .enquiry,
+            .invoke_charset,
+            .cursor_up,
+            .cursor_down,
+            .cursor_left,
+            .cursor_right,
+            .cursor_col,
+            .cursor_row,
+            .cursor_col_relative,
+            .cursor_row_relative,
+            .cursor_pos,
+            .cursor_style,
+            .tab_clear_current,
+            .tab_clear_all,
+            .tab_set,
+            .tab_reset,
+            .save_mode,
+            .request_mode,
+            .request_mode_unknown,
+            .top_and_bottom_margin,
+            .left_and_right_margin,
+            .left_and_right_margin_ambiguous,
+            .save_cursor,
+            .restore_cursor,
+            .modify_key_format,
+            .mouse_shift_capture,
+            .protected_mode_off,
+            .protected_mode_iso,
+            .protected_mode_dec,
+            .size_report,
+            .title_push,
+            .title_pop,
+            .xtversion,
+            .device_attributes,
+            .device_status,
+            .kitty_keyboard_query,
+            .kitty_keyboard_push,
+            .kitty_keyboard_pop,
+            .kitty_keyboard_set,
+            .kitty_keyboard_set_or,
+            .kitty_keyboard_set_not,
+            .dcs_hook,
+            .dcs_put,
+            .dcs_unhook,
+            .apc_start,
+            .apc_end,
+            .apc_put,
+            .apc_put_slice,
+            .end_hyperlink,
+            .window_title,
+            .report_pwd,
+            .show_desktop_notification,
+            .progress_report,
+            .start_hyperlink,
+            .clipboard_contents,
+            .mouse_shape,
+            .configure_charset,
+            .set_attribute,
+            .kitty_color_report,
+            .color_operation,
+            .semantic_prompt,
+            => .none,
         };
     }
 

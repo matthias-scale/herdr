@@ -112,6 +112,9 @@ Every non-print action that changes the cursor and is not already a separator
 emits Ghostty's authoritative pre- and post-action columns plus rendered-row
 identity. Herdr can therefore reconcile same-row overwrites, including CSI
 positioning and nonzero left margins, while failing closed across row changes.
+An exhaustive Ghostty-side action classification also invalidates open
+candidates when erase, insert/delete, scrolling, screen/status switching, or
+reset actions can replace cells without moving the cursor.
 
 remove when: the vendored source exposes equivalent post-parse text and OSC 8
 events, including confirmed BEL, 8-bit ST, and split `ESC \\` termination, with
@@ -119,7 +122,8 @@ bounded 8 KiB targets and suppression for non-rendered status-display text and
 discarded codepoints, charset-mapped glyph reporting, and continuity across
 non-rendering controls, plus generic post-action cursor transitions with
 rendered-row identity for non-print actions not already classified as
-separators, and the Herdr visibility regressions pass without this patch.
+separators and render invalidations for all cell-mutating non-print actions,
+and the Herdr visibility regressions pass without this patch.
 
 verification:
 

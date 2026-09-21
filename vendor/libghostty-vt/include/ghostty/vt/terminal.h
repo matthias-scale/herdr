@@ -483,6 +483,9 @@ typedef enum GHOSTTY_ENUM_TYPED {
 
   /** Non-print cursor move not already a separator; `pre,post,same-row`. */
   GHOSTTY_TERMINAL_PARSED_OUTPUT_CURSOR_TRANSITION = 4,
+
+  /** A non-print action may have replaced or removed rendered cells. */
+  GHOSTTY_TERMINAL_PARSED_OUTPUT_RENDER_INVALIDATION = 5,
   GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalParsedOutputKind;
 

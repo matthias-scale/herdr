@@ -4898,6 +4898,28 @@ mod tests {
             assert!(!links.output_urls.iter().any(|url| url == stale_url));
             assert!(!links.output_urls.iter().any(|url| url == ignored_url));
         }
+
+        let erased_url = "https://erased-by-csi.example/path";
+        let recovered_url = "https://after-erased-line.example/path";
+        let stream = format!("{erased_url}\x1b[2K\n{recovered_url}\n");
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+            let rendered = runtime.visible_text();
+            assert!(
+                !rendered.contains(erased_url) && rendered.contains(recovered_url),
+                "Ghostty erased the CSI 2K row and rendered recovery at split {split}: {rendered:?}"
+            );
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("recovery URL after CSI 2K at split {split}"));
+            assert_eq!(links.output_urls, [recovered_url], "split {split}");
+            assert!(!links.output_urls.iter().any(|url| url == erased_url));
+        }
     }
 
     #[tokio::test]

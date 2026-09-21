@@ -1108,6 +1108,9 @@ impl GhosttyPaneTerminal {
                 crate::ghostty::ParsedOutput::CursorTransition(transition) => {
                     gate.observe_parsed_cursor_transition(transition);
                 }
+                crate::ghostty::ParsedOutput::RenderInvalidation => {
+                    gate.observe_parsed_render_invalidation();
+                }
             });
     }
 
