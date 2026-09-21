@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::sync::Mutex;
@@ -14,11 +14,7 @@ use crate::layout::PaneId;
 
 pub(crate) const MAX_LINKS: usize = 200;
 
-const LINK_LOOKBEHIND_BYTES: usize = 256;
-// Ingest retains at most 2 MiB: the first and last 1 MiB when output overflows.
-// The middle and any open sequence crossing either cut are dropped.
-const MAX_PENDING_LINK_BYTES: usize = 2 * 1024 * 1024;
-const STAGING_WINDOW_BYTES: usize = MAX_PENDING_LINK_BYTES / 2;
+#[cfg(test)]
 const MAX_OPEN_SEQUENCE_BYTES: usize = 8 * 1024;
 // Publish complete URLs through 8 KiB. Once a URL exceeds this bound, discard the
 // entire open sequence until its terminator so no printed prefix can escape.
@@ -27,6 +23,11 @@ const MAX_URL_BYTES: usize = 8 * 1024;
 // URL when the scheme before `://` is longer than 64 bytes.
 const MAX_SCHEME_BYTES: usize = 64;
 const MAX_MARKER_TAIL_BYTES: usize = MAX_SCHEME_BYTES + 2;
+const MAX_SCHEME_CANDIDATE_BYTES: usize = MAX_SCHEME_BYTES + 3;
+#[cfg(test)]
+const LARGE_TEST_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+#[cfg(test)]
+const OLD_STAGING_BOUNDARY_BYTES: usize = LARGE_TEST_OUTPUT_BYTES / 2;
 
 #[derive(Debug)]
 pub(crate) struct LinkExtractionGate {
@@ -38,10 +39,6 @@ pub(crate) struct LinkExtractionGate {
     extractions: AtomicU64,
     #[cfg(test)]
     lock_acquisitions: AtomicU64,
-    #[cfg(test)]
-    parse_passes: AtomicU64,
-    #[cfg(test)]
-    parses_outside_processing: AtomicU64,
     #[cfg(test)]
     scanned_bytes: AtomicU64,
     #[cfg(test)]
@@ -59,10 +56,6 @@ impl Default for LinkExtractionGate {
             extractions: AtomicU64::new(0),
             #[cfg(test)]
             lock_acquisitions: AtomicU64::new(0),
-            #[cfg(test)]
-            parse_passes: AtomicU64::new(0),
-            #[cfg(test)]
-            parses_outside_processing: AtomicU64::new(0),
             #[cfg(test)]
             scanned_bytes: AtomicU64::new(0),
             #[cfg(test)]
@@ -151,84 +144,85 @@ impl AtomicMarkerTail {
 
 #[derive(Debug, Default)]
 struct PendingLinkBytes {
-    bytes: Vec<u8>,
-    unprocessed: Vec<u8>,
-    overflow_tail: VecDeque<u8>,
-    overflow_transition: OverflowTransition,
-    overflow_at_url_boundary: bool,
-    overflow_dropped: DroppedLinkBytes,
-    staging_truncated: bool,
-    open_url_scan_at: usize,
+    scanner: LinkStreamScanner,
     dirty: bool,
     queued_output_urls: Vec<String>,
     queued_osc8_urls: Vec<String>,
-    truncated_sequence: Option<OpenSequenceKind>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OpenSequenceKind {
-    Url,
-    Csi,
-    Osc,
-    OscEscape,
-    Escape,
 }
 
 #[derive(Debug, Default)]
-struct DroppedLinkBytes {
-    bytes: Vec<u8>,
-    truncated_sequence: Option<OpenSequenceKind>,
-    safe_to_extract: bool,
+struct LinkStreamScanner {
+    visible: VisibleLinkState,
+    terminal: TerminalScanState,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OverflowTerminalState {
+#[derive(Debug, Default)]
+enum VisibleLinkState {
+    #[default]
+    Empty,
+    Scheme(SchemeCandidate),
+    AfterColon(SchemeCandidate),
+    AfterSlash(SchemeCandidate),
+    Url(Vec<u8>),
+    InvalidScheme,
+    DiscardUrl,
+}
+
+#[derive(Debug)]
+struct SchemeCandidate {
+    bytes: [u8; MAX_SCHEME_CANDIDATE_BYTES],
+    len: usize,
+}
+
+impl SchemeCandidate {
+    fn new(byte: u8) -> Self {
+        let mut bytes = [0; MAX_SCHEME_CANDIDATE_BYTES];
+        bytes[0] = byte;
+        Self { bytes, len: 1 }
+    }
+
+    fn push(&mut self, byte: u8) {
+        debug_assert!(self.len < self.bytes.len());
+        self.bytes[self.len] = byte;
+        self.len += 1;
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        self.bytes[..self.len].to_vec()
+    }
+}
+
+#[derive(Debug, Default)]
+enum TerminalScanState {
+    #[default]
     Visible,
-    Csi,
-    Osc,
-    OscEscape,
     Escape,
+    Charset,
+    Csi,
+    Osc(OscScanState),
 }
 
-impl OverflowTerminalState {
-    const ALL: [Self; 5] = [
-        Self::Visible,
-        Self::Csi,
-        Self::Osc,
-        Self::OscEscape,
-        Self::Escape,
-    ];
+#[derive(Debug)]
+struct OscScanState {
+    phase: OscPhase,
+    escaped: bool,
+}
 
-    fn index(self) -> usize {
-        self as usize
+impl Default for OscScanState {
+    fn default() -> Self {
+        Self {
+            phase: OscPhase::Prefix(0),
+            escaped: false,
+        }
     }
 }
 
 #[derive(Debug)]
-struct OverflowTransition {
-    states: [OverflowTerminalState; 5],
-}
-
-impl Default for OverflowTransition {
-    fn default() -> Self {
-        Self {
-            states: OverflowTerminalState::ALL,
-        }
-    }
-}
-
-impl OverflowTransition {
-    fn record_dropped<'a>(&mut self, bytes: impl IntoIterator<Item = &'a u8>) {
-        for byte in bytes {
-            for state in &mut self.states {
-                *state = advance_overflow_terminal_state(*state, *byte);
-            }
-        }
-    }
-
-    fn apply(&self, state: OverflowTerminalState) -> OverflowTerminalState {
-        self.states[state.index()]
-    }
+enum OscPhase {
+    Prefix(usize),
+    Parameters,
+    Target(Vec<u8>),
+    Ignore,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -278,7 +272,8 @@ impl LinkExtractionGate {
             let Ok(mut pending) = self.pending.lock() else {
                 return;
             };
-            stage_unprocessed(&mut pending, bytes);
+            pending.scan(bytes);
+            self.record_scanned_bytes(bytes.len());
             pending.dirty = true;
             self.active.store(true, Ordering::Release);
             return;
@@ -301,7 +296,8 @@ impl LinkExtractionGate {
         let Ok(mut pending) = self.pending.lock() else {
             return;
         };
-        stage_unprocessed(&mut pending, &candidate[marker_start..]);
+        pending.scan(&candidate[marker_start..]);
+        self.record_scanned_bytes(candidate.len() - marker_start);
         pending.dirty = true;
         self.active.store(true, Ordering::Release);
         self.marker_tail.store(&[]);
@@ -324,206 +320,37 @@ impl LinkExtractionGate {
             return None;
         }
         let _claim = ExtractionClaim(&self.extracting);
-        let mut pending = {
+        let (mut output_urls, mut osc8_urls) = {
             let _processing = self.processing.lock().ok()?;
-            let mut stored = self.pending.lock().ok()?;
-            if !stored.dirty {
+            let mut pending = self.pending.lock().ok()?;
+            if !pending.dirty {
                 return None;
             }
-            std::mem::take(&mut *stored)
-        };
-        let unprocessed = std::mem::take(&mut pending.unprocessed);
-        let overflow_tail = std::mem::take(&mut pending.overflow_tail)
-            .into_iter()
-            .collect::<Vec<_>>();
-        let overflow_transition = std::mem::take(&mut pending.overflow_transition);
-        let staging_truncated = std::mem::take(&mut pending.staging_truncated);
-        let overflow_start_state = if staging_truncated {
-            let initial = match pending.truncated_sequence {
-                Some(OpenSequenceKind::Csi) => OverflowTerminalState::Csi,
-                Some(OpenSequenceKind::Osc) => OverflowTerminalState::Osc,
-                Some(OpenSequenceKind::OscEscape) => OverflowTerminalState::OscEscape,
-                Some(OpenSequenceKind::Escape) => OverflowTerminalState::Escape,
-                Some(OpenSequenceKind::Url) | None => OverflowTerminalState::Visible,
-            };
-            let after_pending = overflow_terminal_state_after(initial, &pending.bytes);
-            let after_prefix = overflow_terminal_state_after(after_pending, &unprocessed);
-            overflow_transition.apply(after_prefix)
-        } else {
-            OverflowTerminalState::Visible
-        };
-        if !staging_truncated
-            && pending.truncated_sequence.is_none()
-            && pending.bytes.len().saturating_add(unprocessed.len()) <= MAX_PENDING_LINK_BYTES
-        {
-            pending.bytes.extend_from_slice(&unprocessed);
-        } else {
-            append_pending(&mut pending, &unprocessed);
-        }
-        if staging_truncated {
-            // Bytes beyond the staging bound were discarded at ingest. The retained
-            // prefix may therefore end inside a URL or terminal sequence; discard that
-            // open sequence rather than ever publishing a truncated prefix.
-            pending.open_url_scan_at = 0;
-            if let Some(safe_start) = overflow_suffix_start(&overflow_tail, overflow_start_state) {
-                let mut tail_extracted = extract_agent_links(&overflow_tail[safe_start..]);
-                queue_links(
-                    &mut pending.queued_output_urls,
-                    &mut tail_extracted.links.output_urls,
-                );
-                queue_links(
-                    &mut pending.queued_osc8_urls,
-                    &mut tail_extracted.links.osc8_urls,
-                );
-            }
-        }
-        self.record_parse_pass();
-        let mut deferred_open_url = false;
-        let mut discarded_open_url = false;
-        if !staging_truncated && pending.open_url_scan_at > 0 {
-            self.record_scanned_bytes(pending.bytes.len().saturating_sub(pending.open_url_scan_at));
-            match resume_output_url(&pending.bytes, pending.open_url_scan_at) {
-                ResumedOutputUrl::Completed {
-                    url,
-                    remaining,
-                    mut osc8_urls,
-                } => {
-                    if let Some(url) = url {
-                        pending.queued_output_urls.push(url);
-                    }
-                    queue_links(&mut pending.queued_osc8_urls, &mut osc8_urls);
-                    pending.bytes = remaining;
-                    pending.open_url_scan_at = 0;
-                }
-                ResumedOutputUrl::Deferred {
-                    bytes,
-                    scan_at,
-                    mut osc8_urls,
-                } => {
-                    queue_links(&mut pending.queued_osc8_urls, &mut osc8_urls);
-                    pending.bytes = bytes;
-                    pending.open_url_scan_at = scan_at;
-                    deferred_open_url = true;
-                }
-                ResumedOutputUrl::Oversized { mut osc8_urls } => {
-                    queue_links(&mut pending.queued_osc8_urls, &mut osc8_urls);
-                    pending.bytes.clear();
-                    pending.open_url_scan_at = 0;
-                    pending.truncated_sequence = Some(OpenSequenceKind::Url);
-                    discarded_open_url = true;
-                }
-            }
-        }
-        let mut extracted = if deferred_open_url {
-            AgentLinkExtraction {
-                links: ExtractedAgentLinks {
-                    output_urls: Vec::new(),
-                    osc8_urls: Vec::new(),
-                },
-                unterminated_url: true,
-                incomplete_terminal_sequence: false,
-                tail_output_url: None,
-            }
-        } else if discarded_open_url {
-            // The open URL exceeded its publication bound without reaching a
-            // terminator. Drop it whole and consume its continuation later.
-            AgentLinkExtraction {
-                links: ExtractedAgentLinks {
-                    output_urls: Vec::new(),
-                    osc8_urls: Vec::new(),
-                },
-                unterminated_url: false,
-                incomplete_terminal_sequence: false,
-                tail_output_url: None,
-            }
-        } else {
-            self.record_scanned_bytes(pending.bytes.len());
-            extract_agent_links(&pending.bytes)
-        };
-        extracted
-            .links
-            .output_urls
-            .append(&mut pending.queued_output_urls);
-        extracted
-            .links
-            .osc8_urls
-            .append(&mut pending.queued_osc8_urls);
-        extracted.links.output_urls.sort_unstable();
-        extracted.links.output_urls.dedup();
-        extracted.links.osc8_urls.sort_unstable();
-        extracted.links.osc8_urls.dedup();
-        pending.dirty = false;
-        let (tail, tail_len) = if staging_truncated || deferred_open_url {
-            ([0; MAX_MARKER_TAIL_BYTES], 0)
-        } else {
-            marker_tail_suffix(&pending.bytes)
-        };
-        if staging_truncated {
-            pending.bytes.clear();
-            pending.truncated_sequence = None;
-            pending.open_url_scan_at = 0;
-        } else if deferred_open_url {
-            // The bytes already scanned remain the sole occurrence owner until
-            // a later chunk supplies a URL terminator.
-        } else if pending.truncated_sequence.is_none()
-            && (extracted.unterminated_url || extracted.incomplete_terminal_sequence)
-        {
-            let (carry, truncated_sequence) = pending_sequence_carry(&pending.bytes);
-            pending.bytes = carry;
-            pending.truncated_sequence = truncated_sequence;
-            pending.open_url_scan_at =
-                if extracted.unterminated_url && pending.truncated_sequence.is_none() {
-                    strip_terminal_sequences(&pending.bytes)
-                        .incomplete_terminal_sequence_start
-                        .map_or(pending.bytes.len(), |(start, _)| start)
-                } else {
-                    0
-                };
-        } else if pending.truncated_sequence.is_none() {
-            pending.bytes.clear();
-            pending.open_url_scan_at = 0;
-        }
-        let found_links =
-            !extracted.links.output_urls.is_empty() || !extracted.links.osc8_urls.is_empty();
-        {
-            let _processing = self.processing.lock().ok()?;
-            let mut stored = self.pending.lock().ok()?;
-            let received_while_parsing = !stored.unprocessed.is_empty();
-            if received_while_parsing && pending.bytes.is_empty() {
-                pending.bytes.extend_from_slice(&tail[..tail_len]);
-            }
-            debug_assert!(stored.bytes.is_empty());
-            debug_assert!(stored.truncated_sequence.is_none());
-            stored.bytes = pending.bytes;
-            stored.truncated_sequence = pending.truncated_sequence;
-            stored.open_url_scan_at = pending.open_url_scan_at;
-            queue_links(
-                &mut stored.queued_output_urls,
-                &mut pending.queued_output_urls,
-            );
-            queue_links(&mut stored.queued_osc8_urls, &mut pending.queued_osc8_urls);
-            if received_while_parsing {
-                stored.dirty = true;
-                self.active.store(true, Ordering::Release);
+            pending.dirty = false;
+            let output_urls = std::mem::take(&mut pending.queued_output_urls);
+            let osc8_urls = std::mem::take(&mut pending.queued_osc8_urls);
+            if let Some(tail) = pending.scanner.take_marker_tail() {
+                self.marker_tail.store(&tail);
+                self.active.store(false, Ordering::Release);
             } else {
-                stored.dirty = false;
-                let has_carry = !stored.bytes.is_empty()
-                    || stored.truncated_sequence.is_some()
-                    || !stored.queued_output_urls.is_empty()
-                    || !stored.queued_osc8_urls.is_empty();
-                if has_carry {
-                    self.active.store(true, Ordering::Release);
-                } else {
-                    self.marker_tail.store(&tail[..tail_len]);
-                    self.active.store(false, Ordering::Release);
-                }
+                self.active
+                    .store(!pending.scanner.is_idle(), Ordering::Release);
             }
-        }
+            (output_urls, osc8_urls)
+        };
+        output_urls.sort_unstable();
+        output_urls.dedup();
+        osc8_urls.sort_unstable();
+        osc8_urls.dedup();
+        let found_links = !output_urls.is_empty() || !osc8_urls.is_empty();
         if !found_links {
             return None;
         }
         self.extractions.fetch_add(1, Ordering::Relaxed);
-        Some(extracted.links)
+        Some(ExtractedAgentLinks {
+            output_urls,
+            osc8_urls,
+        })
     }
 
     #[cfg(test)]
@@ -536,17 +363,6 @@ impl LinkExtractionGate {
         self.lock_acquisitions.load(Ordering::Relaxed)
     }
 
-    fn record_parse_pass(&self) {
-        #[cfg(test)]
-        {
-            self.parse_passes.fetch_add(1, Ordering::Relaxed);
-            if self.processing.try_lock().is_ok() {
-                self.parses_outside_processing
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    }
-
     fn record_scanned_bytes(&self, bytes: usize) {
         let _ = bytes;
         #[cfg(test)]
@@ -555,10 +371,10 @@ impl LinkExtractionGate {
     }
 
     #[cfg(test)]
-    fn staged_byte_count(&self) -> usize {
+    fn retained_byte_count(&self) -> usize {
         self.pending
             .lock()
-            .map(|pending| pending.unprocessed.len() + pending.overflow_tail.len())
+            .map(|pending| pending.scanner.retained_byte_count())
             .unwrap_or_default()
     }
 
@@ -570,254 +386,237 @@ impl LinkExtractionGate {
     }
 }
 
-fn stage_unprocessed(pending: &mut PendingLinkBytes, bytes: &[u8]) {
-    if pending.staging_truncated {
-        append_overflow_tail(pending, bytes);
-        return;
+impl PendingLinkBytes {
+    fn scan(&mut self, bytes: &[u8]) {
+        for byte in bytes.iter().copied() {
+            self.scanner.scan_byte(
+                byte,
+                &mut self.queued_output_urls,
+                &mut self.queued_osc8_urls,
+            );
+        }
+        trim_link_queue(&mut self.queued_output_urls);
+        trim_link_queue(&mut self.queued_osc8_urls);
     }
-    let remaining = MAX_PENDING_LINK_BYTES.saturating_sub(pending.unprocessed.len());
-    let appended = remaining.min(bytes.len());
-    pending.unprocessed.extend_from_slice(&bytes[..appended]);
-    if appended == bytes.len() {
-        return;
-    }
-
-    pending.staging_truncated = true;
-    let displaced = pending.unprocessed.split_off(STAGING_WINDOW_BYTES);
-    pending.overflow_tail.extend(displaced);
-    pending.overflow_at_url_boundary = overflow_prefix_ends_at_url_boundary(pending);
-    append_overflow_tail(pending, &bytes[appended..]);
 }
 
-fn append_overflow_tail(pending: &mut PendingLinkBytes, bytes: &[u8]) {
-    let capacity = STAGING_WINDOW_BYTES;
-    if bytes.len() >= capacity {
-        let evicted = pending.overflow_tail.drain(..).collect::<Vec<_>>();
-        extract_dropped_links(pending, &evicted);
-        extract_dropped_links(pending, &bytes[..bytes.len() - capacity]);
-        pending
-            .overflow_tail
-            .extend(&bytes[bytes.len() - capacity..]);
-        return;
+impl LinkStreamScanner {
+    fn scan_byte(&mut self, byte: u8, output_urls: &mut Vec<String>, osc8_urls: &mut Vec<String>) {
+        let terminal = std::mem::take(&mut self.terminal);
+        self.terminal = match terminal {
+            TerminalScanState::Visible if byte == b'\x1b' => TerminalScanState::Escape,
+            TerminalScanState::Visible => {
+                self.scan_visible(byte, output_urls);
+                TerminalScanState::Visible
+            }
+            TerminalScanState::Escape => match byte {
+                b'[' => TerminalScanState::Csi,
+                b']' => TerminalScanState::Osc(OscScanState::default()),
+                b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/' => TerminalScanState::Charset,
+                _ => TerminalScanState::Visible,
+            },
+            TerminalScanState::Charset => TerminalScanState::Visible,
+            TerminalScanState::Csi if (0x40..=0x7e).contains(&byte) => TerminalScanState::Visible,
+            TerminalScanState::Csi => TerminalScanState::Csi,
+            TerminalScanState::Osc(mut osc) => {
+                if osc.scan_byte(byte, osc8_urls) {
+                    if matches!(self.visible, VisibleLinkState::InvalidScheme) {
+                        self.visible = VisibleLinkState::Empty;
+                    }
+                    TerminalScanState::Visible
+                } else {
+                    TerminalScanState::Osc(osc)
+                }
+            }
+        };
     }
-    let overflow = pending
-        .overflow_tail
-        .len()
-        .saturating_add(bytes.len())
-        .saturating_sub(capacity);
-    if overflow > 0 {
-        let evicted = pending.overflow_tail.drain(..overflow).collect::<Vec<_>>();
-        extract_dropped_links(pending, &evicted);
+
+    fn scan_visible(&mut self, byte: u8, output_urls: &mut Vec<String>) {
+        let state = std::mem::take(&mut self.visible);
+        self.visible = match state {
+            VisibleLinkState::Empty => start_scheme(byte),
+            VisibleLinkState::Scheme(mut scheme) if is_scheme_byte(byte) => {
+                if scheme.len < MAX_SCHEME_BYTES {
+                    scheme.push(byte);
+                    VisibleLinkState::Scheme(scheme)
+                } else {
+                    VisibleLinkState::InvalidScheme
+                }
+            }
+            VisibleLinkState::Scheme(mut scheme) if byte == b':' => {
+                scheme.push(byte);
+                VisibleLinkState::AfterColon(scheme)
+            }
+            VisibleLinkState::Scheme(_) => {
+                self.visible = VisibleLinkState::Empty;
+                self.scan_visible(byte, output_urls);
+                return;
+            }
+            VisibleLinkState::AfterColon(mut scheme) if byte == b'/' => {
+                scheme.push(byte);
+                VisibleLinkState::AfterSlash(scheme)
+            }
+            VisibleLinkState::AfterColon(_) => {
+                self.visible = VisibleLinkState::Empty;
+                self.scan_visible(byte, output_urls);
+                return;
+            }
+            VisibleLinkState::AfterSlash(mut scheme) if byte == b'/' => {
+                scheme.push(byte);
+                VisibleLinkState::Url(scheme.into_vec())
+            }
+            VisibleLinkState::AfterSlash(_) => {
+                self.visible = VisibleLinkState::Empty;
+                self.scan_visible(byte, output_urls);
+                return;
+            }
+            VisibleLinkState::Url(url) if is_url_terminator(byte) => {
+                publish_output_url(url, output_urls);
+                VisibleLinkState::Empty
+            }
+            VisibleLinkState::Url(mut url) if url.len() < MAX_URL_BYTES => {
+                url.push(byte);
+                VisibleLinkState::Url(url)
+            }
+            VisibleLinkState::Url(_) => VisibleLinkState::DiscardUrl,
+            VisibleLinkState::DiscardUrl if is_url_terminator(byte) => VisibleLinkState::Empty,
+            VisibleLinkState::DiscardUrl => VisibleLinkState::DiscardUrl,
+            VisibleLinkState::InvalidScheme if is_scheme_byte(byte) => {
+                VisibleLinkState::InvalidScheme
+            }
+            VisibleLinkState::InvalidScheme => start_scheme(byte),
+        };
     }
-    pending.overflow_tail.extend(bytes);
+
+    fn take_marker_tail(&mut self) -> Option<Vec<u8>> {
+        if !matches!(self.terminal, TerminalScanState::Visible) {
+            return None;
+        }
+        let visible = std::mem::take(&mut self.visible);
+        match visible {
+            VisibleLinkState::Empty | VisibleLinkState::InvalidScheme => Some(Vec::new()),
+            VisibleLinkState::Scheme(bytes)
+            | VisibleLinkState::AfterColon(bytes)
+            | VisibleLinkState::AfterSlash(bytes) => Some(bytes.into_vec()),
+            state @ (VisibleLinkState::Url(_) | VisibleLinkState::DiscardUrl) => {
+                self.visible = state;
+                None
+            }
+        }
+    }
+
+    fn is_idle(&self) -> bool {
+        matches!(self.terminal, TerminalScanState::Visible)
+            && matches!(
+                self.visible,
+                VisibleLinkState::Empty | VisibleLinkState::InvalidScheme
+            )
+    }
+
+    #[cfg(test)]
+    fn retained_byte_count(&self) -> usize {
+        let visible = match &self.visible {
+            VisibleLinkState::Scheme(bytes)
+            | VisibleLinkState::AfterColon(bytes)
+            | VisibleLinkState::AfterSlash(bytes) => bytes.len,
+            VisibleLinkState::Url(bytes) => bytes.len(),
+            VisibleLinkState::Empty
+            | VisibleLinkState::InvalidScheme
+            | VisibleLinkState::DiscardUrl => 0,
+        };
+        let osc = match &self.terminal {
+            TerminalScanState::Osc(OscScanState {
+                phase: OscPhase::Target(target),
+                ..
+            }) => target.len(),
+            _ => 0,
+        };
+        visible + osc
+    }
 }
 
-fn extract_dropped_links(pending: &mut PendingLinkBytes, bytes: &[u8]) {
-    if bytes.is_empty() {
-        return;
+impl OscScanState {
+    fn scan_byte(&mut self, byte: u8, osc8_urls: &mut Vec<String>) -> bool {
+        if self.escaped {
+            self.escaped = byte == b'\x1b';
+            if byte == b'\\' {
+                self.publish_target(osc8_urls);
+                return true;
+            }
+            if byte == b'\x07' {
+                self.publish_target(osc8_urls);
+                return true;
+            }
+            if byte != b'\x1b' {
+                self.scan_content(byte);
+            }
+            return false;
+        }
+        match byte {
+            b'\x07' => {
+                self.publish_target(osc8_urls);
+                true
+            }
+            b'\x1b' => {
+                self.escaped = true;
+                false
+            }
+            _ => {
+                self.scan_content(byte);
+                false
+            }
+        }
     }
-    let initial = match pending.truncated_sequence {
-        Some(OpenSequenceKind::Csi) => OverflowTerminalState::Csi,
-        Some(OpenSequenceKind::Osc) => OverflowTerminalState::Osc,
-        Some(OpenSequenceKind::OscEscape) => OverflowTerminalState::OscEscape,
-        Some(OpenSequenceKind::Escape) => OverflowTerminalState::Escape,
-        Some(OpenSequenceKind::Url) | None => OverflowTerminalState::Visible,
-    };
-    let after_pending = overflow_terminal_state_after(initial, &pending.bytes);
-    let after_prefix = overflow_terminal_state_after(after_pending, &pending.unprocessed);
-    let start_state = pending.overflow_transition.apply(after_prefix);
-    let safe_start = if pending.overflow_dropped.safe_to_extract {
-        Some(0)
+
+    fn scan_content(&mut self, byte: u8) {
+        self.phase = match std::mem::replace(&mut self.phase, OscPhase::Ignore) {
+            OscPhase::Prefix(0) if byte == b'8' => OscPhase::Prefix(1),
+            OscPhase::Prefix(1) if byte == b';' => OscPhase::Parameters,
+            OscPhase::Prefix(_) => OscPhase::Ignore,
+            OscPhase::Parameters if byte == b';' => OscPhase::Target(Vec::new()),
+            OscPhase::Parameters => OscPhase::Parameters,
+            OscPhase::Target(mut target) if target.len() < MAX_URL_BYTES => {
+                target.push(byte);
+                OscPhase::Target(target)
+            }
+            OscPhase::Target(_) => OscPhase::Ignore,
+            OscPhase::Ignore => OscPhase::Ignore,
+        };
+    }
+
+    fn publish_target(&mut self, osc8_urls: &mut Vec<String>) {
+        let OscPhase::Target(target) = &self.phase else {
+            return;
+        };
+        let mut urls = extract_urls(&String::from_utf8_lossy(target));
+        queue_links(osc8_urls, &mut urls);
+    }
+}
+
+fn start_scheme(byte: u8) -> VisibleLinkState {
+    if byte.is_ascii_alphabetic() {
+        VisibleLinkState::Scheme(SchemeCandidate::new(byte))
+    } else if is_scheme_byte(byte) {
+        VisibleLinkState::InvalidScheme
     } else {
-        let safe_start =
-            if start_state == OverflowTerminalState::Visible && pending.overflow_at_url_boundary {
-                Some(0)
-            } else {
-                visible_url_boundary(bytes, start_state)
-            };
-        if safe_start.is_some() {
-            pending.overflow_dropped.safe_to_extract = true;
-        }
-        safe_start
-    };
-    if let Some(safe_start) = safe_start {
-        append_dropped_link_bytes(
-            &mut pending.overflow_dropped,
-            &mut pending.queued_output_urls,
-            &mut pending.queued_osc8_urls,
-            &bytes[safe_start..],
-        );
-    }
-    pending.overflow_at_url_boundary =
-        overflow_url_boundary_after(start_state, pending.overflow_at_url_boundary, bytes);
-    pending.overflow_transition.record_dropped(bytes.iter());
-}
-
-fn append_dropped_link_bytes(
-    dropped: &mut DroppedLinkBytes,
-    output_urls: &mut Vec<String>,
-    osc8_urls: &mut Vec<String>,
-    mut bytes: &[u8],
-) {
-    const SCAN_WINDOW_BYTES: usize = 64 * 1024;
-
-    while !bytes.is_empty() {
-        if let Some(mut kind) = dropped.truncated_sequence {
-            let split_st = kind == OpenSequenceKind::OscEscape && bytes.first() == Some(&b'\\');
-            if kind == OpenSequenceKind::OscEscape && !split_st {
-                kind = OpenSequenceKind::Osc;
-            }
-            let terminator = split_st
-                .then_some((0, 1))
-                .or_else(|| open_sequence_terminator(kind, bytes));
-            let Some((terminator, terminator_len)) = terminator else {
-                dropped.truncated_sequence = Some(truncated_sequence_kind(kind, bytes));
-                return;
-            };
-            bytes = &bytes[terminator + terminator_len..];
-            dropped.truncated_sequence = None;
-            if bytes.is_empty() {
-                return;
-            }
-        }
-
-        let appended = bytes.len().min(SCAN_WINDOW_BYTES);
-        dropped.bytes.extend_from_slice(&bytes[..appended]);
-        bytes = &bytes[appended..];
-        flush_dropped_links(dropped, output_urls, osc8_urls);
+        VisibleLinkState::Empty
     }
 }
 
-fn flush_dropped_links(
-    dropped: &mut DroppedLinkBytes,
-    output_urls: &mut Vec<String>,
-    osc8_urls: &mut Vec<String>,
-) {
-    let mut extracted = extract_agent_links(&dropped.bytes);
-    queue_links(output_urls, &mut extracted.links.output_urls);
-    queue_links(osc8_urls, &mut extracted.links.osc8_urls);
-    if extracted
-        .tail_output_url
-        .as_deref()
-        .is_some_and(|url| !url_within_bounds(url))
-    {
-        dropped.bytes.clear();
-        dropped.truncated_sequence = Some(OpenSequenceKind::Url);
-        return;
-    }
-    let (carry, truncated_sequence) = pending_sequence_carry(&dropped.bytes);
-    dropped.bytes = carry;
-    dropped.truncated_sequence = truncated_sequence;
-}
-
-fn overflow_prefix_ends_at_url_boundary(pending: &PendingLinkBytes) -> bool {
-    let initial = match pending.truncated_sequence {
-        Some(OpenSequenceKind::Url) => return false,
-        Some(OpenSequenceKind::Csi) => OverflowTerminalState::Csi,
-        Some(OpenSequenceKind::Osc) => OverflowTerminalState::Osc,
-        Some(OpenSequenceKind::OscEscape) => OverflowTerminalState::OscEscape,
-        Some(OpenSequenceKind::Escape) => OverflowTerminalState::Escape,
-        None => OverflowTerminalState::Visible,
-    };
-    let boundary = pending.truncated_sequence.is_none();
-    let boundary = overflow_url_boundary_after(initial, boundary, &pending.bytes);
-    let state = overflow_terminal_state_after(initial, &pending.bytes);
-    overflow_url_boundary_after(state, boundary, &pending.unprocessed)
-}
-
-fn visible_url_boundary(bytes: &[u8], mut state: OverflowTerminalState) -> Option<usize> {
-    for (index, byte) in bytes.iter().copied().enumerate() {
-        let previous = state;
-        state = advance_overflow_terminal_state(state, byte);
-        if previous == OverflowTerminalState::Visible && byte != b'\x1b' && is_url_terminator(byte)
-        {
-            return Some(index + 1);
-        }
-    }
-    None
-}
-
-fn overflow_url_boundary_after(
-    mut state: OverflowTerminalState,
-    mut boundary: bool,
-    bytes: &[u8],
-) -> bool {
-    for byte in bytes.iter().copied() {
-        let previous = state;
-        state = advance_overflow_terminal_state(state, byte);
-        if previous == OverflowTerminalState::Visible && byte != b'\x1b' {
-            boundary = is_url_terminator(byte);
-        }
-    }
-    boundary
-}
-
-fn advance_overflow_terminal_state(
-    state: OverflowTerminalState,
-    byte: u8,
-) -> OverflowTerminalState {
-    match state {
-        OverflowTerminalState::Visible => {
-            if byte == b'\x1b' {
-                OverflowTerminalState::Escape
-            } else {
-                OverflowTerminalState::Visible
-            }
-        }
-        OverflowTerminalState::Csi => {
-            if (0x40..=0x7e).contains(&byte) {
-                OverflowTerminalState::Visible
-            } else {
-                OverflowTerminalState::Csi
-            }
-        }
-        OverflowTerminalState::Osc => match byte {
-            b'\x07' => OverflowTerminalState::Visible,
-            b'\x1b' => OverflowTerminalState::OscEscape,
-            _ => OverflowTerminalState::Osc,
-        },
-        OverflowTerminalState::OscEscape => match byte {
-            b'\\' | b'\x07' => OverflowTerminalState::Visible,
-            b'\x1b' => OverflowTerminalState::OscEscape,
-            _ => OverflowTerminalState::Osc,
-        },
-        OverflowTerminalState::Escape => match byte {
-            b'[' => OverflowTerminalState::Csi,
-            b']' => OverflowTerminalState::Osc,
-            _ => OverflowTerminalState::Visible,
-        },
+fn publish_output_url(bytes: Vec<u8>, output_urls: &mut Vec<String>) {
+    let url = String::from_utf8_lossy(&bytes);
+    let url = trim_url_suffix(&url);
+    if url_within_bounds(url) && url_domain(url).is_some() {
+        queue_links(output_urls, &mut vec![url.to_owned()]);
     }
 }
 
-fn overflow_terminal_state_after(
-    mut state: OverflowTerminalState,
-    bytes: &[u8],
-) -> OverflowTerminalState {
-    for byte in bytes {
-        state = advance_overflow_terminal_state(state, *byte);
+fn trim_link_queue(queue: &mut Vec<String>) {
+    queue.sort_unstable();
+    queue.dedup();
+    if queue.len() > MAX_LINKS {
+        queue.drain(..queue.len() - MAX_LINKS);
     }
-    state
-}
-
-fn overflow_suffix_start(bytes: &[u8], mut state: OverflowTerminalState) -> Option<usize> {
-    let started_in_sequence = state != OverflowTerminalState::Visible;
-    for (index, byte) in bytes.iter().copied().enumerate() {
-        let previous = state;
-        state = advance_overflow_terminal_state(state, byte);
-        if started_in_sequence
-            && previous != OverflowTerminalState::Visible
-            && state == OverflowTerminalState::Visible
-        {
-            return Some(index + 1);
-        }
-        if !started_in_sequence
-            && previous == OverflowTerminalState::Visible
-            && byte.is_ascii_whitespace()
-        {
-            return Some(index + 1);
-        }
-    }
-    None
 }
 
 struct ExtractionClaim<'a>(&'a AtomicBool);
@@ -825,180 +624,6 @@ struct ExtractionClaim<'a>(&'a AtomicBool);
 impl Drop for ExtractionClaim<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
-    }
-}
-
-fn append_pending(pending: &mut PendingLinkBytes, mut bytes: &[u8]) {
-    while !bytes.is_empty() {
-        if let Some(mut kind) = pending.truncated_sequence {
-            let split_st = kind == OpenSequenceKind::OscEscape && bytes.first() == Some(&b'\\');
-            if kind == OpenSequenceKind::OscEscape && !split_st {
-                kind = OpenSequenceKind::Osc;
-            }
-            let terminator = split_st
-                .then_some((0, 1))
-                .or_else(|| open_sequence_terminator(kind, bytes));
-            let Some((terminator, terminator_len)) = terminator else {
-                pending.truncated_sequence = Some(truncated_sequence_kind(kind, bytes));
-                return;
-            };
-            bytes = &bytes[terminator + terminator_len..];
-            pending.truncated_sequence = None;
-            if bytes.is_empty() {
-                break;
-            }
-        }
-        let remaining = MAX_PENDING_LINK_BYTES.saturating_sub(pending.bytes.len());
-        let appended = bytes.len().min(remaining);
-        pending.bytes.extend_from_slice(&bytes[..appended]);
-        bytes = &bytes[appended..];
-        discard_overlong_url(pending);
-        if bytes.is_empty() {
-            discard_overlong_terminal_sequence(pending);
-            break;
-        }
-
-        let mut extracted = extract_agent_links(&pending.bytes);
-        queue_links(
-            &mut pending.queued_output_urls,
-            &mut extracted.links.output_urls,
-        );
-        queue_links(
-            &mut pending.queued_osc8_urls,
-            &mut extracted.links.osc8_urls,
-        );
-        let (carry, truncated_sequence) = pending_sequence_carry(&pending.bytes);
-        pending.bytes = carry;
-        pending.truncated_sequence = truncated_sequence;
-    }
-}
-
-fn discard_overlong_url(pending: &mut PendingLinkBytes) {
-    if pending.truncated_sequence.is_some() {
-        return;
-    }
-    let mut extracted = extract_agent_links(&pending.bytes);
-    let Some(tail_url) = extracted.tail_output_url.as_deref() else {
-        return;
-    };
-    if url_within_bounds(tail_url) {
-        return;
-    }
-    queue_links(
-        &mut pending.queued_output_urls,
-        &mut extracted.links.output_urls,
-    );
-    queue_links(
-        &mut pending.queued_osc8_urls,
-        &mut extracted.links.osc8_urls,
-    );
-    pending.bytes.clear();
-    pending.truncated_sequence = Some(OpenSequenceKind::Url);
-}
-
-fn discard_overlong_terminal_sequence(pending: &mut PendingLinkBytes) {
-    let stripped = strip_terminal_sequences(&pending.bytes);
-    let Some((start, kind)) = stripped.incomplete_terminal_sequence_start else {
-        return;
-    };
-    if kind == OpenSequenceKind::Escape
-        || (kind == OpenSequenceKind::Osc
-            && open_osc8_target_within_bounds(&pending.bytes[start..]))
-        || pending.bytes.len().saturating_sub(start) <= MAX_OPEN_SEQUENCE_BYTES
-    {
-        return;
-    }
-    let mut extracted = extract_agent_links(&pending.bytes[..start]);
-    queue_links(
-        &mut pending.queued_output_urls,
-        &mut extracted.links.output_urls,
-    );
-    queue_links(
-        &mut pending.queued_osc8_urls,
-        &mut extracted.links.osc8_urls,
-    );
-    let kind = truncated_sequence_kind(kind, &pending.bytes);
-    pending.bytes.clear();
-    pending.truncated_sequence = Some(kind);
-}
-
-fn pending_sequence_carry(bytes: &[u8]) -> (Vec<u8>, Option<OpenSequenceKind>) {
-    let stripped = strip_terminal_sequences(bytes);
-    let open_url_start =
-        unterminated_output_url_start(&stripped.visible_bytes, &stripped.visible_offsets);
-    if let Some((url, visible_url)) = open_url_start {
-        if let Some((terminal, _)) = stripped.incomplete_terminal_sequence_start {
-            if url < terminal {
-                let mut carry = stripped.visible_bytes[visible_url..].to_vec();
-                carry.extend_from_slice(&bytes[terminal..]);
-                return (carry, None);
-            }
-        } else {
-            return (stripped.visible_bytes[visible_url..].to_vec(), None);
-        }
-    }
-    let open = stripped.incomplete_terminal_sequence_start;
-    let Some((start, kind)) = open else {
-        let tail_start = bytes.len().saturating_sub(LINK_LOOKBEHIND_BYTES);
-        return (bytes[tail_start..].to_vec(), None);
-    };
-    if kind == OpenSequenceKind::Osc && open_osc8_target_within_bounds(&bytes[start..]) {
-        return (bytes[start..].to_vec(), None);
-    }
-    let end = (start + MAX_OPEN_SEQUENCE_BYTES).min(bytes.len());
-    if end < bytes.len() {
-        return (
-            Vec::new(),
-            Some(truncated_sequence_kind(kind, &bytes[start..])),
-        );
-    }
-    (bytes[start..end].to_vec(), None)
-}
-
-fn open_osc8_target_within_bounds(bytes: &[u8]) -> bool {
-    let Some(osc8) = bytes.strip_prefix(b"\x1b]8;") else {
-        return false;
-    };
-    let Some(parameter_end) = osc8.iter().position(|byte| *byte == b';') else {
-        return true;
-    };
-    let target = &osc8[parameter_end + 1..];
-    target.strip_suffix(b"\x1b").unwrap_or(target).len() <= MAX_URL_BYTES
-}
-
-fn unterminated_output_url_start(
-    visible_bytes: &[u8],
-    visible_offsets: &[usize],
-) -> Option<(usize, usize)> {
-    let tail_start = visible_bytes
-        .iter()
-        .rposition(|byte| is_url_terminator(*byte))
-        .map_or(0, |index| index + 1);
-    let visible_start = tail_start + find_scheme_start(&visible_bytes[tail_start..])?;
-    Some((*visible_offsets.get(visible_start)?, visible_start))
-}
-
-fn truncated_sequence_kind(kind: OpenSequenceKind, bytes: &[u8]) -> OpenSequenceKind {
-    if kind == OpenSequenceKind::Osc && bytes.last() == Some(&b'\x1b') {
-        OpenSequenceKind::OscEscape
-    } else {
-        kind
-    }
-}
-
-fn open_sequence_terminator(kind: OpenSequenceKind, bytes: &[u8]) -> Option<(usize, usize)> {
-    match kind {
-        OpenSequenceKind::Url => bytes
-            .iter()
-            .position(|byte| is_url_terminator(*byte))
-            .map(|index| (index, 1)),
-        OpenSequenceKind::Csi => bytes
-            .iter()
-            .position(|byte| (0x40..=0x7e).contains(byte))
-            .map(|index| (index, 1)),
-        OpenSequenceKind::Osc => osc_terminator(bytes),
-        OpenSequenceKind::OscEscape => (bytes.first() == Some(&b'\\')).then_some((0, 1)),
-        OpenSequenceKind::Escape => (!bytes.is_empty()).then_some((0, 1)),
     }
 }
 
@@ -1513,202 +1138,6 @@ fn trim_url_suffix(mut url: &str) -> &str {
     }
 }
 
-struct AgentLinkExtraction {
-    links: ExtractedAgentLinks,
-    unterminated_url: bool,
-    incomplete_terminal_sequence: bool,
-    tail_output_url: Option<String>,
-}
-
-enum ResumedOutputUrl {
-    Completed {
-        url: Option<String>,
-        remaining: Vec<u8>,
-        osc8_urls: Vec<String>,
-    },
-    Deferred {
-        bytes: Vec<u8>,
-        scan_at: usize,
-        osc8_urls: Vec<String>,
-    },
-    Oversized {
-        osc8_urls: Vec<String>,
-    },
-}
-
-struct StrippedTerminalSequences {
-    visible_bytes: Vec<u8>,
-    osc8_urls: Vec<String>,
-    incomplete_terminal_sequence_start: Option<(usize, OpenSequenceKind)>,
-    visible_offsets: Vec<usize>,
-}
-
-fn resume_output_url(bytes: &[u8], scan_at: usize) -> ResumedOutputUrl {
-    let continuation = &bytes[scan_at..];
-    let stripped = strip_terminal_sequences(continuation);
-    if let Some(boundary) = stripped
-        .visible_bytes
-        .iter()
-        .position(|byte| is_url_terminator(*byte))
-    {
-        let raw_boundary = stripped.visible_offsets[boundary];
-        let mut url_bytes = bytes[..scan_at].to_vec();
-        url_bytes.extend_from_slice(&stripped.visible_bytes[..boundary]);
-        let url = String::from_utf8_lossy(&url_bytes);
-        let url = trim_url_suffix(&url);
-        return ResumedOutputUrl::Completed {
-            url: (url_within_bounds(url) && url_domain(url).is_some()).then(|| url.to_owned()),
-            remaining: continuation[raw_boundary + 1..].to_vec(),
-            osc8_urls: stripped.osc8_urls,
-        };
-    }
-
-    let mut normalized = bytes[..scan_at].to_vec();
-    normalized.extend_from_slice(&stripped.visible_bytes);
-    let next_scan_at = normalized.len();
-    if next_scan_at > MAX_URL_BYTES {
-        return ResumedOutputUrl::Oversized {
-            osc8_urls: stripped.osc8_urls,
-        };
-    }
-    if let Some((incomplete_at, _)) = stripped.incomplete_terminal_sequence_start {
-        normalized.extend_from_slice(&continuation[incomplete_at..]);
-    }
-    ResumedOutputUrl::Deferred {
-        bytes: normalized,
-        scan_at: next_scan_at,
-        osc8_urls: stripped.osc8_urls,
-    }
-}
-
-fn extract_agent_links(bytes: &[u8]) -> AgentLinkExtraction {
-    let mut stripped = strip_terminal_sequences(bytes);
-    let visible = String::from_utf8_lossy(&stripped.visible_bytes);
-    let mut unterminated_url = false;
-    let mut tail_output_url = None;
-    let mut output_urls = URL_RE
-        .find_iter(&visible)
-        .filter_map(|matched| {
-            let url = trim_url_suffix(matched.as_str()).to_string();
-            let valid_url = url_within_bounds(&url) && url_domain(&url).is_some();
-            if matched.end() == visible.len() {
-                unterminated_url = true;
-                tail_output_url = Some(url.clone());
-                return None;
-            }
-            valid_url.then_some(url)
-        })
-        .collect::<Vec<_>>();
-    if has_unterminated_url_candidate(&visible) {
-        unterminated_url = true;
-    }
-    output_urls.sort_unstable();
-    output_urls.dedup();
-    stripped.osc8_urls.sort_unstable();
-    stripped.osc8_urls.dedup();
-    AgentLinkExtraction {
-        links: ExtractedAgentLinks {
-            output_urls,
-            osc8_urls: stripped.osc8_urls,
-        },
-        unterminated_url,
-        incomplete_terminal_sequence: stripped.incomplete_terminal_sequence_start.is_some(),
-        tail_output_url,
-    }
-}
-
-fn has_unterminated_url_candidate(text: &str) -> bool {
-    let tail_start = text
-        .char_indices()
-        .rev()
-        .find(|(_, character)| {
-            character.is_whitespace()
-                || character.is_control()
-                || matches!(character, '"' | '\'' | '<' | '>')
-        })
-        .map_or(0, |(index, character)| index + character.len_utf8());
-    find_scheme_start(&text.as_bytes()[tail_start..]).is_some()
-}
-
-fn strip_terminal_sequences(bytes: &[u8]) -> StrippedTerminalSequences {
-    let mut visible_bytes = Vec::with_capacity(bytes.len());
-    let mut visible_offsets = Vec::with_capacity(bytes.len());
-    let mut osc8_urls = Vec::new();
-    let mut incomplete_terminal_sequence_start = None;
-    let mut offset = 0;
-    while offset < bytes.len() {
-        if bytes[offset] != b'\x1b' {
-            visible_bytes.push(bytes[offset]);
-            visible_offsets.push(offset);
-            offset += 1;
-            continue;
-        }
-
-        match bytes.get(offset + 1).copied() {
-            Some(b'[') => {
-                let Some(end) = bytes[offset + 2..]
-                    .iter()
-                    .position(|byte| (0x40..=0x7e).contains(byte))
-                    .map(|relative| offset + 2 + relative + 1)
-                else {
-                    incomplete_terminal_sequence_start = Some((offset, OpenSequenceKind::Csi));
-                    break;
-                };
-                offset = end;
-            }
-            Some(b']') => {
-                let content_start = offset + 2;
-                let Some((relative_end, terminator_len)) = osc_terminator(&bytes[content_start..])
-                else {
-                    incomplete_terminal_sequence_start = Some((offset, OpenSequenceKind::Osc));
-                    break;
-                };
-                let content_end = content_start + relative_end;
-                let content = &bytes[content_start..content_end];
-                if let Some(osc8) = content.strip_prefix(b"8;") {
-                    if let Some(parameter_end) = osc8.iter().position(|byte| *byte == b';') {
-                        let target = &osc8[parameter_end + 1..];
-                        if target.len() <= MAX_URL_BYTES {
-                            osc8_urls.extend(extract_urls(&String::from_utf8_lossy(target)));
-                        }
-                    }
-                }
-                offset = content_end + terminator_len;
-            }
-            Some(b'(' | b')' | b'*' | b'+' | b'-' | b'.' | b'/') => {
-                if offset + 2 >= bytes.len() {
-                    incomplete_terminal_sequence_start = Some((offset, OpenSequenceKind::Escape));
-                    break;
-                }
-                offset += 3;
-            }
-            Some(_) => offset += 2,
-            None => {
-                incomplete_terminal_sequence_start = Some((offset, OpenSequenceKind::Escape));
-                break;
-            }
-        }
-    }
-    StrippedTerminalSequences {
-        visible_bytes,
-        osc8_urls,
-        incomplete_terminal_sequence_start,
-        visible_offsets,
-    }
-}
-
-fn osc_terminator(bytes: &[u8]) -> Option<(usize, usize)> {
-    bytes.iter().enumerate().find_map(|(index, byte)| {
-        if *byte == b'\x07' {
-            Some((index, 1))
-        } else if *byte == b'\x1b' && bytes.get(index + 1) == Some(&b'\\') {
-            Some((index, 2))
-        } else {
-            None
-        }
-    })
-}
-
 fn url_domain(url: &str) -> Option<String> {
     let (_, rest) = url.split_once("://")?;
     let authority = rest.split(['/', '?', '#']).next()?;
@@ -1810,25 +1239,6 @@ mod tests {
         assert_eq!(gate.lock_acquisition_count(), 1);
         gate.observe_chunk(b"/continued\n");
         assert_eq!(gate.lock_acquisition_count(), 2);
-    }
-
-    #[test]
-    fn pty_callback_only_queues_bytes_and_parser_runs_once_outside_processing_lock() {
-        let gate = LinkExtractionGate::default();
-        gate.observe_chunk(b"https://outside-lock.example");
-
-        assert_eq!(gate.parse_passes.load(Ordering::Relaxed), 0);
-        assert!(gate.take_links().is_none());
-        assert_eq!(gate.parse_passes.load(Ordering::Relaxed), 1);
-        assert_eq!(gate.parses_outside_processing.load(Ordering::Relaxed), 1);
-
-        gate.observe_chunk(b"/path\n");
-
-        assert_eq!(gate.parse_passes.load(Ordering::Relaxed), 1);
-        let links = gate.take_links().expect("completed link");
-        assert_eq!(links.output_urls, vec!["https://outside-lock.example/path"]);
-        assert_eq!(gate.parse_passes.load(Ordering::Relaxed), 2);
-        assert_eq!(gate.parses_outside_processing.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -2022,7 +1432,7 @@ mod tests {
 
         let overlong_url = format!(
             "https://bounds.example/{}\n",
-            "b".repeat(MAX_PENDING_LINK_BYTES)
+            "b".repeat(LARGE_TEST_OUTPUT_BYTES)
         );
         gate.observe_chunk(overlong_url.as_bytes());
         assert!(gate.take_links().is_none());
@@ -2224,7 +1634,7 @@ mod tests {
     fn pending_buffer_cap_extracts_then_keeps_scanning_later_output() {
         let gate = LinkExtractionGate::default();
         gate.observe_chunk(b"https://before-cap.example.test/path\n");
-        gate.observe_chunk(&vec![b'x'; MAX_PENDING_LINK_BYTES]);
+        gate.observe_chunk(&vec![b'x'; LARGE_TEST_OUTPUT_BYTES]);
         gate.observe_chunk(b"\nhttps://after-cap.example.test/path\n");
 
         let links = gate.take_links().expect("bounded link extraction");
@@ -2245,7 +1655,7 @@ mod tests {
 
         let mut open_url = b"https://at-cap.example.test/".to_vec();
         open_url.resize(1_024, b'a');
-        let filler_len = MAX_PENDING_LINK_BYTES - first.len() - open_url.len();
+        let filler_len = LARGE_TEST_OUTPUT_BYTES - first.len() - open_url.len();
         let mut filler = vec![b'x'; filler_len];
         *filler.last_mut().expect("non-empty filler") = b'\n';
         gate.observe_chunk(&filler);
@@ -2268,9 +1678,9 @@ mod tests {
     fn ingest_bounds_staging_and_drops_a_cut_url_whole() {
         let gate = LinkExtractionGate::default();
         gate.observe_chunk(b"https://oversized.example/");
-        gate.observe_chunk(&vec![b'a'; MAX_PENDING_LINK_BYTES]);
+        gate.observe_chunk(&vec![b'a'; LARGE_TEST_OUTPUT_BYTES]);
 
-        assert_eq!(gate.staged_byte_count(), MAX_PENDING_LINK_BYTES);
+        assert!(gate.retained_byte_count() <= MAX_URL_BYTES);
         assert!(gate.take_links().is_none());
 
         gate.observe_chunk(b"\nhttps://after-overflow.example/path\n");
@@ -2284,17 +1694,17 @@ mod tests {
     fn ingest_extracts_url_wholly_contained_in_evicted_middle() {
         let gate = LinkExtractionGate::default();
         let evicted_url = b"https://evicted.example/path";
-        let evicted_at = STAGING_WINDOW_BYTES + 128;
+        let evicted_at = OLD_STAGING_BOUNDARY_BYTES + 128;
         let mut chunk = b"https://before-overflow.example/path\n".to_vec();
         chunk.resize(evicted_at, b'x');
         chunk.push(b' ');
         chunk.extend_from_slice(evicted_url);
         chunk.push(b'\n');
-        chunk.resize(MAX_PENDING_LINK_BYTES + 4_096, b'y');
+        chunk.resize(LARGE_TEST_OUTPUT_BYTES + 4_096, b'y');
 
         gate.observe_chunk(&chunk);
 
-        assert_eq!(gate.staged_byte_count(), MAX_PENDING_LINK_BYTES);
+        assert!(gate.retained_byte_count() <= MAX_URL_BYTES);
         assert_eq!(
             gate.take_links()
                 .expect("links spanning staging windows")
@@ -2311,17 +1721,17 @@ mod tests {
         let gate = LinkExtractionGate::default();
         let evicted_url = b"https://evicted-in-pieces.example/path";
         let mut first = b"https://before-piecewise-overflow.example/path\n".to_vec();
-        first.resize(STAGING_WINDOW_BYTES + 40, b'x');
+        first.resize(OLD_STAGING_BOUNDARY_BYTES + 40, b'x');
         first.push(b'\n');
         first.extend_from_slice(evicted_url);
         first.push(b'\n');
-        first.resize(MAX_PENDING_LINK_BYTES, b'y');
+        first.resize(LARGE_TEST_OUTPUT_BYTES, b'y');
 
         gate.observe_chunk(&first);
         gate.observe_chunk(&[b'z'; 64]);
         gate.observe_chunk(&[b'z'; 64]);
 
-        assert_eq!(gate.staged_byte_count(), MAX_PENDING_LINK_BYTES);
+        assert!(gate.retained_byte_count() <= MAX_URL_BYTES);
         assert_eq!(
             gate.take_links()
                 .expect("piecewise-evicted link")
@@ -2334,6 +1744,92 @@ mod tests {
     }
 
     #[test]
+    fn complete_urls_at_old_staging_boundaries_survive_large_prefix_and_suffix() {
+        for boundary in (1..=4).map(|multiple| OLD_STAGING_BOUNDARY_BYTES * multiple) {
+            let gate = LinkExtractionGate::default();
+            let url = format!("https://boundary-{boundary}.example/path");
+            let mut chunk = vec![b'x'; boundary];
+            *chunk.last_mut().expect("non-empty prefix") = b'\n';
+            chunk.extend_from_slice(url.as_bytes());
+            chunk.push(b'\n');
+            chunk.resize(chunk.len() + LARGE_TEST_OUTPUT_BYTES, b'y');
+
+            gate.observe_chunk(&chunk);
+
+            assert!(
+                gate.retained_byte_count()
+                    <= MAX_URL_BYTES + MAX_SCHEME_BYTES + MAX_OPEN_SEQUENCE_BYTES,
+                "old staging boundary {boundary} retained a multi-MiB window"
+            );
+            assert_eq!(
+                gate.take_links()
+                    .unwrap_or_else(|| panic!("URL at old staging boundary {boundary}"))
+                    .output_urls,
+                vec![url],
+                "old staging boundary {boundary}"
+            );
+        }
+    }
+
+    #[test]
+    fn unterminated_url_survives_many_detection_cycles_until_terminated() {
+        let gate = LinkExtractionGate::default();
+        gate.observe_chunk(b"https://many-cycles.example/");
+
+        let styling = b"\x1b[31m".repeat(LARGE_TEST_OUTPUT_BYTES / 5 + 1);
+        let mut max_retained = 0;
+
+        for _ in 0..3 {
+            gate.observe_chunk(&styling);
+            max_retained = max_retained.max(gate.retained_byte_count());
+            assert!(gate.take_links().is_none());
+            gate.observe_chunk(b"a");
+        }
+
+        assert!(gate.take_links().is_none());
+        gate.observe_chunk(b"\n");
+        assert_eq!(
+            gate.take_links().expect("terminated URL").output_urls,
+            vec![format!("https://many-cycles.example/{}", "a".repeat(3))]
+        );
+        assert!(
+            max_retained <= MAX_URL_BYTES + MAX_SCHEME_BYTES + MAX_OPEN_SEQUENCE_BYTES,
+            "a detection cycle retained the full styling burst"
+        );
+    }
+
+    #[test]
+    fn independent_chunk_streams_scan_each_received_byte_once() {
+        const PANES: usize = 24;
+        const CHUNKS: usize = 128;
+        let gates = (0..PANES)
+            .map(|_| LinkExtractionGate::default())
+            .collect::<Vec<_>>();
+
+        let prefix = b"\x1b]8;;https://linear.example/";
+        for gate in &gates {
+            gate.observe_chunk(prefix);
+            assert!(gate.take_links().is_none());
+        }
+        for _ in 0..CHUNKS {
+            for gate in &gates {
+                gate.observe_chunk(b"a");
+                assert!(gate.take_links().is_none());
+            }
+        }
+
+        let received = (prefix.len() + CHUNKS) * PANES;
+        let scanned = gates
+            .iter()
+            .map(|gate| gate.scanned_bytes.load(Ordering::Relaxed) as usize)
+            .sum::<usize>();
+        assert!(
+            scanned <= received,
+            "already-scanned bytes were revisited: received {received}, scanned {scanned}"
+        );
+    }
+
+    #[test]
     fn overflow_suffix_resumes_after_open_osc_terminator() {
         for split_st in [false, true] {
             let gate = LinkExtractionGate::default();
@@ -2341,9 +1837,9 @@ mod tests {
             gate.observe_chunk(first);
 
             let osc = b"\x1b]0;title";
-            let mut overflow = vec![b'x'; STAGING_WINDOW_BYTES - first.len() - osc.len()];
+            let mut overflow = vec![b'x'; OLD_STAGING_BOUNDARY_BYTES - first.len() - osc.len()];
             overflow.extend_from_slice(osc);
-            overflow.resize(MAX_PENDING_LINK_BYTES + 256, b'y');
+            overflow.resize(LARGE_TEST_OUTPUT_BYTES + 256, b'y');
             overflow.extend_from_slice(b" hidden https://hidden.example/path ");
             if split_st {
                 overflow.push(b'\x1b');
@@ -2354,7 +1850,7 @@ mod tests {
                 gate.observe_chunk(&overflow);
             }
 
-            assert_eq!(gate.staged_byte_count(), MAX_PENDING_LINK_BYTES);
+            assert!(gate.retained_byte_count() <= MAX_URL_BYTES);
             let links = gate.take_links().expect("visible URL after open OSC");
             assert_eq!(
                 links.output_urls,
@@ -2457,7 +1953,7 @@ mod tests {
         gate.observe_chunk(first);
 
         let csi_len = MAX_OPEN_SEQUENCE_BYTES + 1_024;
-        let filler_len = MAX_PENDING_LINK_BYTES - first.len() - csi_len;
+        let filler_len = LARGE_TEST_OUTPUT_BYTES - first.len() - csi_len;
         let mut chunk = vec![b'x'; filler_len];
         *chunk.last_mut().expect("non-empty filler") = b'\n';
         chunk.extend_from_slice(b"\x1b[");
@@ -2487,7 +1983,7 @@ mod tests {
         gate.observe_chunk(first);
 
         let osc_len = MAX_OPEN_SEQUENCE_BYTES + 1_024;
-        let filler_len = MAX_PENDING_LINK_BYTES - first.len() - osc_len;
+        let filler_len = LARGE_TEST_OUTPUT_BYTES - first.len() - osc_len;
         let mut chunk = vec![b'x'; filler_len];
         *chunk.last_mut().expect("non-empty filler") = b'\n';
         let mut control = b"\x1b]8;;https://too-long.example.test/".to_vec();
@@ -2531,7 +2027,7 @@ mod tests {
     fn pending_rollover_preserves_trailing_escape_for_split_st() {
         let gate = LinkExtractionGate::default();
         let mut chunk = b"\x1b]8;;https://too-long.example.test/".to_vec();
-        chunk.resize(MAX_PENDING_LINK_BYTES, b'a');
+        chunk.resize(LARGE_TEST_OUTPUT_BYTES, b'a');
         *chunk.last_mut().expect("non-empty pending buffer") = b'\x1b';
         chunk.extend_from_slice(b"\\\nhttps://after-rollover.example/path\n");
 
