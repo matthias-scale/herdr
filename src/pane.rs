@@ -2769,6 +2769,7 @@ impl PaneRuntime {
         let reflected_input_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let link_extraction = Arc::new(crate::agent_state::LinkExtractionGate::default());
+        terminal.install_link_extraction(link_extraction.clone());
         let agent_output_seq = Arc::new(AtomicU64::new(0));
         let suppress_pane_died = Arc::new(AtomicBool::new(false));
 
@@ -2782,7 +2783,6 @@ impl PaneRuntime {
             let input_delivery_seq_for_read = Arc::clone(&input_delivery_seq);
             let reflected_input_seq_for_read = Arc::clone(&reflected_input_seq);
             let detection_content_seq = detection_content_seq.clone();
-            let link_extraction_for_read = link_extraction.clone();
             let agent_output_seq = agent_output_seq.clone();
             let child_pid = child_pid.clone();
             let read_events = events.clone();
@@ -2805,7 +2805,6 @@ impl PaneRuntime {
                     );
                 }
                 publish_terminal_bells(pane_id, result.terminal_bells, &read_events);
-                link_extraction_for_read.observe_chunk(bytes);
                 observe_detection_content_change(bytes, &detection_content_seq);
                 observe_agent_output(bytes, &agent_output_seq);
                 if result.request_render && render_dirty.request_pty(pane_id) {
@@ -2984,6 +2983,7 @@ impl PaneRuntime {
         let reflected_input_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
         let link_extraction = Arc::new(crate::agent_state::LinkExtractionGate::default());
+        terminal.install_link_extraction(link_extraction.clone());
         let full_lifecycle_hook_baseline_content_seq = Arc::new(AtomicU64::new(0));
         let agent_output_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
@@ -3030,7 +3030,6 @@ impl PaneRuntime {
             let input_delivery_seq_for_read = Arc::clone(&input_delivery_seq);
             let reflected_input_seq_for_read = Arc::clone(&reflected_input_seq);
             let detection_content_seq = detection_content_seq.clone();
-            let link_extraction_for_read = link_extraction.clone();
             let agent_output_seq = agent_output_seq.clone();
             let first_output = Arc::new(AtomicBool::new(false));
             let first_output_for_read = first_output.clone();
@@ -3059,7 +3058,6 @@ impl PaneRuntime {
                     );
                 }
                 publish_terminal_bells(pane_id, result.terminal_bells, &events);
-                link_extraction_for_read.observe_chunk(bytes);
                 if agent_detection == AgentDetection::Enabled {
                     observe_detection_content_change(bytes, &detection_content_seq);
                     observe_agent_output(bytes, &agent_output_seq);
@@ -4533,6 +4531,78 @@ mod tests {
             assert_eq!(links.output_urls, vec![uri], "link gate {name}");
             assert!(links.osc8_urls.is_empty(), "link gate {name}");
         }
+    }
+
+    #[tokio::test]
+    async fn c1_control_strings_and_escape_controls_match_ghostty_visible_output() {
+        let mut callback_events = 0;
+        let mut callback_bytes = 0;
+        let cases = [
+            ("DCS", 0x90, "dcs"),
+            ("SOS", 0x98, "sos"),
+            ("PM", 0x9e, "pm"),
+            ("APC", 0x9f, "apc"),
+        ];
+
+        for (name, introducer, slug) in cases {
+            let hidden = format!("https://hidden-{slug}.example.test/path");
+            let visible = format!("https://visible-{slug}.example.test/path");
+            // Ghostty handles raw 8-bit C1 bytes through the VT table while
+            // already in parser state. ESC puts this stream on that path.
+            let mut stream = vec![b'\x1b', introducer];
+            stream.extend_from_slice(hidden.as_bytes());
+            stream.push(0x9c);
+            stream.extend_from_slice(visible.as_bytes());
+            stream.push(b'\n');
+
+            let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream);
+            let rendered = runtime.visible_text();
+            assert!(
+                !rendered.contains(&hidden),
+                "Ghostty hid {name} payload; rendered={rendered:?}"
+            );
+            assert!(
+                rendered.contains(&visible),
+                "Ghostty rendered text after {name}; rendered={rendered:?}"
+            );
+
+            let links = gate.take_links().expect("visible URL after C1 ST");
+            assert_eq!(links.output_urls, vec![visible], "link gate {name}");
+            assert!(links.osc8_urls.is_empty(), "link gate {name}");
+            let (events, bytes) = gate.parsed_event_measurement();
+            callback_events += events;
+            callback_bytes += bytes;
+        }
+
+        let hidden = "https://hidden-escape-control.example.test/path";
+        let rendered_hidden = "ttps://hidden-escape-control.example.test/path";
+        let visible = "https://visible-escape-control.example.test/path";
+        let stream = format!("\x1b\x07{hidden} {visible}\n");
+        let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+        let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+        runtime.terminal.install_link_extraction(gate.clone());
+        runtime.test_process_pty_bytes(stream.as_bytes());
+        let rendered = runtime.visible_text();
+        assert!(
+            !rendered.contains(hidden),
+            "Ghostty consumed ESC plus C0 and dispatch"
+        );
+        assert!(rendered.contains(rendered_hidden));
+        assert!(
+            rendered.contains(visible),
+            "Ghostty rendered text after ESC plus C0"
+        );
+
+        let links = gate.take_links().expect("visible URL after ESC plus C0");
+        assert_eq!(links.output_urls, vec![visible, rendered_hidden]);
+        assert!(links.osc8_urls.is_empty());
+        let (events, bytes) = gate.parsed_event_measurement();
+        callback_events += events;
+        callback_bytes += bytes;
+        eprintln!("parsed output callbacks: {callback_events} events, {callback_bytes} bytes");
     }
 
     #[tokio::test]

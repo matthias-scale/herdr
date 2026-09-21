@@ -297,6 +297,10 @@ pub const Parser = struct {
     /// Maximum size of a "normal" OSC.
     pub const MAX_BUF = 2048;
 
+    /// Maximum callback-only OSC 8 evidence. This does not change the
+    /// terminal's normal OSC parsing limit or hyperlink behavior.
+    pub const MAX_HYPERLINK_EVIDENCE = 8193;
+
     /// Optional allocator used to accept data longer than MAX_BUF.
     /// This only applies to some commands (e.g. OSC 52) that can
     /// reasonably exceed MAX_BUF.
@@ -311,6 +315,12 @@ pub const Parser = struct {
     /// Capture state. If this is set then we're actively capturing the
     /// bytes coming into the parser.
     capture: ?Capture,
+
+    /// Bounded OSC 8 evidence for embedders that need the parser's visibility
+    /// classification without running a second VT state machine.
+    hyperlink_evidence: std.ArrayListUnmanaged(u8),
+    hyperlink_evidence_active: bool,
+    hyperlink_evidence_overflow: bool,
 
     /// The command that is the result of parsing.
     command: Command,
@@ -376,6 +386,9 @@ pub const Parser = struct {
             .state = .start,
             .capture = null,
             .command = .invalid,
+            .hyperlink_evidence = .{},
+            .hyperlink_evidence_active = false,
+            .hyperlink_evidence_overflow = false,
 
             // Keeping all our undefined values together so we can
             // visually easily duplicate them in the Valgrind check below.
@@ -393,6 +406,7 @@ pub const Parser = struct {
     /// This must be called to clean up any allocated memory.
     pub fn deinit(self: *Parser) void {
         self.reset();
+        if (self.alloc) |alloc| self.hyperlink_evidence.deinit(alloc);
     }
 
     /// Reset the parser state.
@@ -438,6 +452,9 @@ pub const Parser = struct {
         self.state = .start;
         self.capture = null;
         self.command = .invalid;
+        self.hyperlink_evidence.clearRetainingCapacity();
+        self.hyperlink_evidence_active = false;
+        self.hyperlink_evidence_overflow = false;
 
         if (std.valgrind.runningOnValgrind() > 0) {
             // Initialize our undefined fields so Valgrind can catch it.
@@ -544,6 +561,8 @@ pub const Parser = struct {
 
     /// Consume the next character c and advance the parser state.
     pub fn next(self: *Parser, c: u8) void {
+        self.recordHyperlinkEvidence(c);
+
         // If the state becomes invalid for any reason, just discard
         // any further input.
         if (self.state == .invalid) return;
@@ -743,13 +762,45 @@ pub const Parser = struct {
             .@"0",
             .@"22",
             .@"777",
-            .@"8",
             .@"9",
             => switch (c) {
                 ';' => self.captureTrailing(.fixed),
                 else => self.state = .invalid,
             },
+
+            .@"8" => switch (c) {
+                ';' => {
+                    self.captureTrailing(.fixed);
+                    self.hyperlink_evidence_active = true;
+                },
+                else => self.state = .invalid,
+            },
         }
+    }
+
+    /// Copies the normal fixed capture only when OSC 8 outgrows it, then
+    /// retains at most the callback evidence bound.
+    inline fn recordHyperlinkEvidence(self: *Parser, c: u8) void {
+        if (!self.hyperlink_evidence_active or self.hyperlink_evidence_overflow) return;
+        const alloc = self.alloc orelse {
+            self.hyperlink_evidence_overflow = true;
+            return;
+        };
+        if (self.hyperlink_evidence.items.len == 0) {
+            const cap = if (self.capture) |*value| value else return;
+            if (cap.trailing().len < MAX_BUF) return;
+            self.hyperlink_evidence.appendSlice(alloc, cap.trailing()) catch {
+                self.hyperlink_evidence_overflow = true;
+                return;
+            };
+        }
+        if (self.hyperlink_evidence.items.len >= MAX_HYPERLINK_EVIDENCE) {
+            self.hyperlink_evidence_overflow = true;
+            return;
+        }
+        self.hyperlink_evidence.append(alloc, c) catch {
+            self.hyperlink_evidence_overflow = true;
+        };
     }
 
     /// End the sequence and return the command, if any. If the return value
@@ -835,6 +886,16 @@ pub const Parser = struct {
 
             .@"5522" => parsers.kitty_clipboard_protocol.parse(self, terminator_ch),
         };
+    }
+
+    /// Returns the OSC 8 URI classified by this parser when it exceeded the
+    /// terminal's normal OSC buffer but remained within the callback bound.
+    pub fn hyperlinkEvidence(self: *const Parser) ?[]const u8 {
+        if (!self.hyperlink_evidence_active or self.hyperlink_evidence_overflow) return null;
+        const data = self.hyperlink_evidence.items;
+        const separator = std.mem.indexOfScalar(u8, data, ';') orelse return null;
+        const uri = data[separator + 1 ..];
+        return if (uri.len == 0) null else uri;
     }
 };
 

@@ -464,17 +464,63 @@ impl CellWide {
 }
 
 type WritePtyCallback = dyn FnMut(&[u8]) + Send;
+type ParsedOutputCallback = dyn for<'a> FnMut(ParsedOutput<'a>) + Send;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ParsedOutput<'a> {
+    Text(&'a [u8]),
+    Separator,
+    Hyperlink(&'a [u8]),
+}
 
 const MAX_CLIPBOARD_BYTES: usize = 192 * 1024;
 
 #[derive(Default)]
 struct TerminalCallbackState {
     write_pty: Option<Box<WritePtyCallback>>,
+    parsed_output: Option<Box<ParsedOutputCallback>>,
+    parsed_output_enabled: bool,
     bell_count: u16,
     pwd_changes: Vec<Vec<u8>>,
     clipboard_writes: Vec<Vec<u8>>,
     size_report: ffi::GhosttySizeReportSize,
     color_scheme: Option<ColorScheme>,
+}
+
+unsafe extern "C" fn parsed_output_trampoline(
+    _terminal: ffi::GhosttyTerminal,
+    userdata: *mut c_void,
+    kind: ffi::GhosttyTerminalParsedOutputKind,
+    data: *const u8,
+    len: usize,
+) {
+    if userdata.is_null() || (data.is_null() && len != 0) {
+        return;
+    }
+    let state = unsafe { &mut *userdata.cast::<TerminalCallbackState>() };
+    if !state.parsed_output_enabled {
+        return;
+    }
+    let Some(callback) = state.parsed_output.as_mut() else {
+        return;
+    };
+    let bytes = if len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(data, len) }
+    };
+    match kind {
+        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_TEXT => {
+            callback(ParsedOutput::Text(bytes));
+        }
+        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_SEPARATOR => {
+            callback(ParsedOutput::Separator);
+        }
+        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_HYPERLINK => {
+            callback(ParsedOutput::Hyperlink(bytes));
+        }
+        _ => {}
+    }
 }
 
 unsafe extern "C" fn bell_trampoline(_terminal: ffi::GhosttyTerminal, userdata: *mut c_void) {
@@ -859,6 +905,12 @@ impl Terminal {
                 (&glyph_protocol as *const bool).cast(),
             )
             .into_result()?;
+            ffi::ghostty_terminal_set(
+                terminal.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_PARSED_OUTPUT,
+                (parsed_output_trampoline as *const ()).cast(),
+            )
+            .into_result()?;
         }
         Ok(terminal)
     }
@@ -988,6 +1040,17 @@ impl Terminal {
         }
         self.callback_state.write_pty = Some(Box::new(callback));
         Ok(())
+    }
+
+    pub(crate) fn set_parsed_output_callback<F>(&mut self, callback: F)
+    where
+        F: for<'a> FnMut(ParsedOutput<'a>) + Send + 'static,
+    {
+        self.callback_state.parsed_output = Some(Box::new(callback));
+    }
+
+    pub(crate) fn set_parsed_output_enabled(&mut self, enabled: bool) {
+        self.callback_state.parsed_output_enabled = enabled;
     }
 
     pub fn set_color_scheme(&mut self, color_scheme: Option<ColorScheme>) -> Option<ColorScheme> {

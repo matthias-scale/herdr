@@ -23,6 +23,15 @@ const log = std.log.scoped(.stream_terminal);
 /// a Terminal and updates the Terminal state.
 pub const Stream = stream.Stream(Handler);
 
+/// Parsed output events exposed to terminal embedders. These are emitted from
+/// the same VT action stream that mutates the terminal.
+pub const ParsedOutputKind = enum(c_int) {
+    text = 0,
+    separator = 1,
+    hyperlink = 2,
+    _,
+};
+
 /// A stream handler that updates terminal state. By default, it is
 /// readonly in the sense that it only updates terminal state and ignores
 /// all other sequences that require a response or otherwise have side
@@ -105,6 +114,10 @@ pub const Handler = struct {
         /// library has no way to mediate that with user consent.
         clipboard_write: ?*const fn (*Handler, clipboard.Write) clipboard.WriteResult,
 
+        /// Called for printable text, C0 separators, and OSC 8 targets after
+        /// the VT parser has classified the input.
+        parsed_output: ?*const fn (*Handler, ParsedOutputKind, []const u8) void,
+
         /// Called in response to an XTVERSION query. Returns the version
         /// string to report (e.g. "ghostty 1.2.3"). The returned memory
         /// must be valid for the lifetime of the call. The maximum length
@@ -117,6 +130,7 @@ pub const Handler = struct {
         pub const readonly: Effects = .{
             .bell = null,
             .clipboard_write = null,
+            .parsed_output = null,
             .color_scheme = null,
             .device_attributes = null,
             .enquiry = null,
@@ -143,9 +157,54 @@ pub const Handler = struct {
         comptime action: Action.Tag,
         value: Action.Value(action),
     ) void {
+        self.emitParsedOutput(action, value);
         self.vtFallible(action, value) catch |err| {
             log.warn("error handling VT action action={} err={}", .{ action, err });
         };
+    }
+
+    /// Reports callback-only evidence from OSC state exit. Terminal behavior
+    /// remains governed by the normal OSC dispatch action.
+    pub fn vtParsedOscEnd(self: *Handler, hyperlink: ?[]const u8, invalid: bool) void {
+        const callback = self.effects.parsed_output orelse return;
+        if (hyperlink) |uri| {
+            callback(self, .hyperlink, uri);
+        } else if (invalid) {
+            callback(self, .separator, "");
+        }
+    }
+
+    fn emitParsedOutput(
+        self: *Handler,
+        comptime action: Action.Tag,
+        value: Action.Value(action),
+    ) void {
+        const callback = self.effects.parsed_output orelse return;
+        switch (action) {
+            .print => {
+                var buf: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(value.cp, &buf) catch return;
+                callback(self, .text, buf[0..len]);
+            },
+            .print_slice => {
+                var buf: [4096]u8 = undefined;
+                var start: usize = 0;
+                while (start < value.cps.len) {
+                    var len: usize = 0;
+                    while (start < value.cps.len) : (start += 1) {
+                        const cp: u21 = @intCast(value.cps[start]);
+                        const cp_len = std.unicode.utf8CodepointSequenceLength(cp) catch break;
+                        if (len + cp_len > buf.len) break;
+                        len += std.unicode.utf8Encode(cp, buf[len..]) catch break;
+                    }
+                    if (len == 0) return;
+                    callback(self, .text, buf[0..len]);
+                }
+            },
+            .bell, .backspace, .horizontal_tab, .linefeed, .carriage_return, .enquiry => callback(self, .separator, ""),
+            .start_hyperlink => callback(self, .hyperlink, value.uri),
+            else => {},
+        }
     }
 
     inline fn vtFallible(

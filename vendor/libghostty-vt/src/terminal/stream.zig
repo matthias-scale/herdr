@@ -894,6 +894,7 @@ pub fn Stream(comptime H: type) type {
         /// we may be in the UTF-8 decoding state call nextSlice or next.
         fn nextNonUtf8(self: *Self, c: u8) void {
             assert(self.parser.state != .ground);
+            const parser_state_before = self.parser.state;
 
             // Fast path for CSI entry.
             if (self.parser.state == .escape and c == '[') {
@@ -970,6 +971,16 @@ pub fn Stream(comptime H: type) type {
             // miscompile or it's just very counter-intuitive comptime stuff,
             // but regardless, this is the easy solution.
             const actions = @call(.always_inline, Parser.next, .{ &self.parser, c });
+
+            if (comptime @hasDecl(T, "vtParsedOscEnd")) {
+                if (parser_state_before == .osc_string and self.parser.state != .osc_string) {
+                    const osc_parser = &self.parser.osc_parser;
+                    self.handler.vtParsedOscEnd(
+                        if (osc_parser.state == .invalid) osc_parser.hyperlinkEvidence() else null,
+                        osc_parser.state == .invalid,
+                    );
+                }
+            }
 
             for (actions) |action_opt| {
                 const action = action_opt orelse continue;
