@@ -116,11 +116,6 @@ impl App {
         let Some((workspace_index, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
-        let Some(tab_index) =
-            self.state.workspaces[workspace_index].find_tab_index_for_pane(pane_id)
-        else {
-            return encode_error(id, "pane_not_found", "pane not found");
-        };
         let Some(pane) = self.state.workspaces[workspace_index].pane_state(pane_id) else {
             return encode_error(id, "pane_not_found", "pane not found");
         };
@@ -155,9 +150,9 @@ impl App {
         );
         let Some(saved_pane) = snapshot
             .workspaces
-            .get_mut(workspace_index)
-            .and_then(|workspace| workspace.tabs.get_mut(tab_index))
-            .and_then(|tab| tab.panes.get_mut(&pane_id.raw()))
+            .iter_mut()
+            .flat_map(|workspace| workspace.tabs.iter_mut())
+            .find_map(|tab| tab.panes.get_mut(&pane_id.raw()))
         else {
             return encode_error(
                 id,
@@ -403,6 +398,74 @@ mod tests {
             .next()
             .expect("saved pane");
         assert_eq!(saved.group_membership, membership);
+    }
+
+    #[test]
+    fn membership_persists_for_a_local_tab_behind_an_omitted_proxy_tab() {
+        let (mut app, dir, _) = app_with_groups("membership-after-proxy");
+        let local_tab = app.state.workspaces[0].test_add_tab(Some("later local"));
+        app.state.ensure_test_terminals();
+        let local_pane = app.state.workspaces[0].tabs[local_tab].root_pane;
+        let local_public_id = app.public_pane_id(0, local_pane).expect("local pane id");
+
+        let proxy_pane = crate::layout::PaneId::alloc();
+        let proxy_terminal = crate::terminal::TerminalId::alloc();
+        let (proxy_runtime, _channels) = crate::terminal::TerminalRuntime::spawn_remote_proxy(
+            proxy_pane,
+            24,
+            80,
+            0,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::default()),
+            crate::remote::RemoteFocusOperationState::new(),
+        )
+        .expect("proxy runtime");
+        app.state.terminals.insert(
+            proxy_terminal.clone(),
+            crate::terminal::TerminalState::new(proxy_terminal.clone(), "/remote".into()),
+        );
+        app.terminal_runtimes
+            .insert(proxy_terminal.clone(), proxy_runtime);
+        let events = app.state.workspaces[0].tabs[0].events.clone();
+        let proxy_tab = app.state.workspaces[0].create_tab_from_existing_pane(
+            crate::workspace::MovedPane {
+                pane_id: proxy_pane,
+                pane_state: crate::pane::PaneState::new(proxy_terminal),
+            },
+            Some("proxy only".into()),
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::default()),
+        );
+        assert!(app.state.workspaces[0].move_tab(proxy_tab, 1));
+        assert_eq!(
+            app.state.workspaces[0].find_tab_index_for_pane(local_pane),
+            Some(2)
+        );
+
+        let response = app.handle_pane_group_set(
+            "clear".into(),
+            PaneGroupSetParams {
+                pane_id: local_public_id,
+                group_id: None,
+                expected_revision: 0,
+            },
+        );
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+            "pane membership should persist by identity: {response}"
+        );
+
+        let session_json = std::fs::read_to_string(dir.session_paths().0).unwrap();
+        let snapshot: crate::persist::SessionSnapshot =
+            serde_json::from_str(&session_json).expect("persisted session");
+        let saved = snapshot.workspaces[0]
+            .tabs
+            .iter()
+            .find_map(|tab| tab.panes.get(&local_pane.raw()))
+            .expect("local pane persisted after compacting proxy-only tab");
+        assert_eq!(saved.group_membership.revision, 1);
+        assert!(saved.group_membership.group_id.is_none());
     }
 
     #[test]
