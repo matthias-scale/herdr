@@ -645,6 +645,16 @@ pub(crate) struct HyperlinkSpan {
     pub(crate) uri: String,
 }
 
+// Keep span traversal in step with Ratatui's cell-width policy and Herdr's
+// terminal encoder, which render halfwidth sound marks as their own cells.
+fn rendered_cell_width(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text).saturating_add(
+        text.chars()
+            .filter(|ch| matches!(ch, '\u{ff9e}' | '\u{ff9f}'))
+            .count(),
+    )
+}
+
 impl FrameData {
     /// Creates a `FrameData` from a ratatui `Buffer` and optional cursor.
     ///
@@ -685,7 +695,7 @@ impl FrameData {
         }
         for span in spans {
             let (mut x, y) = span.position;
-            let label_width = unicode_width::UnicodeWidthStr::width(span.label.as_str());
+            let label_width = rendered_cell_width(span.label.as_str());
             let right = x.saturating_add(label_width.min(u16::MAX as usize) as u16);
             while x < right {
                 let Some(cell) = buffer.cell((x, y)) else {
@@ -693,7 +703,7 @@ impl FrameData {
                 };
                 let symbol = cell.symbol();
                 hyperlink_by_position.insert((x, y), (symbol, span.uri.as_str()));
-                let cell_width = unicode_width::UnicodeWidthStr::width(symbol).max(1);
+                let cell_width = rendered_cell_width(symbol).max(1);
                 x = x.saturating_add(cell_width.min(u16::MAX as usize) as u16);
             }
         }
@@ -2284,6 +2294,40 @@ mod tests {
         assert_eq!(restored.cell((1, 0)).unwrap().symbol(), "i");
         assert_eq!(restored.cell((2, 0)).unwrap().symbol(), "!");
         assert_eq!(restored.cell((2, 0)).unwrap().fg, Color::Rgb(255, 128, 0));
+    }
+
+    #[test]
+    fn r361_7_hyperlink_spans_follow_ratatui_cell_width() {
+        let mut buffer = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 8, 1));
+        buffer.set_string(0, 0, "界x", ratatui::style::Style::default());
+        buffer.cell_mut((4, 0)).unwrap().set_symbol("ｶ\u{ff9e}");
+        buffer.cell_mut((6, 0)).unwrap().set_symbol("x");
+        let frame = FrameData::from_ratatui_buffer_with_hyperlinks_and_spans(
+            &buffer,
+            None,
+            &[],
+            &[
+                HyperlinkSpan {
+                    position: (0, 0),
+                    label: "界x".into(),
+                    uri: "https://example.com/wide".into(),
+                },
+                HyperlinkSpan {
+                    position: (4, 0),
+                    label: "ｶ\u{ff9e}x".into(),
+                    uri: "https://example.com/kana".into(),
+                },
+            ],
+        );
+
+        assert_eq!(frame.cells[0].hyperlink, Some(0));
+        assert_eq!(frame.cells[2].hyperlink, Some(0));
+        assert_eq!(frame.cells[4].hyperlink, Some(1));
+        assert_eq!(
+            frame.cells[6].hyperlink,
+            Some(1),
+            "the glyph after a two-cell halfwidth-kana grapheme remains linked"
+        );
     }
 
     #[test]

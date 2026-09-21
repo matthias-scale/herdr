@@ -650,15 +650,15 @@ fn compute_view_internal(
             .iter()
             .take(usize::from(body.height))
             .filter_map(|row| row.observed_at)
-            .map(|observed_at| {
+            .filter_map(|observed_at| {
                 let observed_unix_s = observed_at
                     .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                    .map_or(app.view_observed_unix_s, |duration| duration.as_secs());
+                    .ok()?
+                    .as_secs();
                 app.view_observed_at
                     .checked_sub(std::time::Duration::from_secs(
                         app.view_observed_unix_s.saturating_sub(observed_unix_s),
                     ))
-                    .unwrap_or(app.view_observed_at)
             })
             .collect()
     } else {

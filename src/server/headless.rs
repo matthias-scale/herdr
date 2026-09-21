@@ -4141,9 +4141,6 @@ impl HeadlessServer {
         } else {
             false
         };
-        if foreground_changed {
-            self.resize_shared_runtime_to_effective_size_before_input();
-        }
         let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
         // Client-local theme reports were applied above; routing them again would update every
         // pane once per palette entry instead of once per captured batch.
@@ -4207,6 +4204,11 @@ impl HeadlessServer {
         }
         if let Some(view) = &mut usage_view {
             self.app.state.swap_usage_view(view);
+        }
+        if foreground_changed {
+            // Promotion changes the effective size, but input geometry also
+            // depends on the source client's attach-local presentation.
+            self.resize_shared_runtime_to_effective_size_before_input();
         }
         pomodoro_changed |= self.route_full_app_human_events(client_id, events, false);
         if pomodoro_changed {
@@ -4513,9 +4515,6 @@ impl HeadlessServer {
                     return false;
                 }
                 let foreground_changed = self.promote_client_to_foreground(client_id);
-                if foreground_changed {
-                    self.resize_shared_runtime_to_effective_size_before_input();
-                }
                 let mut pomodoro_presentation =
                     self.pomodoro_input_presentation_for_input(client_id);
                 let mut notepad_presentation = self
@@ -4527,6 +4526,9 @@ impl HeadlessServer {
                     .state
                     .notepad
                     .swap_presentation(&mut notepad_presentation);
+                if foreground_changed {
+                    self.resize_shared_runtime_to_effective_size_before_input();
+                }
                 let changed = self.app.route_client_pixel_mouse_with_presentation(
                     client_id,
                     &data,
