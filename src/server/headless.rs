@@ -6213,14 +6213,12 @@ impl HeadlessServer {
             let area = Rect::new(0, 0, cols, rows);
             let resize_panes = self.app.state.view.pane_infos.is_empty();
             let render_started = crate::render_prof::timer();
-            let _ = crate::server::render_stream::render_virtual_with_runtime_registry_and_handles(
+            let _ = crate::server::render_stream::render_virtual_with_runtime_registry(
                 &mut self.app.state,
                 &self.app.terminal_runtimes,
                 area,
                 resize_panes,
                 crate::kitty_graphics::HostCellSize::default(),
-                &self.app.render_notify,
-                &self.app.render_dirty,
             );
             crate::render_prof::duration_since("full_render.render_virtual", render_started);
             self.app.full_redraw_pending = false;
@@ -6293,14 +6291,12 @@ impl HeadlessServer {
                         self.app.state.mobile_switcher_scroll,
                     ));
                     let (buffer, cursor) =
-                        crate::server::render_stream::render_virtual_with_runtime_registry_and_handles(
+                        crate::server::render_stream::render_virtual_with_runtime_registry(
                             &mut self.app.state,
                             &self.app.terminal_runtimes,
                             area,
                             is_foreground,
                             render_cell_size,
-                            &self.app.render_notify,
-                            &self.app.render_dirty,
                         );
                     self.app.record_pending_first_frame();
                     // The editor PTY is a shared runtime resource. Its size follows the

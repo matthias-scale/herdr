@@ -709,10 +709,6 @@ impl App {
             NavigateAction::GitCreatePr => {
                 request_git_action(&mut self.state, crate::app::state::GitAction::CreatePr);
             }
-            NavigateAction::ToggleInfoPanel => {
-                self.state.info_panel_expanded = !self.state.info_panel_expanded;
-                leave_navigate_mode(&mut self.state);
-            }
             NavigateAction::OpenSymphony => {
                 self.state.toggle_symphony();
                 leave_navigate_mode(&mut self.state);
@@ -2352,7 +2348,6 @@ pub(crate) enum NavigateAction {
     GitCommit,
     GitPush,
     GitCreatePr,
-    ToggleInfoPanel,
     OpenSymphony,
     OpenRuns,
     OpenWorkView,
@@ -2624,7 +2619,6 @@ macro_rules! non_indexed_action_bindings {
             (&kb.show_scratchpad, NavigateAction::ShowScratchpad),
             (&kb.toggle_notepad, NavigateAction::ToggleNotepad),
             (&kb.toggle_pomodoro, NavigateAction::TogglePomodoro),
-            (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
             (&kb.symphony, NavigateAction::OpenSymphony),
             (&kb.runs, NavigateAction::OpenRuns),
             (&kb.work, NavigateAction::OpenWorkView),
@@ -3192,10 +3186,6 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::GitCreatePr => {
             request_git_action(state, crate::app::state::GitAction::CreatePr);
-        }
-        NavigateAction::ToggleInfoPanel => {
-            state.info_panel_expanded = !state.info_panel_expanded;
-            leave_navigate_mode(state);
         }
         NavigateAction::OpenSymphony => {
             state.toggle_symphony();
@@ -5058,7 +5048,7 @@ mod tests {
                 TerminalKey::new(KeyCode::Char('i'), KeyModifiers::empty()),
                 BindingDispatch::Prefix,
             ),
-            Some(NavigateAction::ToggleInfoPanel)
+            None
         );
     }
 

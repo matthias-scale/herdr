@@ -1077,8 +1077,7 @@ impl App {
                 pane_toggle_below_hit_area: Rect::default(),
                 pane_toggle_right_hit_area: Rect::default(),
                 terminal_area: Rect::default(),
-                info_panel_rect: Rect::default(),
-                info_panel_link_rows: Vec::new(),
+                work_context_link_rows: Vec::new(),
                 mobile_header_rect: Rect::default(),
                 mobile_menu_hit_area: Rect::default(),
                 config_diagnostic_hit_area: Rect::default(),
@@ -1231,7 +1230,6 @@ impl App {
                 config.ui.sidebar_animation,
                 Instant::now(),
             ),
-            info_panel_expanded: false,
             mobile_width_threshold: config.ui.mobile_width_threshold,
             sidebar_width_source,
             sidebar_width_auto: false,
@@ -1288,7 +1286,6 @@ impl App {
             pane_gaps: config.ui.pane_gaps,
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
-            show_subscription_usage: config.ui.show_subscription_usage,
             status_bar_expanded: config.ui.status_bar_expanded,
             status_now_unix: crate::provider_usage::now_unix(),
             provider_usage: crate::provider_usage::ProviderUsageSnapshot::default(),
@@ -2144,12 +2141,10 @@ impl App {
                     self.resize_dock_editor();
                     self.ensure_scratchpad();
                     self.ensure_notepad();
-                    crate::ui::render_with_runtime_registry_and_handles(
+                    crate::ui::render_with_runtime_registry(
                         &self.state,
                         &self.terminal_runtimes,
                         frame,
-                        &self.render_notify,
-                        &self.render_dirty,
                     );
                 })?;
                 self.status_metrics_visible =
@@ -2658,7 +2653,6 @@ impl App {
                 self.state.show_agent_labels_on_pane_borders =
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
-                self.state.show_subscription_usage = config.ui.show_subscription_usage;
                 self.state.status_bar_expanded = config.ui.status_bar_expanded;
                 let status_bar_was_enabled = self.state.status_bar_enabled;
                 self.state.status_bar_enabled = config.ui.status_bar.enabled;
