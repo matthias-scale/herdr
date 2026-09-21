@@ -485,6 +485,7 @@ pub(crate) fn save_group_catalog_cache(path: &Path, snapshot: &Snapshot) -> std:
 
 struct RoutedApiRequest {
     catalog: GroupCatalog,
+    config_generation: u64,
     request: Request,
     respond_to: std::sync::mpsc::Sender<String>,
 }
@@ -493,6 +494,7 @@ struct RoutedApiRequest {
 /// order while keeping every IPC or SSH wait off the app event loop.
 pub(crate) struct AuthorityMutationRouter {
     sender: std::sync::Mutex<Option<std::sync::mpsc::Sender<RoutedApiRequest>>>,
+    config_generation: Arc<std::sync::atomic::AtomicU64>,
     ssh_program: std::ffi::OsString,
     timeout: Duration,
 }
@@ -501,6 +503,7 @@ impl Default for AuthorityMutationRouter {
     fn default() -> Self {
         Self {
             sender: std::sync::Mutex::new(None),
+            config_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             ssh_program: std::ffi::OsString::from("ssh"),
             timeout: Duration::from_secs(5),
         }
@@ -512,14 +515,21 @@ impl AuthorityMutationRouter {
     pub(crate) fn with_ssh_program(program: PathBuf, timeout: Duration) -> Self {
         Self {
             sender: std::sync::Mutex::new(None),
+            config_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             ssh_program: program.into_os_string(),
             timeout,
         }
     }
 
+    pub(crate) fn reconfigure(&self, config_generation: u64) {
+        self.config_generation
+            .store(config_generation, std::sync::atomic::Ordering::Release);
+    }
+
     pub(crate) fn enqueue(
         &self,
         catalog: GroupCatalog,
+        config_generation: u64,
         request: Request,
         respond_to: std::sync::mpsc::Sender<String>,
     ) -> Result<(), String> {
@@ -531,11 +541,28 @@ impl AuthorityMutationRouter {
             let (request_tx, request_rx) = std::sync::mpsc::channel::<RoutedApiRequest>();
             let ssh_program = self.ssh_program.clone();
             let timeout = self.timeout;
+            let current_generation = Arc::clone(&self.config_generation);
             std::thread::Builder::new()
                 .name("herdr-group-mutations".into())
                 .spawn(move || {
                     while let Ok(job) = request_rx.recv() {
                         let id = job.request.id.clone();
+                        if job.config_generation
+                            != current_generation.load(std::sync::atomic::Ordering::Acquire)
+                        {
+                            let response = serde_json::to_string(
+                                &crate::api::schema::ErrorResponse {
+                                    id,
+                                    error: crate::api::schema::ErrorBody {
+                                        code: "authority_not_fresh".into(),
+                                        message: "fleet configuration changed before the queued mutation could run".into(),
+                                    },
+                                },
+                            )
+                            .unwrap_or_else(|_| "{}".to_string());
+                            let _ = job.respond_to.send(response);
+                            continue;
+                        }
                         let response = route_api_request_with_ssh_program(
                             &job.catalog,
                             &job.request,
@@ -566,6 +593,7 @@ impl AuthorityMutationRouter {
         sender
             .send(RoutedApiRequest {
                 catalog,
+                config_generation,
                 request,
                 respond_to,
             })
@@ -4367,10 +4395,10 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
         let (second_tx, second_rx) = std::sync::mpsc::channel();
 
         router
-            .enqueue(catalog.clone(), request("first", 3), first_tx)
+            .enqueue(catalog.clone(), 0, request("first", 3), first_tx)
             .expect("enqueue first mutation");
         router
-            .enqueue(catalog, request("second", 4), second_tx)
+            .enqueue(catalog, 0, request("second", 4), second_tx)
             .expect("enqueue second mutation");
         first_rx
             .recv_timeout(Duration::from_secs(2))

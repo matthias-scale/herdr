@@ -2590,6 +2590,8 @@ impl App {
             let config_generation = self
                 .fleet_poller_config
                 .replace(config.remote.fleet.clone());
+            self.authority_mutation_router
+                .reconfigure(config_generation);
             let reconciled_snapshot = self
                 .state
                 .fleet_snapshot
