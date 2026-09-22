@@ -1053,6 +1053,42 @@ impl AppState {
         self.sidebar_group_collapsed_persistence_request = Some((key, collapsed));
     }
 
+    /// Collapses every repo group except the one owning the focused pane.
+    ///
+    /// This is a transient lens, not a preference: it writes no persistence
+    /// overrides, so a restart re-seeds the defaults and a group the operator
+    /// never toggled by hand keeps following them.
+    pub(crate) fn focus_owning_repo_group(&mut self) -> bool {
+        if self.sidebar_group_mode != crate::app::state::SidebarGroupMode::Repo {
+            return false;
+        }
+        let Some(plan) = crate::ui::repo_group_focus_plan(self) else {
+            return false;
+        };
+        let namespace = self.sidebar_group_mode.collapse_namespace();
+        for key in &plan.group_keys {
+            let full_key = format!("{namespace}:{key}");
+            if *key == plan.owner_key {
+                self.collapsed_sidebar_groups.remove(&full_key);
+            } else {
+                self.collapsed_sidebar_groups.insert(full_key);
+            }
+        }
+        // The owning group is the one thing on screen, so its card must not
+        // stay folded by an earlier per-Space disclosure click.
+        if let Some(workspace) = self.workspaces.get(plan.owner_ws_idx) {
+            self.sidebar_presentation
+                .expanded_workspace_ids
+                .insert(workspace.id.clone());
+        }
+        self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+            self,
+            self.view.sidebar_rect,
+            self.workspace_scroll,
+        );
+        true
+    }
+
     /// Select a fleet agent, then keep its row in view.
     pub(crate) fn select_remote_agent_row(&mut self, agent_ref: crate::api::schema::AgentRef) {
         self.sidebar_selected_remote_agent = Some(agent_ref.clone());
@@ -1104,6 +1140,7 @@ impl AppState {
                 | crate::ui::SidebarRow::AloopCleanRun { .. }
                 | crate::ui::SidebarRow::AloopUnreachable { .. }
                 | crate::ui::SidebarRow::AloopEmpty
+                | crate::ui::SidebarRow::NeedsYou { .. }
                 | crate::ui::SidebarRow::AgentRun { .. } => None,
             })
     }
@@ -1142,6 +1179,7 @@ impl AppState {
                 | crate::ui::SidebarRow::AloopCleanRun { .. }
                 | crate::ui::SidebarRow::AloopUnreachable { .. }
                 | crate::ui::SidebarRow::AloopEmpty
+                | crate::ui::SidebarRow::NeedsYou { .. }
                 | crate::ui::SidebarRow::AgentRun { .. } => None,
                 crate::ui::SidebarRow::Tab { entry, .. } => entry
                     .local_target()
@@ -2120,6 +2158,7 @@ mod tests {
                     format!("section:{title}")
                 }
                 crate::ui::SidebarRow::Divider => "divider".to_string(),
+                crate::ui::SidebarRow::NeedsYou { title, .. } => format!("needs-you:{title}"),
                 crate::ui::SidebarRow::NestedHeader { key, .. } => format!("group:{key}"),
                 crate::ui::SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
                 crate::ui::SidebarRow::SymphonyEmpty => "symphony:empty".to_string(),

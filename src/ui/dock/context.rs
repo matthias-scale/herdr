@@ -296,7 +296,7 @@ fn render_links(app: &AppState, frame: &mut Frame, links_area: Rect) {
     }
 }
 
-pub(super) fn render_context(app: &AppState, frame: &mut Frame, area: Rect) {
+pub(crate) fn render_context(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }

@@ -147,9 +147,10 @@ pub(crate) use self::{
         agent_counts_by_workspace, agent_panel_entries, all_agent_panel_entries,
         collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
         collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
-        compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
-        relative_agent_navigation_entry, remote_agent_panel_entries, remote_agent_panel_entries_at,
-        remote_agent_row_at, sidebar_agent_run_at, sidebar_aloop_target_at, sidebar_dim_header_at,
+        compute_workspace_card_areas, expanded_sidebar_toggle_rect, needs_you_row_at,
+        normalized_workspace_scroll, relative_agent_navigation_entry, remote_agent_panel_entries,
+        remote_agent_panel_entries_at, remote_agent_row_at, repo_group_focus_plan,
+        sidebar_agent_run_at, sidebar_aloop_target_at, sidebar_dim_header_at,
         sidebar_filter_anchor_rect, sidebar_filter_menu_layout, sidebar_filter_options,
         sidebar_group_menu_layout, sidebar_group_mode_anchor_rect, sidebar_header_new_menu_rect,
         sidebar_header_new_thread_rect, sidebar_header_overflow_rect, sidebar_header_search_rect,
@@ -165,7 +166,7 @@ pub(crate) use self::{
         sidebar_unassigned_spawn_at, sidebar_work_group_activation, workspace_agent_chevron_rect,
         workspace_drop_slots, workspace_list_entries, workspace_list_entries_expanded,
         workspace_list_rect_for_app, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
-        workspace_parent_group_state, AgentPanelEntry, AgentPanelLocalIdentity,
+        workspace_parent_group_state, AgentPanelEntry, AgentPanelLocalIdentity, NeedsYouTarget,
         RemoteAgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
         WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
@@ -776,12 +777,22 @@ fn compute_view_internal(
         pane_toggle_below_hit_area,
         pane_toggle_right_hit_area,
         terminal_area,
-        work_context_link_rows: if !app.dock_collapsed
-            && app.dock_tab == Some(crate::app::DockSurface::Context)
-        {
-            dock_context::context_link_rows(app, dock_body_rect)
-        } else {
-            Vec::new()
+        work_context_link_rows: {
+            let mut rows =
+                if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Context) {
+                    dock_context::context_link_rows(app, dock_body_rect)
+                } else {
+                    Vec::new()
+                };
+            // The notepad strip's Context tab renders the same surface in the
+            // sidebar, so its link rows register their own geometry.
+            if app.notepad.context_active {
+                rows.extend(dock_context::context_link_rows(
+                    app,
+                    notepad::notepad_body_rect(notepad_rect),
+                ));
+            }
+            rows
         },
         status_buttons: Vec::new(),
         status_work_links: Vec::new(),

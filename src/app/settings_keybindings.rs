@@ -217,6 +217,9 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
         &[
             built_in("toggle_sidebar", "toggle sidebar", |kb| &kb.toggle_sidebar),
             built_in("focus_sidebar", "focus sidebar", |kb| &kb.focus_sidebar),
+            built_in("focus_owning_repo_group", "focus owning repo group", |kb| {
+                &kb.focus_owning_repo_group
+            }),
             built_in("sidebar_cycle_group_mode", "cycle sidebar grouping", |kb| {
                 &kb.sidebar_cycle_group_mode
             }),
