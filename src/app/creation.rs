@@ -182,6 +182,7 @@ impl App {
                 label: None,
                 env: Default::default(),
                 work_context: None,
+                source_workspace_id: None,
             },
         );
         if let Ok(error) = serde_json::from_str::<crate::api::schema::ErrorResponse>(&response) {
@@ -851,6 +852,7 @@ impl App {
             agent_session: terminal_agent_session_info(terminal),
             scroll,
             revision: terminal.revision,
+            restore_error: terminal.restore_error.clone(),
         })
     }
 
@@ -985,6 +987,13 @@ fn aggregate_tab_agent_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn title_test_home() -> PathBuf {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .expect("test host HOME or USERPROFILE")
+    }
 
     #[test]
     fn unreachable_fleet_host_surfaces_error_without_spawning() {
@@ -1208,7 +1217,7 @@ mod tests {
         // The plan is characterized for its directory, target and workspace; the
         // agent binary itself is not under test and is absent on CI runners, so
         // spawn a command that exists everywhere.
-        plan.argv = vec!["/bin/sh".into(), "-c".into(), "exit 0".into()];
+        plan.argv = vec![crate::app::api::test_support::exiting_test_command().into()];
         plan
     }
 
@@ -1409,7 +1418,7 @@ mod tests {
             work_context_patch: crate::work_context::PaneWorkContextPatch::default(),
             target: crate::app::home::HomeTarget::Existing(workspace_id),
             prompt: "verify identity invariants".into(),
-            argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+            argv: vec![crate::app::api::test_support::exiting_test_command().into()],
             env: Vec::new(),
             remote: None,
         };
@@ -1539,9 +1548,8 @@ mod tests {
 
     #[test]
     fn tab_info_label_rejects_composed_agent_and_cwd_titles_for_all_separators() {
-        let home = std::path::PathBuf::from(
-            std::env::var_os("HOME").expect("test environment should define HOME"),
-        );
+        let _env_lock = crate::integration::integration_env_lock();
+        let home = title_test_home();
         let cwd = home.join(".herdr-test");
 
         for separator in ['—', '–', '·', '|'] {
@@ -1563,9 +1571,8 @@ mod tests {
 
     #[test]
     fn tab_info_label_strips_leading_agent_from_composed_title() {
-        let home = std::path::PathBuf::from(
-            std::env::var_os("HOME").expect("test environment should define HOME"),
-        );
+        let _env_lock = crate::integration::integration_env_lock();
+        let home = title_test_home();
         let (mut app, terminal_id) = title_test_app();
         configure_title_test_terminal(
             &mut app,
@@ -1594,9 +1601,8 @@ mod tests {
 
     #[test]
     fn tab_info_label_rejects_composed_agent_and_cwd_title_case_insensitively() {
-        let home = std::path::PathBuf::from(
-            std::env::var_os("HOME").expect("test environment should define HOME"),
-        );
+        let _env_lock = crate::integration::integration_env_lock();
+        let home = title_test_home();
         let (mut app, terminal_id) = title_test_app();
         configure_title_test_terminal(
             &mut app,
@@ -1611,9 +1617,8 @@ mod tests {
 
     #[test]
     fn tab_info_label_rejects_empty_terminal_titles() {
-        let home = std::path::PathBuf::from(
-            std::env::var_os("HOME").expect("test environment should define HOME"),
-        );
+        let _env_lock = crate::integration::integration_env_lock();
+        let home = title_test_home();
 
         for title in ["", "   "] {
             let (mut app, terminal_id) = title_test_app();
@@ -1645,9 +1650,8 @@ mod tests {
 
     #[test]
     fn tab_info_label_rejects_full_and_tilde_cwd_titles() {
-        let home = std::path::PathBuf::from(
-            std::env::var_os("HOME").expect("test environment should define HOME"),
-        );
+        let _env_lock = crate::integration::integration_env_lock();
+        let home = title_test_home();
         let cwd = home.join("Repos/herdr-test");
         let relative = cwd.strip_prefix(&home).unwrap().display().to_string();
         let expected = "Write Poem";

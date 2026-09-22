@@ -359,6 +359,9 @@ pub struct App {
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<session::SessionSaveResult>>,
     pub(crate) session_save_failures: u32,
     pub(crate) session_save_retry_deadline: Option<Instant>,
+    session_writer: Arc<std::sync::Mutex<crate::persist::SessionWriter>>,
+    pane_exit_checkpoint_requests: HashSet<crate::layout::PaneId>,
+    pane_exit_checkpoint_pending: bool,
     pub(crate) detached_custom_command_children: Vec<std::process::Child>,
     pub(crate) detached_process_children: Vec<std::process::Child>,
     tab_bar_status_generation: u64,
@@ -704,6 +707,10 @@ impl App {
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let restored_snapshot = (!no_session).then(crate::persist::load).flatten();
+        let session_writer = Arc::new(std::sync::Mutex::new(crate::persist::SessionWriter::new(
+            !no_session && restored_snapshot.is_none(),
+        )));
         let (
             workspaces,
             active,
@@ -724,7 +731,7 @@ impl App {
                 std::collections::HashSet::new(),
                 false,
             )
-        } else if let Some(snap) = crate::persist::load() {
+        } else if let Some(snap) = restored_snapshot {
             let history = config
                 .experimental
                 .pane_history
@@ -1629,6 +1636,9 @@ impl App {
             session_save_thread: None,
             session_save_failures: 0,
             session_save_retry_deadline: None,
+            session_writer,
+            pane_exit_checkpoint_requests: HashSet::new(),
+            pane_exit_checkpoint_pending: false,
             detached_custom_command_children: Vec::new(),
             detached_process_children: Vec::new(),
             tab_bar_status_generation: 0,
@@ -2039,6 +2049,7 @@ impl App {
                         label: None,
                         env: Default::default(),
                         work_context: None,
+                        source_workspace_id: None,
                     },
                 );
                 needs_render = true;
@@ -2113,6 +2124,7 @@ impl App {
                         label: None,
                         env: Default::default(),
                         work_context: None,
+                        source_workspace_id: None,
                     },
                 );
                 needs_render = true;
@@ -2364,9 +2376,14 @@ impl App {
             Mode::ReleaseNotes | Mode::ProductAnnouncement | Mode::Settings
         );
         let cwd = self.resolve_new_terminal_cwd(None);
+        let preserve_checkpoint = self.pane_exit_checkpoint_pending && !self.state.session_dirty;
 
         match self.create_workspace_with_options(cwd, true) {
             Ok(_) => {
+                if preserve_checkpoint {
+                    self.pane_exit_checkpoint_pending = true;
+                    self.finish_checkpointed_pane_exit();
+                }
                 if preserve_mode {
                     self.state.set_server_mode(previous_mode);
                 }
@@ -3377,8 +3394,11 @@ impl App {
                         }
                         crossterm::event::KeyEventKind::Release => {
                             if let Some(lease) = self.input_leases.remove_forwarded(&lease_key) {
-                                let _ = self
-                                    .forward_terminal_key_to_target_headless(&lease.target, key);
+                                let release = key.with_windows_composition_from(&lease.key);
+                                let _ = self.forward_terminal_key_to_target_headless(
+                                    &lease.target,
+                                    release,
+                                );
                             }
                         }
                     }

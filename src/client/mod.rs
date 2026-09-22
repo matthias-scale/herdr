@@ -14,6 +14,7 @@
 
 #[cfg(unix)]
 mod direct_graphics;
+pub(crate) mod endpoint;
 mod input;
 pub(crate) mod presentation;
 
@@ -53,6 +54,15 @@ use crate::protocol::{
     MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
 };
 use crate::server::socket_paths::client_socket_path;
+
+pub(crate) fn probe_endpoint_negotiation(
+    _stream: &mut crate::ipc::LocalStream,
+) -> io::Result<endpoint::EndpointNegotiation> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "endpoint negotiation is unavailable in the fork client",
+    ))
+}
 
 static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 const HOST_APPEARANCE_ENV_VAR: &str = "HERDR_HOST_APPEARANCE";
@@ -820,7 +830,7 @@ fn set_mouse_capture(enabled: bool, sgr_pixels: bool) -> io::Result<()> {
     crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
     #[cfg(windows)]
     if is_ssh_session() && windows_vti_input_backend_enabled() {
-        return crate::terminal_modes::set_windows_ssh_mouse_reporting(
+        return crate::terminal_modes::set_windows_mouse_reporting(
             &mut io::stdout(),
             enabled,
             sgr_pixels,
@@ -3261,7 +3271,7 @@ fn write_host_cell_size_query(mut writer: impl io::Write) -> io::Result<()> {
     writer.flush()
 }
 
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 fn store_reported_cell_size(reported_cell_size: &AtomicU64, width_px: u32, height_px: u32) {
     let packed = pack_cell_size(width_px, height_px);
     if reported_cell_size.swap(packed, Ordering::AcqRel) != packed {

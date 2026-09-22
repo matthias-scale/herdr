@@ -106,6 +106,7 @@ fn workspace_create(args: &[String]) -> std::io::Result<i32> {
     }
 
     super::runtime::workspace_create(WorkspaceCreateParams {
+        source_workspace_id: None,
         cwd,
         focus,
         label,

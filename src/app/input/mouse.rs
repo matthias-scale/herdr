@@ -4041,6 +4041,7 @@ mod tests {
         workspace::Workspace,
     };
 
+    #[cfg(unix)]
     fn context_tab_ids(app: &App, ws_idx: usize, tab_idx: usize) -> (String, String) {
         let workspace_id = app.state.workspaces[ws_idx].id.clone();
         let tab_id = crate::workspace::public_tab_id_for_number(

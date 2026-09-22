@@ -140,7 +140,7 @@ mod tests {
     use crate::layout::PaneId;
     use crate::terminal::{TerminalId, TerminalRuntime};
     use ratatui::{backend::TestBackend, Terminal};
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     fn blocked(terminal_id: TerminalId, blocked_since: Option<Instant>) -> BlockedAgent {
         BlockedAgent {
@@ -202,12 +202,12 @@ mod tests {
             terminal_id.clone(),
             TerminalRuntime::test_with_screen_bytes(60, 4, b"WAITING"),
         );
-        let agent = blocked(terminal_id, Some(Instant::now() - Duration::from_secs(720)));
+        let agent = blocked(terminal_id, Some(Instant::now()));
 
         let text = draw(&app, &runtimes, Some(&agent), 3, 0, Rect::new(0, 0, 60, 8));
 
         assert!(text.contains("3 blocked"), "rendered: {text:?}");
-        assert!(text.contains("12m"), "rendered: {text:?}");
+        assert!(text.contains("waiting <1m"), "rendered: {text:?}");
         assert!(text.contains("herdr"), "rendered: {text:?}");
     }
 

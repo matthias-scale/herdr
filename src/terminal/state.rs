@@ -730,6 +730,7 @@ pub struct TerminalState {
     pub(super) recent_agent_process_exit: Option<RecentAgentProcessExit>,
     agent_process_acquisition_pending: bool,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
+    pub restore_error: Option<String>,
 }
 
 fn normalize_declared_wait(
@@ -804,6 +805,7 @@ impl TerminalState {
             recent_agent_process_exit: None,
             agent_process_acquisition_pending: false,
             pending_agent_resume_plan: None,
+            restore_error: None,
         }
     }
 

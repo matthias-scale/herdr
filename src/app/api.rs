@@ -543,6 +543,14 @@ impl App {
     }
 
     pub(crate) fn handle_internal_event(&mut self, ev: AppEvent) -> Option<bool> {
+        if let AppEvent::PaneExitCheckpoint { pane_id } = &ev {
+            self.pane_exit_checkpoint_requests.insert(*pane_id);
+            return None;
+        }
+        let checkpoint_requested = match &ev {
+            AppEvent::PaneDied { pane_id } => self.pane_exit_checkpoint_requests.remove(pane_id),
+            _ => false,
+        };
         let hook_report = match &ev {
             AppEvent::HookStateReported {
                 pane_id,
@@ -854,6 +862,17 @@ impl App {
             }
         }
 
+        let checkpointed_pane_exit = checkpoint_requested
+            && matches!(
+                &ev,
+                AppEvent::PaneDied { pane_id }
+                    if self.find_pane(*pane_id).is_some()
+                        && !self.overlay_panes.contains_key(pane_id)
+            );
+        if checkpointed_pane_exit {
+            self.checkpoint_session_before_pane_exit();
+        }
+
         let overlay_state = if let AppEvent::PaneDied { pane_id } = &ev {
             self.overlay_panes.remove(pane_id).map(|overlay| {
                 let was_overlay_active =
@@ -929,6 +948,9 @@ impl App {
         let previous_toast = self.state.toast.clone();
         let (pane_updates, hook_state_report_accepted) =
             self.state.handle_app_event_with_hook_report_status(ev);
+        if checkpointed_pane_exit {
+            self.finish_checkpointed_pane_exit();
+        }
         if pane_updates
             .iter()
             .any(|update| update.hook_work_context_changed)
@@ -3551,9 +3573,8 @@ mod tests {
     #[test]
     fn loop_receipt_change_event_refreshes_cache_and_publishes_update() {
         let path = std::env::temp_dir().join(format!(
-            "herdr-loop-runs-app-refresh-{}-{}.jsonl",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            "herdr-loop-runs-app-refresh-{}.jsonl",
+            crate::config::test_unique_suffix()
         ));
         std::fs::write(
             &path,
@@ -4732,6 +4753,8 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         );
+        app.state.default_shell = test_support::exiting_test_command().into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
         let workspace = crate::workspace::Workspace::test_new("restored");
         let pane_id = workspace.tabs[0].root_pane;
         let terminal_id = workspace.terminal_id(pane_id).cloned().unwrap();

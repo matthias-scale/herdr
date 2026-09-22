@@ -20,6 +20,11 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
         parser.state = .invalid;
         return null;
     };
+    const uri_len = data.len - s - 2;
+    if (s > Parser.MAX_HYPERLINK_COMPONENT or uri_len > Parser.MAX_HYPERLINK_COMPONENT) {
+        parser.state = .invalid;
+        return null;
+    }
 
     parser.command = .{
         .hyperlink_start = .{

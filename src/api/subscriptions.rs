@@ -1,5 +1,6 @@
 use regex::Regex;
 
+use crate::api::event_hub::EventHistoryError;
 use crate::api::schema::{
     ErrorBody, ErrorResponse, EventKind, Method, PaneAgentStatusChangedEvent,
     PaneOutputMatchedEvent, PaneScrollChangedEvent, PaneScrollInfo, Request, Subscription,
@@ -307,6 +308,71 @@ impl ActiveSubscription {
             _ => Ok(self.poll(api_tx, event_hub)),
         }
     }
+
+    pub(super) fn poll_batch(
+        &mut self,
+        api_tx: &ApiRequestSender,
+        event_hub: &EventHub,
+    ) -> Result<Vec<serde_json::Value>, ErrorBody> {
+        match self {
+            Self::Event(subscription) => {
+                let events = subscription_events_after(event_hub, subscription.last_sequence)?;
+                let mut matching = Vec::new();
+                for (sequence, event) in events {
+                    subscription.last_sequence = sequence;
+                    if event.event == subscription.event_kind {
+                        matching.push(serde_json::to_value(event).map_err(event_encoding_error)?);
+                    }
+                }
+                Ok(matching)
+            }
+            Self::AgentStatusChanged(subscription) => {
+                let events = subscription_events_after(event_hub, subscription.last_sequence)?;
+                let mut matching = Vec::new();
+                for (sequence, event) in events {
+                    subscription.last_sequence = sequence;
+                    if let Some(event) = subscription.event_from_history(event) {
+                        matching.push(serde_json::to_value(event).map_err(event_encoding_error)?);
+                    }
+                }
+                if matching.is_empty() {
+                    if let Some(event) = subscription
+                        .poll_snapshot(api_tx, event_hub)
+                        .map_err(|response| response.error)?
+                    {
+                        matching.push(serde_json::to_value(event).map_err(event_encoding_error)?);
+                    }
+                }
+                Ok(matching)
+            }
+            Self::OutputMatched(_) | Self::ScrollChanged(_) => {
+                Ok(self.poll(api_tx, event_hub).into_iter().collect())
+            }
+        }
+    }
+}
+
+fn subscription_events_after(
+    event_hub: &EventHub,
+    sequence: u64,
+) -> Result<Vec<(u64, crate::api::schema::EventEnvelope)>, ErrorBody> {
+    event_hub.events_after_checked(sequence).map_err(|error| match error {
+        EventHistoryError::Lost => ErrorBody {
+            code: "events_lost".into(),
+            message: "event subscription fell behind retained history; resubscribe and resync with session.snapshot".into(),
+        },
+        EventHistoryError::Unavailable => ErrorBody {
+            code: "server_unavailable".into(),
+            message: "event history is unavailable".into(),
+        },
+    })
+}
+
+fn event_encoding_error(error: serde_json::Error) -> ErrorBody {
+    ErrorBody {
+        code: "internal_error".into(),
+        message: format!("failed to encode subscription event: {error}"),
+    }
 }
 
 impl ActiveEventSubscription {
@@ -371,10 +437,70 @@ impl ActiveAgentStatusChangedSubscription {
         api_tx: &ApiRequestSender,
         event_hub: &EventHub,
     ) -> Result<Option<SubscriptionEventEnvelope>, ErrorResponse> {
-        let mut saw_status_event = false;
-        for (sequence, event) in event_hub.events_after(self.last_sequence) {
+        let events = subscription_events_after(event_hub, self.last_sequence).map_err(|error| {
+            ErrorResponse {
+                id: self.request_prefix.clone(),
+                error,
+            }
+        })?;
+        for (sequence, event) in events {
             self.last_sequence = sequence;
-            let crate::api::schema::EventData::PaneAgentStatusChanged {
+            if let Some(event) = self.event_from_history(event) {
+                return Ok(Some(event));
+            }
+        }
+
+        self.poll_snapshot(api_tx, event_hub)
+    }
+
+    fn event_from_history(
+        &mut self,
+        event: crate::api::schema::EventEnvelope,
+    ) -> Option<SubscriptionEventEnvelope> {
+        if event.event != EventKind::PaneAgentStatusChanged {
+            return None;
+        }
+        let crate::api::schema::EventData::PaneAgentStatusChanged {
+            pane_id,
+            workspace_id,
+            agent_status,
+            waiting_on_agents,
+            wait,
+            eta_s,
+            reported_at,
+            agent,
+            title,
+            display_agent,
+            state_labels,
+        } = event.data
+        else {
+            return None;
+        };
+        if pane_id != self.pane_id {
+            return None;
+        }
+
+        self.last_status = Some(agent_status);
+        self.last_presentation = Some(PanePresentationSnapshot::from_event(
+            &title,
+            &display_agent,
+            &state_labels,
+            &wait,
+            eta_s,
+            &reported_at,
+            waiting_on_agents,
+        ));
+        self.initial_event = None;
+        if self
+            .status_filter
+            .is_some_and(|wanted| wanted != agent_status)
+        {
+            return None;
+        }
+
+        Some(SubscriptionEventEnvelope {
+            event: SubscriptionEventKind::PaneAgentStatusChanged,
+            data: SubscriptionEventData::PaneAgentStatusChanged(PaneAgentStatusChangedEvent {
                 pane_id,
                 workspace_id,
                 agent_status,
@@ -386,58 +512,16 @@ impl ActiveAgentStatusChangedSubscription {
                 title,
                 display_agent,
                 state_labels,
-            } = event.data
-            else {
-                continue;
-            };
-            if event.event != crate::api::schema::EventKind::PaneAgentStatusChanged {
-                continue;
-            }
-            if pane_id != self.pane_id {
-                continue;
-            }
-            saw_status_event = true;
+            }),
+        })
+    }
 
-            let current_presentation = PanePresentationSnapshot::from_event(
-                &title,
-                &display_agent,
-                &state_labels,
-                &wait,
-                eta_s,
-                &reported_at,
-                waiting_on_agents,
-            );
-            self.last_status = Some(agent_status);
-            self.last_presentation = Some(current_presentation);
-            if self
-                .status_filter
-                .is_some_and(|wanted| wanted != agent_status)
-            {
-                continue;
-            }
-
-            self.initial_event = None;
-            return Ok(Some(SubscriptionEventEnvelope {
-                event: SubscriptionEventKind::PaneAgentStatusChanged,
-                data: SubscriptionEventData::PaneAgentStatusChanged(PaneAgentStatusChangedEvent {
-                    pane_id,
-                    workspace_id,
-                    agent_status,
-                    waiting_on_agents,
-                    wait,
-                    eta_s,
-                    reported_at,
-                    agent,
-                    title,
-                    display_agent,
-                    state_labels,
-                }),
-            }));
-        }
-
-        if saw_status_event {
-            self.initial_event = None;
-        } else if event_hub.current_sequence() != self.last_sequence {
+    fn poll_snapshot(
+        &mut self,
+        api_tx: &ApiRequestSender,
+        event_hub: &EventHub,
+    ) -> Result<Option<SubscriptionEventEnvelope>, ErrorResponse> {
+        if event_hub.current_sequence() != self.last_sequence {
             return Ok(None);
         } else if let Some(event) = self.initial_event.take() {
             return Ok(Some(SubscriptionEventEnvelope {
@@ -673,6 +757,7 @@ mod tests {
             focused: true,
             settled_at: None,
             snoozed_until: None,
+            restore_error: None,
             work_context: Default::default(),
             cwd: None,
             foreground_cwd: None,

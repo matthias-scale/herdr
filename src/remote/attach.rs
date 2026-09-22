@@ -3,9 +3,9 @@
 use super::shell_quote;
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, IsTerminal, Write as _};
+use std::io::{self, IsTerminal, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 
 use interprocess::local_socket::traits::Listener as _;
 #[cfg(windows)]
@@ -30,6 +30,7 @@ const CURRENT_PROTOCOL: u32 = crate::protocol::PROTOCOL_VERSION;
 const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
 const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
 const REMOTE_BINARY_ENV_VAR: &str = "HERDR_REMOTE_BINARY";
+const REMOTE_OUTPUT_READY_MARKER: &str = "herdr-remote-output-ready:1";
 const SSH_CONTROL_SOCKET_NAME: &str = "ctl";
 pub(crate) const REATTACH_COMMAND_ENV_VAR: &str = "HERDR_REATTACH_COMMAND";
 
@@ -149,7 +150,7 @@ pub(crate) fn extract_remote_args(
     Ok((cleaned, remote))
 }
 
-fn validate_remote_target(target: &str) -> Result<&str, String> {
+pub(crate) fn validate_remote_target(target: &str) -> Result<&str, String> {
     if target.is_empty() {
         return Err("missing value for --remote".to_string());
     }
@@ -461,7 +462,8 @@ impl RemoteSsh {
     }
 
     fn sh_output(&self, script: &str) -> io::Result<Output> {
-        let mut child = self
+        let script = posix_remote_output_command(script);
+        let child = self
             .command()
             .arg("/bin/sh -s")
             .stdin(Stdio::piped())
@@ -469,21 +471,22 @@ impl RemoteSsh {
             .stderr(Stdio::piped())
             .spawn()?;
 
-        let write_result = if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(script.as_bytes())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "ssh bootstrap stdin missing",
-            ))
-        };
-        let output = child.wait_with_output()?;
-        write_result?;
-        Ok(output)
+        normalize_remote_output(output_with_forwarded_stderr(
+            child,
+            Some(script.as_bytes()),
+        )?)
     }
 
     fn user_shell_output(&self, command: &str) -> io::Result<Output> {
-        self.command().arg(command).output()
+        let command = posix_remote_output_command(command);
+        let child = self
+            .command()
+            .arg(&command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        normalize_remote_output(output_with_forwarded_stderr(child, None)?)
     }
 
     fn install_herdr(&self, remote_herdr: &RemoteHerdr, source_path: &Path) -> io::Result<()> {
@@ -527,6 +530,109 @@ impl RemoteSsh {
             Err(io::Error::other(format!(
                 "remote install exited with {status}"
             )))
+        }
+    }
+}
+
+// Interactive SSH setup can wait for browser or hardware approval. Relay its
+// diagnostics immediately while retaining them for the contextual error.
+fn output_with_forwarded_stderr(mut child: Child, stdin: Option<&[u8]>) -> io::Result<Output> {
+    let mut child_stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "ssh command stderr missing"))?;
+    let stderr_relay = thread::spawn(move || -> io::Result<Vec<u8>> {
+        let mut captured = Vec::new();
+        let mut buffer = [0_u8; 8 * 1024];
+        let mut destination = io::stderr();
+        loop {
+            let read = child_stderr.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            captured.extend_from_slice(&buffer[..read]);
+            if destination.write_all(&buffer[..read]).is_ok() {
+                let _ = destination.flush();
+            }
+        }
+        Ok(captured)
+    });
+
+    let write_result = if let Some(bytes) = stdin {
+        if let Some(mut child_stdin) = child.stdin.take() {
+            child_stdin.write_all(bytes)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "ssh bootstrap stdin missing",
+            ))
+        }
+    } else {
+        Ok(())
+    };
+    let output_result = child.wait_with_output();
+    let stderr_result = stderr_relay
+        .join()
+        .map_err(|_| io::Error::other("ssh stderr relay panicked"))?;
+
+    let mut output = output_result?;
+    write_result?;
+    output.stderr = stderr_result?;
+    Ok(output)
+}
+
+fn posix_remote_output_command(command: &str) -> String {
+    format!("printf '\n%s\n' '{REMOTE_OUTPUT_READY_MARKER}'\n{command}")
+}
+
+fn normalize_remote_output(mut output: Output) -> io::Result<Output> {
+    let consumed = {
+        let mut reader = io::Cursor::new(output.stdout.as_slice());
+        match discard_remote_output_preamble(&mut reader) {
+            Ok(()) => reader.position() as usize,
+            Err(_) if !output.status.success() => return Ok(output),
+            Err(err) => return Err(err),
+        }
+    };
+    output.stdout.drain(..consumed);
+    Ok(output)
+}
+
+fn discard_remote_output_preamble(reader: &mut impl io::BufRead) -> io::Result<()> {
+    let marker = REMOTE_OUTPUT_READY_MARKER.as_bytes();
+    let mut matched = 0;
+    let mut matching = true;
+    loop {
+        let (consumed, ready) = {
+            let buffer = reader.fill_buf()?;
+            if buffer.is_empty() {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "remote command exited before producing its output marker",
+                ));
+            }
+            let mut consumed = 0;
+            let mut ready = false;
+            for &byte in buffer {
+                consumed += 1;
+                if byte == b'\n' {
+                    if matching && matched == marker.len() {
+                        ready = true;
+                        break;
+                    }
+                    matched = 0;
+                    matching = true;
+                } else if matching && matched < marker.len() && byte == marker[matched] {
+                    matched += 1;
+                } else if matching && (matched != marker.len() || byte != b'\r') {
+                    matching = false;
+                }
+            }
+            (consumed, ready)
+        };
+        reader.consume(consumed);
+        if ready {
+            return Ok(());
         }
     }
 }
@@ -877,11 +983,18 @@ fn remote_binary_matches(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) -> io::Res
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut lines = stdout.lines();
     let version = lines.next().unwrap_or_default().trim();
-    let status = lines.next().unwrap_or_default();
-    Ok(version == format!("herdr {}", current_version())
-        && parse_client_status_json(status)
-            .map(|status| status.protocol == CURRENT_PROTOCOL)
-            .unwrap_or(false))
+    let status = lines
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(version);
+    let Some(status) = parse_client_status_json(status) else {
+        return Ok(false);
+    };
+    let version_matches = if version.starts_with('{') {
+        status.version.as_deref() == Some(current_version().as_str())
+    } else {
+        version == format!("herdr {}", current_version())
+    };
+    Ok(version_matches && status.protocol == CURRENT_PROTOCOL)
 }
 
 fn remote_binary_exists(ssh: &RemoteSsh, remote_herdr: &RemoteHerdr) -> io::Result<bool> {
@@ -1226,6 +1339,8 @@ fn remote_server_status(
 
 #[derive(Debug, Deserialize)]
 struct RemoteClientStatusJson {
+    #[serde(default)]
+    version: Option<String>,
     protocol: u32,
 }
 
@@ -1319,8 +1434,10 @@ fn confirm_remote_server_stop(
         }
     }
 
+    eprintln!("This stops active remote pane processes, including shells, agents, dev servers, and tests.");
+
     let prompt = if reason == RemoteServerRestartReason::ProtocolMismatch {
-        "stop the remote server and continue attaching? [Y/n] "
+        "stop the remote server and continue attaching? [y/N] "
     } else {
         "restart the remote server now? [y/N] "
     };
@@ -1331,9 +1448,6 @@ fn confirm_remote_server_stop(
     io::stdin().read_line(&mut answer)?;
     let answer = answer.trim().to_ascii_lowercase();
     if answer == "y" || answer == "yes" {
-        return Ok(true);
-    }
-    if answer.is_empty() && reason == RemoteServerRestartReason::ProtocolMismatch {
         return Ok(true);
     }
     if reason == RemoteServerRestartReason::ProtocolMismatch {

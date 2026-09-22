@@ -51,7 +51,7 @@ impl App {
         PathBuf::from("git")
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_test_git_program(&mut self, program: PathBuf) {
         self.git_program_override = Some(program);
     }

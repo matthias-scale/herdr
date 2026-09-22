@@ -206,6 +206,16 @@ fn genTable() Table {
         single(&result, 0x19, source, source, .ignore);
         range(&result, 0, 0x17, source, source, .ignore);
         range(&result, 0x1C, 0x1F, source, source, .ignore);
+
+        // High bytes are ignored payload data, overriding the
+        // "anywhere" C1 transitions. See dcs_passthrough below for more.
+        // In dcs_ignore the additional concern is that a UTF-8 payload in
+        // an ignored DCS could otherwise begin a live sequence mid-string
+        // (e.g. 0x9B => csi_entry).
+        range(&result, 0x80, 0xFF, source, source, .ignore);
+
+        // Herdr's parser-classified output contract also accepts raw 8-bit ST.
+        single(&result, 0x9C, source, .ground, .none);
     }
 
     // dcs_param
@@ -241,6 +251,24 @@ fn genTable() Table {
         range(&result, 0x1C, 0x1F, source, source, .put);
         range(&result, 0x20, 0x7E, source, source, .put);
         single(&result, 0x7F, source, source, .ignore);
+
+        // High bytes are payload data, overriding the "anywhere" C1
+        // transitions, matching how osc_string handles them below.
+        // Ghostty is UTF-8 only, and DCS payloads carry UTF-8 text
+        // (e.g. tmux control mode pane content): without this, a
+        // UTF-8 continuation byte in the C1 range terminates or
+        // corrupts the string and 0xA0-0xFF are silently dropped.
+        //
+        // This includes 0x9C (8-bit ST) on purpose: a raw 0x9C is
+        // indistinguishable from a UTF-8 continuation byte ("Ü" is
+        // 0xC3 0x9C), and Ghostty doesn't honor 8-bit C1 controls in
+        // the ground state either (they go through UTF-8 decoding).
+        // DCS strings terminate via 7-bit ST (ESC \) and abort via
+        // CAN/SUB, which are unaffected here.
+        range(&result, 0x80, 0xFF, source, source, .put);
+
+        // Herdr's parser-classified output contract also accepts raw 8-bit ST.
+        single(&result, 0x9C, source, .ground, .none);
     }
 
     // csi_param
@@ -335,6 +363,9 @@ fn genTable() Table {
         range(&result, 0x1C, 0x1F, source, source, .ignore);
         range(&result, 0x20, 0xFF, source, source, .osc_put);
 
+        // Herdr's parser-classified output contract also accepts raw 8-bit ST.
+        single(&result, 0x9C, source, .ground, .none);
+
         // XTerm accepts either BEL  or ST  for terminating OSC
         // sequences, and when returning information, uses the same
         // terminator used in a query.
@@ -385,4 +416,50 @@ test {
     // This forces comptime-evaluation of table, so we're just testing
     // that it succeeds in creation.
     _ = table;
+}
+
+test "dcs_passthrough: high bytes except 8-bit ST are payload data" {
+    // Bytes 0x80-0xFF within a DCS string are payload data, not C1
+    // controls. Herdr deliberately retains raw 8-bit ST as a terminator for
+    // its parser-classified output contract.
+    for (0x80..0x100) |c| {
+        const entry = table[c][@intFromEnum(State.dcs_passthrough)];
+        if (c == 0x9C) {
+            try std.testing.expectEqual(State.ground, entry.state);
+            try std.testing.expectEqual(Action.none, entry.action);
+            continue;
+        }
+        try std.testing.expectEqual(State.dcs_passthrough, entry.state);
+        try std.testing.expectEqual(Action.put, entry.action);
+    }
+}
+
+test "dcs_ignore: high bytes are ignored payload data" {
+    // Same as dcs_passthrough: a UTF-8 payload inside an ignored DCS
+    // must not trigger "anywhere" C1 transitions (e.g. 0x9B beginning
+    // a CSI mid-string).
+    for (0x80..0x100) |c| {
+        const entry = table[c][@intFromEnum(State.dcs_ignore)];
+        if (c == 0x9C) {
+            try std.testing.expectEqual(State.ground, entry.state);
+            try std.testing.expectEqual(Action.none, entry.action);
+            continue;
+        }
+        try std.testing.expectEqual(State.dcs_ignore, entry.state);
+        try std.testing.expectEqual(Action.ignore, entry.action);
+    }
+}
+
+test "dcs_passthrough: ESC, CAN, and SUB still exit" {
+    // 7-bit ST (ESC \) is the DCS terminator and CAN/SUB abort, so
+    // these must continue to leave dcs_passthrough. dcs_unhook is
+    // emitted by the parser on any transition out of dcs_passthrough.
+    const esc = table[0x1B][@intFromEnum(State.dcs_passthrough)];
+    try std.testing.expectEqual(State.escape, esc.state);
+
+    const can = table[0x18][@intFromEnum(State.dcs_passthrough)];
+    try std.testing.expectEqual(State.ground, can.state);
+
+    const sub = table[0x1A][@intFromEnum(State.dcs_passthrough)];
+    try std.testing.expectEqual(State.ground, sub.state);
 }

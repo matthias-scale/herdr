@@ -1,10 +1,10 @@
 diff --git a/vendor/libghostty-vt/include/ghostty/vt/terminal.h b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
-index 9bb961d..e9ca58d 100644
+index 81f9ebd0..840700e6 100644
 --- a/vendor/libghostty-vt/include/ghostty/vt/terminal.h
 +++ b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
-@@ -467,6 +467,34 @@ typedef GhosttyClipboardWriteResult (*GhosttyTerminalClipboardWriteFn)(
+@@ -911,6 +911,34 @@ typedef void (*GhosttyTerminalProgressReportFn)(
      void* userdata,
-     const GhosttyClipboardWrite* write);
+     const GhosttyTerminalProgressReport* report);
  
 +/** Parser-classified output event kind. */
 +typedef enum GHOSTTY_ENUM_TYPED {
@@ -37,10 +37,10 @@ index 9bb961d..e9ca58d 100644
  /**
   * Callback function type for color scheme queries (CSI ? 996 n).
   *
-@@ -887,6 +915,14 @@ typedef enum GHOSTTY_ENUM_TYPED {
-    * Input type: GhosttyTerminalClipboardWriteFn
+@@ -1545,6 +1573,14 @@ typedef enum GHOSTTY_ENUM_TYPED {
+    * Input type: size_t*
     */
-   GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE = 26,
+   GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES = 39,
 +
 +  /**
 +   * Callback invoked for parser-classified printable text, control boundaries,
@@ -48,15 +48,15 @@ index 9bb961d..e9ca58d 100644
 +   *
 +   * Input type: GhosttyTerminalParsedOutputFn
 +   */
-+  GHOSTTY_TERMINAL_OPT_PARSED_OUTPUT = 27,
++  GHOSTTY_TERMINAL_OPT_PARSED_OUTPUT = 40,
    GHOSTTY_TERMINAL_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
  } GhosttyTerminalOption;
  
 diff --git a/vendor/libghostty-vt/src/terminal/Terminal.zig b/vendor/libghostty-vt/src/terminal/Terminal.zig
-index 0892012..f4fb433 100644
+index e9cc3b8e..8e5ac463 100644
 --- a/vendor/libghostty-vt/src/terminal/Terminal.zig
 +++ b/vendor/libghostty-vt/src/terminal/Terminal.zig
-@@ -365,6 +365,30 @@ pub fn printRepeat(self: *Terminal, count_req: usize) !void {
+@@ -521,6 +521,33 @@ pub fn printRepeat(self: *Terminal, count_req: usize) !void {
      }
  }
  
@@ -75,7 +75,10 @@ index 0892012..f4fb433 100644
 +/// to callers without duplicating the terminal's rendering rules.
 +pub fn printSliceTracked(self: *Terminal, cps: []const u32) !PrintSliceTrackedResult {
 +    if (cps.len == 0) return .{ .consumed = 0, .output = .hidden };
-+    const consumed = try self.printSliceFast(cps);
++    const consumed = if (self.printSliceFastConfig()) |config|
++        try self.printSliceFast(cps, config.grapheme_cluster, config.allow_unicode)
++    else
++        0;
 +    if (consumed > 0) return .{ .consumed = consumed, .output = .unchanged };
 +    const rendered = try self.printTracked(@intCast(cps[0]));
 +    return .{
@@ -87,7 +90,117 @@ index 0892012..f4fb433 100644
  /// Print multiple codepoints to the terminal at once. This is
  /// semantically identical to calling `print` for each codepoint in
  /// order, but is much faster because it can batch cell writes and
-@@ -880,12 +904,19 @@ inline fn printSliceCheckExpected(style_id: style.Id) u64 {
+@@ -537,36 +564,64 @@ pub fn printRepeat(self: *Terminal, count_req: usize) !void {
+ /// slower per-codepoint path. They're less common and this is optimized
+ /// for the aforementioned cases.
+ pub fn printSlice(self: *Terminal, cps: []const u32) !void {
++    const config = self.printSliceFastConfig() orelse {
++        for (cps) |cp| try self.print(@intCast(cp));
++        return;
++    };
++
++    var i: usize = 0;
++    while (i < cps.len) {
++        // Try the fast-path print first. This will return the number of
++        // codepoints it consumed.
++        const consumed = try self.printSliceFast(
++            cps[i..],
++            config.grapheme_cluster,
++            config.allow_unicode,
++        );
++        if (consumed > 0) {
++            i += consumed;
++            continue;
++        }
++
++        // Consuming zero bytes means that the fast path can't handle
++        // the next codepoint or the terminal is in a state we can't
++        // fast-path. Fall back to the slow cp-by-cp print then try
++        // fast paths again.
++        try self.print(@intCast(cps[i]));
++        i += 1;
++    }
++}
++
++const PrintSliceFastConfig = struct {
++    grapheme_cluster: bool,
++    allow_unicode: bool,
++};
++
++fn printSliceFastConfig(self: *Terminal) ?PrintSliceFastConfig {
+     // Check if we can do the fast path up front. If we can't
+     // we need to go back to scalar `print`.
+-    const fast = fast: {
++    {
+         // Only the main display is supported.
+-        if (self.status_display != .main) break :fast false;
++        if (self.status_display != .main) return null;
+ 
+         // Modes that require per-codepoint handling in print().
+         // Wraparound is required (its the default) so that our
+         // row-fill logic below can assume soft-wrap semantics. Insert
+         // mode shifts cells per print.
+-        if (self.modes.get(.insert)) break :fast false;
+-        if (!self.modes.get(.wraparound)) break :fast false;
++        if (self.modes.get(.insert)) return null;
++        if (!self.modes.get(.wraparound)) return null;
+ 
+         // Charset must map ASCII as-is (true unless a DEC special
+         // charset is actively invoked, which is rare).
+         const screen: *Screen = self.screens.active;
+-        if (screen.charset.single_shift != null) break :fast false;
++        if (screen.charset.single_shift != null) return null;
+         switch (screen.charset.charsets.get(screen.charset.gl)) {
+             .utf8, .ascii => {},
+-            else => break :fast false,
++            else => return null,
+         }
+ 
+         // Hyperlinks require per-cell map bookkeeping.
+-        if (screen.cursor.hyperlink_id != 0) break :fast false;
+-
+-        break :fast true;
+-    };
+-    if (!fast) {
+-        for (cps) |cp| try self.print(@intCast(cp));
+-        return;
++        if (screen.cursor.hyperlink_id != 0) return null;
+     }
+ 
+     const grapheme_cluster = self.modes.get(.grapheme_cluster);
+@@ -577,27 +632,10 @@ pub fn printSlice(self: *Terminal, cps: []const u32) !void {
+     // the [0x10, 0xFF] range in that case (those never cluster).
+     const allow_unicode = !grapheme_cluster or self.scrolling_region.left == 0;
+ 
+-    var i: usize = 0;
+-    while (i < cps.len) {
+-        // Try the fast-path print first. This will return the number of
+-        // codepoints it consumed.
+-        const consumed = try self.printSliceFast(
+-            cps[i..],
+-            grapheme_cluster,
+-            allow_unicode,
+-        );
+-        if (consumed > 0) {
+-            i += consumed;
+-            continue;
+-        }
+-
+-        // Consuming zero bytes means that the fast path can't handle
+-        // the next codepoint or the terminal is in a state we can't
+-        // fast-path. Fall back to the slow cp-by-cp print then try
+-        // fast paths again.
+-        try self.print(@intCast(cps[i]));
+-        i += 1;
+-    }
++    return .{
++        .grapheme_cluster = grapheme_cluster,
++        .allow_unicode = allow_unicode,
++    };
+ }
+ 
+ /// Attempt to print a prefix of `cps` using a batched fast path that
+@@ -1199,12 +1237,19 @@ inline fn printSliceCheckExpected(style_id: style.Id) u64 {
  }
  
  pub fn print(self: *Terminal, c: u21) !void {
@@ -108,7 +221,7 @@ index 0892012..f4fb433 100644
      }
  
      // After doing any printing, wrapping, scrolling, etc. we want to ensure
-@@ -971,7 +1002,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+@@ -1290,7 +1335,7 @@ pub fn print(self: *Terminal, c: u21) !void {
          // with the previous char.
          if (!grapheme_break) {
              switch (unicode.graphemeWidthEffect(previous_codepoint, c)) {
@@ -117,7 +230,7 @@ index 0892012..f4fb433 100644
                  .wide => wide: {
                      if (prev.cell.wide == .wide) break :wide;
  
-@@ -983,7 +1014,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+@@ -1302,7 +1347,7 @@ pub fn print(self: *Terminal, c: u21) !void {
                      // insert spacers and wrap. We need special handling if the
                      // previous cell has grapheme data.
                      if (self.screens.active.cursor.x == right_limit - 1) {
@@ -126,8 +239,8 @@ index 0892012..f4fb433 100644
  
                          // This path can write a spacer_head before printWrap
                          // which can trigger integrity violations so mark
-@@ -1001,7 +1032,7 @@ pub fn print(self: *Terminal, c: u21) !void {
-                             prev.cell.content.codepoint = 0;
+@@ -1320,7 +1365,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+                             prev.cell.content.codepoint.data = 0;
  
                              try self.printWrap();
 -                            self.printCell(prev_cp, .wide);
@@ -135,9 +248,9 @@ index 0892012..f4fb433 100644
  
                              const new_pin = self.screens.active.cursor.page_pin.*;
                              const new_rac = new_pin.rowAndCell();
-@@ -1031,12 +1062,12 @@ pub fn print(self: *Terminal, c: u21) !void {
+@@ -1357,12 +1402,12 @@ pub fn print(self: *Terminal, c: u21) !void {
                              // we'll be appending graphemes to
-                             prev.cell = new_rac.cell;
+                             prev.cell = self.screens.active.cursor.page_cell;
                          } else {
 -                            self.printCell(
 +                            _ = self.printCell(
@@ -150,16 +263,24 @@ index 0892012..f4fb433 100644
  
                              // Point prev.cell to our new previous cell that
                              // we'll be appending graphemes to
-@@ -1048,7 +1079,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+@@ -1374,7 +1419,6 @@ pub fn print(self: *Terminal, c: u21) !void {
  
                      // Write our spacer, since prev.cell is now wide
                      self.screens.active.cursorRight(1);
+-
+                     // Writing the spacer can grow the page to make room for
+                     // the cursor hyperlink. Growing replaces the page, which
+                     // invalidates `prev.cell`. Record the page identity first
+@@ -1386,7 +1430,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+                     const spacer_node = self.screens.active.cursor.page_pin.node;
+                     const spacer_serial = spacer_node.serial;
+ 
 -                    self.printCell(0, .spacer_tail);
 +                    _ = self.printCell(0, .spacer_tail);
  
-                     // Move the cursor again so we're beyond our spacer
-                     if (self.screens.active.cursor.x == right_limit - 1) {
-@@ -1098,7 +1129,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+                     if (self.screens.active.cursor.page_pin.node != spacer_node or
+                         self.screens.active.cursor.page_pin.node.serial != spacer_serial)
+@@ -1442,7 +1486,7 @@ pub fn print(self: *Terminal, c: u21) !void {
              });
              self.screens.active.cursorMarkDirty();
              try self.screens.active.appendGrapheme(prev.cell, c);
@@ -168,7 +289,7 @@ index 0892012..f4fb433 100644
          }
      }
  
-@@ -1120,7 +1151,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+@@ -1464,7 +1508,7 @@ pub fn print(self: *Terminal, c: u21) !void {
          // If we have grapheme clustering enabled, we don't blindly attach
          // any zero width character to our cells and we instead just ignore
          // it.
@@ -177,7 +298,7 @@ index 0892012..f4fb433 100644
  
          // If we have wraparound enabled and a pending wrap, the character
          // we're attaching to is still under the cursor. Otherwise, it's the
-@@ -1133,7 +1164,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+@@ -1477,7 +1521,7 @@ pub fn print(self: *Terminal, c: u21) !void {
          // character at the time of writing.
          if (self.screens.active.cursor.x == 0 and left == 1) {
              log.warn("zero-width character with no prior character, ignoring", .{});
@@ -186,7 +307,7 @@ index 0892012..f4fb433 100644
          }
  
          // Find our previous cell
-@@ -1146,18 +1177,18 @@ pub fn print(self: *Terminal, c: u21) !void {
+@@ -1490,18 +1534,18 @@ pub fn print(self: *Terminal, c: u21) !void {
          // If our previous cell has no text, just ignore the zero-width character
          if (!prev.hasText()) {
              log.warn("zero-width character with no prior character, ignoring", .{});
@@ -196,7 +317,7 @@ index 0892012..f4fb433 100644
  
          // If this is a emoji variation selector, prev must be an emoji
          if (c == 0xFE0F or c == 0xFE0E) {
-             const prev_props = unicode.table.get(prev.content.codepoint);
+             const prev_props = unicode.table.get(prev.content.codepoint.data);
              const emoji = prev_props.grapheme_break == .extended_pictographic;
 -            if (!emoji) return;
 +            if (!emoji) return null;
@@ -208,7 +329,7 @@ index 0892012..f4fb433 100644
      }
  
      // We have a printable character, save it
-@@ -1176,19 +1207,19 @@ pub fn print(self: *Terminal, c: u21) !void {
+@@ -1520,19 +1564,19 @@ pub fn print(self: *Terminal, c: u21) !void {
          self.insertBlanks(width);
      }
  
@@ -232,7 +353,7 @@ index 0892012..f4fb433 100644
              // If we don't have space for the wide char, we need
              // to insert spacers and wrap. Then we just print the wide
              // char as normal.
-@@ -1196,7 +1227,7 @@ pub fn print(self: *Terminal, c: u21) !void {
+@@ -1540,7 +1584,7 @@ pub fn print(self: *Terminal, c: u21) !void {
                  // If we don't have wraparound enabled then we don't print
                  // this character at all and don't move the cursor. This is
                  // how xterm behaves.
@@ -241,7 +362,7 @@ index 0892012..f4fb433 100644
  
                  // We only create a spacer head if we're at the real edge
                  // of the screen. Otherwise, we clear the space with a narrow.
-@@ -1207,43 +1238,45 @@ pub fn print(self: *Terminal, c: u21) !void {
+@@ -1551,43 +1595,45 @@ pub fn print(self: *Terminal, c: u21) !void {
                      // a page resize during printCell then it'll fail
                      // integrity checks.
                      self.screens.active.cursor.page_row.wrap = true;
@@ -296,7 +417,7 @@ index 0892012..f4fb433 100644
      defer self.screens.active.assertIntegrity();
  
      // TODO: spacers should use a bgcolor only cell
-@@ -1405,6 +1438,8 @@ fn printCell(
+@@ -1753,6 +1799,8 @@ fn printCell(
          page.clearHyperlink(cell);
          page.updateRowHyperlinkFlag(self.screens.active.cursor.page_row);
      }
@@ -306,28 +427,28 @@ index 0892012..f4fb433 100644
  
  fn printWrap(self: *Terminal) !void {
 diff --git a/vendor/libghostty-vt/src/terminal/c/terminal.zig b/vendor/libghostty-vt/src/terminal/c/terminal.zig
-index 0f95fcf..ed13531 100644
+index 91bbe310..f36e71eb 100644
 --- a/vendor/libghostty-vt/src/terminal/c/terminal.zig
 +++ b/vendor/libghostty-vt/src/terminal/c/terminal.zig
-@@ -28,6 +28,7 @@ const clipboard = @import("../clipboard.zig");
- const Result = @import("result.zig").Result;
+@@ -36,6 +36,7 @@ const Result = @import("result.zig").Result;
+ const assert = @import("../../quirks.zig").inlineAssert;
  
  const Handler = @import("../stream_terminal.zig").Handler;
 +const ParsedOutputKind = @import("../stream_terminal.zig").ParsedOutputKind;
  
- const log = std.log.scoped(.terminal_c);
+ const max_path_bytes = if (builtin.os.tag == .freestanding) 4096 else std.fs.max_path_bytes;
  
-@@ -74,6 +75,7 @@ const Effects = struct {
-     pwd_changed: ?PwdChangedFn = null,
-     size_cb: ?SizeFn = null,
+@@ -257,6 +258,7 @@ const Effects = struct {
      clipboard_write: ?ClipboardWriteFn = null,
+     clipboard_read: ?ClipboardReadFn = null,
+     unknown_sequence: ?UnknownSequenceFn = null,
 +    parsed_output: ?ParsedOutputFn = null,
  
      /// Scratch buffer for DA1 feature codes. The device attributes
      /// trampoline converts C feature codes into this buffer and returns
-@@ -108,6 +110,9 @@ const Effects = struct {
-     /// and its contents are borrowed and only valid for the callback duration.
-     pub const ClipboardWriteFn = *const fn (Terminal, ?*anyopaque, *const ClipboardWrite) callconv(lib.calling_conv) clipboard.WriteResult;
+@@ -301,6 +303,9 @@ const Effects = struct {
+     /// request and its strings are borrowed for the callback duration.
+     pub const DesktopNotificationFn = *const fn (Terminal, ?*anyopaque, *const DesktopNotification) callconv(lib.calling_conv) void;
  
 +    /// C function pointer type for parser-classified output.
 +    pub const ParsedOutputFn = *const fn (Terminal, ?*anyopaque, ParsedOutputKind, [*]const u8, usize) callconv(lib.calling_conv) void;
@@ -335,8 +456,8 @@ index 0f95fcf..ed13531 100644
      /// C function pointer type for the title_changed callback.
      pub const TitleChangedFn = *const fn (Terminal, ?*anyopaque) callconv(lib.calling_conv) void;
  
-@@ -200,6 +205,13 @@ const Effects = struct {
-         return func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
+@@ -528,6 +533,13 @@ const Effects = struct {
+         func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
      }
  
 +    fn parsedOutputTrampoline(handler: *Handler, kind: ParsedOutputKind, data: []const u8) void {
@@ -347,93 +468,256 @@ index 0f95fcf..ed13531 100644
 +    }
 +
      fn colorSchemeTrampoline(handler: *Handler) ?device_status.ColorScheme {
-         const stream_ptr: *Stream = @fieldParentPtr("handler", handler);
-         const wrapper: *TerminalWrapper = @fieldParentPtr("stream", stream_ptr);
-@@ -366,6 +378,7 @@ fn new_(
-         .pwd_changed = &Effects.pwdChangedTrampoline,
-         .size = &Effects.sizeTrampoline,
-         .clipboard_write = &Effects.clipboardWriteTrampoline,
+         const wrapper = TerminalWrapper.fromHandler(handler);
+         const func = wrapper.effects.color_scheme orelse return null;
+@@ -678,6 +690,7 @@ fn wrap(
+         // Installed dynamically when the callback is set; see Effects.
+         .clipboard_write = null,
+         .clipboard_read = null,
 +        .parsed_output = null,
      };
  
      wrapper.* = .{
-@@ -438,6 +451,7 @@ pub const Option = enum(c_int) {
-     glyph_protocol = 24,
-     pwd_changed = 25,
-     clipboard_write = 26,
-+    parsed_output = 27,
+@@ -1174,6 +1187,7 @@ pub const Option = enum(c_int) {
+     terminfo_name = 37,
+     clipboard_read = 38,
+     clipboard_write_max_bytes = 39,
++    parsed_output = 40,
  
      /// Input type expected for setting the option.
      pub fn InType(comptime self: Option) type {
-@@ -453,6 +467,7 @@ pub const Option = enum(c_int) {
-             .pwd_changed => ?Effects.PwdChangedFn,
-             .size_cb => ?Effects.SizeFn,
+@@ -1193,6 +1207,7 @@ pub const Option = enum(c_int) {
              .clipboard_write => ?Effects.ClipboardWriteFn,
+             .clipboard_read => ?Effects.ClipboardReadFn,
+             .unknown_sequence => ?Effects.UnknownSequenceFn,
 +            .parsed_output => ?Effects.ParsedOutputFn,
-             .title, .pwd => ?*const lib.String,
+             .title, .pwd, .terminfo_name => ?*const lib.String,
              .color_foreground, .color_background, .color_cursor => ?*const color.RGB.C,
              .color_palette => ?*const color.PaletteC,
-@@ -510,6 +525,11 @@ fn setTyped(
-         .pwd_changed => wrapper.effects.pwd_changed = value,
-         .size_cb => wrapper.effects.size_cb = value,
-         .clipboard_write => wrapper.effects.clipboard_write = value,
+@@ -1281,6 +1296,11 @@ fn setTyped(
+             else
+                 null;
+         },
 +        .parsed_output => {
 +            wrapper.effects.parsed_output = value;
 +            wrapper.stream.handler.effects.parsed_output =
 +                if (value != null) &Effects.parsedOutputTrampoline else null;
 +        },
-         .title => {
-             const str = if (value) |v| v.ptr[0..v.len] else "";
-             wrapper.terminal.setTitle(str) catch return .out_of_memory;
+         .title_report => wrapper.stream.handler.title_report = if (value) |ptr|
+             ptr.*
+         else
 diff --git a/vendor/libghostty-vt/src/terminal/osc.zig b/vendor/libghostty-vt/src/terminal/osc.zig
-index 26ce126..d2b2d26 100644
+index dbc35492..f570825d 100644
 --- a/vendor/libghostty-vt/src/terminal/osc.zig
 +++ b/vendor/libghostty-vt/src/terminal/osc.zig
-@@ -297,6 +297,10 @@ pub const Parser = struct {
-     /// Maximum size of a "normal" OSC.
-     pub const MAX_BUF = 2048;
+@@ -311,6 +311,12 @@ pub const Parser = struct {
+     /// OSC input is untrusted, so these captures must have a finite bound.
+     pub const MAX_ALLOCATING_BUF = 8 * 1024 * 1024;
  
-+    /// Maximum accepted OSC 8 `params;URI` payload. Each component may be as
-+    /// large as 8 KiB while the parser remains bounded.
-+    pub const MAX_HYPERLINK_CAPTURE = 16 * 1024 + 1;
++    /// Maximum accepted OSC 8 params or URI component.
++    pub const MAX_HYPERLINK_COMPONENT = 8 * 1024;
++
++    /// Maximum accepted OSC 8 `params;URI` payload.
++    pub const MAX_HYPERLINK_CAPTURE = 2 * MAX_HYPERLINK_COMPONENT + 1;
 +
      /// Optional allocator used to accept data longer than MAX_BUF.
      /// This only applies to some commands (e.g. OSC 52) that can
      /// reasonably exceed MAX_BUF.
-@@ -551,6 +555,10 @@ pub const Parser = struct {
-         // If a writer has been initialized, we just accumulate the rest of the
-         // OSC sequence in the writer's buffer and skip the state machine.
-         if (self.capture) |*cap| {
-+            if (self.state == .@"8" and cap.trailing().len >= MAX_HYPERLINK_CAPTURE) {
-+                self.state = .invalid;
-+                return;
-+            }
-             cap.writer.writeByte(c) catch |err| switch (err) {
-                 // We have overflowed our buffer or had some other error, set the
-                 // state to invalid so that we discard any further input.
-@@ -743,12 +751,16 @@ pub const Parser = struct {
+@@ -606,27 +612,31 @@ pub const Parser = struct {
+             ),
+ 
+             .allocating => {
+-                const alloc = self.alloc orelse {
+-                    // We don't have an allocator - fall back to a fixed buffer and hope
+-                    // that it's big enough.
+-                    self.captureTrailing(.fixed);
+-                    return;
+-                };
+-
+-                Capture.allocating(
+-                    &self.capture,
+-                    alloc,
+-                    self.max_allocating_bytes,
+-                ) catch {
+-                    // The allocator failed for some reason, fall back to a fixed buffer
+-                    // and hope that it's big enough.
+-                    self.captureTrailing(.fixed);
+-                    return;
+-                };
++                self.captureTrailingAllocating(self.max_allocating_bytes);
+             },
+         }
+     }
+ 
++    inline fn captureTrailingAllocating(self: *Parser, max_bytes: usize) void {
++        const alloc = self.alloc orelse {
++            // We don't have an allocator - fall back to a fixed buffer and hope
++            // that it's big enough.
++            self.captureTrailing(.fixed);
++            return;
++        };
++
++        Capture.allocating(
++            &self.capture,
++            alloc,
++            @min(self.max_allocating_bytes, max_bytes),
++        ) catch {
++            // The allocator failed for some reason, fall back to a fixed buffer
++            // and hope that it's big enough.
++            self.captureTrailing(.fixed);
++            return;
++        };
++    }
++
+     /// Consume a slice of bytes, advancing the parser state. This is
+     /// equivalent to calling `next` for each byte in order, but is much
+     /// faster once a data capture is active because the remaining bytes
+@@ -869,11 +879,15 @@ pub const Parser = struct {
              .@"0",
              .@"22",
              .@"777",
 -            .@"8",
-             .@"9",
              => switch (c) {
                  ';' => self.captureTrailing(.fixed),
                  else => self.state = .invalid,
              },
 +
 +            .@"8" => switch (c) {
-+                ';' => self.captureTrailing(.allocating),
++                ';' => self.captureTrailingAllocating(MAX_HYPERLINK_CAPTURE),
 +                else => self.state = .invalid,
 +            },
          }
      }
  
+diff --git a/vendor/libghostty-vt/src/terminal/osc/parsers/hyperlink.zig b/vendor/libghostty-vt/src/terminal/osc/parsers/hyperlink.zig
+index d8e84b63..755f2bf5 100644
+--- a/vendor/libghostty-vt/src/terminal/osc/parsers/hyperlink.zig
++++ b/vendor/libghostty-vt/src/terminal/osc/parsers/hyperlink.zig
+@@ -20,6 +20,11 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
+         parser.state = .invalid;
+         return null;
+     };
++    const uri_len = data.len - s - 2;
++    if (s > Parser.MAX_HYPERLINK_COMPONENT or uri_len > Parser.MAX_HYPERLINK_COMPONENT) {
++        parser.state = .invalid;
++        return null;
++    }
+ 
+     parser.command = .{
+         .hyperlink_start = .{
+diff --git a/vendor/libghostty-vt/src/terminal/parse_table.zig b/vendor/libghostty-vt/src/terminal/parse_table.zig
+index fa074fa0..3133d3ab 100644
+--- a/vendor/libghostty-vt/src/terminal/parse_table.zig
++++ b/vendor/libghostty-vt/src/terminal/parse_table.zig
+@@ -213,6 +213,9 @@ fn genTable() Table {
+         // an ignored DCS could otherwise begin a live sequence mid-string
+         // (e.g. 0x9B => csi_entry).
+         range(&result, 0x80, 0xFF, source, source, .ignore);
++
++        // Herdr's parser-classified output contract also accepts raw 8-bit ST.
++        single(&result, 0x9C, source, .ground, .none);
+     }
+ 
+     // dcs_param
+@@ -263,6 +266,9 @@ fn genTable() Table {
+         // DCS strings terminate via 7-bit ST (ESC \) and abort via
+         // CAN/SUB, which are unaffected here.
+         range(&result, 0x80, 0xFF, source, source, .put);
++
++        // Herdr's parser-classified output contract also accepts raw 8-bit ST.
++        single(&result, 0x9C, source, .ground, .none);
+     }
+ 
+     // csi_param
+@@ -357,6 +363,9 @@ fn genTable() Table {
+         range(&result, 0x1C, 0x1F, source, source, .ignore);
+         range(&result, 0x20, 0xFF, source, source, .osc_put);
+ 
++        // Herdr's parser-classified output contract also accepts raw 8-bit ST.
++        single(&result, 0x9C, source, .ground, .none);
++
+         // XTerm accepts either BEL  or ST  for terminating OSC
+         // sequences, and when returning information, uses the same
+         // terminator used in a query.
+@@ -409,14 +418,17 @@ test {
+     _ = table;
+ }
+ 
+-test "dcs_passthrough: high bytes are payload data" {
++test "dcs_passthrough: high bytes except 8-bit ST are payload data" {
+     // Bytes 0x80-0xFF within a DCS string are payload data, not C1
+-    // controls. This includes 0x9C (8-bit ST): a raw 0x9C is
+-    // indistinguishable from a UTF-8 continuation byte (e.g. "Ü" is
+-    // 0xC3 0x9C) and Ghostty doesn't support 8-bit C1 controls
+-    // anywhere else.
++    // controls. Herdr deliberately retains raw 8-bit ST as a terminator for
++    // its parser-classified output contract.
+     for (0x80..0x100) |c| {
+         const entry = table[c][@intFromEnum(State.dcs_passthrough)];
++        if (c == 0x9C) {
++            try std.testing.expectEqual(State.ground, entry.state);
++            try std.testing.expectEqual(Action.none, entry.action);
++            continue;
++        }
+         try std.testing.expectEqual(State.dcs_passthrough, entry.state);
+         try std.testing.expectEqual(Action.put, entry.action);
+     }
+@@ -428,6 +440,11 @@ test "dcs_ignore: high bytes are ignored payload data" {
+     // a CSI mid-string).
+     for (0x80..0x100) |c| {
+         const entry = table[c][@intFromEnum(State.dcs_ignore)];
++        if (c == 0x9C) {
++            try std.testing.expectEqual(State.ground, entry.state);
++            try std.testing.expectEqual(Action.none, entry.action);
++            continue;
++        }
+         try std.testing.expectEqual(State.dcs_ignore, entry.state);
+         try std.testing.expectEqual(Action.ignore, entry.action);
+     }
 diff --git a/vendor/libghostty-vt/src/terminal/stream.zig b/vendor/libghostty-vt/src/terminal/stream.zig
-index efb06ec..6e09a4d 100644
+index 29bdde7d..26690beb 100644
 --- a/vendor/libghostty-vt/src/terminal/stream.zig
 +++ b/vendor/libghostty-vt/src/terminal/stream.zig
-@@ -895,6 +895,12 @@ pub fn Stream(comptime H: type) type {
+@@ -899,6 +899,9 @@ pub fn Stream(comptime H: type) type {
+                                 if (self.parser.osc_parser.end(
+                                     std.ascii.control_code.esc,
+                                 )) |cmd| self.oscDispatch(cmd.*);
++                                if (comptime @hasDecl(T, "vtParsedOscEnd")) {
++                                    self.handler.vtParsedOscEnd(std.ascii.control_code.esc);
++                                }
+                                 self.parser.clear();
+                                 self.parser.state = .escape;
+                                 offset += 1;
+@@ -909,6 +912,9 @@ pub fn Stream(comptime H: type) type {
+                                 if (self.parser.osc_parser.end(
+                                     std.ascii.control_code.bel,
+                                 )) |cmd| self.oscDispatch(cmd.*);
++                                if (comptime @hasDecl(T, "vtParsedOscEnd")) {
++                                    self.handler.vtParsedOscEnd(std.ascii.control_code.bel);
++                                }
+                                 self.parser.state = .ground;
+                                 offset += 1;
+                                 continue;
+@@ -1090,7 +1096,8 @@ pub fn Stream(comptime H: type) type {
+                 const ByteVector = @Vector(vector_len, u8);
+                 while (end + vector_len <= input.len) {
+                     const bytes: ByteVector = input[end..][0..vector_len].*;
+-                    const stop = bytes < @as(ByteVector, @splat(0x20));
++                    const stop = (bytes < @as(ByteVector, @splat(0x20))) |
++                        (bytes == @as(ByteVector, @splat(0x9C)));
+                     if (@reduce(.Or, stop)) break;
+                     end += vector_len;
+                 }
+@@ -1099,7 +1106,7 @@ pub fn Stream(comptime H: type) type {
+                 switch (input[end]) {
+                     // Not osc_put bytes: BEL/CAN/SUB/ESC terminate or
+                     // abort the state; other C0 bytes are ignored by it.
+-                    0x00...0x1F => break,
++                    0x00...0x1F, 0x9C => break,
+                     // Everything else is an osc_put byte.
+                     else => end += 1,
+                 }
+@@ -1203,6 +1210,12 @@ pub fn Stream(comptime H: type) type {
          fn nextNonUtf8(self: *Self, c: u8) void {
              assert(self.parser.state != .ground);
  
@@ -446,7 +730,7 @@ index efb06ec..6e09a4d 100644
              // Fast path for CSI entry.
              if (self.parser.state == .escape and c == '[') {
                  self.parser.state = .csi_entry;
-@@ -969,6 +975,7 @@ pub fn Stream(comptime H: type) type {
+@@ -1277,6 +1290,7 @@ pub fn Stream(comptime H: type) type {
              // that causes weird behavior in some tests- I'm not sure if they
              // miscompile or it's just very counter-intuitive comptime stuff,
              // but regardless, this is the easy solution.
@@ -454,8 +738,8 @@ index efb06ec..6e09a4d 100644
              const actions = @call(.always_inline, Parser.next, .{ &self.parser, c });
  
              for (actions) |action_opt| {
-@@ -1006,6 +1013,12 @@ pub fn Stream(comptime H: type) type {
-                     .apc_end => self.handler.vt(.apc_end, {}),
+@@ -1316,6 +1330,12 @@ pub fn Stream(comptime H: type) type {
+                     }),
                  }
              }
 +
@@ -468,10 +752,10 @@ index efb06ec..6e09a4d 100644
  
          /// Finalize and dispatch a CSI directly from parser state for
 diff --git a/vendor/libghostty-vt/src/terminal/stream_terminal.zig b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
-index 91cfb21..ecb6004 100644
+index 61172423..7b281693 100644
 --- a/vendor/libghostty-vt/src/terminal/stream_terminal.zig
 +++ b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
-@@ -23,6 +23,16 @@ const log = std.log.scoped(.stream_terminal);
+@@ -30,6 +30,16 @@ const log = std.log.scoped(.stream_terminal);
  /// a Terminal and updates the Terminal state.
  pub const Stream = stream.Stream(Handler);
  
@@ -488,20 +772,24 @@ index 91cfb21..ecb6004 100644
  /// A stream handler that updates terminal state. By default, it is
  /// readonly in the sense that it only updates terminal state and ignores
  /// all other sequences that require a response or otherwise have side
-@@ -46,6 +56,10 @@ pub const Handler = struct {
-     /// the kitty graphics protocol.
-     apc_handler: apc.Handler = .{},
+@@ -105,6 +115,14 @@ pub const Handler = struct {
+     /// silently ignored.
+     terminfo_name: ?[]const u8 = null,
  
-+    /// OSC 8 target awaiting a parser-confirmed terminator. The bytes remain
-+    /// owned by the OSC parser until the next parser byte is consumed.
-+    parsed_hyperlink_pending: ?[]const u8 = null,
++    /// OSC 8 target awaiting a parser-confirmed terminator. BEL and 8-bit ST
++    /// consume the borrowed parser bytes immediately. ESC copies them until
++    /// the following byte confirms or rejects 7-bit ST.
++    parsed_hyperlink_pending: ?struct {
++        uri: []const u8,
++        owned: bool,
++    } = null,
 +
-     /// Default cursor style used by DECSCUSR reset (CSI 0 q).
-     default_cursor: bool = true,
-     default_cursor_style: Screen.CursorStyle = .block,
-@@ -105,6 +119,10 @@ pub const Handler = struct {
-         /// library has no way to mediate that with user consent.
-         clipboard_write: ?*const fn (*Handler, clipboard.Write) clipboard.WriteResult,
+     /// Maximum byte length accepted for `terminfo_name`.
+     pub const max_terminfo_name_bytes = 128;
+ 
+@@ -195,6 +213,10 @@ pub const Handler = struct {
+         /// since the user already pasted. See `paste`.
+         clipboard_read: ?*const fn (*Handler, clipboard.Read) void,
  
 +        /// Called for printable text, control boundaries, and OSC 8 targets after
 +        /// the VT parser has classified the input.
@@ -510,15 +798,23 @@ index 91cfb21..ecb6004 100644
          /// Called in response to an XTVERSION query. Returns the version
          /// string to report (e.g. "ghostty 1.2.3"). The returned memory
          /// must be valid for the lifetime of the call. The maximum length
-@@ -117,6 +135,7 @@ pub const Handler = struct {
-         pub const readonly: Effects = .{
+@@ -208,6 +230,7 @@ pub const Handler = struct {
              .bell = null,
+             .clipboard_read = null,
              .clipboard_write = null,
 +            .parsed_output = null,
              .color_scheme = null,
+             .desktop_notification = null,
              .device_attributes = null,
-             .enquiry = null,
-@@ -143,9 +162,199 @@ pub const Handler = struct {
+@@ -241,6 +264,7 @@ pub const Handler = struct {
+     }
+ 
+     pub fn deinit(self: *Handler) void {
++        self.clearParsedOutputPending();
+         self.kittyClipboardAbort();
+         self.kitty_clipboard_grants.deinit(self.terminal.gpa());
+         self.apc_handler.deinit();
+@@ -341,10 +365,218 @@ pub const Handler = struct {
          comptime action: Action.Tag,
          value: Action.Value(action),
      ) void {
@@ -530,6 +826,7 @@ index 91cfb21..ecb6004 100644
 +            if (handled) return;
 +        }
          self.vtFallible(action, value) catch |err| {
+             self.semantic_failure = true;
              log.warn("error handling VT action action={} err={}", .{ action, err });
 +            return;
          };
@@ -545,8 +842,16 @@ index 91cfb21..ecb6004 100644
 +        }
 +        switch (terminator) {
 +            0x07, 0x9C => self.emitPendingHyperlink(),
-+            0x1B => {},
-+            else => self.parsed_hyperlink_pending = null,
++            0x1B => {
++                const pending = self.parsed_hyperlink_pending orelse return;
++                if (pending.owned) return;
++                const uri = self.terminal.gpa().dupe(u8, pending.uri) catch {
++                    self.parsed_hyperlink_pending = null;
++                    return;
++                };
++                self.parsed_hyperlink_pending = .{ .uri = uri, .owned = true };
++            },
++            else => self.clearParsedOutputPending(),
 +        }
 +    }
 +
@@ -556,15 +861,22 @@ index 91cfb21..ecb6004 100644
 +        if (byte == '\\') {
 +            self.emitPendingHyperlink();
 +        } else {
-+            self.parsed_hyperlink_pending = null;
++            self.clearParsedOutputPending();
 +        }
 +    }
 +
 +    fn emitPendingHyperlink(self: *Handler) void {
-+        const uri = self.parsed_hyperlink_pending orelse return;
++        const pending = self.parsed_hyperlink_pending orelse return;
 +        self.parsed_hyperlink_pending = null;
++        defer if (pending.owned) self.terminal.gpa().free(pending.uri);
 +        const callback = self.effects.parsed_output orelse return;
-+        callback(self, .hyperlink, uri);
++        callback(self, .hyperlink, pending.uri);
++    }
++
++    pub fn clearParsedOutputPending(self: *Handler) void {
++        const pending = self.parsed_hyperlink_pending orelse return;
++        self.parsed_hyperlink_pending = null;
++        if (pending.owned) self.terminal.gpa().free(pending.uri);
 +    }
 +
 +    fn emitParsedOutput(
@@ -574,7 +886,10 @@ index 91cfb21..ecb6004 100644
 +    ) void {
 +        const callback = self.effects.parsed_output orelse return;
 +        switch (action) {
-+            .start_hyperlink => self.parsed_hyperlink_pending = value.uri,
++            .start_hyperlink => {
++                self.clearParsedOutputPending();
++                self.parsed_hyperlink_pending = .{ .uri = value.uri, .owned = false };
++            },
 +
 +            // Actions that cannot move rendered text: the next printed run
 +            // still continues the last one. Everything else separates the
@@ -717,4 +1032,4 @@ index 91cfb21..ecb6004 100644
 +        }
      }
  
-     inline fn vtFallible(
+     fn unknownSequence(self: *Handler, value: UnknownSequence) void {

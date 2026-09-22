@@ -177,7 +177,7 @@ impl RawInputFramer {
         self.byte_framer.enable_host_color_scheme_change_tracking();
     }
 
-    #[cfg(any(not(windows), test))]
+    #[cfg(not(windows))]
     pub(crate) fn enable_host_appearance_query_on_focus(&mut self) {
         self.byte_framer.enable_host_appearance_query_on_focus();
     }
@@ -191,12 +191,25 @@ impl RawInputFramer {
     }
 
     #[cfg(any(windows, test))]
+    pub(crate) fn has_pending_default_mouse_sequence(&self) -> bool {
+        starts_with_incomplete_default_mouse_sequence(&self.byte_framer.buffer)
+    }
+
+    #[cfg(any(windows, test))]
     pub(crate) fn has_pending_bracketed_paste(&self) -> bool {
         self.byte_framer.has_pending_bracketed_paste()
     }
 
     pub(crate) fn flush_timeout(&mut self) -> Vec<RawInputEvent> {
         Self::events_from_chunks(self.byte_framer.flush_timeout())
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn flush_interrupted(&mut self) -> Vec<RawInputEvent> {
+        let mut chunks = self.byte_framer.flush_timeout();
+        self.byte_framer.timed_out_mouse_prefix = None;
+        chunks.extend(self.byte_framer.drain_available_chunks());
+        Self::events_from_chunks(chunks)
     }
 
     fn events_from_chunks(chunks: Vec<Vec<u8>>) -> Vec<RawInputEvent> {
@@ -223,6 +236,8 @@ pub(crate) struct RawInputByteFramer {
     buffer: Vec<u8>,
     discard_until: Option<ControlStringFamily>,
     discarded_tail_bytes: usize,
+    // Keep the discarded prefix separate from continuation bytes awaiting validation.
+    timed_out_mouse_prefix: Option<Vec<u8>>,
     lone_escape_recently_flushed: bool,
     host_color_replies_awaited: u16,
     host_cell_size_replies_awaited: u16,
@@ -332,7 +347,7 @@ impl RawInputByteFramer {
         !self.buffer.is_empty()
     }
 
-    #[cfg(any(not(windows), test))]
+    #[cfg(not(windows))]
     pub(crate) fn has_pending_lone_escape(&self) -> bool {
         self.buffer.as_slice() == [ESC]
     }
@@ -351,17 +366,16 @@ impl RawInputByteFramer {
     pub(crate) fn flush_timeout(&mut self) -> Vec<Vec<u8>> {
         let mut chunks = self.drain_available_chunks();
 
+        // Idle is not evidence that a mouse report has ended. The continuation
+        // stays bounded and is released if it cannot complete a valid report.
+        if self.timed_out_mouse_prefix.is_some() {
+            return chunks;
+        }
+
         if let Some(family) = self.discard_until {
             if family == ControlStringFamily::HostReplyCsi {
                 return chunks;
             }
-            if family == ControlStringFamily::OrphanedSgrMouseTail {
-                self.buffer.clear();
-                self.discard_until = None;
-                self.discarded_tail_bytes = 0;
-                return chunks;
-            }
-
             let keep_split_st = self.buffer.last() == Some(&ESC);
             let keep_discarding = plausible_control_string_tail(family, &self.buffer);
             self.discarded_tail_bytes = self.discarded_tail_bytes.saturating_add(self.buffer.len());
@@ -386,11 +400,9 @@ impl RawInputByteFramer {
                 len = self.buffer.len(),
                 "discarding incomplete orphaned SGR mouse tail after input timeout"
             );
-            discard_or_buffer_orphaned_sgr_mouse_tail(
-                &mut self.buffer,
-                &mut self.discard_until,
-                &mut self.discarded_tail_bytes,
-            );
+            let mut prefix = vec![ESC];
+            prefix.append(&mut self.buffer);
+            self.retain_timed_out_mouse_prefix(prefix);
             self.lone_escape_recently_flushed = false;
             return chunks;
         }
@@ -400,10 +412,8 @@ impl RawInputByteFramer {
                 bytes = ?self.buffer,
                 "discarding incomplete SGR mouse sequence after input timeout"
             );
-            self.discarded_tail_bytes = self.buffer.len();
-            self.discard_until = (self.discarded_tail_bytes <= MAX_DISCARDED_CONTROL_TAIL_BYTES)
-                .then_some(ControlStringFamily::OrphanedSgrMouseTail);
-            self.buffer.clear();
+            let prefix = std::mem::take(&mut self.buffer);
+            self.retain_timed_out_mouse_prefix(prefix);
             return chunks;
         }
 
@@ -531,10 +541,27 @@ impl RawInputByteFramer {
         chunks
     }
 
+    fn retain_timed_out_mouse_prefix(&mut self, prefix: Vec<u8>) {
+        self.timed_out_mouse_prefix = (prefix.len() < MAX_DISCARDED_CONTROL_TAIL_BYTES
+            && plausible_sgr_mouse_prefix(&prefix))
+        .then_some(prefix);
+    }
+
     fn drain_available_chunks(&mut self) -> Vec<Vec<u8>> {
         let mut chunks = Vec::new();
 
         loop {
+            if let Some(prefix) = &self.timed_out_mouse_prefix {
+                match classify_sgr_mouse_continuation(prefix, &self.buffer) {
+                    SgrMouseContinuation::Incomplete => break,
+                    SgrMouseContinuation::Complete(len) => {
+                        self.buffer.drain(..len);
+                    }
+                    SgrMouseContinuation::Invalid => {}
+                }
+                self.timed_out_mouse_prefix = None;
+            }
+
             if self.lone_escape_recently_flushed {
                 if starts_with_incomplete_orphaned_sgr_mouse_tail(&self.buffer) {
                     break;
@@ -1162,19 +1189,6 @@ fn discard_complete_orphaned_sgr_mouse_tail(buffer: &mut Vec<u8>) -> bool {
     true
 }
 
-fn discard_or_buffer_orphaned_sgr_mouse_tail(
-    buffer: &mut Vec<u8>,
-    discard_until: &mut Option<ControlStringFamily>,
-    discarded_tail_bytes: &mut usize,
-) {
-    if !discard_complete_orphaned_sgr_mouse_tail(buffer) {
-        *discarded_tail_bytes = buffer.len();
-        *discard_until = (*discarded_tail_bytes <= MAX_DISCARDED_CONTROL_TAIL_BYTES)
-            .then_some(ControlStringFamily::OrphanedSgrMouseTail);
-        buffer.clear();
-    }
-}
-
 fn discard_host_reply_csi_tail(buffer: &mut Vec<u8>, discarded_tail_bytes: &mut usize) -> bool {
     let remaining = MAX_DISCARDED_CONTROL_TAIL_BYTES.saturating_sub(*discarded_tail_bytes);
     let inspected = buffer.len().min(remaining);
@@ -1224,6 +1238,78 @@ fn discard_orphaned_sgr_mouse_tail(buffer: &mut Vec<u8>, discarded_tail_bytes: &
 
     buffer.clear();
     false
+}
+
+enum SgrMouseContinuation {
+    Incomplete,
+    Complete(usize),
+    Invalid,
+}
+
+fn classify_sgr_mouse_continuation(prefix: &[u8], tail: &[u8]) -> SgrMouseContinuation {
+    let remaining = MAX_DISCARDED_CONTROL_TAIL_BYTES.saturating_sub(prefix.len());
+    let tail = &tail[..tail.len().min(remaining)];
+    let final_index = tail
+        .iter()
+        .position(|byte| !byte.is_ascii_digit() && *byte != b';');
+    let payload_len = final_index.unwrap_or(tail.len());
+    let mut report = prefix.to_vec();
+    report.extend_from_slice(&tail[..payload_len]);
+    if !plausible_sgr_mouse_prefix(&report) {
+        return SgrMouseContinuation::Invalid;
+    }
+    if let Some(index) = final_index {
+        report.push(tail[index]);
+        let valid = std::str::from_utf8(&report)
+            .ok()
+            .and_then(parse_sgr_mouse)
+            .is_some();
+        return if valid {
+            SgrMouseContinuation::Complete(index + 1)
+        } else {
+            SgrMouseContinuation::Invalid
+        };
+    }
+    if report.len() >= MAX_DISCARDED_CONTROL_TAIL_BYTES {
+        SgrMouseContinuation::Invalid
+    } else {
+        SgrMouseContinuation::Incomplete
+    }
+}
+
+// Reject impossible continuations early, without changing the general mouse
+// parser. A partial last field (including zero) can still become valid.
+fn plausible_sgr_mouse_prefix(report: &[u8]) -> bool {
+    let Some(body) = report.strip_prefix(b"\x1b[<") else {
+        return false;
+    };
+    let mut fields = body.split(|byte| *byte == b';').enumerate().peekable();
+    while let Some((field, digits)) = fields.next() {
+        if field > 2 {
+            return false;
+        }
+        if digits.is_empty() {
+            return fields.peek().is_none();
+        }
+        if !digits.iter().all(u8::is_ascii_digit) {
+            return false;
+        }
+        let Some(value) = std::str::from_utf8(digits)
+            .ok()
+            .and_then(|digits| digits.parse::<u16>().ok())
+        else {
+            return false;
+        };
+        if field == 0 && value > u16::from(u8::MAX) {
+            return false;
+        }
+        if fields.peek().is_some()
+            && ((field == 0 && parse_mouse_cb(value as u8).is_none()) || (field == 1 && value == 0))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn osc_string_terminator(buffer: &[u8]) -> Option<usize> {
@@ -1938,11 +2024,11 @@ mod tests {
     }
 
     #[test]
-    fn modified_rxvt_f_key_alias_stays_unsupported() {
+    fn parses_modified_rxvt_f_key_alias() {
         let (event, consumed) = extract_one_event(b"\x1b[14;3~").unwrap();
 
         assert_eq!(consumed, 7);
-        assert!(matches!(event, RawInputEvent::Unsupported));
+        assert_raw_key(event, KeyCode::F(4), KeyModifiers::ALT);
     }
 
     #[test]

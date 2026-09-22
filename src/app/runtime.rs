@@ -370,8 +370,9 @@ impl App {
                     }
                     crossterm::event::KeyEventKind::Release => {
                         if let Some(lease) = self.input_leases.remove_forwarded(&lease_key) {
+                            let release = key.with_windows_composition_from(&lease.key);
                             let _ = self
-                                .forward_terminal_key_to_target(&lease.target, key)
+                                .forward_terminal_key_to_target(&lease.target, release)
                                 .await;
                         }
                         false
@@ -1790,7 +1791,8 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_scheduler_ticks_stalled_agent_auto_nudge() {
-        let now = Instant::now();
+        let activity_at = Instant::now();
+        let now = activity_at + Duration::from_secs(20 * 60);
         let mut config = crate::config::Config::default();
         config.session.auto_nudge_stalled_agents = true;
         let mut app = super::super::App::new(
@@ -1811,7 +1813,7 @@ mod tests {
             .get_mut(&pane_id)
             .expect("root pane")
             .activity
-            .set_last_at(now - Duration::from_secs(20 * 60));
+            .set_last_at(activity_at);
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.ensure_test_terminals();

@@ -39,7 +39,6 @@ mod kitty_keyboard;
 mod osc;
 mod state;
 mod terminal;
-mod xtgettcap;
 
 #[cfg(unix)]
 use self::agent_detection::DetectionPublishState;
@@ -65,7 +64,7 @@ pub use self::{
 };
 
 const RELEASE_REACQUIRE_SUPPRESSION: std::time::Duration = std::time::Duration::from_secs(1);
-const PANE_TERM: &str = "xterm-256color";
+pub(crate) const PANE_TERM: &str = "xterm-256color";
 const PANE_COLORTERM: &str = "truecolor";
 
 #[cfg(test)]
@@ -1308,6 +1307,8 @@ pub struct PaneRuntime {
     child_pid: Arc<AtomicU32>,
     tty_name: Option<std::path::PathBuf>,
     reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
+    persistence_cwd: Mutex<Option<std::path::PathBuf>>,
+    cwd_process_exited: Arc<AtomicBool>,
     child_wait_completed: Option<Arc<AtomicBool>>,
     kitty_keyboard_flags: Arc<AtomicU16>,
     content_seq: Arc<AtomicU64>,
@@ -2316,6 +2317,8 @@ impl PaneRuntime {
                 child_pid: Arc::new(AtomicU32::new(0)),
                 tty_name: None,
                 reported_cwd: Arc::new(Mutex::new(None)),
+                persistence_cwd: Mutex::new(None),
+                cwd_process_exited: Arc::new(AtomicBool::new(false)),
                 child_wait_completed: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
                 content_seq: Arc::new(AtomicU64::new(0)),
@@ -2761,6 +2764,7 @@ impl PaneRuntime {
         let terminal = Arc::new(PaneTerminal::new(pane_terminal));
         let child_pid = Arc::new(AtomicU32::new(child_pid));
         let reported_cwd = Arc::new(Mutex::new(None));
+        let cwd_process_exited = Arc::new(AtomicBool::new(false));
         let kitty_keyboard_flags = Arc::new(AtomicU16::new(keyboard_protocol_flags));
         let content_seq = Arc::new(AtomicU64::new(0));
         let input_admission = Arc::new(Mutex::new(InputAdmissionState::default()));
@@ -2839,7 +2843,9 @@ impl PaneRuntime {
             let exit_events = events.clone();
             let poison_events = events.clone();
             let suppress_pane_died_on_exit = suppress_pane_died.clone();
+            let cwd_process_exited = cwd_process_exited.clone();
             let on_reader_exit = Box::new(move || {
+                cwd_process_exited.store(true, Ordering::Release);
                 if !suppress_pane_died_on_exit.load(Ordering::Acquire) {
                     let _ = rt.block_on(exit_events.send(AppEvent::PaneDied { pane_id }));
                 }
@@ -2900,6 +2906,8 @@ impl PaneRuntime {
             child_pid,
             tty_name,
             reported_cwd,
+            persistence_cwd: Mutex::new(None),
+            cwd_process_exited,
             child_wait_completed: None,
             kitty_keyboard_flags,
             content_seq,
@@ -3002,17 +3010,24 @@ impl PaneRuntime {
                 crate::logging::pane_spawned(pane_id.raw(), pid);
             }
             tokio::task::spawn_blocking(move || {
-                match child.wait() {
+                let checkpoint_before_exit = match child.wait() {
                     Ok(status) => {
                         let status_text = format!("{status:?}");
                         crate::logging::pane_exited(pane_id.raw(), &status_text);
+                        crate::platform::classify_child_exit(&status).requires_session_checkpoint()
                     }
-                    Err(e) => crate::logging::pane_exit_failed(pane_id.raw(), &e.to_string()),
-                }
+                    Err(e) => {
+                        crate::logging::pane_exit_failed(pane_id.raw(), &e.to_string());
+                        false
+                    }
+                };
                 child_wait_completed.store(true, Ordering::Release);
                 // Normal exits are critical and must not be dropped. Suspension is
                 // handled synchronously by the settlement lifecycle instead.
                 if !suppress_pane_died_on_exit.load(Ordering::Acquire) {
+                    if checkpoint_before_exit {
+                        let _ = rt.block_on(events.send(AppEvent::PaneExitCheckpoint { pane_id }));
+                    }
                     if let Err(e) = rt.block_on(events.send(AppEvent::PaneDied { pane_id })) {
                         error!(pane = pane_id.raw(), err = %e, "failed to send PaneDied event");
                     }
@@ -3603,6 +3618,8 @@ impl PaneRuntime {
             child_pid,
             tty_name,
             reported_cwd,
+            persistence_cwd: Mutex::new(None),
+            cwd_process_exited: child_wait_completed.clone(),
             child_wait_completed: Some(child_wait_completed),
             kitty_keyboard_flags,
             content_seq,
@@ -3656,7 +3673,7 @@ impl PaneRuntime {
         self.detect_screen_rescan_notify.clone()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn agent_detection_enabled_for_test(&self) -> bool {
         self.detect_handle.is_some()
     }
@@ -4291,6 +4308,27 @@ impl PaneRuntime {
         crate::platform::process_cwd(pid)
     }
 
+    pub fn cwd_for_persistence(&self) -> Option<std::path::PathBuf> {
+        let pid = self.child_pid.load(Ordering::Acquire);
+        let exited = self.cwd_process_exited.load(Ordering::Acquire);
+        if let Some(cwd) = (!exited)
+            .then(|| crate::platform::process_cwd(pid))
+            .flatten()
+            .filter(|cwd| cwd.is_absolute())
+        {
+            // Persistence observations must not change OSC authority or follow-cwd behavior.
+            if let Ok(mut known) = self.persistence_cwd.lock() {
+                *known = Some(cwd.clone());
+            }
+            return Some(cwd);
+        }
+        self.persistence_cwd
+            .lock()
+            .ok()
+            .and_then(|cwd| cwd.clone())
+            .or_else(|| self.reported_cwd.lock().ok().and_then(|cwd| cwd.clone()))
+    }
+
     pub fn child_pid(&self) -> Option<u32> {
         let pid = self.child_pid.load(Ordering::Acquire);
         (pid > 0).then_some(pid)
@@ -4479,6 +4517,8 @@ impl PaneRuntime {
                 child_pid: Arc::new(AtomicU32::new(0)),
                 tty_name: None,
                 reported_cwd: Arc::new(Mutex::new(None)),
+                persistence_cwd: Mutex::new(None),
+                cwd_process_exited: Arc::new(AtomicBool::new(false)),
                 child_wait_completed: None,
                 kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
                 content_seq: Arc::new(AtomicU64::new(0)),
@@ -6239,6 +6279,8 @@ mod tests {
             child_pid: Arc::new(AtomicU32::new(0)),
             tty_name: None,
             reported_cwd: Arc::new(Mutex::new(None)),
+            persistence_cwd: Mutex::new(None),
+            cwd_process_exited: Arc::new(AtomicBool::new(false)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             content_seq: Arc::new(AtomicU64::new(0)),
@@ -6284,6 +6326,8 @@ mod tests {
             child_pid: Arc::new(AtomicU32::new(0)),
             tty_name: None,
             reported_cwd: Arc::new(Mutex::new(None)),
+            persistence_cwd: Mutex::new(None),
+            cwd_process_exited: Arc::new(AtomicBool::new(false)),
             child_wait_completed: None,
             kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
             content_seq: Arc::new(AtomicU64::new(0)),
