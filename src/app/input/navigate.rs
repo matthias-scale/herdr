@@ -496,6 +496,10 @@ impl App {
                 self.state.focus_client_on_sidebar();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::AssignPaneToPod => {
+                self.open_sidebar_pod_picker_for_focused_pane();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::FocusOwningRepoGroup => {
                 self.state.focus_owning_repo_group();
                 leave_navigate_mode(&mut self.state);
@@ -2409,6 +2413,7 @@ pub(crate) enum NavigateAction {
     ResizePaneRight,
     ToggleSidebar,
     FocusSidebar,
+    AssignPaneToPod,
     FocusOwningRepoGroup,
     CycleSidebarGroupMode,
     RefreshSidebar,
@@ -2694,6 +2699,7 @@ macro_rules! non_indexed_action_bindings {
             (&kb.resize_pane_right, NavigateAction::ResizePaneRight),
             (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
             (&kb.focus_sidebar, NavigateAction::FocusSidebar),
+            (&kb.assign_pane_to_pod, NavigateAction::AssignPaneToPod),
             (
                 &kb.focus_owning_repo_group,
                 NavigateAction::FocusOwningRepoGroup,
@@ -3116,6 +3122,24 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::FocusSidebar => {
             state.focus_client_on_sidebar();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::AssignPaneToPod => {
+            if let Some((ws_idx, pane_id)) = state.active.and_then(|ws_idx| {
+                state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(crate::workspace::Workspace::focused_pane_id)
+                    .map(|pane_id| (ws_idx, pane_id))
+            }) {
+                state.sidebar_pod_picker = Some(crate::app::state::SidebarPodPickerState {
+                    ws_idx,
+                    pane_id,
+                    anchor: (state.view.sidebar_rect.x, state.view.sidebar_rect.y),
+                    filter: crate::ui::dropdown::DropdownFilterState::default(),
+                });
+                state.focus_client_on_sidebar();
+            }
             leave_navigate_mode(state);
         }
         NavigateAction::FocusOwningRepoGroup => {

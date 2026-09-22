@@ -1556,6 +1556,7 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) object_menu: Option<SidebarObjectMenuState>,
     pub(crate) sort_menu: Option<SidebarSortMenuState>,
     pub(crate) subgroup_picker: Option<SidebarSubgroupPickerState>,
+    pub(crate) pod_picker: Option<SidebarPodPickerState>,
     /// Per-group sort choices, keyed by the group's canonical key. Client
     /// presentation: two attaches may sort the same group differently.
     pub(crate) group_sorts: std::collections::HashMap<String, SidebarSortMode>,
@@ -1617,6 +1618,7 @@ pub(crate) enum ClientInputOwner {
     SidebarObjectMenu,
     SidebarSortMenu,
     SidebarSubgroupPicker,
+    SidebarPodPicker,
     PrActionConfirmation,
     DockSurfaceMenu,
 }
@@ -1974,6 +1976,15 @@ pub(crate) struct SidebarSubgroupPickerState {
     pub(crate) ws_idx: usize,
     pub(crate) tab_idx: usize,
     /// Cell the dropdown hangs from: the context menu item the operator chose.
+    pub(crate) anchor: (u16, u16),
+    pub(crate) filter: crate::ui::dropdown::DropdownFilterState,
+}
+
+/// Attach-local picker that assigns one pane to a pod.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SidebarPodPickerState {
+    pub(crate) ws_idx: usize,
+    pub(crate) pane_id: crate::layout::PaneId,
     pub(crate) anchor: (u16, u16),
     pub(crate) filter: crate::ui::dropdown::DropdownFilterState,
 }
@@ -3366,6 +3377,13 @@ pub(crate) enum DragTarget {
         source_tab_idx: usize,
         insert_idx: Option<usize>,
     },
+    PodAssign {
+        source_id: crate::app::InputSourceId,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        public_pane_id: String,
+        hover: Option<crate::groups::GroupId>,
+    },
     WorkspaceListScrollbar {
         grab_row_offset: u16,
     },
@@ -3408,6 +3426,14 @@ pub(crate) struct WorkspacePressState {
 pub(crate) struct TabPressState {
     pub ws_idx: usize,
     pub tab_idx: usize,
+    pub start_col: u16,
+    pub start_row: u16,
+}
+
+pub(crate) struct AgentPressState {
+    pub ws_idx: usize,
+    pub pane_id: crate::layout::PaneId,
+    pub public_pane_id: String,
     pub start_col: u16,
     pub start_row: u16,
 }
@@ -3491,6 +3517,9 @@ pub(crate) enum RenameTarget {
     Pane {
         workspace_id: String,
         pane_id: PaneId,
+    },
+    Pod {
+        record: crate::groups::GroupRecord,
     },
 }
 
@@ -4170,6 +4199,10 @@ pub struct AppState {
     pub(crate) symphony_snapshot: crate::symphony::Snapshot,
     /// Server-owned fleet inventory, refreshed off the render thread.
     pub(crate) fleet_snapshot: crate::fleet::Snapshot,
+    /// Server-owned snapshot of this authority's groups and memberships.
+    /// The runtime refreshes it at group lifecycle boundaries so pure UI
+    /// projections do not read the durable group store.
+    pub(crate) local_group_snapshot: Option<crate::groups::GroupAuthoritySnapshot>,
     /// This server's configured component in cross-host agent references.
     pub(crate) agent_host_name: String,
     /// Local row identity materialized when the sidebar projection changes.
@@ -4413,6 +4446,8 @@ pub struct AppState {
     /// state; the assignment itself lives on the tab and persists with the
     /// session.
     pub(crate) sidebar_subgroup_picker: Option<SidebarSubgroupPickerState>,
+    /// Transient client-local query and cursor for pod assignment.
+    pub(crate) sidebar_pod_picker: Option<SidebarPodPickerState>,
     /// Per-group sidebar sort choices keyed by canonical group key. Only groups
     /// with an explicit non-default choice have an entry.
     pub(crate) sidebar_group_sorts: std::collections::HashMap<String, SidebarSortMode>,
@@ -4458,6 +4493,7 @@ pub struct AppState {
     pub(crate) workspace_presses:
         std::collections::HashMap<crate::app::InputSourceId, WorkspacePressState>,
     pub(crate) tab_presses: std::collections::HashMap<crate::app::InputSourceId, TabPressState>,
+    pub(crate) agent_presses: std::collections::HashMap<crate::app::InputSourceId, AgentPressState>,
     pub(crate) remote_agent_presses:
         std::collections::HashMap<crate::app::InputSourceId, RemoteAgentPressState>,
     pub selection: Option<Selection>,
@@ -4810,6 +4846,7 @@ struct ClientInputOwnerState {
     overlay: ClientOverlay,
     agent_picker_open: bool,
     subgroup_picker_open: bool,
+    pod_picker_open: bool,
     sort_menu_open: bool,
     object_menu_open: bool,
     project_menu_open: bool,
@@ -4834,6 +4871,7 @@ impl ClientInputOwnerState {
             overlay: app.client_overlay,
             agent_picker_open: app.agent_picker.is_some(),
             subgroup_picker_open: app.sidebar_subgroup_picker.is_some(),
+            pod_picker_open: app.sidebar_pod_picker.is_some(),
             sort_menu_open: app.sidebar_sort_menu.is_some(),
             object_menu_open: app.sidebar_object_menu.is_some(),
             project_menu_open: app.sidebar_project_menu.is_some(),
@@ -4862,6 +4900,7 @@ impl ClientInputOwnerState {
             overlay: sidebar.overlay.kind,
             agent_picker_open: sidebar.overlay.agent_picker.is_some(),
             subgroup_picker_open: sidebar.subgroup_picker.is_some(),
+            pod_picker_open: sidebar.pod_picker.is_some(),
             sort_menu_open: sidebar.sort_menu.is_some(),
             object_menu_open: sidebar.object_menu.is_some(),
             project_menu_open: sidebar.project_menu.is_some(),
@@ -4895,6 +4934,9 @@ impl ClientInputOwnerState {
         }
         if self.subgroup_picker_open {
             return Some(ClientInputOwner::SidebarSubgroupPicker);
+        }
+        if self.pod_picker_open {
+            return Some(ClientInputOwner::SidebarPodPicker);
         }
         if self.sort_menu_open {
             return Some(ClientInputOwner::SidebarSortMenu);
@@ -6049,6 +6091,7 @@ impl AppState {
             &mut self.sidebar_subgroup_picker,
             &mut other.subgroup_picker,
         );
+        std::mem::swap(&mut self.sidebar_pod_picker, &mut other.pod_picker);
         std::mem::swap(&mut self.sidebar_group_sorts, &mut other.group_sorts);
         std::mem::swap(
             &mut self.sidebar_unassigned_expanded_views,
@@ -6268,6 +6311,19 @@ impl AppState {
                 .iter()
                 .find(|workspace| workspace.id == *workspace_id)
                 .is_some_and(|workspace| workspace.pane_state(*pane_id).is_some()),
+            Some(RenameTarget::Pod { record }) => self
+                .local_group_snapshot
+                .iter()
+                .chain(
+                    self.fleet_snapshot
+                        .group_catalogs
+                        .iter()
+                        .filter_map(|catalog| catalog.snapshot.as_ref()),
+                )
+                .flat_map(|snapshot| snapshot.groups.iter())
+                .any(|candidate| {
+                    candidate.id == record.id && candidate.revision == record.revision
+                }),
             None => self.pending_workspace_create_cwd.is_some() || self.creating_new_tab,
         };
         if matches!(
@@ -7330,6 +7386,7 @@ impl AppState {
             aloop_run_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             fleet_snapshot: crate::fleet::Snapshot::default(),
+            local_group_snapshot: None,
             agent_host_name: "localhost".to_string(),
             local_agent_panel_identities: std::collections::HashMap::new(),
             remote_agent_panel_entries: Vec::new(),
@@ -7462,6 +7519,7 @@ impl AppState {
             sidebar_object_menu: None,
             sidebar_sort_menu: None,
             sidebar_subgroup_picker: None,
+            sidebar_pod_picker: None,
             sidebar_group_sorts: std::collections::HashMap::new(),
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
@@ -7578,6 +7636,7 @@ impl AppState {
             drag: None,
             workspace_presses: std::collections::HashMap::new(),
             tab_presses: std::collections::HashMap::new(),
+            agent_presses: std::collections::HashMap::new(),
             remote_agent_presses: std::collections::HashMap::new(),
             selection: None,
             selection_autoscroll: None,
@@ -8320,6 +8379,14 @@ mod tests {
             ClientInputOwner::SidebarSubgroupPicker => {
                 state.sidebar_subgroup_picker = Some(SidebarSubgroupPickerState::default());
             }
+            ClientInputOwner::SidebarPodPicker => {
+                state.sidebar_pod_picker = Some(SidebarPodPickerState {
+                    ws_idx: 0,
+                    pane_id: target.pane_id,
+                    anchor: (1, 1),
+                    filter: crate::ui::dropdown::DropdownFilterState::default(),
+                });
+            }
             ClientInputOwner::PrActionConfirmation => {
                 state.pr_action_confirmation = Some(PrActionConfirmation {
                     key: WorkItemKey {
@@ -8416,6 +8483,7 @@ mod tests {
             ClientInputOwner::SidebarObjectMenu,
             ClientInputOwner::SidebarSortMenu,
             ClientInputOwner::SidebarSubgroupPicker,
+            ClientInputOwner::SidebarPodPicker,
             ClientInputOwner::PrActionConfirmation,
             ClientInputOwner::DockSurfaceMenu,
         ];

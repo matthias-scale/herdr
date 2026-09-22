@@ -5,11 +5,11 @@ use tracing::warn;
 
 use crate::{
     app::state::{
-        AddActionState, AppState, ClientInputOwner, ClientOverlay, ContextMenuAction,
-        ContextMenuKind, ContextMenuState, DragState, DragTarget, HomeHitTarget, InputOwner,
-        MenuListState, Mode, PaneMenuWorkLink, PaneMenuWorkLinkAction, RemoteAgentPressState,
-        RightClickPassthroughGesture, ServerInputOwner, SurfaceInputOwner, TabPressState,
-        ViewLayout, WorkspacePressState,
+        AddActionState, AgentPressState, AppState, ClientInputOwner, ClientOverlay,
+        ContextMenuAction, ContextMenuKind, ContextMenuState, DragState, DragTarget, HomeHitTarget,
+        InputOwner, MenuListState, Mode, PaneMenuWorkLink, PaneMenuWorkLinkAction,
+        RemoteAgentPressState, RightClickPassthroughGesture, ServerInputOwner, SurfaceInputOwner,
+        TabPressState, ViewLayout, WorkspacePressState,
     },
     layout::{PaneId, PaneInfo, SplitBorder},
     selection::Selection,
@@ -92,6 +92,8 @@ pub(super) enum MouseAction {
         source_tab_idx: usize,
         insert_idx: usize,
     },
+    SetPaneGroup(crate::api::schema::PaneGroupSetParams),
+    PodPickerSelect(usize),
     SetSplitRatio {
         path: Vec<bool>,
         ratio: f32,
@@ -1256,6 +1258,27 @@ impl AppState {
                         self.toggle_sidebar_group(title);
                         return None;
                     }
+                    if let Some((group_id, _)) = crate::ui::sidebar_pod_header_at(self, mouse.row) {
+                        self.toggle_sidebar_group(&format!(
+                            "pod:{}:{}",
+                            group_id.owner, group_id.local
+                        ));
+                        return None;
+                    }
+                    if let Some(target) = crate::ui::sidebar_pod_member_at(self, mouse.row) {
+                        return match target {
+                            crate::ui::PodTarget::Local(target) => Some(MouseAction::FocusPane {
+                                ws_idx: target.ws_idx,
+                                pane_id: target.pane_id,
+                            }),
+                            crate::ui::PodTarget::Remote(agent_ref) => {
+                                Some(MouseAction::OpenFleetHost {
+                                    name: agent_ref.host,
+                                    focus_agent: Some(agent_ref.agent),
+                                })
+                            }
+                        };
+                    }
                     if let Some(key) = crate::ui::sidebar_nested_header_at(self, mouse.row) {
                         self.sidebar_selected_work_group =
                             crate::ui::sidebar_object_at(self, mouse.row);
@@ -1396,16 +1419,30 @@ impl AppState {
                         return None;
                     }
 
-                    if let Some((ws_idx, _tab_idx, pane_id)) = self.sidebar_local_pane_at(mouse.row)
-                    {
-                        self.selected = ws_idx;
-                        self.set_server_mode(Mode::Terminal);
-                        return Some(MouseAction::FocusPane { ws_idx, pane_id });
-                    }
-
                     if let Some((ws_idx, _tab_idx, pane_id)) =
                         self.agent_detail_target_at(mouse.row)
                     {
+                        if let Some(public_pane_id) = self
+                            .local_agent_panel_identities
+                            .get(&pane_id)
+                            .map(|identity| identity.agent_ref.agent.clone())
+                        {
+                            self.agent_presses.insert(
+                                source_id,
+                                AgentPressState {
+                                    ws_idx,
+                                    pane_id,
+                                    public_pane_id,
+                                    start_col: mouse.column,
+                                    start_row: mouse.row,
+                                },
+                            );
+                            return None;
+                        }
+                    }
+                    if let Some((ws_idx, _tab_idx, pane_id)) = self.sidebar_local_pane_at(mouse.row)
+                    {
+                        self.selected = ws_idx;
                         self.set_server_mode(Mode::Terminal);
                         return Some(MouseAction::FocusPane { ws_idx, pane_id });
                     }
@@ -1517,6 +1554,26 @@ impl AppState {
                                 },
                             });
                         }
+                    } else if let Some(press) = self.agent_presses.get(&source_id) {
+                        let delta_col = mouse.column.abs_diff(press.start_col);
+                        let delta_row = mouse.row.abs_diff(press.start_row);
+                        let has_target = crate::ui::sidebar_rows(self).iter().any(|row| {
+                            matches!(row, crate::ui::SidebarRow::PodHeader { fresh: true, .. })
+                        });
+                        if has_target && delta_col.max(delta_row) >= TAB_DRAG_THRESHOLD {
+                            let hover = crate::ui::sidebar_pod_header_at(self, mouse.row)
+                                .filter(|(_, fresh)| *fresh)
+                                .map(|(group_id, _)| group_id);
+                            self.drag = Some(DragState {
+                                target: DragTarget::PodAssign {
+                                    source_id,
+                                    ws_idx: press.ws_idx,
+                                    pane_id: press.pane_id,
+                                    public_pane_id: press.public_pane_id.clone(),
+                                    hover,
+                                },
+                            });
+                        }
                     }
                 }
 
@@ -1547,7 +1604,9 @@ impl AppState {
                     }
                 } else if let Some(drag) = &self.drag {
                     match &drag.target {
-                        DragTarget::WorkspaceReorder { .. } | DragTarget::TabReorder { .. } => {}
+                        DragTarget::WorkspaceReorder { .. }
+                        | DragTarget::TabReorder { .. }
+                        | DragTarget::PodAssign { .. } => {}
                         DragTarget::WorkspaceListScrollbar { grab_row_offset } => {
                             if let Some(offset_from_bottom) =
                                 self.workspace_list_offset_for_drag_row(mouse.row, *grab_row_offset)
@@ -1614,6 +1673,29 @@ impl AppState {
                         | DragTarget::KeybindHelpScrollbar { .. } => {}
                     }
                 }
+                let current_group = self.agent_presses.get(&source_id).and_then(|press| {
+                    self.workspaces
+                        .get(press.ws_idx)
+                        .and_then(|workspace| workspace.pane_state(press.pane_id))
+                        .and_then(|pane| pane.group_membership.group_id.clone())
+                });
+                let hover = crate::ui::sidebar_pod_header_at(self, mouse.row)
+                    .filter(|(_, fresh)| *fresh)
+                    .map(|(group_id, _)| group_id)
+                    .filter(|group_id| current_group.as_ref() != Some(group_id));
+                if let Some(DragState {
+                    target:
+                        DragTarget::PodAssign {
+                            source_id: drag_source_id,
+                            hover: drag_hover,
+                            ..
+                        },
+                }) = &mut self.drag
+                {
+                    if *drag_source_id == source_id {
+                        *drag_hover = hover;
+                    }
+                }
             }
 
             MouseEventKind::Up(MouseButton::Left) => {
@@ -1653,6 +1735,7 @@ impl AppState {
 
                 let workspace_press = self.workspace_presses.remove(&source_id);
                 let tab_press = self.tab_presses.remove(&source_id);
+                let agent_press = self.agent_presses.remove(&source_id);
                 let remote_agent_press = self.remote_agent_presses.remove(&source_id);
                 let remote_agent_action = remote_agent_press.and_then(|press| {
                     (in_sidebar
@@ -1704,6 +1787,37 @@ impl AppState {
                     }
                     Some(DragState {
                         target:
+                            DragTarget::PodAssign {
+                                ws_idx,
+                                pane_id,
+                                public_pane_id,
+                                hover: Some(group_id),
+                                ..
+                            },
+                    }) => {
+                        let pane = self
+                            .workspaces
+                            .get(ws_idx)
+                            .and_then(|workspace| workspace.pane_state(pane_id));
+                        if let Some(pane) = pane {
+                            return Some(MouseAction::SetPaneGroup(
+                                crate::api::schema::PaneGroupSetParams {
+                                    pane_id: public_pane_id,
+                                    group_id: Some(group_id),
+                                    expected_revision: pane.group_membership.revision,
+                                    expected_pane_authority: self
+                                        .local_group_snapshot
+                                        .as_ref()
+                                        .map(|snapshot| snapshot.authority_id.clone()),
+                                    expected_pane_incarnation: Some(
+                                        pane.attached_terminal_id.to_string(),
+                                    ),
+                                },
+                            ));
+                        }
+                    }
+                    Some(DragState {
+                        target:
                             DragTarget::TabReorder {
                                 ws_idx,
                                 source_tab_idx,
@@ -1720,8 +1834,30 @@ impl AppState {
                             });
                         }
                     }
+                    Some(DragState {
+                        target: DragTarget::PodAssign { hover: None, .. },
+                    }) => {
+                        if let Some((group_id, false)) =
+                            crate::ui::sidebar_pod_header_at(self, mouse.row)
+                        {
+                            self.toast = Some(crate::app::state::ToastNotification {
+                                kind: crate::app::state::ToastKind::NeedsAttention,
+                                title: "Pod not moved".into(),
+                                context: format!("pod owner {} unreachable", group_id.owner),
+                                position: None,
+                                target: None,
+                            });
+                        }
+                    }
                     Some(_) => {}
                     None => {
+                        if let Some(press) = agent_press {
+                            self.set_server_mode(Mode::Terminal);
+                            return Some(MouseAction::FocusPane {
+                                ws_idx: press.ws_idx,
+                                pane_id: press.pane_id,
+                            });
+                        }
                         return remote_agent_action
                             .or_else(|| self.chrome_press_action(workspace_press, tab_press));
                     }
@@ -2282,6 +2418,21 @@ impl AppState {
                     } else {
                         self.sidebar_subgroup_picker = None;
                     }
+                }
+                None
+            }
+            ClientInputOwner::SidebarPodPicker => {
+                if matches!(mouse.kind, MouseEventKind::Moved) {
+                    if let Some(index) = self.sidebar_pod_picker_item_at(mouse.column, mouse.row) {
+                        if let Some(picker) = self.sidebar_pod_picker.as_mut() {
+                            picker.filter.selected = index;
+                        }
+                    }
+                } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    if let Some(index) = self.sidebar_pod_picker_item_at(mouse.column, mouse.row) {
+                        return Some(MouseAction::PodPickerSelect(index));
+                    }
+                    self.sidebar_pod_picker = None;
                 }
                 None
             }
@@ -3448,6 +3599,7 @@ impl AppState {
 
     fn chrome_press_pending(&self, source_id: crate::app::InputSourceId) -> bool {
         self.tab_presses.contains_key(&source_id)
+            || self.agent_presses.contains_key(&source_id)
             || self.workspace_presses.contains_key(&source_id)
             || self.remote_agent_presses.contains_key(&source_id)
     }
@@ -3460,6 +3612,9 @@ impl AppState {
                     source_id: drag_source_id,
                     ..
                 } | DragTarget::TabReorder {
+                    source_id: drag_source_id,
+                    ..
+                } | DragTarget::PodAssign {
                     source_id: drag_source_id,
                     ..
                 } if drag_source_id != source_id
@@ -3506,6 +3661,9 @@ impl AppState {
                 } | DragTarget::TabReorder {
                     source_id: drag_source_id,
                     ..
+                } | DragTarget::PodAssign {
+                    source_id: drag_source_id,
+                    ..
                 } if drag_source_id == source_id
             )
         }) {
@@ -3516,6 +3674,7 @@ impl AppState {
 
     fn clear_chrome_press(&mut self, source_id: crate::app::InputSourceId) {
         self.tab_presses.remove(&source_id);
+        self.agent_presses.remove(&source_id);
         self.workspace_presses.remove(&source_id);
         self.remote_agent_presses.remove(&source_id);
     }
@@ -4868,6 +5027,230 @@ mod tests {
         ));
 
         assert_eq!(app.state.active, Some(0));
+    }
+
+    #[test]
+    fn leaf_agent_drag_assigns_to_a_fresh_pod() {
+        let mut app = app_for_mouse_test();
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-pod-drag-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        app.group_runtime = crate::groups::Runtime::load(&dir.join("groups"));
+        app.group_session_paths_override =
+            Some((dir.join("session.json"), dir.join("history.json")));
+        app.no_session = false;
+        app.state.workspaces = vec![Workspace::test_new("drag-source")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.state.refresh_local_agent_panel_identities();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("pane")
+            .set_snoozed_until(Some(u64::MAX));
+        app.rebuild_group_membership_projection();
+        let response = app.dispatch_api_request(
+            "create-pod",
+            crate::api::schema::Method::GroupCreate(crate::api::schema::GroupCreateParams {
+                name: "Target".into(),
+                expected_revision: 0,
+            }),
+        );
+        let response: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&response).expect("create pod");
+        let crate::api::schema::ResponseResult::GroupMutation { record, .. } = response.result
+        else {
+            panic!("group mutation response");
+        };
+        app.state.collapsed_sidebar_groups.remove("repo:Snoozed");
+        let pod_collapse_key = format!(
+            "{}:pod:{}:{}",
+            app.state.sidebar_group_mode.collapse_namespace(),
+            record.id.owner,
+            record.id.local
+        );
+        app.state
+            .collapsed_sidebar_groups
+            .insert(pod_collapse_key.clone());
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let card = app.state.view.agent_card_areas[0].clone();
+        let pod_row = (0..40)
+            .find(|row| crate::ui::sidebar_pod_header_at(&app.state, *row).is_some())
+            .expect("pod header row");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            card.rect.x + 1,
+            card.rect.y,
+        ));
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("pane")
+            .group_membership
+            .revision = 4;
+        app.refresh_group_membership_projection_for_pane(
+            &app.state.local_agent_panel_identities[&pane_id]
+                .agent_ref
+                .agent
+                .clone(),
+        );
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            card.rect.x + 1,
+            pod_row,
+        ));
+        assert!(matches!(
+            app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::PodAssign { hover: Some(_), .. })
+        ));
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .group_membership
+                .group_id,
+            None,
+            "hover does not optimistically move the pane"
+        );
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            card.rect.x + 1,
+            pod_row,
+        ));
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .group_membership
+                .group_id,
+            Some(record.id)
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .group_membership
+                .revision,
+            5,
+            "the drop reads the current revision rather than the grab-time revision"
+        );
+        assert!(
+            app.state
+                .collapsed_sidebar_groups
+                .contains(&pod_collapse_key),
+            "drop on a collapsed pod does not expand it"
+        );
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let card = app.state.view.agent_card_areas[0].clone();
+        let pod_row = (0..40)
+            .find(|row| crate::ui::sidebar_pod_header_at(&app.state, *row).is_some())
+            .expect("pod header row after assignment");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            card.rect.x + 1,
+            card.rect.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            card.rect.x + 1,
+            pod_row,
+        ));
+        assert!(matches!(
+            app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::PodAssign { hover: None, .. })
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            card.rect.x + 1,
+            pod_row,
+        ));
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .group_membership
+                .revision,
+            5,
+            "dropping on the current pod is a client-side no-op"
+        );
+
+        let store_revision = app
+            .state
+            .local_group_snapshot
+            .as_ref()
+            .expect("local group snapshot")
+            .revision;
+        let response = app.dispatch_api_request(
+            "create-transient-pod",
+            crate::api::schema::Method::GroupCreate(crate::api::schema::GroupCreateParams {
+                name: "Transient".into(),
+                expected_revision: store_revision,
+            }),
+        );
+        let response: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&response).expect("create transient pod");
+        let crate::api::schema::ResponseResult::GroupMutation {
+            record: transient, ..
+        } = response.result
+        else {
+            panic!("group mutation response");
+        };
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let card = app.state.view.agent_card_areas[0].clone();
+        let transient_row = (0..40)
+            .find(|row| {
+                crate::ui::sidebar_pod_header_at(&app.state, *row)
+                    .is_some_and(|(group_id, _)| group_id == transient.id)
+            })
+            .expect("transient pod row");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            card.rect.x + 1,
+            card.rect.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            card.rect.x + 1,
+            transient_row,
+        ));
+        assert!(matches!(
+            app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::PodAssign {
+                hover: Some(group_id),
+                ..
+            }) if group_id == &transient.id
+        ));
+        let response = app.dispatch_api_request(
+            "delete-transient-pod",
+            crate::api::schema::Method::GroupDelete(crate::api::schema::GroupDeleteParams {
+                group_id: transient.id,
+                expected_revision: transient.revision,
+            }),
+        );
+        assert!(serde_json::from_str::<crate::api::schema::SuccessResponse>(&response).is_ok());
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            card.rect.x + 1,
+            transient_row,
+        ));
+        assert!(matches!(
+            app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::PodAssign { hover: None, .. })
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            card.rect.x + 1,
+            transient_row,
+        ));
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .group_membership
+                .revision,
+            5,
+            "a pod deleted during the gesture issues no assignment"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

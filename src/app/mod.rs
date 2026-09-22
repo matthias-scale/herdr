@@ -909,6 +909,7 @@ impl App {
             sidebar_object_menu: None,
             sidebar_sort_menu: None,
             sidebar_subgroup_picker: None,
+            sidebar_pod_picker: None,
             sidebar_group_sorts,
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
@@ -926,6 +927,7 @@ impl App {
             aloop_run_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             fleet_snapshot: crate::fleet::Snapshot::unpolled(&config.remote.fleet.hosts),
+            local_group_snapshot: None,
             agent_host_name,
             local_agent_panel_identities,
             remote_agent_panel_entries: Vec::new(),
@@ -1162,6 +1164,7 @@ impl App {
             drag: None,
             workspace_presses: HashMap::new(),
             tab_presses: HashMap::new(),
+            agent_presses: HashMap::new(),
             remote_agent_presses: HashMap::new(),
             selection: None,
             selection_autoscroll: None,
@@ -3600,6 +3603,9 @@ impl App {
                 state::ClientInputOwner::SidebarSubgroupPicker => {
                     self.state.handle_sidebar_subgroup_picker_key(key_event);
                 }
+                state::ClientInputOwner::SidebarPodPicker => {
+                    self.handle_sidebar_pod_picker_key(key_event);
+                }
                 state::ClientInputOwner::PrActionConfirmation => {
                     self.handle_pr_action_confirmation_key(key_event);
                 }
@@ -3688,6 +3694,14 @@ impl App {
                     input::SidebarWorkGroupKeyAction::Consumed => return,
                     input::SidebarWorkGroupKeyAction::Dispatch(plan) => {
                         self.dispatch_sidebar_work_group_plan(*plan);
+                        return;
+                    }
+                    input::SidebarWorkGroupKeyAction::RenamePod(record) => {
+                        input::open_rename_pod(&mut self.state, record);
+                        return;
+                    }
+                    input::SidebarWorkGroupKeyAction::DeletePod(record) => {
+                        self.runtime_delete_pod(record);
                         return;
                     }
                 }

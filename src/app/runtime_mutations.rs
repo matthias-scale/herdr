@@ -10,6 +10,32 @@ use crate::api::schema::{
 use super::App;
 
 impl App {
+    pub(crate) fn show_pod_mutation_error(&mut self, title: &str, response: &str) {
+        let context = serde_json::from_str::<crate::api::schema::ErrorResponse>(response)
+            .map(|error| error.error.message)
+            .unwrap_or_else(|_| "pod mutation failed".to_string());
+        self.state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::NeedsAttention,
+            title: title.to_string(),
+            context,
+            position: None,
+            target: None,
+        });
+    }
+
+    pub(crate) fn runtime_delete_pod(&mut self, record: crate::groups::GroupRecord) {
+        let response = self.dispatch_runtime_mutation(
+            "sidebar-pod-delete",
+            Method::GroupDelete(crate::api::schema::GroupDeleteParams {
+                group_id: record.id,
+                expected_revision: record.revision,
+            }),
+        );
+        if serde_json::from_str::<crate::api::schema::ErrorResponse>(&response).is_ok() {
+            self.show_pod_mutation_error("Pod not deleted", &response);
+        }
+    }
+
     pub(crate) fn dispatch_runtime_mutation(&mut self, id: &'static str, method: Method) -> String {
         self.dispatch_api_request(id, method)
     }
@@ -20,6 +46,30 @@ impl App {
         method: Method,
     ) -> Option<String> {
         self.dispatch_deferred_api_request(id, method)
+    }
+
+    pub(crate) fn runtime_pane_group_set(
+        &mut self,
+        params: crate::api::schema::PaneGroupSetParams,
+    ) {
+        let response =
+            self.dispatch_runtime_mutation("sidebar-pod-assign", Method::PaneGroupSet(params));
+        let Ok(error) = serde_json::from_str::<crate::api::schema::ErrorResponse>(&response) else {
+            return;
+        };
+        let context = match error.error.code.as_str() {
+            "revision_conflict" => "membership changed elsewhere — not moved".to_string(),
+            "authority_not_fresh" => format!("pod owner unreachable: {}", error.error.message),
+            "group_not_found" => format!("pod no longer exists: {}", error.error.message),
+            _ => error.error.message,
+        };
+        self.state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::NeedsAttention,
+            title: "Pod not moved".to_string(),
+            context,
+            position: None,
+            target: None,
+        });
     }
 
     pub(crate) fn runtime_workspace_focus(

@@ -404,6 +404,20 @@ pub(super) fn open_rename_workspace(
     state.open_client_overlay(ClientOverlay::RenameWorkspace);
 }
 
+pub(crate) fn open_rename_pod(state: &mut AppState, record: crate::groups::GroupRecord) {
+    let crate::groups::GroupState::Active { name } = &record.state else {
+        return;
+    };
+    state.pending_workspace_create_cwd = None;
+    state.rename_pane_target = None;
+    state.rename_target = Some(crate::app::state::RenameTarget::Pod {
+        record: record.clone(),
+    });
+    state.name_input = name.clone();
+    state.name_input_replace_on_type = false;
+    state.open_client_overlay(ClientOverlay::RenamePane);
+}
+
 pub(crate) fn open_new_workspace_dialog(state: &mut AppState, cwd: std::path::PathBuf) {
     let suggested_name = crate::workspace::derive_label_from_cwd(&cwd);
     state.creating_new_tab = false;
@@ -1458,7 +1472,27 @@ impl App {
                 }
             }
             Mode::RenamePane => {
-                if let Some(crate::app::state::RenameTarget::Pane {
+                if let Some(crate::app::state::RenameTarget::Pod { record }) =
+                    self.state.rename_target.clone()
+                {
+                    if !new_name.is_empty() {
+                        let response = self.dispatch_runtime_mutation(
+                            "sidebar-pod-rename",
+                            crate::api::schema::Method::GroupRename(
+                                crate::api::schema::GroupRenameParams {
+                                    group_id: record.id,
+                                    name: new_name,
+                                    expected_revision: record.revision,
+                                },
+                            ),
+                        );
+                        if serde_json::from_str::<crate::api::schema::ErrorResponse>(&response)
+                            .is_ok()
+                        {
+                            self.show_pod_mutation_error("Pod not renamed", &response);
+                        }
+                    }
+                } else if let Some(crate::app::state::RenameTarget::Pane {
                     workspace_id,
                     pane_id,
                 }) = self.state.rename_target.clone()

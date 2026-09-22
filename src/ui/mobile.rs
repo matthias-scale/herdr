@@ -209,6 +209,8 @@ fn mobile_switcher_target_for_row(
             run_id: summary.run_id.clone(),
         },
         SidebarRow::SectionHeader { .. }
+        | SidebarRow::PodHeader { .. }
+        | SidebarRow::PodMember { .. }
         | SidebarRow::Divider
         | SidebarRow::NeedsYou { .. }
         | SidebarRow::SymphonyJob { .. }
@@ -247,6 +249,8 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
         | SidebarRow::SymphonyEmpty
         | SidebarRow::Agent { .. }
         | SidebarRow::RemoteAgent { .. }
+        | SidebarRow::PodHeader { .. }
+        | SidebarRow::PodMember { .. }
         | SidebarRow::AloopLoop { .. }
         | SidebarRow::AloopRunLine { .. }
         | SidebarRow::AloopFinding { .. }
@@ -928,6 +932,46 @@ fn render_mobile_switcher_content(
                         ),
                     )),
                 );
+            }
+            SidebarRow::PodHeader {
+                title,
+                count,
+                owner,
+                fresh,
+                collapsed,
+                ..
+            } => {
+                if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
+                    super::sidebar::render_pod_header_row(
+                        app,
+                        frame,
+                        Rect::new(content.x, y, content.width, 1),
+                        title,
+                        *count,
+                        owner,
+                        *fresh,
+                        *collapsed,
+                    );
+                }
+            }
+            SidebarRow::PodMember {
+                title,
+                age,
+                host,
+                blocked,
+                ..
+            } => {
+                if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
+                    super::sidebar::render_pod_member_row(
+                        app,
+                        frame,
+                        Rect::new(content.x, y, content.width, 1),
+                        title,
+                        age,
+                        host,
+                        *blocked,
+                    );
+                }
             }
             SidebarRow::Divider => {
                 render_one_line_item(

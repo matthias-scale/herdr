@@ -1186,6 +1186,8 @@ pub(crate) struct AgentPanelEntry {
     /// Per-projection ambiguity against both local and remote titles. This is
     /// a scalar overlay; the cached remote entry remains shared through `Arc`.
     pub(crate) remote_show_host_identity: bool,
+    /// Read-only membership token projected once for a canonical pane row.
+    pub(crate) pod: Option<PodToken>,
 }
 
 #[derive(Clone)]
@@ -1261,6 +1263,7 @@ impl AgentPanelEntry {
             space_label_redundant: false,
             remote_entry: None,
             remote_show_host_identity: false,
+            pod: None,
         }
     }
 
@@ -2313,6 +2316,19 @@ pub(crate) enum NeedsYouTarget {
     Remote(crate::api::schema::AgentRef),
 }
 
+/// What a click on a duplicated row in the Pods section focuses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PodTarget {
+    Local(AgentPanelLocalTarget),
+    Remote(crate::api::schema::AgentRef),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PodToken {
+    pub(crate) name: String,
+    pub(crate) fresh: bool,
+}
+
 #[derive(Clone)]
 pub(crate) struct SidebarStateCount {
     pub(super) glyph: &'static str,
@@ -2367,6 +2383,24 @@ pub(crate) enum SidebarRow {
         entry: std::sync::Arc<RemoteAgentPanelEntry>,
         depth: u16,
         show_host_identity: bool,
+    },
+    /// One manual shared group. The UI calls it a pod to avoid colliding with
+    /// the existing sidebar grouping vocabulary.
+    PodHeader {
+        group_id: crate::groups::GroupId,
+        title: String,
+        count: usize,
+        owner: String,
+        fresh: bool,
+        collapsed: bool,
+    },
+    /// A duplicated pane row under its pod header.
+    PodMember {
+        title: String,
+        age: String,
+        host: String,
+        blocked: bool,
+        target: PodTarget,
     },
     /// A group label. Carries no pane, so it is deliberately absent from every
     /// card-area list: it cannot be focused or navigated onto. Clicking it
@@ -2476,6 +2510,7 @@ pub(crate) const SNOOZED_SECTION_TITLE: &str = "Snoozed";
 pub(crate) const SETTLED_SECTION_TITLE: &str = "Settled";
 pub(crate) const SPACES_SECTION_TITLE: &str = "Spaces";
 pub(crate) const FLEET_SECTION_TITLE: &str = "Fleet";
+pub(crate) const PODS_SECTION_TITLE: &str = "Pods";
 /// Symphony workflows run headless on a Temporal worker, so nothing in the
 /// pane list ever shows them. The section is the only ambient surface they get.
 pub(crate) const SYMPHONY_SECTION_TITLE: &str = "Symphony";
@@ -2898,6 +2933,7 @@ fn compact_sidebar_rows_inner(
     } else {
         Vec::new()
     };
+    let pods = pod_projection(app, &entries);
     let has_one_space_label = entries.first().is_some_and(|first| {
         entries
             .iter()
@@ -2983,7 +3019,13 @@ fn compact_sidebar_rows_inner(
         && settled_entries.is_empty()
         && remote_entries.is_empty()
     {
-        append_symphony_rows(app, &mut rows);
+        append_pod_rows(app, &mut rows, &pods);
+        let mut ambient = Vec::new();
+        append_symphony_rows(app, &mut ambient);
+        if !rows.is_empty() && !ambient.is_empty() {
+            rows.push(SidebarRow::Divider);
+        }
+        rows.append(&mut ambient);
         return rows;
     }
     // A Space is a folder, so this separation must hold even when no pane
@@ -3024,6 +3066,7 @@ fn compact_sidebar_rows_inner(
         &settled_entries,
         &remote_entries,
         expand_worktrees,
+        &pods,
     );
     // The Needs-you strip leads the list; the mobile switcher keeps its own
     // flatter presentation instead.
@@ -3780,15 +3823,280 @@ fn append_object_group_rows(
     }
 }
 
+#[derive(Clone)]
+struct PodCardProjection {
+    group_id: crate::groups::GroupId,
+    title: String,
+    owner_token: String,
+    fresh: bool,
+    local: bool,
+    members: Vec<PodMemberProjection>,
+}
+
+#[derive(Clone)]
+struct PodMemberProjection {
+    title: String,
+    age: String,
+    host: String,
+    blocked: bool,
+    target: PodTarget,
+}
+
+#[derive(Default)]
+struct PodProjection {
+    cards: Vec<PodCardProjection>,
+    local_tokens: std::collections::HashMap<String, PodToken>,
+}
+
+/// Build all pod rows and canonical-row tokens once for this row projection.
+/// Rendering consumes only scalar row fields and never walks group catalogs.
+fn pod_projection(app: &AppState, local_entries: &[AgentPanelEntry]) -> PodProjection {
+    use crate::groups::GroupState;
+
+    #[cfg(test)]
+    POD_PROJECTION_BUILDS.with(|builds| builds.set(builds.get() + 1));
+
+    let local_authority = app
+        .local_group_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.authority_id.clone());
+    let mut hosts = vec![app.agent_host_name.as_str()];
+    hosts.extend(
+        app.fleet_snapshot
+            .group_catalogs
+            .iter()
+            .map(|catalog| catalog.host.as_str()),
+    );
+    let host_tokens = narrow_host_tokens(hosts);
+    let local_host_token = host_tokens
+        .get(&app.agent_host_name)
+        .cloned()
+        .unwrap_or_else(|| middle_elide(&app.agent_host_name, SIDEBAR_HOST_TOKEN_NARROW_WIDTH));
+
+    let mut cards = std::collections::BTreeMap::<crate::groups::GroupId, PodCardProjection>::new();
+    let mut memberships = Vec::<(
+        crate::groups::AuthorityId,
+        String,
+        crate::groups::OwnedPaneMembership,
+    )>::new();
+
+    if let Some(snapshot) = app.local_group_snapshot.as_ref() {
+        for record in &snapshot.groups {
+            let GroupState::Active { name } = &record.state else {
+                continue;
+            };
+            cards.insert(
+                record.id.clone(),
+                PodCardProjection {
+                    group_id: record.id.clone(),
+                    title: name.clone(),
+                    owner_token: local_host_token.clone(),
+                    fresh: true,
+                    local: true,
+                    members: Vec::new(),
+                },
+            );
+        }
+        memberships.extend(snapshot.memberships.iter().cloned().map(|membership| {
+            (
+                snapshot.authority_id.clone(),
+                app.agent_host_name.clone(),
+                membership,
+            )
+        }));
+    }
+
+    for catalog in &app.fleet_snapshot.group_catalogs {
+        let Some(snapshot) = catalog.snapshot.as_ref() else {
+            continue;
+        };
+        if local_authority.as_ref() == Some(&snapshot.authority_id) {
+            continue;
+        }
+        let owner_token = host_tokens
+            .get(&catalog.host)
+            .cloned()
+            .unwrap_or_else(|| middle_elide(&catalog.host, SIDEBAR_HOST_TOKEN_NARROW_WIDTH));
+        for record in &snapshot.groups {
+            let GroupState::Active { name } = &record.state else {
+                continue;
+            };
+            cards
+                .entry(record.id.clone())
+                .or_insert_with(|| PodCardProjection {
+                    group_id: record.id.clone(),
+                    title: name.clone(),
+                    owner_token: owner_token.clone(),
+                    fresh: catalog.is_fresh(),
+                    local: false,
+                    members: Vec::new(),
+                });
+        }
+        memberships.extend(snapshot.memberships.iter().cloned().map(|membership| {
+            (
+                snapshot.authority_id.clone(),
+                catalog.host.clone(),
+                membership,
+            )
+        }));
+    }
+
+    let local_members = local_entries
+        .iter()
+        .filter_map(|entry| {
+            let target = entry.local_target()?;
+            let pane_id = app
+                .local_agent_panel_identities
+                .get(&target.pane_id)?
+                .agent_ref
+                .agent
+                .clone();
+            Some((
+                pane_id,
+                PodMemberProjection {
+                    title: compact_row_title(entry, false).to_string(),
+                    age: compact_age(entry, app.view_observed_at).0,
+                    host: local_host_token.clone(),
+                    blocked: entry_is_blocked(entry),
+                    target: PodTarget::Local(target),
+                },
+            ))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let remote_members = app
+        .remote_agent_panel_entries
+        .iter()
+        .map(|entry| {
+            let host = entry.agent_ref.host.clone();
+            let pane_id = entry.agent_ref.agent.clone();
+            let host_token = host_tokens
+                .get(&host)
+                .cloned()
+                .unwrap_or_else(|| middle_elide(&host, SIDEBAR_HOST_TOKEN_NARROW_WIDTH));
+            (
+                (host, pane_id),
+                PodMemberProjection {
+                    title: entry.render_title.clone(),
+                    age: remote_compact_age(entry, app.view_observed_at),
+                    host: host_token,
+                    blocked: entry_is_blocked(&entry.entry),
+                    target: PodTarget::Remote(entry.agent_ref.clone()),
+                },
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let mut local_tokens = std::collections::HashMap::new();
+    for (pane_authority, host, membership) in memberships {
+        let Some(group_id) = membership.membership.group_id.as_ref() else {
+            continue;
+        };
+        let Some(card) = cards.get_mut(group_id) else {
+            continue;
+        };
+        let member = if local_authority.as_ref() == Some(&pane_authority) {
+            local_members.get(&membership.pane_id).cloned()
+        } else {
+            remote_members
+                .get(&(host.clone(), membership.pane_id.clone()))
+                .cloned()
+        }
+        .unwrap_or_else(|| PodMemberProjection {
+            title: membership.pane_id.clone(),
+            age: "—".to_string(),
+            host: host_tokens
+                .get(&host)
+                .cloned()
+                .unwrap_or_else(|| middle_elide(&host, SIDEBAR_HOST_TOKEN_NARROW_WIDTH)),
+            blocked: false,
+            target: PodTarget::Remote(crate::api::schema::AgentRef {
+                host: host.clone(),
+                agent: membership.pane_id.clone(),
+            }),
+        });
+        card.members.push(member);
+        if local_authority.as_ref() == Some(&pane_authority) {
+            local_tokens.insert(
+                membership.pane_id,
+                PodToken {
+                    name: card.title.clone(),
+                    fresh: card.fresh,
+                },
+            );
+        }
+    }
+
+    let mut cards = cards.into_values().collect::<Vec<_>>();
+    cards.sort_by(|left, right| {
+        (!left.local)
+            .cmp(&(!right.local))
+            .then_with(|| cmp_sidebar_entry_names(&left.title, &right.title))
+            .then_with(|| left.group_id.cmp(&right.group_id))
+    });
+    PodProjection {
+        cards,
+        local_tokens,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static POD_PROJECTION_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn take_pod_projection_builds() -> usize {
+    POD_PROJECTION_BUILDS.with(|builds| builds.replace(0))
+}
+
+fn append_pod_rows(app: &AppState, rows: &mut Vec<SidebarRow>, projection: &PodProjection) {
+    if projection.cards.is_empty() {
+        return;
+    }
+    let collapsed = section_is_collapsed(app, PODS_SECTION_TITLE);
+    rows.push(SidebarRow::SectionHeader {
+        title: PODS_SECTION_TITLE,
+        count: projection.cards.len(),
+        host_counts: Vec::new(),
+        collapsed,
+    });
+    if collapsed {
+        return;
+    }
+    for card in &projection.cards {
+        let key = format!("pod:{}:{}", card.group_id.owner, card.group_id.local);
+        let collapsed = section_is_collapsed(app, &key);
+        rows.push(SidebarRow::PodHeader {
+            group_id: card.group_id.clone(),
+            title: card.title.clone(),
+            count: card.members.len(),
+            owner: card.owner_token.clone(),
+            fresh: card.fresh,
+            collapsed,
+        });
+        if !collapsed {
+            rows.extend(card.members.iter().map(|member| SidebarRow::PodMember {
+                title: member.title.clone(),
+                age: member.age.clone(),
+                host: member.host.clone(),
+                blocked: member.blocked,
+                target: member.target.clone(),
+            }));
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum SidebarBlock {
+    Pods,
     Unassigned,
     Deferred,
     Fleet,
     Ambient,
 }
 
-const SIDEBAR_BLOCK_ORDER: [SidebarBlock; 4] = [
+const SIDEBAR_BLOCK_ORDER: [SidebarBlock; 5] = [
+    SidebarBlock::Pods,
     SidebarBlock::Unassigned,
     SidebarBlock::Deferred,
     SidebarBlock::Fleet,
@@ -3803,15 +4111,22 @@ fn append_ordered_sidebar_blocks(
     settled_entries: &[AgentPanelEntry],
     remote_entries: &[AgentPanelEntry],
     expand_worktrees: bool,
+    pods: &PodProjection,
 ) {
     for block in SIDEBAR_BLOCK_ORDER {
         let mut block_rows = Vec::new();
         match block {
+            SidebarBlock::Pods => append_pod_rows(app, &mut block_rows, pods),
             SidebarBlock::Unassigned => {
                 append_unassigned_rows(app, &mut block_rows, active_entries);
             }
             SidebarBlock::Deferred => {
-                append_snoozed_rows(app, &mut block_rows, snoozed_entries.to_vec());
+                append_snoozed_rows(
+                    app,
+                    &mut block_rows,
+                    snoozed_entries.to_vec(),
+                    &pods.local_tokens,
+                );
                 append_settled_rows(
                     app,
                     &mut block_rows,
@@ -3975,7 +4290,12 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
     }
 }
 
-fn append_snoozed_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: Vec<AgentPanelEntry>) {
+fn append_snoozed_rows(
+    app: &AppState,
+    rows: &mut Vec<SidebarRow>,
+    entries: Vec<AgentPanelEntry>,
+    pod_tokens: &std::collections::HashMap<String, PodToken>,
+) {
     if entries.is_empty() {
         return;
     }
@@ -3987,9 +4307,17 @@ fn append_snoozed_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: Vec<
         collapsed,
     });
     if !collapsed {
-        rows.extend(entries.into_iter().map(|entry| SidebarRow::Agent {
-            entry: Box::new(entry),
-            depth: 0,
+        rows.extend(entries.into_iter().map(|mut entry| {
+            let pod = entry
+                .local_target()
+                .and_then(|target| app.local_agent_panel_identities.get(&target.pane_id))
+                .and_then(|identity| pod_tokens.get(&identity.agent_ref.agent))
+                .cloned();
+            entry.pod = pod;
+            SidebarRow::Agent {
+                entry: Box::new(entry),
+                depth: 0,
+            }
         }));
     }
 }
@@ -6165,6 +6493,8 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
             agent_entry_height_in_body_at(app, entry, body_height, *depth)
         }
         SidebarRow::Tab { .. }
+        | SidebarRow::PodHeader { .. }
+        | SidebarRow::PodMember { .. }
         | SidebarRow::NeedsYou { .. }
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::Divider
@@ -6227,6 +6557,8 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
         (SidebarRow::Tab { .. }, SidebarRow::Workspace { .. }) => app.sidebar_spaces.row_gap,
         (SidebarRow::Agent { .. }, SidebarRow::Tab { .. }) => 0,
         (SidebarRow::RemoteAgent { .. }, _) | (_, SidebarRow::RemoteAgent { .. }) => 0,
+        (SidebarRow::PodHeader { .. } | SidebarRow::PodMember { .. }, _)
+        | (_, SidebarRow::PodHeader { .. } | SidebarRow::PodMember { .. }) => 0,
         (SidebarRow::Tab { .. }, SidebarRow::Tab { .. }) => 0,
         // A header hugs the group it names, and earns the agent gap above it so
         // the two groups read as separate lists rather than one long one.
@@ -6319,6 +6651,7 @@ pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) 
             .local_target()
             .is_some_and(|target| target.ws_idx == ws_idx),
         SidebarRow::RemoteAgent { .. } => false,
+        SidebarRow::PodHeader { .. } | SidebarRow::PodMember { .. } => false,
         // Headers belong to a state, not a workspace, so scrolling to a
         // workspace must never land on one.
         SidebarRow::SectionHeader { .. } => false,
@@ -6474,6 +6807,8 @@ pub(crate) fn compute_sidebar_row_areas(
             SidebarRow::Tab { .. }
             | SidebarRow::NeedsYou { .. }
             | SidebarRow::RemoteAgent { .. }
+            | SidebarRow::PodHeader { .. }
+            | SidebarRow::PodMember { .. }
             | SidebarRow::SectionHeader { .. }
             | SidebarRow::Divider
             | SidebarRow::NestedHeader { .. }
@@ -6783,6 +7118,184 @@ fn render_needs_you_row(
         ])),
         Rect::new(rect.x, rect.y, rect.width, 1),
     );
+}
+
+pub(super) fn render_pod_header_row(
+    app: &AppState,
+    frame: &mut Frame,
+    rect: Rect,
+    title: &str,
+    count: usize,
+    owner: &str,
+    fresh: bool,
+    collapsed: bool,
+) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let prefix = if collapsed { "  ▸ " } else { "  ▾ " };
+    let count = format!(" ({count})");
+    let stale = if fresh { "" } else { " ⧖" };
+    let owner = format!(" ·{owner}");
+    let fixed = display_width(prefix) + display_width(&count) + display_width(stale);
+    let full_title_width = display_width(title);
+    let show_owner = fixed + full_title_width + display_width(&owner) <= usize::from(rect.width);
+    let owner = if show_owner { owner } else { String::new() };
+    let title = truncate_end(
+        title,
+        usize::from(rect.width)
+            .saturating_sub(fixed)
+            .saturating_sub(display_width(&owner)),
+    );
+    let modifier = if fresh { Modifier::BOLD } else { Modifier::DIM };
+    let style = Style::default()
+        .fg(if fresh {
+            app.palette.subtext0
+        } else {
+            app.palette.overlay0
+        })
+        .add_modifier(modifier);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(prefix, style),
+            Span::styled(title, style),
+            Span::styled(
+                count,
+                Style::default()
+                    .fg(app.palette.overlay0)
+                    .add_modifier(Modifier::DIM),
+            ),
+            Span::styled(
+                owner,
+                Style::default()
+                    .fg(app.palette.overlay0)
+                    .add_modifier(Modifier::DIM),
+            ),
+            Span::styled(stale, style),
+        ])),
+        rect,
+    );
+}
+
+pub(super) fn render_pod_member_row(
+    app: &AppState,
+    frame: &mut Frame,
+    rect: Rect,
+    title: &str,
+    age: &str,
+    host: &str,
+    blocked: bool,
+) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let prefix = "    ";
+    let marker = "● ";
+    let age_label = format!(" {age}");
+    let host_label = format!(" ·{host}");
+    let fixed = display_width(prefix) + display_width(marker);
+    let full =
+        fixed + display_width(title) + display_width(&age_label) + display_width(&host_label);
+    let show_age = full <= usize::from(rect.width);
+    let without_age = fixed + display_width(title) + display_width(&host_label);
+    let show_host = show_age || without_age <= usize::from(rect.width);
+    let age_label = if show_age { age_label } else { String::new() };
+    let host_label = if show_host { host_label } else { String::new() };
+    let title = truncate_end(
+        title,
+        usize::from(rect.width)
+            .saturating_sub(fixed)
+            .saturating_sub(display_width(&age_label))
+            .saturating_sub(display_width(&host_label)),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(prefix),
+            Span::styled(
+                marker,
+                Style::default().fg(if blocked {
+                    app.palette.red
+                } else {
+                    app.palette.overlay0
+                }),
+            ),
+            Span::styled(title, Style::default().fg(app.palette.subtext0)),
+            Span::styled(
+                age_label,
+                Style::default()
+                    .fg(app.palette.overlay0)
+                    .add_modifier(Modifier::DIM),
+            ),
+            Span::styled(
+                host_label,
+                Style::default()
+                    .fg(app.palette.overlay0)
+                    .add_modifier(Modifier::DIM),
+            ),
+        ])),
+        rect,
+    );
+}
+
+fn pod_row_areas_from_rows(
+    app: &AppState,
+    rows: &[SidebarRow],
+    body: Rect,
+    scroll_skip: usize,
+) -> Vec<(usize, Rect)> {
+    let mut y = body.y;
+    let mut out = Vec::new();
+    for (idx, row) in rows.iter().enumerate().skip(scroll_skip) {
+        let height = sidebar_row_height(app, row, body.height);
+        if y.saturating_add(height) > body.bottom() {
+            break;
+        }
+        if matches!(
+            row,
+            SidebarRow::PodHeader { .. } | SidebarRow::PodMember { .. }
+        ) {
+            out.push((idx, Rect::new(body.x, y, body.width, height)));
+        }
+        y = y
+            .saturating_add(height)
+            .saturating_add(sidebar_row_gap(app, rows, idx));
+    }
+    out
+}
+
+pub(crate) fn sidebar_pod_header_at(
+    app: &AppState,
+    row: u16,
+) -> Option<(crate::groups::GroupId, bool)> {
+    let list = workspace_list_rect_for_app(app, app.view.sidebar_rect);
+    let metrics = workspace_list_scroll_metrics(app, list);
+    let body = workspace_list_body_rect(list, should_show_scrollbar(metrics));
+    let rows = sidebar_rows(app);
+    let scroll = workspace_list_scroll_skip(app, &metrics);
+    pod_row_areas_from_rows(app, &rows, body, scroll)
+        .into_iter()
+        .find(|(_, rect)| row >= rect.y && row < rect.bottom())
+        .and_then(|(idx, _)| match rows.get(idx) {
+            Some(SidebarRow::PodHeader {
+                group_id, fresh, ..
+            }) => Some((group_id.clone(), *fresh)),
+            _ => None,
+        })
+}
+
+pub(crate) fn sidebar_pod_member_at(app: &AppState, row: u16) -> Option<PodTarget> {
+    let list = workspace_list_rect_for_app(app, app.view.sidebar_rect);
+    let metrics = workspace_list_scroll_metrics(app, list);
+    let body = workspace_list_body_rect(list, should_show_scrollbar(metrics));
+    let rows = sidebar_rows(app);
+    let scroll = workspace_list_scroll_skip(app, &metrics);
+    pod_row_areas_from_rows(app, &rows, body, scroll)
+        .into_iter()
+        .find(|(_, rect)| row >= rect.y && row < rect.bottom())
+        .and_then(|(idx, _)| match rows.get(idx) {
+            Some(SidebarRow::PodMember { target, .. }) => Some(target.clone()),
+            _ => None,
+        })
 }
 
 /// What an agent dot is saying, in the row's own vocabulary. A pane can
@@ -8007,6 +8520,28 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     Rect::new(ws_area.x, y, ws_area.width, 1),
                 );
             }
+            SidebarRow::PodHeader { fresh, .. } => {
+                frame.render_widget(
+                    Paragraph::new("◇").style(Style::default().fg(p.overlay0).add_modifier(
+                        if *fresh {
+                            Modifier::empty()
+                        } else {
+                            Modifier::DIM
+                        },
+                    )),
+                    Rect::new(ws_area.x, y, ws_area.width, 1),
+                );
+            }
+            SidebarRow::PodMember { blocked, .. } => {
+                frame.render_widget(
+                    Paragraph::new("●").style(Style::default().fg(if *blocked {
+                        p.red
+                    } else {
+                        p.overlay0
+                    })),
+                    Rect::new(ws_area.x, y, ws_area.width, 1),
+                );
+            }
             // Collapsed there is no room for a workflow name; the section rule
             // above already shows that a Symphony run is open.
             SidebarRow::SymphonyJob { .. }
@@ -9087,6 +9622,45 @@ fn render_workspace_list(
     for header in compute_sidebar_nested_header_areas(app, sidebar_area) {
         render_nested_header(app, frame, &header);
     }
+    {
+        let body = workspace_list_body_rect(list_area, should_show_scrollbar(metrics));
+        let scroll = workspace_list_scroll_skip(app, &metrics);
+        for (row_idx, rect) in pod_row_areas_from_rows(app, &row_entries, body, scroll) {
+            match row_entries.get(row_idx) {
+                Some(SidebarRow::PodHeader {
+                    group_id,
+                    title,
+                    count,
+                    owner,
+                    fresh,
+                    collapsed,
+                    ..
+                }) => {
+                    render_pod_header_row(
+                        app, frame, rect, title, *count, owner, *fresh, *collapsed,
+                    );
+                    let hovered = app.drag.as_ref().is_some_and(|drag| {
+                        matches!(&drag.target,
+                            crate::app::state::DragTarget::PodAssign { hover: Some(hover), .. }
+                            if hover == group_id)
+                    });
+                    if hovered {
+                        frame
+                            .buffer_mut()
+                            .set_style(rect, Style::default().bg(app.palette.surface1));
+                    }
+                }
+                Some(SidebarRow::PodMember {
+                    title,
+                    age,
+                    host,
+                    blocked,
+                    ..
+                }) => render_pod_member_row(app, frame, rect, title, age, host, *blocked),
+                _ => {}
+            }
+        }
+    }
     let tab_cards = compute_tab_card_areas(app, sidebar_area);
     let narrow_prefix = tab_cards
         .first()
@@ -9296,9 +9870,33 @@ fn render_agent_card(
         None,
         narrow_prefix,
     );
+    if let Some(pod) = detail.pod.as_ref() {
+        let marker = if pod.fresh { "◇" } else { "◇⧖" };
+        let max_name = usize::from(rect.width).saturating_sub(display_width(marker) + 2);
+        let label = format!(" {marker}{}", middle_elide(&pod.name, max_name.min(10)));
+        let width = u16::try_from(display_width(&label))
+            .unwrap_or(rect.width)
+            .min(rect.width);
+        let token_rect = Rect::new(rect.right().saturating_sub(width), rect.y, width, 1);
+        frame.render_widget(
+            Paragraph::new(label).style(
+                Style::default()
+                    .fg(app.palette.overlay0)
+                    .add_modifier(Modifier::DIM),
+            ),
+            token_rect,
+        );
+    }
     if detail.local_target().is_some_and(|target| {
         app.pane_is_settled(target.ws_idx, target.pane_id)
             || app.pane_is_snoozed(target.ws_idx, target.pane_id)
+    }) {
+        dim_inactive_pane_row(frame, rect, app.palette.overlay0);
+    }
+    if detail.local_target().is_some_and(|target| {
+        app.drag.as_ref().is_some_and(|drag| {
+            matches!(drag.target, crate::app::state::DragTarget::PodAssign { pane_id, .. } if pane_id == target.pane_id)
+        })
     }) {
         dim_inactive_pane_row(frame, rect, app.palette.overlay0);
     }
@@ -10253,6 +10851,161 @@ pub(super) fn render_sidebar_subgroup_picker(app: &AppState, frame: &mut Frame) 
         Paragraph::new(lines).style(Style::default().bg(app.palette.panel_bg)),
         layout.list_rect,
     );
+}
+
+/// One keyboard choice for changing the focused pane's pod membership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SidebarPodChoice {
+    Existing {
+        id: crate::groups::GroupId,
+        name: String,
+        fresh: bool,
+    },
+    Create(String),
+    NoPod,
+}
+
+impl SidebarPodChoice {
+    pub(crate) fn enabled(&self) -> bool {
+        !matches!(self, Self::Existing { fresh: false, .. })
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::Existing { name, fresh, .. } if !fresh => format!("{name} ⧖"),
+            Self::Existing { name, .. } => name.clone(),
+            Self::Create(name) => format!("Create \"{name}\""),
+            Self::NoPod => "No pod".to_string(),
+        }
+    }
+}
+
+/// Build picker rows from the same snapshots as the sidebar projection. Local
+/// pods stay available without a fleet configuration; stale remote pods stay
+/// visible but disabled.
+pub(crate) fn sidebar_pod_picker_choices(app: &AppState) -> Vec<SidebarPodChoice> {
+    let Some(picker) = app.sidebar_pod_picker.as_ref() else {
+        return Vec::new();
+    };
+    let current = app
+        .workspaces
+        .get(picker.ws_idx)
+        .and_then(|workspace| workspace.pane_state(picker.pane_id))
+        .and_then(|pane| pane.group_membership.group_id.as_ref());
+    let local_authority = app
+        .local_group_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.authority_id.clone());
+    let mut pods = Vec::<(crate::groups::GroupId, String, bool, bool)>::new();
+    if let Some(snapshot) = app.local_group_snapshot.as_ref() {
+        for record in &snapshot.groups {
+            if let crate::groups::GroupState::Active { name } = &record.state {
+                pods.push((record.id.clone(), name.clone(), true, true));
+            }
+        }
+    }
+    for catalog in &app.fleet_snapshot.group_catalogs {
+        let Some(snapshot) = catalog.snapshot.as_ref() else {
+            continue;
+        };
+        if local_authority.as_ref() == Some(&snapshot.authority_id) {
+            continue;
+        }
+        for record in &snapshot.groups {
+            if let crate::groups::GroupState::Active { name } = &record.state {
+                pods.push((record.id.clone(), name.clone(), catalog.is_fresh(), false));
+            }
+        }
+    }
+    pods.sort_by(|left, right| {
+        right
+            .3
+            .cmp(&left.3)
+            .then_with(|| cmp_sidebar_entry_names(&left.1, &right.1))
+    });
+
+    let names = pods
+        .iter()
+        .map(|(_, name, _, _)| name.clone())
+        .collect::<Vec<_>>();
+    let matches = picker.filter.matches(&names);
+    let query = picker.filter.query.trim();
+    let mut choices = matches
+        .into_iter()
+        .filter_map(|(index, _)| pods.get(index))
+        .filter(|(id, _, _, _)| current != Some(id))
+        .map(|(id, name, fresh, _)| SidebarPodChoice::Existing {
+            id: id.clone(),
+            name: name.clone(),
+            fresh: *fresh,
+        })
+        .collect::<Vec<_>>();
+    if !query.is_empty()
+        && local_authority.is_some()
+        && !pods
+            .iter()
+            .any(|(_, name, _, _)| name.eq_ignore_ascii_case(query))
+    {
+        choices.push(SidebarPodChoice::Create(query.to_string()));
+    }
+    if current.is_some() && (query.is_empty() || "no pod".contains(&query.to_ascii_lowercase())) {
+        choices.push(SidebarPodChoice::NoPod);
+    }
+    choices
+}
+
+pub(crate) fn sidebar_pod_picker_layout(
+    app: &AppState,
+    area: Rect,
+) -> Option<super::dropdown::DropdownLayout> {
+    let picker = app.sidebar_pod_picker.as_ref()?;
+    let choices = sidebar_pod_picker_choices(app);
+    let width = choices
+        .iter()
+        .map(|choice| display_width(&choice.label()).saturating_add(4))
+        .max()
+        .unwrap_or(24)
+        .max(24);
+    super::dropdown::layout_dropdown(
+        &super::dropdown::DropdownSpec {
+            anchor: Rect::new(picker.anchor.0, picker.anchor.1, 1, 1),
+            item_count: choices.len(),
+            selected: picker.filter.selected,
+            has_filter: true,
+            max_rows: 9,
+            min_width: u16::try_from(width).unwrap_or(u16::MAX),
+        },
+        area,
+    )
+}
+
+pub(super) fn render_sidebar_pod_picker(app: &AppState, frame: &mut Frame) {
+    let Some(picker) = app.sidebar_pod_picker.as_ref() else {
+        return;
+    };
+    let Some(layout) = sidebar_pod_picker_layout(app, frame.area()) else {
+        return;
+    };
+    let choices = sidebar_pod_picker_choices(app);
+    frame.render_widget(ratatui::widgets::Clear, layout.rect);
+    if let Some(filter) = layout.filter_rect {
+        frame.render_widget(
+            Paragraph::new(format!(" 🔍 {}▏", picker.filter.query)).style(
+                Style::default()
+                    .fg(app.palette.text)
+                    .bg(app.palette.panel_bg),
+            ),
+            filter,
+        );
+    }
+    let rows = choices
+        .iter()
+        .map(|choice| super::dropdown::DropdownMenuRow::Item {
+            label: choice.label(),
+            enabled: choice.enabled(),
+        })
+        .collect::<Vec<_>>();
+    super::dropdown::render_menu(&app.palette, frame, &layout, &rows, picker.filter.selected);
 }
 
 pub(crate) const SETTLED_MENU_LABELS: [&str; 4] = [
@@ -13772,6 +14525,222 @@ pub(crate) mod tests {
         app
     }
 
+    fn app_with_local_pod(member: bool) -> (AppState, crate::groups::GroupId) {
+        let mut app = app_with_agents(&["alpha"]);
+        app.agent_host_name = "ub1".into();
+        app.refresh_local_agent_panel_identities();
+        let authority = crate::groups::AuthorityId::from_random_bytes([91; 16]);
+        let group_id = crate::groups::GroupId {
+            owner: authority.clone(),
+            local: 7,
+        };
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let public_id = app.local_agent_panel_identities[&pane_id]
+            .agent_ref
+            .agent
+            .clone();
+        let memberships = member
+            .then(|| crate::groups::OwnedPaneMembership {
+                pane_id: public_id,
+                pane_incarnation: app.workspaces[0].tabs[0].panes[&pane_id]
+                    .attached_terminal_id
+                    .to_string(),
+                membership: crate::groups::PaneGroupMembership {
+                    group_id: Some(group_id.clone()),
+                    revision: 1,
+                },
+            })
+            .into_iter()
+            .collect();
+        app.local_group_snapshot = Some(crate::groups::GroupAuthoritySnapshot {
+            authority_id: authority,
+            revision: 1,
+            groups: vec![crate::groups::GroupRecord {
+                id: group_id.clone(),
+                revision: 1,
+                state: crate::groups::GroupState::Active {
+                    name: "release-crew".into(),
+                },
+            }],
+            memberships,
+        });
+        (app, group_id)
+    }
+
+    #[test]
+    fn pods_precede_unassigned_in_every_group_mode() {
+        let (mut app, _) = app_with_local_pod(false);
+        for mode in SidebarGroupMode::ALL {
+            app.sidebar_group_mode = mode;
+            let rows = sidebar_rows(&app);
+            let pod = rows
+                .iter()
+                .position(|row| matches!(row, SidebarRow::SectionHeader { title, .. } if *title == PODS_SECTION_TITLE))
+                .expect("Pods section");
+            let unassigned = rows.iter().position(|row| {
+                matches!(row, SidebarRow::SectionHeader { title, .. } if unassigned_section_title(mode) == Some(*title))
+            });
+            assert!(unassigned.is_none_or(|index| pod < index));
+        }
+    }
+
+    #[test]
+    fn empty_pod_stays_visible_expanded_by_default_and_rename_keeps_identity_collapse() {
+        let (mut app, group_id) = app_with_local_pod(false);
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(row,
+            SidebarRow::PodHeader { title, count: 0, collapsed: false, fresh: true, .. }
+            if title == "release-crew"
+        )));
+        let key = format!("pod:{}:{}", group_id.owner, group_id.local);
+        app.collapsed_sidebar_groups.insert(format!(
+            "{}:{key}",
+            app.sidebar_group_mode.collapse_namespace()
+        ));
+        if let Some(snapshot) = app.local_group_snapshot.as_mut() {
+            snapshot.groups[0].state = crate::groups::GroupState::Active {
+                name: "renamed".into(),
+            };
+        }
+        assert!(sidebar_rows(&app).iter().any(|row| matches!(row,
+            SidebarRow::PodHeader { title, count: 0, collapsed: true, .. } if title == "renamed"
+        )));
+    }
+
+    #[test]
+    fn pod_members_join_local_projection_and_stale_remote_catalog() {
+        let (mut app, local_id) = app_with_local_pod(true);
+        let remote = crate::groups::AuthorityId::from_random_bytes([92; 16]);
+        let remote_id = crate::groups::GroupId {
+            owner: remote.clone(),
+            local: 2,
+        };
+        app.fleet_snapshot.group_catalogs = vec![crate::fleet::GroupCatalog {
+            host: "ub2".into(),
+            target: "ub2".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Stale,
+            observed_authority_id: Some(remote.clone()),
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: remote,
+                revision: 1,
+                groups: vec![crate::groups::GroupRecord {
+                    id: remote_id,
+                    revision: 1,
+                    state: crate::groups::GroupState::Active {
+                        name: "old-experiment".into(),
+                    },
+                }],
+                memberships: vec![crate::groups::OwnedPaneMembership {
+                    pane_id: "remote-pane".into(),
+                    pane_incarnation: "remote-incarnation".into(),
+                    membership: crate::groups::PaneGroupMembership {
+                        group_id: Some(local_id),
+                        revision: 1,
+                    },
+                }],
+            }),
+            error: Some("offline".into()),
+        }];
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(row,
+            SidebarRow::PodHeader { title, fresh: false, .. } if title == "old-experiment"
+        )));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::PodMember {
+                target: PodTarget::Local(_),
+                ..
+            }
+        )));
+        assert!(rows.iter().any(|row| matches!(row,
+            SidebarRow::PodMember { title, target: PodTarget::Remote(_), .. } if title == "remote-pane"
+        )));
+    }
+
+    #[test]
+    fn pod_projection_builds_once_per_sidebar_row_build() {
+        let (mut app, _) = app_with_local_pod(true);
+        app.collapsed_sidebar_groups.remove(&format!(
+            "{}:{SNOOZED_SECTION_TITLE}",
+            app.sidebar_group_mode.collapse_namespace()
+        ));
+        take_pod_projection_builds();
+        let rows = sidebar_rows(&app);
+        assert!(!rows.is_empty());
+        assert_eq!(take_pod_projection_builds(), 1);
+    }
+
+    #[test]
+    fn only_canonical_agent_rows_receive_pod_tokens() {
+        let (mut app, _) = app_with_local_pod(true);
+        app.collapsed_sidebar_groups.remove(&format!(
+            "{}:{SNOOZED_SECTION_TITLE}",
+            app.sidebar_group_mode.collapse_namespace()
+        ));
+        let entries = sidebar_thread_entries(&app);
+        let projection = pod_projection(&app, &entries);
+        let mut rows = Vec::new();
+        append_snoozed_rows(&app, &mut rows, entries.clone(), &projection.local_tokens);
+        assert!(rows.iter().any(|row| matches!(row,
+            SidebarRow::Agent { entry, .. } if entry.pod.as_ref().is_some_and(|pod| pod.name == "release-crew")
+        )));
+        let mut tab_rows = Vec::new();
+        append_tab_rows(&mut tab_rows, entries, 0);
+        assert!(tab_rows
+            .iter()
+            .all(|row| matches!(row, SidebarRow::Tab { entry, .. } if entry.pod.is_none())));
+    }
+
+    #[test]
+    fn pod_width_ladder_keeps_required_header_and_member_fields() {
+        let app = AppState::test_new();
+        for width in [38, 20] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 2)).expect("pod terminal");
+            terminal
+                .draw(|frame| {
+                    render_pod_header_row(
+                        &app,
+                        frame,
+                        Rect::new(0, 0, width, 1),
+                        "release-crew",
+                        3,
+                        "ub1",
+                        false,
+                        false,
+                    );
+                    render_pod_member_row(
+                        &app,
+                        frame,
+                        Rect::new(0, 1, width, 1),
+                        "fix-auth-flow",
+                        "2m",
+                        "ub2",
+                        true,
+                    );
+                })
+                .expect("draw pods");
+            let buffer = terminal.backend().buffer();
+            let header = (0..width)
+                .map(|x| buffer[(x, 0)].symbol())
+                .collect::<String>();
+            let member = (0..width)
+                .map(|x| buffer[(x, 1)].symbol())
+                .collect::<String>();
+            assert!(header.contains("▾") && header.contains("(3)") && header.contains("⧖"));
+            assert!(member.contains("●") && member.contains("fix"));
+            if width == 38 {
+                assert!(header.contains("ub1"));
+                assert!(member.contains("2m") && member.contains("ub2"));
+            } else {
+                assert!(!header.contains("ub1"));
+                assert!(!member.contains("2m"));
+            }
+        }
+    }
+
     fn expand_section_for_all_views(app: &mut AppState, title: &str) {
         for mode in SidebarGroupMode::ALL {
             app.collapsed_sidebar_groups
@@ -14351,6 +15320,8 @@ pub(crate) mod tests {
                 }
                 SidebarRow::NestedHeader { .. } => Some(('h', 0)),
                 SidebarRow::SectionHeader { .. }
+                | SidebarRow::PodHeader { .. }
+                | SidebarRow::PodMember { .. }
                 | SidebarRow::Divider
                 | SidebarRow::NeedsYou { .. }
                 | SidebarRow::SymphonyJob { .. }
@@ -15779,6 +16750,8 @@ pub(crate) mod tests {
                 SidebarRow::Workspace { .. }
                 | SidebarRow::Agent { .. }
                 | SidebarRow::RemoteAgent { .. }
+                | SidebarRow::PodHeader { .. }
+                | SidebarRow::PodMember { .. }
                 | SidebarRow::SectionHeader { .. }
                 | SidebarRow::Divider
                 | SidebarRow::NestedHeader { .. }
@@ -15836,6 +16809,8 @@ pub(crate) mod tests {
                         )
                     }
                     SidebarRow::RemoteAgent { .. } => ("remote", 0, None, None),
+                    SidebarRow::PodHeader { .. } => ("pod", 0, None, None),
+                    SidebarRow::PodMember { .. } => ("pod-member", 0, None, None),
                     SidebarRow::SectionHeader { .. } => ("section", 0, None, None),
                     SidebarRow::Divider => ("divider", 0, None, None),
                     SidebarRow::NestedHeader { .. } => ("section", 0, None, None),
@@ -17965,6 +18940,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 SidebarRow::Tab { .. } => Some(("tab", String::new())),
                 SidebarRow::NestedHeader { title, .. } => Some(("section", title)),
                 SidebarRow::SectionHeader { .. }
+                | SidebarRow::PodHeader { .. }
+                | SidebarRow::PodMember { .. }
                 | SidebarRow::Divider
                 | SidebarRow::NeedsYou { .. }
                 | SidebarRow::SymphonyJob { .. }
@@ -24926,6 +25903,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     Some(format!("remote:{}", entry.agent_ref))
                 }
                 SidebarRow::SectionHeader { .. }
+                | SidebarRow::PodHeader { .. }
+                | SidebarRow::PodMember { .. }
                 | SidebarRow::Divider
                 | SidebarRow::NeedsYou { .. }
                 | SidebarRow::SymphonyJob { .. }

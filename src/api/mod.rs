@@ -78,6 +78,11 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::PaneClearAgentAuthority(_)
             | Method::PaneReleaseAgent(_)
             | Method::PaneClose(_)
+            | Method::GroupCreate(_)
+            | Method::GroupRename(_)
+            | Method::GroupDelete(_)
+            | Method::PaneGroupSet(_)
+            | Method::GroupAuthorityMutate(_)
             | Method::PopupClose(_)
             | Method::PluginUnlink(_)
             | Method::PluginDisable(_)
@@ -104,7 +109,10 @@ pub fn socket_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::schema::{PaneSnoozeParams, PaneTarget};
+    use crate::api::schema::{
+        AuthorityMutation, AuthorityMutationParams, GroupCreateParams, GroupDeleteParams,
+        GroupRenameParams, PaneGroupSetParams, PaneSnoozeParams, PaneTarget,
+    };
 
     #[test]
     fn snooze_transitions_are_classified_as_ui_changes() {
@@ -125,5 +133,49 @@ mod tests {
 
         assert!(request_changes_ui(&snooze));
         assert!(request_changes_ui(&unsnooze));
+    }
+
+    #[test]
+    fn group_mutations_are_classified_as_ui_changes() {
+        let authority = crate::groups::AuthorityId::from_random_bytes([7; 16]);
+        let group_id = crate::groups::GroupId {
+            owner: authority.clone(),
+            local: 1,
+        };
+        let pane_set = PaneGroupSetParams {
+            pane_id: "w1:p1".into(),
+            group_id: Some(group_id.clone()),
+            expected_revision: 0,
+            expected_pane_authority: Some(authority.clone()),
+            expected_pane_incarnation: Some("pane-1".into()),
+        };
+        let requests = [
+            Method::GroupCreate(GroupCreateParams {
+                name: "Pod".into(),
+                expected_revision: 0,
+            }),
+            Method::GroupRename(GroupRenameParams {
+                group_id: group_id.clone(),
+                name: "Renamed".into(),
+                expected_revision: 1,
+            }),
+            Method::GroupDelete(GroupDeleteParams {
+                group_id: group_id.clone(),
+                expected_revision: 1,
+            }),
+            Method::PaneGroupSet(pane_set.clone()),
+            Method::GroupAuthorityMutate(AuthorityMutationParams {
+                expected_authority: authority,
+                forwarded: true,
+                mutation: AuthorityMutation::PaneGroupSet(pane_set),
+            }),
+        ];
+
+        for method in requests {
+            assert!(request_changes_ui(&Request {
+                id: "group-mutation".into(),
+                method,
+            }));
+        }
     }
 }

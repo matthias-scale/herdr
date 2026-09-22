@@ -53,6 +53,8 @@ mod settings;
 mod sidebar;
 mod terminal;
 
+pub(crate) use self::modal::open_rename_pod;
+
 #[cfg(test)]
 pub(crate) use self::modal::open_new_tab_dialog;
 #[cfg(test)]
@@ -260,6 +262,9 @@ impl App {
                 ClientInputOwner::SidebarSubgroupPicker => {
                     self.state.handle_sidebar_subgroup_picker_key(key_event);
                 }
+                ClientInputOwner::SidebarPodPicker => {
+                    self.handle_sidebar_pod_picker_key(key_event);
+                }
                 ClientInputOwner::PrActionConfirmation => {
                     self.handle_pr_action_confirmation_key(key_event);
                 }
@@ -354,6 +359,14 @@ impl App {
                     sidebar::SidebarWorkGroupKeyAction::Consumed => return None,
                     sidebar::SidebarWorkGroupKeyAction::Dispatch(plan) => {
                         self.dispatch_sidebar_work_group_plan(*plan);
+                        return None;
+                    }
+                    sidebar::SidebarWorkGroupKeyAction::RenamePod(record) => {
+                        modal::open_rename_pod(&mut self.state, record);
+                        return None;
+                    }
+                    sidebar::SidebarWorkGroupKeyAction::DeletePod(record) => {
+                        self.runtime_delete_pod(record);
                         return None;
                     }
                 }
@@ -4737,6 +4750,15 @@ impl App {
             InputOwner::Client(ClientInputOwner::SidebarSubgroupPicker) => {
                 self.route_text_to_sidebar_subgroup_picker(text)
             }
+            InputOwner::Client(ClientInputOwner::SidebarPodPicker) => {
+                for character in text.chars() {
+                    self.handle_sidebar_pod_picker_key(KeyEvent::new(
+                        KeyCode::Char(character),
+                        KeyModifiers::empty(),
+                    ));
+                }
+                true
+            }
             InputOwner::AddProject | InputOwner::Surface(SurfaceInputOwner::Home) => {
                 self.handle_home_text_commit(text);
                 true
@@ -5358,6 +5380,8 @@ impl App {
                         source_tab_idx,
                         insert_idx,
                     } => self.move_tab_via_api(ws_idx, source_tab_idx, insert_idx),
+                    MouseAction::SetPaneGroup(params) => self.runtime_pane_group_set(params),
+                    MouseAction::PodPickerSelect(index) => self.accept_sidebar_pod_picker(index),
                     MouseAction::SetSplitRatio { path, ratio } => {
                         self.set_split_ratio_via_api(path, ratio)
                     }
@@ -5443,6 +5467,7 @@ impl App {
             | ClientInputOwner::SidebarObjectMenu
             | ClientInputOwner::SidebarSortMenu
             | ClientInputOwner::SidebarSubgroupPicker
+            | ClientInputOwner::SidebarPodPicker
             | ClientInputOwner::DockSurfaceMenu => self.state.handle_mouse_for_owner(
                 &mut self.terminal_runtimes,
                 source_id,
@@ -5477,6 +5502,8 @@ impl App {
                     }
                 }
                 MouseAction::RenameModal(action) => self.apply_rename_mouse_action_via_api(action),
+                MouseAction::SetPaneGroup(params) => self.runtime_pane_group_set(params),
+                MouseAction::PodPickerSelect(index) => self.accept_sidebar_pod_picker(index),
                 MouseAction::ConfirmCloseAccept => self.confirm_close_accept_via_api(),
                 MouseAction::ContextMenu { menu, action } => {
                     let menu = *menu;
