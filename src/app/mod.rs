@@ -2972,6 +2972,11 @@ impl App {
             diagnostics,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn apply_live_config_for_test(&mut self, config: &crate::config::Config) {
+        self.apply_live_config(config, &[], &[], false);
+    }
 }
 
 // ---------------------------------------------------------------------------

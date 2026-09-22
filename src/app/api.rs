@@ -59,6 +59,14 @@ impl App {
         self.install_fleet_snapshot_against(snapshot, None)
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_fleet_snapshot_for_test(
+        &mut self,
+        snapshot: crate::fleet::Snapshot,
+    ) -> bool {
+        self.install_fleet_snapshot(snapshot)
+    }
+
     fn install_fleet_snapshot_against(
         &mut self,
         mut snapshot: crate::fleet::Snapshot,

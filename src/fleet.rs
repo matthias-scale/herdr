@@ -3588,19 +3588,118 @@ mod tests {
         ));
     }
 
+    fn fleet_with_history_connection(target: &str) -> FleetConfig {
+        FleetConfig {
+            hosts: vec![FleetHostConfig {
+                name: "office".into(),
+                target: target.into(),
+                local: false,
+                session: Some("agents".into()),
+                socket: Some("/tmp/herdr.sock".into()),
+            }],
+            ..FleetConfig::default()
+        }
+    }
+
+    fn app_config_with_fleet(fleet: FleetConfig) -> crate::config::Config {
+        let mut config = crate::config::Config::default();
+        config.remote.fleet = fleet;
+        config
+    }
+
+    fn app_with_retained_deleted_group(
+        config: &crate::config::Config,
+        path: &Path,
+    ) -> crate::app::App {
+        save_authority_acceptance_ledger(path, &ledger_with_deleted_group())
+            .expect("persist accepted tombstone");
+        let mut app = crate::app::App::new(
+            config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.authority_acceptance_ledger_path = Some(path.to_path_buf());
+        app.authority_acceptance_ledger =
+            load_authority_acceptance_ledger(path).expect("load retained history into app");
+        app
+    }
+
+    fn install_snapshot_and_finish_ledger_write(app: &mut crate::app::App, mut snapshot: Snapshot) {
+        snapshot.config_generation = app.fleet_poller_config.generation();
+        assert!(!app.install_fleet_snapshot_for_test(snapshot));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let event = loop {
+            match app.event_rx.try_recv() {
+                Ok(event) => break event,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("ledger completion unavailable: {error}"),
+            }
+        };
+        assert!(matches!(
+            event,
+            crate::events::AppEvent::AuthorityAcceptanceLedgerPersisted { .. }
+                | crate::events::AppEvent::AuthorityAcceptanceLedgerReconciled { .. }
+        ));
+        app.handle_internal_event_with_render_impact(event);
+        assert!(!app.authority_acceptance_ledger_write_in_flight);
+    }
+
+    fn assert_rolled_back_poll_is_not_fresh(app: &mut crate::app::App, path: &Path, target: &str) {
+        let rolled_back = Snapshot {
+            polled: true,
+            group_catalogs: vec![group_catalog(
+                "office",
+                target,
+                1,
+                1,
+                vec![group_record(1, 1, 1, false)],
+            )],
+            ..Snapshot::default()
+        };
+        install_snapshot_and_finish_ledger_write(app, rolled_back);
+
+        let shown = &app.state.fleet_snapshot.group_catalogs[0];
+        assert_eq!(shown.state, GroupCatalogState::Stale);
+        assert!(matches!(
+            shown
+                .snapshot
+                .as_ref()
+                .expect("current rolled-back answer")
+                .groups[0]
+                .state,
+            crate::groups::GroupState::Active { .. }
+        ));
+        let durable =
+            load_authority_acceptance_ledger(path).expect("reload history after rolled-back poll");
+        assert!(matches!(
+            durable
+                .accepted(&crate::groups::AuthorityId::from_random_bytes([1; 16]))
+                .expect("accepted tombstone history")
+                .groups[0]
+                .state,
+            crate::groups::GroupState::Deleted
+        ));
+    }
+
     #[test]
     fn deleted_group_stays_deleted_after_connection_remove_and_readd() {
         let dir = run_fixture_dir("group-history-remove-readd");
         let path = dir.join("remote-group-catalogs.json");
-        let ledger = ledger_with_deleted_group();
-        save_authority_acceptance_ledger(&path, &ledger).expect("persist accepted tombstone");
+        let fleet = fleet_with_history_connection("machine-a");
+        let config = app_config_with_fleet(fleet.clone());
+        let mut app = app_with_retained_deleted_group(&config, &path);
 
-        let removed = Snapshot::default().reconcile_after_config_reload(&FleetConfig::default(), 1);
-        assert!(removed.group_catalogs.is_empty());
-
-        let retained =
-            load_authority_acceptance_ledger(&path).expect("reload after restoring connection");
-        assert_rolled_back_group_is_not_fresh(&retained, "office", "machine-a");
+        app.apply_live_config_for_test(&crate::config::Config::default());
+        install_snapshot_and_finish_ledger_write(&mut app, Snapshot::unpolled(&[]));
+        app.apply_live_config_for_test(&config);
+        assert_rolled_back_poll_is_not_fresh(&mut app, &path, "machine-a");
         std::fs::remove_dir_all(dir).expect("remove remove-readd fixture");
     }
 
@@ -3608,12 +3707,16 @@ mod tests {
     fn deleted_group_stays_deleted_after_connection_repoint() {
         let dir = run_fixture_dir("group-history-repoint");
         let path = dir.join("remote-group-catalogs.json");
-        let ledger = ledger_with_deleted_group();
-        save_authority_acceptance_ledger(&path, &ledger).expect("persist accepted tombstone");
+        let config = app_config_with_fleet(fleet_with_history_connection("machine-a"));
+        let mut app = app_with_retained_deleted_group(&config, &path);
+        let repointed = app_config_with_fleet(fleet_with_history_connection("machine-b"));
 
-        let retained =
-            load_authority_acceptance_ledger(&path).expect("load after repointing the connection");
-        assert_rolled_back_group_is_not_fresh(&retained, "office", "machine-b");
+        app.apply_live_config_for_test(&repointed);
+        install_snapshot_and_finish_ledger_write(
+            &mut app,
+            Snapshot::unpolled(&repointed.remote.fleet.hosts),
+        );
+        assert_rolled_back_poll_is_not_fresh(&mut app, &path, "machine-b");
         std::fs::remove_dir_all(dir).expect("remove repoint fixture");
     }
 
@@ -3633,19 +3736,10 @@ mod tests {
     fn deleted_group_stays_deleted_after_poll_worker_panic() {
         let dir = run_fixture_dir("group-history-poll-panic");
         let path = dir.join("remote-group-catalogs.json");
-        let configured = FleetHostConfig {
-            name: "office".into(),
-            target: "machine-a".into(),
-            local: false,
-            session: Some("agents".into()),
-            socket: Some("/tmp/herdr.sock".into()),
-        };
-        let fleet = FleetConfig {
-            hosts: vec![configured.clone()],
-            ..FleetConfig::default()
-        };
-        let ledger = ledger_with_deleted_group();
-        save_authority_acceptance_ledger(&path, &ledger).expect("persist accepted tombstone");
+        let fleet = fleet_with_history_connection("machine-a");
+        let configured = fleet.hosts[0].clone();
+        let config = app_config_with_fleet(fleet.clone());
+        let mut app = app_with_retained_deleted_group(&config, &path);
 
         let panicked = collect_snapshot_with(&PanickingReader, &[configured], &fleet);
         assert_eq!(panicked.group_catalogs[0].target, "machine-a");
@@ -3654,8 +3748,8 @@ mod tests {
             GroupCatalogState::Unavailable
         );
 
-        let retained = load_authority_acceptance_ledger(&path).expect("reload after poll panic");
-        assert_rolled_back_group_is_not_fresh(&retained, "office", "machine-a");
+        install_snapshot_and_finish_ledger_write(&mut app, panicked);
+        assert_rolled_back_poll_is_not_fresh(&mut app, &path, "machine-a");
         std::fs::remove_dir_all(dir).expect("remove poll panic fixture");
     }
 
@@ -3663,19 +3757,19 @@ mod tests {
     fn deleted_group_stays_deleted_after_invalid_fleet_configuration() {
         let dir = run_fixture_dir("group-history-invalid-config");
         let path = dir.join("remote-group-catalogs.json");
-        let ledger = ledger_with_deleted_group();
-        save_authority_acceptance_ledger(&path, &ledger).expect("persist accepted tombstone");
-
         let invalid = FleetConfig {
             self_name: Some("invalid::self".into()),
             ..FleetConfig::default()
         };
+        let invalid_config = app_config_with_fleet(invalid.clone());
+        let mut app = app_with_retained_deleted_group(&invalid_config, &path);
         let unusable = poll_without_generation(&invalid);
         assert!(unusable.group_catalogs.is_empty());
 
-        let retained =
-            load_authority_acceptance_ledger(&path).expect("reload after repairing fleet config");
-        assert_rolled_back_group_is_not_fresh(&retained, "office", "machine-a");
+        install_snapshot_and_finish_ledger_write(&mut app, unusable);
+        let repaired = app_config_with_fleet(fleet_with_history_connection("machine-a"));
+        app.apply_live_config_for_test(&repaired);
+        assert_rolled_back_poll_is_not_fresh(&mut app, &path, "machine-a");
         std::fs::remove_dir_all(dir).expect("remove invalid config fixture");
     }
 
@@ -3770,16 +3864,38 @@ mod tests {
             previous_catalog.snapshot
         );
 
-        let mut repointed = same_connection.clone();
-        repointed.group_catalogs[0].target = "machine-b".into();
-        repointed.group_catalogs[0].snapshot = None;
-        repointed.group_catalogs[0].state = GroupCatalogState::Unavailable;
-        repointed.retain_unavailable_group_catalogs_from(&previous);
-        assert!(repointed.group_catalogs[0].snapshot.is_none());
-        assert_eq!(
-            repointed.group_catalogs[0].state,
-            GroupCatalogState::Unavailable
-        );
+        let mut changed_connections = Vec::new();
+        let mut target = same_connection.group_catalogs[0].clone();
+        target.target = "machine-b".into();
+        changed_connections.push(("target", target));
+        let mut local = same_connection.group_catalogs[0].clone();
+        local.local = true;
+        changed_connections.push(("local", local));
+        let mut session = same_connection.group_catalogs[0].clone();
+        session.session = Some("other-session".into());
+        changed_connections.push(("session", session));
+        let mut socket = same_connection.group_catalogs[0].clone();
+        socket.socket = Some("/tmp/other.sock".into());
+        changed_connections.push(("socket", socket));
+
+        for (field, mut catalog) in changed_connections {
+            catalog.snapshot = None;
+            catalog.state = GroupCatalogState::Unavailable;
+            let mut changed = Snapshot {
+                group_catalogs: vec![catalog],
+                ..Snapshot::default()
+            };
+            changed.retain_unavailable_group_catalogs_from(&previous);
+            assert!(
+                changed.group_catalogs[0].snapshot.is_none(),
+                "changing {field} must not alias the retained connection"
+            );
+            assert_eq!(
+                changed.group_catalogs[0].state,
+                GroupCatalogState::Unavailable,
+                "changing {field} must remain unavailable"
+            );
+        }
     }
 
     #[test]
@@ -4102,22 +4218,14 @@ mod tests {
     fn unusable_poll_cannot_erase_retained_tombstone_history() {
         let dir = run_fixture_dir("unusable-poll-retains-tombstone");
         let path = dir.join("remote-group-catalogs.json");
-        let fleet = FleetConfig {
-            hosts: vec![FleetHostConfig {
-                name: "office".into(),
-                target: "machine-a".into(),
-                local: false,
-                session: Some("agents".into()),
-                socket: Some("/tmp/herdr.sock".into()),
-            }],
-            ..FleetConfig::default()
-        };
+        let fleet = fleet_with_history_connection("machine-a");
+        let config = app_config_with_fleet(fleet.clone());
+        let mut app = app_with_retained_deleted_group(&config, &path);
         let ledger = ledger_with_deleted_group();
-        save_authority_acceptance_ledger(&path, &ledger)
-            .expect("persist accepted tombstone history");
 
         let not_polled = Snapshot::unpolled(&fleet.hosts);
         assert!(not_polled.group_catalogs.is_empty());
+        install_snapshot_and_finish_ledger_write(&mut app, not_polled);
 
         let mut unusable_config = fleet.clone();
         unusable_config.timeout_ms = 1;
@@ -4130,11 +4238,12 @@ mod tests {
                 && host.session.as_deref() == Some("agents")
                 && host.socket.as_deref() == Some("/tmp/herdr.sock")
         }));
+        install_snapshot_and_finish_ledger_write(&mut app, unusable_poll);
 
         let retained = load_authority_acceptance_ledger(&path)
             .expect("load retained history after repairing config");
         assert_eq!(retained, ledger);
-        assert_rolled_back_group_is_not_fresh(&retained, "office", "machine-a");
+        assert_rolled_back_poll_is_not_fresh(&mut app, &path, "machine-a");
 
         std::fs::remove_dir_all(dir).expect("remove unusable poll fixture");
     }
