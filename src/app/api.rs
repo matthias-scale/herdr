@@ -3574,6 +3574,8 @@ mod tests {
             api_rx,
             crate::api::EventHub::default(),
         );
+        app.state.default_shell = test_support::exiting_test_command().into();
+        app.state.shell_mode = crate::config::ShellModeConfig::NonLogin;
         let workspace = crate::workspace::Workspace::test_new("restored");
         let pane_id = workspace.tabs[0].root_pane;
         let terminal_id = workspace.terminal_id(pane_id).cloned().unwrap();

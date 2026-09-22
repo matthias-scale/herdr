@@ -1217,7 +1217,7 @@ mod tests {
         // The plan is characterized for its directory, target and workspace; the
         // agent binary itself is not under test and is absent on CI runners, so
         // spawn a command that exists everywhere.
-        plan.argv = vec!["/bin/sh".into(), "-c".into(), "exit 0".into()];
+        plan.argv = vec![crate::app::api::test_support::exiting_test_command().into()];
         plan
     }
 
@@ -1418,7 +1418,7 @@ mod tests {
             work_context_patch: crate::work_context::PaneWorkContextPatch::default(),
             target: crate::app::home::HomeTarget::Existing(workspace_id),
             prompt: "verify identity invariants".into(),
-            argv: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+            argv: vec![crate::app::api::test_support::exiting_test_command().into()],
             env: Vec::new(),
             remote: None,
         };
