@@ -14608,6 +14608,40 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn pods_section_uses_existing_title_keyed_collapse_storage() {
+        let (mut app, _) = app_with_local_pod(false);
+        let key = format!(
+            "{}:{PODS_SECTION_TITLE}",
+            app.sidebar_group_mode.collapse_namespace()
+        );
+        assert!(!app.collapsed_sidebar_groups.contains(&key));
+        assert!(sidebar_rows(&app)
+            .iter()
+            .any(|row| matches!(row, SidebarRow::PodHeader { .. })));
+
+        app.toggle_sidebar_group(PODS_SECTION_TITLE);
+        assert!(app.collapsed_sidebar_groups.contains(&key));
+        let collapsed = sidebar_rows(&app);
+        assert!(collapsed.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: PODS_SECTION_TITLE,
+                collapsed: true,
+                ..
+            }
+        )));
+        assert!(!collapsed
+            .iter()
+            .any(|row| matches!(row, SidebarRow::PodHeader { .. })));
+
+        app.toggle_sidebar_group(PODS_SECTION_TITLE);
+        assert!(!app.collapsed_sidebar_groups.contains(&key));
+        assert!(sidebar_rows(&app)
+            .iter()
+            .any(|row| matches!(row, SidebarRow::PodHeader { .. })));
+    }
+
+    #[test]
     fn pod_members_join_local_projection_and_stale_remote_catalog() {
         let (mut app, local_id) = app_with_local_pod(true);
         let remote = crate::groups::AuthorityId::from_random_bytes([92; 16]);
@@ -14739,6 +14773,69 @@ pub(crate) mod tests {
                 assert!(!member.contains("2m"));
             }
         }
+    }
+
+    #[test]
+    fn collapsed_stale_pod_header_keeps_count_owner_and_stale_marker() {
+        let app = AppState::test_new();
+        let width = 38;
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("pod terminal");
+        terminal
+            .draw(|frame| {
+                render_pod_header_row(
+                    &app,
+                    frame,
+                    Rect::new(0, 0, width, 1),
+                    "old-experiment",
+                    2,
+                    "ub3",
+                    false,
+                    true,
+                );
+            })
+            .expect("draw collapsed pod");
+        let buffer = terminal.backend().buffer();
+        let row = (0..width)
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect::<String>();
+        assert!(row.contains("▸"), "collapsed chevron missing: {row:?}");
+        assert!(row.contains("(2)"), "member count missing: {row:?}");
+        assert!(row.contains("ub3"), "owner token missing: {row:?}");
+        assert!(row.contains("⧖"), "stale marker missing: {row:?}");
+    }
+
+    #[test]
+    fn hovered_fresh_pod_header_uses_surface_highlight() {
+        let (mut app, group_id) = app_with_local_pod(false);
+        let source_id = 0;
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        app.drag = Some(crate::app::state::DragState {
+            target: crate::app::state::DragTarget::PodAssign {
+                source_id,
+                ws_idx: 0,
+                pane_id,
+                public_pane_id: app.local_agent_panel_identities[&pane_id]
+                    .agent_ref
+                    .agent
+                    .clone(),
+                hover: Some(group_id.clone()),
+            },
+        });
+        let area = Rect::new(0, 0, 40, 20);
+        app.view.sidebar_rect = area;
+        let row = (0..area.height)
+            .find(|row| {
+                sidebar_pod_header_at(&app, *row)
+                    .is_some_and(|(candidate, _)| candidate == group_id)
+            })
+            .expect("pod header row");
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("sidebar terminal");
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .expect("draw hovered pod");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(1, row)].bg, app.palette.surface1);
     }
 
     fn expand_section_for_all_views(app: &mut AppState, title: &str) {
