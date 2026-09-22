@@ -5,6 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(all(test, unix))]
+pub(crate) mod ssh_agent;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForegroundProcess {
     pub pid: u32,
@@ -27,6 +30,32 @@ pub enum Signal {
     Kill,
 }
 
+/// Why a pane runtime ended, before application persistence policy is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildExitReason {
+    Exited,
+    Interrupted,
+}
+
+impl ChildExitReason {
+    pub(crate) fn requires_session_checkpoint(self) -> bool {
+        matches!(self, Self::Interrupted)
+    }
+}
+
+#[cfg(unix)]
+pub(crate) use unix_common::classify_child_exit;
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn classify_child_exit(_status: &portable_pty::ExitStatus) -> ChildExitReason {
+    ChildExitReason::Exited
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn launch_executable() -> std::io::Result<std::path::PathBuf> {
+    std::env::current_exe()
+}
+
 pub(crate) fn detached_custom_command_process(command: &str) -> std::process::Command {
     let mut process = detached_custom_command_process_platform(command);
     configure_background_command(&mut process);
@@ -39,6 +68,15 @@ pub(crate) fn pane_custom_command_pty_builder(command: &str) -> portable_pty::Co
 
 pub(crate) fn apply_pane_runtime_marker(command: &mut portable_pty::CommandBuilder) {
     apply_pane_runtime_marker_platform(command);
+}
+
+pub(crate) fn plugin_runtime_path(path: &std::path::Path) -> std::path::PathBuf {
+    plugin_runtime_path_platform(path)
+}
+
+#[cfg(not(windows))]
+fn plugin_runtime_path_platform(path: &std::path::Path) -> std::path::PathBuf {
+    path.to_path_buf()
 }
 
 #[cfg(not(windows))]
@@ -74,6 +112,9 @@ pub fn launch_server_daemon_command(command: &mut std::process::Command) -> std:
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn detach_server_daemon_command(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
+
+    #[cfg(target_os = "macos")]
+    macos::configure_server_daemon_context(command);
 
     unsafe {
         command.pre_exec(|| {
@@ -221,9 +262,18 @@ pub(crate) struct RemoteSshConfigPaths {
 }
 
 #[cfg(unix)]
+mod remote_bridge;
+#[cfg(all(test, unix))]
+mod remote_bridge_tests;
+#[cfg(unix)]
 mod unix_common;
 #[cfg(unix)]
-pub(crate) use unix_common::{begin_cli_output, end_cli_output};
+pub(crate) use unix_common::{
+    begin_cli_output, end_cli_output, forward_remote_bridge_stdio, RemoteBridgeWake,
+};
+
+mod client_state;
+pub(crate) use client_state::{create_private_state_file, replace_file, sync_parent_directory};
 
 #[cfg(not(unix))]
 pub(crate) fn begin_cli_output() {}
@@ -389,6 +439,35 @@ pub(crate) fn pane_shell_name(name: &str) -> Option<String> {
     is_pane_shell_process_name(&normalized).then_some(normalized)
 }
 
+pub(crate) fn quote_windows_command_line_arg(value: &str) -> String {
+    if !value.is_empty()
+        && !value
+            .chars()
+            .any(|ch| matches!(ch, ' ' | '\t' | '\n' | '\x0b' | '"'))
+    {
+        return value.to_string();
+    }
+
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0;
+    for ch in value.chars() {
+        if ch == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        if ch == '"' {
+            quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
+        } else {
+            quoted.push_str(&"\\".repeat(backslashes));
+        }
+        backslashes = 0;
+        quoted.push(ch);
+    }
+    quoted.push_str(&"\\".repeat(backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
 pub(crate) fn is_pane_shell_process_name(name: &str) -> bool {
     let normalized = normalized_process_name(name);
     matches!(
@@ -486,7 +565,7 @@ impl PrefixInputSource for RealPrefixInputSource {
 /// Scaling keeps one budget in the source and gives the slower platform the
 /// headroom it needs. This is a pure policy constant -- both branches compile on
 /// every target -- so it uses `cfg!` rather than a compile gate.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn test_spawn_budget(base: std::time::Duration) -> std::time::Duration {
     if cfg!(target_os = "macos") {
         base * 20
@@ -553,6 +632,22 @@ pub(crate) fn resolve_write_target(path: &Path) -> std::io::Result<PathBuf> {
         }
         _ => Ok(current),
     }
+}
+
+#[cfg(all(test, any(unix, windows)))]
+#[test]
+fn child_exit_classification_only_checkpoints_interruptions() {
+    for code in [0, 1, 130, 255, 0xC0000005] {
+        let reason = classify_child_exit(&portable_pty::ExitStatus::with_exit_code(code));
+        assert_eq!(reason, ChildExitReason::Exited, "exit code {code:#x}");
+        assert!(!reason.requires_session_checkpoint());
+    }
+    #[cfg(windows)]
+    let status = portable_pty::ExitStatus::with_exit_code(0xC000013A);
+    #[cfg(not(windows))]
+    let status = portable_pty::ExitStatus::with_signal("Terminated: 15");
+    assert_eq!(classify_child_exit(&status), ChildExitReason::Interrupted);
+    assert!(classify_child_exit(&status).requires_session_checkpoint());
 }
 
 #[cfg(all(test, unix))]

@@ -316,7 +316,7 @@ impl WorkItemDetailCache {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -1470,7 +1470,7 @@ fn carry_cached_pr_details(items: &mut [WorkItem], previous: Option<&Snapshot>) 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn refresh_work_index(
     config: &WorkIndexConfig,
     panes: &[WorkIndexPane],
@@ -3944,6 +3944,7 @@ pub(crate) fn write_snapshot(path: &Path, snapshot: &Snapshot) -> io::Result<()>
 /// view until the first refresh completes, but the persisted file is best
 /// effort: a missing or corrupt file (partial write, format change) must
 /// fall back to `None` rather than panic or block startup.
+#[cfg(any(not(test), unix))]
 pub(crate) fn load_snapshot(path: &Path) -> Option<Snapshot> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()

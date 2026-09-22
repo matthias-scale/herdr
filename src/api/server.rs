@@ -413,6 +413,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::GroupCreate(_) => "group.create",
         Method::GroupRename(_) => "group.rename",
         Method::GroupDelete(_) => "group.delete",
+        Method::GroupAuthorityMutate(_) => "group.authority_mutate",
         Method::WorktreeList(_) => "worktree.list",
         Method::WorktreeCreate(_) => "worktree.create",
         Method::WorktreeOpen(_) => "worktree.open",
@@ -745,7 +746,7 @@ fn stream_subscriptions(
     if let Err(err) = write_json_line(
         &mut stream,
         &SuccessResponse {
-            id: request_id,
+            id: request_id.clone(),
             result: ResponseResult::SubscriptionStarted {},
         },
     ) {
@@ -761,7 +762,20 @@ fn stream_subscriptions(
         }
 
         for subscription in &mut subscriptions {
-            if let Some(event) = subscription.poll(api_tx, event_hub) {
+            let events = match subscription.poll_batch(api_tx, event_hub) {
+                Ok(events) => events,
+                Err(error) => {
+                    write_json_line_allow_disconnect(
+                        &mut stream,
+                        &ErrorResponse {
+                            id: request_id.clone(),
+                            error,
+                        },
+                    )?;
+                    return Ok(());
+                }
+            };
+            for event in events {
                 if let Err(err) = write_json_line(&mut stream, &event) {
                     if is_connection_closed_error(&err) {
                         return Ok(());
@@ -954,6 +968,35 @@ mod tests {
         line
     }
 
+    fn read_json_line_until(
+        stream: &mut LocalStream,
+        buffered: &mut Vec<u8>,
+        deadline: Instant,
+    ) -> serde_json::Value {
+        loop {
+            if let Some(end) = buffered.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<_> = buffered.drain(..=end).collect();
+                return serde_json::from_slice(&line).expect("subscription JSON");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for socket response"
+            );
+            let mut bytes = [0; 4096];
+            match crate::ipc::poll_local_stream_read_count(stream, &mut bytes).unwrap() {
+                crate::ipc::LocalStreamReadCount::Data(count) => {
+                    buffered.extend_from_slice(&bytes[..count]);
+                }
+                crate::ipc::LocalStreamReadCount::Pending => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                crate::ipc::LocalStreamReadCount::Closed => {
+                    panic!("subscription socket closed before the next event")
+                }
+            }
+        }
+    }
+
     fn local_stream_pair(name: &str) -> (LocalStream, LocalStream, PathBuf) {
         let path = unique_test_path(name);
         let listener = crate::ipc::bind_local_listener(&path).unwrap();
@@ -974,6 +1017,7 @@ mod tests {
             focused: true,
             settled_at: None,
             snoozed_until: None,
+            restore_error: None,
             work_context: Default::default(),
             cwd: None,
             foreground_cwd: None,
@@ -1427,12 +1471,13 @@ mod tests {
     }
 
     #[test]
-    fn subscriptions_stop_when_client_disconnects() {
-        let (api_tx, _api_rx) = mpsc::unbounded_channel::<ApiRequestMessage>();
+    fn agent_status_subscription_drains_burst_without_manufactured_history_loss() {
+        let (api_tx, responder) =
+            spawn_pane_get_responder(crate::api::schema::AgentStatus::Working);
         let (mut client, server, _path) = local_stream_pair("api-sub-disconnect");
         client
             .write_all(
-                br#"{"id":"sub_1","method":"events.subscribe","params":{"subscriptions":[{"type":"workspace.created"}]}}"#,
+                br#"{"id":"sub_1","method":"events.subscribe","params":{"subscriptions":[{"type":"pane.agent_status_changed","pane_id":"pane_1"}]}}"#,
             )
             .unwrap();
         client.write_all(b"\n").unwrap();
@@ -1441,9 +1486,11 @@ mod tests {
         let running = Arc::new(AtomicBool::new(true));
         let server_running = Arc::clone(&running);
         let event_hub = EventHub::default();
+        let server_event_hub = event_hub.clone();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let server_thread = std::thread::spawn(move || {
-            let result = handle_connection(server, &api_tx, &event_hub, &server_running, None);
+            let result =
+                handle_connection(server, &api_tx, &server_event_hub, &server_running, None);
             done_tx.send(result).unwrap();
         });
 
@@ -1451,11 +1498,53 @@ mod tests {
         let ack: serde_json::Value = serde_json::from_str(&ack).unwrap();
         assert_eq!(ack["result"]["type"], "subscription_started");
 
+        crate::ipc::set_local_stream_polling(&mut client, true).unwrap();
+        let push_status = |index| {
+            event_hub.push(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::PaneAgentStatusChanged,
+                data: crate::api::schema::EventData::PaneAgentStatusChanged {
+                    pane_id: "pane_1".into(),
+                    workspace_id: "ws_1".into(),
+                    agent_status: crate::api::schema::AgentStatus::Working,
+                    waiting_on_agents: index % 2 == 0,
+                    wait: Some(format!("wait-{index}")),
+                    eta_s: Some(index),
+                    reported_at: Some(format!("reported-{index}")),
+                    agent: Some("pi".into()),
+                    title: Some(format!("burst-{index}")),
+                    display_agent: None,
+                    state_labels: HashMap::new(),
+                },
+            });
+        };
+        for index in 0..500 {
+            push_status(index);
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut buffered = Vec::new();
+        let first = read_json_line_until(&mut client, &mut buffered, deadline);
+        assert_eq!(first["data"]["title"], "burst-0", "{first}");
+
+        // The server has advanced through the first retained batch before sending
+        // its first event. A one-event poll has not, so these additions evict its
+        // cursor and manufacture an `events_lost` response on the next poll.
+        for index in 500..520 {
+            push_status(index);
+        }
+        for index in 1..520 {
+            let event = read_json_line_until(&mut client, &mut buffered, deadline);
+            assert_eq!(event["event"], "pane.agent_status_changed", "{event}");
+            assert_eq!(event["data"]["title"], format!("burst-{index}"));
+            assert_eq!(event["data"]["wait"], format!("wait-{index}"));
+        }
+
         drop(client);
 
         let result = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(result.is_ok());
         server_thread.join().unwrap();
+        drop(running);
+        responder.join().unwrap();
     }
 
     #[test]

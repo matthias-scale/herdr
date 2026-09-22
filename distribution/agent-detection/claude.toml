@@ -1,7 +1,7 @@
 id = "claude"
-version = "2026.08.31.1001"
+version = "2026.09.11.1"
 min_engine_version = 2
-updated_at = "2026-08-31T00:00:00Z"
+updated_at = "2026-09-11T00:00:00Z"
 aliases = ["claude-code"]
 
 [[rules]]
@@ -10,6 +10,7 @@ state = "working"
 priority = 1100
 region = "osc_title"
 visible_working = true
+# Braille covers <= 2.1.227; half-circles are the 2.1.228 busy spinner.
 regex = ['^[\x{2800}-\x{28FF}\x{25D0}-\x{25D3}] ']
 
 [[rules]]
@@ -20,7 +21,7 @@ region = "bottom_non_empty_lines(12)"
 visible_working = true
 any = [
   { line_regex = ['^\s*[⏸⏵].*esc to interrupt(?:\s|·|$)'] },
-  { line_regex = ['^\s*[\x{002A}\x{00B7}\x{2722}\x{2736}\x{273B}\x{273D}]\s+\S.*…(?:\s+\(\d+[smh](?:\s|·)|\s*$)'] },
+  { line_regex = ['^\s*[\x{002A}\x{00B7}\x{2722}\x{2733}\x{2736}\x{273B}\x{273D}]\s+\S.*…(?:\s+\(\d+[smh](?:\s|·)|\s*$)'] },
 ]
 
 [[rules]]
@@ -119,13 +120,13 @@ id = "dynamic_workflow_prompt"
 state = "blocked"
 priority = 980
 region = "whole_recent"
-visible_blocker = false
+visible_blocker = true
 contains = ["run a dynamic workflow?", "esc to cancel"]
 
 [[rules]]
 # These terminal failures leave the live prompt box visible. Priority 960 puts
-# them above idle (950) but below every working rule (965+) so recovery clears
-# the blocker even while the banner remains in the terminal buffer.
+# them above idle (950) but below every working rule so recovery clears the
+# blocker even while the banner remains in the terminal buffer.
 id = "auth_failure"
 state = "blocked"
 priority = 960
@@ -154,10 +155,8 @@ any = [
 ]
 
 [[rules]]
-# Plan usage exhausted: nobody can answer this, the agent resumes on its own
-# when the window rolls. Ranks above the idle prompt box (950) so the banner
-# wins while it is on screen, and below every working rule (975+) so a resumed
-# agent clears it without latching.
+# Plan usage exhausted: the agent resumes when the window rolls. Keep this
+# above the idle prompt while allowing working evidence to clear it.
 id = "usage_limit_reached"
 state = "blocked"
 priority = 960
@@ -223,8 +222,8 @@ not = [
 [[rules]]
 id = "bash_permission_prompt"
 state = "blocked"
-priority = 1190
-region = "after_last_horizontal_rule"
+priority = 850
+region = "whole_recent"
 visible_blocker = true
 contains = ["do you want to proceed?"]
 any = [
@@ -234,14 +233,26 @@ any = [
   { contains = ["tab to amend"] },
   { contains = ["ctrl+e to explain"] },
 ]
+# Claude marks the selected option with "❯", so every option branch has to allow
+# that prefix. Numbered branches that omit it only match options the cursor has
+# moved away from, which left the resting layout below unmatched here (#2650):
+#   ❯ 1. Yes / 2. Yes, and don't ask again for: <cmd> / 3. No
+# Cover both the two-option and "don't ask again" three-option shapes so this
+# rule, not the narrower generic_permission_prompt, claims Bash approvals.
 all = [
-  { any = [{ line_regex = ['(?i)^\s*❯?\s*yes\b'] }, { line_regex = ['(?i)^\s*1\.\s*yes\b'] }, { line_regex = ['(?i)^\s*2\.\s*no\b'] }] },
+  { any = [
+    { line_regex = ['(?i)^\s*❯?\s*yes\b'] },
+    { line_regex = ['(?i)^\s*❯?\s*1\.\s*yes\b'] },
+    { line_regex = ['(?i)^\s*❯?\s*2\.\s*yes\b'] },
+    { line_regex = ['(?i)^\s*❯?\s*2\.\s*no\b'] },
+    { line_regex = ['(?i)^\s*❯?\s*3\.\s*no\b'] },
+  ] },
 ]
 
 [[rules]]
 id = "generic_permission_prompt"
 state = "blocked"
-priority = 1190
+priority = 840
 region = "after_last_horizontal_rule"
 visible_blocker = true
 contains = ["do you want to proceed?", "esc to cancel"]

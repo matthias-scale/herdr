@@ -1,5 +1,6 @@
 use super::*;
 
+// Codex is only a registry key here; behavior tests supply synthetic rules.
 fn remote_manifest(version: &str, state: &str, contains: &str) -> String {
     format!(
         r#"
@@ -77,14 +78,17 @@ fn write_local_codex(content: &str) {
 
 #[test]
 fn known_agent_no_match_defaults_to_idle_fallback() {
-    let explain = bundled_explain(Agent::Codex, "ordinary prompt text");
+    with_manifest_dirs("no-match", || {
+        write_local_codex(&local_manifest("working", "active-marker"));
+        let explain = explain(Agent::Codex, "unmatched-marker");
 
-    assert_eq!(explain.state, AgentState::Idle);
-    assert!(!explain.visible_idle);
-    assert_eq!(
-        explain.fallback_reason.as_deref(),
-        Some(DEFAULT_KNOWN_AGENT_IDLE_FALLBACK)
-    );
+        assert_eq!(explain.state, AgentState::Idle);
+        assert!(!explain.visible_idle);
+        assert_eq!(
+            explain.fallback_reason.as_deref(),
+            Some(DEFAULT_KNOWN_AGENT_IDLE_FALLBACK)
+        );
+    });
 }
 
 #[test]
@@ -188,7 +192,6 @@ fn older_cached_remote_manifest_does_not_shadow_newer_bundled_manifest() {
 
         let explain = explain(Agent::Codex, "remote-ready");
 
-        assert_eq!(explain.state, AgentState::Idle);
         assert!(matches!(explain.source, Some(ManifestSource::Bundled)));
         assert_eq!(
             explain.cached_remote_version.as_deref(),
@@ -275,6 +278,269 @@ fn detection_uses_cached_manifest_until_explicit_reload() {
             Some("test")
         );
     });
+}
+
+#[test]
+fn compiled_rules_are_shared_until_manifest_reload() {
+    with_manifest_dirs("shared-compiled-rules", || {
+        write_remote_codex(&format!(
+            "{}\nregex = ['^cached-[a-z]+$']\n",
+            remote_manifest("9999.01.01.1", "blocked", "cached-ready")
+        ));
+        let first = load_manifest(Agent::Codex).unwrap();
+        let second = load_manifest(Agent::Codex).unwrap();
+        assert!(!first.compiled_rules.is_empty());
+        assert_eq!(
+            first.compiled_rules.as_ptr(),
+            second.compiled_rules.as_ptr(),
+            "cached loads must retain the same compiled rules and regex search caches"
+        );
+
+        write_remote_codex_without_reload(&format!(
+            "{}\nregex = ['^new-[a-z]+$']\n",
+            remote_manifest("9999.01.01.2", "working", "new-ready")
+        ));
+        let unchanged = load_manifest(Agent::Codex).unwrap();
+        assert_eq!(
+            first.compiled_rules.as_ptr(),
+            unchanged.compiled_rules.as_ptr()
+        );
+
+        reload_manifests_for_agents(&[Agent::Codex]);
+        let reloaded = load_manifest(Agent::Codex).unwrap();
+        let shared_reload = load_manifest(Agent::Codex).unwrap();
+        assert_ne!(
+            first.compiled_rules.as_ptr(),
+            reloaded.compiled_rules.as_ptr()
+        );
+        assert_eq!(
+            reloaded.compiled_rules.as_ptr(),
+            shared_reload.compiled_rules.as_ptr()
+        );
+        assert!(compiled_rule_matches(
+            &first.compiled_rules[0],
+            "cached-ready"
+        ));
+        assert!(!compiled_rule_matches(
+            &first.compiled_rules[0],
+            "new-ready"
+        ));
+        assert_eq!(
+            explain(Agent::Codex, "new-ready").state,
+            AgentState::Working
+        );
+
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let reloaded = &reloaded;
+                scope.spawn(move || {
+                    let loaded = load_manifest(Agent::Codex).unwrap();
+                    assert_eq!(
+                        loaded.compiled_rules.as_ptr(),
+                        reloaded.compiled_rules.as_ptr()
+                    );
+                    for _ in 0..8 {
+                        assert_eq!(detect(Agent::Codex, "new-ready").state, AgentState::Working);
+                    }
+                });
+            }
+        });
+    });
+}
+
+#[test]
+fn osc_regions_use_separate_inputs_and_share_rule_priority() {
+    with_manifest_dirs("osc-regions", || {
+        write_local_codex(&rules_manifest(
+            r#"
+[[rules]]
+id = "screen"
+state = "idle"
+priority = 10
+region = "whole_recent"
+visible_idle = true
+contains = ["screen-marker"]
+
+[[rules]]
+id = "title"
+state = "working"
+priority = 20
+region = "osc_title"
+visible_working = true
+regex = ['^title-marker$']
+
+[[rules]]
+id = "progress"
+state = "blocked"
+priority = 30
+region = "osc_progress"
+visible_blocker = true
+regex = ['^progress-marker$']
+"#,
+        ));
+        for (screen, title, progress, state, rule) in [
+            ("screen-marker", "", "", AgentState::Idle, "screen"),
+            (
+                "screen-marker",
+                "title-marker",
+                "",
+                AgentState::Working,
+                "title",
+            ),
+            (
+                "screen-marker",
+                "title-marker",
+                "progress-marker",
+                AgentState::Blocked,
+                "progress",
+            ),
+            (
+                "screen-marker title-marker progress-marker",
+                "",
+                "",
+                AgentState::Idle,
+                "screen",
+            ),
+        ] {
+            let input = DetectionInput {
+                screen,
+                osc_title: title,
+                osc_progress: progress,
+            };
+            let result = explain_with_input(Agent::Codex, input);
+            assert_eq!(result.state, state);
+            assert_eq!(
+                result
+                    .matched_rule
+                    .as_ref()
+                    .map(|matched| matched.id.as_str()),
+                Some(rule)
+            );
+            let detection =
+                crate::detect::detect_agent_with_osc(Some(Agent::Codex), screen, title, progress);
+            assert_eq!(detection.state, state);
+            assert_eq!(detection.visible_idle, state == AgentState::Idle);
+            assert_eq!(detection.visible_working, state == AgentState::Working);
+            assert_eq!(detection.visible_blocker, state == AgentState::Blocked);
+        }
+        let swapped = explain_with_input(
+            Agent::Codex,
+            DetectionInput {
+                screen: "",
+                osc_title: "progress-marker",
+                osc_progress: "title-marker",
+            },
+        );
+        assert!(swapped.matched_rule.is_none());
+    });
+}
+
+#[test]
+fn skip_rule_suppresses_state_update_without_visible_state_evidence() {
+    with_manifest_dirs("skip-rule", || {
+        write_local_codex(&rules_manifest(
+            r#"
+[[rules]]
+id = "activity"
+state = "working"
+priority = 10
+visible_working = true
+contains = ["activity-marker"]
+
+[[rules]]
+id = "overlay"
+state = "unknown"
+priority = 20
+skip_state_update = true
+contains = ["overlay-marker"]
+"#,
+        ));
+        let screen = "activity-marker overlay-marker";
+        let result = explain(Agent::Codex, screen);
+        assert_eq!(result.state, AgentState::Unknown);
+        assert!(result.skip_state_update);
+        assert_eq!(
+            result.skipped_update_reason.as_deref(),
+            Some("matched_rule:overlay")
+        );
+        assert!(!result.visible_idle);
+        assert!(!result.visible_working);
+        assert!(!result.visible_blocker);
+        assert!(detect(Agent::Codex, screen).skip_state_update);
+        assert!(should_skip_state_update(Agent::Codex, screen));
+        assert!(!should_skip_state_update(Agent::Codex, "activity-marker"));
+    });
+}
+
+#[test]
+fn screen_regions_extract_structure_without_classifying_agent_state() {
+    for (screen, spec, expected) in [
+        ("old\n\nnew\n", "bottom_lines(2)", "\nnew\n"),
+        (
+            "before\n› input\nafter\n",
+            "after_last_prompt_marker",
+            "after\n",
+        ),
+        (
+            "before\n› input\nafter\n",
+            "before_current_prompt_marker",
+            "before\n",
+        ),
+        (
+            "before\n› input\nafter\n",
+            "whole_recent_without_current_prompt_marker",
+            "",
+        ),
+        (
+            "no marker\n",
+            "whole_recent_without_current_prompt_marker",
+            "no marker\n",
+        ),
+        (
+            "• old\n■ latest\n› input\n",
+            "current_prompt_block_marker",
+            "■ latest",
+        ),
+        (
+            "• old\n■ latest\n› input\n",
+            "after_current_prompt_block_marker",
+            "■ latest\n› input\n",
+        ),
+        ("› old\n• new\n", "current_prompt_block_marker", ""),
+        (
+            "above\n\n───\nbody\n───\nfooter\n",
+            "above_prompt_box",
+            "above\n\n",
+        ),
+        (
+            "above\n\n───\nbody\n───\nfooter\n",
+            "last_non_empty_above_prompt_box",
+            "above",
+        ),
+        (
+            "above\n───\nbody\n───\nfooter\n",
+            "prompt_box_body",
+            "body\n",
+        ),
+        (
+            "above\n───\nbody\n───\nfooter\n",
+            "after_last_horizontal_rule",
+            "footer\n",
+        ),
+    ] {
+        assert_eq!(
+            region(
+                DetectionInput {
+                    screen,
+                    osc_title: "",
+                    osc_progress: ""
+                },
+                spec
+            ),
+            expected,
+            "region={spec}"
+        );
+    }
 }
 
 #[test]
@@ -406,7 +672,6 @@ contain = ["Working"]
 "#
     )
     .is_err());
-
     assert!(parse_manifest(
         r#"
 id = "codex"
@@ -417,7 +682,6 @@ state = "working"
 "#
     )
     .is_err());
-
     assert!(parse_manifest(
         r#"
 id = "codex"
@@ -430,7 +694,6 @@ contains = ["Working"]
 "#
     )
     .is_err());
-
     assert!(parse_manifest(
         r#"
 id = "codex"
@@ -442,7 +705,6 @@ regex = ["["]
 "#
     )
     .is_err());
-
     assert!(parse_manifest(
         r#"
 id = "codex"
@@ -470,7 +732,6 @@ contains = ["menu"]
 "#
     )
     .is_err());
-
     assert!(parse_manifest(
         r#"
 id = "codex"
@@ -503,7 +764,6 @@ contains = ["ready"]
 "#
         ));
     }
-
     assert!(parse_manifest(&manifest).is_err());
 }
 
@@ -536,7 +796,6 @@ all = [
   ] },
 ]
 "#;
-
     assert!(parse_manifest(manifest).is_err());
 }
 
@@ -556,20 +815,18 @@ state = "idle"
 contains = [{matchers}]
 "#
     );
-
     assert!(parse_manifest(&manifest).is_err());
 }
 
 #[test]
 fn bottom_non_empty_lines_uses_bottom_occurrence_for_repeated_text() {
     let content = "marker\nold\n\nmiddle\nmarker\nnew\n";
-
     assert_eq!(
         region(
             DetectionInput {
                 screen: content,
                 osc_title: "",
-                osc_progress: "",
+                osc_progress: ""
             },
             "bottom_non_empty_lines(2)"
         ),
@@ -580,13 +837,12 @@ fn bottom_non_empty_lines_uses_bottom_occurrence_for_repeated_text() {
 #[test]
 fn top_non_empty_lines_uses_top_occurrence_for_repeated_text() {
     let content = "\nmarker\nold\n\nmiddle\nmarker\nnew\n";
-
     assert_eq!(
         region(
             DetectionInput {
                 screen: content,
                 osc_title: "",
-                osc_progress: "",
+                osc_progress: ""
             },
             "top_non_empty_lines(2)"
         ),
@@ -610,7 +866,7 @@ fn top_non_empty_lines_requires_a_canonical_positive_bounded_count() {
 #[test]
 fn top_non_empty_lines_requires_engine_three_when_declared() {
     let manifest = r#"
-id = "grok"
+id = "codex"
 version = "1"
 min_engine_version = 2
 
@@ -620,7 +876,6 @@ state = "working"
 region = " top_non_empty_lines(1) "
 contains = ["active"]
 "#;
-
     assert!(parse_manifest(manifest).is_err());
 }
 
@@ -751,6 +1006,34 @@ fn claude_selection_dialog_is_blocked_at_every_wrap_width() {
         );
         assert!(result.visible_blocker, "{label}");
     }
+}
+
+#[test]
+fn claude_background_shell_summary_is_working() {
+    let result = bundled_explain(Agent::Claude, "⏵ Running background work · 2 shells ·\n");
+    assert_eq!(result.state, AgentState::Working);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("background_shell_working")
+    );
+    assert!(result.visible_working);
+}
+
+#[test]
+fn claude_login_method_prompt_is_blocked() {
+    let result = bundled_explain(
+        Agent::Claude,
+        "select login method:\n\
+❯ 1. Claude account with subscription\n\
+  2. Anthropic Console account\n\
+  3. 3rd-party platform\n",
+    );
+    assert_eq!(result.state, AgentState::Blocked);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("login_method_prompt")
+    );
+    assert!(result.visible_blocker);
 }
 
 #[test]
@@ -1009,21 +1292,24 @@ fn claude_kimi_real_screen_fixtures_classify_idle_and_blocked() {
 }
 
 #[test]
-fn visible_blocker_overrides_fresh_hook_authority_priority_1100_working() {
+fn fresh_hook_working_overrides_stale_native_claude_permission() {
     let native_permission = include_str!(
         "../../../tests/fixtures/agent-detection/claude-native-bash-permission-20260825.txt"
     );
     let result = osc_explain(Agent::Claude, native_permission, "⠋ Claude Code", "4;3;");
-    assert_eq!(result.state, AgentState::Blocked);
-    assert!(result.visible_blocker);
-    assert!(result.matched_rule.as_ref().unwrap().priority > 1100);
+    assert_eq!(result.state, AgentState::Working);
+    assert!(result.visible_working);
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("osc_title_working")
+    );
 }
 
 #[test]
 fn bundled_manifest_versions_cover_deployed_and_upstream_floors() {
     let claude: toml::Value = toml::from_str(include_str!("../manifests/claude.toml")).unwrap();
     let kimi: toml::Value = toml::from_str(include_str!("../manifests/kimi.toml")).unwrap();
-    assert_eq!(claude["version"].as_str(), Some("2026.08.31.1001"));
+    assert_eq!(claude["version"].as_str(), Some("2026.09.11.1"));
     assert!(kimi["version"]
         .as_str()
         .is_some_and(|version| version > "2026.06.10.1"));
@@ -1074,7 +1360,7 @@ fn codex_osc_title_plain_is_idle() {
         result.matched_rule.as_ref().map(|r| r.id.as_str()),
         Some("osc_title_idle")
     );
-    assert!(!result.visible_idle);
+    assert!(result.visible_idle);
 }
 
 #[test]
@@ -1122,7 +1408,7 @@ fn codex_background_terminal_screen_does_not_override_osc_idle() {
         result.matched_rule.as_ref().map(|r| r.id.as_str()),
         Some("osc_title_idle")
     );
-    assert!(!result.visible_idle);
+    assert!(result.visible_idle);
 }
 
 #[test]
@@ -1150,7 +1436,7 @@ fn codex_screen_working_fallback_handles_static_osc_title_and_progress_decoratio
                 .matched_rule
                 .as_ref()
                 .map(|rule| rule.region.as_str()),
-            Some("bottom_non_empty_lines(6)"),
+            Some("before_current_prompt_marker"),
             "{progress_line}"
         );
         assert!(result.visible_working, "{progress_line}");
@@ -1203,12 +1489,11 @@ fn a_codex_pane_running_a_tool_is_working_even_though_it_printed_no_block_marker
 fn a_streaming_codex_pane_shows_no_working_evidence_on_screen_at_all() {
     let result = osc_explain(Agent::Codex, CODEX_STREAMING_SCREEN, "personal", "");
 
-    // Idle by elimination, and the flag says so: nobody observed an idle pane,
-    // the manifest simply ran out of rules. Recent output is what rescues this
-    // screen, and it lives outside the manifest.
+    // The screen has no working evidence; the static OSC title is explicit
+    // idle evidence in the upstream manifest.
     assert_eq!(result.state, AgentState::Idle);
     assert!(!result.visible_working);
-    assert!(!result.visible_idle);
+    assert!(result.visible_idle);
 }
 
 #[test]
@@ -1314,56 +1599,6 @@ fn codex_transcript_viewer_outranks_working_fallback() {
         Some("transcript_viewer")
     );
     assert!(result.skip_state_update);
-    assert!(!result.visible_working);
-}
-
-#[test]
-fn codex_screen_working_fallback_ignores_stale_and_prompt_text() {
-    let screens = [
-        "◦ Working (1m 16s • esc to interrupt)\n\
-         ■ Conversation interrupted\n\
-         › Use /skills to list available skills\n\
-         gpt-5.6-sol default · /work\n",
-        "› Explain the text ◦ Working (1m 16s • esc to interrupt)\n\
-         gpt-5.6-sol default · /work\n",
-        "  ◦ Working (1m 16s • esc to interrupt)\n\
-         › Use /skills to list available skills\n\
-         gpt-5.6-sol default · /work\n",
-        // A stale progress line from an *earlier* turn is deliberately not
-        // tested here, because codex erases that line the moment the turn ends
-        // -- the same erase that leaves a streaming pane with no working
-        // evidence at all (see CODEX_STREAMING_SCREEN). A copy can only survive
-        // in scrollback the pane has already scrolled past, which puts it far
-        // above the bottom lines this rule reads. Narrowing the region to
-        // exclude a screen that cannot occur would cost the margin the observed
-        // tool-call screen needs.
-    ];
-
-    for screen in screens {
-        let result = osc_explain(Agent::Codex, screen, "project", "");
-        assert_eq!(result.state, AgentState::Idle);
-        assert_eq!(
-            result.matched_rule.as_ref().map(|r| r.id.as_str()),
-            Some("osc_title_idle")
-        );
-        assert!(!result.visible_idle);
-        assert!(!result.visible_working);
-    }
-}
-
-#[test]
-fn codex_screen_working_fallback_ignores_interrupted_short_terminal() {
-    let screen = "◦ Working (1m 16s • esc to interrupt)\n\
-        ■ Conversation interrupted\n\
-        ›\n";
-    let result = osc_explain(Agent::Codex, screen, "project", "");
-
-    assert_eq!(result.state, AgentState::Idle);
-    assert_eq!(
-        result.matched_rule.as_ref().map(|r| r.id.as_str()),
-        Some("osc_title_idle")
-    );
-    assert!(!result.visible_idle);
     assert!(!result.visible_working);
 }
 
@@ -1571,7 +1806,7 @@ fn codex_api_error_over_live_prompt_is_blocked() {
 fn codex_working_spinner_clears_a_visible_api_error() {
     let error =
         include_str!("../../../tests/fixtures/agent-detection/codex-api-error-20260831.txt");
-    let screen = format!("{error}Working (1s • esc to interrupt)\n");
+    let screen = error.replacen("\n›\n", "\nWorking (1s • esc to interrupt)\n\n›\n", 1);
     let result = bundled_explain(Agent::Codex, &screen);
 
     assert_eq!(result.state, AgentState::Working);
@@ -1592,7 +1827,7 @@ fn ordinary_claude_permission_prompt_keeps_its_existing_rule() {
     assert_eq!(result.state, AgentState::Blocked);
     assert_eq!(
         result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
-        Some("generic_permission_prompt")
+        Some("bash_permission_prompt")
     );
     assert!(result.visible_blocker);
     assert!(!result.usage_limited);

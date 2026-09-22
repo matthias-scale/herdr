@@ -1,7 +1,7 @@
 id = "codex"
-version = "2026.08.31.1001"
+version = "2026.09.15.1"
 min_engine_version = 3
-updated_at = "2026-08-31T00:00:00Z"
+updated_at = "2026-09-15T00:00:00Z"
 
 [[rules]]
 id = "osc_title_blocked"
@@ -43,9 +43,17 @@ all = [
 ]
 
 [[rules]]
-# Codex renders terminal failures above a returned composer. These rules rank
-# above idle (100) but below screen working (500), so a new working spinner
-# clears a still-visible error without depending on OSC title updates.
+id = "startup_update"
+state = "blocked"
+priority = 950
+region = "bottom_non_empty_lines(20)"
+visible_blocker = true
+contains = ["Update available!", "Update now"]
+regex = ['Skip\s+until\s+next\s+version', 'Press enter to continue\s*\z']
+
+[[rules]]
+# Codex renders terminal failures above a returned composer. Keep these above
+# idle but below working evidence so a resumed turn clears the blocker.
 id = "auth_failure"
 state = "blocked"
 priority = 490
@@ -77,9 +85,7 @@ any = [
 ]
 
 [[rules]]
-# Plan usage exhausted: nobody can answer this, the agent resumes on its own
-# when the window rolls. Ranks above the live blockers (900) and below the
-# working rules (1050+) so a resumed agent clears it without latching.
+# Plan usage exhausted: the agent resumes when the window rolls.
 id = "usage_limit_reached"
 state = "blocked"
 priority = 960
@@ -113,6 +119,8 @@ id = "weak_blocker"
 state = "blocked"
 priority = 600
 region = "whole_recent_without_current_prompt_marker"
+# Sparkles can replace the space after ›. A later response marker makes that prompt stale.
+not = [{ regex = ['(?m)^›[⠁⠂⠄⠈⠐⠠⡀⢀][^\n]*(?:\n(?:[^•■✗✓\n][^\n]*)?)*\z'] }]
 any = [
   { contains = ["[y/n]"] },
   { contains = ["yes (y)"] },
@@ -124,22 +132,22 @@ any = [
 id = "screen_working_fallback"
 state = "working"
 priority = 500
-region = "bottom_non_empty_lines(6)"
+region = "before_current_prompt_marker"
 visible_working = true
-# Anchoring to a block marker looked tidier but empties the region on a real
-# turn: a codex 0.147 pane running a tool prints no bullet at all, so there is
-# nothing to anchor to and the only working rule the manifest has stops firing.
-# Six bottom lines clear the composer and status footer with room for a taller
-# one, and codex erases this line when it streams, so scrollback holds no stale
-# copy to match by accident.
-line_regex = ['^(?:[•◦]\s+)?Working \([^)]*esc to interrupt\)(?: · .*)?$']
-not = [{ contains = ["■ Conversation interrupted"] }]
+# Support animated and reduced-motion status, including dynamic activity labels.
+# The interrupt hint can be remapped, unbound, or hidden, and queued inputs can
+# sit below the status. Require the live timer suffix with no later response.
+any = [{ contains = [" to interrupt)"] }, { contains = ["s)"] }]
+regex = ['(?m)^(?:[•◦][ \t]+)?[^\s›•◦■✗✓─][^\r\n]* \((?:[0-9]+[hm] )*[0-9]+s(?: • [^\r\n]+? to interrupt)?\)(?: · [^\r\n]*)?(?:\r?\n(?:[^•◦›■✗✓─\r\n][^\r\n]*|•[ \t]+(?:Queued\s+follow-up\s+inputs|Messages\s+to\s+be\s+submitted\s+after\s+next\s+tool\s+call(?:\s+\(press\s+[^\r\n]+?\s+to\s+interrupt\s+and\s+send\s+immediately\))?|Messages\s+to\s+be\s+submitted\s+at\s+end\s+of\s+turn)|›[⠁⠂⠄⠈⠐⠠⡀⢀][^\r\n]*)?)*\s*\z']
+# A failed reconnect keeps its final elapsed timer but is no longer working.
+not = [{ line_regex = ['^(?:[•◦][ \t]+)?Reconnect failed — check the endpoint, then relaunch \([0-9hms ]+\)$'] }]
 
 [[rules]]
 id = "osc_title_idle"
 state = "idle"
 priority = 100
 region = "osc_title"
+visible_idle = true
 regex = ['\S']
 not = [
   { regex = ['(?:^| )[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏](?: |$)'] },

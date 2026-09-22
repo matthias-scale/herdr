@@ -1,12 +1,14 @@
+#![cfg(unix)]
+
 mod support;
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -879,6 +881,191 @@ fn live_handoff_preserves_installed_plugins() {
         ["test.live-handoff-added", "test.live-handoff-existing"]
     );
 
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn live_handoff_preserves_accepted_group_history() {
+    fn wait_for_catalog(
+        socket_path: &Path,
+        authority: Option<&str>,
+        state: &str,
+        error_fragment: Option<&str>,
+    ) -> serde_json::Value {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut last = serde_json::Value::Null;
+        while Instant::now() < deadline {
+            last = request(
+                socket_path,
+                serde_json::json!({"id":"test:fleet","method":"fleet.list","params":{}}),
+            );
+            let found = last["result"]["snapshot"]["authority_catalogs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|catalog| {
+                    catalog["connection"] == "history-source"
+                        && catalog["state"] == state
+                        && authority.is_none_or(|authority| catalog["authority_id"] == authority)
+                        && error_fragment.is_none_or(|fragment| {
+                            catalog["error"]
+                                .as_str()
+                                .is_some_and(|error| error.contains(fragment))
+                        })
+                });
+            if found {
+                return last;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        panic!("fleet catalog did not reach {state}: {last}");
+    }
+
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = config_home.join("herdr-dev/herdr.sock");
+    let authority_socket = base.join("authority.sock");
+    let config_path = config_home.join("herdr-dev/config.toml");
+    let data_dir = config_home.join("herdr-dev");
+    let authority = "AQEBAQEBAQEBAQEBAQEBAQ";
+
+    let mut spawned = spawn_default_session_server(&config_home, &runtime_dir);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    fs::write(
+        &config_path,
+        format!(
+            "onboarding = false\n[ui]\nshow_home_on_start = false\n\
+             [remote.fleet]\nself_name = \"replacement\"\ntimeout_ms = 100\n\
+             refresh_interval_ms = 100\n[[remote.fleet.hosts]]\n\
+             name = \"history-source\"\nlocal = true\nsocket = \"{}\"\n",
+            authority_socket.display()
+        ),
+    )
+    .unwrap();
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:reload","method":"server.reload_config","params":{}}),
+    ));
+    wait_for_catalog(&api_socket, None, "unavailable", None);
+
+    fs::write(
+        data_dir.join("authority-acceptance-ledger-v2.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 2,
+            "authorities": [{
+                "authority_id": authority,
+                "revision": 2,
+                "groups": [{
+                    "id": {"owner": authority, "local": 1},
+                    "revision": 2,
+                    "state": "deleted"
+                }],
+                "memberships": []
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let old_pid = spawned
+        .child
+        .process_id()
+        .expect("test server should expose pid");
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    wait_for_api(&api_socket, Duration::from_secs(10));
+    let old_exit_deadline = Instant::now() + Duration::from_secs(5);
+    while spawned.child.try_wait().unwrap().is_none() && Instant::now() < old_exit_deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        spawned.child.try_wait().unwrap().is_some(),
+        "retiring server {old_pid} did not exit"
+    );
+    drop(spawned);
+
+    let listener = UnixListener::bind(&authority_socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let stop_fixture = Arc::new(AtomicBool::new(false));
+    let fixture_stop = Arc::clone(&stop_fixture);
+    let fixture = thread::spawn(move || {
+        while !fixture_stop.load(Ordering::Acquire) {
+            let (mut stream, _) = match listener.accept() {
+                Ok(accepted) => accepted,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("authority fixture accept failed: {error}"),
+            };
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let incoming: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let result = match incoming["method"].as_str() {
+                Some("agent.list") => {
+                    serde_json::json!({"type": "agent_list", "agents": []})
+                }
+                Some("ping") => serde_json::json!({
+                    "type": "pong",
+                    "version": support::expected_version(),
+                    "protocol": support::CURRENT_PROTOCOL
+                }),
+                Some("group.host_snapshot") => serde_json::json!({
+                    "type": "group_host_snapshot",
+                    "snapshot": {
+                        "authority_id": authority,
+                        "revision": 3,
+                        "groups": [{
+                            "id": {"owner": authority, "local": 1},
+                            "revision": 3,
+                            "state": "active",
+                            "name": "Revived"
+                        }],
+                        "memberships": []
+                    }
+                }),
+                method => panic!("unexpected authority fixture method: {method:?}"),
+            };
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({"id": incoming["id"], "result": result})
+            )
+            .unwrap();
+        }
+    });
+
+    let response = wait_for_catalog(
+        &api_socket,
+        Some(authority),
+        "stale",
+        Some("group 1 attempts to replace an observed tombstone"),
+    );
+    // Revision 3 is valid by itself and would be fresh without retained history.
+    // Only a replacement that adopted revision 2's tombstone can reject this revival.
+    let catalog = response["result"]["snapshot"]["authority_catalogs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|catalog| catalog["authority_id"] == authority)
+        .unwrap();
+    assert_eq!(catalog["snapshot"]["revision"], 3);
+    assert_eq!(catalog["snapshot"]["groups"][0]["state"], "active");
+    assert_eq!(catalog["snapshot"]["groups"][0]["name"], "Revived");
+
+    stop_fixture.store(true, Ordering::Release);
+    fixture.join().unwrap();
     let _ = request(
         &api_socket,
         serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),

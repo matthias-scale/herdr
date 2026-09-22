@@ -1156,7 +1156,7 @@ impl HeadlessServer {
 
         // Save session on exit.
         if !self.app.no_session {
-            self.app.save_session_now();
+            self.app.save_session_on_shutdown();
         }
 
         info!("headless server exiting");
@@ -1310,6 +1310,7 @@ impl HeadlessServer {
                 label,
                 env: Default::default(),
                 work_context: None,
+                source_workspace_id: None,
             }),
         )
     }
@@ -5678,6 +5679,11 @@ impl HeadlessServer {
                 .handle_deferred_worktree_api_request(msg.request, msg.respond_to);
             return changed | deferred_changed;
         }
+        if self.app.should_defer_group_api_request(&msg.request) {
+            self.app
+                .start_deferred_group_api_request(msg.request, msg.respond_to);
+            return changed;
+        }
         let (response, api_pane_state_updates) = if matches!(
             &msg.request.method,
             api::schema::Method::ServerReloadConfig(_)
@@ -7581,9 +7587,12 @@ mod tests {
     use super::*;
     use std::time::SystemTime;
 
+    #[cfg(unix)]
     use crate::app::remote_focus::RemoteFocusTransport;
     use crate::app::AppState;
-    use crate::protocol::{CellData, CursorState, PROTOCOL_VERSION};
+    #[cfg(unix)]
+    use crate::protocol::PROTOCOL_VERSION;
+    use crate::protocol::{CellData, CursorState};
     use unicode_width::UnicodeWidthStr;
 
     #[path = "pane_graphics.rs"]

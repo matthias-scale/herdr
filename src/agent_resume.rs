@@ -69,6 +69,24 @@ pub fn session_ref_from_report(
     agent_session_id.and_then(AgentSessionRef::id)
 }
 
+pub fn persisted_session_from_launch_args(
+    agent: crate::detect::Agent,
+    args: &[String],
+) -> Option<PersistedAgentSession> {
+    let [command, session_id] = args else {
+        return None;
+    };
+    if agent != crate::detect::Agent::Codex || command != "resume" || session_id.starts_with('-') {
+        return None;
+    }
+
+    Some(PersistedAgentSession {
+        source: "herdr:codex".into(),
+        agent: "codex".into(),
+        session_ref: AgentSessionRef::id(session_id.clone())?,
+    })
+}
+
 pub fn normalize_session_start_source(value: Option<String>) -> Option<String> {
     match value.as_deref().map(str::trim) {
         Some(
@@ -207,6 +225,26 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
         ("herdr:grok", "grok", AgentSessionRefKind::Id) => {
             vec!["grok".into(), "--resume".into(), session_ref.value.clone()]
         }
+        ("herdr:letta", "letta", AgentSessionRefKind::Id) => {
+            if let Some(agent_id) = session_ref.value.strip_prefix("default:") {
+                if agent_id.is_empty() {
+                    return None;
+                }
+                vec![
+                    "letta".into(),
+                    "--conversation".into(),
+                    "default".into(),
+                    "--agent".into(),
+                    agent_id.into(),
+                ]
+            } else {
+                vec![
+                    "letta".into(),
+                    "--conversation".into(),
+                    session_ref.value.clone(),
+                ]
+            }
+        }
         _ => return None,
     };
 
@@ -244,6 +282,7 @@ pub(crate) fn is_official_agent_source(source: &str, agent: &str) -> bool {
             | ("herdr:cursor", "cursor")
             | ("herdr:antigravity_cli", "agy")
             | ("herdr:grok", "grok")
+            | ("herdr:letta", "letta")
     )
 }
 
@@ -280,6 +319,40 @@ mod tests {
             "herdr:opencode",
             "opencode"
         ));
+    }
+
+    #[test]
+    fn codex_noncanonical_resume_launch_has_no_explicit_session() {
+        assert_eq!(
+            persisted_session_from_launch_args(
+                crate::detect::Agent::Codex,
+                &["resume".into(), "codex-session".into()]
+            )
+            .unwrap()
+            .session_ref
+            .value,
+            "codex-session"
+        );
+        assert!(persisted_session_from_launch_args(
+            crate::detect::Agent::Codex,
+            &["resume".into(), "--last".into()]
+        )
+        .is_none());
+        assert!(persisted_session_from_launch_args(
+            crate::detect::Agent::Codex,
+            &["resume".into(), "not-a-session".into(), "--last".into()]
+        )
+        .is_none());
+        assert!(persisted_session_from_launch_args(
+            crate::detect::Agent::Codex,
+            &[
+                "--remote".into(),
+                "ws://example.test".into(),
+                "resume".into(),
+                "remote-session".into(),
+            ]
+        )
+        .is_none());
     }
 
     #[test]
@@ -474,6 +547,32 @@ mod tests {
             .argv,
             vec!["grok", "--resume", "grok-session"]
         );
+        assert_eq!(
+            plan(
+                "herdr:letta",
+                "letta",
+                &AgentSessionRef::id("conversation-123").unwrap()
+            )
+            .unwrap()
+            .argv,
+            vec!["letta", "--conversation", "conversation-123"]
+        );
+        assert_eq!(
+            plan(
+                "herdr:letta",
+                "letta",
+                &AgentSessionRef::id("default:agent-123").unwrap()
+            )
+            .unwrap()
+            .argv,
+            vec!["letta", "--conversation", "default", "--agent", "agent-123"]
+        );
+        assert!(plan(
+            "herdr:letta",
+            "letta",
+            &AgentSessionRef::id("default:").unwrap()
+        )
+        .is_none());
     }
 
     #[test]

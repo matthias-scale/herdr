@@ -1,7 +1,6 @@
 use serde::Serialize;
 
-use crate::api;
-use crate::api::client::{ApiClient, ApiClientError};
+use crate::api::client::ApiClientError;
 
 pub(super) fn run_status_command(args: &[String]) -> std::io::Result<i32> {
     let Some((scope, json)) = parse_status_args(args) else {
@@ -143,22 +142,25 @@ fn print_server_status_body(server: &ServerRuntimeStatus, indent: &str) {
             println!("{indent}version: {}", option_label(version.as_deref()));
             println!("{indent}protocol: {}", protocol_label(*protocol));
             println!("{indent}compatible: {}", compatibility_label(*protocol));
-            println!("{indent}socket: {}", api::socket_path().display());
+            println!("{indent}socket: {}", super::target::socket_label());
         }
         ServerRuntimeStatus::NotRunning => {
             println!("{indent}status: not running");
-            println!("{indent}socket: {}", api::socket_path().display());
+            println!("{indent}socket: {}", super::target::socket_label());
         }
     }
 }
 
 fn read_server_runtime_status() -> std::io::Result<ServerRuntimeStatus> {
-    match ApiClient::local().status() {
+    match super::target::server_status(&super::target::api_client()?) {
         Ok(status) => Ok(ServerRuntimeStatus::Running {
             version: status.version,
             protocol: status.protocol,
             capabilities: status.capabilities,
         }),
+        Err(err) if super::target::is_remote() => {
+            Err(super::target::remote_error(api_client_error_to_io(err)))
+        }
         Err(ApiClientError::Io(err)) if super::server_not_running_error(&err) => {
             Ok(ServerRuntimeStatus::NotRunning)
         }
@@ -229,6 +231,7 @@ struct ServerStatusJson {
     socket: String,
     session: Option<String>,
     restart_needed: Option<bool>,
+    server_binary_stale: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -241,6 +244,7 @@ struct ServerCapabilitiesJson {
 #[derive(Serialize)]
 struct UpdateStatusJson {
     restart_needed: Option<bool>,
+    server_binary_stale: Option<bool>,
 }
 
 fn client_status_json() -> ClientStatusJson {
@@ -254,7 +258,7 @@ fn client_status_json() -> ClientStatusJson {
 }
 
 fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
-    match server {
+    let mut status = match server {
         ServerRuntimeStatus::Running {
             version,
             protocol,
@@ -272,9 +276,10 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
                     groups_v1: capabilities.groups_v1,
                 }),
             compatible: protocol.map(|value| value == crate::protocol::PROTOCOL_VERSION),
-            socket: api::socket_path().display().to_string(),
+            socket: super::target::socket_label(),
             session: crate::session::active_name(),
             restart_needed: restart_needed_bool(server),
+            server_binary_stale: server_binary_stale_bool(server),
         },
         ServerRuntimeStatus::NotRunning => ServerStatusJson {
             status: "not_running",
@@ -283,16 +288,23 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
             protocol: None,
             capabilities: None,
             compatible: None,
-            socket: api::socket_path().display().to_string(),
+            socket: super::target::socket_label(),
             session: crate::session::active_name(),
             restart_needed: Some(false),
+            server_binary_stale: Some(false),
         },
+    };
+    if let Some((_, session)) = super::target::remote_identity() {
+        status.session = Some(session);
+        status.server_binary_stale = None;
     }
+    status
 }
 
 fn update_status_json(server: &ServerRuntimeStatus) -> UpdateStatusJson {
     UpdateStatusJson {
         restart_needed: restart_needed_bool(server),
+        server_binary_stale: server_binary_stale_bool(server),
     }
 }
 
@@ -305,6 +317,10 @@ fn restart_needed_bool(server: &ServerRuntimeStatus) -> Option<bool> {
         },
         ServerRuntimeStatus::NotRunning => Some(false),
     }
+}
+
+fn server_binary_stale_bool(server: &ServerRuntimeStatus) -> Option<bool> {
+    restart_needed_bool(server)
 }
 
 fn print_json(value: &impl Serialize) -> std::io::Result<()> {

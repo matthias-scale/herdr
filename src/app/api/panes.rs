@@ -2884,7 +2884,7 @@ mod tests {
         app.state.auto_settle_inactive = false;
         app.state.auto_settle_finished = false;
         app.state.auto_settle_done = true;
-        app.state.settle_done_after = std::time::Duration::from_secs(30 * 60);
+        app.state.settle_done_after = std::time::Duration::from_nanos(1);
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
@@ -2893,7 +2893,7 @@ mod tests {
             session_ref: crate::agent_resume::AgentSessionRef::id("quiet-settle-test")
                 .expect("valid session id"),
         });
-        let old_quiet = std::time::Instant::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        let old_quiet = std::time::Instant::now();
         let pane = app.state.workspaces[0].tabs[0]
             .panes
             .get_mut(&pane_id)
@@ -2901,6 +2901,13 @@ mod tests {
         pane.activity.set_last_at(old_quiet);
         pane.activity.observe_quiet(true, old_quiet);
         (app, public_pane_id, pane_id, terminal_id)
+    }
+
+    fn quiet_settle_ready_at(app: &App, pane_id: PaneId) -> std::time::Instant {
+        app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .activity
+            .last_at()
+            + app.state.settle_done_after
     }
 
     fn closing_block_report(
@@ -3033,7 +3040,8 @@ mod tests {
     }
 
     fn assert_guard_blocks_overdue_inactivity_and_ripe_finished_work(guard: &str) {
-        let now = std::time::Instant::now();
+        let activity_at = std::time::Instant::now();
+        let now = activity_at + std::time::Duration::from_secs(120);
         let url = "https://github.com/owner/repo/pull/23";
         let work = merged_work(url);
         let (mut app, public_pane_id, pane_id, terminal_id) = quiet_settle_test_app();
@@ -3056,7 +3064,7 @@ mod tests {
             .get_mut(&pane_id)
             .unwrap()
             .activity
-            .set_last_at(now - std::time::Duration::from_secs(120));
+            .set_last_at(activity_at);
         let armed_at = now - app.state.settle_finished_after;
         assert_eq!(
             app.state
@@ -3090,7 +3098,7 @@ mod tests {
             .get_mut(&pane_id)
             .unwrap()
             .activity
-            .set_last_at(now - std::time::Duration::from_secs(120));
+            .set_last_at(activity_at);
         app.state.auto_settle_inactive = true;
         assert!(
             app.state.workspaces[0].tabs[0].panes[&pane_id]
@@ -3162,7 +3170,6 @@ mod tests {
     }
 
     fn assert_blocker_clear_starts_quiet_window(blocker: &str) {
-        let now = std::time::Instant::now();
         let (mut app, public_pane_id, pane_id, terminal_id) = quiet_settle_test_app();
         match blocker {
             "closing gate" => {
@@ -3181,13 +3188,15 @@ mod tests {
                     visible_working: false,
                     usage_limited: true,
                     process_exited: false,
-                    observed_at: now,
+                    observed_at: std::time::Instant::now(),
                 });
             }
             _ => unreachable!(),
         }
+        let ready_at = quiet_settle_ready_at(&app, pane_id);
         assert_eq!(
-            app.state.refresh_settled_panes_at(None, now, 1_725_000_000),
+            app.state
+                .refresh_settled_panes_at(None, ready_at, 1_725_000_000),
             0,
             "{blocker} must block settlement"
         );
@@ -3209,7 +3218,7 @@ mod tests {
                     visible_working: false,
                     usage_limited: false,
                     process_exited: false,
-                    observed_at: now,
+                    observed_at: std::time::Instant::now(),
                 });
             }
             _ => unreachable!(),
@@ -3254,8 +3263,6 @@ mod tests {
 
     #[test]
     fn settle_guards_follow_focus_pin_and_agent_report_paths() {
-        let now = std::time::Instant::now();
-
         let (mut focused, public_pane_id, pane_id, _) = quiet_settle_test_app();
         let response = focused.handle_pane_focus(
             "focus".into(),
@@ -3264,10 +3271,11 @@ mod tests {
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ready_at = quiet_settle_ready_at(&focused, pane_id);
         assert_eq!(
             focused
                 .state
-                .refresh_settled_panes_at(None, now, 1_725_000_100),
+                .refresh_settled_panes_at(None, ready_at, 1_725_000_100),
             0,
             "focused pane settled"
         );
@@ -3283,10 +3291,11 @@ mod tests {
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ready_at = quiet_settle_ready_at(&pinned, pane_id);
         assert_eq!(
             pinned
                 .state
-                .refresh_settled_panes_at(None, now, 1_725_000_101),
+                .refresh_settled_panes_at(None, ready_at, 1_725_000_101),
             0,
             "pinned tab settled"
         );
@@ -3325,10 +3334,11 @@ mod tests {
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ready_at = quiet_settle_ready_at(&blocked, pane_id);
         assert_eq!(
             blocked
                 .state
-                .refresh_settled_panes_at(None, now, 1_725_000_102),
+                .refresh_settled_panes_at(None, ready_at, 1_725_000_102),
             0,
             "blocked report settled"
         );
@@ -3340,10 +3350,11 @@ mod tests {
             closing_block_report(&public_pane_id, 1, vec![test_gate()]),
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ready_at = quiet_settle_ready_at(&gated, pane_id);
         assert_eq!(
             gated
                 .state
-                .refresh_settled_panes_at(None, now, 1_725_000_103),
+                .refresh_settled_panes_at(None, ready_at, 1_725_000_103),
             0,
             "closing-block report settled"
         );
@@ -3652,7 +3663,7 @@ mod tests {
         app.state.workspaces[0]
             .pane_state_mut(pane_id)
             .unwrap()
-            .done_since = Some(std::time::Instant::now() - std::time::Duration::from_secs(3600));
+            .done_since = Some(std::time::Instant::now());
         let terminal_id = app.state.workspaces[0]
             .pane_state(pane_id)
             .unwrap()
@@ -8639,6 +8650,9 @@ mod tests {
         ));
         env.set("XDG_CONFIG_HOME", &config_home);
         env.remove(crate::session::SESSION_ENV_VAR);
+        app.session_writer = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::persist::SessionWriter::new(false),
+        ));
 
         app.save_session_now();
         assert!(!app.state.session_dirty, "session save should complete");
@@ -9261,7 +9275,8 @@ mod tests {
                 crate::detect::AgentState::Idle,
             );
         let session_id = "6be5e8e1-cce2-4c1e-b04c-62e3e38eb75a";
-        let transcript = format!("/profiles/team-a/projects/-tmp-repro/{session_id}.jsonl");
+        let transcript_dir = std::env::temp_dir().join("profiles/team-a/projects/-tmp-repro");
+        let transcript = transcript_dir.join(format!("{session_id}.jsonl"));
         let response = app.handle_pane_report_agent_session(
             "claude-session".into(),
             PaneReportAgentSessionParams {
@@ -9270,7 +9285,7 @@ mod tests {
                 agent: "claude".into(),
                 seq: Some(10),
                 agent_session_id: Some(session_id.into()),
-                agent_session_path: Some(transcript.clone()),
+                agent_session_path: Some(transcript.display().to_string()),
                 session_start_source: Some("startup".into()),
             },
         );
@@ -9279,7 +9294,7 @@ mod tests {
             app.state.terminals[&terminal_id]
                 .claude_transcript_path
                 .as_deref(),
-            Some(std::path::Path::new(&transcript))
+            Some(transcript.as_path())
         );
         assert_eq!(
             app.state.terminals[&terminal_id]
@@ -9305,7 +9320,7 @@ mod tests {
             app.state.terminals[&terminal_id]
                 .claude_transcript_path
                 .as_deref(),
-            Some(std::path::Path::new(&transcript)),
+            Some(transcript.as_path()),
             "pathless reports for the same session must retain the exact hook path"
         );
 
@@ -9318,7 +9333,10 @@ mod tests {
                 seq: Some(12),
                 agent_session_id: Some("other-session".into()),
                 agent_session_path: Some(
-                    "/profiles/team-a/projects/-tmp-repro/other-session.jsonl".into(),
+                    transcript_dir
+                        .join("other-session.jsonl")
+                        .display()
+                        .to_string(),
                 ),
                 session_start_source: Some("new".into()),
             },
@@ -9328,7 +9346,7 @@ mod tests {
             app.state.terminals[&terminal_id]
                 .claude_transcript_path
                 .as_deref(),
-            Some(std::path::Path::new(&transcript)),
+            Some(transcript.as_path()),
             "an untrusted source cannot replace the accepted transcript target"
         );
 

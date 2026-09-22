@@ -464,7 +464,7 @@ pub(crate) fn parse_remote_block(bytes: &[u8]) -> HostData {
     let mut findings = Vec::new();
     let mut skipped_findings = 0u64;
     let finding_marks = marker_positions(&bytes[..findings_end], REMOTE_ALOOP_FINDING_MARKER);
-    for (index, mark) in finding_marks.iter().enumerate() {
+    for (index, mark) in finding_marks.iter().take(MAX_FINDING_FILES).enumerate() {
         let start = mark + REMOTE_ALOOP_FINDING_MARKER.len();
         let end = finding_marks
             .get(index + 1)
@@ -491,7 +491,7 @@ pub(crate) fn parse_remote_block(bytes: &[u8]) -> HostData {
         let runs_end = section_end(runs_start, &[registry_at, Some(end_at)]);
         let section = bytes.get(runs_start..runs_end).unwrap_or_default();
         let run_marks = marker_positions(section, REMOTE_ALOOP_RUN_MARKER);
-        for (index, mark) in run_marks.iter().enumerate() {
+        for (index, mark) in run_marks.iter().take(MAX_RUN_FILES).enumerate() {
             let start = mark + REMOTE_ALOOP_RUN_MARKER.len();
             let end = run_marks.get(index + 1).copied().unwrap_or(section.len());
             let record = &section[start..end];
@@ -504,7 +504,16 @@ pub(crate) fn parse_remote_block(bytes: &[u8]) -> HostData {
             if !valid_name_part(loop_name) {
                 continue;
             }
-            loops.push(parse_run_tail(&record[header_end + 2..], loop_name));
+            let content = &record[header_end + 2..];
+            let content = if content.len() > MAX_RUN_FILE_BYTES {
+                let tail = &content[content.len() - MAX_RUN_FILE_BYTES..];
+                tail.iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(&[][..], |newline| &tail[newline + 1..])
+            } else {
+                content
+            };
+            loops.push(parse_run_tail(content, loop_name));
         }
     }
 
@@ -1070,6 +1079,46 @@ mod tests {
         for bytes in [reordered, truncated] {
             assert!(std::panic::catch_unwind(|| parse_remote_block(&bytes)).is_ok());
         }
+    }
+
+    #[test]
+    fn remote_block_reapplies_producer_file_caps() {
+        let mut block = Vec::new();
+        for index in 0..=MAX_FINDING_FILES {
+            block.extend_from_slice(REMOTE_ALOOP_FINDING_MARKER);
+            block.extend_from_slice(&finding_json(
+                "loop-a",
+                &format!("finding-{index:02}"),
+                "pending",
+                "2026-09-18T09:50:00Z",
+            ));
+            block.push(b'\n');
+        }
+        block.extend_from_slice(REMOTE_ALOOP_RUNS_MARKER);
+        block.extend_from_slice(b"\x1eHERDR_FLEET_ALOOP_RUN_V1:oversized\x1e\n");
+        block.extend_from_slice(
+            b"{\"at\":\"2026-09-18T09:59:00Z\",\"duration_ms\":1,\"exit\":0,\"findings\":0,\"stable_ids\":[],\"log_excerpt\":\"must be dropped\"}\n",
+        );
+        block.extend(std::iter::repeat_n(b'x', MAX_RUN_FILE_BYTES + 1));
+        let run = b"{\"at\":\"2026-09-18T09:59:00Z\",\"duration_ms\":1,\"exit\":0,\"findings\":0,\"stable_ids\":[],\"log_excerpt\":\"kept\"}\n";
+        for index in 1..=MAX_RUN_FILES {
+            block.extend_from_slice(
+                format!("\x1eHERDR_FLEET_ALOOP_RUN_V1:loop-{index:02}\x1e\n").as_bytes(),
+            );
+            block.extend_from_slice(run);
+        }
+        block.extend_from_slice(REMOTE_ALOOP_END_MARKER);
+
+        let data = parse_remote_block(&block);
+
+        assert_eq!(data.findings.len(), MAX_FINDING_FILES);
+        assert_eq!(
+            data.findings.last().expect("last finding").stable_id,
+            "finding-39"
+        );
+        assert_eq!(data.loops.len(), MAX_RUN_FILES);
+        assert!(data.loops[0].runs.is_empty(), "oversized run tail leaked");
+        assert!(data.loops.iter().all(|runs| runs.loop_name != "loop-32"));
     }
 
     #[test]

@@ -922,6 +922,7 @@ fn upsert_section_raw(content: &str, section: &str, key: &str, value: &str) -> S
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn symlink_scratch_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "herdr-config-symlink-{}",

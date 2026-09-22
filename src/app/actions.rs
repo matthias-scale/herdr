@@ -3367,6 +3367,8 @@ impl AppState {
     pub fn handle_app_event(&mut self, event: AppEvent) -> Vec<PaneStateUpdate> {
         match event {
             AppEvent::FleetRefreshed { .. } => Vec::new(),
+            AppEvent::AuthorityAcceptanceLedgerPersisted { .. } => Vec::new(),
+            AppEvent::AuthorityAcceptanceLedgerReconciled { .. } => Vec::new(),
             AppEvent::RemoteFocusTransition { .. } => Vec::new(),
             AppEvent::RemoteFocusFrame { .. } => Vec::new(),
             #[cfg(unix)]
@@ -3732,6 +3734,7 @@ impl AppState {
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::TabBarCommandFinished { .. } => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),
+            AppEvent::PaneExitCheckpoint { .. } => Vec::new(),
         }
     }
 
@@ -4956,6 +4959,11 @@ mod tests {
         state.terminals.get_mut(&terminal_id).unwrap().cwd = stale_cwd;
 
         let (events, _) = tokio::sync::mpsc::channel(4);
+        #[cfg(windows)]
+        let live_test_command = "cmd.exe";
+        #[cfg(not(windows))]
+        let live_test_command = "/bin/sh";
+
         let runtime = crate::terminal::TerminalRuntime::spawn(
             pane,
             24,
@@ -4964,7 +4972,10 @@ mod tests {
             0,
             crate::terminal_theme::TerminalTheme::default(),
             None,
-            crate::pane::PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
+            crate::pane::PaneShellConfig::new(
+                live_test_command,
+                crate::config::ShellModeConfig::NonLogin,
+            ),
             &crate::pane::PaneLaunchEnv::default(),
             events,
             std::sync::Arc::new(tokio::sync::Notify::new()),

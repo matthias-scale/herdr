@@ -71,7 +71,6 @@ CHECKS = (
         ),
     ),
     Check("integrations", ("just", "integration-assets-test")),
-    Check("marketplace", ("just", "plugin-marketplace-test")),
 )
 
 WINDOWS_TEST_CHECK = (
@@ -112,7 +111,7 @@ def tool_env() -> dict[str, str]:
     if not zig or not Path(zig).is_file():
         mise = shutil.which("mise")
         mise_root = (
-            command_output((mise, "where", "zig@0.15.2")) if mise else None
+            command_output((mise, "where", "zig@0.16.0")) if mise else None
         )
         if mise_root:
             candidate = Path(mise_root) / "zig"

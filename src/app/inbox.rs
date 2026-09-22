@@ -483,10 +483,14 @@ mod tests {
     fn the_queue_shows_its_first_entry_until_it_is_deferred() {
         let first = PaneId::alloc();
         let second = PaneId::alloc();
-        let now = Instant::now();
+        let first_since = Instant::now();
         let queue = vec![
-            agent(first, Some(now - Duration::from_secs(600)), Some(1)),
-            agent(second, Some(now - Duration::from_secs(60)), Some(2)),
+            agent(first, Some(first_since), Some(1)),
+            agent(
+                second,
+                Some(first_since + Duration::from_secs(540)),
+                Some(2),
+            ),
         ];
         let mut inbox = InboxState::default();
 
@@ -536,12 +540,16 @@ mod tests {
 
     #[test]
     fn the_longest_wait_comes_first() {
-        let now = Instant::now();
+        let oldest_since = Instant::now();
         let oldest = PaneId::alloc();
         let newest = PaneId::alloc();
         let mut queue = [
-            agent(newest, Some(now - Duration::from_secs(30)), Some(2)),
-            agent(oldest, Some(now - Duration::from_secs(3_600)), Some(1)),
+            agent(
+                newest,
+                Some(oldest_since + Duration::from_secs(3_570)),
+                Some(2),
+            ),
+            agent(oldest, Some(oldest_since), Some(1)),
         ];
 
         queue.sort_by(by_longest_wait);

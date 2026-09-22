@@ -9,7 +9,7 @@ use super::snapshot::{
     SessionSnapshot, SNAPSHOT_VERSION,
 };
 
-fn session_path() -> PathBuf {
+pub(super) fn session_path() -> PathBuf {
     crate::session::data_dir().join("session.json")
 }
 
@@ -18,6 +18,16 @@ fn session_history_path() -> PathBuf {
 }
 
 static SAVE_GENERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_JSON_COMMITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn fail_next_json_commits_for_test(count: usize) {
+    FAIL_NEXT_JSON_COMMITS.with(|remaining| remaining.set(count));
+}
 
 fn next_save_generation() -> String {
     // Nanosecond time makes process-restart collisions impractical; PID and a
@@ -48,6 +58,15 @@ fn save_json_to_path<T: serde::Serialize>(path: &Path, snapshot: &T) -> std::io:
 }
 
 pub(crate) fn commit_json_to_path(path: &Path, json: &str) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_JSON_COMMITS.with(|remaining| {
+        let count = remaining.get();
+        remaining.set(count.saturating_sub(1));
+        count > 0
+    }) {
+        return Err(std::io::Error::other("injected JSON commit failure"));
+    }
+
     let target = resolve_write_target(path)?;
     let parent = target
         .parent()
@@ -110,17 +129,38 @@ fn save_to_paths_with_hook(
 ) -> std::io::Result<()> {
     let generation = next_save_generation();
     let session_json = json_with_generation(snapshot, &generation)?;
-    if let Some(history) = history {
+    let history_result = if let Some(history) = history {
         let history_json = json_with_generation(history, &generation)?;
-        commit_json_to_path(history_path, &history_json)?;
+        commit_json_to_path(history_path, &history_json)
     } else {
-        clear_path(history_path)?;
+        clear_path(history_path)
+    };
+    if history_result.is_ok() {
+        after_history_commit()?;
+    } else if let Err(err) = &history_result {
+        tracing::warn!(
+            event = "persist.history",
+            outcome = "error",
+            path = %history_path.display(),
+            err = %err,
+            "failed to persist optional session history"
+        );
     }
-    after_history_commit()?;
-    // The topology is the commit marker: it becomes visible only after the
-    // matching history file (or its durable removal) has committed.
+    // The topology is the commit marker. If optional history failed, its old
+    // generation no longer matches and restore safely ignores it.
     commit_json_to_path(session_path, &session_json)?;
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn save_history_to_path(
+    path: &Path,
+    history: Option<&SessionHistorySnapshot>,
+) -> std::io::Result<()> {
+    match history {
+        Some(history) => save_json_to_path(path, history),
+        None => clear_path(path),
+    }
 }
 
 pub(super) fn clear_path(path: &Path) -> std::io::Result<()> {
@@ -131,35 +171,6 @@ pub(super) fn clear_path(path: &Path) -> std::io::Result<()> {
         SAVE_GENERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     crate::platform::remove_file_durably(&target, &tombstone)
-}
-
-pub fn save(
-    snapshot: &SessionSnapshot,
-    history: Option<&SessionHistorySnapshot>,
-) -> std::io::Result<()> {
-    let path = session_path();
-    let history_path = session_history_path();
-    if let Err(err) = save_to_paths(&path, &history_path, snapshot, history) {
-        crate::logging::session_save_failed(&path, &err.to_string());
-        return Err(err);
-    }
-    crate::logging::session_saved(&path, snapshot.workspaces.len());
-    Ok(())
-}
-
-pub fn clear() -> std::io::Result<()> {
-    let path = session_path();
-    let history_path = session_history_path();
-    if let Err(err) = clear_path(&history_path) {
-        crate::logging::session_clear_failed(&history_path, &err.to_string());
-        return Err(err);
-    }
-    if let Err(err) = clear_path(&path) {
-        crate::logging::session_clear_failed(&path, &err.to_string());
-        return Err(err);
-    }
-    crate::logging::session_cleared(&path);
-    Ok(())
 }
 
 pub fn clear_history() {
@@ -175,13 +186,20 @@ pub fn load() -> Option<SessionSnapshot> {
 }
 
 fn load_from_path(path: &Path) -> Option<SessionSnapshot> {
-    if !path.exists() {
-        return None;
-    }
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            tracing::info!(
+                event = "persist.restore", subsystem = "persist", outcome = "missing",
+                path = %path.display(), "session file is missing"
+            );
+            return None;
+        }
         Err(err) => {
-            warn!(err = %err, "failed to read session file");
+            warn!(
+                event = "persist.restore", subsystem = "persist", outcome = "read_error",
+                path = %path.display(), err = %err, "failed to read session file"
+            );
             return None;
         }
     };
@@ -191,14 +209,17 @@ fn load_from_path(path: &Path) -> Option<SessionSnapshot> {
             if let Some(version) = snapshot_file_version(&content) {
                 if version > SNAPSHOT_VERSION {
                     warn!(
-                        file_version = version,
-                        supported = SNAPSHOT_VERSION,
+                        event = "persist.restore", subsystem = "persist", outcome = "unsupported_version",
+                        path = %path.display(), file_version = version, supported = SNAPSHOT_VERSION,
                         "session file is from a newer herdr version, ignoring"
                     );
                     return None;
                 }
             }
-            warn!(err = %err, "failed to parse session file, ignoring");
+            warn!(
+                event = "persist.restore", subsystem = "persist", outcome = "parse_error",
+                path = %path.display(), err = %err, "failed to parse session file, ignoring"
+            );
             None
         }
     }
@@ -283,6 +304,7 @@ mod tests {
         SessionHistorySnapshot {
             version: SNAPSHOT_VERSION,
             generation: None,
+            layout_fingerprint: None,
             workspaces: vec![WorkspaceHistorySnapshot {
                 tabs: vec![TabHistorySnapshot {
                     panes: std::collections::HashMap::from([(
@@ -302,13 +324,8 @@ mod tests {
     fn save_to_paths_writes_pane_history_only_to_history_file() {
         let (session_path, history_path) = temp_session_paths("split-history");
 
-        save_to_paths(
-            &session_path,
-            &history_path,
-            &empty_snapshot(),
-            Some(&history_snapshot("split-secret")),
-        )
-        .unwrap();
+        save_to_path(&session_path, &empty_snapshot()).unwrap();
+        save_history_to_path(&history_path, Some(&history_snapshot("split-secret"))).unwrap();
 
         let session = std::fs::read_to_string(&session_path).unwrap();
         let history = std::fs::read_to_string(&history_path).unwrap();
@@ -320,15 +337,10 @@ mod tests {
     #[test]
     fn save_to_paths_removes_stale_history_when_history_is_disabled() {
         let (session_path, history_path) = temp_session_paths("clear-history");
-        save_to_paths(
-            &session_path,
-            &history_path,
-            &empty_snapshot(),
-            Some(&history_snapshot("stale-secret")),
-        )
-        .unwrap();
+        save_to_path(&session_path, &empty_snapshot()).unwrap();
+        save_history_to_path(&history_path, Some(&history_snapshot("stale-secret"))).unwrap();
 
-        save_to_paths(&session_path, &history_path, &empty_snapshot(), None).unwrap();
+        save_history_to_path(&history_path, None).unwrap();
 
         assert!(session_path.exists());
         assert!(!history_path.exists());

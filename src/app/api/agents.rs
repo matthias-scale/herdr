@@ -620,13 +620,16 @@ mod tests {
 
     #[test]
     fn agent_list_display_title_filters_tilde_cwd_with_host_home() {
+        let _env_lock = crate::integration::integration_env_lock();
         let mut app = app_with_agent();
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         mark_agent(&mut app, 0, pane_id);
         let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
             .clone();
-        let home = std::env::var_os("HOME").expect("test host HOME");
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .expect("test host HOME or USERPROFILE");
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
         terminal.cwd = std::path::PathBuf::from(home).join("fleet-title-project");
         terminal.set_terminal_title(Some("~/fleet-title-project".into()));
@@ -937,7 +940,7 @@ mod tests {
             panic!("expected agent explain response");
         };
         assert_eq!(explain["screen_detection_skipped"], false);
-        assert_eq!(explain["matched_rule"]["id"], "generic_permission_prompt");
+        assert_eq!(explain["matched_rule"]["id"], "bash_permission_prompt");
         assert_eq!(explain["screen_state"], "blocked");
         assert_eq!(explain["effective_state"], "working");
         assert_eq!(explain["arbitration"], "closing_block_report");

@@ -112,7 +112,7 @@ if [[ -n "$zig_bin" && ! -x "$zig_bin" ]]; then
     exit 66
 fi
 if [[ -z "$zig_bin" ]] && command -v mise >/dev/null 2>&1; then
-    zig_root="$(mise where zig@0.15.2 2>/dev/null || true)"
+    zig_root="$(mise where zig@0.16.0 2>/dev/null || true)"
     if [[ -x "$zig_root/zig" ]]; then
         zig_bin="$zig_root/zig"
     fi

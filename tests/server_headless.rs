@@ -1,5 +1,7 @@
 //! Integration tests for headless server mode.
 
+#![cfg(unix)]
+
 mod support;
 
 use std::fs;

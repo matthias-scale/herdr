@@ -162,7 +162,9 @@ pub(crate) struct RefreshWorkItem {
 enum FileIdentity {
     #[cfg(unix)]
     Unix { device: u64, inode: u64 },
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    Windows(crate::platform::WindowsFileIdentity),
+    #[cfg(not(any(unix, windows)))]
     Portable { created: Option<SystemTime> },
 }
 
@@ -1127,24 +1129,29 @@ fn open_regular_transcript(path: &Path) -> std::io::Result<(File, Metadata, File
             "Claude transcript must be a regular file",
         ));
     }
-    let identity = file_identity(&metadata);
+    let identity = file_identity(&file, &metadata)?;
     Ok((file, metadata, identity))
 }
 
 #[cfg(unix)]
-fn file_identity(metadata: &Metadata) -> FileIdentity {
+fn file_identity(_file: &File, metadata: &Metadata) -> std::io::Result<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
-    FileIdentity::Unix {
+    Ok(FileIdentity::Unix {
         device: metadata.dev(),
         inode: metadata.ino(),
-    }
+    })
 }
 
-#[cfg(not(unix))]
-fn file_identity(metadata: &Metadata) -> FileIdentity {
-    FileIdentity::Portable {
+#[cfg(windows)]
+fn file_identity(file: &File, _metadata: &Metadata) -> std::io::Result<FileIdentity> {
+    crate::platform::windows_file_identity(file).map(FileIdentity::Windows)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_identity(_file: &File, metadata: &Metadata) -> std::io::Result<FileIdentity> {
+    Ok(FileIdentity::Portable {
         created: metadata.created().ok(),
-    }
+    })
 }
 
 pub(crate) fn validated_transcript_path(
@@ -1374,6 +1381,10 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn absolute_fixture_path(relative: impl AsRef<Path>) -> String {
+        std::env::temp_dir().join(relative).display().to_string()
     }
 
     fn line(value: Value) -> Vec<u8> {
@@ -1996,8 +2007,12 @@ mod tests {
     #[test]
     fn claude_transcript_path_binds_profile_path_to_session_id() {
         let session = AgentSessionRef::id(SESSION_ID).unwrap();
-        let default = format!("/home/user/.claude/projects/-tmp-repro/{SESSION_ID}.jsonl");
-        let profile = format!("/profiles/team-a/projects/-tmp-repro/{SESSION_ID}.jsonl");
+        let default = absolute_fixture_path(format!(
+            "home/user/.claude/projects/-tmp-repro/{SESSION_ID}.jsonl"
+        ));
+        let profile = absolute_fixture_path(format!(
+            "profiles/team-a/projects/-tmp-repro/{SESSION_ID}.jsonl"
+        ));
         assert_eq!(
             validated_transcript_path("herdr:claude", "claude", Some(&session), Some(&default)),
             Some(PathBuf::from(default))
@@ -2011,14 +2026,14 @@ mod tests {
     #[test]
     fn spoofed_or_mismatched_transcript_path_is_rejected() {
         let session = AgentSessionRef::id(SESSION_ID).unwrap();
-        let other = "/tmp/projects/-tmp-repro/other.jsonl";
-        let traversal = format!("/tmp/projects/../-tmp-repro/{SESSION_ID}.jsonl");
+        let other = absolute_fixture_path("projects/-tmp-repro/other.jsonl");
+        let traversal = absolute_fixture_path(format!("projects/../-tmp-repro/{SESSION_ID}.jsonl"));
         assert!(
-            validated_transcript_path("custom:claude", "claude", Some(&session), Some(other))
+            validated_transcript_path("custom:claude", "claude", Some(&session), Some(&other))
                 .is_none()
         );
         assert!(
-            validated_transcript_path("herdr:claude", "claude", Some(&session), Some(other))
+            validated_transcript_path("herdr:claude", "claude", Some(&session), Some(&other))
                 .is_none()
         );
         assert!(validated_transcript_path(
@@ -2406,8 +2421,8 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let url = "https://github.com/owner/repo/pull/21";
         let work = merged_work(url);
-        let now = Instant::now();
-        let old_activity = now - std::time::Duration::from_secs(2 * 60 * 60);
+        let old_activity = Instant::now();
+        let now = old_activity + std::time::Duration::from_secs(2 * 60 * 60);
         app.state.active = None;
         app.state.auto_settle_inactive = false;
         app.state.auto_settle_finished = true;

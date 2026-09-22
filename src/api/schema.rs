@@ -115,6 +115,8 @@ pub enum Method {
     GroupRename(GroupRenameParams),
     #[serde(rename = "group.delete")]
     GroupDelete(GroupDeleteParams),
+    #[serde(rename = "group.authority_mutate")]
+    GroupAuthorityMutate(AuthorityMutationParams),
     #[serde(rename = "worktree.list")]
     WorktreeList(WorktreeListParams),
     #[serde(rename = "worktree.create")]

@@ -39,8 +39,6 @@ function Invoke-CargoTestFilter {
     $commonArguments = @(
         "test",
         "--locked",
-        "--target",
-        "x86_64-pc-windows-msvc",
         "--bin",
         "herdr",
         $Filter
@@ -76,15 +74,11 @@ function Invoke-CargoTestFilter {
     Invoke-Checked cargo $runArguments
 }
 
-Invoke-Checked rustup @("target", "add", "x86_64-pc-windows-msvc")
 Invoke-Checked cargo @("fmt", "--check")
 Invoke-CargoWithZigCacheRecovery @(
     "clippy",
-    "--bin",
-    "herdr",
+    "--all-targets",
     "--locked",
-    "--target",
-    "x86_64-pc-windows-msvc",
     "--",
     "-D",
     "warnings"
@@ -94,7 +88,11 @@ if ($Mode -eq "lint") {
     return
 }
 
+# Upstream runs its whole suite on Windows (#3660). The fork carries ~6,000 tests
+# on top of that and they do not finish inside any sane Windows CI budget, so keep
+# the fork's targeted Windows scope: the platform-specific tests plus the two areas
+# that have regressed on Windows before.
 Invoke-CargoTestFilter "windows_"
 Invoke-CargoTestFilter "server::client_transport::tests"
 Invoke-CargoTestFilter "app::tests::native_repeats_and_releases_follow_the_pressed_pane" -Exact
-Invoke-Checked cargo @("build", "--locked", "--target", "x86_64-pc-windows-msvc")
+Invoke-Checked cargo @("build", "--locked")

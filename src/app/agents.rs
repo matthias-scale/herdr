@@ -216,6 +216,8 @@ impl App {
         {
             return Err(AgentStartError::InvalidArgument);
         }
+        let persisted_agent_session =
+            crate::agent_resume::persisted_session_from_launch_args(kind, &params.args);
         let conflicts = self.agent_name_conflicts(&name, "");
         if !conflicts.is_empty() {
             return Err(AgentStartError::DuplicateName {
@@ -272,6 +274,9 @@ impl App {
         if let Err(err) = runtime.try_send_bytes(Bytes::from(bytes)) {
             terminal.clear_agent_name();
             return Err(AgentStartError::InputFailed(err.to_string()));
+        }
+        if let Some(session) = persisted_agent_session {
+            terminal.set_persisted_agent_session(session);
         }
         self.state.mark_session_dirty();
         self.schedule_session_save();
@@ -577,7 +582,9 @@ pub(super) enum AgentRenameError {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_agent_rename_name, runtime_hosts_agent, valid_agent_name};
+    #[cfg(unix)]
+    use super::runtime_hosts_agent;
+    use super::{normalize_agent_rename_name, valid_agent_name};
 
     #[test]
     fn agent_names_use_a_small_cli_safe_grammar() {

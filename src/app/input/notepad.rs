@@ -35,6 +35,8 @@ pub(crate) enum NotepadRequest {
     FocusAgentPane(Option<String>),
     /// Copy the full URL of an agent-tab link row.
     CopyAgentLink(String),
+    /// Open the full URL of an agent-tab link row in the operator's browser.
+    OpenAgentLink(String),
 }
 
 fn rect_contains(rect: ratatui::layout::Rect, column: u16, row: u16) -> bool {
@@ -286,7 +288,9 @@ impl AppState {
     }
 
     /// A click in the agent tab's body resolves to the row's action: fold a
-    /// section, focus a subagent's pane, or copy a link.
+    /// section, focus a subagent's pane, or follow a link. A plain click opens
+    /// the link; alt-click copies it instead, which is the only way to get a
+    /// ticket's compact id rather than its URL.
     fn handle_agent_tab_click(&mut self, mouse: &MouseEvent) {
         let body = notepad_body_rect(self.view.notepad_rect);
         if !rect_contains(body, mouse.column, mouse.row) {
@@ -306,7 +310,14 @@ impl AppState {
                 self.request_notepad(NotepadRequest::FocusAgentPane(target));
             }
             Some(NotepadAgentAction::CopyLink(url)) => {
-                self.request_notepad(NotepadRequest::CopyAgentLink(url));
+                if mouse
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::ALT)
+                {
+                    self.request_notepad(NotepadRequest::CopyAgentLink(url));
+                } else {
+                    self.request_notepad(NotepadRequest::OpenAgentLink(url));
+                }
             }
             Some(NotepadAgentAction::CopyLinkIndex(_)) | Some(NotepadAgentAction::None) | None => {}
         }
@@ -467,6 +478,15 @@ impl crate::app::App {
                     self.show_work_link_notice("could not copy work link");
                 } else {
                     self.show_work_link_notice("copied");
+                }
+                true
+            }
+            NotepadRequest::OpenAgentLink(url) => {
+                if let Err(error) = crate::platform::open_url(&url) {
+                    tracing::warn!(%error, %url, "failed to open agent link");
+                    self.show_work_link_notice("could not open link");
+                } else {
+                    self.show_work_link_notice("opened");
                 }
                 true
             }
@@ -679,8 +699,10 @@ mod tests {
         state.view.notepad_rect = Rect::new(0, 14, 20, 26);
         state.set_manual_notepad_height(30);
         assert_eq!(state.notepad.height, 10);
+        // Dragging to the top of a 26-row panel keeps every row it covers: the
+        // fixed ceiling no longer truncates the drag.
         state.set_manual_notepad_height(2);
-        assert_eq!(state.notepad.height, crate::notepad::MAX_HEIGHT);
+        assert_eq!(state.notepad.height, 38);
         state.set_manual_notepad_height(45);
         assert_eq!(state.notepad.height, crate::notepad::MIN_HEIGHT);
     }
@@ -809,6 +831,13 @@ mod tests {
         assert!(state.handle_notepad_mouse(&click_at(body.x, body.y + index as u16)));
     }
 
+    fn alt_click_agent_row(state: &mut AppState, index: usize) {
+        let body = notepad_body_rect(state.view.notepad_rect);
+        let mut click = click_at(body.x, body.y + index as u16);
+        click.modifiers = KeyModifiers::ALT;
+        assert!(state.handle_notepad_mouse(&click));
+    }
+
     #[test]
     fn clicking_the_agent_header_selects_the_read_only_tab() {
         let mut state = state_with_notepad();
@@ -929,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_link_row_asks_to_copy_the_full_url() {
+    fn clicking_a_link_row_asks_to_open_the_full_url() {
         let (mut state, _) = state_with_agent_tab();
         let link = state
             .view
@@ -939,6 +968,25 @@ mod tests {
             .expect("link row");
 
         click_agent_row(&mut state, link);
+        assert_eq!(
+            state.notepad_request,
+            Some(NotepadRequest::OpenAgentLink(
+                "https://github.com/owner/repo/pull/1259".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn alt_clicking_a_link_row_still_copies_it() {
+        let (mut state, _) = state_with_agent_tab();
+        let link = state
+            .view
+            .notepad_agent_rows
+            .iter()
+            .position(|row| matches!(row.action, NotepadAgentAction::CopyLink(_)))
+            .expect("link row");
+
+        alt_click_agent_row(&mut state, link);
         assert_eq!(
             state.notepad_request,
             Some(NotepadRequest::CopyAgentLink(

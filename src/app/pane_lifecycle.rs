@@ -380,10 +380,15 @@ mod tests {
         (app, pane_id)
     }
 
+    fn elapsed_test_clock(elapsed: Duration) -> (Instant, Instant) {
+        let since = Instant::now();
+        (since, since + elapsed)
+    }
+
     #[test]
     fn never_reaps_a_pane_that_still_has_live_work() {
         for label in ["subagents", "shell", "usage"] {
-            let done_since = Instant::now() - Duration::from_secs(5 * 60 * 60);
+            let (done_since, now) = elapsed_test_clock(Duration::from_secs(5 * 60 * 60));
             let (mut app, pane_id) = lifecycle_state(AgentState::Idle, false, done_since);
             let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
                 .attached_terminal_id
@@ -394,14 +399,14 @@ mod tests {
                 "shell" => terminal.holds_shell = true,
                 _ => terminal.usage_limited = true,
             }
-            let due = app.due_done_pane_ids(Instant::now());
+            let due = app.due_done_pane_ids(now);
             assert!(due.is_empty(), "{label}: still-live pane reaped: {due:?}");
         }
     }
 
     #[test]
     fn never_reaps_a_pane_holding_an_unanswered_gate() {
-        let done_since = Instant::now() - Duration::from_secs(5 * 60 * 60);
+        let (done_since, now) = elapsed_test_clock(Duration::from_secs(5 * 60 * 60));
         let (mut app, pane_id) = lifecycle_state(AgentState::Idle, false, done_since);
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
@@ -420,7 +425,7 @@ mod tests {
         }];
         let pane = app.workspaces[0].pane_state(pane_id).expect("pane state");
         assert!(pane.agent_projection(terminal).counts_as_blocked());
-        let due = app.due_done_pane_ids(Instant::now());
+        let due = app.due_done_pane_ids(now);
         assert!(
             due.is_empty(),
             "a pane waiting on a human gate must not be reaped: {due:?}"
@@ -429,7 +434,7 @@ mod tests {
 
     #[test]
     fn never_reaps_a_pane_holding_an_unanswered_closing_item() {
-        let done_since = Instant::now() - Duration::from_secs(5 * 60 * 60);
+        let (done_since, now) = elapsed_test_clock(Duration::from_secs(5 * 60 * 60));
         let (mut app, pane_id) = lifecycle_state(AgentState::Idle, false, done_since);
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
@@ -449,7 +454,7 @@ mod tests {
         let pane = &app.workspaces[0].tabs[0].panes[&pane_id];
         assert!(!pane_is_done(pane, terminal));
         assert!(!pane_is_quiet(pane, terminal));
-        let due = app.due_done_pane_ids(Instant::now());
+        let due = app.due_done_pane_ids(now);
         assert!(
             due.is_empty(),
             "a pane waiting on a human answer must not be reaped: {due:?}"
@@ -458,7 +463,7 @@ mod tests {
 
     #[test]
     fn settled_pane_is_not_done_or_reaped() {
-        let done_since = Instant::now() - Duration::from_secs(5 * 60 * 60);
+        let (done_since, now) = elapsed_test_clock(Duration::from_secs(5 * 60 * 60));
         let (mut app, pane_id) = lifecycle_state(AgentState::Idle, false, done_since);
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
@@ -476,13 +481,12 @@ mod tests {
         pane.settled_at = Some(1_725_000_021);
 
         assert!(!pane_is_done(pane, &app.terminals[&terminal_id]));
-        assert!(app.due_done_pane_ids(Instant::now()).is_empty());
+        assert!(app.due_done_pane_ids(now).is_empty());
     }
 
     #[test]
     fn settled_unresumable_quiet_pane_stays_on_the_reap_clock() {
-        let now = Instant::now();
-        let quiet_since = now - Duration::from_secs(5 * 60 * 60);
+        let (quiet_since, now) = elapsed_test_clock(Duration::from_secs(5 * 60 * 60));
         let (mut app, pane_id) = lifecycle_state(AgentState::Idle, true, quiet_since);
         let pane = app.workspaces[0].tabs[0]
             .panes
@@ -531,34 +535,31 @@ mod tests {
 
     #[test]
     fn never_reaps_working_blocked_or_unknown_statuses() {
-        let done_since = Instant::now() - Duration::from_secs(5 * 60 * 60);
+        let (done_since, now) = elapsed_test_clock(Duration::from_secs(5 * 60 * 60));
         for state in [
             AgentState::Working,
             AgentState::Blocked,
             AgentState::Unknown,
         ] {
             let (app, _) = lifecycle_state(state, false, done_since);
-            assert!(
-                app.due_done_pane_ids(Instant::now()).is_empty(),
-                "{state:?}"
-            );
+            assert!(app.due_done_pane_ids(now).is_empty(), "{state:?}");
         }
     }
 
     #[test]
     fn never_reaps_the_currently_focused_pane() {
-        let done_since = Instant::now() - Duration::from_secs(5 * 60 * 60);
+        let (done_since, now) = elapsed_test_clock(Duration::from_secs(5 * 60 * 60));
         let (mut app, _) = lifecycle_state(AgentState::Idle, false, done_since);
         app.active = Some(0);
-        assert!(app.due_done_pane_ids(Instant::now()).is_empty());
+        assert!(app.due_done_pane_ids(now).is_empty());
     }
 
     #[test]
     fn never_reaps_a_pane_in_a_pinned_tab() {
-        let done_since = Instant::now() - Duration::from_secs(5 * 60 * 60);
+        let (done_since, now) = elapsed_test_clock(Duration::from_secs(5 * 60 * 60));
         let (mut app, _) = lifecycle_state(AgentState::Idle, false, done_since);
         app.workspaces[0].tabs[0].pinned = true;
-        assert!(app.due_done_pane_ids(Instant::now()).is_empty());
+        assert!(app.due_done_pane_ids(now).is_empty());
     }
 
     #[test]

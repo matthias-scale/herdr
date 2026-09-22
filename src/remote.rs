@@ -1,8 +1,11 @@
-mod attach;
 mod control;
 #[cfg(unix)]
 mod host_unix;
-
+mod machine_args;
+mod machine_attach;
+mod machine_process;
+mod machine_restart_policy;
+mod machine_saved;
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc, Mutex, MutexGuard,
@@ -108,11 +111,17 @@ impl RemoteFocusOperationState {
     }
 }
 
-pub(crate) use attach::*;
 pub(crate) use control::SshRemoteFocusTransport;
-#[cfg(unix)]
+pub(crate) use machine_args::*;
+pub(crate) use machine_attach::*;
+pub(crate) use machine_saved::*;
+
+const ENDPOINT_PROTOCOL_GENERATION: u32 = 1;
+const SURFACE_INTEREST_CAPABILITY: &str = "surface_interest";
+const PRESENTATION_EFFECTS_FENCE_CAPABILITY: &str = "presentation_effects_fence";
+const HEALTH_CHECK_CAPABILITY: &str = "health_check";
+#[cfg(all(test, unix))]
 // Test-only transport seams are re-exported for the real socket handshake harness.
-#[allow(unused_imports)]
 pub(crate) use control::{ControlReadHalf, ControlStream, SshRunner, TimedRead};
 #[cfg(unix)]
 pub(crate) use host_unix::{run_remote_client_bridge, run_remote_control_bridge};
@@ -140,6 +149,45 @@ pub(crate) fn print_remote_error_hint(err: &std::io::Error, target: &str) {
         eprintln!(
             "hint: if your SSH key has a passphrase, load it into ssh-agent with `ssh-add` before running `herdr --remote`."
         );
+    }
+}
+
+pub(crate) fn run_remote_api_bridge(args: &[String]) -> std::io::Result<()> {
+    match args {
+        [] => {
+            let path = crate::api::socket_path();
+            let stream = crate::ipc::connect_local_stream(&path).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "failed to connect to remote Herdr API socket {}: {error}",
+                        path.display()
+                    ),
+                )
+            })?;
+            crate::platform::forward_remote_bridge_stdio(stream, false)
+        }
+        [flag] if flag == "--check" => {
+            println!("herdr-api-bridge-v1");
+            Ok(())
+        }
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "usage: herdr remote-api-bridge [--check]",
+        )),
+    }
+}
+
+pub(crate) fn print_saved_ssh_error_hint(err: &std::io::Error, target: &str) {
+    let message = err.to_string().to_ascii_lowercase();
+    if message.contains("host key verification failed")
+        || message.contains("remote host identification has changed")
+    {
+        eprintln!(
+            "hint: saved machines use strict host-key checking; add the host key to the configured known_hosts file, then retry."
+        );
+    } else {
+        print_remote_error_hint(err, target);
     }
 }
 
