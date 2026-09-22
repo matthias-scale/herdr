@@ -66,6 +66,18 @@ pub(crate) fn notepad_body_rect(panel: Rect) -> Rect {
     )
 }
 
+fn read_only_tab_labels(width: u16) -> (&'static str, &'static str, &'static str) {
+    if width >= 32 {
+        (
+            crate::notepad::NOTEPAD_CONTEXT_TAB_LABEL,
+            super::notepad_agent::TAB_LABEL,
+            super::notepad_usage::TAB_LABEL,
+        )
+    } else {
+        ("C", "A", "U")
+    }
+}
+
 /// Clickable name segments in the header, one per note, left to right, then
 /// the Context tab and the agent tab after their divider. Only the names that
 /// fit are returned, so a click can never resolve to a tab the operator cannot
@@ -80,14 +92,16 @@ pub(crate) fn notepad_tab_hit_areas(
     let mut areas = Vec::new();
     let mut x = panel.x.saturating_add(2);
     let right = panel.right();
-    let context_width = display_width_u16(crate::notepad::NOTEPAD_CONTEXT_TAB_LABEL);
-    let agent_width = display_width_u16(super::notepad_agent::TAB_LABEL);
-    // The two pane tabs follow a divider two columns wide and are separated
-    // from each other by one column.
+    let (context_label, agent_label, usage_label) = read_only_tab_labels(panel.width);
+    let context_width = display_width_u16(context_label);
+    let agent_width = display_width_u16(agent_label);
+    let usage_width = display_width_u16(usage_label);
     let pane_tabs_width = 2u16
         .saturating_add(context_width)
         .saturating_add(1)
-        .saturating_add(agent_width);
+        .saturating_add(agent_width)
+        .saturating_add(1)
+        .saturating_add(usage_width);
     for (index, file) in app.notepad.files.iter().enumerate() {
         let width = display_width_u16(&file.name);
         let next_x = x.saturating_add(width).saturating_add(1);
@@ -115,6 +129,13 @@ pub(crate) fn notepad_tab_hit_areas(
                 crate::notepad::NotepadTabTarget::Agent,
                 Rect::new(agent_x, panel.y, agent_width, 1),
             ));
+            let usage_x = agent_x.saturating_add(agent_width).saturating_add(1);
+            if usage_x.saturating_add(usage_width) <= right {
+                areas.push((
+                    crate::notepad::NotepadTabTarget::Usage,
+                    Rect::new(usage_x, panel.y, usage_width, 1),
+                ));
+            }
         }
     }
     areas
@@ -143,20 +164,26 @@ fn header_spans<'a>(app: &'a AppState, palette: &Palette, width: u16) -> Line<'a
         }),
     )];
     let mut used = 2u16;
-    let context_width = display_width_u16(crate::notepad::NOTEPAD_CONTEXT_TAB_LABEL);
-    let agent_width = display_width_u16(super::notepad_agent::TAB_LABEL);
+    let (context_label, agent_label, usage_label) = read_only_tab_labels(width);
+    let context_width = display_width_u16(context_label);
+    let agent_width = display_width_u16(agent_label);
+    let usage_width = display_width_u16(usage_label);
     let pane_tabs_width = 2u16
         .saturating_add(context_width)
         .saturating_add(1)
-        .saturating_add(agent_width);
+        .saturating_add(agent_width)
+        .saturating_add(1)
+        .saturating_add(usage_width);
     for (index, file) in app.notepad.files.iter().enumerate() {
         let name_width = display_width_u16(&file.name);
         let next_used = used.saturating_add(name_width).saturating_add(1);
         if next_used.saturating_add(pane_tabs_width) > width {
             break;
         }
-        let active =
-            !app.notepad.context_active && !app.notepad.agent_tab && index == app.notepad.active;
+        let active = !app.notepad.context_active
+            && !app.notepad.agent_tab
+            && !app.notepad.usage_tab
+            && index == app.notepad.active;
         let style = tab_style(palette, active, focused);
         spans.push(Span::styled(file.name.as_str(), style));
         spans.push(Span::raw(" "));
@@ -175,17 +202,25 @@ fn header_spans<'a>(app: &'a AppState, palette: &Palette, width: u16) -> Line<'a
         spans.push(Span::styled("│", Style::default().fg(palette.surface_dim)));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
-            crate::notepad::NOTEPAD_CONTEXT_TAB_LABEL,
+            context_label,
             tab_style(palette, app.notepad.context_active, focused),
         ));
         used = used.saturating_add(2).saturating_add(context_width);
         if used.saturating_add(1).saturating_add(agent_width) <= width {
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
-                super::notepad_agent::TAB_LABEL,
+                agent_label,
                 tab_style(palette, app.notepad.agent_tab, focused),
             ));
             used = used.saturating_add(1).saturating_add(agent_width);
+            if used.saturating_add(1).saturating_add(usage_width) <= width {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    usage_label,
+                    tab_style(palette, app.notepad.usage_tab, focused),
+                ));
+                used = used.saturating_add(1).saturating_add(usage_width);
+            }
         }
     }
     // Unsaved and diverged are the two facts the operator cannot recover by
@@ -231,6 +266,10 @@ pub(crate) fn render_notepad(app: &AppState, frame: &mut Frame, panel: Rect) {
     }
     if app.notepad.agent_tab {
         super::notepad_agent::render_agent_body(app, frame, body);
+        return;
+    }
+    if app.notepad.usage_tab {
+        super::notepad_usage::render_usage_body(app, frame, body);
         return;
     }
     if let Some(error) = &app.notepad.error {
@@ -282,6 +321,7 @@ pub(crate) fn render_notepad(app: &AppState, frame: &mut Frame, panel: Rect) {
 pub(crate) fn notepad_caret_position(app: &AppState, panel: Rect) -> Option<(u16, u16)> {
     if !app.notepad.focused
         || app.notepad.agent_tab
+        || app.notepad.usage_tab
         || app.notepad.context_active
         || app.notepad.error.is_some()
     {
@@ -392,11 +432,13 @@ mod tests {
             areas,
             vec![
                 (NotepadTabTarget::Note(0), Rect::new(2, 10, 4, 1)),
-                (NotepadTabTarget::Context, Rect::new(9, 10, 7, 1)),
-                (NotepadTabTarget::Agent, Rect::new(17, 10, 5, 1)),
+                (NotepadTabTarget::Note(1), Rect::new(7, 10, 5, 1)),
+                (NotepadTabTarget::Context, Rect::new(15, 10, 1, 1)),
+                (NotepadTabTarget::Agent, Rect::new(17, 10, 1, 1)),
+                (NotepadTabTarget::Usage, Rect::new(19, 10, 1, 1)),
             ]
         );
-        // The later notes yield because the two pane tabs own the suffix.
+        // The later notes yield because the read-only tabs own the suffix.
     }
 
     #[test]
@@ -411,8 +453,9 @@ mod tests {
             areas,
             vec![
                 (NotepadTabTarget::Note(0), Rect::new(2, 10, 4, 1)),
-                (NotepadTabTarget::Context, Rect::new(9, 10, 7, 1)),
-                (NotepadTabTarget::Agent, Rect::new(17, 10, 5, 1)),
+                (NotepadTabTarget::Context, Rect::new(9, 10, 1, 1)),
+                (NotepadTabTarget::Agent, Rect::new(11, 10, 1, 1)),
+                (NotepadTabTarget::Usage, Rect::new(13, 10, 1, 1)),
             ]
         );
     }
@@ -434,14 +477,16 @@ mod tests {
         let areas = notepad_tab_hit_areas(&app, Rect::new(0, 10, 18, 8));
         assert_eq!(
             areas.last().map(|(target, _)| *target),
-            Some(NotepadTabTarget::Agent),
+            Some(NotepadTabTarget::Usage),
             "the read-only tab stays reachable after note tabs yield"
         );
         assert_eq!(
             areas,
             vec![
-                (NotepadTabTarget::Context, Rect::new(4, 10, 7, 1)),
-                (NotepadTabTarget::Agent, Rect::new(12, 10, 5, 1)),
+                (NotepadTabTarget::Note(0), Rect::new(2, 10, 5, 1)),
+                (NotepadTabTarget::Context, Rect::new(10, 10, 1, 1)),
+                (NotepadTabTarget::Agent, Rect::new(12, 10, 1, 1)),
+                (NotepadTabTarget::Usage, Rect::new(14, 10, 1, 1)),
             ]
         );
     }
@@ -456,6 +501,7 @@ mod tests {
             vec![
                 (NotepadTabTarget::Context, Rect::new(12, 10, 7, 1)),
                 (NotepadTabTarget::Agent, Rect::new(20, 10, 5, 1)),
+                (NotepadTabTarget::Usage, Rect::new(26, 10, 5, 1)),
             ]
         );
         let header = header_spans(&app, &app.palette, panel.width)
@@ -468,6 +514,7 @@ mod tests {
             "Context"
         );
         assert_eq!(header.chars().skip(20).take(5).collect::<String>(), "agent");
+        assert_eq!(header.chars().skip(26).take(5).collect::<String>(), "usage");
     }
 }
 
@@ -488,7 +535,7 @@ mod render_tests {
     }
 
     #[test]
-    fn agent_tab_renders_at_minimum_and_normal_sidebar_widths() {
+    fn read_only_tabs_render_at_minimum_and_normal_sidebar_widths() {
         for width in [18, 26] {
             let mut app = AppState::test_new();
             app.notepad.enabled = true;
@@ -508,15 +555,12 @@ mod render_tests {
                 .draw(|frame| render_notepad(&app, frame, panel))
                 .expect("render");
             let header = buffer_text(&terminal)[0].clone();
-            assert!(
-                header.contains("│ Context") && header.contains("agent"),
-                "width {width}: {header}"
-            );
+            assert!(header.contains("│ C A U"), "width {width}: {header}");
             assert_eq!(
                 notepad_tab_hit_areas(&app, panel)
                     .last()
                     .map(|(target, _)| *target),
-                Some(NotepadTabTarget::Agent)
+                Some(NotepadTabTarget::Usage)
             );
         }
     }
@@ -547,15 +591,13 @@ mod render_tests {
         assert!(sidebar.width > 0, "the wide layout keeps a sidebar");
         assert_eq!(app.view.notepad_rect.height, 6);
         assert_eq!(app.view.notepad_rect.bottom(), sidebar.bottom() - 1);
-        // The two pane tabs are a fixed suffix, so on this sidebar the second
-        // note name gives way to them: one note tab, Context, agent.
-        assert_eq!(app.view.notepad_tab_hit_areas.len(), 3);
+        assert_eq!(app.view.notepad_tab_hit_areas.len(), 5);
         assert_eq!(
             app.view
                 .notepad_tab_hit_areas
                 .last()
                 .map(|(target, _)| *target),
-            Some(crate::notepad::NotepadTabTarget::Agent)
+            Some(crate::notepad::NotepadTabTarget::Usage)
         );
 
         let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("test terminal");
@@ -566,10 +608,8 @@ mod render_tests {
         let panel_rows = &rows
             [usize::from(app.view.notepad_rect.y)..usize::from(app.view.notepad_rect.bottom())];
         assert!(
-            panel_rows[0].contains("todo")
-                && panel_rows[0].contains("Context")
-                && panel_rows[0].contains("agent"),
-            "header lists the notes that fit and both pane tabs: {:?}",
+            panel_rows[0].contains("todo") && panel_rows[0].contains("│ C A U"),
+            "header lists the notes that fit and compact read-only tabs: {:?}",
             panel_rows[0]
         );
         assert!(
@@ -639,7 +679,7 @@ mod render_tests {
         let rows = buffer_text(&terminal);
         let panel_rows = &rows[usize::from(panel.y)..usize::from(panel.bottom())];
         assert!(
-            panel_rows[0].contains("Context"),
+            panel_rows[0].contains("│ C A U"),
             "header carries the Context tab: {:?}",
             panel_rows[0]
         );

@@ -2635,6 +2635,10 @@ pub struct ViewState {
     pub(crate) notepad_agent_rows: Vec<crate::ui::notepad_agent::NotepadAgentRow>,
     /// Maximum attach-local agent-tab offset for the last computed geometry.
     pub(crate) notepad_agent_max_scroll: usize,
+    /// Visible Usage-tab rows, materialized with their click actions.
+    pub(crate) notepad_usage_rows: Vec<crate::ui::notepad_usage::NotepadUsageRow>,
+    /// Maximum attach-local Usage-tab offset for the last computed geometry.
+    pub(crate) notepad_usage_max_scroll: usize,
     /// The break-timer countdown in the sidebar footer row.
     pub(crate) pomodoro_hit_area: Rect,
     /// Per-machine notification toggle beside the break timer.
@@ -7501,6 +7505,8 @@ impl AppState {
                 notepad_tab_hit_areas: Vec::new(),
                 notepad_agent_rows: Vec::new(),
                 notepad_agent_max_scroll: 0,
+                notepad_usage_rows: Vec::new(),
+                notepad_usage_max_scroll: 0,
                 pomodoro_hit_area: Rect::default(),
                 notification_hit_area: Rect::default(),
                 hyperspace_rect: Rect::default(),

@@ -6884,6 +6884,13 @@ impl HeadlessServer {
         } else {
             changed |= self.app.discard_stale_status_metrics(now);
         }
+        if has_app_client
+            && (self.app.state.notepad.enabled
+                || self.app.state.usage_view.is_some()
+                || self.app.state.home.is_some())
+        {
+            self.app.schedule_provider_usage(now);
+        }
 
         // No resize polling needed — server has no terminal.
         // Client resize messages drive size changes instead.
@@ -8470,9 +8477,23 @@ esac
                 name: "todo".into(),
             }]);
         server.app.state.notepad.set_body("note");
+        server.app.state.provider_usage =
+            crate::provider_usage::ProviderUsageSnapshot::with_primary_accounts(
+                crate::provider_usage::AccountUsage::default(),
+                crate::provider_usage::AccountUsage::default(),
+                crate::provider_usage::AccountUsage::default(),
+            );
+        let template = server.app.state.provider_usage.accounts[0].clone();
+        for index in 0..20 {
+            let mut account = template.clone();
+            account.profile_id = format!("extra-{index}");
+            account.label = format!("extra-{index}");
+            server.app.state.provider_usage.accounts.push(account);
+        }
 
         let (first_writer, _first_control, first_render) = test_client_writer();
         let (second_writer, _second_control, second_render) = test_client_writer();
+        let (third_writer, _third_control, third_render) = test_client_writer();
         let mut first = ClientConnection::new(
             (120, 40),
             crate::kitty_graphics::HostCellSize::default(),
@@ -8485,7 +8506,7 @@ esac
         first.notepad_presentation.agent_tab = true;
         first.notepad_presentation.agent_collapsed.tasks = true;
         first.notepad_presentation.agent_scroll = 1;
-        let second = ClientConnection::new(
+        let mut second = ClientConnection::new(
             (80, 24),
             crate::kitty_graphics::HostCellSize::default(),
             crate::terminal_theme::TerminalTheme::default(),
@@ -8494,8 +8515,20 @@ esac
             RenderEncoding::SemanticFrame,
             Some(second_writer),
         );
+        second.notepad_presentation.usage_tab = true;
+        second.notepad_presentation.usage_scroll = 1;
+        let third = ClientConnection::new(
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            Some(false),
+            0,
+            RenderEncoding::SemanticFrame,
+            Some(third_writer),
+        );
         server.clients.insert(1, first);
         server.clients.insert(2, second);
+        server.clients.insert(3, third);
         server.foreground_client_id = Some(1);
         server.app.full_redraw_pending = true;
 
@@ -8511,17 +8544,26 @@ esac
                 .recv_timeout(Duration::from_secs(1))
                 .expect("second client frame"),
         ));
+        let third_text = frame_text(&read_server_frame(
+            third_render
+                .recv_timeout(Duration::from_secs(1))
+                .expect("third client frame"),
+        ));
         assert!(first_text.contains("▸ Tasks"), "{first_text}");
         assert!(!first_text.contains("note"), "{first_text}");
-        assert!(second_text.contains("note"), "{second_text}");
+        assert!(second_text.contains("CX"), "{second_text}");
+        assert!(!second_text.contains("note"), "{second_text}");
+        assert!(third_text.contains("note"), "{third_text}");
         assert!(
             server.clients[&1]
                 .notepad_presentation
                 .agent_collapsed
                 .tasks
         );
-        assert!(!server.clients[&2].notepad_presentation.agent_tab);
+        assert!(server.clients[&2].notepad_presentation.usage_tab);
+        assert!(!server.clients[&3].notepad_presentation.agent_tab);
         assert_eq!(server.clients[&1].notepad_presentation.agent_scroll, 1);
+        assert_eq!(server.clients[&2].notepad_presentation.usage_scroll, 1);
     }
 
     fn read_server_shutdown_reason(bytes: Vec<u8>) -> Option<String> {
@@ -12676,6 +12718,39 @@ next_tab = ""
         assert!(attached.app.provider_usage_in_flight);
         assert_eq!(attached.app.connectivity_probed_at, Some(now));
         assert!(attached.app.connectivity_probe_in_flight);
+    }
+
+    #[test]
+    fn a_notepad_client_refreshes_usage_when_the_status_bar_is_disabled() {
+        let mut server = test_headless_server();
+        server.app.status_metric_refresh_enabled = true;
+        server.app.state.status_bar_enabled = false;
+        server.app.state.notepad.enabled = true;
+        let now = Instant::now();
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        assert!(server.handle_server_event(ServerEvent::ClientConnected {
+            client_id: 7,
+            cols: 80,
+            rows: 24,
+            cell_width_px: 0,
+            cell_height_px: 0,
+            render_encoding: RenderEncoding::SemanticFrame,
+            keybindings: None,
+            direct_attach_requested: false,
+            direct_graphics: false,
+            writer,
+        }));
+        server.app.provider_usage_refreshed_at = None;
+        server.app.provider_usage_in_flight = false;
+        server.app.connectivity_probed_at = None;
+        server.app.connectivity_probe_in_flight = false;
+
+        server.handle_scheduled_tasks_headless(now, false);
+
+        assert_eq!(server.app.provider_usage_refreshed_at, Some(now));
+        assert!(server.app.provider_usage_in_flight);
+        assert_eq!(server.app.connectivity_probed_at, None);
+        assert!(!server.app.connectivity_probe_in_flight);
     }
 
     #[test]
