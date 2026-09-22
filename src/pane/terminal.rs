@@ -1339,12 +1339,16 @@ impl GhosttyPaneTerminal {
         let default_color_events = core.default_color_event_tracker.drain_pending();
         let xtgettcap_responses = core.xtgettcap_query_tracker.drain_pending();
         let write_started = crate::render_prof::timer();
-        if let Err(error) = core.terminal.set_parsed_output_enabled(true) {
-            debug!(
-                pane = pane_id.raw(),
-                ?error,
-                "failed to enable parsed output callback"
-            );
+        // Two FFI option writes per batch are wasted on a pane nobody observes.
+        let classify_output = core.terminal.has_parsed_output_callback();
+        if classify_output {
+            if let Err(error) = core.terminal.set_parsed_output_enabled(true) {
+                debug!(
+                    pane = pane_id.raw(),
+                    ?error,
+                    "failed to enable parsed output callback"
+                );
+            }
         }
         self.write_pty_bytes_with_ordered_responses(
             &mut core,
@@ -1354,12 +1358,14 @@ impl GhosttyPaneTerminal {
             xtgettcap_responses,
             &mut terminal_responses,
         );
-        if let Err(error) = core.terminal.set_parsed_output_enabled(false) {
-            debug!(
-                pane = pane_id.raw(),
-                ?error,
-                "failed to disable parsed output callback"
-            );
+        if classify_output {
+            if let Err(error) = core.terminal.set_parsed_output_enabled(false) {
+                debug!(
+                    pane = pane_id.raw(),
+                    ?error,
+                    "failed to disable parsed output callback"
+                );
+            }
         }
         if !filtered_bytes.is_empty() {
             self.content_revision.fetch_add(1, Ordering::Release);

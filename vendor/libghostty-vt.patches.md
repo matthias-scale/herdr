@@ -110,15 +110,17 @@ allocating 16 KiB one. Classification runs only while an embedder callback is
 installed; clearing the callback clears the handler effect, so a pane without
 link extraction pays nothing on the parse path. Printable callbacks use the
 terminal's own print result so discarded codepoints are not exposed and
-charset-mapped glyphs are reported as Ghostty rendered them. Non-rendering C0
-controls do not split visible text, while any action that moved the cursor
-does, because the next run is printed somewhere else on screen.
+charset-mapped glyphs are reported as Ghostty rendered them. Actions that
+cannot move rendered text keep two printed runs joined; every other action
+separates them, including cursor motion, erasure and scrolling, because the
+text around the cursor is no longer what it was. An unclassified new
+upstream action separates by default.
 
 remove when: the vendored source exposes equivalent post-parse text and OSC 8
 events, including confirmed BEL, 8-bit ST, and split `ESC \\` termination, with
 bounded 8 KiB targets and suppression for non-rendered status-display text and
 discarded codepoints, charset-mapped glyph reporting, and continuity across
-non-rendering controls, cursor-motion separation, and the Herdr visibility
+non-rendering controls, screen-motion separation, and the Herdr visibility
 regressions pass without this patch.
 
 verification:
@@ -128,7 +130,7 @@ just test-one matches_ghostty_rendered_text
 just test-one c1_introducers_and_st_match_ghostty_rendered_text
 just test-one cancelled_osc_capture_matches_ghostty_visible_output
 just test-one osc8_target_bound_excludes_split_and_unsplit_st_bytes
-just test-one cursor_motion_between_runs_does_not_join_one_url
+just test-one screen_motion_between_runs_does_not_join_one_url
 just test-one parsed_output_stops_when_disabled
 python3 -m unittest scripts.test_vendor_libghostty_vt
 ```

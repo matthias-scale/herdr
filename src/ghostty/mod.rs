@@ -1043,10 +1043,14 @@ impl Terminal {
         self.callback_state.parsed_output = Some(Box::new(callback));
     }
 
+    pub(crate) fn has_parsed_output_callback(&self) -> bool {
+        self.callback_state.parsed_output.is_some()
+    }
+
     /// Enabling without an installed callback would make the vendored terminal
     /// classify every printed codepoint for nobody, on every pane.
     pub(crate) fn set_parsed_output_enabled(&mut self, enabled: bool) -> Result<(), Error> {
-        let enabled = enabled && self.callback_state.parsed_output.is_some();
+        let enabled = enabled && self.has_parsed_output_callback();
         let callback = if enabled {
             (parsed_output_trampoline as *const ()).cast()
         } else {

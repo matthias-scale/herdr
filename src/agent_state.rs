@@ -932,6 +932,11 @@ fn discarded_url_terminates(pending_utf8: &mut Vec<u8>, byte: u8) -> bool {
     }
 }
 
+/// Queues one finished URL, keeping the first source that saw it and dropping
+/// the oldest entry past `MAX_LINKS`. The dedup scan is linear in the queue, so
+/// it costs at most `MAX_LINKS` string compares, and it runs once per URL that
+/// visibly ended rather than per parsed byte; `just bench-parse-scale` covers
+/// the OSC 8-heavy case this path is reached from.
 fn queue_link(queue: &mut VecDeque<DetectedAgentLink>, url: String, source: AgentLinkSource) {
     let source = queue
         .iter()

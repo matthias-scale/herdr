@@ -4520,15 +4520,96 @@ mod tests {
             .collect()
     }
 
+    // PTY parse throughput is a multiplicative path: bytes x panes. The gate
+    // adds classification to it, so measure the parse loop itself rather than
+    // inferring it from render scaling.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "manual PTY parse scaling profile"]
+    async fn parse_scale_profile() {
+        const WARMUP: usize = 3;
+        const SAMPLES: usize = 21;
+
+        fn chunk(osc8_heavy: bool) -> Vec<u8> {
+            let mut out = Vec::new();
+            for index in 0..64 {
+                if osc8_heavy {
+                    out.extend_from_slice(
+                        format!(
+                            "\x1b]8;;https://example.test/file-{index}\x1b\\file-{index}\x1b]8;;\x1b\\  "
+                        )
+                        .as_bytes(),
+                    );
+                } else {
+                    out.extend_from_slice(
+                        format!("line {index} plain output without any link at all\r\n").as_bytes(),
+                    );
+                }
+            }
+            out.push(b'\n');
+            out
+        }
+
+        fn profile(panes: usize, with_gate: bool, osc8_heavy: bool) -> u128 {
+            let runtimes: Vec<_> = (0..panes)
+                .map(|_| {
+                    let runtime = PaneRuntime::test_with_screen_bytes(120, 24, b"");
+                    if with_gate {
+                        let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+                        runtime.terminal.install_link_extraction(gate);
+                    }
+                    runtime
+                })
+                .collect();
+            let bytes = chunk(osc8_heavy);
+
+            for _ in 0..WARMUP {
+                for runtime in &runtimes {
+                    runtime.test_process_pty_bytes(&bytes);
+                }
+            }
+            let mut samples = Vec::with_capacity(SAMPLES);
+            for _ in 0..SAMPLES {
+                let started = std::time::Instant::now();
+                for runtime in &runtimes {
+                    runtime.test_process_pty_bytes(&bytes);
+                }
+                samples.push(started.elapsed().as_micros());
+            }
+            samples.sort_unstable();
+            samples[SAMPLES / 2]
+        }
+
+        for (label, osc8_heavy) in [("plain output", false), ("OSC 8 per item", true)] {
+            println!("{label}: median microseconds per batch across all panes");
+            println!("     panes  no_gate  with_gate  gate_cost");
+            for panes in [1usize, 15, 50] {
+                let without = profile(panes, false, osc8_heavy);
+                let with = profile(panes, true, osc8_heavy);
+                println!(
+                    "{panes:>10}  {without:>7}  {with:>9}  {:>8.2}x",
+                    with as f64 / without.max(1) as f64
+                );
+            }
+        }
+    }
+
     #[tokio::test]
-    async fn cursor_motion_between_runs_does_not_join_one_url() {
-        // Two runs printed at unrelated screen positions never formed one
-        // displayed link, so they must not be published as one either.
+    async fn screen_motion_between_runs_does_not_join_one_url() {
+        // Two runs the screen never showed as one link must not be published
+        // as one. Cursor motion, scrolling, erasure and margin changes all
+        // break adjacency.
         for (label, motion) in [
             ("CUP", b"\x1b[10;40H".as_slice()),
             ("CUF", b"\x1b[20C".as_slice()),
             ("CUD", b"\x1b[3B".as_slice()),
             ("CUU", b"\x1b[2A".as_slice()),
+            ("SU", b"\x1b[1S".as_slice()),
+            ("SD", b"\x1b[1T".as_slice()),
+            ("IL", b"\x1b[1L".as_slice()),
+            ("DL", b"\x1b[1M".as_slice()),
+            ("ED", b"\x1b[J".as_slice()),
+            ("EL", b"\x1b[K".as_slice()),
+            ("DECSTBM", b"\x1b[1;5r".as_slice()),
         ] {
             let mut stream = b"\x1b[12;1Hhttps://shown.example.test/path".to_vec();
             stream.extend_from_slice(motion);
@@ -4545,7 +4626,7 @@ mod tests {
             assert_eq!(
                 links.output_urls,
                 vec!["https://shown.example.test/path"],
-                "{label} moved the cursor, so the runs must stay separate"
+                "{label} moved rendered text, so the runs must stay separate"
             );
         }
     }

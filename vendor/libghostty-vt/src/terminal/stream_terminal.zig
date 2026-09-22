@@ -169,13 +169,11 @@ pub const Handler = struct {
             };
             if (handled) return;
         }
-        const cursor_before = self.cursorPosition();
         self.vtFallible(action, value) catch |err| {
             log.warn("error handling VT action action={} err={}", .{ action, err });
             return;
         };
         self.emitParsedOutput(action, value);
-        self.emitCursorBreak(cursor_before);
     }
 
     /// Finalizes an OSC-derived callback using the parser transition that
@@ -209,25 +207,6 @@ pub const Handler = struct {
         callback(self, .hyperlink, uri);
     }
 
-    const CursorPosition = struct { x: usize, y: usize };
-
-    fn cursorPosition(self: *const Handler) ?CursorPosition {
-        if (self.effects.parsed_output == null) return null;
-        const cursor = &self.terminal.screens.active.cursor;
-        return .{ .x = cursor.x, .y = cursor.y };
-    }
-
-    /// Any action that moved the cursor broke text adjacency: the next run is
-    /// printed somewhere else on screen, so it cannot continue the last one.
-    /// Ghostty owns the motion; nothing here enumerates escape sequences.
-    fn emitCursorBreak(self: *Handler, before: ?CursorPosition) void {
-        const start = before orelse return;
-        const callback = self.effects.parsed_output orelse return;
-        const cursor = &self.terminal.screens.active.cursor;
-        if (cursor.x == start.x and cursor.y == start.y) return;
-        callback(self, .separator, "");
-    }
-
     fn emitParsedOutput(
         self: *Handler,
         comptime action: Action.Tag,
@@ -235,9 +214,66 @@ pub const Handler = struct {
     ) void {
         const callback = self.effects.parsed_output orelse return;
         switch (action) {
-            .backspace, .horizontal_tab, .linefeed, .carriage_return => callback(self, .separator, ""),
             .start_hyperlink => self.parsed_hyperlink_pending = value.uri,
-            else => {},
+
+            // Actions that cannot move rendered text: the next printed run
+            // still continues the last one. Everything else separates the
+            // runs, including cursor motion, erasure and scrolling, because
+            // the text around the cursor is no longer what it was. New
+            // upstream actions separate until they are classified here.
+            .print,
+            .print_slice,
+            .print_repeat,
+            .bell,
+            .enquiry,
+            .xtversion,
+            .device_attributes,
+            .device_status,
+            .size_report,
+            .request_mode,
+            .request_mode_unknown,
+            .save_mode,
+            .modify_key_format,
+            .mouse_shift_capture,
+            .mouse_shape,
+            .protected_mode_off,
+            .protected_mode_iso,
+            .protected_mode_dec,
+            .set_attribute,
+            .color_operation,
+            .kitty_color_report,
+            .kitty_keyboard_query,
+            .kitty_keyboard_push,
+            .kitty_keyboard_pop,
+            .kitty_keyboard_set,
+            .kitty_keyboard_set_or,
+            .kitty_keyboard_set_not,
+            .window_title,
+            .title_push,
+            .title_pop,
+            .report_pwd,
+            .show_desktop_notification,
+            .progress_report,
+            .semantic_prompt,
+            .clipboard_contents,
+            .end_hyperlink,
+            .cursor_style,
+            .configure_charset,
+            .invoke_charset,
+            .tab_set,
+            .tab_clear_current,
+            .tab_clear_all,
+            .tab_reset,
+            .dcs_hook,
+            .dcs_put,
+            .dcs_unhook,
+            .apc_start,
+            .apc_put,
+            .apc_put_slice,
+            .apc_end,
+            => {},
+
+            else => callback(self, .separator, ""),
         }
     }
 
