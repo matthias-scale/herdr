@@ -1437,7 +1437,9 @@ impl AppState {
                                     start_row: mouse.row,
                                 },
                             );
-                            return None;
+                            self.selected = ws_idx;
+                            self.set_server_mode(Mode::Terminal);
+                            return Some(MouseAction::FocusPane { ws_idx, pane_id });
                         }
                     }
                     if let Some((ws_idx, _tab_idx, pane_id)) = self.sidebar_local_pane_at(mouse.row)
@@ -5029,6 +5031,389 @@ mod tests {
         assert_eq!(app.state.active, Some(0));
     }
 
+    struct PodDragFixture {
+        app: App,
+        pane_id: crate::layout::PaneId,
+        public_pane_id: String,
+        pane_incarnation: String,
+        local_authority: crate::groups::AuthorityId,
+        current: crate::groups::GroupId,
+        target: crate::groups::GroupId,
+        remote: crate::groups::GroupId,
+        source_col: u16,
+        source_row: u16,
+        current_row: u16,
+        target_row: u16,
+        remote_row: u16,
+        member_row: u16,
+    }
+
+    fn pod_drag_fixture(remote_state: crate::fleet::GroupCatalogState) -> PodDragFixture {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("drag-source")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.state.agent_host_name = "ub1".into();
+        app.state.refresh_local_agent_panel_identities();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let pane = app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("source pane");
+        pane.set_snoozed_until(Some(u64::MAX));
+        let pane_incarnation = pane.attached_terminal_id.to_string();
+        let public_pane_id = app.state.local_agent_panel_identities[&pane_id]
+            .agent_ref
+            .agent
+            .clone();
+        let local_authority = crate::groups::AuthorityId::from_random_bytes([71; 16]);
+        let remote_authority = crate::groups::AuthorityId::from_random_bytes([72; 16]);
+        let current = crate::groups::GroupId {
+            owner: local_authority.clone(),
+            local: 1,
+        };
+        let target = crate::groups::GroupId {
+            owner: local_authority.clone(),
+            local: 2,
+        };
+        let remote = crate::groups::GroupId {
+            owner: remote_authority.clone(),
+            local: 1,
+        };
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("source pane")
+            .group_membership = crate::groups::PaneGroupMembership {
+            group_id: Some(current.clone()),
+            revision: 7,
+        };
+        app.state.local_group_snapshot = Some(crate::groups::GroupAuthoritySnapshot {
+            authority_id: local_authority.clone(),
+            revision: 2,
+            groups: vec![
+                crate::groups::GroupRecord {
+                    id: current.clone(),
+                    revision: 1,
+                    state: crate::groups::GroupState::Active {
+                        name: "current".into(),
+                    },
+                },
+                crate::groups::GroupRecord {
+                    id: target.clone(),
+                    revision: 1,
+                    state: crate::groups::GroupState::Active {
+                        name: "target".into(),
+                    },
+                },
+            ],
+            memberships: vec![crate::groups::OwnedPaneMembership {
+                pane_id: public_pane_id.clone(),
+                pane_incarnation: pane_incarnation.clone(),
+                membership: crate::groups::PaneGroupMembership {
+                    group_id: Some(current.clone()),
+                    revision: 7,
+                },
+            }],
+        });
+        app.state.fleet_snapshot.group_catalogs = vec![crate::fleet::GroupCatalog {
+            host: "ub2".into(),
+            target: "ub2".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: remote_state,
+            observed_authority_id: Some(remote_authority.clone()),
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: remote_authority,
+                revision: 1,
+                groups: vec![crate::groups::GroupRecord {
+                    id: remote.clone(),
+                    revision: 1,
+                    state: crate::groups::GroupState::Active {
+                        name: "remote".into(),
+                    },
+                }],
+                memberships: Vec::new(),
+            }),
+            error: None,
+        }];
+        app.state.collapsed_sidebar_groups.remove(&format!(
+            "{}:{}",
+            app.state.sidebar_group_mode.collapse_namespace(),
+            crate::ui::sidebar::SNOOZED_SECTION_TITLE
+        ));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 50));
+        let source = app
+            .state
+            .view
+            .agent_card_areas
+            .iter()
+            .find(|card| card.pane_id == pane_id)
+            .expect("canonical source row")
+            .rect;
+        let header_row = |id: &crate::groups::GroupId| {
+            (0..50)
+                .find(|row| {
+                    crate::ui::sidebar_pod_header_at(&app.state, *row)
+                        .is_some_and(|(candidate, _)| &candidate == id)
+                })
+                .expect("pod header row")
+        };
+        let current_row = header_row(&current);
+        let target_row = header_row(&target);
+        let remote_row = header_row(&remote);
+        let member_row = (0..50)
+            .find(|row| crate::ui::sidebar_pod_member_at(&app.state, *row).is_some())
+            .expect("pod member row");
+
+        PodDragFixture {
+            app,
+            pane_id,
+            public_pane_id,
+            pane_incarnation,
+            local_authority,
+            current,
+            target,
+            remote,
+            source_col: source.x + 1,
+            source_row: source.y,
+            current_row,
+            target_row,
+            remote_row,
+            member_row,
+        }
+    }
+
+    #[test]
+    fn pod_drag_hover_accepts_only_fresh_non_current_headers_and_mouse_up_cancels() {
+        let mut fixture = pod_drag_fixture(crate::fleet::GroupCatalogState::Stale);
+        let down = fixture.app.state.handle_mouse(
+            &mut fixture.app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                fixture.source_col,
+                fixture.source_row,
+            ),
+        );
+        assert!(matches!(
+            down,
+            Some(MouseAction::FocusPane { pane_id, .. }) if pane_id == fixture.pane_id
+        ));
+
+        for (row, expected) in [
+            (fixture.target_row, Some(fixture.target.clone())),
+            (fixture.current_row, None),
+            (fixture.member_row, None),
+            (fixture.remote_row, None),
+            (49, None),
+        ] {
+            fixture.app.state.handle_mouse(
+                &mut fixture.app.terminal_runtimes,
+                crate::app::LOCAL_INPUT_SOURCE,
+                mouse(
+                    MouseEventKind::Drag(MouseButton::Left),
+                    fixture.source_col,
+                    row,
+                ),
+            );
+            assert_eq!(
+                fixture
+                    .app
+                    .state
+                    .drag
+                    .as_ref()
+                    .and_then(|drag| match &drag.target {
+                        DragTarget::PodAssign { hover, .. } => hover.clone(),
+                        _ => None,
+                    }),
+                expected,
+                "unexpected hover at row {row}"
+            );
+        }
+
+        let up = fixture.app.state.handle_mouse(
+            &mut fixture.app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                fixture.source_col,
+                49,
+            ),
+        );
+        assert!(up.is_none());
+        assert!(fixture.app.state.drag.is_none());
+        assert_eq!(
+            fixture.app.state.workspaces[0].tabs[0].panes[&fixture.pane_id]
+                .group_membership
+                .group_id,
+            Some(fixture.current)
+        );
+    }
+
+    #[test]
+    fn pod_drag_re_resolves_hover_against_current_catalogs_on_every_motion() {
+        let mut fixture = pod_drag_fixture(crate::fleet::GroupCatalogState::Fresh);
+        fixture.app.state.handle_mouse(
+            &mut fixture.app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                fixture.source_col,
+                fixture.source_row,
+            ),
+        );
+        fixture.app.state.handle_mouse(
+            &mut fixture.app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                fixture.source_col,
+                fixture.remote_row,
+            ),
+        );
+        assert!(matches!(
+            fixture.app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::PodAssign { hover: Some(group_id), .. }) if group_id == &fixture.remote
+        ));
+
+        fixture.app.state.fleet_snapshot.group_catalogs[0].state =
+            crate::fleet::GroupCatalogState::Stale;
+        fixture.app.state.handle_mouse(
+            &mut fixture.app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                fixture.source_col,
+                fixture.remote_row,
+            ),
+        );
+        assert!(matches!(
+            fixture.app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::PodAssign { hover: None, .. })
+        ));
+    }
+
+    #[test]
+    fn pod_drop_emits_typed_request_without_optimistically_changing_rows() {
+        let mut fixture = pod_drag_fixture(crate::fleet::GroupCatalogState::Stale);
+        fixture.app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&fixture.pane_id)
+            .expect("source pane")
+            .group_membership
+            .group_id = None;
+        fixture
+            .app
+            .state
+            .local_group_snapshot
+            .as_mut()
+            .unwrap()
+            .memberships[0]
+            .membership
+            .group_id = None;
+        crate::ui::compute_view(&mut fixture.app.state, Rect::new(0, 0, 120, 50));
+        let source = fixture
+            .app
+            .state
+            .view
+            .agent_card_areas
+            .iter()
+            .find(|card| card.pane_id == fixture.pane_id)
+            .expect("canonical source row")
+            .rect;
+        fixture.source_col = source.x + 1;
+        fixture.source_row = source.y;
+        fixture.target_row = (0..50)
+            .find(|row| {
+                crate::ui::sidebar_pod_header_at(&fixture.app.state, *row)
+                    .is_some_and(|(candidate, _)| candidate == fixture.target)
+            })
+            .expect("target pod row");
+
+        fixture.app.state.handle_mouse(
+            &mut fixture.app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                fixture.source_col,
+                fixture.source_row,
+            ),
+        );
+        fixture.app.state.handle_mouse(
+            &mut fixture.app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                fixture.source_col,
+                fixture.target_row,
+            ),
+        );
+        let action = fixture.app.state.handle_mouse(
+            &mut fixture.app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                fixture.source_col,
+                fixture.target_row,
+            ),
+        );
+        let Some(MouseAction::SetPaneGroup(params)) = action else {
+            panic!("drop did not emit PaneGroupSet");
+        };
+        assert_eq!(params.pane_id, fixture.public_pane_id);
+        assert_eq!(params.group_id, Some(fixture.target.clone()));
+        assert_eq!(params.expected_revision, 7);
+        assert_eq!(
+            params.expected_pane_authority,
+            Some(fixture.local_authority.clone())
+        );
+        assert_eq!(
+            params.expected_pane_incarnation,
+            Some(fixture.pane_incarnation.clone())
+        );
+        assert_eq!(
+            fixture.app.state.workspaces[0].tabs[0].panes[&fixture.pane_id]
+                .group_membership
+                .group_id,
+            None,
+            "drop must not mutate membership before the projection changes"
+        );
+
+        let rows = crate::ui::sidebar_rows(&fixture.app.state);
+        assert!(rows.iter().any(|row| matches!(row,
+            crate::ui::SidebarRow::PodHeader { group_id, count: 0, .. }
+            if group_id == &fixture.target
+        )));
+        assert!(!rows.iter().any(|row| matches!(row,
+            crate::ui::SidebarRow::Agent { entry, .. }
+            if entry.local_target().is_some_and(|target| target.pane_id == fixture.pane_id)
+                && entry.pod.is_some()
+        )));
+
+        fixture
+            .app
+            .state
+            .local_group_snapshot
+            .as_mut()
+            .unwrap()
+            .memberships[0]
+            .membership
+            .group_id = Some(fixture.target.clone());
+        let projected = crate::ui::sidebar_rows(&fixture.app.state);
+        assert!(projected.iter().any(|row| matches!(row,
+            crate::ui::SidebarRow::PodHeader { group_id, count: 1, .. }
+            if group_id == &fixture.target
+        )));
+        assert!(projected.iter().any(|row| matches!(row,
+            crate::ui::SidebarRow::Agent { entry, .. }
+            if entry.local_target().is_some_and(|target| target.pane_id == fixture.pane_id)
+                && entry.pod.as_ref().is_some_and(|pod| pod.name == "target")
+        )));
+    }
+
     #[test]
     fn leaf_agent_drag_assigns_to_a_fresh_pod() {
         let mut app = app_for_mouse_test();
@@ -7326,7 +7711,14 @@ mod tests {
     /// against the cwd of the pane that printed it.
     #[tokio::test]
     async fn right_click_on_a_printed_path_resolves_it_against_the_pane_cwd() {
-        let dir = std::env::temp_dir().join(format!("herdr-open-with-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-open-with-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let file = dir.join("notes.md");
         std::fs::write(&file, b"x").expect("temp file");
