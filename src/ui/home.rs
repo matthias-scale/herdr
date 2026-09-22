@@ -288,10 +288,13 @@ struct HomeBands {
 ///
 /// Shared with hit-testing so a click can never land on a row the renderer put
 /// somewhere else.
-/// The normal composer card has a border, a six-row prompt, two control rows,
-/// and a closing border. Short frames fall back to the previous one-row prompt.
+/// The composer card has two border rows and three control rows around its
+/// prompt. Short frames fall back to the previous one-row prompt.
 const NORMAL_COMPOSER_CARD_ROWS: u16 = 11;
 const COMPACT_COMPOSER_CARD_ROWS: u16 = 6;
+const TALL_COMPOSER_PROMPT_ROWS: u16 = 15;
+const COMPOSER_NON_PROMPT_ROWS: u16 = 5;
+const TALL_COMPOSER_CARD_ROWS: u16 = TALL_COMPOSER_PROMPT_ROWS + COMPOSER_NON_PROMPT_ROWS;
 /// The card is a reading surface, not a pane: past this it stops being one
 /// glance and the headline drifts away from the prompt it introduces.
 /// The composer card clamps to this width and centres in whatever is left.
@@ -314,6 +317,21 @@ fn body_rows(area: Rect, queue_rows: usize, trailing: u16) -> u16 {
     u16::try_from(queue_rows.max(1))
         .unwrap_or(u16::MAX)
         .clamp(1, available)
+}
+
+/// Return the card and prompt heights that fit while leaving one queue row and
+/// the headline, header, gap, and hint in place.
+fn composer_dimensions(area_height: u16) -> (u16, u16) {
+    let available_card_rows = area_height.saturating_sub(COMPOSER_NON_PROMPT_ROWS);
+    let card_rows = if available_card_rows < NORMAL_COMPOSER_CARD_ROWS {
+        COMPACT_COMPOSER_CARD_ROWS
+    } else {
+        available_card_rows.min(TALL_COMPOSER_CARD_ROWS)
+    };
+    (
+        card_rows,
+        card_rows.saturating_sub(COMPOSER_NON_PROMPT_ROWS).max(1),
+    )
 }
 
 fn bands_for(area: Rect, lens_requested: bool, queue_rows: usize) -> HomeBands {
@@ -379,14 +397,7 @@ fn bands_for(area: Rect, lens_requested: bool, queue_rows: usize) -> HomeBands {
             hint,
         }
     } else if !lens_requested && area.height >= crate::app::home::HOME_COMPOSER_MIN_HEIGHT {
-        let normal = area.height
-            >= crate::app::home::HOME_COMPOSER_MIN_HEIGHT
-                .saturating_add(NORMAL_COMPOSER_CARD_ROWS - COMPACT_COMPOSER_CARD_ROWS);
-        let card_rows = if normal {
-            NORMAL_COMPOSER_CARD_ROWS
-        } else {
-            COMPACT_COMPOSER_CARD_ROWS
-        };
+        let (card_rows, prompt_rows) = composer_dimensions(area.height);
         // The composer sits directly under the queue; the slack goes below it,
         // so a short queue no longer strands the prompt at the pane floor.
         let [header, gap, body, headline, card_row, _slack, hint] = Layout::vertical([
@@ -411,7 +422,7 @@ fn bands_for(area: Rect, lens_requested: bool, queue_rows: usize) -> HomeBands {
         );
         let inner = frame.inner(Margin::new(1, 1));
         let [prompt, chips_row, divider_row, bottom] = Layout::vertical([
-            Constraint::Length(if normal { 6 } else { 1 }),
+            Constraint::Length(prompt_rows),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -2169,17 +2180,17 @@ mod tests {
     }
 
     #[test]
-    fn the_composer_is_drawn_as_a_card_around_its_six_rows() {
+    fn the_composer_is_drawn_as_a_card_around_its_tall_prompt() {
         let mut app = AppState::test_new();
         app.home = Some(HomeState::default());
         let queue = vec![blocked(0)];
-        let area = Rect::new(0, 0, 60, 17);
+        let area = Rect::new(0, 0, 60, 25);
         let layout = bands(area, queue.len());
         let composer = layout.composer.expect("composer should fit");
         let buffer = draw_home(&app, &queue, area);
 
-        assert_eq!(composer.frame.height, NORMAL_COMPOSER_CARD_ROWS);
-        assert_eq!(composer.prompt.height, 6);
+        assert_eq!(composer.frame.height, TALL_COMPOSER_CARD_ROWS);
+        assert_eq!(composer.prompt.height, TALL_COMPOSER_PROMPT_ROWS);
         assert_eq!(buffer[(composer.frame.x, composer.frame.y)].symbol(), "┌");
         assert_eq!(
             buffer[(composer.frame.right() - 1, composer.frame.y)].symbol(),
@@ -2459,20 +2470,32 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_hit_area_matches_all_six_normal_rows() {
+    fn the_prompt_hit_area_matches_the_drawn_rows_at_each_composer_height() {
         let mut app = AppState::test_new();
         app.home = Some(HomeState::default());
         let queue = vec![blocked(0)];
-        let area = Rect::new(0, 0, 60, 17);
-        let layout = bands(area, queue.len());
-        let prompt = layout.composer.expect("normal composer").prompt;
-        let hit = home_hit_areas(&app, &queue, area)
-            .into_iter()
-            .find(|hit| hit.target == HomeHitTarget::Prompt)
-            .expect("prompt hit area");
+        for (height, expected_card_rows, expected_prompt_rows) in [
+            (25, TALL_COMPOSER_CARD_ROWS, TALL_COMPOSER_PROMPT_ROWS),
+            (20, 15, 10),
+            (16, NORMAL_COMPOSER_CARD_ROWS, 6),
+            (15, COMPACT_COMPOSER_CARD_ROWS, 1),
+            (11, COMPACT_COMPOSER_CARD_ROWS, 1),
+        ] {
+            let area = Rect::new(0, 0, 60, height);
+            let layout = bands(area, queue.len());
+            let composer = layout.composer.expect("composer should fit");
+            let buffer = draw_home(&app, &queue, area);
+            let hit = home_hit_areas(&app, &queue, area)
+                .into_iter()
+                .find(|hit| hit.target == HomeHitTarget::Prompt)
+                .expect("prompt hit area");
 
-        assert_eq!(prompt.height, 6);
-        assert_eq!(hit.rect, prompt);
+            assert_eq!(composer.frame.height, expected_card_rows);
+            assert_eq!(composer.prompt.height, expected_prompt_rows);
+            assert_eq!(hit.rect, composer.prompt);
+            assert!(composer.frame.bottom() <= layout.hint.y);
+            assert_eq!(buffer.area(), &area);
+        }
     }
 
     #[test]
