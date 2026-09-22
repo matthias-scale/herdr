@@ -1203,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn pod_deleted_after_hover_toasts_group_not_found_without_moving() {
+    fn pod_deleted_after_last_motion_toasts_group_not_found_without_moving() {
         let (mut app, _dir, pane_id) = app_with_groups("pod-deleted-race-toast");
         let created = created_group(&app.handle_group_create(
             "create".into(),

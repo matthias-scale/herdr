@@ -5297,6 +5297,69 @@ mod tests {
     }
 
     #[test]
+    fn pod_deleted_after_hover_clears_on_next_motion_without_moving() {
+        let mut fixture = pod_drag_fixture(crate::fleet::GroupCatalogState::Fresh);
+        fixture.app.state.handle_mouse(
+            &mut fixture.app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                fixture.source_col,
+                fixture.source_row,
+            ),
+        );
+        fixture.app.state.handle_mouse(
+            &mut fixture.app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                fixture.source_col,
+                fixture.remote_row,
+            ),
+        );
+        assert!(matches!(
+            fixture.app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::PodAssign { hover: Some(group_id), .. }) if group_id == &fixture.remote
+        ));
+
+        fixture.app.state.fleet_snapshot.group_catalogs[0]
+            .snapshot
+            .as_mut()
+            .expect("remote catalog snapshot")
+            .groups
+            .clear();
+        fixture.app.state.handle_mouse(
+            &mut fixture.app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                fixture.source_col,
+                fixture.remote_row,
+            ),
+        );
+        assert!(matches!(
+            fixture.app.state.drag.as_ref().map(|drag| &drag.target),
+            Some(DragTarget::PodAssign { hover: None, .. })
+        ));
+        let action = fixture.app.state.handle_mouse(
+            &mut fixture.app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                fixture.source_col,
+                fixture.remote_row,
+            ),
+        );
+        assert!(action.is_none());
+        assert_eq!(
+            fixture.app.state.workspaces[0].tabs[0].panes[&fixture.pane_id]
+                .group_membership
+                .group_id,
+            Some(fixture.current)
+        );
+    }
+
+    #[test]
     fn pod_drop_emits_typed_request_without_optimistically_changing_rows() {
         let mut fixture = pod_drag_fixture(crate::fleet::GroupCatalogState::Stale);
         fixture.app.state.workspaces[0].tabs[0]
@@ -5351,6 +5414,33 @@ mod tests {
                 fixture.target_row,
             ),
         );
+        let original_terminal_id = fixture.app.state.workspaces[0].tabs[0].panes[&fixture.pane_id]
+            .attached_terminal_id
+            .clone();
+        let expected_revision = 11;
+        let expected_authority = crate::groups::AuthorityId::from_random_bytes([73; 16]);
+        let expected_terminal_id = crate::terminal::TerminalId::alloc();
+        assert_ne!(expected_revision, 7);
+        assert_ne!(expected_authority, fixture.local_authority);
+        assert_ne!(expected_terminal_id.to_string(), fixture.pane_incarnation);
+        fixture.app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&fixture.pane_id)
+            .expect("source pane")
+            .group_membership
+            .revision = expected_revision;
+        fixture.app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&fixture.pane_id)
+            .expect("source pane")
+            .attached_terminal_id = expected_terminal_id.clone();
+        fixture
+            .app
+            .state
+            .local_group_snapshot
+            .as_mut()
+            .expect("local group snapshot")
+            .authority_id = expected_authority.clone();
         let action = fixture.app.state.handle_mouse(
             &mut fixture.app.terminal_runtimes,
             crate::app::LOCAL_INPUT_SOURCE,
@@ -5365,15 +5455,24 @@ mod tests {
         };
         assert_eq!(params.pane_id, fixture.public_pane_id);
         assert_eq!(params.group_id, Some(fixture.target.clone()));
-        assert_eq!(params.expected_revision, 7);
-        assert_eq!(
-            params.expected_pane_authority,
-            Some(fixture.local_authority.clone())
-        );
+        assert_eq!(params.expected_revision, expected_revision);
+        assert_eq!(params.expected_pane_authority, Some(expected_authority));
         assert_eq!(
             params.expected_pane_incarnation,
-            Some(fixture.pane_incarnation.clone())
+            Some(expected_terminal_id.to_string())
         );
+        fixture.app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&fixture.pane_id)
+            .expect("source pane")
+            .attached_terminal_id = original_terminal_id;
+        fixture
+            .app
+            .state
+            .local_group_snapshot
+            .as_mut()
+            .expect("local group snapshot")
+            .authority_id = fixture.local_authority.clone();
         assert_eq!(
             fixture.app.state.workspaces[0].tabs[0].panes[&fixture.pane_id]
                 .group_membership
@@ -5412,6 +5511,83 @@ mod tests {
             if entry.local_target().is_some_and(|target| target.pane_id == fixture.pane_id)
                 && entry.pod.as_ref().is_some_and(|pod| pod.name == "target")
         )));
+    }
+
+    #[test]
+    fn drop_on_collapsed_pod_emits_assignment_without_expanding_it() {
+        let mut fixture = pod_drag_fixture(crate::fleet::GroupCatalogState::Stale);
+        let collapse_key = format!(
+            "{}:pod:{}:{}",
+            fixture.app.state.sidebar_group_mode.collapse_namespace(),
+            fixture.target.owner,
+            fixture.target.local
+        );
+        fixture
+            .app
+            .state
+            .collapsed_sidebar_groups
+            .insert(collapse_key.clone());
+        crate::ui::compute_view(&mut fixture.app.state, Rect::new(0, 0, 120, 50));
+        let rows = crate::ui::sidebar_rows(&fixture.app.state);
+        assert!(rows.iter().any(|row| matches!(row,
+            crate::ui::SidebarRow::PodHeader { group_id, collapsed: true, .. }
+            if group_id == &fixture.target
+        )));
+        let source = fixture
+            .app
+            .state
+            .view
+            .agent_card_areas
+            .iter()
+            .find(|card| card.pane_id == fixture.pane_id)
+            .expect("canonical source row")
+            .rect;
+        let target_row = (0..50)
+            .find(|row| {
+                crate::ui::sidebar_pod_header_at(&fixture.app.state, *row)
+                    .is_some_and(|(candidate, _)| candidate == fixture.target)
+            })
+            .expect("collapsed target pod row");
+
+        fixture.app.state.handle_mouse(
+            &mut fixture.app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                source.x + 1,
+                source.y,
+            ),
+        );
+        fixture.app.state.handle_mouse(
+            &mut fixture.app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                source.x + 1,
+                target_row,
+            ),
+        );
+        let action = fixture.app.state.handle_mouse(
+            &mut fixture.app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                source.x + 1,
+                target_row,
+            ),
+        );
+        assert!(matches!(
+            action,
+            Some(MouseAction::SetPaneGroup(crate::api::schema::PaneGroupSetParams {
+                group_id: Some(group_id),
+                ..
+            })) if group_id == fixture.target
+        ));
+        assert!(fixture
+            .app
+            .state
+            .collapsed_sidebar_groups
+            .contains(&collapse_key));
     }
 
     #[test]
