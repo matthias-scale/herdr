@@ -4521,6 +4521,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cursor_motion_between_runs_does_not_join_one_url() {
+        // Two runs printed at unrelated screen positions never formed one
+        // displayed link, so they must not be published as one either.
+        for (label, motion) in [
+            ("CUP", b"\x1b[10;40H".as_slice()),
+            ("CUF", b"\x1b[20C".as_slice()),
+            ("CUD", b"\x1b[3B".as_slice()),
+            ("CUU", b"\x1b[2A".as_slice()),
+        ] {
+            let mut stream = b"\x1b[12;1Hhttps://shown.example.test/path".to_vec();
+            stream.extend_from_slice(motion);
+            stream.extend_from_slice(b"@attacker.example.test\n");
+
+            let runtime = PaneRuntime::test_with_screen_bytes(120, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream);
+
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("visible URL before {label}"));
+            assert_eq!(
+                links.output_urls,
+                vec!["https://shown.example.test/path"],
+                "{label} moved the cursor, so the runs must stay separate"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn cancelled_osc_capture_matches_ghostty_visible_output() {
         let uri = "https://after-cancel.example.test/path";
         for (name, cancellation) in [

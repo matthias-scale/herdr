@@ -1390,6 +1390,7 @@ fn url_domain(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[derive(Debug, PartialEq, Eq)]

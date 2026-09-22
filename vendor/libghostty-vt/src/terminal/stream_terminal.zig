@@ -169,11 +169,13 @@ pub const Handler = struct {
             };
             if (handled) return;
         }
+        const cursor_before = self.cursorPosition();
         self.vtFallible(action, value) catch |err| {
             log.warn("error handling VT action action={} err={}", .{ action, err });
             return;
         };
         self.emitParsedOutput(action, value);
+        self.emitCursorBreak(cursor_before);
     }
 
     /// Finalizes an OSC-derived callback using the parser transition that
@@ -205,6 +207,25 @@ pub const Handler = struct {
         self.parsed_hyperlink_pending = null;
         const callback = self.effects.parsed_output orelse return;
         callback(self, .hyperlink, uri);
+    }
+
+    const CursorPosition = struct { x: usize, y: usize };
+
+    fn cursorPosition(self: *const Handler) ?CursorPosition {
+        if (self.effects.parsed_output == null) return null;
+        const cursor = &self.terminal.screens.active.cursor;
+        return .{ .x = cursor.x, .y = cursor.y };
+    }
+
+    /// Any action that moved the cursor broke text adjacency: the next run is
+    /// printed somewhere else on screen, so it cannot continue the last one.
+    /// Ghostty owns the motion; nothing here enumerates escape sequences.
+    fn emitCursorBreak(self: *Handler, before: ?CursorPosition) void {
+        const start = before orelse return;
+        const callback = self.effects.parsed_output orelse return;
+        const cursor = &self.terminal.screens.active.cursor;
+        if (cursor.x == start.x and cursor.y == start.y) return;
+        callback(self, .separator, "");
     }
 
     fn emitParsedOutput(

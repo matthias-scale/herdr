@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn r361_9_elapsed_age_without_observed_instant_refreshes_at_bucket_boundary() {
+    fn elapsed_age_without_observed_instant_refreshes_at_bucket_boundary() {
         let now = Instant::now();
         assert_eq!(
             next_change_after_elapsed(Duration::from_secs(75), now),

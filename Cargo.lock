@@ -693,7 +693,6 @@ dependencies = [
  "interprocess",
  "jsonc-parser",
  "libc",
- "memchr",
  "notify",
  "png",
  "portable-pty",

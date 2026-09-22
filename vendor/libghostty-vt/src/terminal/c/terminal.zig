@@ -378,7 +378,7 @@ fn new_(
         .pwd_changed = &Effects.pwdChangedTrampoline,
         .size = &Effects.sizeTrampoline,
         .clipboard_write = &Effects.clipboardWriteTrampoline,
-        .parsed_output = &Effects.parsedOutputTrampoline,
+        .parsed_output = null,
     };
 
     wrapper.* = .{
@@ -525,7 +525,11 @@ fn setTyped(
         .pwd_changed => wrapper.effects.pwd_changed = value,
         .size_cb => wrapper.effects.size_cb = value,
         .clipboard_write => wrapper.effects.clipboard_write = value,
-        .parsed_output => wrapper.effects.parsed_output = value,
+        .parsed_output => {
+            wrapper.effects.parsed_output = value;
+            wrapper.stream.handler.effects.parsed_output =
+                if (value != null) &Effects.parsedOutputTrampoline else null;
+        },
         .title => {
             const str = if (value) |v| v.ptr[0..v.len] else "";
             wrapper.terminal.setTitle(str) catch return .out_of_memory;

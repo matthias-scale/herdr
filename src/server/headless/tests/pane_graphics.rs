@@ -559,7 +559,7 @@ fn assert_promoted_client_first_link_click(pixel_mouse: bool) {
 }
 
 #[test]
-fn r361_2_first_promoted_client_link_click_uses_its_geometry_on_both_mouse_paths() {
+fn first_promoted_client_link_click_uses_its_geometry_on_both_mouse_paths() {
     assert_promoted_client_first_link_click(false);
     assert_promoted_client_first_link_click(true);
 }
@@ -608,13 +608,13 @@ fn assert_resized_client_first_link_click(pixel_mouse: bool) {
 }
 
 #[test]
-fn r361_2_resize_then_link_click_uses_new_geometry_on_both_mouse_paths() {
+fn resize_then_link_click_uses_new_geometry_on_both_mouse_paths() {
     assert_resized_client_first_link_click(false);
     assert_resized_client_first_link_click(true);
 }
 
 #[test]
-fn r361_2_resize_then_pixel_dock_divider_uses_source_client_presentation() {
+fn resize_then_pixel_dock_divider_uses_source_client_presentation() {
     let (mut server, _control_rx, _link_click, _expected) = promoted_agent_link_fixture(true);
     server
         .clients

@@ -1043,7 +1043,10 @@ impl Terminal {
         self.callback_state.parsed_output = Some(Box::new(callback));
     }
 
+    /// Enabling without an installed callback would make the vendored terminal
+    /// classify every printed codepoint for nobody, on every pane.
     pub(crate) fn set_parsed_output_enabled(&mut self, enabled: bool) -> Result<(), Error> {
+        let enabled = enabled && self.callback_state.parsed_output.is_some();
         let callback = if enabled {
             (parsed_output_trampoline as *const ()).cast()
         } else {
@@ -3310,6 +3313,31 @@ impl<'a> RowCellIter<'a> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn parsed_output_stops_when_disabled() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let mut terminal = Terminal::new(40, 5, 0).unwrap();
+        let events = Arc::new(AtomicUsize::new(0));
+        let counter = events.clone();
+        terminal.set_parsed_output_callback(move |_| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        });
+
+        terminal.set_parsed_output_enabled(true).unwrap();
+        terminal.write(b"hello\n");
+        let while_enabled = events.load(Ordering::Relaxed);
+        assert!(while_enabled > 0, "callback runs while enabled");
+
+        terminal.set_parsed_output_enabled(false).unwrap();
+        terminal.write(b"world\n");
+        assert_eq!(
+            events.load(Ordering::Relaxed),
+            while_enabled,
+            "no classification work is done once disabled"
+        );
+    }
     use super::*;
 
     fn write_numbered_lines(terminal: &mut Terminal, count: usize) {

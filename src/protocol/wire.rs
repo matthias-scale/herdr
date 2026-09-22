@@ -2301,7 +2301,7 @@ mod tests {
     }
 
     #[test]
-    fn r361_7_hyperlink_spans_follow_ratatui_cell_width() {
+    fn hyperlink_spans_follow_ratatui_cell_width() {
         let mut buffer = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 8, 1));
         buffer.set_string(0, 0, "界x", ratatui::style::Style::default());
         buffer.cell_mut((4, 0)).unwrap().set_symbol("ｶ\u{ff9e}");

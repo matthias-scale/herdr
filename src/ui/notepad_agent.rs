@@ -717,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn r361_9_agent_age_without_monotonic_instant_still_schedules_refresh() {
+    fn agent_age_without_monotonic_instant_still_schedules_refresh() {
         let (mut app, pane_id) = app_with_agent();
         app.agent_states
             .report(
@@ -969,7 +969,7 @@ mod tests {
     }
 
     #[test]
-    fn r361_7_rendered_kana_link_spans_match_ansi_cell_width() {
+    fn rendered_kana_link_spans_match_ansi_cell_width() {
         let (mut app, pane_id) = app_with_agent();
         let links = [
             "https://example.com/ｶx".to_owned(),

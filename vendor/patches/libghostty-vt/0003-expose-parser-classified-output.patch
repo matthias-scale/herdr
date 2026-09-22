@@ -1,5 +1,5 @@
 diff --git a/vendor/libghostty-vt/include/ghostty/vt/terminal.h b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
-index 9bb961d3..e9ca58d2 100644
+index 9bb961d..e9ca58d 100644
 --- a/vendor/libghostty-vt/include/ghostty/vt/terminal.h
 +++ b/vendor/libghostty-vt/include/ghostty/vt/terminal.h
 @@ -467,6 +467,34 @@ typedef GhosttyClipboardWriteResult (*GhosttyTerminalClipboardWriteFn)(
@@ -53,7 +53,7 @@ index 9bb961d3..e9ca58d2 100644
  } GhosttyTerminalOption;
  
 diff --git a/vendor/libghostty-vt/src/terminal/Terminal.zig b/vendor/libghostty-vt/src/terminal/Terminal.zig
-index 08920127..f4fb433b 100644
+index 0892012..f4fb433 100644
 --- a/vendor/libghostty-vt/src/terminal/Terminal.zig
 +++ b/vendor/libghostty-vt/src/terminal/Terminal.zig
 @@ -365,6 +365,30 @@ pub fn printRepeat(self: *Terminal, count_req: usize) !void {
@@ -306,7 +306,7 @@ index 08920127..f4fb433b 100644
  
  fn printWrap(self: *Terminal) !void {
 diff --git a/vendor/libghostty-vt/src/terminal/c/terminal.zig b/vendor/libghostty-vt/src/terminal/c/terminal.zig
-index 0f95fcf1..5e860179 100644
+index 0f95fcf..ed13531 100644
 --- a/vendor/libghostty-vt/src/terminal/c/terminal.zig
 +++ b/vendor/libghostty-vt/src/terminal/c/terminal.zig
 @@ -28,6 +28,7 @@ const clipboard = @import("../clipboard.zig");
@@ -353,7 +353,7 @@ index 0f95fcf1..5e860179 100644
          .pwd_changed = &Effects.pwdChangedTrampoline,
          .size = &Effects.sizeTrampoline,
          .clipboard_write = &Effects.clipboardWriteTrampoline,
-+        .parsed_output = &Effects.parsedOutputTrampoline,
++        .parsed_output = null,
      };
  
      wrapper.* = .{
@@ -373,16 +373,20 @@ index 0f95fcf1..5e860179 100644
              .title, .pwd => ?*const lib.String,
              .color_foreground, .color_background, .color_cursor => ?*const color.RGB.C,
              .color_palette => ?*const color.PaletteC,
-@@ -510,6 +525,7 @@ fn setTyped(
+@@ -510,6 +525,11 @@ fn setTyped(
          .pwd_changed => wrapper.effects.pwd_changed = value,
          .size_cb => wrapper.effects.size_cb = value,
          .clipboard_write => wrapper.effects.clipboard_write = value,
-+        .parsed_output => wrapper.effects.parsed_output = value,
++        .parsed_output => {
++            wrapper.effects.parsed_output = value;
++            wrapper.stream.handler.effects.parsed_output =
++                if (value != null) &Effects.parsedOutputTrampoline else null;
++        },
          .title => {
              const str = if (value) |v| v.ptr[0..v.len] else "";
              wrapper.terminal.setTitle(str) catch return .out_of_memory;
 diff --git a/vendor/libghostty-vt/src/terminal/osc.zig b/vendor/libghostty-vt/src/terminal/osc.zig
-index 26ce1267..d2b2d269 100644
+index 26ce126..d2b2d26 100644
 --- a/vendor/libghostty-vt/src/terminal/osc.zig
 +++ b/vendor/libghostty-vt/src/terminal/osc.zig
 @@ -297,6 +297,10 @@ pub const Parser = struct {
@@ -426,7 +430,7 @@ index 26ce1267..d2b2d269 100644
      }
  
 diff --git a/vendor/libghostty-vt/src/terminal/stream.zig b/vendor/libghostty-vt/src/terminal/stream.zig
-index efb06ecd..6e09a4de 100644
+index efb06ec..6e09a4d 100644
 --- a/vendor/libghostty-vt/src/terminal/stream.zig
 +++ b/vendor/libghostty-vt/src/terminal/stream.zig
 @@ -895,6 +895,12 @@ pub fn Stream(comptime H: type) type {
@@ -464,7 +468,7 @@ index efb06ecd..6e09a4de 100644
  
          /// Finalize and dispatch a CSI directly from parser state for
 diff --git a/vendor/libghostty-vt/src/terminal/stream_terminal.zig b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
-index 91cfb21c..b95adbe0 100644
+index 91cfb21..f5a9261 100644
 --- a/vendor/libghostty-vt/src/terminal/stream_terminal.zig
 +++ b/vendor/libghostty-vt/src/terminal/stream_terminal.zig
 @@ -23,6 +23,16 @@ const log = std.log.scoped(.stream_terminal);
@@ -514,7 +518,7 @@ index 91cfb21c..b95adbe0 100644
              .color_scheme = null,
              .device_attributes = null,
              .enquiry = null,
-@@ -143,9 +162,142 @@ pub const Handler = struct {
+@@ -143,9 +162,163 @@ pub const Handler = struct {
          comptime action: Action.Tag,
          value: Action.Value(action),
      ) void {
@@ -525,11 +529,13 @@ index 91cfb21c..b95adbe0 100644
 +            };
 +            if (handled) return;
 +        }
++        const cursor_before = self.cursorPosition();
          self.vtFallible(action, value) catch |err| {
              log.warn("error handling VT action action={} err={}", .{ action, err });
 +            return;
          };
 +        self.emitParsedOutput(action, value);
++        self.emitCursorBreak(cursor_before);
 +    }
 +
 +    /// Finalizes an OSC-derived callback using the parser transition that
@@ -561,6 +567,25 @@ index 91cfb21c..b95adbe0 100644
 +        self.parsed_hyperlink_pending = null;
 +        const callback = self.effects.parsed_output orelse return;
 +        callback(self, .hyperlink, uri);
++    }
++
++    const CursorPosition = struct { x: usize, y: usize };
++
++    fn cursorPosition(self: *const Handler) ?CursorPosition {
++        if (self.effects.parsed_output == null) return null;
++        const cursor = &self.terminal.screens.active.cursor;
++        return .{ .x = cursor.x, .y = cursor.y };
++    }
++
++    /// Any action that moved the cursor broke text adjacency: the next run is
++    /// printed somewhere else on screen, so it cannot continue the last one.
++    /// Ghostty owns the motion; nothing here enumerates escape sequences.
++    fn emitCursorBreak(self: *Handler, before: ?CursorPosition) void {
++        const start = before orelse return;
++        const callback = self.effects.parsed_output orelse return;
++        const cursor = &self.terminal.screens.active.cursor;
++        if (cursor.x == start.x and cursor.y == start.y) return;
++        callback(self, .separator, "");
 +    }
 +
 +    fn emitParsedOutput(
