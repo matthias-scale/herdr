@@ -2306,6 +2306,13 @@ pub(crate) enum WorkspaceListEntry {
     },
 }
 
+/// What a click on a `Needs you` strip row aims at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NeedsYouTarget {
+    Local(AgentPanelLocalTarget),
+    Remote(crate::api::schema::AgentRef),
+}
+
 #[derive(Clone)]
 pub(crate) struct SidebarStateCount {
     pub(super) glyph: &'static str,
@@ -2342,6 +2349,17 @@ pub(crate) enum SidebarRow {
     Agent {
         entry: Box<AgentPanelEntry>,
         depth: u16,
+    },
+    /// A `Needs you` strip row: an agent that is blocked or waiting on the
+    /// human, hoisted above the repo groups. It carries its own click target
+    /// because the same pane still appears under its group further down.
+    NeedsYou {
+        title: String,
+        /// Short host token, e.g. `ub1`; local rows name the current host.
+        host: String,
+        /// Blocked rows read red; attention-only rows read peach.
+        blocked: bool,
+        target: NeedsYouTarget,
     },
     /// Read-only fleet agent. It carries no local card hit area, so clicks and
     /// focus actions cannot be misrouted to a colliding local pane id.
@@ -2545,6 +2563,20 @@ pub(crate) fn section_is_collapsed(app: &AppState, title: &str) -> bool {
         !app.collapsed_sidebar_groups.contains(&key)
     } else {
         app.collapsed_sidebar_groups.contains(&key)
+    }
+}
+
+/// A repo-group card folds on either disclosure state: the per-Space chevron,
+/// or the group collapse key that header clicks and the focus keybind write.
+fn workspace_card_expanded(app: &AppState, ws_idx: usize, sort_key: Option<&str>) -> bool {
+    if !app.workspace_agents_expanded(ws_idx) {
+        return false;
+    }
+    match sort_key {
+        Some(key) if key.starts_with(REPO_GROUP_PREFIX) || key.starts_with("repo-path:") => {
+            !section_is_collapsed(app, key)
+        }
+        _ => true,
     }
 }
 
@@ -2956,7 +2988,7 @@ fn compact_sidebar_rows_inner(
     }
     // A Space is a folder, so this separation must hold even when no pane
     // resolved a repository.
-    if app.sidebar_group_mode == SidebarGroupMode::Spaces
+    let legacy_space_tree = app.sidebar_group_mode == SidebarGroupMode::Spaces
         || app.sidebar_group_mode == SidebarGroupMode::RepoWorktree
         || (app.sidebar_group_mode == SidebarGroupMode::Repo
             && !visible_entries
@@ -2964,8 +2996,8 @@ fn compact_sidebar_rows_inner(
                 .any(|entry| entry_repo_label(app, entry).is_some())
             && !visible_entries.iter().any(|entry| {
                 entry_work_context(app, entry).is_some_and(pane_context_has_sidebar_metadata)
-            }))
-    {
+            }));
+    if legacy_space_tree {
         append_legacy_space_rows(
             app,
             &mut rows,
@@ -2973,26 +3005,15 @@ fn compact_sidebar_rows_inner(
             expand_worktrees,
             terminal_runtimes,
         );
-        append_ordered_sidebar_blocks(
-            app,
-            &mut rows,
-            &visible_entries,
-            &snoozed_entries,
-            &settled_entries,
-            &remote_entries,
-            expand_worktrees,
-        );
-        let row_width = sidebar_row_render_width(app, &rows, expand_worktrees);
-        mark_ambiguous_remote_titles(&mut rows, row_width);
-        return rows;
-    }
-    match app.sidebar_group_mode {
-        SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {
-            append_repo_group_rows(app, &mut rows, &visible_entries, false);
-        }
-        SidebarGroupMode::Spaces => {}
-        SidebarGroupMode::RepoPr | SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive => {
-            append_object_group_rows(app, &mut rows, &visible_entries, false);
+    } else {
+        match app.sidebar_group_mode {
+            SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {
+                append_repo_group_rows(app, &mut rows, &visible_entries, false);
+            }
+            SidebarGroupMode::Spaces => {}
+            SidebarGroupMode::RepoPr | SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive => {
+                append_object_group_rows(app, &mut rows, &visible_entries, false);
+            }
         }
     }
     append_ordered_sidebar_blocks(
@@ -3004,6 +3025,20 @@ fn compact_sidebar_rows_inner(
         &remote_entries,
         expand_worktrees,
     );
+    // The Needs-you strip leads the list; the mobile switcher keeps its own
+    // flatter presentation instead.
+    if !expand_worktrees {
+        let needs_you =
+            needs_you_strip_rows(app, &visible_entries, &snoozed_entries, &remote_entries);
+        if !needs_you.is_empty() {
+            let mut strip = needs_you;
+            if !rows.is_empty() {
+                strip.push(SidebarRow::Divider);
+            }
+            strip.append(&mut rows);
+            rows = strip;
+        }
+    }
     let row_width = sidebar_row_render_width(app, &rows, expand_worktrees);
     mark_ambiguous_remote_titles(&mut rows, row_width);
     rows
@@ -3377,6 +3412,42 @@ fn sidebar_repo_groups(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<Sideb
     groups
 }
 
+/// The Repo view's groups plus the one owning the focused pane, for the focus
+/// keybind that collapses every group but that one. `None` when the focused
+/// pane resolves to no group, because collapsing everything is never the right
+/// answer to "where am I".
+pub(crate) struct RepoGroupFocusPlan {
+    pub(crate) owner_key: String,
+    /// Workspace the focused pane lives in; the owning group's card expands.
+    pub(crate) owner_ws_idx: usize,
+    pub(crate) group_keys: Vec<String>,
+}
+
+pub(crate) fn repo_group_focus_plan(app: &AppState) -> Option<RepoGroupFocusPlan> {
+    let entries = sidebar_filtered_agent_entries_from(app, None);
+    let (ws_idx, pane_id) = app.active.and_then(|ws_idx| {
+        app.workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.focused_pane_id())
+            .map(|pane_id| (ws_idx, pane_id))
+    })?;
+    let owner = entries.iter().find(|entry| {
+        entry
+            .local_target()
+            .is_some_and(|target| target.ws_idx == ws_idx && target.pane_id == pane_id)
+    })?;
+    let (owner_key, _) = entry_repo_group(app, owner)?;
+    let group_keys = sidebar_repo_groups(app, &entries)
+        .into_iter()
+        .map(|group| group.key)
+        .collect();
+    Some(RepoGroupFocusPlan {
+        owner_key,
+        owner_ws_idx: ws_idx,
+        group_keys,
+    })
+}
+
 fn append_tab_rows(rows: &mut Vec<SidebarRow>, entries: Vec<AgentPanelEntry>, depth: u16) {
     rows.extend(entries.into_iter().map(|mut entry| {
         let show_host_identity = entry.remote_show_host_identity;
@@ -3544,7 +3615,7 @@ fn append_repo_group_rows(
                     sort_key: Some(group.key.clone()),
                     sort_mode: group_sort,
                 });
-                if !app.workspace_agents_expanded(representative.ws_idx) {
+                if collapsed || !app.workspace_agents_expanded(representative.ws_idx) {
                     group
                         .entries
                         .retain(|entry| matches!(entry.identity, AgentPanelIdentity::Remote(_)));
@@ -3763,6 +3834,58 @@ fn append_ordered_sidebar_blocks(
         }
         rows.append(&mut block_rows);
     }
+}
+
+/// The `Needs you` strip: every admitted row whose agent is blocked or waiting
+/// on the human, hoisted above the repo groups. Local rows come from the same
+/// classified lists the body renders; `remote_entries` is already gated by the
+/// machine-scope switch, so the strip follows it exactly. Blocked rows lead.
+/// An empty strip emits no rows at all — no header, no divider.
+fn needs_you_strip_rows(
+    app: &AppState,
+    visible_entries: &[AgentPanelEntry],
+    snoozed_entries: &[AgentPanelEntry],
+    remote_entries: &[AgentPanelEntry],
+) -> Vec<SidebarRow> {
+    let local_host = middle_elide(&app.agent_host_name, SIDEBAR_HOST_TOKEN_NARROW_WIDTH);
+    let mut rows = Vec::new();
+    for entry in visible_entries.iter().chain(snoozed_entries) {
+        if !entry_needs_human_attention(entry) {
+            continue;
+        }
+        let Some(target) = entry.local_target() else {
+            continue;
+        };
+        rows.push(SidebarRow::NeedsYou {
+            title: compact_row_title(entry, true).to_string(),
+            host: local_host.clone(),
+            blocked: entry_is_blocked(entry),
+            target: NeedsYouTarget::Local(target),
+        });
+    }
+    for entry in remote_entries {
+        if !entry_needs_human_attention(entry) {
+            continue;
+        }
+        let Some(remote) = entry.remote_entry.as_ref() else {
+            continue;
+        };
+        rows.push(SidebarRow::NeedsYou {
+            title: remote.render_title.clone(),
+            host: remote
+                .narrow_host_suffix
+                .strip_prefix(" · ")
+                .map(str::to_string)
+                .unwrap_or_else(|| remote.agent_ref.host.clone()),
+            blocked: entry_is_blocked(entry),
+            target: NeedsYouTarget::Remote(remote.agent_ref.clone()),
+        });
+    }
+    rows.sort_by_key(|row| match row {
+        SidebarRow::NeedsYou { blocked, .. } => !blocked,
+        _ => false,
+    });
+    rows
 }
 
 fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[AgentPanelEntry]) {
@@ -6042,6 +6165,7 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
             agent_entry_height_in_body_at(app, entry, body_height, *depth)
         }
         SidebarRow::Tab { .. }
+        | SidebarRow::NeedsYou { .. }
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::Divider
         | SidebarRow::NestedHeader { .. }
@@ -6135,6 +6259,8 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
             | SidebarRow::AloopUnreachable { .. }
             | SidebarRow::AloopEmpty,
         ) => 0,
+        // Strip rows hug each other and the divider that closes the strip.
+        (SidebarRow::NeedsYou { .. }, _) | (_, SidebarRow::NeedsYou { .. }) => 0,
     }
 }
 
@@ -6196,6 +6322,8 @@ pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) 
         // Headers belong to a state, not a workspace, so scrolling to a
         // workspace must never land on one.
         SidebarRow::SectionHeader { .. } => false,
+        // Strip rows duplicate a row the workspace owns further down.
+        SidebarRow::NeedsYou { .. } => false,
         SidebarRow::Divider => false,
         SidebarRow::NestedHeader { .. } => false,
         // A Symphony workflow runs on a worker, not in a workspace.
@@ -6344,6 +6472,7 @@ pub(crate) fn compute_sidebar_row_areas(
                 });
             }
             SidebarRow::Tab { .. }
+            | SidebarRow::NeedsYou { .. }
             | SidebarRow::RemoteAgent { .. }
             | SidebarRow::SectionHeader { .. }
             | SidebarRow::Divider
@@ -6571,6 +6700,89 @@ pub(crate) fn remote_agent_row_at(
         .into_iter()
         .find(|area| row >= area.rect.y && row < area.rect.bottom())
         .map(|area| area.agent_ref)
+}
+
+/// Strip-row geometry from rows a caller already walked, so the render pass
+/// and the hit test read the same layout.
+fn needs_you_row_areas_from_rows(
+    app: &AppState,
+    rows: &[SidebarRow],
+    body: Rect,
+    scroll_skip: usize,
+) -> Vec<(usize, Rect)> {
+    if body.width == 0 || body.height == 0 {
+        return Vec::new();
+    }
+    let mut y = body.y;
+    let mut out = Vec::new();
+    for (idx, row) in rows.iter().enumerate().skip(scroll_skip) {
+        let height = sidebar_row_height(app, row, body.height);
+        if y.saturating_add(height) > body.bottom() {
+            break;
+        }
+        if matches!(row, SidebarRow::NeedsYou { .. }) {
+            out.push((idx, Rect::new(body.x, y, body.width, height)));
+        }
+        y = y
+            .saturating_add(height)
+            .saturating_add(sidebar_row_gap(app, rows, idx));
+    }
+    out
+}
+
+/// The `Needs you` strip row at this screen row, if any.
+pub(crate) fn needs_you_row_at(app: &AppState, row: u16) -> Option<NeedsYouTarget> {
+    let ws_area = workspace_list_rect_for_app(app, app.view.sidebar_rect);
+    let metrics = workspace_list_scroll_metrics(app, ws_area);
+    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    let rows = sidebar_rows(app);
+    let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
+    needs_you_row_areas_from_rows(app, &rows, body, scroll_skip)
+        .into_iter()
+        .find(|(_, rect)| row >= rect.y && row < rect.bottom())
+        .and_then(|(idx, _)| match rows.get(idx) {
+            Some(SidebarRow::NeedsYou { target, .. }) => Some(target.clone()),
+            _ => None,
+        })
+}
+
+fn render_needs_you_row(
+    app: &AppState,
+    frame: &mut Frame,
+    title: &str,
+    host: &str,
+    blocked: bool,
+    rect: Rect,
+) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let p = &app.palette;
+    let marker_color = if blocked { p.red } else { p.peach };
+    let host_width = display_width(host);
+    // " ! " plus the right-aligned host and its gap come off the title.
+    let title_width = usize::from(rect.width).saturating_sub(3 + host_width + 1);
+    let title = truncate_end(title, title_width);
+    let pad = title_width.saturating_sub(display_width(&title));
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                "!",
+                Style::default()
+                    .fg(marker_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(title, Style::default().fg(p.subtext0)),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(
+                format!(" {host}"),
+                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+            ),
+        ])),
+        Rect::new(rect.x, rect.y, rect.width, 1),
+    );
 }
 
 /// What an agent dot is saying, in the row's own vocabulary. A pane can
@@ -7807,6 +8019,18 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             | SidebarRow::AloopUnreachable { .. }
             | SidebarRow::AloopEmpty
             | SidebarRow::AgentRun { .. } => {}
+            // The rail keeps the strip's one fact: something needs you.
+            SidebarRow::NeedsYou { blocked, .. } => {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        "!",
+                        Style::default()
+                            .fg(if *blocked { p.red } else { p.peach })
+                            .add_modifier(Modifier::BOLD),
+                    ))),
+                    Rect::new(ws_area.x, y, ws_area.width, 1),
+                );
+            }
         }
     }
 
@@ -7937,8 +8161,11 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let ws_area = workspace_list_rect_for_app(app, area);
-    render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
+    // render_workspace_list takes the full sidebar rect, like the compute and
+    // input paths do; its walkers subtract the separator, notepad and
+    // animation reservations themselves. Passing the already-shrunk list rect
+    // here takes them twice and clips rows compute_view considers visible.
+    render_workspace_list(app, terminal_runtimes, frame, area, is_navigating);
     crate::ui::notepad::render_notepad(app, frame, sidebar_notepad_rect(app, area));
     crate::ui::hyperspace::render_animation(app, frame, sidebar_animation_rect(app, area));
     render_sidebar_header(app, frame, area, p);
@@ -8613,6 +8840,13 @@ fn render_workspace_list(
     is_navigating: bool,
 ) {
     let p = &app.palette;
+    // The full sidebar rect, same as compute_view and the input handlers pass
+    // to these walkers; each walker subtracts the separator and the
+    // notepad/animation reservations itself.
+    let sidebar_area = area;
+    let list_area = workspace_list_rect_for_app(app, sidebar_area);
+    let list_bottom = list_area.y + list_area.height;
+    let workspace_labels = sidebar_workspace_labels(app, terminal_runtimes);
     let dragged_ws_idx = match app.drag.as_ref().map(|drag| &drag.target) {
         Some(crate::app::state::DragTarget::WorkspaceReorder { source_ws_idx, .. }) => {
             Some(*source_ws_idx)
@@ -8623,14 +8857,16 @@ fn render_workspace_list(
         Some(crate::app::state::DragTarget::WorkspaceReorder {
             drop_target: Some(drop_target),
             ..
-        }) => workspace_drop_indicator_row(app, &app.view.workspace_card_areas, area, *drop_target),
+        }) => workspace_drop_indicator_row(
+            app,
+            &app.view.workspace_card_areas,
+            list_area,
+            *drop_target,
+        ),
         _ => None,
     };
 
-    let list_bottom = area.y + area.height;
-    let workspace_labels = sidebar_workspace_labels(app, terminal_runtimes);
-
-    let metrics = workspace_list_scroll_metrics(app, area);
+    let metrics = workspace_list_scroll_metrics(app, list_area);
     let row_entries = sidebar_rows_from(app, terminal_runtimes);
     let workspace_headers = row_entries
         .iter()
@@ -8653,8 +8889,7 @@ fn render_workspace_list(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let scrollbar_rect = workspace_list_scrollbar_rect(app, area);
-    let sidebar_area = Rect::new(area.x, area.y, area.width.saturating_add(1), area.height);
+    let scrollbar_rect = workspace_list_scrollbar_rect(app, sidebar_area);
     let computed_cards = compute_workspace_card_areas(app, sidebar_area);
     let cards = &computed_cards;
     for (card_index, card) in cards.iter().enumerate() {
@@ -8749,7 +8984,7 @@ fn render_workspace_list(
             spans.push(Span::raw(" "));
         }
         spans.push(Span::styled(
-            if app.workspace_agents_expanded(i) {
+            if workspace_card_expanded(app, i, header.and_then(|(.., sort_key, _)| *sort_key)) {
                 "▾"
             } else {
                 "▸"
@@ -8795,6 +9030,7 @@ fn render_workspace_list(
             SidebarRow::Workspace { .. }
                 | SidebarRow::Tab { .. }
                 | SidebarRow::Agent { .. }
+                | SidebarRow::NeedsYou { .. }
                 | SidebarRow::RemoteAgent { .. }
                 | SidebarRow::NestedHeader { .. }
         )
@@ -8802,7 +9038,7 @@ fn render_workspace_list(
     if (!has_matching_rows && !app.sidebar_work_filter.query.is_empty())
         || (row_entries.is_empty() && !app.sidebar_shows_spaces_tree())
     {
-        let body = workspace_list_body_rect(area, should_show_scrollbar(metrics));
+        let body = workspace_list_body_rect(list_area, should_show_scrollbar(metrics));
         let empty_y = section_headers
             .iter()
             .map(|header| header.rect.bottom())
@@ -8881,7 +9117,7 @@ fn render_workspace_list(
         render_agent_card(app, frame, entry, card.rect, depth, narrow_prefix);
     }
     if !app.remote_agent_panel_entries.is_empty() {
-        let body = workspace_list_body_rect(area, should_show_scrollbar(metrics));
+        let body = workspace_list_body_rect(list_area, should_show_scrollbar(metrics));
         let scroll = workspace_list_scroll_skip(app, &metrics);
         for row_area in remote_agent_row_areas_from_rows(app, &row_entries, body, scroll) {
             let Some(SidebarRow::RemoteAgent {
@@ -8908,6 +9144,25 @@ fn render_workspace_list(
                 narrow_prefix,
                 *show_host_identity,
             );
+        }
+    }
+
+    // The Needs-you strip leads the same row list, so its geometry comes from
+    // the same walk as the remote rows above it.
+    {
+        let body = workspace_list_body_rect(list_area, should_show_scrollbar(metrics));
+        let scroll = workspace_list_scroll_skip(app, &metrics);
+        for (row_idx, rect) in needs_you_row_areas_from_rows(app, &row_entries, body, scroll) {
+            let Some(SidebarRow::NeedsYou {
+                title,
+                host,
+                blocked,
+                ..
+            }) = row_entries.get(row_idx)
+            else {
+                continue;
+            };
+            render_needs_you_row(app, frame, title, host, *blocked, rect);
         }
     }
 
@@ -14094,6 +14349,7 @@ pub(crate) mod tests {
                 SidebarRow::NestedHeader { .. } => Some(('h', 0)),
                 SidebarRow::SectionHeader { .. }
                 | SidebarRow::Divider
+                | SidebarRow::NeedsYou { .. }
                 | SidebarRow::SymphonyJob { .. }
                 | SidebarRow::SymphonyEmpty
                 | SidebarRow::AgentRun { .. }
@@ -15056,7 +15312,7 @@ pub(crate) mod tests {
             let usage_row = rows
                 .iter()
                 .find(|row| row.contains('○') && row.contains("pi"))
-                .unwrap_or_else(|| panic!("width {width} omitted usage cue: {rows:?}"));
+                .unwrap_or_else(|| panic!("width {width} omitted usage cue"));
             assert!(usage_row.contains('○'), "{usage_row:?}");
             assert!(!usage_row.contains("limit"), "{usage_row:?}");
             if width >= 24 {
@@ -15523,6 +15779,7 @@ pub(crate) mod tests {
                 | SidebarRow::SectionHeader { .. }
                 | SidebarRow::Divider
                 | SidebarRow::NestedHeader { .. }
+                | SidebarRow::NeedsYou { .. }
                 | SidebarRow::SymphonyJob { .. }
                 | SidebarRow::SymphonyEmpty
                 | SidebarRow::AloopLoop { .. }
@@ -15579,6 +15836,7 @@ pub(crate) mod tests {
                     SidebarRow::SectionHeader { .. } => ("section", 0, None, None),
                     SidebarRow::Divider => ("divider", 0, None, None),
                     SidebarRow::NestedHeader { .. } => ("section", 0, None, None),
+                    SidebarRow::NeedsYou { .. } => ("needs-you", 0, None, None),
                     SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty => {
                         ("symphony", 0, None, None)
                     }
@@ -15846,7 +16104,7 @@ row_gap = 1
         assert!(
             rows.iter()
                 .any(|row| row.replace(['│', '▕'], "").trim().is_empty()),
-            "Space groups should have a visual gap: {rows:?}"
+            "Space groups should have a visual gap"
         );
 
         let Ok(path) = std::env::var("HERDR_SIDEBAR_EVIDENCE_HTML") else {
@@ -17705,6 +17963,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 SidebarRow::NestedHeader { title, .. } => Some(("section", title)),
                 SidebarRow::SectionHeader { .. }
                 | SidebarRow::Divider
+                | SidebarRow::NeedsYou { .. }
                 | SidebarRow::SymphonyJob { .. }
                 | SidebarRow::SymphonyEmpty
                 | SidebarRow::AgentRun { .. }
@@ -18080,6 +18339,328 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             "an empty Blocked group does not cost a row"
         );
         assert_eq!(rows[0], ("section", SPACES_SECTION_TITLE.to_string()));
+    }
+
+    #[test]
+    fn needs_you_strip_hoists_blocked_rows_above_the_groups_and_vanishes_when_clear() {
+        let mut app = app_with_agents(&["working", "blocked"]);
+        app.active = Some(0);
+
+        // Both panes working: the strip renders nothing at all — no rows, and
+        // nothing, divider included, is prepended to the list.
+        let rows = sidebar_rows(&app);
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::NeedsYou { .. })));
+        assert!(
+            matches!(rows.first(), Some(SidebarRow::SectionHeader { .. })),
+            "an empty strip leaves the body's first row alone"
+        );
+
+        let blocked_pane = app.workspaces[1].tabs[0].root_pane;
+        let terminal_id = app.workspaces[1].tabs[0].panes[&blocked_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Blocked);
+
+        let rows = sidebar_rows(&app);
+        let Some(SidebarRow::NeedsYou {
+            host,
+            blocked,
+            target,
+            ..
+        }) = rows.first()
+        else {
+            panic!("the strip leads the list");
+        };
+        assert!(blocked);
+        assert!(!host.is_empty());
+        assert_eq!(
+            *target,
+            NeedsYouTarget::Local(AgentPanelLocalTarget {
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id: blocked_pane,
+            })
+        );
+        assert!(
+            matches!(rows.get(1), Some(SidebarRow::Divider)),
+            "a divider closes the strip"
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::NeedsYou { .. }))
+                .count(),
+            1,
+            "the working pane is not hoisted"
+        );
+        // The hoisted row never leaves its group: the pane still renders below.
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. } if entry
+                .local_target()
+                .is_some_and(|target| target.ws_idx == 1)
+        )));
+    }
+
+    #[test]
+    fn needs_you_strip_follows_the_machine_scope() {
+        let snapshot = crate::fleet::Snapshot {
+            polled: true,
+            configured_hosts: vec!["remote-b".into()],
+            hosts: vec![fleet_host_snapshot(
+                "remote-b",
+                false,
+                vec![crate::fleet::FleetRow::test_agent_info_row(
+                    "remote-b",
+                    remote_agent_info(
+                        "pane/1",
+                        "remote blocked",
+                        crate::api::schema::AgentStatus::Blocked,
+                        false,
+                        false,
+                    ),
+                )],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+        let mut app = app_with_agents(&["local"]);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+
+        let rows = sidebar_rows(&app);
+        assert!(
+            rows.iter().any(|row| matches!(
+                row,
+                SidebarRow::NeedsYou {
+                    target: NeedsYouTarget::Remote(agent_ref),
+                    ..
+                } if agent_ref.host == "remote-b"
+            )),
+            "all-machines scope hoists the remote blocked row"
+        );
+
+        let this_machine = sidebar_filter_options(&app)
+            .iter()
+            .position(|option| {
+                matches!(
+                    option,
+                    SidebarFilterOption::MachineScope(
+                        crate::app::state::SidebarMachineScope::ThisMachine
+                    )
+                )
+            })
+            .expect("this-machine scope option");
+        app.select_sidebar_filter_option(this_machine);
+        let rows = sidebar_rows(&app);
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row, SidebarRow::NeedsYou { .. })),
+            "this-machine scope admits nothing remote"
+        );
+        assert!(
+            !matches!(
+                rows.first(),
+                Some(SidebarRow::NeedsYou { .. } | SidebarRow::Divider)
+            ),
+            "an empty strip leaves no divider behind"
+        );
+    }
+
+    #[test]
+    fn needs_you_row_click_targets_the_pane_behind_the_row() {
+        let mut app = app_with_agents(&["working", "blocked"]);
+        app.active = Some(0);
+        let blocked_pane = app.workspaces[1].tabs[0].root_pane;
+        let terminal_id = app.workspaces[1].tabs[0].panes[&blocked_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Blocked);
+        app.view.sidebar_rect = Rect::new(0, 0, 26, 20);
+
+        let mut hits = (0..20).filter_map(|row| needs_you_row_at(&app, row));
+        assert_eq!(
+            hits.next(),
+            Some(NeedsYouTarget::Local(AgentPanelLocalTarget {
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id: blocked_pane,
+            }))
+        );
+        assert_eq!(hits.next(), None, "one blocked pane is one strip row");
+    }
+
+    #[test]
+    fn needs_you_strip_never_pushes_the_hoisted_panes_row_below_the_render_fold() {
+        let mut app = app_with_agents(&["alpha", "beta"]);
+        let blocked_pane = app.workspaces[1].tabs[0].root_pane;
+        let terminal_id = app.workspaces[1].tabs[0].panes[&blocked_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_raw_agent_state_for_test(AgentState::Blocked);
+        // The idle animation reserves rows at the bottom of the sidebar; the
+        // renderer must subtract that reservation exactly once, or the strip's
+        // two leading rows push the hoisted pane's own row below the fold.
+        app.hyperspace.enabled = true;
+
+        let area = Rect::new(0, 0, 40, 20);
+        let card = compute_tab_card_areas(&app, area)
+            .into_iter()
+            .find(|card| card.pane_id == blocked_pane)
+            .expect("compute_view keeps the blocked pane's row visible");
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
+        assert!(
+            rendered.contains('○') && rendered.contains("pi"),
+            "the row compute_view placed at y={} must be the one rendered there: {rendered:?}",
+            card.rect.y
+        );
+    }
+
+    #[test]
+    fn repo_group_chevron_and_body_agree_in_both_collapse_states() {
+        let mut app = app_with_agents(&["alpha"]);
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("owner/alpha".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        app.reconcile_sidebar_presentation();
+
+        let has_child_rows = |app: &AppState| {
+            sidebar_rows(app).iter().any(|row| {
+                matches!(row, SidebarRow::Tab { entry, .. } if entry
+                    .local_target()
+                    .is_some_and(|target| target.ws_idx == 0))
+            })
+        };
+        let area = Rect::new(0, 0, 40, 12);
+        let rendered_chevron = |app: &AppState| {
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let header = compute_workspace_card_areas(app, area)
+                .into_iter()
+                .find(|card| card.ws_idx == 0)
+                .expect("group header card");
+            row_text(terminal.backend().buffer(), header.rect.y, area.width - 1)
+        };
+
+        assert!(has_child_rows(&app));
+        assert!(workspace_card_expanded(&app, 0, Some("repo:owner/alpha")));
+        assert!(
+            rendered_chevron(&app).contains('▾'),
+            "an expanded group shows the open chevron"
+        );
+
+        app.collapsed_sidebar_groups
+            .insert("repo:repo:owner/alpha".into());
+
+        assert!(!has_child_rows(&app));
+        assert!(!workspace_card_expanded(&app, 0, Some("repo:owner/alpha")));
+        assert!(
+            rendered_chevron(&app).contains('▸'),
+            "a collapsed group shows the closed chevron"
+        );
+    }
+
+    #[test]
+    fn focus_keybind_collapses_every_repo_group_but_the_focused_panes_own() {
+        let mut app = app_with_agents(&["alpha", "beta"]);
+        for (ws_idx, repo) in [(0usize, "owner/alpha"), (1, "owner/beta")] {
+            replace_tab_context(
+                &mut app,
+                ws_idx,
+                0,
+                crate::work_context::PaneWorkContext {
+                    repo: Some(repo.into()),
+                    ..Default::default()
+                },
+                Default::default(),
+            );
+        }
+        app.active = Some(1);
+        app.reconcile_sidebar_presentation();
+
+        assert!(app.focus_owning_repo_group());
+        assert!(app
+            .collapsed_sidebar_groups
+            .contains("repo:repo:owner/alpha"));
+        assert!(!app
+            .collapsed_sidebar_groups
+            .contains("repo:repo:owner/beta"));
+
+        let rows = sidebar_rows(&app);
+        assert!(
+            !rows.iter().any(|row| matches!(
+                row,
+                SidebarRow::Tab { entry, .. } if entry
+                    .local_target()
+                    .is_some_and(|target| target.ws_idx == 0)
+            )),
+            "the other group's rows are folded away"
+        );
+        assert!(
+            rows.iter().any(|row| matches!(
+                row,
+                SidebarRow::Tab { entry, .. } if entry
+                    .local_target()
+                    .is_some_and(|target| target.ws_idx == 1)
+            )),
+            "the focused pane's group keeps its rows"
+        );
+        // Both group headers stay: a collapsed group is folded, not deleted.
+        for title in ["owner/alpha", "owner/beta"] {
+            assert!(
+                rows.iter().any(|row| matches!(
+                    row,
+                    SidebarRow::Workspace { title: row_title, .. } if row_title == title
+                )),
+                "{title} header"
+            );
+        }
+        // A lens is transient: nothing queues a persistence override.
+        assert!(app
+            .take_sidebar_group_collapsed_persistence_request()
+            .is_none());
+    }
+
+    #[test]
+    fn focus_keybind_is_a_noop_outside_the_repo_view() {
+        let mut app = app_with_agents(&["alpha", "beta"]);
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("owner/alpha".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        app.set_sidebar_group_mode(SidebarGroupMode::Spaces);
+        let before = app.collapsed_sidebar_groups.clone();
+        assert!(!app.focus_owning_repo_group());
+        assert_eq!(app.collapsed_sidebar_groups, before);
     }
 
     #[test]
@@ -22550,7 +23131,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .join("\n");
         assert!(
             !rows.contains("2.1.245"),
-            "display-agent fallback leaked the version: {rows:?}"
+            "display-agent fallback leaked the version"
         );
 
         let mut suffixless = app_for_real_sidebar_fixtures(&["gemini"]);
@@ -22583,14 +23164,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .map(|row| row_text(rendered.backend().buffer(), row, area.width - 1))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(
-            !rows.contains("0.9.3"),
-            "suffixless version leaked: {rows:?}"
-        );
-        assert!(
-            rows.contains("gemini"),
-            "provider identity missing: {rows:?}"
-        );
+        assert!(!rows.contains("0.9.3"), "suffixless version leaked");
+        assert!(rows.contains("gemini"), "provider identity missing");
 
         suffixless.workspaces[0].tabs[0].custom_name = Some("2026.08.26".into());
         let area = Rect::new(0, 0, 60, 12);
@@ -22604,7 +23179,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .join("\n");
         assert!(
             rows.contains("2026.08.26"),
-            "semantic dotted title was hidden: {rows:?}"
+            "semantic dotted title was hidden"
         );
     }
 
@@ -22665,9 +23240,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let rendered = (0..area.height)
             .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
             .collect::<Vec<_>>();
+        // The blocked Claude pane is hoisted into the Needs-you strip as well;
+        // the strip row leads with `!`, the group row is the one under test.
         let claude = rendered
             .iter()
-            .find(|row| row.contains("Approve Bash command"))
+            .find(|row| row.contains("Approve Bash command") && !row.trim_start().starts_with('!'))
             .expect("Claude row");
         assert!(claude.contains("cc"), "{claude:?}");
         let claude_row_without_space = claude.split(" · ").next().expect("row title and provider");
@@ -24267,6 +24844,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 }
                 SidebarRow::SectionHeader { .. }
                 | SidebarRow::Divider
+                | SidebarRow::NeedsYou { .. }
                 | SidebarRow::SymphonyJob { .. }
                 | SidebarRow::SymphonyEmpty
                 | SidebarRow::AgentRun { .. }

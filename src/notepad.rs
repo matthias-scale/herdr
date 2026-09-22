@@ -35,6 +35,24 @@ pub(crate) struct NotepadFile {
     pub(crate) name: String,
 }
 
+/// One clickable tab in the panel's header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotepadTabTarget {
+    Note(usize),
+    /// The focused pane's work context, rendered by the dock's Context surface.
+    Context,
+    /// The focused pane's agent state, read-only.
+    Agent,
+}
+
+/// The Context tab's header label.
+pub(crate) const NOTEPAD_CONTEXT_TAB_LABEL: &str = "Context";
+
+/// Smallest and largest panel heights, header row included. Dragging the
+/// panel's top edge and `[notepad] height` both clamp to this range.
+pub(crate) const MIN_HEIGHT: u16 = 3;
+pub(crate) const MAX_HEIGHT: u16 = 24;
+
 /// One collapsible section of the agent tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentSection {
@@ -92,6 +110,9 @@ pub(crate) struct NotepadState {
     pub(crate) dir: Option<PathBuf>,
     pub(crate) files: Vec<NotepadFile>,
     pub(crate) active: usize,
+    /// The Context tab is showing instead of a note. `active` still names the
+    /// note the operator was on, so leaving the tab lands back on it.
+    pub(crate) context_active: bool,
     /// The note body, one entry per line. Always at least one (empty) line.
     pub(crate) lines: Vec<String>,
     pub(crate) cursor_line: usize,
@@ -124,6 +145,7 @@ impl Default for NotepadState {
             dir: None,
             files: Vec::new(),
             active: 0,
+            context_active: false,
             lines: vec![String::new()],
             cursor_line: 0,
             cursor_col: 0,
@@ -150,7 +172,7 @@ impl NotepadState {
     pub(crate) fn from_config(config: &crate::config::NotepadConfig) -> Self {
         Self {
             enabled: config.enabled,
-            height: config.height.clamp(3, 24),
+            height: config.height.clamp(MIN_HEIGHT, MAX_HEIGHT),
             dir: config.enabled.then(|| notes_dir(config)),
             ..Self::default()
         }
@@ -195,13 +217,14 @@ impl NotepadState {
     }
 
     pub(crate) fn select(&mut self, index: usize) -> bool {
-        if self.files.is_empty()
-            || index >= self.files.len()
-            || (index == self.active && !self.agent_tab)
-        {
+        if self.files.is_empty() || index >= self.files.len() {
+            return false;
+        }
+        if index == self.active && !self.context_active && !self.agent_tab {
             return false;
         }
         self.active = index;
+        self.context_active = false;
         self.agent_tab = false;
         self.cursor_line = 0;
         self.cursor_col = 0;
@@ -216,6 +239,7 @@ impl NotepadState {
             return false;
         }
         self.agent_tab = true;
+        self.context_active = false;
         self.focused = false;
         self.agent_scroll = 0;
         true
@@ -232,17 +256,44 @@ impl NotepadState {
         self.agent_scroll = (scroll.max(0) as usize).min(max);
     }
 
-    pub(crate) fn cycle(&mut self, backwards: bool) -> bool {
-        if self.files.len() < 2 {
+    /// Shows the Context tab. The note buffer is untouched, so returning to a
+    /// note needs no reload.
+    pub(crate) fn select_context(&mut self) -> bool {
+        if self.context_active {
             return false;
         }
-        let len = self.files.len();
-        let next = if backwards {
-            (self.active + len - 1) % len
+        self.context_active = true;
+        self.agent_tab = false;
+        true
+    }
+
+    pub(crate) fn cycle(&mut self, backwards: bool) -> bool {
+        // The Context and agent tabs ride after the last note, in that order.
+        let context_stop = self.files.len();
+        let agent_stop = context_stop + 1;
+        let stops = agent_stop + 1;
+        if stops < 2 {
+            return false;
+        }
+        let current = if self.agent_tab {
+            agent_stop
+        } else if self.context_active {
+            context_stop
         } else {
-            (self.active + 1) % len
+            self.active
         };
-        self.select(next)
+        let next = if backwards {
+            (current + stops - 1) % stops
+        } else {
+            (current + 1) % stops
+        };
+        if next == agent_stop {
+            self.select_agent_tab()
+        } else if next == context_stop {
+            self.select_context()
+        } else {
+            self.select(next)
+        }
     }
 
     fn line_len(&self, line: usize) -> usize {
@@ -772,10 +823,23 @@ mod tests {
                 name: "b".into(),
             },
         ]);
+        // The pane tabs are the last stops: a → b → Context → agent → a.
         assert!(state.cycle(false));
         assert_eq!(state.active, 1);
         assert!(state.cycle(false));
+        assert!(state.context_active);
+        assert!(state.cycle(false));
+        assert!(state.agent_tab);
+        assert!(!state.context_active);
+        assert!(state.cycle(false));
         assert_eq!(state.active, 0);
+        assert!(!state.context_active);
+        assert!(!state.agent_tab);
+        assert!(state.cycle(true));
+        assert!(state.agent_tab);
+        assert!(state.cycle(true));
+        assert!(state.context_active);
+        assert!(!state.agent_tab);
         assert!(state.cycle(true));
         assert_eq!(state.active, 1);
     }
@@ -826,6 +890,20 @@ mod tests {
         assert_eq!(state.agent_scroll, 3);
         state.agent_scroll_by(-10, 3);
         assert_eq!(state.agent_scroll, 0);
+    }
+
+    #[test]
+    fn selecting_a_note_leaves_the_context_tab() {
+        let mut state = state_with("");
+        state.set_files(vec![NotepadFile {
+            path: PathBuf::from("/notes/a.md"),
+            name: "a".into(),
+        }]);
+        assert!(state.select_context());
+        assert!(!state.select_context());
+        // Re-selecting the already-active note still leaves the Context tab.
+        assert!(state.select(0));
+        assert!(!state.context_active);
     }
 
     #[test]

@@ -4601,6 +4601,9 @@ impl HeadlessServer {
         if let Some(width) = self.app.state.take_dock_width_persistence_request() {
             self.send_to_client(client_id, ServerMessage::DockWidth { width });
         }
+        if let Some(height) = self.app.state.take_notepad_height_persistence_request() {
+            crate::client::presentation::save_notepad_height(height);
+        }
         if let Some(mode) = self.app.state.take_sidebar_group_mode_persistence_request() {
             crate::client::presentation::save_sidebar_group_mode(mode);
         }

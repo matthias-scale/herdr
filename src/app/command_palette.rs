@@ -90,6 +90,7 @@ pub(crate) fn action_for_field(field: &str) -> Option<NavigateAction> {
         "copy_mode" => NavigateAction::CopyMode,
         "toggle_sidebar" => NavigateAction::ToggleSidebar,
         "focus_sidebar" => NavigateAction::FocusSidebar,
+        "focus_owning_repo_group" => NavigateAction::FocusOwningRepoGroup,
         "sidebar_cycle_group_mode" => NavigateAction::CycleSidebarGroupMode,
         "sidebar_refresh" => NavigateAction::RefreshSidebar,
         "toggle_blocked_filter" => NavigateAction::ToggleBlockedFilter,

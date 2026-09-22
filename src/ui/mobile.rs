@@ -210,6 +210,7 @@ fn mobile_switcher_target_for_row(
         },
         SidebarRow::SectionHeader { .. }
         | SidebarRow::Divider
+        | SidebarRow::NeedsYou { .. }
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
         | SidebarRow::AloopLoop { .. }
@@ -240,6 +241,7 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
         | SidebarRow::Tab { .. }
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::Divider
+        | SidebarRow::NeedsYou { .. }
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
@@ -1143,6 +1145,9 @@ fn render_mobile_switcher_content(
                     }
                 }
             }
+            // The mobile switcher never receives strip rows; the projection
+            // gate in `compact_sidebar_rows_inner` keeps them desktop-only.
+            SidebarRow::NeedsYou { .. } => {}
         }
         doc_y += mobile_sidebar_row_height(row);
     }

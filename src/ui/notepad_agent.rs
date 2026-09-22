@@ -902,7 +902,8 @@ mod tests {
         };
         let header = panel_text(panel.y);
         assert!(header.contains("todo"), "{header}");
-        assert!(header.contains("│ agent"), "{header}");
+        assert!(header.contains("│ Context"), "{header}");
+        assert!(header.contains("agent"), "{header}");
         let body: Vec<String> = (panel.y + 1..panel.bottom()).map(panel_text).collect();
         let body_text = body.join("\n");
         assert!(body_text.contains("working ·"), "{body_text}");

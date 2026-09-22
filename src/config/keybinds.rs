@@ -405,6 +405,7 @@ pub struct Keybinds {
     pub resize_pane_right: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
     pub focus_sidebar: ActionKeybinds,
+    pub focus_owning_repo_group: ActionKeybinds,
     pub sidebar_cycle_group_mode: ActionKeybinds,
     pub sidebar_refresh: ActionKeybinds,
     pub toggle_blocked_filter: ActionKeybinds,
@@ -629,6 +630,7 @@ impl Config {
             resize_pane_right: empty_action!(),
             toggle_sidebar: empty_action!(),
             focus_sidebar: empty_action!(),
+            focus_owning_repo_group: empty_action!(),
             sidebar_cycle_group_mode: empty_action!(),
             sidebar_refresh: empty_action!(),
             toggle_blocked_filter: empty_action!(),
@@ -832,6 +834,11 @@ impl Config {
             apply_action!(keybinds.resize_pane_right, resize_pane_right, source);
             apply_action!(keybinds.toggle_sidebar, toggle_sidebar, source);
             apply_action!(keybinds.focus_sidebar, focus_sidebar, source);
+            apply_action!(
+                keybinds.focus_owning_repo_group,
+                focus_owning_repo_group,
+                source
+            );
             apply_action!(
                 keybinds.sidebar_cycle_group_mode,
                 sidebar_cycle_group_mode,

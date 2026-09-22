@@ -216,6 +216,9 @@ pub struct App {
     pub(crate) notepad_watched_dir: Option<std::path::PathBuf>,
     /// Note names the operator wants offered first, from `[notepad] files`.
     pub(crate) notepad_preferred_files: Vec<String>,
+    /// The `[notepad] height` last applied from config. A reload that did not
+    /// change the key leaves a dragged panel height alone.
+    pub(crate) applied_notepad_config_height: Option<u16>,
     pub(crate) notepad_git_sync: bool,
     pub(crate) notepad_git_sync_interval: std::time::Duration,
     pub(crate) notepad_next_git_pull: Option<Instant>,
@@ -1002,6 +1005,7 @@ impl App {
             request_client_config_reload: false,
             request_client_notification_config: None,
             dock_width_persistence_request: None,
+            notepad_height_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
             sidebar_group_sort_persistence_request: None,
             sidebar_group_collapsed_persistence_request: None,
@@ -1368,6 +1372,13 @@ impl App {
 
         state.terminals = restored_terminals;
 
+        // The notepad's dragged height persists in the host's presentation
+        // file, next to the dock width.
+        #[cfg(not(test))]
+        if let Some(height) = crate::client::presentation::load_notepad_height() {
+            state.notepad.height = height;
+        }
+
         for ws_idx in 0..state.workspaces.len() {
             let cwd = state.workspaces[ws_idx]
                 .resolved_identity_cwd_from(&state.terminals, &restored_terminal_runtimes);
@@ -1466,6 +1477,12 @@ impl App {
             notepad_watcher: None,
             notepad_watched_dir: None,
             notepad_preferred_files: config.notepad.files.clone(),
+            applied_notepad_config_height: Some(
+                config
+                    .notepad
+                    .height
+                    .clamp(crate::notepad::MIN_HEIGHT, crate::notepad::MAX_HEIGHT),
+            ),
             notepad_git_sync: config.notepad.git_sync,
             notepad_git_sync_interval: std::time::Duration::from_secs(
                 config.notepad.git_sync_interval_seconds.clamp(15, 3600),
@@ -2091,6 +2108,9 @@ impl App {
             self.sync_host_keyboard_report_all(&mut host_keyboard_report_all_active)?;
             if let Some(width) = self.state.take_dock_width_persistence_request() {
                 crate::client::presentation::save_dock_width(width);
+            }
+            if let Some(height) = self.state.take_notepad_height_persistence_request() {
+                crate::client::presentation::save_notepad_height(height);
             }
             if let Some(mode) = self.state.take_sidebar_group_mode_persistence_request() {
                 crate::client::presentation::save_sidebar_group_mode(mode);

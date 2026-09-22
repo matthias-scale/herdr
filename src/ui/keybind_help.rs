@@ -178,6 +178,10 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.toggle_sidebar), "toggle sidebar"),
         help_entry(keybind_label(&kb.focus_sidebar), "focus sidebar"),
         help_entry(
+            keybind_label(&kb.focus_owning_repo_group),
+            "collapse other repo groups",
+        ),
+        help_entry(
             keybind_label(&kb.sidebar_cycle_group_mode),
             "cycle sidebar grouping mode",
         ),

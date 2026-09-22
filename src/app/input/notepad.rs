@@ -12,7 +12,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::app::state::AppState;
-use crate::ui::notepad::{notepad_body_rect, NotepadTabTarget};
+use crate::ui::notepad::notepad_body_rect;
 use crate::ui::notepad_agent::NotepadAgentAction;
 
 /// Work the notepad's input handlers cannot do themselves because it touches
@@ -21,6 +21,8 @@ use crate::ui::notepad_agent::NotepadAgentAction;
 pub(crate) enum NotepadRequest {
     /// Load another note, flushing the current one first.
     Select(usize),
+    /// Show the focused pane's work context instead of a note.
+    SelectContext,
     Cycle {
         backwards: bool,
     },
@@ -126,6 +128,30 @@ impl AppState {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        // The Context tab is read-only: navigation keys scroll it, everything
+        // else plain is swallowed so it cannot edit the note it hides, and
+        // modifier combinations keep reaching the global shortcuts.
+        if self.notepad.context_active {
+            match key.code {
+                KeyCode::Esc => self.set_notepad_focus(false),
+                KeyCode::Tab => self.request_notepad(NotepadRequest::Cycle { backwards: false }),
+                KeyCode::BackTab => self.request_notepad(NotepadRequest::Cycle { backwards: true }),
+                KeyCode::Up => self.dock_scroll = self.dock_scroll.saturating_sub(1),
+                KeyCode::Down => self.dock_scroll = self.dock_scroll.saturating_add(1),
+                KeyCode::PageUp => {
+                    self.dock_scroll = self.dock_scroll.saturating_sub(self.notepad.body_rows())
+                }
+                KeyCode::PageDown => {
+                    self.dock_scroll = self.dock_scroll.saturating_add(self.notepad.body_rows())
+                }
+                KeyCode::Char(_) if !ctrl && !alt => {}
+                _ => {
+                    let _ = shift;
+                    return false;
+                }
+            }
+            return true;
+        }
         match key.code {
             KeyCode::Esc => self.set_notepad_focus(false),
             KeyCode::Char('s') if ctrl => self.request_notepad(NotepadRequest::Save),
@@ -162,6 +188,17 @@ impl AppState {
         if !self.notepad.enabled {
             return false;
         }
+        // A drag off the top edge leaves the panel's rows; the active
+        // resize owns the gesture wherever the pointer goes.
+        if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left))
+            && matches!(
+                self.drag.as_ref().map(|drag| &drag.target),
+                Some(crate::app::state::DragTarget::NotepadDivider)
+            )
+        {
+            self.set_manual_notepad_height(mouse.row);
+            return true;
+        }
         let panel = self.view.notepad_rect;
         let inside = rect_contains(panel, mouse.column, mouse.row);
         if !inside {
@@ -180,6 +217,12 @@ impl AppState {
                 if self.notepad.agent_tab {
                     self.notepad
                         .agent_scroll_by(delta, self.view.notepad_agent_max_scroll);
+                } else if self.notepad.context_active {
+                    self.dock_scroll = if delta < 0 {
+                        self.dock_scroll.saturating_sub(1)
+                    } else {
+                        self.dock_scroll.saturating_add(1)
+                    };
                 } else {
                     self.notepad.scroll_by(delta);
                 }
@@ -194,18 +237,35 @@ impl AppState {
                     .map(|(target, _)| *target)
                 {
                     match target {
-                        NotepadTabTarget::Agent => {
+                        crate::notepad::NotepadTabTarget::Note(index) => {
+                            self.set_notepad_focus(true);
+                            if index != self.notepad.active
+                                || self.notepad.context_active
+                                || self.notepad.agent_tab
+                            {
+                                self.request_notepad(NotepadRequest::Select(index));
+                            }
+                        }
+                        crate::notepad::NotepadTabTarget::Context => {
+                            self.set_notepad_focus(true);
+                            if !self.notepad.context_active {
+                                self.request_notepad(NotepadRequest::SelectContext);
+                            }
+                        }
+                        crate::notepad::NotepadTabTarget::Agent => {
                             if self.notepad.select_agent_tab() {
                                 self.request_notepad(NotepadRequest::Save);
                             }
                         }
-                        NotepadTabTarget::Note(index) => {
-                            self.set_notepad_focus(true);
-                            if index != self.notepad.active {
-                                self.request_notepad(NotepadRequest::Select(index));
-                            }
-                        }
                     }
+                    return true;
+                }
+                // The header row outside the tabs is the panel's drag handle:
+                // pressing it starts a vertical resize rather than an edit.
+                if mouse.row == panel.y {
+                    self.drag = Some(crate::app::state::DragState {
+                        target: crate::app::state::DragTarget::NotepadDivider,
+                    });
                     return true;
                 }
                 if self.notepad.agent_tab {
@@ -213,9 +273,11 @@ impl AppState {
                     return true;
                 }
                 self.set_notepad_focus(true);
-                let body = notepad_body_rect(panel);
-                if rect_contains(body, mouse.column, mouse.row) {
-                    self.place_notepad_caret(mouse.column, mouse.row, body);
+                if !self.notepad.context_active {
+                    let body = notepad_body_rect(panel);
+                    if rect_contains(body, mouse.column, mouse.row) {
+                        self.place_notepad_caret(mouse.column, mouse.row, body);
+                    }
                 }
                 true
             }
@@ -247,6 +309,23 @@ impl AppState {
                 self.request_notepad(NotepadRequest::CopyAgentLink(url));
             }
             Some(NotepadAgentAction::CopyLinkIndex(_)) | Some(NotepadAgentAction::None) | None => {}
+        }
+    }
+
+    /// Drags the notepad's top edge to `row`: the panel is bottom-anchored, so
+    /// the dragged row becomes its new top. The height persists per host.
+    pub(crate) fn set_manual_notepad_height(&mut self, row: u16) {
+        let panel = self.view.notepad_rect;
+        if panel.height == 0 {
+            return;
+        }
+        let height = panel
+            .bottom()
+            .saturating_sub(row)
+            .clamp(crate::notepad::MIN_HEIGHT, crate::notepad::MAX_HEIGHT);
+        if self.notepad.height != height {
+            self.notepad.height = height;
+            self.notepad_height_persistence_request = Some(height);
         }
     }
 
@@ -372,6 +451,7 @@ impl crate::app::App {
         };
         match request {
             NotepadRequest::Select(index) => self.select_notepad_file(index),
+            NotepadRequest::SelectContext => self.select_notepad_context(),
             NotepadRequest::Cycle { backwards } => self.cycle_notepad_file(backwards),
             NotepadRequest::Save => self.write_notepad_now(),
             NotepadRequest::ConfirmPomodoro => self.confirm_pomodoro(std::time::Instant::now()),
@@ -418,6 +498,7 @@ impl crate::app::App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notepad::NotepadTabTarget;
     use ratatui::layout::Rect;
     use std::time::{Duration, Instant};
 
@@ -516,6 +597,92 @@ mod tests {
         assert!(!state.handle_notepad_mouse(&event));
         assert!(!state.notepad.focused);
         assert_eq!(state.notepad_request, Some(NotepadRequest::Save));
+    }
+
+    #[test]
+    fn clicking_the_context_tab_asks_for_it() {
+        let mut state = state_with_notepad();
+        state.view.notepad_rect = Rect::new(0, 10, 20, 5);
+        state.view.notepad_tab_hit_areas = vec![(
+            crate::notepad::NotepadTabTarget::Context,
+            Rect::new(2, 10, 7, 1),
+        )];
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 3,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(state.handle_notepad_mouse(&event));
+        assert_eq!(state.notepad_request, Some(NotepadRequest::SelectContext));
+    }
+
+    #[test]
+    fn the_context_tab_is_read_only_but_still_cycles_and_scrolls() {
+        let now = Instant::now();
+        let mut state = state_with_notepad();
+        state.notepad.context_active = true;
+        state.notepad.set_body("keep me");
+        // Plain keys never reach the note the tab hides.
+        assert!(state.handle_notepad_key(key(KeyCode::Char('x')), now));
+        assert_eq!(state.notepad.lines, vec!["keep me".to_string()]);
+        // Scrolling drives the context view's scroll, not the note's.
+        state.dock_scroll = 4;
+        assert!(state.handle_notepad_key(key(KeyCode::Up), now));
+        assert_eq!(state.dock_scroll, 3);
+        // Global modifier shortcuts still fall through.
+        assert!(!state.handle_notepad_key(
+            KeyEvent::new(
+                KeyCode::Char('m'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            ),
+            now
+        ));
+        assert!(state.handle_notepad_key(key(KeyCode::Tab), now));
+        assert_eq!(
+            state.notepad_request,
+            Some(NotepadRequest::Cycle { backwards: false })
+        );
+    }
+
+    #[test]
+    fn dragging_the_top_edge_resizes_the_panel_and_queues_persistence() {
+        let mut state = state_with_notepad();
+        state.notepad.focused = false;
+        state.notepad.height = 6;
+        state.view.notepad_rect = Rect::new(0, 14, 20, 6);
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 3,
+            row: 14,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(state.handle_notepad_mouse(&down));
+        assert!(matches!(
+            state.drag.as_ref().map(|drag| &drag.target),
+            Some(crate::app::state::DragTarget::NotepadDivider)
+        ));
+        // A grab on the handle does not hand the panel the keyboard.
+        assert!(!state.notepad.focused);
+
+        let drag = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 3,
+            row: 11,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(state.handle_notepad_mouse(&drag));
+        assert_eq!(state.notepad.height, 9, "the panel is bottom-anchored");
+        assert_eq!(state.notepad_height_persistence_request, Some(9));
+
+        // The handle clamps to the same range the config key documents.
+        state.view.notepad_rect = Rect::new(0, 14, 20, 26);
+        state.set_manual_notepad_height(30);
+        assert_eq!(state.notepad.height, 10);
+        state.set_manual_notepad_height(2);
+        assert_eq!(state.notepad.height, crate::notepad::MAX_HEIGHT);
+        state.set_manual_notepad_height(45);
+        assert_eq!(state.notepad.height, crate::notepad::MIN_HEIGHT);
     }
 
     #[test]

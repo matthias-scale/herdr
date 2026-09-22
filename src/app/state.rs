@@ -2627,8 +2627,9 @@ pub struct ViewState {
     pub(crate) sidebar_footer_missive_hit_area: Rect,
     /// The notepad panel at the bottom of the sidebar. Empty when it is off.
     pub(crate) notepad_rect: Rect,
-    /// Clickable note names in the notepad header, paired with their index.
-    pub(crate) notepad_tab_hit_areas: Vec<(crate::ui::notepad::NotepadTabTarget, Rect)>,
+    /// Clickable tabs in the notepad header: note names, the Context tab and
+    /// the agent tab.
+    pub(crate) notepad_tab_hit_areas: Vec<(crate::notepad::NotepadTabTarget, Rect)>,
     /// The agent tab's body rows, derived in view computation so clicks
     /// resolve to the exact row the operator saw. Empty on the note tabs.
     pub(crate) notepad_agent_rows: Vec<crate::ui::notepad_agent::NotepadAgentRow>,
@@ -3385,6 +3386,8 @@ pub(crate) enum DragTarget {
     },
     SidebarDivider,
     DockDivider,
+    /// The notepad strip's top edge, dragged vertically to resize the panel.
+    NotepadDivider,
 }
 
 /// Active mouse drag on a split border or sidebar divider.
@@ -4338,6 +4341,8 @@ pub struct AppState {
     pub(crate) request_client_notification_config: Option<bool>,
     /// Width to persist in the attached client's local presentation state.
     pub(crate) dock_width_persistence_request: Option<u16>,
+    /// Notepad panel height to persist in the host's local presentation state.
+    pub(crate) notepad_height_persistence_request: Option<u16>,
     pub(crate) sidebar_group_mode_persistence_request: Option<SidebarGroupMode>,
     pub(crate) sidebar_group_sort_persistence_request: Option<(String, SidebarSortMode)>,
     pub(crate) sidebar_group_collapsed_persistence_request: Option<(String, bool)>,
@@ -5745,6 +5750,17 @@ impl AppState {
         self.sidebar_settled_menu_delete_armed = false;
     }
 
+    /// Hand the keyboard to a terminal-area surface the sidebar just opened.
+    ///
+    /// `input_owner` answers `Sidebar` ahead of every terminal-area surface, so
+    /// a view opened from a sidebar row inherits a sidebar that still owns the
+    /// keyboard. The sidebar arm consumes Esc and returns, the view's own key
+    /// handler never runs, and the operator has no way to close what they just
+    /// opened.
+    pub(crate) fn release_sidebar_focus_to_surface(&mut self) {
+        self.sidebar_focused = false;
+    }
+
     pub(crate) fn toggle_loop_run_history(&mut self) {
         if self.loop_run_history_detail.is_some() {
             self.clear_loop_run_history();
@@ -5764,6 +5780,7 @@ impl AppState {
     /// existing MAT-126 run-history table filtered to that loop.
     pub(crate) fn open_aloop_loop_history(&mut self, loop_name: &str) {
         self.clear_aloop_run_detail();
+        self.release_sidebar_focus_to_surface();
         let producer_host = self
             .fleet_snapshot
             .aloop
@@ -5845,11 +5862,10 @@ impl AppState {
         else {
             return false;
         };
-        self.show_aloop_run_detail(
-            loop_name.to_string(),
-            snapshot.host.clone(),
-            std::sync::Arc::clone(run),
-        );
+        let host = snapshot.host.clone();
+        let run = std::sync::Arc::clone(run);
+        self.release_sidebar_focus_to_surface();
+        self.show_aloop_run_detail(loop_name.to_string(), host, run);
         true
     }
 }
@@ -5864,6 +5880,10 @@ impl AppState {
 
     pub(crate) fn take_dock_width_persistence_request(&mut self) -> Option<u16> {
         self.dock_width_persistence_request.take()
+    }
+
+    pub(crate) fn take_notepad_height_persistence_request(&mut self) -> Option<u16> {
+        self.notepad_height_persistence_request.take()
     }
 
     pub(crate) fn set_sidebar_group_mode(&mut self, mode: SidebarGroupMode) {
@@ -7400,6 +7420,7 @@ impl AppState {
             request_client_config_reload: false,
             request_client_notification_config: None,
             dock_width_persistence_request: None,
+            notepad_height_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
             sidebar_group_sort_persistence_request: None,
             sidebar_group_collapsed_persistence_request: None,

@@ -496,6 +496,10 @@ impl App {
                 self.state.focus_client_on_sidebar();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::FocusOwningRepoGroup => {
+                self.state.focus_owning_repo_group();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::CycleSidebarGroupMode => {
                 self.state.cycle_sidebar_group_mode();
                 leave_navigate_mode(&mut self.state);
@@ -2306,6 +2310,7 @@ pub(crate) enum NavigateAction {
     ResizePaneRight,
     ToggleSidebar,
     FocusSidebar,
+    FocusOwningRepoGroup,
     CycleSidebarGroupMode,
     RefreshSidebar,
     ToggleStatusDetail,
@@ -2590,6 +2595,10 @@ macro_rules! non_indexed_action_bindings {
             (&kb.resize_pane_right, NavigateAction::ResizePaneRight),
             (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
             (&kb.focus_sidebar, NavigateAction::FocusSidebar),
+            (
+                &kb.focus_owning_repo_group,
+                NavigateAction::FocusOwningRepoGroup,
+            ),
             (
                 &kb.sidebar_cycle_group_mode,
                 NavigateAction::CycleSidebarGroupMode,
@@ -3008,6 +3017,10 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::FocusSidebar => {
             state.focus_client_on_sidebar();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::FocusOwningRepoGroup => {
+            state.focus_owning_repo_group();
             leave_navigate_mode(state);
         }
         NavigateAction::CycleSidebarGroupMode => {
@@ -5040,13 +5053,15 @@ mod tests {
             ),
             Some(NavigateAction::CopyWorkPreview)
         );
+        // The info panel's old `prefix+i` slot now collapses every repo group
+        // except the focused pane's.
         assert_eq!(
             action_for_key(
                 &state,
                 TerminalKey::new(KeyCode::Char('i'), KeyModifiers::empty()),
                 BindingDispatch::Prefix,
             ),
-            None
+            Some(NavigateAction::FocusOwningRepoGroup)
         );
     }
 
