@@ -157,7 +157,12 @@ impl App {
         }
         if let Some(group_id) = params.group_id.as_ref() {
             if let Err(message) = self.validate_group_target(group_id) {
-                return encode_error(id, "authority_not_fresh", message);
+                return pane_group_set_error(
+                    id,
+                    "authority_not_fresh",
+                    message,
+                    params.expected_pane_authority.as_ref(),
+                );
             }
         }
         self.apply_pane_group_set(id, params)
@@ -323,7 +328,15 @@ impl App {
         }
         let actual = match self.group_runtime.authority() {
             Ok(authority) => authority.authority_id().clone(),
-            Err(error) => return encode_runtime_error(id, error),
+            Err(error) => {
+                let pane_authority = match &params.mutation {
+                    AuthorityMutation::PaneGroupSet(params) => {
+                        params.expected_pane_authority.as_ref()
+                    }
+                    _ => None,
+                };
+                return encode_runtime_error_for_pane(id, error, pane_authority);
+            }
         };
         if actual != params.expected_authority {
             return encode_error(
@@ -704,38 +717,54 @@ impl App {
 }
 
 fn encode_runtime_error(id: String, error: RuntimeError) -> String {
-    match error {
-        RuntimeError::Unavailable(message) => {
-            encode_error(id, "group_authority_unavailable", message)
-        }
-        RuntimeError::Persistence(message) => encode_error(id, "persistence_failed", message),
-        RuntimeError::Mutation(MutationError::Deleted) => {
-            encode_error(id, "group_deleted", "group is deleted")
-        }
-        RuntimeError::Mutation(MutationError::ForeignOwner) => {
-            encode_error(id, "group_not_owned", "group is owned by another server")
-        }
-        RuntimeError::Mutation(MutationError::InvalidName) => {
-            encode_error(id, "invalid_group_name", "group name must not be empty")
-        }
-        RuntimeError::Mutation(MutationError::NotFound) => {
-            encode_error(id, "group_not_found", "group not found")
-        }
-        RuntimeError::Mutation(MutationError::RevisionConflict { expected, actual }) => {
-            revision_conflict(id, expected, actual)
-        }
-        RuntimeError::Mutation(MutationError::RevisionExhausted) => {
-            encode_error(id, "revision_exhausted", "group revision is exhausted")
-        }
-    }
+    encode_runtime_error_for_pane(id, error, None)
 }
 
-fn revision_conflict(id: String, expected: u64, actual: u64) -> String {
-    encode_error(
-        id,
-        "revision_conflict",
-        format!("expected revision {expected}, current revision is {actual}"),
-    )
+fn encode_runtime_error_for_pane(
+    id: String,
+    error: RuntimeError,
+    pane_authority: Option<&crate::groups::AuthorityId>,
+) -> String {
+    match error {
+        RuntimeError::Unavailable(message) => {
+            pane_group_set_error(id, "group_authority_unavailable", message, pane_authority)
+        }
+        RuntimeError::Persistence(message) => {
+            pane_group_set_error(id, "persistence_failed", message, pane_authority)
+        }
+        RuntimeError::Mutation(MutationError::Deleted) => {
+            pane_group_set_error(id, "group_deleted", "group is deleted", pane_authority)
+        }
+        RuntimeError::Mutation(MutationError::ForeignOwner) => pane_group_set_error(
+            id,
+            "group_not_owned",
+            "group is owned by another server",
+            pane_authority,
+        ),
+        RuntimeError::Mutation(MutationError::InvalidName) => pane_group_set_error(
+            id,
+            "invalid_group_name",
+            "group name must not be empty",
+            pane_authority,
+        ),
+        RuntimeError::Mutation(MutationError::NotFound) => {
+            pane_group_set_error(id, "group_not_found", "group not found", pane_authority)
+        }
+        RuntimeError::Mutation(MutationError::RevisionConflict { expected, actual }) => {
+            pane_group_set_error(
+                id,
+                "revision_conflict",
+                format!("expected revision {expected}, current revision is {actual}"),
+                pane_authority,
+            )
+        }
+        RuntimeError::Mutation(MutationError::RevisionExhausted) => pane_group_set_error(
+            id,
+            "revision_exhausted",
+            "group revision is exhausted",
+            pane_authority,
+        ),
+    }
 }
 
 fn pane_group_set_error(
@@ -1298,6 +1327,12 @@ mod tests {
     #[test]
     fn foreign_mutations_name_the_authority_when_no_fresh_route_exists() {
         let (mut app, _dir, pane_public_id) = app_with_groups("foreign-mutation");
+        let local_authority = app
+            .group_runtime
+            .authority()
+            .expect("local authority")
+            .authority_id()
+            .clone();
         let other_dir = TestDir::new("foreign-owner");
         let other = crate::groups::Runtime::load(&other_dir.0);
         let foreign_id = GroupId {
@@ -1305,7 +1340,7 @@ mod tests {
             local: 1,
         };
 
-        let responses = [
+        let foreign_authority_responses = [
             app.handle_group_rename(
                 "rename".into(),
                 GroupRenameParams {
@@ -1321,25 +1356,31 @@ mod tests {
                     expected_revision: 1,
                 },
             ),
-            app.handle_pane_group_set(
-                "assign".into(),
-                PaneGroupSetParams {
-                    pane_id: pane_public_id,
-                    group_id: Some(foreign_id.clone()),
-                    expected_revision: 0,
-                    expected_pane_authority: None,
-                    expected_pane_incarnation: None,
-                },
-            ),
         ];
 
-        for response in responses {
+        for response in foreign_authority_responses {
             let response: serde_json::Value = serde_json::from_str(&response).unwrap();
             assert_eq!(response["error"]["code"], "authority_not_fresh");
             assert!(response["error"]["message"]
                 .as_str()
                 .is_some_and(|message| message.contains(foreign_id.owner.as_str())));
         }
+
+        let pane_response: serde_json::Value = serde_json::from_str(&app.handle_pane_group_set(
+            "assign".into(),
+            PaneGroupSetParams {
+                pane_id: pane_public_id,
+                group_id: Some(foreign_id),
+                expected_revision: 0,
+                expected_pane_authority: Some(local_authority.clone()),
+                expected_pane_incarnation: None,
+            },
+        ))
+        .expect("pane mutation response");
+        assert_eq!(pane_response["error"]["code"], "authority_not_fresh");
+        assert!(pane_response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(local_authority.as_str())));
     }
 
     #[test]
@@ -1746,6 +1787,119 @@ mod tests {
                 response.error.message
             );
         }
+    }
+
+    #[test]
+    fn local_pane_move_target_refusals_name_the_pane_authority() {
+        let group_owner = crate::groups::AuthorityId::from_random_bytes([37; 16]);
+        let group_id = GroupId {
+            owner: group_owner.clone(),
+            local: 1,
+        };
+        let base_catalog = crate::fleet::GroupCatalog {
+            host: "group-owner".into(),
+            target: "group-host".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Fresh,
+            observed_authority_id: Some(group_owner.clone()),
+            snapshot: Some(GroupAuthoritySnapshot {
+                authority_id: group_owner,
+                revision: 1,
+                groups: vec![GroupRecord {
+                    id: group_id.clone(),
+                    revision: 1,
+                    state: GroupState::Active {
+                        name: "Remote".into(),
+                    },
+                }],
+                memberships: Vec::new(),
+            }),
+            error: None,
+        };
+
+        for case in ["missing", "stale", "deleted", "conflicted"] {
+            let (mut app, _dir, pane_id) = app_with_groups(case);
+            let pane_owner = app
+                .group_runtime
+                .authority()
+                .expect("pane authority")
+                .authority_id()
+                .clone();
+            let mut catalog = base_catalog.clone();
+            match case {
+                "missing" => catalog
+                    .snapshot
+                    .as_mut()
+                    .expect("group catalog snapshot")
+                    .groups
+                    .clear(),
+                "stale" => catalog.state = crate::fleet::GroupCatalogState::Stale,
+                "deleted" => {
+                    catalog
+                        .snapshot
+                        .as_mut()
+                        .expect("group catalog snapshot")
+                        .groups[0]
+                        .state = GroupState::Deleted;
+                }
+                "conflicted" => catalog.state = crate::fleet::GroupCatalogState::IdentityConflict,
+                _ => unreachable!(),
+            }
+            app.state.fleet_snapshot.group_catalogs = vec![catalog];
+
+            let response: crate::api::schema::ErrorResponse =
+                serde_json::from_str(&app.handle_pane_group_set(
+                    case.into(),
+                    PaneGroupSetParams {
+                        pane_id,
+                        group_id: Some(group_id.clone()),
+                        expected_revision: 0,
+                        expected_pane_authority: Some(pane_owner.clone()),
+                        expected_pane_incarnation: None,
+                    },
+                ))
+                .expect("local target refusal");
+            assert_eq!(response.error.code, "authority_not_fresh", "{case}");
+            assert!(
+                response.error.message.contains(pane_owner.as_str()),
+                "{case} refusal omitted the local pane authority: {}",
+                response.error.message
+            );
+        }
+    }
+
+    #[test]
+    fn forwarded_pane_move_runtime_refusal_names_the_pane_authority() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let pane_owner = crate::groups::AuthorityId::from_random_bytes([38; 16]);
+        let response: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&app.handle_group_authority_mutate(
+                "runtime-unavailable".into(),
+                AuthorityMutationParams {
+                    expected_authority: pane_owner.clone(),
+                    forwarded: true,
+                    mutation: AuthorityMutation::PaneGroupSet(PaneGroupSetParams {
+                        pane_id: "missing-pane".into(),
+                        group_id: None,
+                        expected_revision: 0,
+                        expected_pane_authority: Some(pane_owner.clone()),
+                        expected_pane_incarnation: Some("missing-incarnation".into()),
+                    }),
+                },
+            ))
+            .expect("receiver runtime refusal");
+
+        assert_eq!(response.error.code, "group_authority_unavailable");
+        assert!(response.error.message.contains(pane_owner.as_str()));
     }
 
     #[test]

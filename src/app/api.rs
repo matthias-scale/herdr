@@ -67,6 +67,7 @@ impl App {
         if snapshot.config_generation != self.fleet_poller_config.generation() {
             return false;
         }
+        snapshot.sanitize_group_catalog_memberships();
         let raw_snapshot = snapshot.clone();
         snapshot.retain_unreachable_inventory_from(&self.state.fleet_snapshot);
         snapshot.retain_unavailable_group_catalogs_from(&self.state.fleet_snapshot);
@@ -74,38 +75,13 @@ impl App {
             .or(self.queued_authority_acceptance_ledger.as_ref())
             .or(self.pending_authority_acceptance_ledger.as_ref())
             .unwrap_or(&self.authority_acceptance_ledger);
-        let mut candidate_ledger =
+        let candidate_ledger =
             if let Some(error) = self.authority_acceptance_ledger_error.as_deref() {
                 snapshot.reject_group_catalogs_without_durable_history(error);
                 admission_base.clone()
             } else {
                 snapshot.admit_group_catalogs(admission_base)
             };
-        if candidate_ledger == self.authority_acceptance_ledger {
-            if let Some(path) = self.authority_acceptance_ledger_path.as_deref() {
-                match crate::fleet::load_authority_acceptance_ledger(path) {
-                    Ok(mut durable_ledger) => match durable_ledger.merge(&candidate_ledger) {
-                        Ok(()) if durable_ledger != candidate_ledger => {
-                            snapshot.admit_group_catalogs(&durable_ledger);
-                            candidate_ledger = durable_ledger;
-                        }
-                        Ok(()) => {}
-                        Err(error) => {
-                            tracing::warn!(%error, path = %path.display(), "cannot reconcile durable authority acceptance ledger");
-                            snapshot.reject_group_catalogs_without_durable_history(&format!(
-                                "durable authority acceptance ledger reconciliation failed: {error}"
-                            ));
-                        }
-                    },
-                    Err(error) => {
-                        tracing::warn!(%error, path = %path.display(), "cannot reload durable authority acceptance ledger");
-                        snapshot.reject_group_catalogs_without_durable_history(&format!(
-                            "cannot reload durable authority acceptance ledger: {error}"
-                        ));
-                    }
-                }
-            }
-        }
         self.authority_mutation_router.observe_snapshot(&snapshot);
         if self.authority_acceptance_ledger_write_in_flight {
             self.queued_authority_acceptance_ledger = Some(candidate_ledger);
@@ -135,6 +111,26 @@ impl App {
                 }
             } else {
                 self.authority_acceptance_ledger = candidate_ledger;
+            }
+        } else if let Some(path) = self.authority_acceptance_ledger_path.as_deref() {
+            match self
+                .authority_acceptance_ledger_writer
+                .enqueue_reconciliation(
+                    path.to_path_buf(),
+                    candidate_ledger.clone(),
+                    snapshot.clone(),
+                ) {
+                Ok(()) => {
+                    self.authority_acceptance_ledger_write_in_flight = true;
+                    self.pending_authority_acceptance_ledger = Some(candidate_ledger);
+                    return false;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, path = %path.display(), "cannot queue durable authority acceptance ledger reconciliation");
+                    snapshot.reject_group_catalogs_without_durable_history(&format!(
+                        "durable authority acceptance ledger reconciliation failed: {error}"
+                    ));
+                }
             }
         }
         self.commit_fleet_snapshot(snapshot)
@@ -168,6 +164,49 @@ impl App {
                         &self.authority_acceptance_ledger,
                         &format!("durable ledger persistence failed: {error}"),
                     );
+                    self.authority_mutation_router.observe_snapshot(&snapshot);
+                    changed = self.commit_fleet_snapshot(snapshot);
+                }
+            }
+        }
+        let queued_ledger = self.queued_authority_acceptance_ledger.take();
+        if let Some(queued) = self.queued_fleet_snapshot.take() {
+            if queued.config_generation == self.fleet_poller_config.generation() {
+                changed |= self.install_fleet_snapshot_against(queued, queued_ledger.as_ref());
+            } else if let Some(queued_ledger) = queued_ledger {
+                self.persist_accepted_ledger_without_presentation(queued_ledger, queued);
+            }
+        }
+        changed
+    }
+
+    fn finish_authority_acceptance_ledger_reconciliation(
+        &mut self,
+        ledger: crate::fleet::AuthorityAcceptanceLedger,
+        mut snapshot: crate::fleet::Snapshot,
+        result: Result<(), String>,
+    ) -> bool {
+        self.authority_acceptance_ledger_write_in_flight = false;
+        self.pending_authority_acceptance_ledger = None;
+        let mut changed = false;
+        match result {
+            Ok(()) => {
+                snapshot.admit_group_catalogs(&ledger);
+                self.authority_acceptance_ledger = ledger;
+                if snapshot.config_generation == self.fleet_poller_config.generation() {
+                    changed = self.commit_fleet_snapshot(snapshot);
+                }
+            }
+            Err(error) => {
+                if let Some(path) = self.authority_acceptance_ledger_path.as_deref() {
+                    tracing::warn!(%error, path = %path.display(), "cannot reconcile durable authority acceptance ledger");
+                } else {
+                    tracing::warn!(%error, "cannot reconcile durable authority acceptance ledger");
+                }
+                if snapshot.config_generation == self.fleet_poller_config.generation() {
+                    snapshot.reject_group_catalogs_without_durable_history(&format!(
+                        "durable authority acceptance ledger reconciliation failed: {error}"
+                    ));
                     self.authority_mutation_router.observe_snapshot(&snapshot);
                     changed = self.commit_fleet_snapshot(snapshot);
                 }
@@ -275,6 +314,11 @@ impl App {
                 snapshot,
                 result,
             } => self.finish_authority_acceptance_ledger_write(ledger, *snapshot, result),
+            AppEvent::AuthorityAcceptanceLedgerReconciled {
+                ledger,
+                snapshot,
+                result,
+            } => self.finish_authority_acceptance_ledger_reconciliation(ledger, *snapshot, result),
             AppEvent::SymphonyWorkflowsRefreshed { snapshot } => {
                 self.refresh_symphony_snapshot(snapshot)
             }
@@ -532,6 +576,17 @@ impl App {
         } = ev
         {
             return Some(self.finish_authority_acceptance_ledger_write(ledger, *snapshot, result));
+        }
+
+        if let AppEvent::AuthorityAcceptanceLedgerReconciled {
+            ledger,
+            snapshot,
+            result,
+        } = ev
+        {
+            return Some(
+                self.finish_authority_acceptance_ledger_reconciliation(ledger, *snapshot, result),
+            );
         }
 
         if let AppEvent::ScratchpadChanged = ev {
@@ -2220,6 +2275,33 @@ mod tests {
         }
     }
 
+    fn catalog_with_duplicate_pane_memberships(
+        host: &str,
+        authority: &crate::groups::AuthorityId,
+    ) -> crate::fleet::GroupCatalog {
+        let membership = |incarnation: &str| crate::groups::OwnedPaneMembership {
+            pane_id: "workspace:pane".into(),
+            pane_incarnation: incarnation.into(),
+            membership: crate::groups::PaneGroupMembership::default(),
+        };
+        crate::fleet::GroupCatalog {
+            host: host.into(),
+            target: host.into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: authority.clone(),
+                revision: 1,
+                groups: Vec::new(),
+                memberships: vec![membership("first"), membership("second")],
+            }),
+            error: None,
+        }
+    }
+
     fn wait_for_app_event(app: &mut App, description: &str) -> crate::events::AppEvent {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
@@ -2510,6 +2592,78 @@ mod tests {
             catalogs[0].state,
             crate::api::schema::AuthorityCatalogStateInfo::Fresh
         );
+    }
+
+    #[test]
+    fn conflicted_catalog_ingress_removes_duplicate_memberships_from_consumers() {
+        let hub = crate::api::EventHub::default();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            hub.clone(),
+        );
+        let authority = crate::groups::AuthorityId::from_random_bytes([39; 16]);
+        let mut snapshot = fleet_snapshot(Vec::new());
+        snapshot.group_catalogs = vec![
+            catalog_with_duplicate_pane_memberships("office", &authority),
+            catalog_with_duplicate_pane_memberships("home", &authority),
+        ];
+
+        assert!(app.install_fleet_snapshot(snapshot));
+
+        let infos = app.authority_catalog_infos();
+        assert!(infos.iter().all(|catalog| {
+            catalog.state == crate::api::schema::AuthorityCatalogStateInfo::IdentityConflict
+                && catalog
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.memberships.is_empty())
+        }));
+        let update_catalogs = hub
+            .events_after(0)
+            .into_iter()
+            .find_map(|(_, event)| match event.data {
+                crate::api::schema::EventData::AuthorityCatalogsUpdated { catalogs } => {
+                    Some(catalogs)
+                }
+                _ => None,
+            })
+            .expect("catalog update event");
+        assert!(update_catalogs.iter().all(|catalog| catalog
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.memberships.is_empty())));
+    }
+
+    #[test]
+    fn unreadable_history_catalog_ingress_removes_duplicate_memberships_from_consumers() {
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.authority_acceptance_ledger_error = Some("retained history is unreadable".into());
+        let authority = crate::groups::AuthorityId::from_random_bytes([40; 16]);
+        let mut snapshot = fleet_snapshot(Vec::new());
+        snapshot.group_catalogs = vec![catalog_with_duplicate_pane_memberships(
+            "office", &authority,
+        )];
+
+        assert!(app.install_fleet_snapshot(snapshot));
+
+        let infos = app.authority_catalog_infos();
+        assert_eq!(
+            infos[0].state,
+            crate::api::schema::AuthorityCatalogStateInfo::Unavailable
+        );
+        assert!(infos[0]
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.memberships.is_empty()));
     }
 
     #[test]
@@ -2972,10 +3126,41 @@ mod tests {
         retiring_writer.join().expect("join retiring writer");
         app.handle_internal_event_with_render_impact(replacement_write);
 
+        let app_loop_thread = std::thread::current().id();
+        let (reconcile_tx, reconcile_rx) = std::sync::mpsc::channel();
+        let observed_authority = authority_a.clone();
+        app.authority_acceptance_ledger_writer =
+            crate::fleet::AuthorityAcceptanceLedgerWriter::with_save(
+                app.event_tx.clone(),
+                move |path, requested| {
+                    let requested_tombstone =
+                        requested
+                            .accepted(&observed_authority)
+                            .is_some_and(|snapshot| {
+                                matches!(
+                                    snapshot.groups[0].state,
+                                    crate::groups::GroupState::Deleted
+                                )
+                            });
+                    reconcile_tx
+                        .send((std::thread::current().id(), requested_tombstone))
+                        .map_err(|_| std::io::Error::other("reconciliation observation closed"))?;
+                    crate::fleet::save_authority_acceptance_ledger(path, requested)
+                },
+            );
+
         assert!(!app.install_fleet_snapshot(snapshot(vec![active_a, active_b])));
         assert!(
             app.authority_acceptance_ledger_write_in_flight,
             "an equality poll must reconcile the ledger written by the retiring server"
+        );
+        let (reconciliation_thread, requested_tombstone) = reconcile_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("background reconciliation observation");
+        assert_ne!(reconciliation_thread, app_loop_thread);
+        assert!(
+            !requested_tombstone,
+            "the app loop loaded the late tombstone before queueing reconciliation"
         );
         let reconciliation = wait_for_app_event(&mut app, "handoff reconciliation completion");
         app.handle_internal_event_with_render_impact(reconciliation);

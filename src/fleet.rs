@@ -555,18 +555,22 @@ pub(crate) fn save_authority_acceptance_ledger(
         .open(PathBuf::from(lock_path))?;
     lock.lock()?;
 
-    let mut merged = load_authority_acceptance_ledger(path).map_err(|error| {
+    let durable = load_authority_acceptance_ledger(path).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("cannot merge durable authority acceptance ledger: {error}"),
         )
     })?;
+    let mut merged = durable.clone();
     merged.merge(ledger).map_err(|error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("cannot merge authority acceptance ledger advance: {error}"),
         )
     })?;
+    if merged == durable {
+        return Ok(merged);
+    }
 
     let file = AuthorityAcceptanceLedgerFile {
         version: AUTHORITY_ACCEPTANCE_LEDGER_VERSION,
@@ -621,6 +625,7 @@ struct AuthorityAcceptanceLedgerWrite {
     path: PathBuf,
     ledger: AuthorityAcceptanceLedger,
     snapshot: Snapshot,
+    reconcile_only: bool,
 }
 
 type AuthorityAcceptanceLedgerSave = dyn Fn(&Path, &AuthorityAcceptanceLedger) -> std::io::Result<AuthorityAcceptanceLedger>
@@ -628,8 +633,9 @@ type AuthorityAcceptanceLedgerSave = dyn Fn(&Path, &AuthorityAcceptanceLedger) -
     + Sync
     + 'static;
 
-/// Serial durable ledger writer. The app loop admits each candidate before it
-/// enters this queue and publishes it only after the matching completion.
+/// Serial durable ledger worker. The app loop admits each candidate before it
+/// enters this queue; disk reconciliation and persistence finish here before
+/// the matching completion publishes the result.
 pub(crate) struct AuthorityAcceptanceLedgerWriter {
     sender: std::sync::Mutex<Option<std::sync::mpsc::Sender<AuthorityAcceptanceLedgerWrite>>>,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
@@ -666,6 +672,25 @@ impl AuthorityAcceptanceLedgerWriter {
         ledger: AuthorityAcceptanceLedger,
         snapshot: Snapshot,
     ) -> Result<(), String> {
+        self.enqueue_operation(path, ledger, snapshot, false)
+    }
+
+    pub(crate) fn enqueue_reconciliation(
+        &self,
+        path: PathBuf,
+        ledger: AuthorityAcceptanceLedger,
+        snapshot: Snapshot,
+    ) -> Result<(), String> {
+        self.enqueue_operation(path, ledger, snapshot, true)
+    }
+
+    fn enqueue_operation(
+        &self,
+        path: PathBuf,
+        ledger: AuthorityAcceptanceLedger,
+        snapshot: Snapshot,
+        reconcile_only: bool,
+    ) -> Result<(), String> {
         let mut sender = self
             .sender
             .lock()
@@ -689,16 +714,20 @@ impl AuthorityAcceptanceLedgerWriter {
                             Ok(merged) => (merged, Ok(())),
                             Err(error) => (requested_ledger, Err(error)),
                         };
-                        if event_tx
-                            .blocking_send(
-                                crate::events::AppEvent::AuthorityAcceptanceLedgerPersisted {
-                                    ledger: persisted_ledger,
-                                    snapshot: Box::new(job.snapshot),
-                                    result,
-                                },
-                            )
-                            .is_err()
-                        {
+                        let event = if job.reconcile_only {
+                            crate::events::AppEvent::AuthorityAcceptanceLedgerReconciled {
+                                ledger: persisted_ledger,
+                                snapshot: Box::new(job.snapshot),
+                                result,
+                            }
+                        } else {
+                            crate::events::AppEvent::AuthorityAcceptanceLedgerPersisted {
+                                ledger: persisted_ledger,
+                                snapshot: Box::new(job.snapshot),
+                                result,
+                            }
+                        };
+                        if event_tx.blocking_send(event).is_err() {
                             return;
                         }
                     }
@@ -716,6 +745,7 @@ impl AuthorityAcceptanceLedgerWriter {
                 path,
                 ledger,
                 snapshot,
+                reconcile_only,
             })
             .map_err(|_| "authority acceptance ledger writer stopped".to_string())
     }
@@ -1083,6 +1113,35 @@ fn api_client_for_catalog(catalog: &GroupCatalog) -> ApiClient {
 }
 
 impl Snapshot {
+    /// Drop ambiguous pane projection before any catalog state classification.
+    /// Group records remain observable, but no consumer or router can choose
+    /// between two memberships for the same public pane address.
+    pub(crate) fn sanitize_group_catalog_memberships(&mut self) {
+        for catalog in &mut self.group_catalogs {
+            let Some(snapshot) = catalog.snapshot.as_mut() else {
+                continue;
+            };
+            let duplicate = {
+                let mut pane_ids = HashSet::new();
+                snapshot
+                    .memberships
+                    .iter()
+                    .find(|membership| !pane_ids.insert(membership.pane_id.as_str()))
+                    .map(|membership| membership.pane_id.clone())
+            };
+            let Some(duplicate) = duplicate else {
+                continue;
+            };
+            snapshot.memberships.clear();
+            if catalog.state == GroupCatalogState::Fresh {
+                catalog.state = GroupCatalogState::Stale;
+                catalog.error = Some(format!(
+                    "catalog rejected: snapshot contains duplicate pane membership {duplicate}"
+                ));
+            }
+        }
+    }
+
     fn identity_conflicts(&self) -> HashSet<crate::groups::AuthorityId> {
         let mut reports_by_authority = HashMap::new();
         for catalog in &self.group_catalogs {
@@ -1229,6 +1288,7 @@ impl Snapshot {
         &mut self,
         ledger: &AuthorityAcceptanceLedger,
     ) -> AuthorityAcceptanceLedger {
+        self.sanitize_group_catalog_memberships();
         self.mark_identity_conflicts(true);
         let mut candidate = ledger.clone();
         for catalog in &mut self.group_catalogs {
@@ -1262,6 +1322,7 @@ impl Snapshot {
     }
 
     pub(crate) fn reject_group_catalogs_without_durable_history(&mut self, error: &str) {
+        self.sanitize_group_catalog_memberships();
         for catalog in &mut self.group_catalogs {
             if catalog.state != GroupCatalogState::IdentityConflict {
                 catalog.state = GroupCatalogState::Unavailable;
