@@ -2333,7 +2333,7 @@ mod tests {
             .all(|pair| pair[0].1.right() + 3 == pair[1].1.x));
         let chip_row = row_text(&buffer, composer.frame, composer.chips.y);
         assert!(
-            chip_row.contains("claude ▾ │ Claude Opus 5 ▾ │ auto ▾ │ bypass ▾ │ 200k ▾"),
+            chip_row.contains("claude ▾ │ Claude Opus 5 ▾ │ auto ▾ │ bypass ▾ │ 1M ▾"),
             "the picker row should read agent │ model │ effort │ access │ context: {chip_row:?}"
         );
         assert!(
@@ -2952,7 +2952,7 @@ mod tests {
             let buffer = draw_home(&app, &queue, area);
             let row = row_text(&buffer, composer.frame, composer.chips.y);
 
-            for label in ["Fable 5.1 ▾", "auto ▾", "bypass ▾", "200k ▾"] {
+            for label in ["Fable 5.1 ▾", "auto ▾", "bypass ▾", "1M ▾"] {
                 assert!(
                     row.contains(label),
                     "picker row at {columns} columns: {row:?}"
@@ -3095,7 +3095,7 @@ mod tests {
         assert!(card_row(composer.prompt.y).contains('█'));
         let chips = card_row(composer.chips.y);
         assert!(
-            chips.contains("claude ▾ │ Claude Opus 5 ▾ │ auto ▾ │ bypass ▾ │ 200k ▾"),
+            chips.contains("claude ▾ │ Claude Opus 5 ▾ │ auto ▾ │ bypass ▾ │ 1M ▾"),
             "{chips:?}"
         );
         assert!(chips.ends_with("[ ↵ ]│"), "{chips:?}");

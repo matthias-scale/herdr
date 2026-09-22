@@ -1469,7 +1469,7 @@ impl HomeState {
                 matches!(context, DEFAULT_CONTEXT_WINDOW | LARGE_CONTEXT_WINDOW)
             });
             if !selected_is_valid {
-                self.context_window = Some(DEFAULT_CONTEXT_WINDOW.into());
+                self.context_window = Some(LARGE_CONTEXT_WINDOW.into());
             }
         } else {
             self.context_window = None;
@@ -3267,7 +3267,7 @@ mod tests {
             vec![
                 "claude",
                 "--model",
-                "claude-opus-5",
+                "claude-opus-5[1m]",
                 "--dangerously-skip-permissions",
                 "implement the retry cap"
             ]
@@ -3443,7 +3443,7 @@ mod tests {
         let expected_argv = [
             "claude",
             "--model",
-            "claude-opus-5",
+            "claude-opus-5[1m]",
             "--permission-mode",
             "acceptEdits",
             "run the checks",
@@ -3495,7 +3495,7 @@ mod tests {
             vec![
                 "claude",
                 "--model",
-                "claude-fable-5-1",
+                "claude-fable-5-1[1m]",
                 "--effort",
                 "high",
                 "--dangerously-skip-permissions",
@@ -3842,7 +3842,7 @@ mod tests {
         assert!(!home.context_visible());
 
         home.set_model("claude-fable-5-1");
-        assert_eq!(home.context_window.as_deref(), Some(DEFAULT_CONTEXT_WINDOW));
+        assert_eq!(home.context_window.as_deref(), Some(LARGE_CONTEXT_WINDOW));
         assert_eq!(
             home.context_options(),
             [DEFAULT_CONTEXT_WINDOW, LARGE_CONTEXT_WINDOW]
@@ -3852,6 +3852,20 @@ mod tests {
         assert!(!home.context_visible());
         home.set_agent(Agent::Codex);
         assert!(!home.context_visible());
+    }
+
+    #[test]
+    fn explicit_narrow_context_survives_agent_and_large_model_switches() {
+        let mut home = home_with_codex_catalog();
+        home.set_context_window(Some(DEFAULT_CONTEXT_WINDOW.into()));
+        home.set_model("claude-fable-5-1");
+
+        home.set_agent(Agent::Codex);
+        home.set_agent(Agent::Claude);
+        assert_eq!(home.context_window.as_deref(), Some(DEFAULT_CONTEXT_WINDOW));
+
+        home.set_model("claude-opus-5");
+        assert_eq!(home.context_window.as_deref(), Some(DEFAULT_CONTEXT_WINDOW));
     }
 
     #[test]
@@ -4335,6 +4349,7 @@ mod tests {
         assert_eq!(home.agent, Agent::Claude);
         assert_eq!(home.model, "claude-opus-5");
         assert_eq!(home.access, Some(HomeAccess::ClaudeBypass));
+        assert_eq!(home.context_window.as_deref(), Some(LARGE_CONTEXT_WINDOW));
         assert!(
             home.context_visible(),
             "opus carries a 1M window, so the composer must offer the choice"
