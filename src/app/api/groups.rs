@@ -174,36 +174,71 @@ impl App {
     }
 
     fn apply_pane_group_set(&mut self, id: String, params: PaneGroupSetParams) -> String {
+        let pane_authority = params.expected_pane_authority.clone();
         if params.group_id.is_some() {
             if let Some(message) = self.local_authority_conflict_message() {
-                return encode_error(id, "authority_not_fresh", message);
+                return pane_group_set_error(
+                    id,
+                    "authority_not_fresh",
+                    message,
+                    pane_authority.as_ref(),
+                );
             }
         }
         if self.no_session {
-            return encode_error(
+            return pane_group_set_error(
                 id,
                 "group_persistence_disabled",
                 "pane membership requires session persistence",
+                pane_authority.as_ref(),
             );
         }
         let Some((workspace_index, pane_id)) = self.parse_pane_id(&params.pane_id) else {
-            return encode_error(id, "pane_not_found", "pane not found");
+            return pane_group_set_error(
+                id,
+                "pane_not_found",
+                "pane not found",
+                pane_authority.as_ref(),
+            );
         };
         let Some(pane) = self.state.workspaces[workspace_index].pane_state(pane_id) else {
-            return encode_error(id, "pane_not_found", "pane not found");
+            return pane_group_set_error(
+                id,
+                "pane_not_found",
+                "pane not found",
+                pane_authority.as_ref(),
+            );
         };
         if self
             .terminal_runtimes
             .get(&pane.attached_terminal_id)
             .is_some_and(crate::terminal::TerminalRuntime::is_remote_proxy)
         {
-            return encode_error(id, "pane_not_owned", "pane is not owned by this server");
+            return pane_group_set_error(
+                id,
+                "pane_not_owned",
+                "pane is not owned by this server",
+                pane_authority.as_ref(),
+            );
         }
         if pane.group_membership.revision != params.expected_revision {
-            return revision_conflict(id, params.expected_revision, pane.group_membership.revision);
+            return pane_group_set_error(
+                id,
+                "revision_conflict",
+                format!(
+                    "expected revision {}, current revision is {}",
+                    params.expected_revision, pane.group_membership.revision
+                ),
+                pane_authority.as_ref(),
+            );
         }
         let Some(revision) = pane.group_membership.revision.checked_add(1) else {
-            return encode_error(id, "revision_exhausted", "membership revision is exhausted");
+            return pane_group_set_error(
+                id,
+                "revision_exhausted",
+                "membership revision is exhausted",
+                pane_authority.as_ref(),
+            );
         };
         let membership = PaneGroupMembership {
             group_id: params.group_id,
@@ -227,10 +262,11 @@ impl App {
             .flat_map(|workspace| workspace.tabs.iter_mut())
             .find_map(|tab| tab.panes.get_mut(&pane_id.raw()))
         else {
-            return encode_error(
+            return pane_group_set_error(
                 id,
                 "pane_not_persistable",
                 "pane is not in the session snapshot",
+                pane_authority.as_ref(),
             );
         };
         saved_pane.group_membership = membership.clone();
@@ -242,10 +278,20 @@ impl App {
             )
         });
         if let Err(error) = self.persist_session_candidate(snapshot, history) {
-            return encode_error(id, "persistence_failed", error.to_string());
+            return pane_group_set_error(
+                id,
+                "persistence_failed",
+                error.to_string(),
+                pane_authority.as_ref(),
+            );
         }
         let Some(pane) = self.state.workspaces[workspace_index].pane_state_mut(pane_id) else {
-            return encode_error(id, "pane_not_found", "pane disappeared after persistence");
+            return pane_group_set_error(
+                id,
+                "pane_not_found",
+                "pane disappeared after persistence",
+                pane_authority.as_ref(),
+            );
         };
         pane.group_membership = membership.clone();
         self.refresh_group_membership_projection_for_pane(&params.pane_id);
@@ -663,6 +709,21 @@ fn revision_conflict(id: String, expected: u64, actual: u64) -> String {
         "revision_conflict",
         format!("expected revision {expected}, current revision is {actual}"),
     )
+}
+
+fn pane_group_set_error(
+    id: String,
+    code: &str,
+    message: impl Into<String>,
+    pane_authority: Option<&crate::groups::AuthorityId>,
+) -> String {
+    let mut message = message.into();
+    if let Some(authority) = pane_authority {
+        if !message.contains(authority.as_str()) {
+            message = format!("authority {authority}: {message}");
+        }
+    }
+    encode_error(id, code, message)
 }
 
 #[cfg(test)]
@@ -1630,6 +1691,142 @@ mod tests {
         assert!(response.error.message.contains(pane_owner.as_str()));
     }
 
+    #[test]
+    fn remote_pane_move_receiver_refusals_name_the_pane_authority() {
+        fn params(
+            pane_id: String,
+            authority: &crate::groups::AuthorityId,
+            expected_revision: u64,
+        ) -> PaneGroupSetParams {
+            PaneGroupSetParams {
+                pane_id,
+                group_id: None,
+                expected_revision,
+                expected_pane_authority: Some(authority.clone()),
+                expected_pane_incarnation: Some("receiver-fixture".into()),
+            }
+        }
+
+        fn refusal(response: String) -> crate::api::schema::ErrorResponse {
+            serde_json::from_str(&response).expect("receiver refusal response")
+        }
+
+        let mut refusals = Vec::new();
+
+        let (mut disabled, _dir, pane_id) = app_with_groups("receiver-disabled");
+        let authority = disabled
+            .group_runtime
+            .authority()
+            .expect("receiver authority")
+            .authority_id()
+            .clone();
+        disabled.no_session = true;
+        refusals.push((
+            authority.clone(),
+            refusal(
+                disabled.apply_pane_group_set("disabled".into(), params(pane_id, &authority, 0)),
+            ),
+        ));
+
+        let (mut missing, _dir, _) = app_with_groups("receiver-missing");
+        let authority = missing
+            .group_runtime
+            .authority()
+            .expect("receiver authority")
+            .authority_id()
+            .clone();
+        refusals.push((
+            authority.clone(),
+            refusal(missing.apply_pane_group_set(
+                "missing".into(),
+                params("missing-pane".into(), &authority, 0),
+            )),
+        ));
+
+        let (mut foreign, _dir, pane_id) = app_with_groups("receiver-not-owned");
+        let authority = foreign
+            .group_runtime
+            .authority()
+            .expect("receiver authority")
+            .authority_id()
+            .clone();
+        let pane = foreign.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = foreign.state.workspaces[0]
+            .pane_state(pane)
+            .expect("receiver pane")
+            .attached_terminal_id
+            .clone();
+        let (proxy_runtime, _channels) = crate::terminal::TerminalRuntime::spawn_remote_proxy(
+            pane,
+            24,
+            80,
+            0,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::default()),
+            crate::remote::RemoteFocusOperationState::new(),
+        )
+        .expect("proxy runtime");
+        foreign.terminal_runtimes.insert(terminal_id, proxy_runtime);
+        refusals.push((
+            authority.clone(),
+            refusal(
+                foreign.apply_pane_group_set("not-owned".into(), params(pane_id, &authority, 0)),
+            ),
+        ));
+
+        let (mut conflict, _dir, pane_id) = app_with_groups("receiver-conflict");
+        let authority = conflict
+            .group_runtime
+            .authority()
+            .expect("receiver authority")
+            .authority_id()
+            .clone();
+        refusals.push((
+            authority.clone(),
+            refusal(
+                conflict.apply_pane_group_set("conflict".into(), params(pane_id, &authority, 1)),
+            ),
+        ));
+
+        let (mut failed, dir, pane_id) = app_with_groups("receiver-persist-failure");
+        let authority = failed
+            .group_runtime
+            .authority()
+            .expect("receiver authority")
+            .authority_id()
+            .clone();
+        let blocker = dir.0.join("not-a-directory");
+        std::fs::write(&blocker, "block").expect("create persistence blocker");
+        failed.group_session_paths_override = Some((
+            blocker.join("session.json"),
+            blocker.join("session-history.json"),
+        ));
+        refusals.push((
+            authority.clone(),
+            refusal(failed.apply_pane_group_set("persist".into(), params(pane_id, &authority, 0))),
+        ));
+
+        assert_eq!(
+            refusals
+                .iter()
+                .map(|(_, response)| response.error.code.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "group_persistence_disabled",
+                "pane_not_found",
+                "pane_not_owned",
+                "revision_conflict",
+                "persistence_failed",
+            ]
+        );
+        let unnamed = refusals
+            .iter()
+            .filter(|(authority, response)| !response.error.message.contains(authority.as_str()))
+            .map(|(_, response)| response.error.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(unnamed.is_empty(), "unnamed receiver refusals: {unnamed:?}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn remote_pane_move_transport_refusal_names_the_pane_authority() {
@@ -1673,6 +1870,52 @@ mod tests {
         let response: crate::api::schema::ErrorResponse =
             serde_json::from_str(&response).expect("transport refusal response");
         assert_eq!(response.error.code, "authority_unreachable");
+        assert!(response.error.message.contains(pane_owner.as_str()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_pane_move_forwarded_refusal_names_the_pane_authority() {
+        let (mut app, dir, _) = app_with_groups("remote-move-forwarded-refusal");
+        let fake_ssh = dir.0.join("receiver-refusal-ssh");
+        write_executable(
+            &fake_ssh,
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"id\":\"move\",\"error\":{\"code\":\"group_persistence_disabled\",\"message\":\"pane membership requires session persistence\"}}'\n",
+        );
+        app.authority_mutation_router = crate::fleet::AuthorityMutationRouter::with_ssh_program(
+            fake_ssh,
+            std::time::Duration::from_secs(1),
+        );
+        let pane_owner = crate::groups::AuthorityId::from_random_bytes([26; 16]);
+        let group_owner = crate::groups::AuthorityId::from_random_bytes([27; 16]);
+        let (group_id, catalogs) = remote_pane_move_catalogs(&pane_owner, &group_owner);
+        app.state.fleet_snapshot.group_catalogs = catalogs;
+        app.authority_mutation_router
+            .observe_snapshot(&app.state.fleet_snapshot);
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+
+        app.handle_api_request_message(crate::api::ApiRequestMessage {
+            request: Request {
+                id: "move".into(),
+                method: Method::PaneGroupSet(PaneGroupSetParams {
+                    pane_id: "remote-pane".into(),
+                    group_id: Some(group_id),
+                    expected_revision: 0,
+                    expected_pane_authority: Some(pane_owner.clone()),
+                    expected_pane_incarnation: None,
+                }),
+            },
+            respond_to,
+            response_write_complete: None,
+            stream_active: None,
+        });
+
+        let response = response_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("forwarded receiver refusal");
+        let response: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&response).expect("forwarded refusal response");
+        assert_eq!(response.error.code, "group_persistence_disabled");
         assert!(response.error.message.contains(pane_owner.as_str()));
     }
 

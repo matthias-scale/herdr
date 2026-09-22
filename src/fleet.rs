@@ -440,6 +440,29 @@ impl AuthorityAcceptanceLedger {
     fn snapshots(&self) -> Vec<crate::groups::GroupAuthoritySnapshot> {
         self.authorities.values().cloned().collect()
     }
+
+    fn merge(&mut self, other: &Self) -> Result<(), String> {
+        for candidate in other.snapshots() {
+            let retained = self.authorities.get(&candidate.authority_id).cloned();
+            match self.advance(&candidate) {
+                Ok(_) => {}
+                Err(candidate_error) => {
+                    let Some(retained) = retained else {
+                        return Err(candidate_error);
+                    };
+                    crate::groups::admit_authority_snapshot(Some(&candidate), &retained).map_err(
+                        |retained_error| {
+                            format!(
+                                "authority {} histories cannot be merged: {candidate_error}; {retained_error}",
+                                candidate.authority_id
+                            )
+                        },
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(test))]
@@ -520,13 +543,36 @@ pub(crate) fn save_authority_acceptance_ledger(
     path: &Path,
     ledger: &AuthorityAcceptanceLedger,
 ) -> std::io::Result<()> {
-    let file = AuthorityAcceptanceLedgerFile {
-        version: AUTHORITY_ACCEPTANCE_LEDGER_VERSION,
-        authorities: ledger.snapshots(),
-    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(PathBuf::from(lock_path))?;
+    lock.lock()?;
+
+    let mut merged = load_authority_acceptance_ledger(path).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("cannot merge durable authority acceptance ledger: {error}"),
+        )
+    })?;
+    merged.merge(ledger).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("cannot merge authority acceptance ledger advance: {error}"),
+        )
+    })?;
+
+    let file = AuthorityAcceptanceLedgerFile {
+        version: AUTHORITY_ACCEPTANCE_LEDGER_VERSION,
+        authorities: merged.snapshots(),
+    };
     let bytes = serde_json::to_vec_pretty(&file).map_err(std::io::Error::other)?;
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -628,16 +674,27 @@ impl AuthorityAcceptanceLedgerWriter {
                 .name("herdr-group-ledger".into())
                 .spawn(move || {
                     while let Ok(job) = write_rx.recv() {
-                        let result = save(&job.path, &job.ledger).map_err(|error| {
-                            format!(
-                                "cannot persist authority acceptance ledger at {}: {error}",
-                                job.path.display()
-                            )
-                        });
+                        let mut persisted_ledger = job.ledger;
+                        let result = save(&job.path, &persisted_ledger)
+                            .map_err(|error| {
+                                format!(
+                                    "cannot persist authority acceptance ledger at {}: {error}",
+                                    job.path.display()
+                                )
+                            })
+                            .and_then(|()| {
+                                load_authority_acceptance_ledger(&job.path).map_err(|error| {
+                                    format!(
+                                        "cannot reload merged authority acceptance ledger at {}: {error}",
+                                        job.path.display()
+                                    )
+                                })
+                            })
+                            .map(|merged| persisted_ledger = merged);
                         if event_tx
                             .blocking_send(
                                 crate::events::AppEvent::AuthorityAcceptanceLedgerPersisted {
-                                    ledger: job.ledger,
+                                    ledger: persisted_ledger,
                                     snapshot: Box::new(job.snapshot),
                                     result,
                                 },
@@ -953,7 +1010,7 @@ fn route_api_request_with_ssh_program(
     timeout: Duration,
     ssh_program: impl AsRef<OsStr>,
 ) -> Result<String, String> {
-    let value = if catalog.local {
+    let mut value = if catalog.local {
         api_client_for_catalog(catalog)
             .request_value_with_timeout(request, timeout)
             .map_err(|error| error.to_string())?
@@ -977,7 +1034,37 @@ fn route_api_request_with_ssh_program(
         serde_json::from_slice(output.trim_ascii())
             .map_err(|error| format!("invalid authority mutation response: {error}"))?
     };
+    name_forwarded_pane_authority(&mut value, request);
     serde_json::to_string(&value).map_err(|error| error.to_string())
+}
+
+fn name_forwarded_pane_authority(value: &mut serde_json::Value, request: &Request) {
+    let pane_authority = match &request.method {
+        Method::PaneGroupSet(params) => params.expected_pane_authority.as_ref(),
+        Method::GroupAuthorityMutate(params) => match &params.mutation {
+            crate::api::schema::AuthorityMutation::PaneGroupSet(params) => {
+                params.expected_pane_authority.as_ref()
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(authority) = pane_authority else {
+        return;
+    };
+    let Some(message) = value
+        .get_mut("error")
+        .and_then(|error| error.get_mut("message"))
+        .and_then(|message| message.as_str())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    if message.contains(authority.as_str()) {
+        return;
+    }
+    let named = format!("authority {authority}: {message}");
+    value["error"]["message"] = serde_json::Value::String(named);
 }
 
 fn api_client_for_catalog(catalog: &GroupCatalog) -> ApiClient {
@@ -3642,6 +3729,103 @@ mod tests {
             .expect("write and sync ledger contents");
 
         assert_eq!(file.operations, ["write_all", "sync_all"]);
+    }
+
+    #[test]
+    fn overlapping_handoff_writers_cannot_narrow_accepted_history() {
+        let dir = run_fixture_dir("overlapping-handoff-ledger-writers");
+        let path = dir.join("authority-acceptance-ledger-v2.json");
+        let active = group_catalog(
+            "source",
+            "machine-a",
+            1,
+            1,
+            vec![group_record(1, 1, 1, false)],
+        );
+        let mut base = AuthorityAcceptanceLedger::default();
+        base.advance(active.snapshot.as_ref().expect("active authority snapshot"))
+            .expect("accept active group");
+        save_authority_acceptance_ledger(&path, &base).expect("persist shared handoff base");
+
+        // The old server and its replacement both load the same durable base
+        // before either completes its next write.
+        let mut old_server = load_authority_acceptance_ledger(&path).expect("old server base");
+        old_server
+            .advance(
+                group_catalog(
+                    "source",
+                    "machine-a",
+                    1,
+                    2,
+                    vec![group_record(1, 1, 2, true)],
+                )
+                .snapshot
+                .as_ref()
+                .expect("old server tombstone"),
+            )
+            .expect("old server accepts tombstone");
+        let mut replacement_server =
+            load_authority_acceptance_ledger(&path).expect("replacement server base");
+        replacement_server
+            .advance(
+                group_catalog(
+                    "replacement",
+                    "machine-b",
+                    2,
+                    1,
+                    vec![group_record(2, 1, 1, false)],
+                )
+                .snapshot
+                .as_ref()
+                .expect("replacement server advance"),
+            )
+            .expect("replacement server accepts another authority");
+
+        save_authority_acceptance_ledger(&path, &old_server)
+            .expect("old server persists tombstone");
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
+        let writer = AuthorityAcceptanceLedgerWriter::new(event_tx);
+        writer
+            .enqueue(path.clone(), replacement_server, Snapshot::default())
+            .expect("replacement queues overlapping advance");
+        let completion = event_rx
+            .blocking_recv()
+            .expect("replacement writer completion");
+        let crate::events::AppEvent::AuthorityAcceptanceLedgerPersisted {
+            ledger: replacement_memory,
+            result,
+            ..
+        } = completion
+        else {
+            panic!("expected ledger writer completion");
+        };
+        result.expect("replacement persists overlapping advance");
+
+        let durable = load_authority_acceptance_ledger(&path).expect("merged handoff history");
+        let authority_a = crate::groups::AuthorityId::from_random_bytes([1; 16]);
+        let accepted_a = durable.accepted(&authority_a).expect("authority A history");
+        assert_eq!(accepted_a.revision, 2);
+        assert!(matches!(
+            accepted_a.groups[0].state,
+            crate::groups::GroupState::Deleted
+        ));
+        assert!(durable
+            .accepted(&crate::groups::AuthorityId::from_random_bytes([2; 16]))
+            .is_some());
+        assert_eq!(replacement_memory, durable);
+
+        let mut rolled_back = Snapshot {
+            group_catalogs: vec![active],
+            ..Snapshot::default()
+        };
+        let admitted = rolled_back.admit_group_catalogs(&replacement_memory);
+        assert_eq!(admitted, replacement_memory);
+        assert_eq!(
+            rolled_back.group_catalogs[0].state,
+            GroupCatalogState::Stale
+        );
+
+        std::fs::remove_dir_all(dir).expect("remove handoff overlap fixture");
     }
 
     #[test]

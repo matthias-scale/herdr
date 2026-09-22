@@ -126,6 +126,7 @@ impl App {
         let mut changed = false;
         match result {
             Ok(()) => {
+                snapshot.admit_group_catalogs(&ledger);
                 self.authority_acceptance_ledger = ledger;
                 if snapshot.config_generation == self.fleet_poller_config.generation() {
                     changed = self.commit_fleet_snapshot(snapshot);
