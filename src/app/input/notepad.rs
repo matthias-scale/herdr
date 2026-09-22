@@ -679,8 +679,10 @@ mod tests {
         state.view.notepad_rect = Rect::new(0, 14, 20, 26);
         state.set_manual_notepad_height(30);
         assert_eq!(state.notepad.height, 10);
+        // Dragging to the top of a 26-row panel keeps every row it covers: the
+        // fixed ceiling no longer truncates the drag.
         state.set_manual_notepad_height(2);
-        assert_eq!(state.notepad.height, crate::notepad::MAX_HEIGHT);
+        assert_eq!(state.notepad.height, 38);
         state.set_manual_notepad_height(45);
         assert_eq!(state.notepad.height, crate::notepad::MIN_HEIGHT);
     }
