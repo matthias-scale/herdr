@@ -9049,7 +9049,8 @@ mod tests {
                 crate::detect::AgentState::Idle,
             );
         let session_id = "6be5e8e1-cce2-4c1e-b04c-62e3e38eb75a";
-        let transcript = format!("/profiles/team-a/projects/-tmp-repro/{session_id}.jsonl");
+        let transcript_dir = std::env::temp_dir().join("profiles/team-a/projects/-tmp-repro");
+        let transcript = transcript_dir.join(format!("{session_id}.jsonl"));
         let response = app.handle_pane_report_agent_session(
             "claude-session".into(),
             PaneReportAgentSessionParams {
@@ -9058,7 +9059,7 @@ mod tests {
                 agent: "claude".into(),
                 seq: Some(10),
                 agent_session_id: Some(session_id.into()),
-                agent_session_path: Some(transcript.clone()),
+                agent_session_path: Some(transcript.display().to_string()),
                 session_start_source: Some("startup".into()),
             },
         );
@@ -9067,7 +9068,7 @@ mod tests {
             app.state.terminals[&terminal_id]
                 .claude_transcript_path
                 .as_deref(),
-            Some(std::path::Path::new(&transcript))
+            Some(transcript.as_path())
         );
         assert_eq!(
             app.state.terminals[&terminal_id]
@@ -9093,7 +9094,7 @@ mod tests {
             app.state.terminals[&terminal_id]
                 .claude_transcript_path
                 .as_deref(),
-            Some(std::path::Path::new(&transcript)),
+            Some(transcript.as_path()),
             "pathless reports for the same session must retain the exact hook path"
         );
 
@@ -9106,7 +9107,10 @@ mod tests {
                 seq: Some(12),
                 agent_session_id: Some("other-session".into()),
                 agent_session_path: Some(
-                    "/profiles/team-a/projects/-tmp-repro/other-session.jsonl".into(),
+                    transcript_dir
+                        .join("other-session.jsonl")
+                        .display()
+                        .to_string(),
                 ),
                 session_start_source: Some("new".into()),
             },
@@ -9116,7 +9120,7 @@ mod tests {
             app.state.terminals[&terminal_id]
                 .claude_transcript_path
                 .as_deref(),
-            Some(std::path::Path::new(&transcript)),
+            Some(transcript.as_path()),
             "an untrusted source cannot replace the accepted transcript target"
         );
 

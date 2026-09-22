@@ -1002,6 +1002,10 @@ mod tests {
         }
     }
 
+    fn absolute_fixture_path(relative: impl AsRef<Path>) -> String {
+        std::env::temp_dir().join(relative).display().to_string()
+    }
+
     fn line(value: Value) -> Vec<u8> {
         let mut bytes = serde_json::to_vec(&value).unwrap();
         bytes.push(b'\n');
@@ -1215,8 +1219,12 @@ mod tests {
     #[test]
     fn claude_transcript_path_binds_profile_path_to_session_id() {
         let session = AgentSessionRef::id(SESSION_ID).unwrap();
-        let default = format!("/home/user/.claude/projects/-tmp-repro/{SESSION_ID}.jsonl");
-        let profile = format!("/profiles/team-a/projects/-tmp-repro/{SESSION_ID}.jsonl");
+        let default = absolute_fixture_path(format!(
+            "home/user/.claude/projects/-tmp-repro/{SESSION_ID}.jsonl"
+        ));
+        let profile = absolute_fixture_path(format!(
+            "profiles/team-a/projects/-tmp-repro/{SESSION_ID}.jsonl"
+        ));
         assert_eq!(
             validated_transcript_path("herdr:claude", "claude", Some(&session), Some(&default)),
             Some(PathBuf::from(default))
@@ -1230,14 +1238,14 @@ mod tests {
     #[test]
     fn spoofed_or_mismatched_transcript_path_is_rejected() {
         let session = AgentSessionRef::id(SESSION_ID).unwrap();
-        let other = "/tmp/projects/-tmp-repro/other.jsonl";
-        let traversal = format!("/tmp/projects/../-tmp-repro/{SESSION_ID}.jsonl");
+        let other = absolute_fixture_path("projects/-tmp-repro/other.jsonl");
+        let traversal = absolute_fixture_path(format!("projects/../-tmp-repro/{SESSION_ID}.jsonl"));
         assert!(
-            validated_transcript_path("custom:claude", "claude", Some(&session), Some(other))
+            validated_transcript_path("custom:claude", "claude", Some(&session), Some(&other))
                 .is_none()
         );
         assert!(
-            validated_transcript_path("herdr:claude", "claude", Some(&session), Some(other))
+            validated_transcript_path("herdr:claude", "claude", Some(&session), Some(&other))
                 .is_none()
         );
         assert!(validated_transcript_path(
