@@ -748,6 +748,63 @@ mod tests {
         std::fs::set_permissions(path, permissions).expect("mark fixture executable");
     }
 
+    fn remote_pane_move_catalogs(
+        pane_owner: &crate::groups::AuthorityId,
+        group_owner: &crate::groups::AuthorityId,
+    ) -> (GroupId, Vec<crate::fleet::GroupCatalog>) {
+        let group_id = GroupId {
+            owner: group_owner.clone(),
+            local: 1,
+        };
+        (
+            group_id.clone(),
+            vec![
+                crate::fleet::GroupCatalog {
+                    host: "pane-owner".into(),
+                    target: "pane-host".into(),
+                    local: false,
+                    session: None,
+                    socket: None,
+                    state: crate::fleet::GroupCatalogState::Fresh,
+                    observed_authority_id: Some(pane_owner.clone()),
+                    snapshot: Some(GroupAuthoritySnapshot {
+                        authority_id: pane_owner.clone(),
+                        revision: 1,
+                        groups: Vec::new(),
+                        memberships: vec![OwnedPaneMembership {
+                            pane_id: "remote-pane".into(),
+                            pane_incarnation: "pane-incarnation".into(),
+                            membership: PaneGroupMembership::default(),
+                        }],
+                    }),
+                    error: None,
+                },
+                crate::fleet::GroupCatalog {
+                    host: "group-owner".into(),
+                    target: "group-host".into(),
+                    local: false,
+                    session: None,
+                    socket: None,
+                    state: crate::fleet::GroupCatalogState::Fresh,
+                    observed_authority_id: Some(group_owner.clone()),
+                    snapshot: Some(GroupAuthoritySnapshot {
+                        authority_id: group_owner.clone(),
+                        revision: 1,
+                        groups: vec![GroupRecord {
+                            id: group_id.clone(),
+                            revision: 1,
+                            state: GroupState::Active {
+                                name: "Remote".into(),
+                            },
+                        }],
+                        memberships: Vec::new(),
+                    }),
+                    error: None,
+                },
+            ],
+        )
+    }
+
     #[test]
     fn create_rename_delete_and_snapshot_keep_one_group_identity() {
         let (mut app, dir, _) = app_with_groups("lifecycle");
@@ -1537,6 +1594,86 @@ mod tests {
         assert!(response["error"]["message"]
             .as_str()
             .is_some_and(|message| message.contains(local.as_str())));
+    }
+
+    #[test]
+    fn remote_pane_move_lease_refusal_names_the_pane_authority() {
+        let (mut app, _dir, _) = app_with_groups("remote-move-stale-lease");
+        let pane_owner = crate::groups::AuthorityId::from_random_bytes([22; 16]);
+        let group_owner = crate::groups::AuthorityId::from_random_bytes([23; 16]);
+        let (group_id, catalogs) = remote_pane_move_catalogs(&pane_owner, &group_owner);
+        app.state.fleet_snapshot.group_catalogs = catalogs;
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+
+        app.handle_api_request_message(crate::api::ApiRequestMessage {
+            request: Request {
+                id: "move".into(),
+                method: Method::PaneGroupSet(PaneGroupSetParams {
+                    pane_id: "remote-pane".into(),
+                    group_id: Some(group_id),
+                    expected_revision: 0,
+                    expected_pane_authority: Some(pane_owner.clone()),
+                    expected_pane_incarnation: None,
+                }),
+            },
+            respond_to,
+            response_write_complete: None,
+            stream_active: None,
+        });
+
+        let response = response_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("immediate lease refusal");
+        let response: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&response).expect("lease refusal response");
+        assert_eq!(response.error.code, "authority_unreachable");
+        assert!(response.error.message.contains(pane_owner.as_str()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_pane_move_transport_refusal_names_the_pane_authority() {
+        let (mut app, dir, _) = app_with_groups("remote-move-transport-refusal");
+        let fake_ssh = dir.0.join("refusing-ssh");
+        write_executable(
+            &fake_ssh,
+            "#!/bin/sh\ncat >/dev/null\nprintf 'transport refused by fixture\\n' >&2\nexit 17\n",
+        );
+        app.authority_mutation_router = crate::fleet::AuthorityMutationRouter::with_ssh_program(
+            fake_ssh,
+            std::time::Duration::from_secs(1),
+        );
+        let pane_owner = crate::groups::AuthorityId::from_random_bytes([24; 16]);
+        let group_owner = crate::groups::AuthorityId::from_random_bytes([25; 16]);
+        let (group_id, catalogs) = remote_pane_move_catalogs(&pane_owner, &group_owner);
+        app.state.fleet_snapshot.group_catalogs = catalogs;
+        app.authority_mutation_router
+            .observe_snapshot(&app.state.fleet_snapshot);
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+
+        app.handle_api_request_message(crate::api::ApiRequestMessage {
+            request: Request {
+                id: "move".into(),
+                method: Method::PaneGroupSet(PaneGroupSetParams {
+                    pane_id: "remote-pane".into(),
+                    group_id: Some(group_id),
+                    expected_revision: 0,
+                    expected_pane_authority: Some(pane_owner.clone()),
+                    expected_pane_incarnation: None,
+                }),
+            },
+            respond_to,
+            response_write_complete: None,
+            stream_active: None,
+        });
+
+        let response = response_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("transport refusal");
+        let response: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&response).expect("transport refusal response");
+        assert_eq!(response.error.code, "authority_unreachable");
+        assert!(response.error.message.contains(pane_owner.as_str()));
     }
 
     #[cfg(unix)]

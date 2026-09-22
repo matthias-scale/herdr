@@ -458,7 +458,22 @@ pub(crate) fn load_authority_acceptance_ledger_with_legacy(
 ) -> Result<AuthorityAcceptanceLedger, String> {
     match path.try_exists() {
         Ok(true) => load_authority_acceptance_ledger(path),
-        Ok(false) => load_authority_acceptance_ledger(legacy_path),
+        Ok(false) => match legacy_path.try_exists() {
+            Ok(true) => {
+                let ledger = load_authority_acceptance_ledger(legacy_path)?;
+                save_authority_acceptance_ledger(path, &ledger).map_err(|error| {
+                    format!(
+                        "cannot migrate legacy authority acceptance ledger to {}: {error}",
+                        path.display()
+                    )
+                })?;
+                Ok(ledger)
+            }
+            Ok(false) => Ok(AuthorityAcceptanceLedger::default()),
+            Err(error) => Err(format!(
+                "cannot inspect legacy authority acceptance ledger: {error}"
+            )),
+        },
         Err(error) => Err(format!(
             "cannot inspect authority acceptance ledger: {error}"
         )),
@@ -831,7 +846,7 @@ impl AuthorityMutationRouter {
             .valid
             .get(&mutation_route)
             .copied()
-            .ok_or_else(|| "authority route is no longer fresh".to_string())?;
+            .ok_or_else(|| format!("authority {} route is no longer fresh", route.authority))?;
         let mut sender = self
             .sender
             .lock()
@@ -899,7 +914,10 @@ impl AuthorityMutationRouter {
                                 id,
                                 error: crate::api::schema::ErrorBody {
                                     code: "authority_unreachable".into(),
-                                    message: error,
+                                    message: format!(
+                                        "authority {} is unreachable: {error}",
+                                        job.route.authority
+                                    ),
                                 },
                             })
                             .unwrap_or_else(|_| "{}".to_string())

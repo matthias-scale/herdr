@@ -1634,19 +1634,22 @@ fn legacy_v1_writer_cannot_narrow_the_v2_authority_ledger() {
     let authority_path = alpha_data.join("group-authority.json");
     let groups_path = alpha_data.join("groups.json");
     let legacy_path = beta_data.join("remote-group-catalogs-v1.json");
+    let v2_path = beta_data.join("authority-acceptance-ledger-v2.json");
     let active_authority = fs::read(&authority_path).expect("active authority state");
     let active_groups = fs::read(&groups_path).expect("active group state");
-    let active_legacy = serde_json::to_vec_pretty(&json!({
-        "version": 1,
-        "entries": [{
-            "target": "legacy-alpha",
-            "local": true,
-            "session": null,
-            "socket": socket_a,
-            "snapshot": active_snapshot
-        }]
-    }))
-    .expect("serialize legacy cache");
+    let legacy_file = |snapshot: Value| {
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "entries": [{
+                "target": "legacy-alpha",
+                "local": true,
+                "session": null,
+                "socket": socket_a,
+                "snapshot": snapshot
+            }]
+        }))
+        .expect("serialize legacy cache")
+    };
 
     let deleted = send_json_request(
         &socket_a,
@@ -1656,10 +1659,46 @@ fn legacy_v1_writer_cannot_narrow_the_v2_authority_ledger() {
     );
     assert_eq!(deleted["result"]["record"]["state"], "deleted", "{deleted}");
     wait_for_authority_group_state(&socket_b, &authority, "fresh", "deleted");
+    let deleted_snapshot = send_json_request(
+        &socket_a,
+        "deleted_snapshot_for_upgrade",
+        "group.host_snapshot",
+        json!({}),
+    )["result"]["snapshot"]
+        .clone();
 
     drop(server_a);
     drop(server_b);
-    fs::write(&legacy_path, active_legacy).expect("simulate the old v1 writer");
+    if v2_path.exists() {
+        fs::remove_file(&v2_path).expect("remove v2 written before the upgrade fixture");
+    }
+    fs::write(&legacy_path, legacy_file(deleted_snapshot)).expect("seed the first upgrade from v1");
+
+    let first_upgrade = spawn_server_with_config_text(
+        &config_b,
+        &runtime_b,
+        &socket_b,
+        None,
+        "onboarding = false\n[ui]\nshow_home_on_start = false\n",
+    );
+    wait_for_socket(&socket_b, Duration::from_secs(5));
+    ping_socket(&socket_b);
+    let migration_deadline = Instant::now() + Duration::from_secs(5);
+    while !v2_path.exists() && Instant::now() < migration_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let durable_v2: Value = serde_json::from_slice(
+        &fs::read(&v2_path).expect("first upgrade must materialize the v2 ledger"),
+    )
+    .expect("parse migrated v2 ledger");
+    assert_eq!(durable_v2["version"], 2);
+    assert_eq!(
+        durable_v2["authorities"][0]["groups"][0]["state"],
+        "deleted"
+    );
+    drop(first_upgrade);
+
+    fs::write(&legacy_path, legacy_file(active_snapshot)).expect("simulate the old v1 writer");
     fs::write(&authority_path, active_authority).expect("roll back owner authority");
     fs::write(&groups_path, active_groups).expect("roll back owner group store");
 

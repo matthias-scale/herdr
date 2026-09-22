@@ -149,9 +149,40 @@ impl App {
         }
         let queued_ledger = self.queued_authority_acceptance_ledger.take();
         if let Some(queued) = self.queued_fleet_snapshot.take() {
-            changed |= self.install_fleet_snapshot_against(queued, queued_ledger.as_ref());
+            if queued.config_generation == self.fleet_poller_config.generation() {
+                changed |= self.install_fleet_snapshot_against(queued, queued_ledger.as_ref());
+            } else if let Some(queued_ledger) = queued_ledger {
+                self.persist_accepted_ledger_without_presentation(queued_ledger, queued);
+            }
         }
         changed
+    }
+
+    fn persist_accepted_ledger_without_presentation(
+        &mut self,
+        ledger: crate::fleet::AuthorityAcceptanceLedger,
+        snapshot: crate::fleet::Snapshot,
+    ) {
+        if ledger == self.authority_acceptance_ledger {
+            return;
+        }
+        let Some(path) = self.authority_acceptance_ledger_path.as_deref() else {
+            self.authority_acceptance_ledger = ledger;
+            return;
+        };
+        match self.authority_acceptance_ledger_writer.enqueue(
+            path.to_path_buf(),
+            ledger.clone(),
+            snapshot,
+        ) {
+            Ok(()) => {
+                self.authority_acceptance_ledger_write_in_flight = true;
+                self.pending_authority_acceptance_ledger = Some(ledger);
+            }
+            Err(error) => {
+                tracing::warn!(%error, path = %path.display(), "cannot queue authority acceptance ledger write");
+            }
+        }
     }
 
     fn commit_fleet_snapshot(&mut self, snapshot: crate::fleet::Snapshot) -> bool {
@@ -2717,6 +2748,107 @@ mod tests {
             crate::fleet::load_authority_acceptance_ledger(&path).expect("reload written ledger");
         assert!(reloaded_ledger.accepted(&authority).is_some());
         std::fs::remove_dir_all(root).expect("remove ledger reload fixture");
+    }
+
+    #[test]
+    fn queued_tombstone_survives_config_reload_after_prior_write_completes() {
+        let config = crate::config::Config::default();
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let root = std::env::temp_dir().join(format!(
+            "herdr-ledger-queued-reload-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let path = root.join("authority-acceptance-ledger.json");
+        app.authority_acceptance_ledger_path = Some(path.clone());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
+        let write_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        app.authority_acceptance_ledger_writer =
+            crate::fleet::AuthorityAcceptanceLedgerWriter::with_save(app.event_tx.clone(), {
+                let write_count = std::sync::Arc::clone(&write_count);
+                move |path, ledger| {
+                    if write_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        let _ = started_tx.send(());
+                        release_rx
+                            .lock()
+                            .map_err(|_| std::io::Error::other("ledger release gate poisoned"))?
+                            .recv()
+                            .map_err(|_| std::io::Error::other("ledger release gate closed"))?;
+                    }
+                    crate::fleet::save_authority_acceptance_ledger(path, ledger)
+                }
+            });
+        let authority = crate::groups::AuthorityId::from_random_bytes([21; 16]);
+        let catalog = |revision, state| crate::fleet::GroupCatalog {
+            host: "office".into(),
+            target: "machine-a".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: authority.clone(),
+                revision,
+                groups: vec![crate::groups::GroupRecord {
+                    id: crate::groups::GroupId {
+                        owner: authority.clone(),
+                        local: 1,
+                    },
+                    revision,
+                    state,
+                }],
+                memberships: Vec::new(),
+            }),
+            error: None,
+        };
+        let poll = |catalog| {
+            let mut snapshot = fleet_snapshot(Vec::new());
+            snapshot.group_catalogs = vec![catalog];
+            snapshot
+        };
+
+        assert!(!app.install_fleet_snapshot(poll(catalog(
+            2,
+            crate::groups::GroupState::Active {
+                name: "Work".into(),
+            },
+        ))));
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("revision 2 ledger write started");
+        assert!(!app.install_fleet_snapshot(poll(catalog(3, crate::groups::GroupState::Deleted,))));
+
+        app.apply_live_config(&config, &[], &[], false);
+        let presentation_after_reload = app.state.fleet_snapshot.clone();
+        release_tx.send(()).expect("release revision 2 write");
+        let first = wait_for_app_event(&mut app, "revision 2 ledger completion");
+        assert!(!app.handle_internal_event_with_render_impact(first));
+        let second = wait_for_app_event(&mut app, "queued revision 3 ledger completion");
+        assert!(!app.handle_internal_event_with_render_impact(second));
+
+        let durable = crate::fleet::load_authority_acceptance_ledger(&path)
+            .expect("reload ledger after queued tombstone");
+        let accepted = durable.accepted(&authority).expect("accepted authority");
+        assert_eq!(accepted.revision, 3);
+        assert!(matches!(
+            accepted.groups[0].state,
+            crate::groups::GroupState::Deleted
+        ));
+        assert_eq!(app.authority_acceptance_ledger, durable);
+        assert_eq!(app.state.fleet_snapshot, presentation_after_reload);
+        std::fs::remove_dir_all(root).expect("remove queued reload fixture");
     }
 
     #[test]
