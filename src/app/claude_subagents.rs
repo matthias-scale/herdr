@@ -139,7 +139,9 @@ pub(crate) struct RefreshWorkItem {
 enum FileIdentity {
     #[cfg(unix)]
     Unix { device: u64, inode: u64 },
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    Windows(crate::platform::WindowsFileIdentity),
+    #[cfg(not(any(unix, windows)))]
     Portable { created: Option<SystemTime> },
 }
 
@@ -784,24 +786,29 @@ fn open_regular_transcript(path: &Path) -> std::io::Result<(File, Metadata, File
             "Claude transcript must be a regular file",
         ));
     }
-    let identity = file_identity(&metadata);
+    let identity = file_identity(&file, &metadata)?;
     Ok((file, metadata, identity))
 }
 
 #[cfg(unix)]
-fn file_identity(metadata: &Metadata) -> FileIdentity {
+fn file_identity(_file: &File, metadata: &Metadata) -> std::io::Result<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
-    FileIdentity::Unix {
+    Ok(FileIdentity::Unix {
         device: metadata.dev(),
         inode: metadata.ino(),
-    }
+    })
 }
 
-#[cfg(not(unix))]
-fn file_identity(metadata: &Metadata) -> FileIdentity {
-    FileIdentity::Portable {
+#[cfg(windows)]
+fn file_identity(file: &File, _metadata: &Metadata) -> std::io::Result<FileIdentity> {
+    crate::platform::windows_file_identity(file).map(FileIdentity::Windows)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_identity(_file: &File, metadata: &Metadata) -> std::io::Result<FileIdentity> {
+    Ok(FileIdentity::Portable {
         created: metadata.created().ok(),
-    }
+    })
 }
 
 pub(crate) fn validated_transcript_path(
