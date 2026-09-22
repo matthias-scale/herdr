@@ -1009,6 +1009,12 @@
           "description": "Cycle the sidebar grouping mode."
         },
         {
+          "key": "keys.assign_pane_to_pod",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the pod picker for the focused pane. Unset by default."
+        },
+        {
           "key": "keys.sidebar_refresh",
           "type": "keybinding",
           "default": "unset",

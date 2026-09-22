@@ -111,8 +111,9 @@ pub(crate) use self::sidebar::{
 use self::sidebar::{
     render_sidebar, render_sidebar_collapsed, render_sidebar_filter_menu,
     render_sidebar_group_menu, render_sidebar_new_menu, render_sidebar_new_thread,
-    render_sidebar_object_menu, render_sidebar_project_menu, render_sidebar_settled_menu,
-    render_sidebar_snooze_menu, render_sidebar_sort_menu, render_sidebar_subgroup_picker,
+    render_sidebar_object_menu, render_sidebar_pod_picker, render_sidebar_project_menu,
+    render_sidebar_settled_menu, render_sidebar_snooze_menu, render_sidebar_sort_menu,
+    render_sidebar_subgroup_picker,
 };
 #[cfg(test)]
 pub(crate) use self::status::focused_context as focused_status_context_for_test;
@@ -159,18 +160,19 @@ pub(crate) use self::{
         sidebar_header_star_filter_rect, sidebar_missive_copy_url, sidebar_nested_header_at,
         sidebar_new_menu_layout, sidebar_new_thread_layout, sidebar_new_thread_matches,
         sidebar_object_action_at, sidebar_object_at, sidebar_object_menu_item_at,
-        sidebar_object_menu_items, sidebar_project_anchor_rect, sidebar_project_menu_layout,
-        sidebar_project_menu_matches, sidebar_pull_request_actions, sidebar_pull_request_key,
-        sidebar_row_index_for_workspace, sidebar_row_scroll_for_target, sidebar_rows,
-        sidebar_separator_col, sidebar_settled_menu_layout, sidebar_show_more_at,
-        sidebar_show_more_key, sidebar_snooze_menu_layout, sidebar_symphony_job_at,
-        sidebar_thread_entries, sidebar_ticket_action_entries, sidebar_ticket_target,
-        sidebar_unassigned_spawn_at, sidebar_work_group_activation, workspace_agent_chevron_rect,
-        workspace_drop_slots, workspace_list_entries, workspace_list_entries_expanded,
-        workspace_list_rect_for_app, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
-        workspace_parent_group_state, AgentPanelEntry, AgentPanelLocalIdentity, NeedsYouTarget,
-        RemoteAgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
-        WorkspaceListEntry, SETTLED_MENU_LABELS,
+        sidebar_object_menu_items, sidebar_pod_header_at, sidebar_pod_member_at,
+        sidebar_project_anchor_rect, sidebar_project_menu_layout, sidebar_project_menu_matches,
+        sidebar_pull_request_actions, sidebar_pull_request_key, sidebar_row_index_for_workspace,
+        sidebar_row_scroll_for_target, sidebar_rows, sidebar_separator_col,
+        sidebar_settled_menu_layout, sidebar_show_more_at, sidebar_show_more_key,
+        sidebar_snooze_menu_layout, sidebar_symphony_job_at, sidebar_thread_entries,
+        sidebar_ticket_action_entries, sidebar_ticket_target, sidebar_unassigned_spawn_at,
+        sidebar_work_group_activation, workspace_agent_chevron_rect, workspace_drop_slots,
+        workspace_list_entries, workspace_list_entries_expanded, workspace_list_rect_for_app,
+        workspace_list_scroll_metrics, workspace_list_scrollbar_rect, workspace_parent_group_state,
+        AgentPanelEntry, AgentPanelLocalIdentity, NeedsYouTarget, PodTarget, RemoteAgentPanelEntry,
+        SidebarFilterOption, SidebarObjectMenuItem, SidebarRow, WorkspaceListEntry,
+        SETTLED_MENU_LABELS,
     },
 };
 
@@ -1409,6 +1411,9 @@ fn render_with_runtime_registry_inner(
         }
         InputOwner::Client(ClientInputOwner::SidebarSubgroupPicker) => {
             render_sidebar_subgroup_picker(app, frame)
+        }
+        InputOwner::Client(ClientInputOwner::SidebarPodPicker) => {
+            render_sidebar_pod_picker(app, frame)
         }
         InputOwner::Client(ClientInputOwner::PrActionConfirmation) => {
             pr_actions::render_confirmation(app, frame, frame.area())

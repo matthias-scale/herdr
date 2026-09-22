@@ -1,7 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 
-use crate::app::state::{AppState, ViewLayout};
+use crate::app::{
+    state::{AppState, ViewLayout},
+    App,
+};
 
 use super::ScrollbarClickTarget;
 
@@ -20,6 +23,24 @@ pub(crate) enum SidebarWorkGroupKeyAction {
     Ignored,
     Consumed,
     Dispatch(Box<crate::app::home::HomeDispatchPlan>),
+    RenamePod(crate::groups::GroupRecord),
+    DeletePod(crate::groups::GroupRecord),
+}
+
+fn pod_record_for_key(state: &AppState, key: &str) -> Option<crate::groups::GroupRecord> {
+    state
+        .local_group_snapshot
+        .iter()
+        .chain(
+            state
+                .fleet_snapshot
+                .group_catalogs
+                .iter()
+                .filter_map(|catalog| catalog.snapshot.as_ref()),
+        )
+        .flat_map(|snapshot| snapshot.groups.iter())
+        .find(|record| format!("pod:{}:{}", record.id.owner, record.id.local) == key)
+        .cloned()
 }
 
 fn sidebar_snooze_params(
@@ -433,6 +454,11 @@ impl AppState {
         }
     }
 
+    pub(crate) fn sidebar_pod_picker_item_at(&self, col: u16, row: u16) -> Option<usize> {
+        let layout = crate::ui::sidebar::sidebar_pod_picker_layout(self, self.screen_rect())?;
+        crate::ui::dropdown::hit_test(&layout, col, row)
+    }
+
     /// Remove the window's subgroup outright, from the tab context menu.
     pub(crate) fn clear_tab_subgroup(&mut self, ws_idx: usize, tab_idx: usize) {
         if let Some(tab) = self
@@ -688,6 +714,32 @@ impl AppState {
         let Some(selected) = self.sidebar_selected_work_group.clone() else {
             return SidebarWorkGroupKeyAction::Ignored;
         };
+        if selected == crate::ui::sidebar::PODS_SECTION_TITLE {
+            if key.code == KeyCode::Enter && key.modifiers.is_empty() {
+                self.toggle_sidebar_group(crate::ui::sidebar::PODS_SECTION_TITLE);
+                return SidebarWorkGroupKeyAction::Consumed;
+            }
+        } else if selected.starts_with("pod:") {
+            match key.code {
+                KeyCode::Enter if key.modifiers.is_empty() => {
+                    self.toggle_sidebar_group(&selected);
+                    return SidebarWorkGroupKeyAction::Consumed;
+                }
+                KeyCode::Char('r') if key.modifiers.is_empty() => {
+                    return pod_record_for_key(self, &selected).map_or(
+                        SidebarWorkGroupKeyAction::Consumed,
+                        SidebarWorkGroupKeyAction::RenamePod,
+                    );
+                }
+                KeyCode::Char('d') if key.modifiers.is_empty() => {
+                    return pod_record_for_key(self, &selected).map_or(
+                        SidebarWorkGroupKeyAction::Consumed,
+                        SidebarWorkGroupKeyAction::DeletePod,
+                    );
+                }
+                _ => {}
+            }
+        }
         // Aloops rows that are not findings have their own verbs (MAT-159):
         // loop headers open the run-history table (AC8), run lines and the
         // clean-run fold toggle, and a clean run opens its recorded log (AC7).
@@ -1126,6 +1178,8 @@ impl AppState {
             .and_then(|entry| match entry {
                 crate::ui::SidebarRow::Workspace { ws_idx, .. } => Some(*ws_idx),
                 crate::ui::SidebarRow::Agent { .. }
+                | crate::ui::SidebarRow::PodHeader { .. }
+                | crate::ui::SidebarRow::PodMember { .. }
                 | crate::ui::SidebarRow::RemoteAgent { .. }
                 | crate::ui::SidebarRow::Tab { .. }
                 | crate::ui::SidebarRow::SectionHeader { .. }
@@ -1166,6 +1220,8 @@ impl AppState {
                     .local_target()
                     .map(|target| (target.ws_idx, target.pane_id)),
                 crate::ui::SidebarRow::Workspace { .. }
+                | crate::ui::SidebarRow::PodHeader { .. }
+                | crate::ui::SidebarRow::PodMember { .. }
                 | crate::ui::SidebarRow::RemoteAgent { .. }
                 | crate::ui::SidebarRow::SectionHeader { .. }
                 | crate::ui::SidebarRow::NestedHeader { .. }
@@ -1343,6 +1399,161 @@ impl AppState {
             .into_iter()
             .find(|card| row >= card.rect.y && row < card.rect.y + card.rect.height)
             .map(|card| (card.ws_idx, card.tab_idx))
+    }
+}
+
+impl App {
+    /// Open the pod picker for the focused local pane. The action is safe to
+    /// expose in the palette even when no pod exists because a typed name can
+    /// create the first local pod.
+    pub(crate) fn open_sidebar_pod_picker_for_focused_pane(&mut self) -> bool {
+        let Some(ws_idx) = self.state.active else {
+            return false;
+        };
+        let Some(pane_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(crate::workspace::Workspace::focused_pane_id)
+        else {
+            return false;
+        };
+        let anchor =
+            crate::ui::sidebar::compute_agent_card_areas(&self.state, self.state.view.sidebar_rect)
+                .into_iter()
+                .find(|card| card.ws_idx == ws_idx && card.pane_id == pane_id)
+                .map(|card| (card.rect.x.saturating_add(2), card.rect.y))
+                .unwrap_or((
+                    self.state.view.sidebar_rect.x.saturating_add(2),
+                    self.state.view.sidebar_rect.y.saturating_add(1),
+                ));
+        self.state.sidebar_pod_picker = Some(crate::app::state::SidebarPodPickerState {
+            ws_idx,
+            pane_id,
+            anchor,
+            filter: crate::ui::dropdown::DropdownFilterState::default(),
+        });
+        self.state.focus_client_on_sidebar();
+        true
+    }
+
+    pub(crate) fn handle_sidebar_pod_picker_key(&mut self, key: KeyEvent) -> bool {
+        if self.state.sidebar_pod_picker.is_none() {
+            return false;
+        }
+        let choices = crate::ui::sidebar::sidebar_pod_picker_choices(&self.state);
+        let Some(mut picker) = self.state.sidebar_pod_picker.take() else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Esc => return true,
+            KeyCode::Up | KeyCode::Down => {
+                let len = choices.len();
+                if len > 0 {
+                    let current = picker.filter.selected.min(len - 1);
+                    for distance in 1..=len {
+                        let candidate = if key.code == KeyCode::Up {
+                            (current + len - (distance % len)) % len
+                        } else {
+                            (current + distance) % len
+                        };
+                        if choices
+                            .get(candidate)
+                            .is_some_and(crate::ui::sidebar::SidebarPodChoice::enabled)
+                        {
+                            picker.filter.selected = candidate;
+                            break;
+                        }
+                    }
+                }
+            }
+            KeyCode::Backspace => picker.filter.pop(),
+            KeyCode::Enter => {
+                let selected = picker.filter.selected;
+                self.state.sidebar_pod_picker = Some(picker);
+                self.accept_sidebar_pod_picker(selected);
+                return true;
+            }
+            KeyCode::Char(character)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                picker.filter.push(character);
+            }
+            _ => {}
+        }
+        self.state.sidebar_pod_picker = Some(picker);
+        true
+    }
+
+    pub(crate) fn accept_sidebar_pod_picker(&mut self, index: usize) {
+        let choices = crate::ui::sidebar::sidebar_pod_picker_choices(&self.state);
+        let Some(picker) = self.state.sidebar_pod_picker.take() else {
+            return;
+        };
+        let Some(choice) = choices.get(index).cloned() else {
+            return;
+        };
+        if !choice.enabled() {
+            self.state.sidebar_pod_picker = Some(picker);
+            return;
+        }
+        let target = match choice {
+            crate::ui::sidebar::SidebarPodChoice::Existing { id, .. } => Some(id),
+            crate::ui::sidebar::SidebarPodChoice::NoPod => None,
+            crate::ui::sidebar::SidebarPodChoice::Create(name) => {
+                let Some(expected_revision) = self
+                    .state
+                    .local_group_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.revision)
+                else {
+                    return;
+                };
+                let response = self.dispatch_runtime_mutation(
+                    "sidebar-pod-create",
+                    crate::api::schema::Method::GroupCreate(
+                        crate::api::schema::GroupCreateParams {
+                            name,
+                            expected_revision,
+                        },
+                    ),
+                );
+                let Ok(success) =
+                    serde_json::from_str::<crate::api::schema::SuccessResponse>(&response)
+                else {
+                    self.show_pod_mutation_error("Pod not created", &response);
+                    return;
+                };
+                let crate::api::schema::ResponseResult::GroupMutation { record, .. } =
+                    success.result
+                else {
+                    return;
+                };
+                Some(record.id)
+            }
+        };
+        let Some(public_pane_id) = self.public_pane_id(picker.ws_idx, picker.pane_id) else {
+            return;
+        };
+        let Some(pane) = self
+            .state
+            .workspaces
+            .get(picker.ws_idx)
+            .and_then(|workspace| workspace.pane_state(picker.pane_id))
+        else {
+            return;
+        };
+        self.runtime_pane_group_set(crate::api::schema::PaneGroupSetParams {
+            pane_id: public_pane_id,
+            group_id: target,
+            expected_revision: pane.group_membership.revision,
+            expected_pane_authority: self
+                .state
+                .local_group_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.authority_id.clone()),
+            expected_pane_incarnation: Some(pane.attached_terminal_id.to_string()),
+        });
     }
 }
 
@@ -2129,6 +2340,220 @@ mod tests {
         );
     }
 
+    fn pod_keyboard_app() -> (crate::app::App, crate::groups::GroupRecord) {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("pods")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let owner = crate::groups::AuthorityId::from_random_bytes([61; 16]);
+        let record = crate::groups::GroupRecord {
+            id: crate::groups::GroupId {
+                owner: owner.clone(),
+                local: 1,
+            },
+            revision: 3,
+            state: crate::groups::GroupState::Active {
+                name: "release".into(),
+            },
+        };
+        app.state.local_group_snapshot = Some(crate::groups::GroupAuthoritySnapshot {
+            authority_id: owner,
+            revision: 3,
+            groups: vec![record.clone()],
+            memberships: Vec::new(),
+        });
+        app.state.sidebar_pod_picker = Some(crate::app::state::SidebarPodPickerState {
+            ws_idx: 0,
+            pane_id,
+            anchor: (1, 1),
+            filter: crate::ui::dropdown::DropdownFilterState::default(),
+        });
+        (app, record)
+    }
+
+    #[test]
+    fn pod_picker_keeps_stale_rows_visible_but_disabled() {
+        let (mut app, _) = pod_keyboard_app();
+        let remote = crate::groups::AuthorityId::from_random_bytes([62; 16]);
+        app.state.fleet_snapshot.group_catalogs = vec![crate::fleet::GroupCatalog {
+            host: "ub2".into(),
+            target: "ub2".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Stale,
+            observed_authority_id: Some(remote.clone()),
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: remote.clone(),
+                revision: 1,
+                groups: vec![crate::groups::GroupRecord {
+                    id: crate::groups::GroupId {
+                        owner: remote,
+                        local: 9,
+                    },
+                    revision: 1,
+                    state: crate::groups::GroupState::Active {
+                        name: "offline".into(),
+                    },
+                }],
+                memberships: Vec::new(),
+            }),
+            error: Some("offline".into()),
+        }];
+        let choices = crate::ui::sidebar::sidebar_pod_picker_choices(&app.state);
+        assert!(matches!(
+            choices.as_slice(),
+            [
+                crate::ui::sidebar::SidebarPodChoice::Existing { fresh: true, .. },
+                crate::ui::sidebar::SidebarPodChoice::Existing { fresh: false, .. }
+            ]
+        ));
+
+        assert!(
+            app.handle_sidebar_pod_picker_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty(),))
+        );
+        assert_eq!(
+            app.state
+                .sidebar_pod_picker
+                .as_ref()
+                .expect("picker remains open")
+                .filter
+                .selected,
+            0,
+            "keyboard selection skips the disabled stale row"
+        );
+        app.accept_sidebar_pod_picker(1);
+        assert!(app.state.sidebar_pod_picker.is_some());
+        assert!(
+            app.state.workspaces[0].tabs[0].panes[&app.state.workspaces[0].tabs[0].root_pane]
+                .group_membership
+                .group_id
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pod_picker_create_chains_group_create_and_pane_assignment() {
+        let mut app = app_for_mouse_test();
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-pod-picker-create-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        app.group_runtime = crate::groups::Runtime::load(&dir.join("groups"));
+        app.group_session_paths_override =
+            Some((dir.join("session.json"), dir.join("history.json")));
+        app.no_session = false;
+        app.state.workspaces = vec![Workspace::test_new("pods")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.state.refresh_local_agent_panel_identities();
+        app.rebuild_group_membership_projection();
+
+        assert!(app.open_sidebar_pod_picker_for_focused_pane());
+        for character in "new-pod".chars() {
+            assert!(app.handle_sidebar_pod_picker_key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::empty(),
+            )));
+        }
+        let choices = crate::ui::sidebar::sidebar_pod_picker_choices(&app.state);
+        let create = choices
+            .iter()
+            .position(|choice| matches!(choice, crate::ui::sidebar::SidebarPodChoice::Create(name) if name == "new-pod"))
+            .expect("create choice");
+        app.accept_sidebar_pod_picker(create);
+
+        let snapshot = app
+            .state
+            .local_group_snapshot
+            .as_ref()
+            .expect("local snapshot after create");
+        let created_id = snapshot
+            .groups
+            .iter()
+            .find_map(|record| match &record.state {
+                crate::groups::GroupState::Active { name } if name == "new-pod" => {
+                    Some(record.id.clone())
+                }
+                _ => None,
+            })
+            .expect("created pod");
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .group_membership
+                .group_id,
+            Some(created_id.clone())
+        );
+        assert!(app.open_sidebar_pod_picker_for_focused_pane());
+        let choices = crate::ui::sidebar::sidebar_pod_picker_choices(&app.state);
+        let no_pod = choices
+            .iter()
+            .position(|choice| matches!(choice, crate::ui::sidebar::SidebarPodChoice::NoPod))
+            .expect("no-pod choice");
+        app.accept_sidebar_pod_picker(no_pod);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .group_membership
+                .group_id,
+            None
+        );
+        assert!(app.open_sidebar_pod_picker_for_focused_pane());
+        let choices = crate::ui::sidebar::sidebar_pod_picker_choices(&app.state);
+        let existing = choices
+            .iter()
+            .position(|choice| matches!(choice, crate::ui::sidebar::SidebarPodChoice::Existing { id, fresh: true, .. } if id == &created_id))
+            .expect("existing pod choice");
+        app.accept_sidebar_pod_picker(existing);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id]
+                .group_membership
+                .group_id,
+            Some(created_id)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn pod_header_keyboard_actions_toggle_rename_and_delete() {
+        let (mut app, record) = pod_keyboard_app();
+        let key = format!("pod:{}:{}", record.id.owner, record.id.local);
+        app.state.sidebar_selected_work_group = Some(key.clone());
+        assert!(matches!(
+            app.state.handle_sidebar_work_group_key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::empty(),
+            )),
+            super::SidebarWorkGroupKeyAction::Consumed
+        ));
+        assert!(app.state.collapsed_sidebar_groups.contains(&format!(
+            "{}:{key}",
+            app.state.sidebar_group_mode.collapse_namespace()
+        )));
+
+        assert!(matches!(
+            app.state.handle_sidebar_work_group_key(KeyEvent::new(
+                KeyCode::Char('r'),
+                KeyModifiers::empty(),
+            )),
+            super::SidebarWorkGroupKeyAction::RenamePod(candidate) if candidate == record
+        ));
+        assert!(matches!(
+            app.state.handle_sidebar_work_group_key(KeyEvent::new(
+                KeyCode::Char('d'),
+                KeyModifiers::empty(),
+            )),
+            super::SidebarWorkGroupKeyAction::DeletePod(candidate) if candidate == record
+        ));
+    }
+
     fn sidebar_order_signature(app: &crate::app::state::AppState) -> Vec<String> {
         crate::ui::sidebar_rows(app)
             .into_iter()
@@ -2153,6 +2578,12 @@ mod tests {
                 }
                 crate::ui::SidebarRow::RemoteAgent { entry, .. } => {
                     format!("remote:{}", entry.agent_ref)
+                }
+                crate::ui::SidebarRow::PodHeader { group_id, .. } => {
+                    format!("pod:{}:{}", group_id.owner, group_id.local)
+                }
+                crate::ui::SidebarRow::PodMember { title, .. } => {
+                    format!("pod-member:{title}")
                 }
                 crate::ui::SidebarRow::SectionHeader { title, .. } => {
                     format!("section:{title}")

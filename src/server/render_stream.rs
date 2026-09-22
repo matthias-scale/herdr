@@ -767,6 +767,80 @@ mod render_scale_benchmark {
         app
     }
 
+    fn app_with_pods(pane_count: usize) -> AppState {
+        let mut app = app_with_active_panes(pane_count);
+        app.ensure_test_terminals();
+        app.refresh_local_agent_panel_identities();
+        let local = crate::groups::AuthorityId::from_random_bytes([61; 16]);
+        let remote = crate::groups::AuthorityId::from_random_bytes([62; 16]);
+        let ids = [
+            crate::groups::GroupId {
+                owner: local.clone(),
+                local: 1,
+            },
+            crate::groups::GroupId {
+                owner: local.clone(),
+                local: 2,
+            },
+            crate::groups::GroupId {
+                owner: remote.clone(),
+                local: 1,
+            },
+        ];
+        let memberships = app
+            .local_agent_panel_identities
+            .values()
+            .enumerate()
+            .map(|(index, identity)| crate::groups::OwnedPaneMembership {
+                pane_id: identity.agent_ref.agent.clone(),
+                pane_incarnation: format!("pane-{index}"),
+                membership: crate::groups::PaneGroupMembership {
+                    group_id: Some(ids[index % ids.len()].clone()),
+                    revision: 1,
+                },
+            })
+            .collect();
+        app.local_group_snapshot = Some(crate::groups::GroupAuthoritySnapshot {
+            authority_id: local.clone(),
+            revision: 2,
+            groups: ids[..2]
+                .iter()
+                .enumerate()
+                .map(|(index, id)| crate::groups::GroupRecord {
+                    id: id.clone(),
+                    revision: 1,
+                    state: crate::groups::GroupState::Active {
+                        name: format!("local-pod-{index}"),
+                    },
+                })
+                .collect(),
+            memberships,
+        });
+        app.fleet_snapshot.group_catalogs = vec![crate::fleet::GroupCatalog {
+            host: "bench-remote".into(),
+            target: "bench-remote".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::GroupCatalogState::Stale,
+            observed_authority_id: Some(remote.clone()),
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: remote,
+                revision: 1,
+                groups: vec![crate::groups::GroupRecord {
+                    id: ids[2].clone(),
+                    revision: 1,
+                    state: crate::groups::GroupState::Active {
+                        name: "remote-stale".into(),
+                    },
+                }],
+                memberships: Vec::new(),
+            }),
+            error: Some("benchmark stale catalog".into()),
+        }];
+        app
+    }
+
     fn app_with(workspaces: Vec<Workspace>) -> AppState {
         let mut app = AppState::test_new();
         app.set_server_mode(Mode::Terminal);
@@ -846,6 +920,10 @@ mod render_scale_benchmark {
         [1, 15, 50].map(|count| (count, profile(app_with_usage_tab_panes(count, open))))
     }
 
+    fn profile_pod_cardinalities() -> [(usize, RenderStats); 3] {
+        [1, 15, 50].map(|count| (count, profile(app_with_pods(count))))
+    }
+
     fn print_profiles(label: &str, profiles: [(usize, RenderStats); 3]) {
         let baseline_median_us = profiles[0].1.median_us as f64;
         let baseline_p95_us = profiles[0].1.p95_us as f64;
@@ -913,6 +991,42 @@ mod render_scale_benchmark {
         assert!(!app_with_usage_tab_panes(15, false).notepad.usage_tab);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn pod_profile_fixture_has_three_pods_two_hosts_and_one_stale() {
+        let app = app_with_pods(15);
+        let rows = crate::ui::sidebar_rows(&app);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, crate::ui::SidebarRow::PodHeader { .. }))
+                .count(),
+            3
+        );
+        assert_eq!(
+            rows.iter()
+                .filter_map(|row| match row {
+                    crate::ui::SidebarRow::PodHeader { group_id, .. } => {
+                        Some(group_id.owner.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            2
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, crate::ui::SidebarRow::PodHeader { fresh: false, .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, crate::ui::SidebarRow::PodMember { .. }))
+                .count(),
+            15
+        );
+    }
+
     #[test]
     fn unchanged_home_composer_renders_identical_consecutive_frames() {
         let mut app = AppState::test_new();
@@ -966,6 +1080,10 @@ mod render_scale_benchmark {
         print_profiles(
             "usage tab open (three accounts)",
             profile_usage_tab_cardinalities(true),
+        );
+        print_profiles(
+            "Pods section (3 pods, 2 hosts, 1 stale)",
+            profile_pod_cardinalities(),
         );
     }
 }

@@ -95,6 +95,14 @@ impl App {
                     self.dispatch_sidebar_work_group_plan(*plan);
                     return None;
                 }
+                super::sidebar::SidebarWorkGroupKeyAction::RenamePod(record) => {
+                    super::modal::open_rename_pod(&mut self.state, record);
+                    return None;
+                }
+                super::sidebar::SidebarWorkGroupKeyAction::DeletePod(record) => {
+                    self.runtime_delete_pod(record);
+                    return None;
+                }
             }
             if self.handle_sidebar_session_action_key(key_event) {
                 return None;

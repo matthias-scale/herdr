@@ -90,6 +90,7 @@ pub(crate) fn action_for_field(field: &str) -> Option<NavigateAction> {
         "copy_mode" => NavigateAction::CopyMode,
         "toggle_sidebar" => NavigateAction::ToggleSidebar,
         "focus_sidebar" => NavigateAction::FocusSidebar,
+        "assign_pane_to_pod" => NavigateAction::AssignPaneToPod,
         "focus_owning_repo_group" => NavigateAction::FocusOwningRepoGroup,
         "sidebar_cycle_group_mode" => NavigateAction::CycleSidebarGroupMode,
         "sidebar_refresh" => NavigateAction::RefreshSidebar,
@@ -211,6 +212,18 @@ impl AppState {
                 label: label.to_string(),
                 key: accessor(&self.keybinds).label().unwrap_or_default(),
                 command: PaletteCommand::BuiltIn(action),
+                score,
+            });
+        }
+
+        let group = "pane";
+        let label = "assign pane to pod";
+        if let Some(score) = score_entry(group, label, query) {
+            entries.push(PaletteEntry {
+                group: group.to_string(),
+                label: label.to_string(),
+                key: String::new(),
+                command: PaletteCommand::BuiltIn(NavigateAction::AssignPaneToPod),
                 score,
             });
         }
@@ -514,6 +527,7 @@ mod tests {
             ("dock: symphony", NavigateAction::OpenDockSymphony),
             ("toggle dark/light theme", NavigateAction::ToggleTheme),
             ("focus sidebar", NavigateAction::FocusSidebar),
+            ("assign pane to pod", NavigateAction::AssignPaneToPod),
         ];
 
         for (label, action) in expected {

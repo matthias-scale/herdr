@@ -39,6 +39,7 @@ impl App {
             .create(&params.name, params.expected_revision)
         {
             Ok((record, revision)) => {
+                self.refresh_local_group_snapshot();
                 encode_success(id, ResponseResult::GroupMutation { record, revision })
             }
             Err(error) => encode_runtime_error(id, error),
@@ -62,6 +63,7 @@ impl App {
             .rename(&params.group_id, &params.name, params.expected_revision)
         {
             Ok((record, revision)) => {
+                self.refresh_local_group_snapshot();
                 encode_success(id, ResponseResult::GroupMutation { record, revision })
             }
             Err(error) => encode_runtime_error(id, error),
@@ -85,6 +87,7 @@ impl App {
             .delete(&params.group_id, params.expected_revision)
         {
             Ok((record, revision)) => {
+                self.refresh_local_group_snapshot();
                 encode_success(id, ResponseResult::GroupMutation { record, revision })
             }
             Err(error) => encode_runtime_error(id, error),
@@ -142,7 +145,7 @@ impl App {
                     if let Err(message) = self.validate_group_target(group_id) {
                         return pane_group_set_error(
                             id,
-                            "authority_not_fresh",
+                            group_target_error_code(&message),
                             message,
                             Some(&owner),
                         );
@@ -169,7 +172,7 @@ impl App {
             if let Err(message) = self.validate_group_target(group_id) {
                 return pane_group_set_error(
                     id,
-                    "authority_not_fresh",
+                    group_target_error_code(&message),
                     message,
                     params.expected_pane_authority.as_ref(),
                 );
@@ -405,7 +408,7 @@ impl App {
                     if let Err(message) = self.validate_group_target(group_id) {
                         return pane_group_set_error(
                             id,
-                            "authority_not_fresh",
+                            group_target_error_code(&message),
                             message,
                             params.expected_pane_authority.as_ref(),
                         );
@@ -448,6 +451,7 @@ impl App {
             }
         }
         self.group_membership_projection = projection;
+        self.refresh_local_group_snapshot();
     }
 
     pub(crate) fn refresh_group_membership_projection_for_pane(&mut self, public_id: &str) {
@@ -471,18 +475,34 @@ impl App {
                 self.group_membership_projection.remove(public_id);
             }
         }
+        self.refresh_local_group_snapshot();
+    }
+
+    fn refresh_local_group_snapshot(&mut self) {
+        self.state.local_group_snapshot =
+            self.group_runtime
+                .authority()
+                .ok()
+                .map(|authority| GroupAuthoritySnapshot {
+                    authority_id: authority.authority_id().clone(),
+                    revision: authority.revision(),
+                    groups: authority.records(),
+                    memberships: self.group_membership_projection.values().cloned().collect(),
+                });
     }
 
     pub(crate) fn observe_group_membership_lifecycle_event(
         &mut self,
         data: &crate::api::schema::EventData,
     ) {
-        match data {
+        let changed = match data {
             crate::api::schema::EventData::PaneCreated { pane } => {
                 self.refresh_group_membership_projection_for_pane(&pane.pane_id);
+                false
             }
             crate::api::schema::EventData::PaneClosed { pane_id, .. } => {
                 self.group_membership_projection.remove(pane_id);
+                true
             }
             crate::api::schema::EventData::PaneMoved {
                 previous_pane_id,
@@ -491,11 +511,13 @@ impl App {
             } => {
                 self.group_membership_projection.remove(previous_pane_id);
                 self.refresh_group_membership_projection_for_pane(&pane.pane_id);
+                false
             }
             crate::api::schema::EventData::WorkspaceClosed { workspace_id, .. } => {
                 let prefix = format!("{workspace_id}:");
                 self.group_membership_projection
                     .retain(|pane_id, _| !pane_id.starts_with(&prefix));
+                true
             }
             crate::api::schema::EventData::TabClosed { .. } => {
                 let pane_ids = self
@@ -508,8 +530,12 @@ impl App {
                         self.group_membership_projection.remove(&pane_id);
                     }
                 }
+                true
             }
-            _ => {}
+            _ => false,
+        };
+        if changed {
+            self.refresh_local_group_snapshot();
         }
     }
 
@@ -679,7 +705,7 @@ impl App {
                     if let Err(message) = self.validate_group_target(group_id) {
                         let _ = respond_to.send(pane_group_set_error(
                             id,
-                            "authority_not_fresh",
+                            group_target_error_code(&message),
                             message,
                             Some(&owner),
                         ));
@@ -791,6 +817,17 @@ fn pane_group_set_error(
         }
     }
     encode_error(id, code, message)
+}
+
+fn group_target_error_code(message: &str) -> &'static str {
+    if message.contains("does not report the target group")
+        || message.contains("reports a deleted group")
+        || message.contains("is unavailable") && message.contains("group")
+    {
+        "group_not_found"
+    } else {
+        "authority_not_fresh"
+    }
 }
 
 #[cfg(test)]
@@ -970,6 +1007,241 @@ mod tests {
             panic!("expected host snapshot");
         };
         assert_eq!(snapshot.groups, vec![deleted]);
+    }
+
+    #[test]
+    fn local_group_created_without_fleet_catalog_renders_its_name() {
+        let (mut app, _dir, _) = app_with_groups("local-render");
+        assert!(app.state.fleet_snapshot.group_catalogs.is_empty());
+        let _ = created_group(&app.dispatch_api_request(
+            "create",
+            Method::GroupCreate(GroupCreateParams {
+                name: "Solo".into(),
+                expected_revision: 0,
+            }),
+        ));
+
+        assert!(crate::ui::sidebar_rows(&app.state).iter().any(|row| {
+            matches!(row, crate::ui::SidebarRow::PodHeader { title, .. } if title == "Solo")
+        }));
+    }
+
+    #[test]
+    fn local_group_snapshot_tracks_record_and_membership_mutations() {
+        let (mut app, _dir, pane_id) = app_with_groups("local-projection");
+        let created = created_group(&app.handle_group_create(
+            "create".into(),
+            GroupCreateParams {
+                name: "One".into(),
+                expected_revision: 0,
+            },
+        ));
+        assert_eq!(
+            app.state.local_group_snapshot.as_ref().map(|s| s.revision),
+            Some(1)
+        );
+        let renamed = created_group(&app.handle_group_rename(
+            "rename".into(),
+            GroupRenameParams {
+                group_id: created.id.clone(),
+                name: "Two".into(),
+                expected_revision: created.revision,
+            },
+        ));
+        let authority = created.id.owner.clone();
+        let assigned: SuccessResponse = serde_json::from_str(&app.handle_pane_group_set(
+            "assign".into(),
+            PaneGroupSetParams {
+                pane_id: pane_id.clone(),
+                group_id: Some(created.id.clone()),
+                expected_revision: 0,
+                expected_pane_authority: Some(authority.clone()),
+                expected_pane_incarnation: None,
+            },
+        ))
+        .expect("assignment response");
+        assert!(matches!(
+            assigned.result,
+            ResponseResult::PaneGroupSet { .. }
+        ));
+        let snapshot = app
+            .state
+            .local_group_snapshot
+            .as_ref()
+            .expect("local projection");
+        assert_eq!(
+            snapshot.memberships[0].membership.group_id,
+            Some(created.id.clone())
+        );
+        let _ = app.handle_pane_group_set(
+            "clear".into(),
+            PaneGroupSetParams {
+                pane_id,
+                group_id: None,
+                expected_revision: 1,
+                expected_pane_authority: Some(authority),
+                expected_pane_incarnation: None,
+            },
+        );
+        assert_eq!(
+            app.state
+                .local_group_snapshot
+                .as_ref()
+                .expect("projection")
+                .memberships[0]
+                .membership
+                .group_id,
+            None
+        );
+        let _ = app.handle_group_delete(
+            "delete".into(),
+            GroupDeleteParams {
+                group_id: created.id,
+                expected_revision: renamed.revision,
+            },
+        );
+        assert!(matches!(
+            app.state
+                .local_group_snapshot
+                .as_ref()
+                .expect("projection")
+                .groups[0]
+                .state,
+            GroupState::Deleted
+        ));
+    }
+
+    #[test]
+    fn api_group_create_reports_ui_change() {
+        let (mut app, _dir, _) = app_with_groups("api-redraw");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let changed = app.handle_api_request_message(crate::api::ApiRequestMessage {
+            request: Request {
+                id: "create".into(),
+                method: Method::GroupCreate(GroupCreateParams {
+                    name: "Visible".into(),
+                    expected_revision: 0,
+                }),
+            },
+            respond_to: tx,
+            response_write_complete: None,
+            stream_active: None,
+        });
+        assert!(changed);
+        assert!(serde_json::from_str::<SuccessResponse>(&rx.recv().expect("response")).is_ok());
+    }
+
+    #[test]
+    fn pod_assignment_revision_conflict_toasts_without_retry() {
+        let (mut app, _dir, pane_id) = app_with_groups("pod-conflict-toast");
+        let created = created_group(&app.handle_group_create(
+            "create".into(),
+            GroupCreateParams {
+                name: "Target".into(),
+                expected_revision: 0,
+            },
+        ));
+        let authority = created.id.owner.clone();
+        let first = PaneGroupSetParams {
+            pane_id: pane_id.clone(),
+            group_id: Some(created.id.clone()),
+            expected_revision: 0,
+            expected_pane_authority: Some(authority.clone()),
+            expected_pane_incarnation: None,
+        };
+        assert!(serde_json::from_str::<SuccessResponse>(
+            &app.handle_pane_group_set("first".into(), first)
+        )
+        .is_ok());
+        app.runtime_pane_group_set(PaneGroupSetParams {
+            pane_id: pane_id.clone(),
+            group_id: None,
+            expected_revision: 0,
+            expected_pane_authority: Some(authority),
+            expected_pane_incarnation: None,
+        });
+        let pane = app
+            .local_pane(&pane_id)
+            .and_then(|(ws, pane)| app.state.workspaces[ws].pane_state(pane))
+            .expect("pane");
+        assert_eq!(
+            pane.group_membership.revision, 1,
+            "no retry advanced membership"
+        );
+        let toast = app.state.toast.as_ref().expect("visible conflict toast");
+        assert_eq!(toast.context, "membership changed elsewhere — not moved");
+    }
+
+    #[test]
+    fn pod_assignment_stale_owner_toasts_and_does_not_move() {
+        let (mut app, _dir, pane_id) = app_with_groups("pod-stale-owner-toast");
+        let owner = crate::groups::AuthorityId::from_random_bytes([41; 16]);
+
+        app.runtime_pane_group_set(PaneGroupSetParams {
+            pane_id: pane_id.clone(),
+            group_id: Some(GroupId {
+                owner: owner.clone(),
+                local: 1,
+            }),
+            expected_revision: 0,
+            expected_pane_authority: app
+                .state
+                .local_group_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.authority_id.clone()),
+            expected_pane_incarnation: None,
+        });
+
+        let pane = app
+            .local_pane(&pane_id)
+            .and_then(|(ws, pane)| app.state.workspaces[ws].pane_state(pane))
+            .expect("pane");
+        assert_eq!(pane.group_membership, PaneGroupMembership::default());
+        let toast = app.state.toast.as_ref().expect("visible stale-owner toast");
+        assert!(toast.context.contains("pod owner unreachable"));
+        assert!(toast.context.contains(owner.as_str()));
+    }
+
+    #[test]
+    fn pod_deleted_after_last_motion_toasts_group_not_found_without_moving() {
+        let (mut app, _dir, pane_id) = app_with_groups("pod-deleted-race-toast");
+        let created = created_group(&app.handle_group_create(
+            "create".into(),
+            GroupCreateParams {
+                name: "Transient".into(),
+                expected_revision: 0,
+            },
+        ));
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&app.handle_group_delete(
+                "delete".into(),
+                GroupDeleteParams {
+                    group_id: created.id.clone(),
+                    expected_revision: created.revision,
+                },
+            ))
+            .is_ok()
+        );
+
+        app.runtime_pane_group_set(PaneGroupSetParams {
+            pane_id: pane_id.clone(),
+            group_id: Some(created.id),
+            expected_revision: 0,
+            expected_pane_authority: app
+                .state
+                .local_group_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.authority_id.clone()),
+            expected_pane_incarnation: None,
+        });
+
+        let pane = app
+            .local_pane(&pane_id)
+            .and_then(|(ws, pane)| app.state.workspaces[ws].pane_state(pane))
+            .expect("pane");
+        assert_eq!(pane.group_membership, PaneGroupMembership::default());
+        let toast = app.state.toast.as_ref().expect("visible missing-pod toast");
+        assert!(toast.context.contains("pod no longer exists"));
     }
 
     #[test]
@@ -1791,7 +2063,15 @@ mod tests {
                     },
                 ))
                 .expect("target preflight refusal");
-            assert_eq!(response.error.code, "authority_not_fresh", "{case}");
+            assert_eq!(
+                response.error.code,
+                if matches!(case, "missing" | "deleted") {
+                    "group_not_found"
+                } else {
+                    "authority_not_fresh"
+                },
+                "{case}"
+            );
             assert!(
                 response.error.message.contains(pane_owner.as_str()),
                 "{case} refusal named the group authority instead: {}",
@@ -1886,7 +2166,18 @@ mod tests {
                     },
                 ))
                 .expect("local target refusal");
-            assert_eq!(response.error.code, "authority_not_fresh", "{case}");
+            assert_eq!(
+                response.error.code,
+                if matches!(
+                    case.as_str(),
+                    "missing-supplied" | "missing-omitted" | "deleted-supplied" | "deleted-omitted"
+                ) {
+                    "group_not_found"
+                } else {
+                    "authority_not_fresh"
+                },
+                "{case}"
+            );
             assert!(
                 response.error.message.contains(pane_owner.as_str()),
                 "{case} refusal omitted the local pane authority: {}",
