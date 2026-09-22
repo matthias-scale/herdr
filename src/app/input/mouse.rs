@@ -7887,14 +7887,7 @@ mod tests {
     /// against the cwd of the pane that printed it.
     #[tokio::test]
     async fn right_click_on_a_printed_path_resolves_it_against_the_pane_cwd() {
-        let dir = std::env::temp_dir().join(format!(
-            "herdr-open-with-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
+        let dir = std::env::temp_dir().join(format!("herdr-open-with-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let file = dir.join("notes.md");
         std::fs::write(&file, b"x").expect("temp file");
