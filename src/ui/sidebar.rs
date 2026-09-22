@@ -23783,7 +23783,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .as_mut()
             .expect("recent-project picker")
             .filter
-            .set_query("alpha");
+            .set_query("t3-10a/alpha");
         assert_eq!(
             sidebar_new_thread_matches(&app)
                 .into_iter()

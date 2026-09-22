@@ -321,20 +321,27 @@ fn body_rows(area: Rect, queue_rows: usize, trailing: u16) -> u16 {
 
 /// Return the card and prompt heights that fit while leaving one queue row and
 /// the headline, header, gap, and hint in place.
-fn composer_dimensions(area_height: u16) -> (u16, u16) {
+fn composer_dimensions(area_height: u16, picker_clearance: u16) -> (u16, u16) {
     let available_card_rows = area_height.saturating_sub(COMPOSER_NON_PROMPT_ROWS);
     let card_rows = if available_card_rows < NORMAL_COMPOSER_CARD_ROWS {
         COMPACT_COMPOSER_CARD_ROWS
     } else {
         available_card_rows.min(TALL_COMPOSER_CARD_ROWS)
-    };
+    }
+    .saturating_sub(picker_clearance)
+    .max(COMPACT_COMPOSER_CARD_ROWS);
     (
         card_rows,
         card_rows.saturating_sub(COMPOSER_NON_PROMPT_ROWS).max(1),
     )
 }
 
-fn bands_for(area: Rect, lens_requested: bool, queue_rows: usize) -> HomeBands {
+fn bands_for(
+    area: Rect,
+    lens_requested: bool,
+    queue_rows: usize,
+    picker_clearance: u16,
+) -> HomeBands {
     if lens_requested && area.height >= crate::app::home::HOME_LENS_MIN_HEIGHT {
         let [header, gap, body, frame, _slack, hint] = Layout::vertical([
             Constraint::Length(1),
@@ -397,7 +404,7 @@ fn bands_for(area: Rect, lens_requested: bool, queue_rows: usize) -> HomeBands {
             hint,
         }
     } else if !lens_requested && area.height >= crate::app::home::HOME_COMPOSER_MIN_HEIGHT {
-        let (card_rows, prompt_rows) = composer_dimensions(area.height);
+        let (card_rows, prompt_rows) = composer_dimensions(area.height, picker_clearance);
         // The composer sits directly under the queue; the slack goes below it,
         // so a short queue no longer strands the prompt at the pane floor.
         let [header, gap, body, headline, card_row, _slack, hint] = Layout::vertical([
@@ -498,7 +505,7 @@ fn chip_row_bands(chips: Rect) -> ComposerBands {
 
 #[cfg(test)]
 fn bands(area: Rect, queue_rows: usize) -> HomeBands {
-    bands_for(area, false, queue_rows)
+    bands_for(area, false, queue_rows, 0)
 }
 
 fn lens_requested(app: &AppState, queue: &[BlockedAgent]) -> bool {
@@ -510,7 +517,38 @@ fn lens_requested(app: &AppState, queue: &[BlockedAgent]) -> bool {
 }
 
 fn home_bands(app: &AppState, queue: &[BlockedAgent], area: Rect) -> HomeBands {
-    bands_for(area, lens_requested(app, queue), queue.len())
+    let lens_requested = lens_requested(app, queue);
+    let layout = bands_for(area, lens_requested, queue.len(), 0);
+    let Some(home) = app.home.as_ref() else {
+        return layout;
+    };
+    let Some(composer) = layout.composer else {
+        return layout;
+    };
+    if home.picker.is_none() {
+        return layout;
+    }
+    let Some(field) = home
+        .focus
+        .and_then(|focus| composer_field_rect(app, home, composer, focus))
+    else {
+        return layout;
+    };
+    if field.y != composer.bottom.y || picker_layout(app, home, composer, area).is_some() {
+        return layout;
+    }
+
+    // A filtered picker anchored to the bottom row needs one more row than the
+    // card's bottom border provides: its filter plus at least one result.
+    let adjusted = bands_for(area, lens_requested, queue.len(), 1);
+    let Some(composer) = adjusted.composer else {
+        return layout;
+    };
+    if picker_layout(app, home, composer, area).is_some() {
+        adjusted
+    } else {
+        layout
+    }
 }
 
 fn chip_specs(
@@ -2503,7 +2541,7 @@ mod tests {
         let mut app = AppState::test_new();
         let mut home = HomeState::default();
         home.prompt =
-            "开头一 开头二 开头三 开头四 开头五 开头六 开头七 开头八 开头九 开头十 开始 重构用户认证模块 继续检查边界 最后尾部"
+            "开头一 开头二 开头三 开头四 开头五 开头六 开头七 开头八 开头九 开头十 开始 重构用户认证模块 继续检查边界 继续确认溢出滚动 最后尾部"
                 .into();
         app.home = Some(home);
         let queue = vec![blocked(0)];
@@ -2909,7 +2947,7 @@ mod tests {
                 ),
             );
             let queue = vec![blocked(0)];
-            let layout = bands(area, queue.len());
+            let layout = home_bands(&app, &queue, area);
             let composer = layout
                 .composer
                 .unwrap_or_else(|| panic!("composer should fit at {columns}x{rows}"));
@@ -2947,7 +2985,7 @@ mod tests {
             // Nothing clips: the same geometry drawn into a buffer of exactly
             // that size writes every card row inside it.
             let origin = Rect::new(0, 0, area.width, area.height);
-            let origin_composer = bands(origin, queue.len())
+            let origin_composer = home_bands(&app, &queue, origin)
                 .composer
                 .unwrap_or_else(|| panic!("composer should fit at {columns}x{rows}"));
             let buffer = draw_home(&app, &queue, origin);
