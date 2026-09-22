@@ -737,10 +737,11 @@ mod tests {
     }
 
     fn canonical_path_string(path: &std::path::Path) -> String {
-        path.canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf())
-            .display()
-            .to_string()
+        crate::platform::plugin_runtime_path(
+            &path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
+        )
+        .display()
+        .to_string()
     }
 
     /// Wait for non-empty contents at `path`. Shell `>` creates the file empty
