@@ -789,6 +789,23 @@ struct FullLifecycleHookRetirementPorts<'a> {
     state_events: &'a mpsc::Sender<AppEvent>,
 }
 
+async fn publish_agent_links_if_dirty(
+    pane_id: PaneId,
+    gate: &crate::agent_state::LinkExtractionGate,
+    state_events: &mpsc::Sender<AppEvent>,
+) {
+    let Some(links) = gate.take_links() else {
+        return;
+    };
+    let _ = state_events
+        .send(AppEvent::OrderedAgentLinksDetected {
+            pane_id,
+            links: links.ordered_links,
+            observed_at: std::time::SystemTime::now(),
+        })
+        .await;
+}
+
 /// Retire hook authority once sustained output contradicts its latest state.
 ///
 /// Two detect loops run this: the one `spawn_basic_detection_task` starts for a
@@ -853,6 +870,7 @@ fn spawn_basic_detection_task(
     detection_content_seq: Arc<AtomicU64>,
     full_lifecycle_hook_baseline_content_seq: Arc<AtomicU64>,
     agent_output_seq: Arc<AtomicU64>,
+    link_extraction: Arc<crate::agent_state::LinkExtractionGate>,
     authority: DetectionAuthorityMirrors,
     state_events: mpsc::Sender<AppEvent>,
     initial_agent: Option<Agent>,
@@ -932,6 +950,7 @@ fn spawn_basic_detection_task(
             }
 
             let now = std::time::Instant::now();
+            publish_agent_links_if_dirty(pane_id, &link_extraction, &state_events).await;
             let suppressed_agent = active_pending_release(&pending_release_for_task, now);
             if suppressed_agent.is_none() && release_was_active {
                 has_process_probe = false;
@@ -2749,6 +2768,8 @@ impl PaneRuntime {
         let input_delivery_seq = Arc::new(AtomicU64::new(0));
         let reflected_input_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
+        let link_extraction = Arc::new(crate::agent_state::LinkExtractionGate::default());
+        terminal.install_link_extraction(link_extraction.clone());
         let agent_output_seq = Arc::new(AtomicU64::new(0));
         let suppress_pane_died = Arc::new(AtomicBool::new(false));
 
@@ -2853,6 +2874,7 @@ impl PaneRuntime {
                 detection_content_seq.clone(),
                 full_lifecycle_hook_baseline_content_seq.clone(),
                 agent_output_seq.clone(),
+                link_extraction.clone(),
                 DetectionAuthorityMirrors {
                     full_lifecycle_active: full_lifecycle_authority_active.clone(),
                     full_lifecycle_blocked: full_lifecycle_hook_blocked.clone(),
@@ -2960,6 +2982,8 @@ impl PaneRuntime {
         let input_delivery_seq = Arc::new(AtomicU64::new(0));
         let reflected_input_seq = Arc::new(AtomicU64::new(0));
         let detection_content_seq = Arc::new(AtomicU64::new(0));
+        let link_extraction = Arc::new(crate::agent_state::LinkExtractionGate::default());
+        terminal.install_link_extraction(link_extraction.clone());
         let full_lifecycle_hook_baseline_content_seq = Arc::new(AtomicU64::new(0));
         let agent_output_seq = Arc::new(AtomicU64::new(0));
         let full_lifecycle_authority_active = Arc::new(AtomicBool::new(false));
@@ -3104,6 +3128,7 @@ impl PaneRuntime {
             let terminal = terminal.clone();
             let state_events = events.clone();
             let detection_content_seq = detection_content_seq.clone();
+            let link_extraction_for_task = link_extraction.clone();
             let full_lifecycle_hook_baseline_content_seq_for_task =
                 full_lifecycle_hook_baseline_content_seq.clone();
             let agent_output_seq = agent_output_seq.clone();
@@ -3195,6 +3220,8 @@ impl PaneRuntime {
                     }
 
                     let now = Instant::now();
+                    publish_agent_links_if_dirty(pane_id, &link_extraction_for_task, &state_events)
+                        .await;
                     let suppressed_agent = active_pending_release(&pending_release_for_task, now);
                     if suppressed_agent.is_none() && release_was_active {
                         has_process_probe = false;
@@ -4373,6 +4400,7 @@ impl PaneRuntime {
                 runtime.detection_content_seq.clone(),
                 runtime.full_lifecycle_hook_baseline_content_seq.clone(),
                 agent_output_seq,
+                Arc::new(crate::agent_state::LinkExtractionGate::default()),
                 DetectionAuthorityMirrors {
                     full_lifecycle_active: runtime.full_lifecycle_authority_active.clone(),
                     full_lifecycle_blocked: runtime.full_lifecycle_hook_blocked.clone(),
@@ -4480,6 +4508,535 @@ impl PaneRuntime {
 mod tests {
     use self::agent_detection::FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE;
     use super::*;
+
+    fn detected_urls(
+        links: &[crate::agent_state::DetectedAgentLink],
+        source: crate::agent_state::AgentLinkSource,
+    ) -> Vec<&str> {
+        links
+            .iter()
+            .filter(|link| link.source == source)
+            .map(|link| link.url.as_str())
+            .collect()
+    }
+
+    // PTY parse throughput is a multiplicative path: bytes x panes. The gate
+    // adds classification to it, so measure the parse loop itself rather than
+    // inferring it from render scaling.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "manual PTY parse scaling profile"]
+    async fn parse_scale_profile() {
+        const WARMUP: usize = 3;
+        const SAMPLES: usize = 21;
+
+        fn chunk(osc8_heavy: bool) -> Vec<u8> {
+            let mut out = Vec::new();
+            for index in 0..64 {
+                if osc8_heavy {
+                    out.extend_from_slice(
+                        format!(
+                            "\x1b]8;;https://example.test/file-{index}\x1b\\file-{index}\x1b]8;;\x1b\\  "
+                        )
+                        .as_bytes(),
+                    );
+                } else {
+                    out.extend_from_slice(
+                        format!("line {index} plain output without any link at all\r\n").as_bytes(),
+                    );
+                }
+            }
+            out.push(b'\n');
+            out
+        }
+
+        fn profile(panes: usize, with_gate: bool, osc8_heavy: bool) -> u128 {
+            let runtimes: Vec<_> = (0..panes)
+                .map(|_| {
+                    let runtime = PaneRuntime::test_with_screen_bytes(120, 24, b"");
+                    if with_gate {
+                        let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+                        runtime.terminal.install_link_extraction(gate);
+                    }
+                    runtime
+                })
+                .collect();
+            let bytes = chunk(osc8_heavy);
+
+            for _ in 0..WARMUP {
+                for runtime in &runtimes {
+                    runtime.test_process_pty_bytes(&bytes);
+                }
+            }
+            let mut samples = Vec::with_capacity(SAMPLES);
+            for _ in 0..SAMPLES {
+                let started = std::time::Instant::now();
+                for runtime in &runtimes {
+                    runtime.test_process_pty_bytes(&bytes);
+                }
+                samples.push(started.elapsed().as_micros());
+            }
+            samples.sort_unstable();
+            samples[SAMPLES / 2]
+        }
+
+        for (label, osc8_heavy) in [("plain output", false), ("OSC 8 per item", true)] {
+            println!("{label}: median microseconds per batch across all panes");
+            println!("     panes  no_gate  with_gate  gate_cost");
+            for panes in [1usize, 15, 50] {
+                let without = profile(panes, false, osc8_heavy);
+                let with = profile(panes, true, osc8_heavy);
+                println!(
+                    "{panes:>10}  {without:>7}  {with:>9}  {:>8.2}x",
+                    with as f64 / without.max(1) as f64
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn screen_motion_between_runs_does_not_join_one_url() {
+        // Two runs the screen never showed as one link must not be published
+        // as one. Cursor motion, scrolling, erasure and margin changes all
+        // break adjacency.
+        for (label, motion) in [
+            ("CUP", b"\x1b[10;40H".as_slice()),
+            ("CUF", b"\x1b[20C".as_slice()),
+            ("CUD", b"\x1b[3B".as_slice()),
+            ("CUU", b"\x1b[2A".as_slice()),
+            ("SU", b"\x1b[1S".as_slice()),
+            ("SD", b"\x1b[1T".as_slice()),
+            ("IL", b"\x1b[1L".as_slice()),
+            ("DL", b"\x1b[1M".as_slice()),
+            ("ED", b"\x1b[J".as_slice()),
+            ("EL", b"\x1b[K".as_slice()),
+            ("DECSTBM", b"\x1b[1;5r".as_slice()),
+        ] {
+            let mut stream = b"\x1b[12;1Hhttps://shown.example.test/path".to_vec();
+            stream.extend_from_slice(motion);
+            stream.extend_from_slice(b"@attacker.example.test\n");
+
+            let runtime = PaneRuntime::test_with_screen_bytes(120, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream);
+
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("visible URL before {label}"));
+            assert_eq!(
+                links.output_urls,
+                vec!["https://shown.example.test/path"],
+                "{label} moved rendered text, so the runs must stay separate"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_osc_capture_matches_ghostty_visible_output() {
+        let uri = "https://after-cancel.example.test/path";
+        for (name, cancellation) in [
+            ("CAN", b"\x18".as_slice()),
+            ("SUB", b"\x1a".as_slice()),
+            ("ESC", b"\x1bc".as_slice()),
+        ] {
+            let mut stream = b"\x1b]8;;https://cancelled.example.test/hidden".to_vec();
+            stream.extend_from_slice(cancellation);
+            stream.extend_from_slice(uri.as_bytes());
+            stream.push(b'\n');
+
+            let runtime = PaneRuntime::test_with_screen_bytes(120, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream);
+            assert!(runtime.visible_text().contains(uri), "Ghostty {name}");
+
+            let links = gate.take_links().expect("visible URL after cancelled OSC");
+            assert_eq!(links.output_urls, vec![uri], "link gate {name}");
+            assert!(links.osc8_urls.is_empty(), "link gate {name}");
+        }
+    }
+
+    fn assert_parser_classified_link_capture(
+        label: &str,
+        stream: &[u8],
+        hidden: &str,
+        visible: &str,
+        rendered_fragment: Option<&str>,
+    ) {
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream[..split]);
+            runtime.test_process_pty_bytes(&stream[split..]);
+
+            let rendered = runtime.visible_text();
+            assert!(
+                !rendered.contains(hidden),
+                "Ghostty hid {label} payload at split {split}; rendered={rendered:?}"
+            );
+            if let Some(fragment) = rendered_fragment {
+                assert!(
+                    rendered.contains(fragment),
+                    "Ghostty rendered the post-control fragment for {label} at split {split}; rendered={rendered:?}"
+                );
+            }
+            assert!(
+                rendered.contains(visible),
+                "Ghostty rendered the visible URL after {label} at split {split}; rendered={rendered:?}"
+            );
+
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("visible URL after {label} at split {split}"));
+            let mut expected_urls = vec![visible];
+            if let Some(fragment) = rendered_fragment {
+                expected_urls.push(fragment);
+            }
+            expected_urls.sort_unstable();
+            assert_eq!(
+                links.output_urls, expected_urls,
+                "link capture must match Ghostty-rendered text for {label} at split {split}"
+            );
+            assert!(links.osc8_urls.is_empty(), "{label} at split {split}");
+        }
+    }
+
+    #[tokio::test]
+    async fn c1_introducers_and_st_match_ghostty_rendered_text() {
+        for (label, introducer, slug) in [
+            ("DCS", 0x90, "dcs"),
+            ("SOS", 0x98, "sos"),
+            ("PM", 0x9e, "pm"),
+            ("APC", 0x9f, "apc"),
+        ] {
+            let hidden = format!("https://hidden-{slug}.example.test/path");
+            let visible = format!("https://visible-{slug}.example.test/path");
+            let mut stream = vec![b'\x1b', introducer];
+            stream.extend_from_slice(hidden.as_bytes());
+            stream.push(0x9c);
+            stream.extend_from_slice(visible.as_bytes());
+            stream.push(b'\n');
+
+            assert_parser_classified_link_capture(label, &stream, &hidden, &visible, None);
+        }
+
+        let hidden = "https://hidden-dcs-st.example.test/path";
+        let visible = "https://visible-after-st.example.test/path";
+        let mut stream = format!("\x1bP{hidden}").into_bytes();
+        stream.push(0x9c);
+        stream.extend_from_slice(format!("{visible}\n").as_bytes());
+        assert_parser_classified_link_capture("8-bit ST", &stream, hidden, visible, None);
+    }
+
+    #[tokio::test]
+    async fn escape_followed_by_c0_matches_ghostty_rendered_text() {
+        let hidden = "https://hidden-escape-control.example.test/path";
+        let rendered_fragment = "ttps://hidden-escape-control.example.test/path";
+        let visible = "https://visible-escape-control.example.test/path";
+        let stream = format!("\x1b\x07{hidden} {visible}\n");
+
+        assert_parser_classified_link_capture(
+            "ESC plus BEL",
+            stream.as_bytes(),
+            hidden,
+            visible,
+            Some(rendered_fragment),
+        );
+    }
+
+    #[tokio::test]
+    async fn bell_inside_url_matches_ghostty_rendered_text() {
+        let visible = "https://example.com/path";
+        for (label, control) in [("BEL", 0x07), ("ENQ", 0x05)] {
+            let mut stream = b"https://exam".to_vec();
+            stream.push(control);
+            stream.extend_from_slice(b"ple.com/path\n");
+
+            for split in 0..=stream.len() {
+                let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+                let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+                runtime.terminal.install_link_extraction(gate.clone());
+                runtime.test_process_pty_bytes(&stream[..split]);
+                runtime.test_process_pty_bytes(&stream[split..]);
+
+                let rendered = runtime.visible_text();
+                assert!(
+                    rendered.contains(visible),
+                    "Ghostty rendered one continuous URL across {label} at split {split}; rendered={rendered:?}"
+                );
+                let links = gate
+                    .take_links()
+                    .unwrap_or_else(|| panic!("visible URL across {label} at split {split}"));
+                assert_eq!(links.output_urls, vec![visible], "{label} split {split}");
+                assert!(links.osc8_urls.is_empty(), "{label} split {split}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dec_special_charset_matches_ghostty_rendered_text() {
+        let mapped = "https://mapped.example.test/path";
+        let visible = "https://visible-after-reset.example.test/path";
+        let stream = format!("\x1b(0{mapped}\x1b(B {visible}\n");
+
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+            let rendered = runtime.visible_text();
+            assert!(
+                !rendered.contains(mapped),
+                "Ghostty mapped DEC-special text at split {split}; rendered={rendered:?}"
+            );
+            assert!(
+                rendered.contains(visible),
+                "Ghostty rendered text after ASCII reset at split {split}; rendered={rendered:?}"
+            );
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("visible URL after charset reset at split {split}"));
+            assert_eq!(links.output_urls, vec![visible], "split {split}");
+            assert!(links.osc8_urls.is_empty(), "split {split}");
+        }
+    }
+
+    #[tokio::test]
+    async fn status_display_text_matches_ghostty_rendered_text() {
+        let hidden = "https://hidden-status-display.example.test/path";
+        let visible = "https://visible-main-display.example.test/path";
+        let stream = format!("\x1b[1$}}{hidden}\x1b[0$}}{visible}\n");
+
+        assert_parser_classified_link_capture(
+            "status display",
+            stream.as_bytes(),
+            hidden,
+            visible,
+            None,
+        );
+    }
+
+    #[tokio::test]
+    async fn ignored_zero_width_text_matches_ghostty_rendered_text() {
+        let rendered_uri = "https://zero-width.example.test/path";
+        let stream = "https://zero-\u{200b}width.example.test/path\n";
+
+        for split in 0..=stream.len() {
+            let runtime = PaneRuntime::test_with_screen_bytes(160, 24, b"");
+            let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+            runtime.terminal.install_link_extraction(gate.clone());
+            runtime.test_process_pty_bytes(&stream.as_bytes()[..split]);
+            runtime.test_process_pty_bytes(&stream.as_bytes()[split..]);
+
+            let rendered = runtime.visible_text();
+            assert!(
+                rendered.contains(rendered_uri),
+                "Ghostty omitted the zero-width codepoint at split {split}; rendered={rendered:?}"
+            );
+            assert!(
+                !rendered.contains('\u{200b}'),
+                "Ghostty rendered the zero-width codepoint at split {split}; rendered={rendered:?}"
+            );
+
+            let links = gate
+                .take_links()
+                .unwrap_or_else(|| panic!("rendered URL at split {split}"));
+            assert_eq!(
+                links.output_urls,
+                vec![rendered_uri],
+                "link capture must match Ghostty-rendered text at split {split}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dirty_link_snapshot_includes_osc8_hyperlink_target() {
+        let uri = "https://osc.example.test/target";
+        let screen = format!("\x1b]8;;{uri}\x1b\\label\x1b]8;;\x1b\\");
+        let runtime = PaneRuntime::test_with_screen_bytes(80, 24, b"");
+        let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+        runtime.terminal.install_link_extraction(gate.clone());
+        runtime.test_process_pty_bytes(screen.as_bytes());
+        let (tx, mut rx) = mpsc::channel(1);
+
+        publish_agent_links_if_dirty(PaneId::from_raw(71), &gate, &tx).await;
+
+        let event = rx.recv().await.expect("link event");
+        let AppEvent::OrderedAgentLinksDetected { links, .. } = event else {
+            panic!("expected agent link event");
+        };
+        assert!(detected_urls(&links, crate::agent_state::AgentLinkSource::Output).is_empty());
+        assert_eq!(
+            detected_urls(&links, crate::agent_state::AgentLinkSource::Osc8),
+            vec![uri]
+        );
+    }
+
+    #[tokio::test]
+    async fn dirty_link_snapshot_keeps_url_before_eighty_following_lines() {
+        let uri = "https://scrollback.example.test/kept";
+        let mut screen = format!("{uri}\r\n");
+        for index in 0..80 {
+            screen.push_str(&format!("ordinary line {index}\r\n"));
+        }
+        let _runtime =
+            PaneRuntime::test_with_scrollback_bytes(80, 24, 64 * 1024, screen.as_bytes());
+        let gate = crate::agent_state::LinkExtractionGate::default();
+        gate.observe_chunk(format!("{uri}\n").as_bytes());
+        let (tx, mut rx) = mpsc::channel(1);
+
+        publish_agent_links_if_dirty(PaneId::from_raw(72), &gate, &tx).await;
+
+        let event = rx.recv().await.expect("link event");
+        let AppEvent::OrderedAgentLinksDetected { links, .. } = event else {
+            panic!("expected agent link event");
+        };
+        assert!(detected_urls(&links, crate::agent_state::AgentLinkSource::Output).contains(&uri));
+    }
+
+    #[tokio::test]
+    async fn link_capture_does_not_restamp_urls_from_earlier_output() {
+        let pane_id = PaneId::from_raw(73);
+        let first_uri = "https://first.example.test/a";
+        let second_uri = "https://second.example.test/b";
+        let runtime = PaneRuntime::test_with_scrollback_bytes(
+            80,
+            24,
+            64 * 1024,
+            format!("{first_uri}\r\n").as_bytes(),
+        );
+        let gate = crate::agent_state::LinkExtractionGate::default();
+        let (tx, mut rx) = mpsc::channel(2);
+        gate.observe_chunk(format!("{first_uri}\n").as_bytes());
+        publish_agent_links_if_dirty(pane_id, &gate, &tx).await;
+        let first_event = rx.recv().await.expect("first link event");
+
+        runtime.test_process_pty_bytes(format!("{second_uri}\r\n").as_bytes());
+        gate.observe_chunk(format!("{second_uri}\n").as_bytes());
+        publish_agent_links_if_dirty(pane_id, &gate, &tx).await;
+        let second_event = rx.recv().await.expect("second link event");
+
+        let mut store = crate::agent_state::AgentStateStore::default();
+        for event in [first_event, second_event] {
+            let AppEvent::OrderedAgentLinksDetected {
+                links, observed_at, ..
+            } = event
+            else {
+                panic!("expected agent link event");
+            };
+            for link in links {
+                store.observe_links(pane_id, [link.url], link.source, observed_at);
+            }
+        }
+        let links = store
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Idle)
+            .links;
+        let first = links
+            .iter()
+            .find(|link| link.url == first_uri)
+            .expect("first URL retained");
+        assert_eq!(first.first_seen, first.last_seen);
+    }
+
+    #[tokio::test]
+    async fn link_capture_keeps_url_before_two_hundred_following_lines_in_one_chunk() {
+        let uri = "https://burst.example.test/lost";
+        let mut output = format!("{uri}\r\n");
+        for index in 1..=200 {
+            output.push_str(&format!("{index}\r\n"));
+        }
+        let runtime = PaneRuntime::test_with_scrollback_bytes(80, 24, 64 * 1024, b"");
+        let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+        runtime.terminal.install_link_extraction(gate.clone());
+        runtime.test_process_pty_bytes(output.as_bytes());
+        let (tx, mut rx) = mpsc::channel(1);
+
+        publish_agent_links_if_dirty(PaneId::from_raw(74), &gate, &tx).await;
+
+        let AppEvent::OrderedAgentLinksDetected { links, .. } =
+            rx.recv().await.expect("link event")
+        else {
+            panic!("expected agent link event");
+        };
+        assert_eq!(
+            detected_urls(&links, crate::agent_state::AgentLinkSource::Output),
+            vec![uri]
+        );
+    }
+
+    #[tokio::test]
+    async fn link_capture_joins_soft_wrapped_url() {
+        let uri = "https://wrapped.example.test/a/path/that/is/wider/than/the/pane";
+        let output = format!("{uri}\r\n");
+        let _runtime =
+            PaneRuntime::test_with_scrollback_bytes(20, 24, 64 * 1024, output.as_bytes());
+        let gate = crate::agent_state::LinkExtractionGate::default();
+        gate.observe_chunk(output.as_bytes());
+        let (tx, mut rx) = mpsc::channel(1);
+
+        publish_agent_links_if_dirty(PaneId::from_raw(75), &gate, &tx).await;
+
+        let AppEvent::OrderedAgentLinksDetected { links, .. } =
+            rx.recv().await.expect("link event")
+        else {
+            panic!("expected agent link event");
+        };
+        assert_eq!(
+            detected_urls(&links, crate::agent_state::AgentLinkSource::Output),
+            vec![uri]
+        );
+    }
+
+    #[tokio::test]
+    async fn hidden_osc8_link_capture_does_not_depend_on_visible_hyperlinks() {
+        let uri = "https://hidden.example.test/target";
+        let mut output = format!("\x1b]8;;{uri}\x1b\\label\x1b]8;;\x1b\\\r\n");
+        for index in 1..=200 {
+            output.push_str(&format!("{index}\r\n"));
+        }
+        let runtime = PaneRuntime::test_with_scrollback_bytes(80, 24, 64 * 1024, b"");
+        let gate = Arc::new(crate::agent_state::LinkExtractionGate::default());
+        runtime.terminal.install_link_extraction(gate.clone());
+        runtime.test_process_pty_bytes(output.as_bytes());
+        let (tx, mut rx) = mpsc::channel(1);
+
+        publish_agent_links_if_dirty(PaneId::from_raw(76), &gate, &tx).await;
+
+        let AppEvent::OrderedAgentLinksDetected { links, .. } =
+            rx.recv().await.expect("link event")
+        else {
+            panic!("expected agent link event");
+        };
+        assert!(detected_urls(&links, crate::agent_state::AgentLinkSource::Output).is_empty());
+        assert_eq!(
+            detected_urls(&links, crate::agent_state::AgentLinkSource::Osc8),
+            vec![uri]
+        );
+    }
+
+    #[tokio::test]
+    async fn link_capture_publishes_url_with_scheme_split_across_chunks() {
+        let uri = "https://split.example.test/path";
+        let gate = crate::agent_state::LinkExtractionGate::default();
+        gate.observe_chunk(b"https:");
+        gate.observe_chunk(b"//split.example.test/path\r\n");
+        let (tx, mut rx) = mpsc::channel(1);
+
+        publish_agent_links_if_dirty(PaneId::from_raw(77), &gate, &tx).await;
+
+        let AppEvent::OrderedAgentLinksDetected { links, .. } =
+            rx.recv().await.expect("link event")
+        else {
+            panic!("expected agent link event");
+        };
+        assert_eq!(
+            detected_urls(&links, crate::agent_state::AgentLinkSource::Output),
+            vec![uri]
+        );
+    }
 
     #[tokio::test]
     async fn conditional_input_token_sends_once_and_replay_sends_nothing() {

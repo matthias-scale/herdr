@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::agents::AgentInfo;
+use super::agents::{AgentInfo, AgentStateSnapshot};
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
 use super::events::EventEnvelope;
 use super::fleet::FleetSnapshotInfo;
@@ -138,6 +138,9 @@ pub enum ResponseResult {
     },
     AgentInfo {
         agent: AgentInfo,
+    },
+    AgentState {
+        state: AgentStateSnapshot,
     },
     AgentStarted {
         agent: AgentInfo,

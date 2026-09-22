@@ -494,6 +494,12 @@ pub(crate) fn visible_hyperlinks(
     crate::ui::tab_surface_hyperlinks(app_state, terminal_runtimes, app_state.view.tab_surface())
 }
 
+pub(crate) fn visible_hyperlink_spans(app_state: &AppState) -> Vec<crate::protocol::HyperlinkSpan> {
+    // The notepad's agent tab carries its link labels as OSC 8 hyperlinks too,
+    // so a short label still exposes the full URL to the outer terminal.
+    crate::ui::notepad_agent::hyperlink_spans(app_state)
+}
+
 fn focused_terminal_owns_host_cursor_when_owned(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -545,7 +551,7 @@ fn focused_terminal_suppresses_host_cursor_when_owned(
 #[cfg(test)]
 mod render_scale_benchmark {
     use std::hint::black_box;
-    use std::time::Instant;
+    use std::time::{Duration, Instant, SystemTime};
 
     use ratatui::layout::Direction;
 
@@ -712,6 +718,40 @@ mod render_scale_benchmark {
         app_with(vec![workspace])
     }
 
+    fn app_with_agent_tab_links(link_count: usize, open: bool) -> AppState {
+        let mut app = app_with_workspaces(1);
+        app.ensure_test_terminals();
+        let pane_id = app.workspaces[0].focused_pane_id().expect("focused pane");
+        let terminal_id = app.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("pane terminal")
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal state")
+            .set_detected_state(
+                Some(crate::detect::Agent::Codex),
+                crate::detect::AgentState::Working,
+            );
+        let suffix = "x".repeat(8 * 1024);
+        for index in 0..link_count {
+            app.agent_states.observe_links(
+                pane_id,
+                [format!(
+                    "https://github.com/owner/repo/pull/{index}?{suffix}"
+                )],
+                crate::agent_state::AgentLinkSource::Output,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_760_000_000 + index as u64),
+            );
+        }
+        app.notepad.enabled = true;
+        app.notepad.height = 18;
+        if open {
+            assert!(app.notepad.select_agent_tab());
+        }
+        app
+    }
+
     fn app_with(workspaces: Vec<Workspace>) -> AppState {
         let mut app = AppState::test_new();
         app.set_server_mode(Mode::Terminal);
@@ -783,6 +823,10 @@ mod render_scale_benchmark {
         [1, 15, 50].map(|count| (count, profile(app_with_proxy_panes(count))))
     }
 
+    fn profile_agent_tab_cardinalities(open: bool) -> [(usize, RenderStats); 3] {
+        [1, 15, 50].map(|count| (count, profile(app_with_agent_tab_links(count, open))))
+    }
+
     fn print_profiles(label: &str, profiles: [(usize, RenderStats); 3]) {
         let baseline_median_us = profiles[0].1.median_us as f64;
         let baseline_p95_us = profiles[0].1.p95_us as f64;
@@ -838,6 +882,12 @@ mod render_scale_benchmark {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_tab_benchmark_fixture_really_opens_and_closes_the_tab() {
+        assert!(app_with_agent_tab_links(15, true).notepad.agent_tab);
+        assert!(!app_with_agent_tab_links(15, false).notepad.agent_tab);
+    }
+
     #[test]
     fn unchanged_home_composer_renders_identical_consecutive_frames() {
         let mut app = AppState::test_new();
@@ -875,6 +925,14 @@ mod render_scale_benchmark {
         print_profiles(
             "remote focus proxy panes (one workspace)",
             profile_proxy_cardinalities(),
+        );
+        print_profiles(
+            "agent tab closed (8 KiB retained links)",
+            profile_agent_tab_cardinalities(false),
+        );
+        print_profiles(
+            "agent tab open (8 KiB retained links)",
+            profile_agent_tab_cardinalities(true),
         );
     }
 }

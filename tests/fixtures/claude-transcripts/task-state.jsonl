@@ -1,0 +1,8 @@
+{"type":"assistant","timestamp":"2026-08-14T06:18:40.100Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"TaskCreate","id":"toolu_fixture_1","input":{"subject":"inspect runtime boundary","description":"fixture item","activeForm":"inspecting runtime boundary"}}]}}
+{"type":"user","timestamp":"2026-08-14T06:18:40.126Z","toolUseResult":{"task":{"id":"1","subject":"inspect runtime boundary","description":"fixture item"}}}
+{"type":"assistant","timestamp":"2026-08-14T06:18:42.986Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"TaskCreate","id":"toolu_fixture_2","input":{"subject":"add state tests","description":"fixture item","activeForm":"adding state tests"}}]}}
+{"type":"user","timestamp":"2026-08-14T06:18:43.014Z","toolUseResult":{"task":{"id":"2","subject":"add state tests","description":"fixture item"}}}
+{"type":"assistant","timestamp":"2026-08-14T06:18:47.271Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"TaskUpdate","id":"toolu_fixture_3","input":{"taskId":"2","status":"completed"}}]}}
+{"type":"user","timestamp":"2026-08-14T06:18:47.301Z","toolUseResult":{"success":true,"taskId":"2","updatedFields":["status"],"statusChange":{"from":"pending","to":"completed"}}}
+{"type":"assistant","timestamp":"2026-08-14T06:18:47.401Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"TaskUpdate","id":"toolu_fixture_4","input":{"taskId":"1","status":"in_progress"}}]}}
+{"type":"user","timestamp":"2026-08-14T06:18:47.437Z","message":{"role":"user","content":"See https://example.test/review/42 for the stripped fixture."},"toolUseResult":{"success":true,"taskId":"1","updatedFields":["status"],"statusChange":{"from":"pending","to":"in_progress"}}}

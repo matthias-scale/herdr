@@ -28,6 +28,7 @@ const clipboard = @import("../clipboard.zig");
 const Result = @import("result.zig").Result;
 
 const Handler = @import("../stream_terminal.zig").Handler;
+const ParsedOutputKind = @import("../stream_terminal.zig").ParsedOutputKind;
 
 const log = std.log.scoped(.terminal_c);
 
@@ -74,6 +75,7 @@ const Effects = struct {
     pwd_changed: ?PwdChangedFn = null,
     size_cb: ?SizeFn = null,
     clipboard_write: ?ClipboardWriteFn = null,
+    parsed_output: ?ParsedOutputFn = null,
 
     /// Scratch buffer for DA1 feature codes. The device attributes
     /// trampoline converts C feature codes into this buffer and returns
@@ -107,6 +109,9 @@ const Effects = struct {
     /// C function pointer type for the clipboard_write callback. The request
     /// and its contents are borrowed and only valid for the callback duration.
     pub const ClipboardWriteFn = *const fn (Terminal, ?*anyopaque, *const ClipboardWrite) callconv(lib.calling_conv) clipboard.WriteResult;
+
+    /// C function pointer type for parser-classified output.
+    pub const ParsedOutputFn = *const fn (Terminal, ?*anyopaque, ParsedOutputKind, [*]const u8, usize) callconv(lib.calling_conv) void;
 
     /// C function pointer type for the title_changed callback.
     pub const TitleChangedFn = *const fn (Terminal, ?*anyopaque) callconv(lib.calling_conv) void;
@@ -198,6 +203,13 @@ const Effects = struct {
             .contents_len = contents.len,
         };
         return func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
+    }
+
+    fn parsedOutputTrampoline(handler: *Handler, kind: ParsedOutputKind, data: []const u8) void {
+        const stream_ptr: *Stream = @fieldParentPtr("handler", handler);
+        const wrapper: *TerminalWrapper = @fieldParentPtr("stream", stream_ptr);
+        const func = wrapper.effects.parsed_output orelse return;
+        func(@ptrCast(wrapper), wrapper.effects.userdata, kind, data.ptr, data.len);
     }
 
     fn colorSchemeTrampoline(handler: *Handler) ?device_status.ColorScheme {
@@ -366,6 +378,7 @@ fn new_(
         .pwd_changed = &Effects.pwdChangedTrampoline,
         .size = &Effects.sizeTrampoline,
         .clipboard_write = &Effects.clipboardWriteTrampoline,
+        .parsed_output = null,
     };
 
     wrapper.* = .{
@@ -438,6 +451,7 @@ pub const Option = enum(c_int) {
     glyph_protocol = 24,
     pwd_changed = 25,
     clipboard_write = 26,
+    parsed_output = 27,
 
     /// Input type expected for setting the option.
     pub fn InType(comptime self: Option) type {
@@ -453,6 +467,7 @@ pub const Option = enum(c_int) {
             .pwd_changed => ?Effects.PwdChangedFn,
             .size_cb => ?Effects.SizeFn,
             .clipboard_write => ?Effects.ClipboardWriteFn,
+            .parsed_output => ?Effects.ParsedOutputFn,
             .title, .pwd => ?*const lib.String,
             .color_foreground, .color_background, .color_cursor => ?*const color.RGB.C,
             .color_palette => ?*const color.PaletteC,
@@ -510,6 +525,11 @@ fn setTyped(
         .pwd_changed => wrapper.effects.pwd_changed = value,
         .size_cb => wrapper.effects.size_cb = value,
         .clipboard_write => wrapper.effects.clipboard_write = value,
+        .parsed_output => {
+            wrapper.effects.parsed_output = value;
+            wrapper.stream.handler.effects.parsed_output =
+                if (value != null) &Effects.parsedOutputTrampoline else null;
+        },
         .title => {
             const str = if (value) |v| v.ptr[0..v.len] else "";
             wrapper.terminal.setTitle(str) catch return .out_of_memory;

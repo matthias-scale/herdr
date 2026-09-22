@@ -368,6 +368,8 @@ herdr agent attach <target> [--takeover]
 herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]
 herdr agent explain <target> [--json|--verbose]
 herdr agent explain --file PATH --agent LABEL [--json|--verbose]
+herdr agent state <pane> --json
+herdr agent report <pane> --json [payload]
 ```
 
 Agent targets are either a unique live agent name or the pane ID that currently hosts the agent. Terminal IDs and bare agent-kind labels are not agent targets. Agents started through `agent start` require a name; manually launched agents remain unnamed and use their pane ID.
@@ -381,6 +383,10 @@ A successful start returns only after the expected agent owns the same terminal 
 `idle` means ready for input after its pane has been opened in the focused Herdr UI; `done` is the same underlying idle state after unseen background work completes. Opening that agent's pane or targeting it with `pane focus` / `agent focus` marks it seen; opening another pane in the same tab or reading it through the CLI does not. `blocked` means Herdr recognized an approval or question UI. `unknown` means an agent is present but Herdr cannot classify it confidently, not that its work succeeded.
 
 `agent send-keys` sends logical terminal keys such as `enter`, `up`, `esc`, or `ctrl+c`. Herdr validates every key before writing any bytes. `agent read` reads the resolved terminal stream, and `agent rename` names an already detected agent.
+
+`agent state` prints the server-owned state Herdr keeps for a pane: the links seen in its output, the agent's status and when it last acted, and any goal, tasks, or subagents the agent reported. The agent tab in the sidebar renders the same state, so this is the way to read it from a script.
+
+`agent report` is how an agent writes that state. The payload is JSON, either as the value of `--json` or on standard input, and it replaces the agent-owned fields only. Links Herdr observed in pane output are not writable this way.
 
 `agent explain` asks the running server to classify the same bottom-buffer detection snapshot used by screen detection, so live output reflects the server's active manifest cache. Because this uses the `agent.explain` socket method, restart or hand off to an updated server after upgrading Herdr before using live explain. Use `--file PATH --agent LABEL` to explain a saved fixture locally instead. The default output shows the agent, final state, manifest source and version, matched rule with its region evidence, and any fallback, skip, or warning reasons. Add `--verbose` for visible evidence flags, cached remote version, local override shadowing, remote update status, and the full evaluated-rules list with matcher and region evidence. Add `--json` for issue reports or tests.
 

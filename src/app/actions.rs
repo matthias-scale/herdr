@@ -1863,6 +1863,7 @@ impl AppState {
         for pane_id in pane_ids {
             self.plugin_panes.remove(&pane_id);
             self.local_agent_panel_identities.remove(&pane_id);
+            self.agent_states.remove(pane_id);
         }
     }
 
@@ -3485,6 +3486,50 @@ impl AppState {
                 .apply_pane_process_state(pane_id, holds_shell, stale_resolution, observed_at)
                 .into_iter()
                 .collect(),
+            AppEvent::OrderedAgentLinksDetected {
+                pane_id,
+                links,
+                observed_at,
+            } => {
+                if !self
+                    .workspaces
+                    .iter()
+                    .any(|workspace| workspace.pane_state(pane_id).is_some())
+                {
+                    return Vec::new();
+                }
+                self.agent_states
+                    .observe_detected_links(pane_id, links, observed_at);
+                Vec::new()
+            }
+            #[cfg(test)]
+            AppEvent::AgentLinksDetected {
+                pane_id,
+                output_urls,
+                osc8_urls,
+                observed_at,
+            } => {
+                if !self
+                    .workspaces
+                    .iter()
+                    .any(|workspace| workspace.pane_state(pane_id).is_some())
+                {
+                    return Vec::new();
+                }
+                self.agent_states.observe_links(
+                    pane_id,
+                    output_urls,
+                    crate::agent_state::AgentLinkSource::Output,
+                    observed_at,
+                );
+                self.agent_states.observe_links(
+                    pane_id,
+                    osc8_urls,
+                    crate::agent_state::AgentLinkSource::Osc8,
+                    observed_at,
+                );
+                Vec::new()
+            }
             AppEvent::HookStateReported {
                 pane_id,
                 source,
@@ -3880,6 +3925,10 @@ impl AppState {
         }
         let agent_released = mutation.agent_released;
         let change = mutation.effective_state_change.or(unchanged_change)?;
+        if change.previous_state != AgentState::Working && change.state == AgentState::Working {
+            self.agent_states
+                .observe_working(pane_id, std::time::SystemTime::now());
+        }
         let fresh_attention = {
             let pane = self.workspaces[ws_idx].pane_state(pane_id)?;
             let terminal = self.terminals.get(&terminal_id)?;
@@ -6225,12 +6274,131 @@ mod tests {
     fn pane_died_last_pane_removes_workspace() {
         let mut state = app_with_workspaces(&["a", "b"]);
         let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        state
+            .agent_states
+            .report(
+                pane_id,
+                crate::agent_state::AgentReportPayload {
+                    goal: Some(Some("remove on process death".into())),
+                    ..crate::agent_state::AgentReportPayload::default()
+                },
+                std::time::SystemTime::now(),
+            )
+            .expect("valid report");
 
         state.handle_pane_died(pane_id);
 
         assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].custom_name.as_deref(), Some("b"));
+        assert!(state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Unknown)
+            .goal
+            .is_none());
+
+        state.handle_app_event(AppEvent::OrderedAgentLinksDetected {
+            pane_id,
+            links: vec![crate::agent_state::DetectedAgentLink {
+                url: "https://late.example.test/stale".into(),
+                source: crate::agent_state::AgentLinkSource::Output,
+            }],
+            observed_at: std::time::SystemTime::now(),
+        });
+        assert!(state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Unknown)
+            .links
+            .is_empty());
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn repeated_link_event_updates_the_url_keyed_row() {
+        let mut state = app_with_workspaces(&["links"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let first_seen =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
+        state.handle_app_event(AppEvent::OrderedAgentLinksDetected {
+            pane_id,
+            links: vec![crate::agent_state::DetectedAgentLink {
+                url: "https://same.example.test/path".into(),
+                source: crate::agent_state::AgentLinkSource::Output,
+            }],
+            observed_at: first_seen,
+        });
+        state.handle_app_event(AppEvent::OrderedAgentLinksDetected {
+            pane_id,
+            links: vec![crate::agent_state::DetectedAgentLink {
+                url: "https://same.example.test/path".into(),
+                source: crate::agent_state::AgentLinkSource::Output,
+            }],
+            observed_at: first_seen + std::time::Duration::from_secs(3),
+        });
+
+        let links = state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Idle)
+            .links;
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, "https://same.example.test/path");
+        assert_eq!(
+            links[0].first_seen,
+            crate::agent_state::format_rfc3339(first_seen).unwrap()
+        );
+        assert_eq!(
+            links[0].last_seen,
+            crate::agent_state::format_rfc3339(first_seen + std::time::Duration::from_secs(3))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn mixed_source_detection_event_keeps_newest_two_hundred_and_first_source() {
+        let mut state = app_with_workspaces(&["links"]);
+        let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+        let gate = crate::agent_state::LinkExtractionGate::default();
+        for index in 0..=200 {
+            if index % 2 == 0 {
+                gate.observe_parsed_text(
+                    format!("https://mixed-output.example/{index:03}\n").as_bytes(),
+                );
+            } else {
+                gate.observe_parsed_hyperlink(
+                    format!("https://mixed-osc.example/{index:03}").as_bytes(),
+                );
+            }
+        }
+        gate.observe_parsed_text(b"https://mixed-osc.example/001\n");
+        gate.observe_parsed_text(b"https://mixed-output.example/201\n");
+        let detected = gate.take_links().expect("mixed-source detection cycle");
+        state.handle_app_event(AppEvent::OrderedAgentLinksDetected {
+            pane_id,
+            links: detected.ordered_links,
+            observed_at: std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_750_000_000),
+        });
+
+        let links = state
+            .agent_states
+            .snapshot(pane_id, crate::api::schema::AgentStatus::Idle)
+            .links;
+        assert_eq!(links.len(), 200);
+        assert!(!links
+            .iter()
+            .any(|link| link.url == "https://mixed-output.example/002"));
+        let repeated = links
+            .iter()
+            .find(|link| link.url == "https://mixed-osc.example/001")
+            .expect("repeated mixed-source URL");
+        assert_eq!(repeated.source, crate::agent_state::AgentLinkSource::Osc8);
+        assert!(links
+            .iter()
+            .any(|link| link.url == "https://mixed-output.example/200"));
+        assert_eq!(
+            links[198].url, "https://mixed-osc.example/001",
+            "the repeated URL must move to its latest arrival position"
+        );
+        assert_eq!(links[199].url, "https://mixed-output.example/201");
     }
 
     #[test]
@@ -6343,6 +6511,14 @@ mod tests {
         let terminal = state.terminals.get(&terminal_id).unwrap();
         assert_eq!(terminal.raw_agent_state(), AgentState::Working);
         assert_eq!(terminal.detected_agent, Some(Agent::Pi));
+        assert!(
+            state
+                .agent_states
+                .snapshot(pane_id, crate::api::schema::AgentStatus::Working)
+                .last_acted_at
+                .is_some(),
+            "transition into working records agent activity"
+        );
     }
 
     #[test]

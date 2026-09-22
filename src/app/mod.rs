@@ -13,7 +13,7 @@ pub(crate) mod auto_nudge;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
 mod api_helpers;
-pub(crate) use api_helpers::read_terminal_snapshot;
+pub(crate) use api_helpers::{pane_agent_status_with_stale, read_terminal_snapshot};
 pub(crate) mod claude_subagents;
 mod command_palette;
 pub(crate) use command_palette::PaletteEntry;
@@ -971,6 +971,7 @@ impl App {
                 config.session.settle_done_after_minutes.saturating_mul(60),
             ),
             terminals: std::collections::HashMap::new(),
+            agent_states: crate::agent_state::AgentStateStore::default(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
@@ -1060,6 +1061,8 @@ impl App {
                 sidebar_footer_missive_hit_area: Rect::default(),
                 notepad_rect: Rect::default(),
                 notepad_tab_hit_areas: Vec::new(),
+                notepad_agent_rows: Vec::new(),
+                notepad_agent_max_scroll: 0,
                 pomodoro_hit_area: Rect::default(),
                 notification_hit_area: Rect::default(),
                 hyperspace_rect: Rect::default(),
@@ -1069,6 +1072,7 @@ impl App {
                 agent_card_areas: Vec::new(),
                 sidebar_hover_targets: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
+                visible_notepad_agent_ages: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),

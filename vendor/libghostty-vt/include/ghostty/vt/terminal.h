@@ -467,6 +467,34 @@ typedef GhosttyClipboardWriteResult (*GhosttyTerminalClipboardWriteFn)(
     void* userdata,
     const GhosttyClipboardWrite* write);
 
+/** Parser-classified output event kind. */
+typedef enum GHOSTTY_ENUM_TYPED {
+  /** UTF-8 text accepted by the terminal parser for rendering. */
+  GHOSTTY_TERMINAL_PARSED_OUTPUT_TEXT = 0,
+
+  /** A parsed C0 control that separates visible text. */
+  GHOSTTY_TERMINAL_PARSED_OUTPUT_SEPARATOR = 1,
+
+  /** An OSC 8 hyperlink target. */
+  GHOSTTY_TERMINAL_PARSED_OUTPUT_HYPERLINK = 2,
+
+  /** An OSC boundary that separates invalid prefixes but not styled text. */
+  GHOSTTY_TERMINAL_PARSED_OUTPUT_BOUNDARY = 3,
+  GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+} GhosttyTerminalParsedOutputKind;
+
+/**
+ * Callback for output already classified by the terminal VT parser.
+ * Data is borrowed and valid only for the callback duration. Separator
+ * events carry zero bytes.
+ */
+typedef void (*GhosttyTerminalParsedOutputFn)(
+    GhosttyTerminal terminal,
+    void* userdata,
+    GhosttyTerminalParsedOutputKind kind,
+    const uint8_t* data,
+    size_t len);
+
 /**
  * Callback function type for color scheme queries (CSI ? 996 n).
  *
@@ -887,6 +915,14 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Input type: GhosttyTerminalClipboardWriteFn
    */
   GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE = 26,
+
+  /**
+   * Callback invoked for parser-classified printable text, control boundaries,
+   * and OSC 8 targets. Set to NULL to disable parsed output events.
+   *
+   * Input type: GhosttyTerminalParsedOutputFn
+   */
+  GHOSTTY_TERMINAL_OPT_PARSED_OUTPUT = 27,
   GHOSTTY_TERMINAL_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalOption;
 

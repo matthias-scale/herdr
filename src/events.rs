@@ -163,6 +163,20 @@ pub enum AppEvent {
         process_exited: bool,
         observed_at: Instant,
     },
+    /// URLs collected off the PTY parser path on a detection snapshot.
+    #[cfg(test)]
+    AgentLinksDetected {
+        pane_id: PaneId,
+        output_urls: Vec<String>,
+        osc8_urls: Vec<String>,
+        observed_at: std::time::SystemTime,
+    },
+    /// Arrival-ordered URLs collected off the PTY parser path.
+    OrderedAgentLinksDetected {
+        pane_id: PaneId,
+        links: Vec<crate::agent_state::DetectedAgentLink>,
+        observed_at: std::time::SystemTime,
+    },
     /// The process composition below a pane changed.
     PaneProcessStateChanged {
         pane_id: PaneId,

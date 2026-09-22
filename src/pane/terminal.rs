@@ -201,6 +201,13 @@ impl PaneTerminal {
         Self { ghostty }
     }
 
+    pub(crate) fn install_link_extraction(
+        &self,
+        gate: Arc<crate::agent_state::LinkExtractionGate>,
+    ) {
+        self.ghostty.install_link_extraction(gate);
+    }
+
     pub fn process_pty_bytes(
         &self,
         pane_id: PaneId,
@@ -1086,6 +1093,21 @@ impl GhosttyPaneTerminal {
         self.content_revision.load(Ordering::Acquire)
     }
 
+    fn install_link_extraction(&self, gate: Arc<crate::agent_state::LinkExtractionGate>) {
+        let Ok(mut core) = self.core.lock() else {
+            return;
+        };
+        core.terminal
+            .set_parsed_output_callback(move |event| match event {
+                crate::ghostty::ParsedOutput::Text(bytes) => gate.observe_parsed_text(bytes),
+                crate::ghostty::ParsedOutput::Separator => gate.observe_parsed_separator(),
+                crate::ghostty::ParsedOutput::Hyperlink(bytes) => {
+                    gate.observe_parsed_hyperlink(bytes);
+                }
+                crate::ghostty::ParsedOutput::Boundary => gate.observe_parsed_boundary(),
+            });
+    }
+
     pub(super) fn set_windows_powershell_prompt_cwd_reporting(&self, enabled: bool) {
         if let Ok(mut core) = self.core.lock() {
             core.windows_powershell_prompt_cwd_reporting = enabled;
@@ -1317,6 +1339,17 @@ impl GhosttyPaneTerminal {
         let default_color_events = core.default_color_event_tracker.drain_pending();
         let xtgettcap_responses = core.xtgettcap_query_tracker.drain_pending();
         let write_started = crate::render_prof::timer();
+        // Two FFI option writes per batch are wasted on a pane nobody observes.
+        let classify_output = core.terminal.has_parsed_output_callback();
+        if classify_output {
+            if let Err(error) = core.terminal.set_parsed_output_enabled(true) {
+                debug!(
+                    pane = pane_id.raw(),
+                    ?error,
+                    "failed to enable parsed output callback"
+                );
+            }
+        }
         self.write_pty_bytes_with_ordered_responses(
             &mut core,
             filtered_bytes.as_ref(),
@@ -1325,6 +1358,15 @@ impl GhosttyPaneTerminal {
             xtgettcap_responses,
             &mut terminal_responses,
         );
+        if classify_output {
+            if let Err(error) = core.terminal.set_parsed_output_enabled(false) {
+                debug!(
+                    pane = pane_id.raw(),
+                    ?error,
+                    "failed to disable parsed output callback"
+                );
+            }
+        }
         if !filtered_bytes.is_empty() {
             self.content_revision.fetch_add(1, Ordering::Release);
         }

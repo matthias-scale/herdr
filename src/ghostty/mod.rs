@@ -464,17 +464,63 @@ impl CellWide {
 }
 
 type WritePtyCallback = dyn FnMut(&[u8]) + Send;
+type ParsedOutputCallback = dyn for<'a> FnMut(ParsedOutput<'a>) + Send;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ParsedOutput<'a> {
+    Text(&'a [u8]),
+    Separator,
+    Hyperlink(&'a [u8]),
+    Boundary,
+}
 
 const MAX_CLIPBOARD_BYTES: usize = 192 * 1024;
 
 #[derive(Default)]
 struct TerminalCallbackState {
     write_pty: Option<Box<WritePtyCallback>>,
+    parsed_output: Option<Box<ParsedOutputCallback>>,
     bell_count: u16,
     pwd_changes: Vec<Vec<u8>>,
     clipboard_writes: Vec<Vec<u8>>,
     size_report: ffi::GhosttySizeReportSize,
     color_scheme: Option<ColorScheme>,
+}
+
+unsafe extern "C" fn parsed_output_trampoline(
+    _terminal: ffi::GhosttyTerminal,
+    userdata: *mut c_void,
+    kind: ffi::GhosttyTerminalParsedOutputKind,
+    data: *const u8,
+    len: usize,
+) {
+    if userdata.is_null() || (data.is_null() && len != 0) {
+        return;
+    }
+    let state = unsafe { &mut *userdata.cast::<TerminalCallbackState>() };
+    let Some(callback) = state.parsed_output.as_mut() else {
+        return;
+    };
+    let bytes = if len == 0 {
+        &[]
+    } else {
+        unsafe { slice::from_raw_parts(data, len) }
+    };
+    match kind {
+        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_TEXT => {
+            callback(ParsedOutput::Text(bytes));
+        }
+        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_SEPARATOR => {
+            callback(ParsedOutput::Separator);
+        }
+        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_HYPERLINK => {
+            callback(ParsedOutput::Hyperlink(bytes));
+        }
+        ffi::GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_BOUNDARY => {
+            callback(ParsedOutput::Boundary);
+        }
+        _ => {}
+    }
 }
 
 unsafe extern "C" fn bell_trampoline(_terminal: ffi::GhosttyTerminal, userdata: *mut c_void) {
@@ -988,6 +1034,38 @@ impl Terminal {
         }
         self.callback_state.write_pty = Some(Box::new(callback));
         Ok(())
+    }
+
+    pub(crate) fn set_parsed_output_callback<F>(&mut self, callback: F)
+    where
+        F: for<'a> FnMut(ParsedOutput<'a>) + Send + 'static,
+    {
+        self.callback_state.parsed_output = Some(Box::new(callback));
+    }
+
+    pub(crate) fn has_parsed_output_callback(&self) -> bool {
+        self.callback_state.parsed_output.is_some()
+    }
+
+    /// Enabling without an installed callback would make the vendored terminal
+    /// classify every printed codepoint for nobody, on every pane.
+    pub(crate) fn set_parsed_output_enabled(&mut self, enabled: bool) -> Result<(), Error> {
+        let enabled = enabled && self.has_parsed_output_callback();
+        let callback = if enabled {
+            (parsed_output_trampoline as *const ()).cast()
+        } else {
+            ptr::null()
+        };
+        // SAFETY: the callback has the ABI required by the option and its
+        // userdata remains owned by this terminal for the terminal's lifetime.
+        unsafe {
+            ffi::ghostty_terminal_set(
+                self.raw,
+                ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_PARSED_OUTPUT,
+                callback,
+            )
+            .into_result()
+        }
     }
 
     pub fn set_color_scheme(&mut self, color_scheme: Option<ColorScheme>) -> Option<ColorScheme> {
@@ -3239,6 +3317,31 @@ impl<'a> RowCellIter<'a> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn parsed_output_stops_when_disabled() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let mut terminal = Terminal::new(40, 5, 0).unwrap();
+        let events = Arc::new(AtomicUsize::new(0));
+        let counter = events.clone();
+        terminal.set_parsed_output_callback(move |_| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        });
+
+        terminal.set_parsed_output_enabled(true).unwrap();
+        terminal.write(b"hello\n");
+        let while_enabled = events.load(Ordering::Relaxed);
+        assert!(while_enabled > 0, "callback runs while enabled");
+
+        terminal.set_parsed_output_enabled(false).unwrap();
+        terminal.write(b"world\n");
+        assert_eq!(
+            events.load(Ordering::Relaxed),
+            while_enabled,
+            "no classification work is done once disabled"
+        );
+    }
     use super::*;
 
     fn write_numbered_lines(terminal: &mut Terminal, count: usize) {

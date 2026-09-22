@@ -895,6 +895,12 @@ pub fn Stream(comptime H: type) type {
         fn nextNonUtf8(self: *Self, c: u8) void {
             assert(self.parser.state != .ground);
 
+            if (comptime @hasDecl(T, "vtParsedEscapeByte")) {
+                if (self.parser.state == .escape) {
+                    self.handler.vtParsedEscapeByte(c);
+                }
+            }
+
             // Fast path for CSI entry.
             if (self.parser.state == .escape and c == '[') {
                 self.parser.state = .csi_entry;
@@ -969,6 +975,7 @@ pub fn Stream(comptime H: type) type {
             // that causes weird behavior in some tests- I'm not sure if they
             // miscompile or it's just very counter-intuitive comptime stuff,
             // but regardless, this is the easy solution.
+            const parser_state_before = self.parser.state;
             const actions = @call(.always_inline, Parser.next, .{ &self.parser, c });
 
             for (actions) |action_opt| {
@@ -1004,6 +1011,12 @@ pub fn Stream(comptime H: type) type {
                     .apc_start => self.handler.vt(.apc_start, {}),
                     .apc_put => |code| self.handler.vt(.apc_put, code),
                     .apc_end => self.handler.vt(.apc_end, {}),
+                }
+            }
+
+            if (comptime @hasDecl(T, "vtParsedOscEnd")) {
+                if (parser_state_before == .osc_string and self.parser.state != .osc_string) {
+                    self.handler.vtParsedOscEnd(c);
                 }
             }
         }

@@ -2382,6 +2382,26 @@ pub type GhosttyTerminalClipboardWriteFn = ::std::option::Option<
         write: *const GhosttyClipboardWrite,
     ) -> GhosttyClipboardWriteResult,
 >;
+pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_TEXT:
+    GhosttyTerminalParsedOutputKind = 0;
+pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_SEPARATOR:
+    GhosttyTerminalParsedOutputKind = 1;
+pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_HYPERLINK:
+    GhosttyTerminalParsedOutputKind = 2;
+pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_BOUNDARY:
+    GhosttyTerminalParsedOutputKind = 3;
+pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE:
+    GhosttyTerminalParsedOutputKind = 2147483647;
+pub type GhosttyTerminalParsedOutputKind = ::std::os::raw::c_uint;
+pub type GhosttyTerminalParsedOutputFn = ::std::option::Option<
+    unsafe extern "C" fn(
+        terminal: GhosttyTerminal,
+        userdata: *mut ::std::os::raw::c_void,
+        kind: GhosttyTerminalParsedOutputKind,
+        data: *const u8,
+        len: usize,
+    ),
+>;
 #[doc = " Callback function type for color scheme queries (CSI ? 996 n).\n\n Called when the terminal receives a color scheme device status report\n query. Return true and fill *out_scheme with the current color scheme,\n or return false to silently ignore the query.\n\n @param terminal The terminal handle\n @param userdata The userdata pointer set via GHOSTTY_TERMINAL_OPT_USERDATA\n @param[out] out_scheme Pointer to store the current color scheme\n @return true if the color scheme was filled, false to ignore the query\n\n @ingroup terminal"]
 pub type GhosttyTerminalColorSchemeFn = ::std::option::Option<
     unsafe extern "C" fn(
@@ -2498,7 +2518,8 @@ pub const GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_GLYPH_PROTOCOL: GhosttyTerm
 pub const GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_PWD_CHANGED: GhosttyTerminalOption = 25;
 #[doc = " Callback invoked when the running program performs a clipboard write.\n OSC 52 and iTerm2 OSC 1337 Copy writes are normalized to an atomic set\n of decoded MIME representations. Set to NULL to ignore clipboard writes.\n Clipboard read requests are always ignored; see\n GhosttyTerminalClipboardWriteFn.\n\n Input type: GhosttyTerminalClipboardWriteFn"]
 pub const GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE: GhosttyTerminalOption = 26;
-#[doc = " Callback invoked when the running program performs a clipboard write.\n OSC 52 and iTerm2 OSC 1337 Copy writes are normalized to an atomic set\n of decoded MIME representations. Set to NULL to ignore clipboard writes.\n Clipboard read requests are always ignored; see\n GhosttyTerminalClipboardWriteFn.\n\n Input type: GhosttyTerminalClipboardWriteFn"]
+#[doc = " Callback invoked for parser-classified printable text, control boundaries,\n and OSC 8 targets. Set to NULL to disable parsed output events.\n\n Input type: GhosttyTerminalParsedOutputFn"]
+pub const GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_PARSED_OUTPUT: GhosttyTerminalOption = 27;
 pub const GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_MAX_VALUE: GhosttyTerminalOption = 2147483647;
 #[doc = " Terminal option identifiers.\n\n These values are used with ghostty_terminal_set() to configure\n terminal callbacks and associated state.\n\n @ingroup terminal"]
 pub type GhosttyTerminalOption = ::std::os::raw::c_uint;
