@@ -872,7 +872,8 @@ impl Default for AuthorityMutationRouter {
 }
 
 impl AuthorityMutationRouter {
-    #[cfg(test)]
+    // Every caller is a #[cfg(unix)] test that writes a shell-script ssh stub.
+    #[cfg(all(test, unix))]
     pub(crate) fn with_ssh_program(program: PathBuf, timeout: Duration) -> Self {
         Self {
             sender: std::sync::Mutex::new(None),
