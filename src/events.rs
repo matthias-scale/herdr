@@ -73,6 +73,18 @@ pub struct WorktreeRemoveResult {
 pub enum AppEvent {
     /// A read-only fleet host inventory poll completed.
     FleetRefreshed { snapshot: crate::fleet::Snapshot },
+    /// An authority admission advance finished its durable ledger write.
+    AuthorityAcceptanceLedgerPersisted {
+        ledger: crate::fleet::AuthorityAcceptanceLedger,
+        snapshot: Box<crate::fleet::Snapshot>,
+        result: Result<(), String>,
+    },
+    /// An unchanged poll reloaded and merged durable authority history off the app loop.
+    AuthorityAcceptanceLedgerReconciled {
+        ledger: crate::fleet::AuthorityAcceptanceLedger,
+        snapshot: Box<crate::fleet::Snapshot>,
+        result: Result<(), String>,
+    },
     /// A remote focus transport advanced a server-owned operation. The wire
     /// transport will construct this event when the next slice lands.
     #[allow(dead_code)]

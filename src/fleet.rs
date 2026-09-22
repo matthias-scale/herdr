@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::api::client::{ApiClient, ConnectionTarget};
 use crate::api::schema::{AgentInfo, AgentStatus, EmptyParams, Method, Request, ResponseResult};
@@ -15,6 +15,7 @@ use crate::config::{FleetConfig, FleetHostConfig};
 const REMOTE_RUNS_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUNS_V1\x1e\n";
 const REMOTE_RUN_RECORD_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUN_V1:";
 const REMOTE_HOST_MARKER: &[u8] = b"\x1eHERDR_FLEET_HOST_V1\x1e\n";
+const REMOTE_GROUPS_MARKER: &[u8] = b"\x1eHERDR_FLEET_GROUPS_V1\x1e\n";
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const MIN_TIMEOUT_MS: u64 = 100;
 const MAX_TIMEOUT_MS: u64 = 60_000;
@@ -23,8 +24,16 @@ const MIN_REFRESH_INTERVAL_MS: u64 = 100;
 // select its newest records while keeping malformed or unbounded stores capped.
 const MAX_RUN_DIRECTORY_ENTRIES: usize = 2_048;
 const MAX_REMOTE_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+const AUTHORITY_ACCEPTANCE_LEDGER_VERSION: u32 = 2;
+#[cfg(not(test))]
+const AUTHORITY_ACCEPTANCE_LEDGER_FILE: &str = "authority-acceptance-ledger-v2.json";
+#[cfg(not(test))]
+const LEGACY_GROUP_CATALOG_CACHE_FILE: &str = "remote-group-catalogs-v1.json";
 type ParsedRemoteOutput = (
     Result<Vec<AgentInfo>, String>,
+    // `None` when the host was not asked for group data; `Some(Err(_))` when
+    // it was asked but its output did not carry a valid group block.
+    Option<Result<crate::groups::GroupAuthoritySnapshot, String>>,
     Vec<Result<crate::agent_runs::Observation, String>>,
     HostRuntime,
     // `None` when the host was not asked for aloop data; `Some(Err(_))` when
@@ -281,9 +290,904 @@ pub(crate) struct Snapshot {
     pub(crate) aloop: Option<crate::aloop::ProducerSnapshot>,
     pub(crate) configured_hosts: Vec<String>,
     pub(crate) hosts: Vec<HostSnapshot>,
+    /// Complete owner catalogs observed by the periodic fleet poll. Admission
+    /// happens once when the refresh reaches the app event loop.
+    #[serde(skip)]
+    pub(crate) group_catalogs: Vec<GroupCatalog>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GroupCatalogState {
+    Fresh,
+    Stale,
+    IdentityConflict,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct GroupCatalog {
+    pub(crate) host: String,
+    pub(crate) target: String,
+    pub(crate) local: bool,
+    pub(crate) session: Option<String>,
+    #[serde(skip)]
+    pub(crate) socket: Option<String>,
+    pub(crate) state: GroupCatalogState,
+    #[serde(skip)]
+    pub(crate) observed_authority_id: Option<crate::groups::AuthorityId>,
+    pub(crate) snapshot: Option<crate::groups::GroupAuthoritySnapshot>,
+    pub(crate) error: Option<String>,
+}
+
+impl GroupCatalog {
+    fn matches_connection(&self, other: &Self) -> bool {
+        self.target == other.target
+            && self.local == other.local
+            && self.session == other.session
+            && self.socket == other.socket
+    }
+
+    pub(crate) fn authority_id(&self) -> Option<&crate::groups::AuthorityId> {
+        self.observed_authority_id.as_ref().or_else(|| {
+            self.snapshot
+                .as_ref()
+                .map(|snapshot| &snapshot.authority_id)
+        })
+    }
+
+    pub(crate) fn is_fresh(&self) -> bool {
+        self.state == GroupCatalogState::Fresh
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthorityAcceptanceLedgerFile {
+    version: u32,
+    authorities: Vec<crate::groups::GroupAuthoritySnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyGroupCatalogCacheEntry {
+    target: String,
+    local: bool,
+    session: Option<String>,
+    socket: Option<String>,
+    snapshot: crate::groups::GroupAuthoritySnapshot,
+}
+
+impl LegacyGroupCatalogCacheEntry {
+    fn into_snapshot(self) -> crate::groups::GroupAuthoritySnapshot {
+        let Self {
+            target: _,
+            local: _,
+            session: _,
+            socket: _,
+            snapshot,
+        } = self;
+        snapshot
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LegacyGroupCatalogCacheFile {
+    version: u32,
+    entries: Vec<LegacyGroupCatalogCacheEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthorityAcceptanceLedgerHeader {
+    version: u32,
+}
+
+/// Durable, authority-owned admission history. Connection catalogs describe
+/// the latest poll; this ledger records every authority snapshot accepted by
+/// this server and cannot be narrowed by the current fleet configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AuthorityAcceptanceLedger {
+    authorities: BTreeMap<crate::groups::AuthorityId, crate::groups::GroupAuthoritySnapshot>,
+}
+
+impl AuthorityAcceptanceLedger {
+    fn canonical_snapshot(
+        mut snapshot: crate::groups::GroupAuthoritySnapshot,
+    ) -> crate::groups::GroupAuthoritySnapshot {
+        snapshot.groups.sort_by_key(|record| record.id.local);
+        snapshot.memberships.clear();
+        snapshot
+    }
+
+    fn from_snapshots(
+        snapshots: impl IntoIterator<Item = crate::groups::GroupAuthoritySnapshot>,
+    ) -> Result<Self, String> {
+        let mut by_authority: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for snapshot in snapshots {
+            let snapshot = Self::canonical_snapshot(snapshot);
+            by_authority
+                .entry(snapshot.authority_id.clone())
+                .or_default()
+                .push(snapshot);
+        }
+        let mut ledger = Self::default();
+        for snapshots in by_authority.values_mut() {
+            snapshots.sort_by_key(|snapshot| snapshot.revision);
+            for snapshot in snapshots.drain(..) {
+                ledger.advance(&snapshot)?;
+            }
+        }
+        Ok(ledger)
+    }
+
+    pub(crate) fn advance(
+        &mut self,
+        snapshot: &crate::groups::GroupAuthoritySnapshot,
+    ) -> Result<bool, String> {
+        let candidate = Self::canonical_snapshot(snapshot.clone());
+        let retained = self.authorities.get(&candidate.authority_id);
+        crate::groups::admit_authority_snapshot(retained, &candidate)
+            .map_err(|error| error.to_string())?;
+        if retained == Some(&candidate) {
+            return Ok(false);
+        }
+        self.authorities
+            .insert(candidate.authority_id.clone(), candidate);
+        Ok(true)
+    }
+
+    pub(crate) fn accepted(
+        &self,
+        authority: &crate::groups::AuthorityId,
+    ) -> Option<&crate::groups::GroupAuthoritySnapshot> {
+        self.authorities.get(authority)
+    }
+
+    fn contains_snapshot(&self, snapshot: &crate::groups::GroupAuthoritySnapshot) -> bool {
+        let snapshot = Self::canonical_snapshot(snapshot.clone());
+        self.authorities.get(&snapshot.authority_id) == Some(&snapshot)
+    }
+
+    fn snapshots(&self) -> Vec<crate::groups::GroupAuthoritySnapshot> {
+        self.authorities.values().cloned().collect()
+    }
+
+    pub(crate) fn merge(&mut self, other: &Self) -> Result<(), String> {
+        for candidate in other.snapshots() {
+            let retained = self.authorities.get(&candidate.authority_id).cloned();
+            match self.advance(&candidate) {
+                Ok(_) => {}
+                Err(candidate_error) => {
+                    let Some(retained) = retained else {
+                        return Err(candidate_error);
+                    };
+                    crate::groups::admit_authority_snapshot(Some(&candidate), &retained).map_err(
+                        |retained_error| {
+                            format!(
+                                "authority {} histories cannot be merged: {candidate_error}; {retained_error}",
+                                candidate.authority_id
+                            )
+                        },
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(test))]
+pub(crate) fn authority_acceptance_ledger_path() -> PathBuf {
+    crate::session::data_dir().join(AUTHORITY_ACCEPTANCE_LEDGER_FILE)
+}
+
+#[cfg(not(test))]
+pub(crate) fn legacy_group_catalog_cache_path() -> PathBuf {
+    crate::session::data_dir().join(LEGACY_GROUP_CATALOG_CACHE_FILE)
+}
+
+pub(crate) fn load_authority_acceptance_ledger_with_legacy(
+    path: &Path,
+    legacy_path: &Path,
+) -> Result<AuthorityAcceptanceLedger, String> {
+    match path.try_exists() {
+        Ok(true) => load_authority_acceptance_ledger(path),
+        Ok(false) => match legacy_path.try_exists() {
+            Ok(true) => {
+                let ledger = load_authority_acceptance_ledger(legacy_path)?;
+                save_authority_acceptance_ledger(path, &ledger).map_err(|error| {
+                    format!(
+                        "cannot migrate legacy authority acceptance ledger to {}: {error}",
+                        path.display()
+                    )
+                })
+            }
+            Ok(false) => Ok(AuthorityAcceptanceLedger::default()),
+            Err(error) => Err(format!(
+                "cannot inspect legacy authority acceptance ledger: {error}"
+            )),
+        },
+        Err(error) => Err(format!(
+            "cannot inspect authority acceptance ledger: {error}"
+        )),
+    }
+}
+
+pub(crate) fn load_authority_acceptance_ledger(
+    path: &Path,
+) -> Result<AuthorityAcceptanceLedger, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AuthorityAcceptanceLedger::default());
+        }
+        Err(error) => return Err(format!("cannot read authority acceptance ledger: {error}")),
+    };
+    let header: AuthorityAcceptanceLedgerHeader = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("cannot parse authority acceptance ledger: {error}"))?;
+    let snapshots = match header.version {
+        1 => {
+            let file: LegacyGroupCatalogCacheFile = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("cannot parse legacy group catalog cache: {error}"))?;
+            file.entries
+                .into_iter()
+                .map(LegacyGroupCatalogCacheEntry::into_snapshot)
+                .collect::<Vec<_>>()
+        }
+        AUTHORITY_ACCEPTANCE_LEDGER_VERSION => {
+            let file: AuthorityAcceptanceLedgerFile = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("cannot parse authority acceptance ledger: {error}"))?;
+            file.authorities
+        }
+        version => {
+            return Err(format!(
+                "unsupported authority acceptance ledger version {version} (expected {AUTHORITY_ACCEPTANCE_LEDGER_VERSION})"
+            ));
+        }
+    };
+    AuthorityAcceptanceLedger::from_snapshots(snapshots)
+        .map_err(|error| format!("authority acceptance ledger has invalid history: {error}"))
+}
+
+pub(crate) fn save_authority_acceptance_ledger(
+    path: &Path,
+    ledger: &AuthorityAcceptanceLedger,
+) -> std::io::Result<AuthorityAcceptanceLedger> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(PathBuf::from(lock_path))?;
+    lock.lock()?;
+
+    let durable = load_authority_acceptance_ledger(path).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("cannot merge durable authority acceptance ledger: {error}"),
+        )
+    })?;
+    let mut merged = durable.clone();
+    merged.merge(ledger).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("cannot merge authority acceptance ledger advance: {error}"),
+        )
+    })?;
+    if merged == durable {
+        return Ok(merged);
+    }
+
+    let file = AuthorityAcceptanceLedgerFile {
+        version: AUTHORITY_ACCEPTANCE_LEDGER_VERSION,
+        authorities: merged.snapshots(),
+    };
+    let bytes = serde_json::to_vec_pretty(&file).map_err(std::io::Error::other)?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp = path.with_extension(format!("tmp-{}-{nonce}", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    if let Err(error) = write_authority_acceptance_ledger_contents(&mut file, &bytes) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    drop(file);
+    if let Err(error) = crate::platform::replace_file_durably(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    Ok(merged)
+}
+
+trait AuthorityAcceptanceLedgerTempFile {
+    fn write_contents(&mut self, contents: &[u8]) -> std::io::Result<()>;
+    fn sync_contents(&mut self) -> std::io::Result<()>;
+}
+
+impl AuthorityAcceptanceLedgerTempFile for std::fs::File {
+    fn write_contents(&mut self, contents: &[u8]) -> std::io::Result<()> {
+        self.write_all(contents)
+    }
+
+    fn sync_contents(&mut self) -> std::io::Result<()> {
+        self.sync_all()
+    }
+}
+
+fn write_authority_acceptance_ledger_contents(
+    file: &mut impl AuthorityAcceptanceLedgerTempFile,
+    contents: &[u8],
+) -> std::io::Result<()> {
+    file.write_contents(contents)?;
+    file.sync_contents()
+}
+
+struct AuthorityAcceptanceLedgerWrite {
+    path: PathBuf,
+    ledger: AuthorityAcceptanceLedger,
+    snapshot: Snapshot,
+    reconcile_only: bool,
+}
+
+type AuthorityAcceptanceLedgerSave = dyn Fn(&Path, &AuthorityAcceptanceLedger) -> std::io::Result<AuthorityAcceptanceLedger>
+    + Send
+    + Sync
+    + 'static;
+
+/// Serial durable ledger worker. The app loop admits each candidate before it
+/// enters this queue; disk reconciliation and persistence finish here before
+/// the matching completion publishes the result.
+pub(crate) struct AuthorityAcceptanceLedgerWriter {
+    sender: std::sync::Mutex<Option<std::sync::mpsc::Sender<AuthorityAcceptanceLedgerWrite>>>,
+    event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    save: Arc<AuthorityAcceptanceLedgerSave>,
+}
+
+impl AuthorityAcceptanceLedgerWriter {
+    pub(crate) fn new(event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>) -> Self {
+        Self {
+            sender: std::sync::Mutex::new(None),
+            event_tx,
+            save: Arc::new(save_authority_acceptance_ledger),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_save(
+        event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+        save: impl Fn(&Path, &AuthorityAcceptanceLedger) -> std::io::Result<AuthorityAcceptanceLedger>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        Self {
+            sender: std::sync::Mutex::new(None),
+            event_tx,
+            save: Arc::new(save),
+        }
+    }
+
+    pub(crate) fn enqueue(
+        &self,
+        path: PathBuf,
+        ledger: AuthorityAcceptanceLedger,
+        snapshot: Snapshot,
+    ) -> Result<(), String> {
+        self.enqueue_operation(path, ledger, snapshot, false)
+    }
+
+    pub(crate) fn enqueue_reconciliation(
+        &self,
+        path: PathBuf,
+        ledger: AuthorityAcceptanceLedger,
+        snapshot: Snapshot,
+    ) -> Result<(), String> {
+        self.enqueue_operation(path, ledger, snapshot, true)
+    }
+
+    fn enqueue_operation(
+        &self,
+        path: PathBuf,
+        ledger: AuthorityAcceptanceLedger,
+        snapshot: Snapshot,
+        reconcile_only: bool,
+    ) -> Result<(), String> {
+        let mut sender = self
+            .sender
+            .lock()
+            .map_err(|_| "authority acceptance ledger queue is unavailable".to_string())?;
+        if sender.is_none() {
+            let (write_tx, write_rx) = std::sync::mpsc::channel::<AuthorityAcceptanceLedgerWrite>();
+            let event_tx = self.event_tx.clone();
+            let save = Arc::clone(&self.save);
+            std::thread::Builder::new()
+                .name("herdr-group-ledger".into())
+                .spawn(move || {
+                    while let Ok(job) = write_rx.recv() {
+                        let requested_ledger = job.ledger;
+                        let persisted = save(&job.path, &requested_ledger).map_err(|error| {
+                            format!(
+                                "cannot persist authority acceptance ledger at {}: {error}",
+                                job.path.display()
+                            )
+                        });
+                        let (persisted_ledger, result) = match persisted {
+                            Ok(merged) => (merged, Ok(())),
+                            Err(error) => (requested_ledger, Err(error)),
+                        };
+                        let event = if job.reconcile_only {
+                            crate::events::AppEvent::AuthorityAcceptanceLedgerReconciled {
+                                ledger: persisted_ledger,
+                                snapshot: Box::new(job.snapshot),
+                                result,
+                            }
+                        } else {
+                            crate::events::AppEvent::AuthorityAcceptanceLedgerPersisted {
+                                ledger: persisted_ledger,
+                                snapshot: Box::new(job.snapshot),
+                                result,
+                            }
+                        };
+                        if event_tx.blocking_send(event).is_err() {
+                            return;
+                        }
+                    }
+                })
+                .map_err(|error| {
+                    format!("cannot start authority acceptance ledger writer: {error}")
+                })?;
+            *sender = Some(write_tx);
+        }
+        let Some(sender) = sender.as_ref() else {
+            return Err("authority acceptance ledger queue did not initialize".into());
+        };
+        sender
+            .send(AuthorityAcceptanceLedgerWrite {
+                path,
+                ledger,
+                snapshot,
+                reconcile_only,
+            })
+            .map_err(|_| "authority acceptance ledger writer stopped".to_string())
+    }
+}
+
+struct RoutedApiRequest {
+    catalog: GroupCatalog,
+    config_generation: u64,
+    route: AuthorityRoute,
+    mutation_route: MutationRoute,
+    route_lease: u64,
+    request: Request,
+    respond_to: std::sync::mpsc::Sender<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum MutationRoute {
+    Authority(AuthorityRoute),
+    Pane {
+        route: AuthorityRoute,
+        pane_id: String,
+        pane_incarnation: String,
+    },
+}
+
+impl MutationRoute {
+    fn from_request(route: AuthorityRoute, request: &Request) -> Result<Self, String> {
+        let crate::api::schema::Method::GroupAuthorityMutate(params) = &request.method else {
+            return Ok(Self::Authority(route));
+        };
+        let crate::api::schema::AuthorityMutation::PaneGroupSet(params) = &params.mutation else {
+            return Ok(Self::Authority(route));
+        };
+        let pane_incarnation = params
+            .expected_pane_incarnation
+            .clone()
+            .ok_or_else(|| "remote pane mutation has no expected incarnation".to_string())?;
+        Ok(Self::Pane {
+            route,
+            pane_id: params.pane_id.clone(),
+            pane_incarnation,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct AuthorityRoute {
+    authority: crate::groups::AuthorityId,
+    target: String,
+    local: bool,
+    session: Option<String>,
+    socket: Option<String>,
+}
+
+impl AuthorityRoute {
+    fn from_catalog(catalog: &GroupCatalog) -> Option<Self> {
+        Some(Self {
+            authority: catalog.observed_authority_id.clone()?,
+            target: catalog.target.clone(),
+            local: catalog.local,
+            session: catalog.session.clone(),
+            socket: catalog.socket.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct AuthorityRouteLeases {
+    next: u64,
+    valid: BTreeMap<MutationRoute, u64>,
+}
+
+impl AuthorityRouteLeases {
+    fn issue(&mut self) -> u64 {
+        self.next = self.next.wrapping_add(1);
+        if self.next == 0 {
+            self.valid.clear();
+            self.next = 1;
+        }
+        self.next
+    }
+
+    fn observe(&mut self, routes: BTreeMap<MutationRoute, ()>) {
+        self.valid.retain(|route, _| routes.contains_key(route));
+        for route in routes.into_keys() {
+            if self.valid.contains_key(&route) {
+                continue;
+            }
+            let lease = self.issue();
+            self.valid.insert(route, lease);
+        }
+    }
+}
+
+/// FIFO worker for remote authority mutations. One worker preserves API arrival
+/// order while keeping every IPC or SSH wait off the app event loop.
+pub(crate) struct AuthorityMutationRouter {
+    sender: std::sync::Mutex<Option<std::sync::mpsc::Sender<RoutedApiRequest>>>,
+    config_generation: Arc<std::sync::atomic::AtomicU64>,
+    route_leases: Arc<std::sync::Mutex<AuthorityRouteLeases>>,
+    ssh_program: std::ffi::OsString,
+    timeout: Duration,
+}
+
+impl Default for AuthorityMutationRouter {
+    fn default() -> Self {
+        Self {
+            sender: std::sync::Mutex::new(None),
+            config_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            route_leases: Arc::new(std::sync::Mutex::new(AuthorityRouteLeases::default())),
+            ssh_program: std::ffi::OsString::from("ssh"),
+            timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+impl AuthorityMutationRouter {
+    #[cfg(test)]
+    pub(crate) fn with_ssh_program(program: PathBuf, timeout: Duration) -> Self {
+        Self {
+            sender: std::sync::Mutex::new(None),
+            config_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            route_leases: Arc::new(std::sync::Mutex::new(AuthorityRouteLeases::default())),
+            ssh_program: program.into_os_string(),
+            timeout,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_route_leases_for_test(&self) {
+        let route_leases = Arc::clone(&self.route_leases);
+        let _ = std::thread::spawn(move || {
+            let _guard = route_leases.lock().expect("route leases before poison");
+            panic!("poison route leases for enqueue failure");
+        })
+        .join();
+    }
+
+    pub(crate) fn reconfigure(&self, config_generation: u64) {
+        self.config_generation
+            .store(config_generation, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn observe_snapshot(&self, snapshot: &Snapshot) {
+        let conflicts = snapshot.identity_conflicts();
+        let mut routes = BTreeMap::new();
+        for catalog in snapshot.group_catalogs.iter().filter(|catalog| {
+            catalog.state == GroupCatalogState::Fresh
+                && catalog
+                    .observed_authority_id
+                    .as_ref()
+                    .is_some_and(|authority| !conflicts.contains(authority))
+        }) {
+            let Some(route) = AuthorityRoute::from_catalog(catalog) else {
+                continue;
+            };
+            routes.insert(MutationRoute::Authority(route.clone()), ());
+            for membership in catalog
+                .snapshot
+                .iter()
+                .flat_map(|snapshot| &snapshot.memberships)
+                .filter(|membership| !membership.pane_incarnation.is_empty())
+            {
+                routes.insert(
+                    MutationRoute::Pane {
+                        route: route.clone(),
+                        pane_id: membership.pane_id.clone(),
+                        pane_incarnation: membership.pane_incarnation.clone(),
+                    },
+                    (),
+                );
+            }
+        }
+        if let Ok(mut leases) = self.route_leases.lock() {
+            leases.observe(routes);
+        }
+    }
+
+    pub(crate) fn enqueue(
+        &self,
+        catalog: GroupCatalog,
+        config_generation: u64,
+        request: Request,
+        respond_to: std::sync::mpsc::Sender<String>,
+    ) -> Result<(), String> {
+        let route = AuthorityRoute::from_catalog(&catalog)
+            .ok_or_else(|| "authority route has no observed authority".to_string())?;
+        let mutation_route = MutationRoute::from_request(route.clone(), &request)?;
+        let route_lease = self
+            .route_leases
+            .lock()
+            .map_err(|_| "authority route leases are unavailable".to_string())?
+            .valid
+            .get(&mutation_route)
+            .copied()
+            .ok_or_else(|| format!("authority {} route is no longer fresh", route.authority))?;
+        let mut sender = self
+            .sender
+            .lock()
+            .map_err(|_| "remote authority mutation queue is unavailable".to_string())?;
+        if sender.is_none() {
+            let (request_tx, request_rx) = std::sync::mpsc::channel::<RoutedApiRequest>();
+            let ssh_program = self.ssh_program.clone();
+            let timeout = self.timeout;
+            let current_generation = Arc::clone(&self.config_generation);
+            let current_route_leases = Arc::clone(&self.route_leases);
+            std::thread::Builder::new()
+                .name("herdr-group-mutations".into())
+                .spawn(move || {
+                    while let Ok(job) = request_rx.recv() {
+                        let id = job.request.id.clone();
+                        if job.config_generation
+                            != current_generation.load(std::sync::atomic::Ordering::Acquire)
+                        {
+                            let response = serde_json::to_string(
+                                &crate::api::schema::ErrorResponse {
+                                    id,
+                                    error: crate::api::schema::ErrorBody {
+                                        code: "authority_not_fresh".into(),
+                                        message: format!(
+                                            "authority {} fleet configuration changed before the queued mutation could run",
+                                            job.route.authority
+                                        ),
+                                    },
+                                },
+                            )
+                            .unwrap_or_else(|_| "{}".to_string());
+                            let _ = job.respond_to.send(response);
+                            continue;
+                        }
+                        let route_is_current = current_route_leases
+                            .lock()
+                            .is_ok_and(|leases| {
+                                leases.valid.get(&job.mutation_route) == Some(&job.route_lease)
+                            });
+                        if !route_is_current {
+                            let response = serde_json::to_string(
+                                &crate::api::schema::ErrorResponse {
+                                    id,
+                                    error: crate::api::schema::ErrorBody {
+                                        code: "authority_not_fresh".into(),
+                                        message: format!(
+                                            "authority {} route changed before the queued mutation could run",
+                                            job.route.authority
+                                        ),
+                                    },
+                                },
+                            )
+                            .unwrap_or_else(|_| "{}".to_string());
+                            let _ = job.respond_to.send(response);
+                            continue;
+                        }
+                        let response = route_api_request_with_ssh_program(
+                            &job.catalog,
+                            &job.request,
+                            timeout,
+                            &ssh_program,
+                        )
+                        .unwrap_or_else(|error| {
+                            serde_json::to_string(&crate::api::schema::ErrorResponse {
+                                id,
+                                error: crate::api::schema::ErrorBody {
+                                    code: "authority_unreachable".into(),
+                                    message: format!(
+                                        "authority {} is unreachable: {error}",
+                                        job.route.authority
+                                    ),
+                                },
+                            })
+                            .unwrap_or_else(|_| "{}".to_string())
+                        });
+                        let _ = job.respond_to.send(response);
+                    }
+                })
+                .map_err(|error| {
+                    format!("cannot start remote authority mutation worker: {error}")
+                })?;
+            *sender = Some(request_tx);
+        }
+        let Some(sender) = sender.as_ref() else {
+            return Err("remote authority mutation queue did not initialize".into());
+        };
+        sender
+            .send(RoutedApiRequest {
+                catalog,
+                config_generation,
+                route,
+                mutation_route,
+                route_lease,
+                request,
+                respond_to,
+            })
+            .map_err(|_| "remote authority mutation worker stopped".to_string())
+    }
+}
+
+fn route_api_request_with_ssh_program(
+    catalog: &GroupCatalog,
+    request: &Request,
+    timeout: Duration,
+    ssh_program: impl AsRef<OsStr>,
+) -> Result<String, String> {
+    let mut value = if catalog.local {
+        api_client_for_catalog(catalog)
+            .request_value_with_timeout(request, timeout)
+            .map_err(|error| error.to_string())?
+    } else {
+        let request_json = serde_json::to_string(request).map_err(|error| error.to_string())?;
+        let socket = catalog
+            .socket
+            .as_deref()
+            .map(|path| format!("export HERDR_SOCKET_PATH={}\n", shell_quote(path)))
+            .unwrap_or_default();
+        let session = catalog
+            .session
+            .as_deref()
+            .map(|name| format!("export HERDR_SESSION={}\n", shell_quote(name)))
+            .unwrap_or_default();
+        let script = format!(
+            "set -u\n{socket}{session}printf '%s\\n' {} | herdr api relay\n",
+            shell_quote(&request_json)
+        );
+        let output = run_ssh_program_with_timeout(ssh_program, &catalog.target, &script, timeout)?;
+        serde_json::from_slice(output.trim_ascii())
+            .map_err(|error| format!("invalid authority mutation response: {error}"))?
+    };
+    name_forwarded_pane_authority(&mut value, request);
+    serde_json::to_string(&value).map_err(|error| error.to_string())
+}
+
+fn name_forwarded_pane_authority(value: &mut serde_json::Value, request: &Request) {
+    let pane_authority = match &request.method {
+        Method::PaneGroupSet(params) => params.expected_pane_authority.as_ref(),
+        Method::GroupAuthorityMutate(params) => match &params.mutation {
+            crate::api::schema::AuthorityMutation::PaneGroupSet(params) => {
+                params.expected_pane_authority.as_ref()
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(authority) = pane_authority else {
+        return;
+    };
+    let Some(message) = value
+        .get_mut("error")
+        .and_then(|error| error.get_mut("message"))
+        .and_then(|message| message.as_str())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    if message.contains(authority.as_str()) {
+        return;
+    }
+    let named = format!("authority {authority}: {message}");
+    value["error"]["message"] = serde_json::Value::String(named);
+}
+
+fn api_client_for_catalog(catalog: &GroupCatalog) -> ApiClient {
+    catalog.socket.as_ref().map_or_else(
+        || ApiClient::for_target(ConnectionTarget::LocalSession(catalog.session.clone())),
+        |path| ApiClient::for_target(ConnectionTarget::SocketPath(PathBuf::from(path))),
+    )
 }
 
 impl Snapshot {
+    /// Drop ambiguous pane projection before any catalog state classification.
+    /// Group records remain observable, but no consumer or router can choose
+    /// between two memberships for the same public pane address.
+    pub(crate) fn sanitize_group_catalog_memberships(&mut self) {
+        for catalog in &mut self.group_catalogs {
+            let Some(snapshot) = catalog.snapshot.as_mut() else {
+                continue;
+            };
+            let duplicate = {
+                let mut pane_ids = HashSet::new();
+                snapshot
+                    .memberships
+                    .iter()
+                    .find(|membership| !pane_ids.insert(membership.pane_id.as_str()))
+                    .map(|membership| membership.pane_id.clone())
+            };
+            let Some(duplicate) = duplicate else {
+                continue;
+            };
+            snapshot.memberships.clear();
+            if catalog.state == GroupCatalogState::Fresh {
+                catalog.state = GroupCatalogState::Stale;
+                catalog.error = Some(format!(
+                    "catalog rejected: snapshot contains duplicate pane membership {duplicate}"
+                ));
+            }
+        }
+    }
+
+    fn identity_conflicts(&self) -> HashSet<crate::groups::AuthorityId> {
+        let mut reports_by_authority = HashMap::new();
+        for catalog in &self.group_catalogs {
+            let Some(authority) = catalog.observed_authority_id.as_ref() else {
+                continue;
+            };
+            *reports_by_authority
+                .entry(authority.clone())
+                .or_insert(0_usize) += 1;
+        }
+        reports_by_authority
+            .into_iter()
+            .filter_map(|(authority, reports)| (reports > 1).then_some(authority))
+            .collect()
+    }
+
+    fn mark_identity_conflicts(&mut self, durable_history_available: bool) {
+        let conflicts = self.identity_conflicts();
+        for catalog in &mut self.group_catalogs {
+            let Some(authority) = catalog.observed_authority_id.as_ref() else {
+                continue;
+            };
+            if conflicts.contains(authority) {
+                catalog.state = GroupCatalogState::IdentityConflict;
+                catalog.error = Some(if durable_history_available {
+                    format!(
+                        "authority identity conflict: {authority} is reported by multiple connections"
+                    )
+                } else {
+                    format!(
+                        "authority identity conflict while durable history is unavailable: {authority}"
+                    )
+                });
+            }
+        }
+    }
+
     pub(crate) fn unpolled(hosts: &[FleetHostConfig]) -> Self {
         Self {
             configured_hosts: hosts.iter().map(|host| host.name.clone()).collect(),
@@ -312,6 +1216,41 @@ impl Snapshot {
                     .cloned()
             })
             .collect();
+        let matches_connection = |catalog: &GroupCatalog, configured: &FleetHostConfig| {
+            catalog.target == configured.target
+                && catalog.local == configured.local
+                && catalog.session == configured.session
+                && catalog.socket == configured.socket
+        };
+        let mut group_catalogs = self
+            .group_catalogs
+            .iter()
+            .filter(|catalog| {
+                fleet.hosts.iter().any(|configured| {
+                    configured.name == catalog.host && matches_connection(catalog, configured)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for catalog in self.group_catalogs.iter().filter(|catalog| {
+            !fleet.hosts.iter().any(|configured| {
+                configured.name == catalog.host && matches_connection(catalog, configured)
+            })
+        }) {
+            let Some(configured) = fleet.hosts.iter().find(|configured| {
+                matches_connection(catalog, configured)
+                    && !group_catalogs.iter().any(|current| {
+                        current.host == configured.name
+                            && current.matches_connection(catalog)
+                            && current.authority_id() == catalog.authority_id()
+                    })
+            }) else {
+                continue;
+            };
+            let mut retained = catalog.clone();
+            retained.host.clone_from(&configured.name);
+            group_catalogs.push(retained);
+        }
 
         Self {
             polled: self.polled,
@@ -326,6 +1265,7 @@ impl Snapshot {
                 .filter(|aloop| aloop.host == fleet.resolved_aloop_host()),
             configured_hosts: fleet.hosts.iter().map(|host| host.name.clone()).collect(),
             hosts,
+            group_catalogs,
         }
     }
 
@@ -334,6 +1274,141 @@ impl Snapshot {
             .into_iter()
             .flat_map(|host| host.entries)
             .collect()
+    }
+
+    /// Retain only a connection's last live answer when the current poll could
+    /// not read one. Durable authority history lives in
+    /// `AuthorityAcceptanceLedger`, never in this presentation snapshot.
+    pub(crate) fn retain_unavailable_group_catalogs_from(&mut self, previous: &Self) {
+        for catalog in &mut self.group_catalogs {
+            if catalog.snapshot.is_some() {
+                continue;
+            }
+            if let Some(retained) = previous
+                .group_catalogs
+                .iter()
+                .find(|old| old.matches_connection(catalog) && old.snapshot.is_some())
+            {
+                catalog.snapshot = retained.snapshot.clone();
+                catalog.state = GroupCatalogState::Stale;
+            }
+        }
+    }
+
+    /// Validate current authority reports against durable history and return
+    /// the complete advance-only candidate ledger. Conflicted reports never
+    /// advance history, and rejected reports remain visible only as stale
+    /// current observations.
+    pub(crate) fn admit_group_catalogs(
+        &mut self,
+        ledger: &AuthorityAcceptanceLedger,
+    ) -> AuthorityAcceptanceLedger {
+        self.sanitize_group_catalog_memberships();
+        self.mark_identity_conflicts(true);
+        let mut candidate = ledger.clone();
+        for catalog in &mut self.group_catalogs {
+            if catalog.state != GroupCatalogState::Fresh {
+                continue;
+            }
+            let Some(incoming) = catalog.snapshot.as_ref() else {
+                catalog.state = GroupCatalogState::Unavailable;
+                catalog.error = Some("fresh authority catalog had no snapshot".into());
+                continue;
+            };
+            if catalog.observed_authority_id.as_ref() != Some(&incoming.authority_id) {
+                catalog.state = GroupCatalogState::Unavailable;
+                catalog.error = Some("reported authority does not match its snapshot".into());
+                continue;
+            }
+            if let Err(error) = crate::groups::admit_authority_snapshot(None, incoming) {
+                if let Some(snapshot) = catalog.snapshot.as_mut() {
+                    snapshot.memberships.clear();
+                }
+                catalog.state = GroupCatalogState::Stale;
+                catalog.error = Some(format!("catalog rejected: {error}"));
+                continue;
+            }
+            if let Err(error) = candidate.advance(incoming) {
+                catalog.state = GroupCatalogState::Stale;
+                catalog.error = Some(format!("catalog rejected: {error}"));
+            }
+        }
+        candidate
+    }
+
+    pub(crate) fn reject_group_catalogs_without_durable_history(&mut self, error: &str) {
+        self.sanitize_group_catalog_memberships();
+        for catalog in &mut self.group_catalogs {
+            if catalog.state != GroupCatalogState::IdentityConflict {
+                catalog.state = GroupCatalogState::Unavailable;
+            }
+            catalog.error = Some(error.to_string());
+        }
+
+        self.mark_identity_conflicts(false);
+    }
+
+    pub(crate) fn quarantine_unpersisted_advances(
+        &mut self,
+        ledger: &AuthorityAcceptanceLedger,
+        error: &str,
+    ) {
+        for catalog in &mut self.group_catalogs {
+            if catalog.state != GroupCatalogState::Fresh {
+                continue;
+            }
+            let Some(snapshot) = catalog.snapshot.as_ref() else {
+                catalog.state = GroupCatalogState::Unavailable;
+                catalog.error = Some(error.to_string());
+                continue;
+            };
+            if ledger.contains_snapshot(snapshot) {
+                continue;
+            }
+            catalog.state = if ledger.accepted(&snapshot.authority_id).is_some() {
+                GroupCatalogState::Stale
+            } else {
+                GroupCatalogState::Unavailable
+            };
+            catalog.error = Some(error.to_string());
+        }
+        self.mark_identity_conflicts(false);
+    }
+
+    pub(crate) fn fresh_group_catalog(
+        &self,
+        authority: &crate::groups::AuthorityId,
+    ) -> Result<&GroupCatalog, String> {
+        let matching = self
+            .group_catalogs
+            .iter()
+            .filter(|catalog| catalog.observed_authority_id.as_ref() == Some(authority))
+            .collect::<Vec<_>>();
+        if self.identity_conflicts().contains(authority)
+            || matching
+                .iter()
+                .any(|catalog| catalog.state == GroupCatalogState::IdentityConflict)
+        {
+            return Err(format!("authority {authority} has an identity conflict"));
+        }
+        let Some(catalog) = matching.first().copied() else {
+            return Err(format!("authority {authority} has not been observed"));
+        };
+        if !catalog.is_fresh() {
+            return Err(format!("authority {authority} is not fresh"));
+        }
+        Ok(catalog)
+    }
+
+    pub(crate) fn authority_has_identity_conflict(
+        &self,
+        authority: &crate::groups::AuthorityId,
+    ) -> bool {
+        self.identity_conflicts().contains(authority)
+            || self.group_catalogs.iter().any(|catalog| {
+                catalog.observed_authority_id.as_ref() == Some(authority)
+                    && catalog.state == GroupCatalogState::IdentityConflict
+            })
     }
 
     /// Keep the last observed remote inventory when a configured host cannot
@@ -464,6 +1539,7 @@ fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
                         entries: Vec::new(),
                     })
                     .collect(),
+                group_catalogs: Vec::new(),
             }
         }
     }
@@ -740,6 +1816,7 @@ pub(crate) fn start_poller(
 struct HostEvidence {
     host: FleetHostConfig,
     agents: Result<Vec<AgentInfo>, String>,
+    groups: Option<Result<crate::groups::GroupAuthoritySnapshot, String>>,
     runs: Vec<Result<crate::agent_runs::Observation, String>>,
     runtime: HostRuntime,
     /// Aloops producer data, requested only from the host named by
@@ -776,11 +1853,11 @@ fn collect_snapshot_with_implicit_local(
             .iter()
             .cloned()
             .map(|host| {
-                let name = host.name.clone();
+                let fallback = host.clone();
                 let runs_only = host.local && implicit_local_name.as_deref() == Some(&host.name);
                 let include_aloop = host.name == aloop_host;
                 (
-                    name,
+                    fallback,
                     scope.spawn(move || {
                         if runs_only {
                             fetch_local_run_host(host, include_aloop)
@@ -793,14 +1870,12 @@ fn collect_snapshot_with_implicit_local(
             .collect::<Vec<_>>();
         handles
             .into_iter()
-            .map(|(name, handle)| match handle.join() {
+            .map(|(host, handle)| match handle.join() {
                 Ok(evidence) => evidence,
                 Err(_) => HostEvidence {
-                    host: FleetHostConfig {
-                        name,
-                        ..FleetHostConfig::default()
-                    },
+                    host,
                     agents: Err("host reader panicked".into()),
+                    groups: Some(Err("group catalog reader panicked".into())),
                     runs: Vec::new(),
                     runtime: HostRuntime::default(),
                     aloop: None,
@@ -816,6 +1891,7 @@ fn fetch_local_run_host(host: FleetHostConfig, include_aloop: bool) -> HostEvide
     HostEvidence {
         host,
         agents: Ok(Vec::new()),
+        groups: None,
         runs: local_run_states(),
         runtime: HostRuntime::default(),
         aloop: include_aloop.then(crate::aloop::read_local_host_data),
@@ -845,7 +1921,28 @@ fn snapshot_from_evidence(
                 .map(|result| result.as_ref().map_err(Clone::clone).cloned())
         });
     let mut hosts = Vec::with_capacity(evidence.len());
+    let mut group_catalogs = Vec::with_capacity(evidence.len());
     for evidence in evidence {
+        if let Some(group_result) = evidence.groups.clone() {
+            group_catalogs.push(GroupCatalog {
+                host: evidence.host.name.clone(),
+                target: evidence.host.target.clone(),
+                local: evidence.host.local,
+                session: evidence.host.session.clone(),
+                socket: evidence.host.socket.clone(),
+                state: if group_result.is_ok() {
+                    GroupCatalogState::Fresh
+                } else {
+                    GroupCatalogState::Unavailable
+                },
+                observed_authority_id: group_result
+                    .as_ref()
+                    .ok()
+                    .map(|snapshot| snapshot.authority_id.clone()),
+                snapshot: group_result.as_ref().ok().cloned(),
+                error: group_result.err(),
+            });
+        }
         let error = evidence.agents.as_ref().err().cloned();
         let remote_identity = (!evidence.host.local)
             .then(|| evidence.agents.as_ref().ok())
@@ -936,6 +2033,7 @@ fn snapshot_from_evidence(
             .map(|host| host.name.clone())
             .collect(),
         hosts,
+        group_catalogs,
     }
 }
 
@@ -1035,10 +2133,7 @@ fn fetch_host_with(
 }
 
 fn fetch_local_host(host: FleetHostConfig, timeout: Duration, include_aloop: bool) -> HostEvidence {
-    let client = host.socket.as_ref().map_or_else(
-        || ApiClient::for_target(ConnectionTarget::LocalSession(host.session.clone())),
-        |path| ApiClient::for_target(ConnectionTarget::SocketPath(PathBuf::from(path))),
-    );
+    let client = api_client_for_host(&host);
     let request = Request {
         id: "fleet:collect:local".into(),
         method: Method::AgentList(EmptyParams::default()),
@@ -1055,15 +2150,45 @@ fn fetch_local_host(host: FleetHostConfig, timeout: Duration, include_aloop: boo
                 })
         });
     let runtime = fetch_local_runtime(&client, timeout);
+    let groups = fetch_group_catalog(&client, timeout);
     let runs = local_run_states();
     let aloop = include_aloop.then(crate::aloop::read_local_host_data);
     HostEvidence {
         host,
         agents,
+        groups: Some(groups),
         runs,
         runtime,
         aloop,
     }
+}
+
+fn api_client_for_host(host: &FleetHostConfig) -> ApiClient {
+    host.socket.as_ref().map_or_else(
+        || ApiClient::for_target(ConnectionTarget::LocalSession(host.session.clone())),
+        |path| ApiClient::for_target(ConnectionTarget::SocketPath(PathBuf::from(path))),
+    )
+}
+
+fn fetch_group_catalog(
+    client: &ApiClient,
+    timeout: Duration,
+) -> Result<crate::groups::GroupAuthoritySnapshot, String> {
+    let request = Request {
+        id: "fleet:collect:groups".into(),
+        method: Method::GroupHostSnapshot(EmptyParams::default()),
+    };
+    client
+        .request_value_with_timeout(&request, timeout)
+        .map_err(|error| error.to_string())
+        .and_then(|value| {
+            crate::api::client::parse_response_value(value)
+                .map_err(|error| error.to_string())
+                .and_then(|response| match response.result {
+                    ResponseResult::GroupHostSnapshot { snapshot } => Ok(snapshot),
+                    other => Err(format!("unexpected group snapshot response: {other:?}")),
+                })
+        })
 }
 
 fn fetch_local_runtime(client: &ApiClient, timeout: Duration) -> HostRuntime {
@@ -1160,14 +2285,21 @@ fn fetch_remote_host(
     timeout: Duration,
     include_aloop: bool,
 ) -> HostEvidence {
-    let script = remote_read_script(host.socket.as_deref(), host.session.as_deref(), false);
+    // Keep the aloop store in its own bounded SSH read. A maximum-size fleet
+    // snapshot and a maximum-size aloop snapshot must each fit the output cap.
+    let script = remote_read_script(host.socket.as_deref(), host.session.as_deref(), true, false);
     let output = run_ssh_with_timeout(&host.target, &script, timeout);
-    let (agents, runs, runtime) = match output {
+    let (agents, groups, runs, runtime) = match output {
         Ok(output) => {
-            let (agents, runs, runtime, _) = parse_remote_output(&output, false);
-            (agents, runs, runtime)
+            let (agents, groups, runs, runtime, _) = parse_remote_output(&output, true, false);
+            (agents, groups, runs, runtime)
         }
-        Err(error) => (Err(error), Vec::new(), HostRuntime::default()),
+        Err(error) => (
+            Err(error.clone()),
+            Some(Err(error)),
+            Vec::new(),
+            HostRuntime::default(),
+        ),
     };
     let aloop = include_aloop.then(|| {
         run_ssh_with_timeout(
@@ -1180,6 +2312,7 @@ fn fetch_remote_host(
     HostEvidence {
         host,
         agents,
+        groups,
         runs,
         runtime,
         aloop,
@@ -1208,16 +2341,26 @@ fn parse_remote_aloop_output(output: &[u8]) -> Result<crate::aloop::HostData, St
     ))
 }
 
-fn remote_read_script(socket: Option<&str>, session: Option<&str>, include_aloop: bool) -> String {
+fn remote_read_script(
+    socket: Option<&str>,
+    session: Option<&str>,
+    include_groups: bool,
+    include_aloop: bool,
+) -> String {
     let socket = socket
         .map(|path| format!("export HERDR_SOCKET_PATH={}\n", shell_quote(path)))
         .unwrap_or_default();
     let session = session
         .map(|name| format!("export HERDR_SESSION={}\n", shell_quote(name)))
         .unwrap_or_default();
+    let groups = if include_groups {
+        "printf '\\036HERDR_FLEET_GROUPS_V1\\036\\n'\nherdr api authority-snapshot || true\n"
+    } else {
+        ""
+    };
     let aloop = include_aloop.then(remote_aloop_script).unwrap_or_default();
     format!(
-        "set -u\n{socket}{session}herdr agent list || true\nprintf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  ls -1t \"$HOME\"/.agents/runs/*/state.json 2>/dev/null | sed -n '1,{}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    pid=$(head -c {} \"$file\" | sed -n 's/.*\"pid\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)\n    alive=0\n    if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then alive=1; fi\n    printf '\\036HERDR_FLEET_RUN_V1:%s\\036\\n' \"$alive\"\n    head -c {} \"$file\"\n    printf '\\n'\n  done\nfi\n{aloop}printf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n",
+        "set -u\n{socket}{session}herdr agent list || true\n{groups}printf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  ls -1t \"$HOME\"/.agents/runs/*/state.json 2>/dev/null | sed -n '1,{}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    pid=$(head -c {} \"$file\" | sed -n 's/.*\"pid\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)\n    alive=0\n    if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then alive=1; fi\n    printf '\\036HERDR_FLEET_RUN_V1:%s\\036\\n' \"$alive\"\n    head -c {} \"$file\"\n    printf '\\n'\n  done\nfi\n{aloop}printf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n",
         crate::agent_runs::MAX_RUNS_PER_HOST,
         crate::agent_runs::MAX_RUN_STATE_BYTES + 1,
         crate::agent_runs::MAX_RUN_STATE_BYTES + 1,
@@ -1296,20 +2439,36 @@ fn run_ssh_program_with_timeout(
     Ok(output.stdout)
 }
 
-fn parse_remote_output(output: &[u8], include_aloop: bool) -> ParsedRemoteOutput {
+fn parse_remote_output(
+    output: &[u8],
+    include_groups: bool,
+    include_aloop: bool,
+) -> ParsedRemoteOutput {
     let Some(marker_at) = output
         .windows(REMOTE_RUNS_MARKER.len())
         .position(|window| window == REMOTE_RUNS_MARKER)
     else {
         return (
             Err("remote output did not include the fleet read marker".into()),
+            include_groups
+                .then(|| Err("remote output did not include the group catalog marker".into())),
             Vec::new(),
             HostRuntime::default(),
             include_aloop
                 .then(|| Err("remote output did not include the fleet read marker".into())),
         );
     };
-    let response = serde_json::from_slice(output[..marker_at].trim_ascii())
+    let pre_runs = &output[..marker_at];
+    let (agent_bytes, group_bytes) = pre_runs
+        .windows(REMOTE_GROUPS_MARKER.len())
+        .position(|window| window == REMOTE_GROUPS_MARKER)
+        .map_or((pre_runs, None), |groups_marker_at| {
+            (
+                &pre_runs[..groups_marker_at],
+                Some(&pre_runs[groups_marker_at + REMOTE_GROUPS_MARKER.len()..]),
+            )
+        });
+    let response = serde_json::from_slice(agent_bytes.trim_ascii())
         .map_err(|error| format!("invalid remote agent-list JSON: {error}"))
         .and_then(|value| {
             crate::api::client::parse_response_value(value)
@@ -1319,6 +2478,22 @@ fn parse_remote_output(output: &[u8], include_aloop: bool) -> ParsedRemoteOutput
                     other => Err(format!("unexpected agent-list response: {other:?}")),
                 })
         });
+    let groups = include_groups.then(|| {
+        group_bytes
+            .ok_or_else(|| "remote output did not include the group catalog marker".to_string())
+            .and_then(|bytes| {
+                serde_json::from_slice(bytes.trim_ascii())
+                    .map_err(|error| format!("invalid remote group-catalog JSON: {error}"))
+            })
+            .and_then(|value| {
+                crate::api::client::parse_response_value(value)
+                    .map_err(|error| error.to_string())
+                    .and_then(|response| match response.result {
+                        ResponseResult::GroupHostSnapshot { snapshot } => Ok(snapshot),
+                        other => Err(format!("unexpected group snapshot response: {other:?}")),
+                    })
+            })
+    });
     let trailer = &output[marker_at + REMOTE_RUNS_MARKER.len()..];
     let (state_bytes, runtime) = trailer
         .windows(REMOTE_HOST_MARKER.len())
@@ -1348,16 +2523,19 @@ fn parse_remote_output(output: &[u8], include_aloop: bool) -> ParsedRemoteOutput
             .ok_or_else(|| "remote output did not include the aloop marker".to_string())
     });
     let runs = parse_remote_run_records(state_bytes);
-    (response, runs, runtime, aloop)
+    (response, groups, runs, runtime, aloop)
 }
 
 fn parse_remote_run_records(bytes: &[u8]) -> Vec<Result<crate::agent_runs::Observation, String>> {
     let mut records = Vec::new();
     let mut remaining = bytes;
-    while let Some(marker_at) = remaining
-        .windows(REMOTE_RUN_RECORD_MARKER.len())
-        .position(|window| window == REMOTE_RUN_RECORD_MARKER)
-    {
+    while records.len() < crate::agent_runs::MAX_RUNS_PER_HOST {
+        let Some(marker_at) = remaining
+            .windows(REMOTE_RUN_RECORD_MARKER.len())
+            .position(|window| window == REMOTE_RUN_RECORD_MARKER)
+        else {
+            break;
+        };
         remaining = &remaining[marker_at + REMOTE_RUN_RECORD_MARKER.len()..];
         let Some(header_end) = remaining.windows(2).position(|window| window == b"\x1e\n") else {
             records.push(Err("invalid remote run marker".to_string()));
@@ -2477,6 +3655,7 @@ mod tests {
             HostEvidence {
                 host,
                 agents: self.agents.clone(),
+                groups: Some(Err("group catalog unavailable in fake reader".into())),
                 runs: Vec::new(),
                 runtime: self.runtime.clone(),
                 aloop: None,
@@ -2493,6 +3672,7 @@ mod tests {
             HostEvidence {
                 host,
                 agents: self.agents.clone(),
+                groups: Some(Err("group catalog unavailable in fake reader".into())),
                 runs: Vec::new(),
                 runtime: self.runtime.clone(),
                 aloop: None,
@@ -2539,6 +3719,916 @@ mod tests {
             "revision": 1
         }))
         .unwrap()
+    }
+
+    fn group_catalog(
+        host: &str,
+        target: &str,
+        seed: u8,
+        revision: u64,
+        groups: Vec<crate::groups::GroupRecord>,
+    ) -> GroupCatalog {
+        GroupCatalog {
+            host: host.into(),
+            target: target.into(),
+            local: false,
+            session: Some("agents".into()),
+            socket: Some("/tmp/herdr.sock".into()),
+            state: GroupCatalogState::Fresh,
+            observed_authority_id: Some(crate::groups::AuthorityId::from_random_bytes([seed; 16])),
+            snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                authority_id: crate::groups::AuthorityId::from_random_bytes([seed; 16]),
+                revision,
+                groups,
+                memberships: Vec::new(),
+            }),
+            error: None,
+        }
+    }
+
+    fn group_record(
+        seed: u8,
+        local: u64,
+        revision: u64,
+        deleted: bool,
+    ) -> crate::groups::GroupRecord {
+        crate::groups::GroupRecord {
+            id: crate::groups::GroupId {
+                owner: crate::groups::AuthorityId::from_random_bytes([seed; 16]),
+                local,
+            },
+            revision,
+            state: if deleted {
+                crate::groups::GroupState::Deleted
+            } else {
+                crate::groups::GroupState::Active {
+                    name: "Work".into(),
+                }
+            },
+        }
+    }
+
+    fn ledger_with_deleted_group() -> AuthorityAcceptanceLedger {
+        let mut ledger = AuthorityAcceptanceLedger::default();
+        ledger
+            .advance(
+                group_catalog(
+                    "history",
+                    "ignored",
+                    1,
+                    2,
+                    vec![group_record(1, 1, 2, true)],
+                )
+                .snapshot
+                .as_ref()
+                .expect("authority snapshot"),
+            )
+            .expect("accept tombstone");
+        ledger
+    }
+
+    fn assert_rolled_back_group_is_not_fresh(
+        ledger: &AuthorityAcceptanceLedger,
+        host: &str,
+        target: &str,
+    ) {
+        let mut rolled_back = Snapshot {
+            polled: true,
+            group_catalogs: vec![group_catalog(
+                host,
+                target,
+                1,
+                1,
+                vec![group_record(1, 1, 1, false)],
+            )],
+            ..Snapshot::default()
+        };
+        let candidate = rolled_back.admit_group_catalogs(ledger);
+
+        assert_eq!(candidate, *ledger);
+        assert_eq!(
+            rolled_back.group_catalogs[0].state,
+            GroupCatalogState::Stale
+        );
+        assert!(matches!(
+            ledger
+                .accepted(&crate::groups::AuthorityId::from_random_bytes([1; 16]))
+                .expect("accepted tombstone history")
+                .groups[0]
+                .state,
+            crate::groups::GroupState::Deleted
+        ));
+        assert!(matches!(
+            rolled_back.group_catalogs[0]
+                .snapshot
+                .as_ref()
+                .expect("current rolled-back answer")
+                .groups[0]
+                .state,
+            crate::groups::GroupState::Active { .. }
+        ));
+    }
+
+    fn fleet_with_history_connection(target: &str) -> FleetConfig {
+        FleetConfig {
+            hosts: vec![FleetHostConfig {
+                name: "office".into(),
+                target: target.into(),
+                local: false,
+                session: Some("agents".into()),
+                socket: Some("/tmp/herdr.sock".into()),
+            }],
+            ..FleetConfig::default()
+        }
+    }
+
+    fn app_config_with_fleet(fleet: FleetConfig) -> crate::config::Config {
+        let mut config = crate::config::Config::default();
+        config.remote.fleet = fleet;
+        config
+    }
+
+    fn app_with_retained_deleted_group(
+        config: &crate::config::Config,
+        path: &Path,
+    ) -> crate::app::App {
+        save_authority_acceptance_ledger(path, &ledger_with_deleted_group())
+            .expect("persist accepted tombstone");
+        let mut app = crate::app::App::new(
+            config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.authority_acceptance_ledger_path = Some(path.to_path_buf());
+        app.authority_acceptance_ledger =
+            load_authority_acceptance_ledger(path).expect("load retained history into app");
+        app
+    }
+
+    fn install_snapshot_and_finish_ledger_write(app: &mut crate::app::App, mut snapshot: Snapshot) {
+        snapshot.config_generation = app.fleet_poller_config.generation();
+        assert!(!app.install_fleet_snapshot_for_test(snapshot));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let event = loop {
+            match app.event_rx.try_recv() {
+                Ok(event) => break event,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("ledger completion unavailable: {error}"),
+            }
+        };
+        assert!(matches!(
+            event,
+            crate::events::AppEvent::AuthorityAcceptanceLedgerPersisted { .. }
+                | crate::events::AppEvent::AuthorityAcceptanceLedgerReconciled { .. }
+        ));
+        app.handle_internal_event_with_render_impact(event);
+        assert!(!app.authority_acceptance_ledger_write_in_flight);
+    }
+
+    fn assert_rolled_back_poll_is_not_fresh(app: &mut crate::app::App, path: &Path, target: &str) {
+        let rolled_back = Snapshot {
+            polled: true,
+            group_catalogs: vec![group_catalog(
+                "office",
+                target,
+                1,
+                1,
+                vec![group_record(1, 1, 1, false)],
+            )],
+            ..Snapshot::default()
+        };
+        install_snapshot_and_finish_ledger_write(app, rolled_back);
+
+        let shown = &app.state.fleet_snapshot.group_catalogs[0];
+        assert_eq!(shown.state, GroupCatalogState::Stale);
+        assert!(matches!(
+            shown
+                .snapshot
+                .as_ref()
+                .expect("current rolled-back answer")
+                .groups[0]
+                .state,
+            crate::groups::GroupState::Active { .. }
+        ));
+        let durable =
+            load_authority_acceptance_ledger(path).expect("reload history after rolled-back poll");
+        assert!(matches!(
+            durable
+                .accepted(&crate::groups::AuthorityId::from_random_bytes([1; 16]))
+                .expect("accepted tombstone history")
+                .groups[0]
+                .state,
+            crate::groups::GroupState::Deleted
+        ));
+    }
+
+    #[test]
+    fn deleted_group_stays_deleted_after_connection_remove_and_readd() {
+        let dir = run_fixture_dir("group-history-remove-readd");
+        let path = dir.join("remote-group-catalogs.json");
+        let fleet = fleet_with_history_connection("machine-a");
+        let config = app_config_with_fleet(fleet.clone());
+        let mut app = app_with_retained_deleted_group(&config, &path);
+
+        app.apply_live_config_for_test(&crate::config::Config::default());
+        install_snapshot_and_finish_ledger_write(&mut app, Snapshot::unpolled(&[]));
+        app.apply_live_config_for_test(&config);
+        assert_rolled_back_poll_is_not_fresh(&mut app, &path, "machine-a");
+        std::fs::remove_dir_all(dir).expect("remove remove-readd fixture");
+    }
+
+    #[test]
+    fn deleted_group_stays_deleted_after_connection_repoint() {
+        let dir = run_fixture_dir("group-history-repoint");
+        let path = dir.join("remote-group-catalogs.json");
+        let config = app_config_with_fleet(fleet_with_history_connection("machine-a"));
+        let mut app = app_with_retained_deleted_group(&config, &path);
+        let repointed = app_config_with_fleet(fleet_with_history_connection("machine-b"));
+
+        app.apply_live_config_for_test(&repointed);
+        install_snapshot_and_finish_ledger_write(
+            &mut app,
+            Snapshot::unpolled(&repointed.remote.fleet.hosts),
+        );
+        assert_rolled_back_poll_is_not_fresh(&mut app, &path, "machine-b");
+        std::fs::remove_dir_all(dir).expect("remove repoint fixture");
+    }
+
+    struct PanickingReader;
+
+    impl HostReader for PanickingReader {
+        fn fetch_local(
+            &self,
+            _host: FleetHostConfig,
+            _timeout: Duration,
+            _include_aloop: bool,
+        ) -> HostEvidence {
+            panic!("fixture poll panic")
+        }
+
+        fn fetch_remote(
+            &self,
+            _host: FleetHostConfig,
+            _timeout: Duration,
+            _include_aloop: bool,
+        ) -> HostEvidence {
+            panic!("fixture poll panic")
+        }
+    }
+
+    #[test]
+    fn deleted_group_stays_deleted_after_poll_worker_panic() {
+        let dir = run_fixture_dir("group-history-poll-panic");
+        let path = dir.join("remote-group-catalogs.json");
+        let fleet = fleet_with_history_connection("machine-a");
+        let configured = fleet.hosts[0].clone();
+        let config = app_config_with_fleet(fleet.clone());
+        let mut app = app_with_retained_deleted_group(&config, &path);
+
+        let panicked = collect_snapshot_with(&PanickingReader, &[configured], &fleet);
+        assert_eq!(panicked.group_catalogs[0].target, "machine-a");
+        assert_eq!(
+            panicked.group_catalogs[0].state,
+            GroupCatalogState::Unavailable
+        );
+
+        install_snapshot_and_finish_ledger_write(&mut app, panicked);
+        assert_rolled_back_poll_is_not_fresh(&mut app, &path, "machine-a");
+        std::fs::remove_dir_all(dir).expect("remove poll panic fixture");
+    }
+
+    #[test]
+    fn deleted_group_stays_deleted_after_invalid_fleet_configuration() {
+        let dir = run_fixture_dir("group-history-invalid-config");
+        let path = dir.join("remote-group-catalogs.json");
+        let invalid = FleetConfig {
+            self_name: Some("invalid::self".into()),
+            ..FleetConfig::default()
+        };
+        let invalid_config = app_config_with_fleet(invalid.clone());
+        let mut app = app_with_retained_deleted_group(&invalid_config, &path);
+        let unusable = poll_without_generation(&invalid);
+        assert!(unusable.group_catalogs.is_empty());
+
+        install_snapshot_and_finish_ledger_write(&mut app, unusable);
+        let repaired = app_config_with_fleet(fleet_with_history_connection("machine-a"));
+        app.apply_live_config_for_test(&repaired);
+        assert_rolled_back_poll_is_not_fresh(&mut app, &path, "machine-a");
+        std::fs::remove_dir_all(dir).expect("remove invalid config fixture");
+    }
+
+    #[test]
+    fn deleted_group_stays_deleted_after_authority_a_then_b_then_rolled_back_a() {
+        let dir = run_fixture_dir("group-history-a-b-a");
+        let path = dir.join("remote-group-catalogs.json");
+        let mut ledger = ledger_with_deleted_group();
+        let authority_b = group_catalog(
+            "office",
+            "machine-b",
+            2,
+            1,
+            vec![group_record(2, 1, 1, false)],
+        );
+        ledger
+            .advance(authority_b.snapshot.as_ref().expect("authority B snapshot"))
+            .expect("accept authority B");
+        save_authority_acceptance_ledger(&path, &ledger).expect("persist both authority histories");
+
+        let retained =
+            load_authority_acceptance_ledger(&path).expect("load after authority switch");
+        assert!(retained
+            .accepted(&crate::groups::AuthorityId::from_random_bytes([2; 16]))
+            .is_some());
+        assert_rolled_back_group_is_not_fresh(&retained, "office", "machine-b");
+        std::fs::remove_dir_all(dir).expect("remove authority switch fixture");
+    }
+
+    #[test]
+    fn rejected_catalog_retains_the_last_accepted_snapshot_as_stale() {
+        let previous_catalog = group_catalog(
+            "office",
+            "machine-a",
+            1,
+            2,
+            vec![group_record(1, 1, 2, true)],
+        );
+        let mut ledger = AuthorityAcceptanceLedger::default();
+        ledger
+            .advance(
+                previous_catalog
+                    .snapshot
+                    .as_ref()
+                    .expect("accepted snapshot"),
+            )
+            .expect("accept retained snapshot");
+        let mut incoming = Snapshot {
+            group_catalogs: vec![group_catalog("office", "machine-a", 1, 3, Vec::new())],
+            ..Snapshot::default()
+        };
+
+        let candidate = incoming.admit_group_catalogs(&ledger);
+
+        assert_eq!(candidate, ledger);
+        assert_eq!(incoming.group_catalogs[0].state, GroupCatalogState::Stale);
+        assert!(incoming.group_catalogs[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("lost observed tombstone")));
+    }
+
+    #[test]
+    fn stale_catalog_retention_keys_on_authority_and_connection_not_alias() {
+        let previous_catalog = group_catalog(
+            "office",
+            "machine-a",
+            1,
+            1,
+            vec![group_record(1, 1, 1, false)],
+        );
+        let previous = Snapshot {
+            group_catalogs: vec![previous_catalog.clone()],
+            ..Snapshot::default()
+        };
+        let mut renamed_alias = previous_catalog.clone();
+        renamed_alias.host = "laptop".into();
+        renamed_alias.snapshot = None;
+        renamed_alias.state = GroupCatalogState::Unavailable;
+        renamed_alias.error = Some("offline".into());
+        let mut same_connection = Snapshot {
+            group_catalogs: vec![renamed_alias],
+            ..Snapshot::default()
+        };
+        same_connection.retain_unavailable_group_catalogs_from(&previous);
+        assert_eq!(
+            same_connection.group_catalogs[0].state,
+            GroupCatalogState::Stale
+        );
+        assert_eq!(
+            same_connection.group_catalogs[0].snapshot,
+            previous_catalog.snapshot
+        );
+
+        let mut changed_connections = Vec::new();
+        let mut target = same_connection.group_catalogs[0].clone();
+        target.target = "machine-b".into();
+        changed_connections.push(("target", target));
+        let mut local = same_connection.group_catalogs[0].clone();
+        local.local = true;
+        changed_connections.push(("local", local));
+        let mut session = same_connection.group_catalogs[0].clone();
+        session.session = Some("other-session".into());
+        changed_connections.push(("session", session));
+        let mut socket = same_connection.group_catalogs[0].clone();
+        socket.socket = Some("/tmp/other.sock".into());
+        changed_connections.push(("socket", socket));
+
+        for (field, mut catalog) in changed_connections {
+            catalog.snapshot = None;
+            catalog.state = GroupCatalogState::Unavailable;
+            let mut changed = Snapshot {
+                group_catalogs: vec![catalog],
+                ..Snapshot::default()
+            };
+            changed.retain_unavailable_group_catalogs_from(&previous);
+            assert!(
+                changed.group_catalogs[0].snapshot.is_none(),
+                "changing {field} must not alias the retained connection"
+            );
+            assert_eq!(
+                changed.group_catalogs[0].state,
+                GroupCatalogState::Unavailable,
+                "changing {field} must remain unavailable"
+            );
+        }
+    }
+
+    #[test]
+    fn authority_acceptance_ledger_syncs_contents_before_durable_replace() {
+        #[derive(Default)]
+        struct RecordingFile {
+            operations: Vec<&'static str>,
+        }
+
+        impl AuthorityAcceptanceLedgerTempFile for RecordingFile {
+            fn write_contents(&mut self, _contents: &[u8]) -> std::io::Result<()> {
+                self.operations.push("write_all");
+                Ok(())
+            }
+
+            fn sync_contents(&mut self) -> std::io::Result<()> {
+                self.operations.push("sync_all");
+                Ok(())
+            }
+        }
+
+        let mut file = RecordingFile::default();
+        write_authority_acceptance_ledger_contents(&mut file, b"ledger")
+            .expect("write and sync ledger contents");
+
+        assert_eq!(file.operations, ["write_all", "sync_all"]);
+    }
+
+    #[test]
+    fn overlapping_handoff_writers_cannot_narrow_accepted_history() {
+        let dir = run_fixture_dir("overlapping-handoff-ledger-writers");
+        let path = dir.join("authority-acceptance-ledger-v2.json");
+        let active = group_catalog(
+            "source",
+            "machine-a",
+            1,
+            1,
+            vec![group_record(1, 1, 1, false)],
+        );
+        let mut base = AuthorityAcceptanceLedger::default();
+        base.advance(active.snapshot.as_ref().expect("active authority snapshot"))
+            .expect("accept active group");
+        save_authority_acceptance_ledger(&path, &base).expect("persist shared handoff base");
+
+        // The old server and its replacement both load the same durable base
+        // before either completes its next write.
+        let mut old_server = load_authority_acceptance_ledger(&path).expect("old server base");
+        old_server
+            .advance(
+                group_catalog(
+                    "source",
+                    "machine-a",
+                    1,
+                    2,
+                    vec![group_record(1, 1, 2, true)],
+                )
+                .snapshot
+                .as_ref()
+                .expect("old server tombstone"),
+            )
+            .expect("old server accepts tombstone");
+        let mut replacement_server =
+            load_authority_acceptance_ledger(&path).expect("replacement server base");
+        replacement_server
+            .advance(
+                group_catalog(
+                    "replacement",
+                    "machine-b",
+                    2,
+                    1,
+                    vec![group_record(2, 1, 1, false)],
+                )
+                .snapshot
+                .as_ref()
+                .expect("replacement server advance"),
+            )
+            .expect("replacement server accepts another authority");
+
+        save_authority_acceptance_ledger(&path, &old_server)
+            .expect("old server persists tombstone");
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
+        let writer = AuthorityAcceptanceLedgerWriter::new(event_tx);
+        writer
+            .enqueue(path.clone(), replacement_server, Snapshot::default())
+            .expect("replacement queues overlapping advance");
+        let completion = event_rx
+            .blocking_recv()
+            .expect("replacement writer completion");
+        let crate::events::AppEvent::AuthorityAcceptanceLedgerPersisted {
+            ledger: replacement_memory,
+            result,
+            ..
+        } = completion
+        else {
+            panic!("expected ledger writer completion");
+        };
+        result.expect("replacement persists overlapping advance");
+
+        let durable = load_authority_acceptance_ledger(&path).expect("merged handoff history");
+        let authority_a = crate::groups::AuthorityId::from_random_bytes([1; 16]);
+        let accepted_a = durable.accepted(&authority_a).expect("authority A history");
+        assert_eq!(accepted_a.revision, 2);
+        assert!(matches!(
+            accepted_a.groups[0].state,
+            crate::groups::GroupState::Deleted
+        ));
+        assert!(durable
+            .accepted(&crate::groups::AuthorityId::from_random_bytes([2; 16]))
+            .is_some());
+        assert_eq!(replacement_memory, durable);
+
+        let mut rolled_back = Snapshot {
+            group_catalogs: vec![active],
+            ..Snapshot::default()
+        };
+        let admitted = rolled_back.admit_group_catalogs(&replacement_memory);
+        assert_eq!(admitted, replacement_memory);
+        assert_eq!(
+            rolled_back.group_catalogs[0].state,
+            GroupCatalogState::Stale
+        );
+
+        std::fs::remove_dir_all(dir).expect("remove handoff overlap fixture");
+    }
+
+    #[test]
+    fn duplicate_authority_observations_are_identity_conflicts() {
+        let mut snapshot = Snapshot {
+            group_catalogs: vec![
+                group_catalog("office", "machine-a", 1, 0, Vec::new()),
+                group_catalog("home", "machine-b", 1, 0, Vec::new()),
+            ],
+            ..Snapshot::default()
+        };
+
+        snapshot.admit_group_catalogs(&AuthorityAcceptanceLedger::default());
+
+        assert!(snapshot
+            .group_catalogs
+            .iter()
+            .all(|catalog| catalog.state == GroupCatalogState::IdentityConflict));
+        let authority = crate::groups::AuthorityId::from_random_bytes([1; 16]);
+        assert!(snapshot
+            .fresh_group_catalog(&authority)
+            .expect_err("collision cannot be routed")
+            .contains("identity conflict"));
+    }
+
+    #[test]
+    fn catalog_admission_rejects_duplicate_pane_memberships_before_routing() {
+        let authority = crate::groups::AuthorityId::from_random_bytes([36; 16]);
+        let mut catalog = group_catalog(
+            "office",
+            "machine-a",
+            36,
+            1,
+            vec![group_record(36, 1, 1, false)],
+        );
+        catalog
+            .snapshot
+            .as_mut()
+            .expect("authority snapshot")
+            .memberships = vec![
+            crate::groups::OwnedPaneMembership {
+                pane_id: "workspace:pane".into(),
+                pane_incarnation: "first-incarnation".into(),
+                membership: crate::groups::PaneGroupMembership::default(),
+            },
+            crate::groups::OwnedPaneMembership {
+                pane_id: "workspace:pane".into(),
+                pane_incarnation: "second-incarnation".into(),
+                membership: crate::groups::PaneGroupMembership::default(),
+            },
+        ];
+        let mut snapshot = Snapshot {
+            group_catalogs: vec![catalog],
+            ..Snapshot::default()
+        };
+
+        snapshot.admit_group_catalogs(&AuthorityAcceptanceLedger::default());
+        let router = AuthorityMutationRouter::default();
+        router.observe_snapshot(&snapshot);
+
+        let catalog = &snapshot.group_catalogs[0];
+        assert_eq!(catalog.state, GroupCatalogState::Stale);
+        assert!(catalog
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("duplicate pane membership")));
+        assert!(catalog
+            .snapshot
+            .as_ref()
+            .expect("rejected snapshot remains observable")
+            .memberships
+            .is_empty());
+        assert!(snapshot.fresh_group_catalog(&authority).is_err());
+        let pane_route_count = router
+            .route_leases
+            .lock()
+            .expect("route leases")
+            .valid
+            .keys()
+            .filter(|route| matches!(route, MutationRoute::Pane { .. }))
+            .count();
+        assert_eq!(pane_route_count, 0);
+    }
+
+    #[test]
+    fn reload_keeping_both_connection_aliases_preserves_identity_conflict() {
+        let configured_host = |name: &str| FleetHostConfig {
+            name: name.into(),
+            target: "machine-a".into(),
+            session: Some("agents".into()),
+            socket: Some("/tmp/herdr.sock".into()),
+            ..FleetHostConfig::default()
+        };
+        let fleet = FleetConfig {
+            hosts: vec![configured_host("office"), configured_host("duplicate")],
+            ..FleetConfig::default()
+        };
+        let authority = crate::groups::AuthorityId::from_random_bytes([1; 16]);
+        let mut snapshot = Snapshot {
+            group_catalogs: vec![
+                group_catalog("office", "machine-a", 1, 1, Vec::new()),
+                group_catalog("duplicate", "machine-a", 1, 1, Vec::new()),
+            ],
+            ..Snapshot::default()
+        };
+        snapshot.admit_group_catalogs(&AuthorityAcceptanceLedger::default());
+
+        let reloaded = snapshot.reconcile_after_config_reload(&fleet, 2);
+
+        assert_eq!(reloaded.group_catalogs.len(), 2);
+        assert!(reloaded.authority_has_identity_conflict(&authority));
+        assert!(reloaded
+            .group_catalogs
+            .iter()
+            .all(|catalog| catalog.state == GroupCatalogState::IdentityConflict));
+    }
+
+    #[test]
+    fn reload_renaming_both_connection_aliases_preserves_identity_conflict() {
+        let configured_host = |name: &str| FleetHostConfig {
+            name: name.into(),
+            target: "machine-a".into(),
+            session: Some("agents".into()),
+            socket: Some("/tmp/herdr.sock".into()),
+            ..FleetHostConfig::default()
+        };
+        let fleet = FleetConfig {
+            hosts: vec![configured_host("work"), configured_host("backup")],
+            ..FleetConfig::default()
+        };
+        let authority = crate::groups::AuthorityId::from_random_bytes([1; 16]);
+        let mut snapshot = Snapshot {
+            group_catalogs: vec![
+                group_catalog("office", "machine-a", 1, 1, Vec::new()),
+                group_catalog("duplicate", "machine-a", 1, 1, Vec::new()),
+            ],
+            ..Snapshot::default()
+        };
+        snapshot.admit_group_catalogs(&AuthorityAcceptanceLedger::default());
+
+        let reloaded = snapshot.reconcile_after_config_reload(&fleet, 2);
+
+        assert_eq!(
+            reloaded
+                .group_catalogs
+                .iter()
+                .map(|catalog| catalog.host.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["work", "backup"])
+        );
+        assert!(reloaded.authority_has_identity_conflict(&authority));
+    }
+
+    #[test]
+    fn legacy_catalog_cache_migrates_history_without_connection_filtering() {
+        let dir = run_fixture_dir("group-catalog-cache");
+        let path = dir.join("remote-group-catalogs.json");
+        let accepted = group_catalog(
+            "office",
+            "machine-a",
+            1,
+            2,
+            vec![group_record(1, 1, 2, true)],
+        );
+        let accepted = accepted.snapshot.expect("accepted snapshot");
+        let file = LegacyGroupCatalogCacheFile {
+            version: 1,
+            entries: vec![
+                LegacyGroupCatalogCacheEntry {
+                    target: "machine-a".into(),
+                    local: false,
+                    session: Some("agents".into()),
+                    socket: Some("/tmp/herdr.sock".into()),
+                    snapshot: accepted.clone(),
+                },
+                LegacyGroupCatalogCacheEntry {
+                    target: "machine-b".into(),
+                    local: false,
+                    session: None,
+                    socket: None,
+                    snapshot: accepted,
+                },
+            ],
+        };
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&file).expect("serialize legacy cache"),
+        )
+        .expect("write legacy cache");
+
+        let retained = load_authority_acceptance_ledger(&path).expect("migrate legacy cache");
+        assert_rolled_back_group_is_not_fresh(&retained, "renamed", "machine-b");
+        std::fs::remove_dir_all(dir).expect("remove catalog cache fixture");
+    }
+
+    #[test]
+    fn unusable_poll_cannot_erase_retained_tombstone_history() {
+        let dir = run_fixture_dir("unusable-poll-retains-tombstone");
+        let path = dir.join("remote-group-catalogs.json");
+        let fleet = fleet_with_history_connection("machine-a");
+        let config = app_config_with_fleet(fleet.clone());
+        let mut app = app_with_retained_deleted_group(&config, &path);
+        let ledger = ledger_with_deleted_group();
+
+        let not_polled = Snapshot::unpolled(&fleet.hosts);
+        assert!(not_polled.group_catalogs.is_empty());
+        install_snapshot_and_finish_ledger_write(&mut app, not_polled);
+
+        let mut unusable_config = fleet.clone();
+        unusable_config.timeout_ms = 1;
+        let unusable_poll = poll_without_generation(&unusable_config);
+        assert!(unusable_poll.polled);
+        assert!(unusable_poll.group_catalogs.is_empty());
+        assert!(unusable_poll.hosts.iter().any(|host| {
+            host.name == "office"
+                && host.target == "machine-a"
+                && host.session.as_deref() == Some("agents")
+                && host.socket.as_deref() == Some("/tmp/herdr.sock")
+        }));
+        install_snapshot_and_finish_ledger_write(&mut app, unusable_poll);
+
+        let retained = load_authority_acceptance_ledger(&path)
+            .expect("load retained history after repairing config");
+        assert_eq!(retained, ledger);
+        assert_rolled_back_poll_is_not_fresh(&mut app, &path, "machine-a");
+
+        std::fs::remove_dir_all(dir).expect("remove unusable poll fixture");
+    }
+
+    #[test]
+    fn accepted_history_survives_a_connection_switching_authorities() {
+        let mut ledger = ledger_with_deleted_group();
+        let authority_b = group_catalog(
+            "office",
+            "machine-a",
+            2,
+            1,
+            vec![group_record(2, 1, 1, false)],
+        );
+        ledger
+            .advance(authority_b.snapshot.as_ref().expect("authority B snapshot"))
+            .expect("accept authority B");
+
+        let dir = run_fixture_dir("authority-switch-cache");
+        let path = dir.join("remote-group-catalogs.json");
+        save_authority_acceptance_ledger(&path, &ledger).expect("persist both authority histories");
+        let retained_history = load_authority_acceptance_ledger(&path)
+            .expect("load independent histories for the connection");
+        assert!(retained_history
+            .accepted(&crate::groups::AuthorityId::from_random_bytes([2; 16]))
+            .is_some());
+        assert_rolled_back_group_is_not_fresh(&retained_history, "office", "machine-a");
+        std::fs::remove_dir_all(dir).expect("remove authority switch cache fixture");
+    }
+
+    #[test]
+    fn retained_history_does_not_conflict_with_a_current_authority_report() {
+        let authority_a = crate::groups::AuthorityId::from_random_bytes([1; 16]);
+        let authority_b = crate::groups::AuthorityId::from_random_bytes([2; 16]);
+        let mut x_reports_a = Snapshot {
+            group_catalogs: vec![group_catalog(
+                "x",
+                "machine-x",
+                1,
+                1,
+                vec![group_record(1, 1, 1, false)],
+            )],
+            ..Snapshot::default()
+        };
+        let ledger = x_reports_a.admit_group_catalogs(&AuthorityAcceptanceLedger::default());
+        let mut x_reports_b = Snapshot {
+            group_catalogs: vec![group_catalog(
+                "x",
+                "machine-x",
+                2,
+                1,
+                vec![group_record(2, 1, 1, false)],
+            )],
+            ..Snapshot::default()
+        };
+        let ledger = x_reports_b.admit_group_catalogs(&ledger);
+        assert_eq!(x_reports_b.group_catalogs.len(), 1);
+
+        let mut y_reports_a = Snapshot {
+            group_catalogs: vec![
+                group_catalog("x", "machine-x", 2, 2, vec![group_record(2, 1, 2, false)]),
+                group_catalog("y", "machine-y", 1, 2, vec![group_record(1, 1, 2, false)]),
+            ],
+            ..Snapshot::default()
+        };
+        let ledger = y_reports_a.admit_group_catalogs(&ledger);
+
+        let current_a = y_reports_a
+            .fresh_group_catalog(&authority_a)
+            .expect("Y currently reports authority A");
+        assert_eq!(current_a.host, "y");
+        let current_b = y_reports_a
+            .fresh_group_catalog(&authority_b)
+            .expect("X currently reports authority B");
+        assert_eq!(current_b.host, "x");
+        assert!(!y_reports_a.authority_has_identity_conflict(&authority_a));
+        assert_eq!(y_reports_a.group_catalogs.len(), 2);
+        assert!(ledger.accepted(&authority_a).is_some());
+        assert!(ledger.accepted(&authority_b).is_some());
+    }
+
+    #[test]
+    fn authority_acceptance_ledger_rejects_unreadable_or_conflicting_history() {
+        let dir = run_fixture_dir("invalid-group-catalog-cache");
+        let path = dir.join("remote-group-catalogs.json");
+
+        std::fs::write(&path, b"not json").expect("write corrupt cache");
+        assert!(load_authority_acceptance_ledger(&path).is_err());
+
+        let snapshot = group_catalog(
+            "office",
+            "machine-a",
+            1,
+            2,
+            vec![group_record(1, 1, 2, false)],
+        );
+        let mut duplicate = snapshot.clone();
+        duplicate.snapshot.as_mut().expect("snapshot").groups[0].state =
+            crate::groups::GroupState::Active {
+                name: "Focus".into(),
+            };
+        let file = AuthorityAcceptanceLedgerFile {
+            version: AUTHORITY_ACCEPTANCE_LEDGER_VERSION,
+            authorities: vec![
+                snapshot.snapshot.expect("first snapshot"),
+                duplicate.snapshot.expect("conflicting snapshot"),
+            ],
+        };
+        std::fs::write(&path, serde_json::to_vec(&file).expect("serialize cache"))
+            .expect("write ambiguous cache");
+        assert!(load_authority_acceptance_ledger(&path).is_err());
+
+        std::fs::remove_dir_all(dir).expect("remove catalog cache fixture");
+    }
+
+    #[test]
+    fn durable_history_quarantine_preserves_observed_identity_conflicts() {
+        let mut snapshot = Snapshot {
+            group_catalogs: vec![
+                group_catalog("one", "machine-a", 1, 2, Vec::new()),
+                group_catalog("two", "machine-b", 1, 2, Vec::new()),
+            ],
+            ..Snapshot::default()
+        };
+        snapshot.admit_group_catalogs(&AuthorityAcceptanceLedger::default());
+        snapshot.reject_group_catalogs_without_durable_history("retained history is unreadable");
+
+        let authority = crate::groups::AuthorityId::from_random_bytes([1; 16]);
+        assert!(snapshot.authority_has_identity_conflict(&authority));
+        assert!(snapshot.group_catalogs.iter().all(|catalog| {
+            catalog.state == GroupCatalogState::IdentityConflict
+                && catalog.authority_id() == Some(&authority)
+                && catalog.snapshot.is_some()
+        }));
     }
 
     #[test]
@@ -2989,6 +5079,7 @@ mod tests {
         );
 
         assert_eq!(snapshot.hosts[0].state, HostState::Reachable);
+        assert!(snapshot.group_catalogs.is_empty());
         assert_eq!(reader.local_calls.load(Ordering::Relaxed), 0);
         assert_eq!(reader.remote_calls.load(Ordering::Relaxed), 0);
     }
@@ -3195,6 +5286,41 @@ mod tests {
         std::fs::remove_dir_all(root).expect("remove oversized-state fixture");
     }
 
+    #[test]
+    fn remote_run_parser_reapplies_the_record_count_cap() {
+        let state = serde_json::to_vec(&serde_json::json!({
+            "schema": 1,
+            "run_id": "ra-260826-test-a1b2c3d",
+            "host": "ub2",
+            "agent": "codex",
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+            "label": "[cx]",
+            "task": "test",
+            "cwd": "/tmp/test",
+            "repo": "repo",
+            "branch": "feat/test",
+            "pid": 1,
+            "started_at": "2026-08-26T14:00:00Z",
+            "last_heartbeat": "2026-08-26T14:00:01Z",
+            "phase": "implement",
+            "state": "active"
+        }))
+        .expect("run state JSON");
+        let mut remote = Vec::new();
+        for _ in 0..crate::agent_runs::MAX_RUNS_PER_HOST + 5 {
+            remote.extend_from_slice(REMOTE_RUN_RECORD_MARKER);
+            remote.extend_from_slice(b"1\x1e\n");
+            remote.extend_from_slice(&state);
+            remote.push(b'\n');
+        }
+
+        let records = parse_remote_run_records(&remote);
+
+        assert_eq!(records.len(), crate::agent_runs::MAX_RUNS_PER_HOST);
+        assert!(records.iter().all(Result::is_ok));
+    }
+
     #[cfg(unix)]
     #[test]
     fn ssh_timeout_does_not_wait_for_descendant_pipe_holders() {
@@ -3297,6 +5423,7 @@ mod tests {
             vec![HostEvidence {
                 host: configured_host.clone(),
                 agents: Ok(Vec::new()),
+                groups: Some(Err("group catalog unavailable in run fixture".into())),
                 runs: runs.into_iter().map(Ok).collect(),
                 runtime: HostRuntime::default(),
                 aloop: None,
@@ -3384,6 +5511,7 @@ mod tests {
             vec![HostEvidence {
                 host: configured_host.clone(),
                 agents: Ok(Vec::new()),
+                groups: Some(Err("group catalog unavailable in run fixture".into())),
                 runs: vec![rejected],
                 runtime: HostRuntime::default(),
                 aloop: None,
@@ -3443,8 +5571,9 @@ mod tests {
             serde_json::to_vec(&run).unwrap(),
         ]
         .concat();
-        let (agents, runs, runtime, aloop) = parse_remote_output(&output, true);
+        let (agents, groups, runs, runtime, aloop) = parse_remote_output(&output, true, true);
         assert!(agents.unwrap().is_empty());
+        assert!(matches!(groups, Some(Err(_))));
         assert_eq!(runs.len(), 1);
         assert_eq!(
             runs[0].as_ref().unwrap().state.run_id,
@@ -3462,6 +5591,17 @@ mod tests {
             "id": "x",
             "result": {"type": "agent_list", "agents": []}
         });
+        let group_response = crate::api::schema::SuccessResponse {
+            id: "groups".into(),
+            result: ResponseResult::GroupHostSnapshot {
+                snapshot: crate::groups::GroupAuthoritySnapshot {
+                    authority_id: crate::groups::AuthorityId::from_random_bytes([14; 16]),
+                    revision: 0,
+                    groups: Vec::new(),
+                    memberships: Vec::new(),
+                },
+            },
+        };
         let run = serde_json::json!({
             "schema": 1,
             "run_id": "ra-260826-test-a1b2c3d",
@@ -3483,6 +5623,8 @@ mod tests {
         });
         let output = [
             serde_json::to_vec(&agent_response).unwrap(),
+            REMOTE_GROUPS_MARKER.to_vec(),
+            serde_json::to_vec(&group_response).expect("group response JSON"),
             REMOTE_RUNS_MARKER.to_vec(),
             b"\x1eHERDR_FLEET_RUN_V1:1\x1e\n".to_vec(),
             serde_json::to_vec(&run).unwrap(),
@@ -3502,8 +5644,9 @@ mod tests {
             br#"{"version":"0.8.2","protocol":1}"#.to_vec(),
         ]
         .concat();
-        let (agents, runs, _, aloop) = parse_remote_output(&output, true);
+        let (agents, groups, runs, _, aloop) = parse_remote_output(&output, true, true);
         assert!(agents.expect("agents").is_empty());
+        assert!(groups.expect("groups requested").is_ok());
         // The last run record must not swallow the aloop block into its byte
         // budget: it parses, and the aloop data parses separately.
         assert_eq!(runs.len(), 1);
@@ -3517,10 +5660,40 @@ mod tests {
     }
 
     #[test]
+    fn remote_output_parses_aloop_without_groups() {
+        let agent_response = serde_json::json!({
+            "id": "x",
+            "result": {"type": "agent_list", "agents": []}
+        });
+        let output = [
+            serde_json::to_vec(&agent_response).expect("agent response JSON"),
+            REMOTE_RUNS_MARKER.to_vec(),
+            crate::aloop::REMOTE_ALOOP_MARKER.to_vec(),
+            crate::aloop::REMOTE_ALOOP_END_MARKER.to_vec(),
+        ]
+        .concat();
+
+        let (agents, groups, runs, runtime, aloop) = parse_remote_output(&output, false, true);
+
+        assert!(agents.expect("agents").is_empty());
+        assert!(groups.is_none());
+        assert!(runs.is_empty());
+        assert_eq!(runtime, HostRuntime::default());
+        let data = aloop.expect("aloop requested").expect("aloop parsed");
+        assert!(data.findings.is_empty());
+        assert!(data.loops.is_empty());
+    }
+
+    #[test]
     fn aloop_block_is_only_in_the_script_for_the_producer_host() {
-        let plain = remote_read_script(None, None, false);
+        let plain = remote_read_script(None, None, false, false);
         assert!(!plain.contains("HERDR_FLEET_ALOOP_V1"));
-        let with_aloop = remote_read_script(None, None, true);
+        assert!(!plain.contains("HERDR_FLEET_GROUPS_V1"));
+        let with_groups = remote_read_script(None, None, true, false);
+        assert!(with_groups.contains("HERDR_FLEET_GROUPS_V1"));
+        assert!(!with_groups.contains("HERDR_FLEET_ALOOP_V1"));
+        let with_aloop = remote_read_script(None, None, false, true);
+        assert!(!with_aloop.contains("HERDR_FLEET_GROUPS_V1"));
         assert!(with_aloop.contains("HERDR_FLEET_ALOOP_V1"));
         assert!(with_aloop.contains(".agents/aloop"));
         assert!(with_aloop.contains(&format!(
@@ -3529,6 +5702,9 @@ mod tests {
         )));
         assert!(with_aloop.contains("\"status\"[[:space:]]*:[[:space:]]*\"pending\""));
         assert!(with_aloop.contains(crate::loop_runs::LOOP_REGISTRY_RELATIVE_PATH));
+        let with_both = remote_read_script(None, None, true, true);
+        assert!(with_both.contains("HERDR_FLEET_GROUPS_V1"));
+        assert!(with_both.contains("HERDR_FLEET_ALOOP_V1"));
     }
 
     #[cfg(unix)]
@@ -3609,8 +5785,189 @@ mod tests {
     }
 
     #[test]
+    fn remote_output_parses_a_complete_group_segment() {
+        let agent_response = serde_json::json!({
+            "id": "agents",
+            "result": {"type": "agent_list", "agents": []}
+        });
+        let authority = crate::groups::AuthorityId::from_random_bytes([12; 16]);
+        let expected = crate::groups::GroupAuthoritySnapshot {
+            authority_id: authority.clone(),
+            revision: 3,
+            groups: vec![crate::groups::GroupRecord {
+                id: crate::groups::GroupId {
+                    owner: authority,
+                    local: 7,
+                },
+                revision: 3,
+                state: crate::groups::GroupState::Active {
+                    name: "Shared".into(),
+                },
+            }],
+            memberships: Vec::new(),
+        };
+        let group_response = crate::api::schema::SuccessResponse {
+            id: "groups".into(),
+            result: ResponseResult::GroupHostSnapshot {
+                snapshot: expected.clone(),
+            },
+        };
+        let output = [
+            serde_json::to_vec(&agent_response).expect("agent response JSON"),
+            REMOTE_GROUPS_MARKER.to_vec(),
+            serde_json::to_vec(&group_response).expect("group response JSON"),
+            REMOTE_RUNS_MARKER.to_vec(),
+        ]
+        .concat();
+
+        let (agents, groups, runs, runtime, aloop) = parse_remote_output(&output, true, false);
+
+        assert!(agents.expect("agent segment").is_empty());
+        assert_eq!(
+            groups.expect("groups requested").expect("group segment"),
+            expected
+        );
+        assert!(runs.is_empty());
+        assert_eq!(runtime, HostRuntime::default());
+        assert!(aloop.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_authority_mutation_uses_api_relay_framing_over_ssh() {
+        let root = run_fixture_dir("authority-mutation-relay");
+        let fake_ssh = root.join("ssh");
+        write_executable(
+            &fake_ssh,
+            r#"#!/bin/sh
+input=$(cat)
+case "$input" in *"herdr api relay"*) ;; *) exit 41 ;; esac
+case "$input" in *"group.authority_mutate"*) ;; *) exit 42 ;; esac
+case "$input" in *"HERDR_SOCKET_PATH"*) ;; *) exit 43 ;; esac
+case "$input" in *"HERDR_SESSION"*) ;; *) exit 44 ;; esac
+printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
+"#,
+        );
+        let authority = crate::groups::AuthorityId::from_random_bytes([13; 16]);
+        let catalog = GroupCatalog {
+            host: "office".into(),
+            target: "fixture".into(),
+            local: false,
+            session: Some("agents".into()),
+            socket: Some("/tmp/herdr fixture.sock".into()),
+            state: GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
+            snapshot: None,
+            error: None,
+        };
+        let request = Request {
+            id: "mutation".into(),
+            method: Method::GroupAuthorityMutate(crate::api::schema::AuthorityMutationParams {
+                expected_authority: authority.clone(),
+                forwarded: true,
+                mutation: crate::api::schema::AuthorityMutation::Delete(
+                    crate::api::schema::GroupDeleteParams {
+                        group_id: crate::groups::GroupId {
+                            owner: authority,
+                            local: 7,
+                        },
+                        expected_revision: 3,
+                    },
+                ),
+            }),
+        };
+
+        let response = route_api_request_with_ssh_program(
+            &catalog,
+            &request,
+            Duration::from_secs(2),
+            &fake_ssh,
+        )
+        .expect("fake SSH relay response");
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response).expect("response JSON"),
+            serde_json::json!({"id": "mutation", "result": {"type": "ok"}})
+        );
+        std::fs::remove_dir_all(root).expect("remove fake SSH fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authority_mutation_router_preserves_request_and_revision_order() {
+        let root = run_fixture_dir("authority-mutation-order");
+        let fake_ssh = root.join("ssh");
+        let log = root.join("requests");
+        write_executable(
+            &fake_ssh,
+            &format!(
+                "#!/bin/sh\ncat >> '{}'\nprintf '%s\\n' '{{\"id\":\"ok\",\"result\":{{\"type\":\"ok\"}}}}'\n",
+                log.display()
+            ),
+        );
+        let authority = crate::groups::AuthorityId::from_random_bytes([15; 16]);
+        let catalog = GroupCatalog {
+            host: "office".into(),
+            target: "fixture".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: GroupCatalogState::Fresh,
+            observed_authority_id: Some(authority.clone()),
+            snapshot: None,
+            error: None,
+        };
+        let request = |id: &str, expected_revision| Request {
+            id: id.into(),
+            method: Method::GroupAuthorityMutate(crate::api::schema::AuthorityMutationParams {
+                expected_authority: authority.clone(),
+                forwarded: true,
+                mutation: crate::api::schema::AuthorityMutation::Delete(
+                    crate::api::schema::GroupDeleteParams {
+                        group_id: crate::groups::GroupId {
+                            owner: authority.clone(),
+                            local: 7,
+                        },
+                        expected_revision,
+                    },
+                ),
+            }),
+        };
+        let router = AuthorityMutationRouter::with_ssh_program(fake_ssh, Duration::from_secs(2));
+        router.observe_snapshot(&Snapshot {
+            group_catalogs: vec![catalog.clone()],
+            ..Snapshot::default()
+        });
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        let (second_tx, second_rx) = std::sync::mpsc::channel();
+
+        router
+            .enqueue(catalog.clone(), 0, request("first", 3), first_tx)
+            .expect("enqueue first mutation");
+        router
+            .enqueue(catalog, 0, request("second", 4), second_tx)
+            .expect("enqueue second mutation");
+        first_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first mutation response");
+        second_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second mutation response");
+
+        let requests = std::fs::read_to_string(&log).expect("captured mutation requests");
+        let first = requests
+            .find("\"expected_revision\":3")
+            .expect("first expected revision");
+        let second = requests
+            .find("\"expected_revision\":4")
+            .expect("second expected revision");
+        assert!(first < second, "mutation queue reordered requests");
+        std::fs::remove_dir_all(root).expect("remove mutation order fixture");
+    }
+
+    #[test]
     fn remote_run_read_is_bounded_and_survives_an_unavailable_herdr_socket() {
-        let script = remote_read_script(None, None, false);
+        let script = remote_read_script(None, None, true, false);
 
         assert!(script.contains("herdr agent list || true"));
         assert!(script.contains(&format!(
@@ -3636,8 +5993,10 @@ mod tests {
                 REMOTE_RUNS_MARKER.to_vec(),
             ]
             .concat();
-            let (agents, runs, _, _) = parse_remote_output(&output, false);
+            let (agents, groups, runs, _, aloop) = parse_remote_output(&output, false, false);
             assert!(runs.is_empty());
+            assert!(groups.is_none());
+            assert!(aloop.is_none());
             FleetRow::from_agent(
                 "ub1",
                 false,
@@ -3828,6 +6187,7 @@ mod tests {
             vec![HostEvidence {
                 host: configured_host.clone(),
                 agents: Err("agent list unavailable".to_string()),
+                groups: Some(Err("group catalog unavailable".to_string())),
                 runs: Vec::new(),
                 runtime: HostRuntime::default(),
                 aloop: Some(Ok(crate::aloop::HostData::default())),
@@ -3892,7 +6252,7 @@ mod tests {
         let fleet_read = run_ssh_program_with_timeout(
             &fake_ssh,
             "fixture",
-            &remote_read_script(None, None, false),
+            &remote_read_script(None, None, true, false),
             Duration::from_secs(10),
         );
         let aloop_read = run_ssh_program_with_timeout(

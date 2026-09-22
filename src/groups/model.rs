@@ -90,6 +90,8 @@ impl PaneGroupMembership {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OwnedPaneMembership {
     pub pane_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pane_incarnation: String,
     pub membership: PaneGroupMembership,
 }
 
@@ -99,6 +101,180 @@ pub struct GroupAuthoritySnapshot {
     pub revision: u64,
     pub groups: Vec<GroupRecord>,
     pub memberships: Vec<OwnedPaneMembership>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SnapshotAdmissionError {
+    AuthorityMismatch,
+    InvalidRecord {
+        local: u64,
+    },
+    DuplicateRecord {
+        local: u64,
+    },
+    DuplicateMembership {
+        pane_id: String,
+    },
+    SnapshotRollback {
+        retained_revision: u64,
+        incoming_revision: u64,
+    },
+    SnapshotConflict {
+        revision: u64,
+    },
+    MissingRecord {
+        local: u64,
+    },
+    MissingObservedTombstone {
+        local: u64,
+    },
+    RecordRollback {
+        local: u64,
+        retained_revision: u64,
+        incoming_revision: u64,
+    },
+    RecordConflict {
+        local: u64,
+        revision: u64,
+    },
+    TombstoneRevival {
+        local: u64,
+    },
+}
+
+impl fmt::Display for SnapshotAdmissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AuthorityMismatch => f.write_str("snapshot contains a foreign group record"),
+            Self::InvalidRecord { local } => write!(f, "group {local} has an invalid revision"),
+            Self::DuplicateRecord { local } => {
+                write!(f, "snapshot contains duplicate group {local}")
+            }
+            Self::DuplicateMembership { pane_id } => {
+                write!(f, "snapshot contains duplicate pane membership {pane_id}")
+            }
+            Self::SnapshotRollback {
+                retained_revision,
+                incoming_revision,
+            } => write!(
+                f,
+                "snapshot revision rolled back from {retained_revision} to {incoming_revision}"
+            ),
+            Self::SnapshotConflict { revision } => {
+                write!(f, "snapshot conflicts at revision {revision}")
+            }
+            Self::MissingRecord { local } => write!(f, "snapshot lost observed group {local}"),
+            Self::MissingObservedTombstone { local } => {
+                write!(f, "snapshot lost observed tombstone {local}")
+            }
+            Self::RecordRollback {
+                local,
+                retained_revision,
+                incoming_revision,
+            } => write!(
+                f,
+                "group {local} revision rolled back from {retained_revision} to {incoming_revision}"
+            ),
+            Self::RecordConflict { local, revision } => {
+                write!(f, "group {local} conflicts at revision {revision}")
+            }
+            Self::TombstoneRevival { local } => {
+                write!(f, "group {local} attempts to replace an observed tombstone")
+            }
+        }
+    }
+}
+
+/// Validate a complete owner snapshot against the last snapshot accepted from
+/// that authority. Record revisions establish identity continuity; the
+/// authority revision is only an additional rollback check.
+pub(crate) fn admit_authority_snapshot(
+    retained: Option<&GroupAuthoritySnapshot>,
+    incoming: &GroupAuthoritySnapshot,
+) -> Result<(), SnapshotAdmissionError> {
+    let mut incoming_by_local = BTreeMap::new();
+    for record in &incoming.groups {
+        if record.id.owner != incoming.authority_id {
+            return Err(SnapshotAdmissionError::AuthorityMismatch);
+        }
+        if record.id.local == 0 || record.revision == 0 || record.revision > incoming.revision {
+            return Err(SnapshotAdmissionError::InvalidRecord {
+                local: record.id.local,
+            });
+        }
+        if incoming_by_local.insert(record.id.local, record).is_some() {
+            return Err(SnapshotAdmissionError::DuplicateRecord {
+                local: record.id.local,
+            });
+        }
+    }
+    let mut incoming_memberships = BTreeMap::new();
+    for membership in &incoming.memberships {
+        if incoming_memberships
+            .insert(membership.pane_id.as_str(), membership)
+            .is_some()
+        {
+            return Err(SnapshotAdmissionError::DuplicateMembership {
+                pane_id: membership.pane_id.clone(),
+            });
+        }
+    }
+
+    let Some(retained) = retained else {
+        return Ok(());
+    };
+    if retained.authority_id != incoming.authority_id {
+        return Err(SnapshotAdmissionError::AuthorityMismatch);
+    }
+    if incoming.revision < retained.revision {
+        return Err(SnapshotAdmissionError::SnapshotRollback {
+            retained_revision: retained.revision,
+            incoming_revision: incoming.revision,
+        });
+    }
+
+    for previous in &retained.groups {
+        let Some(next) = incoming_by_local.get(&previous.id.local).copied() else {
+            return Err(if matches!(previous.state, GroupState::Deleted) {
+                SnapshotAdmissionError::MissingObservedTombstone {
+                    local: previous.id.local,
+                }
+            } else {
+                SnapshotAdmissionError::MissingRecord {
+                    local: previous.id.local,
+                }
+            });
+        };
+        if next.revision < previous.revision {
+            return Err(SnapshotAdmissionError::RecordRollback {
+                local: previous.id.local,
+                retained_revision: previous.revision,
+                incoming_revision: next.revision,
+            });
+        }
+        if next.revision == previous.revision && next != previous {
+            return Err(SnapshotAdmissionError::RecordConflict {
+                local: previous.id.local,
+                revision: next.revision,
+            });
+        }
+        if matches!(previous.state, GroupState::Deleted) && next != previous {
+            return Err(SnapshotAdmissionError::TombstoneRevival {
+                local: previous.id.local,
+            });
+        }
+    }
+    if incoming.revision == retained.revision
+        && (incoming_by_local.len() != retained.groups.len()
+            || retained.groups.iter().any(|previous| {
+                incoming_by_local.get(&previous.id.local).copied() != Some(previous)
+            }))
+    {
+        return Err(SnapshotAdmissionError::SnapshotConflict {
+            revision: incoming.revision,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,5 +579,219 @@ mod tests {
     #[test]
     fn persisted_state_rejects_revision_history_without_an_identity() {
         assert!(AuthorityState::from_persisted(authority(1), 2, 1, Vec::new()).is_err());
+    }
+
+    fn snapshot(revision: u64, records: Vec<GroupRecord>) -> GroupAuthoritySnapshot {
+        GroupAuthoritySnapshot {
+            authority_id: authority(1),
+            revision,
+            groups: records,
+            memberships: Vec::new(),
+        }
+    }
+
+    fn record(local: u64, revision: u64, state: GroupState) -> GroupRecord {
+        GroupRecord {
+            id: GroupId {
+                owner: authority(1),
+                local,
+            },
+            revision,
+            state,
+        }
+    }
+
+    fn membership(pane_id: &str, revision: u64, group_id: Option<GroupId>) -> OwnedPaneMembership {
+        OwnedPaneMembership {
+            pane_id: pane_id.into(),
+            pane_incarnation: format!("incarnation-{pane_id}"),
+            membership: PaneGroupMembership { group_id, revision },
+        }
+    }
+
+    #[test]
+    fn admission_rejects_a_newer_snapshot_that_lost_an_observed_tombstone() {
+        let retained = snapshot(2, vec![record(1, 2, GroupState::Deleted)]);
+        let incoming = snapshot(3, Vec::new());
+
+        assert_eq!(
+            admit_authority_snapshot(Some(&retained), &incoming),
+            Err(SnapshotAdmissionError::MissingObservedTombstone { local: 1 })
+        );
+    }
+
+    #[test]
+    fn admission_uses_record_revisions_and_rejects_equal_revision_conflicts() {
+        let retained = snapshot(
+            4,
+            vec![record(
+                1,
+                3,
+                GroupState::Active {
+                    name: "Work".into(),
+                },
+            )],
+        );
+        let incoming = snapshot(
+            4,
+            vec![record(
+                1,
+                3,
+                GroupState::Active {
+                    name: "Focus".into(),
+                },
+            )],
+        );
+
+        assert_eq!(
+            admit_authority_snapshot(Some(&retained), &incoming),
+            Err(SnapshotAdmissionError::RecordConflict {
+                local: 1,
+                revision: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn admission_rejects_per_record_rollback_even_when_authority_revision_advances() {
+        let retained = snapshot(
+            4,
+            vec![record(
+                1,
+                4,
+                GroupState::Active {
+                    name: "Focus".into(),
+                },
+            )],
+        );
+        let incoming = snapshot(
+            5,
+            vec![record(
+                1,
+                3,
+                GroupState::Active {
+                    name: "Work".into(),
+                },
+            )],
+        );
+
+        assert_eq!(
+            admit_authority_snapshot(Some(&retained), &incoming),
+            Err(SnapshotAdmissionError::RecordRollback {
+                local: 1,
+                retained_revision: 4,
+                incoming_revision: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn admission_accepts_an_identical_snapshot_idempotently() {
+        let retained = snapshot(
+            2,
+            vec![record(
+                1,
+                2,
+                GroupState::Active {
+                    name: "Work".into(),
+                },
+            )],
+        );
+
+        assert_eq!(admit_authority_snapshot(Some(&retained), &retained), Ok(()));
+    }
+
+    #[test]
+    fn admission_rejects_new_record_content_at_the_same_snapshot_revision() {
+        let retained = snapshot(
+            2,
+            vec![record(
+                1,
+                1,
+                GroupState::Active {
+                    name: "Work".into(),
+                },
+            )],
+        );
+        let incoming = snapshot(
+            2,
+            vec![
+                retained.groups[0].clone(),
+                record(
+                    2,
+                    2,
+                    GroupState::Active {
+                        name: "Focus".into(),
+                    },
+                ),
+            ],
+        );
+
+        assert_eq!(
+            admit_authority_snapshot(Some(&retained), &incoming),
+            Err(SnapshotAdmissionError::SnapshotConflict { revision: 2 })
+        );
+    }
+
+    #[test]
+    fn admission_reports_snapshot_rollback_before_missing_tombstones() {
+        let retained = snapshot(3, vec![record(1, 2, GroupState::Deleted)]);
+        let incoming = snapshot(1, Vec::new());
+
+        assert_eq!(
+            admit_authority_snapshot(Some(&retained), &incoming),
+            Err(SnapshotAdmissionError::SnapshotRollback {
+                retained_revision: 3,
+                incoming_revision: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn admission_rejects_duplicate_pane_memberships() {
+        let mut incoming = snapshot(0, Vec::new());
+        incoming.memberships = vec![membership("w1:p1", 0, None), membership("w1:p1", 0, None)];
+
+        assert_eq!(
+            admit_authority_snapshot(None, &incoming),
+            Err(SnapshotAdmissionError::DuplicateMembership {
+                pane_id: "w1:p1".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn admission_treats_reused_pane_addresses_as_new_membership_observations() {
+        let group_a = GroupId {
+            owner: authority(1),
+            local: 1,
+        };
+        let group_b = GroupId {
+            owner: authority(1),
+            local: 2,
+        };
+        let mut retained = snapshot(2, Vec::new());
+        retained.memberships = vec![membership("w1:p1", 5, Some(group_a.clone()))];
+        let mut rollback = retained.clone();
+        rollback.memberships = vec![membership("w1:p1", 4, Some(group_a))];
+        let mut conflict = retained.clone();
+        conflict.memberships = vec![membership("w1:p1", 5, Some(group_b))];
+
+        assert_eq!(admit_authority_snapshot(Some(&retained), &rollback), Ok(()));
+        assert_eq!(admit_authority_snapshot(Some(&retained), &conflict), Ok(()));
+    }
+
+    #[test]
+    fn admission_accepts_membership_advance_without_authority_revision_change() {
+        let mut retained = snapshot(2, Vec::new());
+        retained.memberships = vec![membership("w1:p1", 5, None)];
+        let mut incoming = retained.clone();
+        incoming.memberships = vec![membership("w1:p1", 6, None)];
+        incoming.memberships.push(membership("w1:p2", 1, None));
+
+        assert_eq!(admit_authority_snapshot(Some(&retained), &incoming), Ok(()));
+
+        incoming.memberships.remove(0);
+        assert_eq!(admit_authority_snapshot(Some(&retained), &incoming), Ok(()));
     }
 }
