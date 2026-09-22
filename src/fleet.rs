@@ -3375,7 +3375,10 @@ mod tests {
 
     #[test]
     fn legacy_remote_tilde_title_ignores_matching_collector_home() {
-        let collector_home = std::env::var_os("HOME").expect("test collector HOME");
+        let _env_lock = crate::integration::integration_env_lock();
+        let collector_home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .expect("test collector HOME or USERPROFILE");
         let remote_cwd = PathBuf::from(collector_home).join("fleet-title-project");
         let agent: AgentInfo = serde_json::from_value(serde_json::json!({
             "terminal_id": "term-1",

@@ -988,6 +988,13 @@ fn aggregate_tab_agent_status(
 mod tests {
     use super::*;
 
+    fn title_test_home() -> PathBuf {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .expect("test host HOME or USERPROFILE")
+    }
+
     #[test]
     fn unreachable_fleet_host_surfaces_error_without_spawning() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1541,9 +1548,8 @@ mod tests {
 
     #[test]
     fn tab_info_label_rejects_composed_agent_and_cwd_titles_for_all_separators() {
-        let home = std::path::PathBuf::from(
-            std::env::var_os("HOME").expect("test environment should define HOME"),
-        );
+        let _env_lock = crate::integration::integration_env_lock();
+        let home = title_test_home();
         let cwd = home.join(".herdr-test");
 
         for separator in ['—', '–', '·', '|'] {
@@ -1565,9 +1571,8 @@ mod tests {
 
     #[test]
     fn tab_info_label_strips_leading_agent_from_composed_title() {
-        let home = std::path::PathBuf::from(
-            std::env::var_os("HOME").expect("test environment should define HOME"),
-        );
+        let _env_lock = crate::integration::integration_env_lock();
+        let home = title_test_home();
         let (mut app, terminal_id) = title_test_app();
         configure_title_test_terminal(
             &mut app,
@@ -1596,9 +1601,8 @@ mod tests {
 
     #[test]
     fn tab_info_label_rejects_composed_agent_and_cwd_title_case_insensitively() {
-        let home = std::path::PathBuf::from(
-            std::env::var_os("HOME").expect("test environment should define HOME"),
-        );
+        let _env_lock = crate::integration::integration_env_lock();
+        let home = title_test_home();
         let (mut app, terminal_id) = title_test_app();
         configure_title_test_terminal(
             &mut app,
@@ -1613,9 +1617,8 @@ mod tests {
 
     #[test]
     fn tab_info_label_rejects_empty_terminal_titles() {
-        let home = std::path::PathBuf::from(
-            std::env::var_os("HOME").expect("test environment should define HOME"),
-        );
+        let _env_lock = crate::integration::integration_env_lock();
+        let home = title_test_home();
 
         for title in ["", "   "] {
             let (mut app, terminal_id) = title_test_app();
@@ -1647,9 +1650,8 @@ mod tests {
 
     #[test]
     fn tab_info_label_rejects_full_and_tilde_cwd_titles() {
-        let home = std::path::PathBuf::from(
-            std::env::var_os("HOME").expect("test environment should define HOME"),
-        );
+        let _env_lock = crate::integration::integration_env_lock();
+        let home = title_test_home();
         let cwd = home.join("Repos/herdr-test");
         let relative = cwd.strip_prefix(&home).unwrap().display().to_string();
         let expected = "Write Poem";
