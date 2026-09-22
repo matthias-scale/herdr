@@ -74,13 +74,38 @@ impl App {
             .or(self.queued_authority_acceptance_ledger.as_ref())
             .or(self.pending_authority_acceptance_ledger.as_ref())
             .unwrap_or(&self.authority_acceptance_ledger);
-        let candidate_ledger =
+        let mut candidate_ledger =
             if let Some(error) = self.authority_acceptance_ledger_error.as_deref() {
                 snapshot.reject_group_catalogs_without_durable_history(error);
                 admission_base.clone()
             } else {
                 snapshot.admit_group_catalogs(admission_base)
             };
+        if candidate_ledger == self.authority_acceptance_ledger {
+            if let Some(path) = self.authority_acceptance_ledger_path.as_deref() {
+                match crate::fleet::load_authority_acceptance_ledger(path) {
+                    Ok(mut durable_ledger) => match durable_ledger.merge(&candidate_ledger) {
+                        Ok(()) if durable_ledger != candidate_ledger => {
+                            snapshot.admit_group_catalogs(&durable_ledger);
+                            candidate_ledger = durable_ledger;
+                        }
+                        Ok(()) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, path = %path.display(), "cannot reconcile durable authority acceptance ledger");
+                            snapshot.reject_group_catalogs_without_durable_history(&format!(
+                                "durable authority acceptance ledger reconciliation failed: {error}"
+                            ));
+                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!(%error, path = %path.display(), "cannot reload durable authority acceptance ledger");
+                        snapshot.reject_group_catalogs_without_durable_history(&format!(
+                            "cannot reload durable authority acceptance ledger: {error}"
+                        ));
+                    }
+                }
+            }
+        }
         self.authority_mutation_router.observe_snapshot(&snapshot);
         if self.authority_acceptance_ledger_write_in_flight {
             self.queued_authority_acceptance_ledger = Some(candidate_ledger);
@@ -2850,6 +2875,131 @@ mod tests {
         assert_eq!(app.authority_acceptance_ledger, durable);
         assert_eq!(app.state.fleet_snapshot, presentation_after_reload);
         std::fs::remove_dir_all(root).expect("remove queued reload fixture");
+    }
+
+    #[test]
+    fn replacement_reconciles_a_retiring_writers_later_tombstone() {
+        let config = crate::config::Config::default();
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let root = std::env::temp_dir().join(format!(
+            "herdr-ledger-reverse-handoff-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let path = root.join("authority-acceptance-ledger.json");
+        app.authority_acceptance_ledger_path = Some(path.clone());
+        let authority_a = crate::groups::AuthorityId::from_random_bytes([31; 16]);
+        let authority_b = crate::groups::AuthorityId::from_random_bytes([32; 16]);
+        let catalog = |authority: &crate::groups::AuthorityId, revision, deleted| {
+            crate::fleet::GroupCatalog {
+                host: authority.to_string(),
+                target: authority.to_string(),
+                local: false,
+                session: None,
+                socket: None,
+                state: crate::fleet::GroupCatalogState::Fresh,
+                observed_authority_id: Some(authority.clone()),
+                snapshot: Some(crate::groups::GroupAuthoritySnapshot {
+                    authority_id: authority.clone(),
+                    revision,
+                    groups: vec![crate::groups::GroupRecord {
+                        id: crate::groups::GroupId {
+                            owner: authority.clone(),
+                            local: 1,
+                        },
+                        revision,
+                        state: if deleted {
+                            crate::groups::GroupState::Deleted
+                        } else {
+                            crate::groups::GroupState::Active {
+                                name: "Work".into(),
+                            }
+                        },
+                    }],
+                    memberships: Vec::new(),
+                }),
+                error: None,
+            }
+        };
+        let snapshot = |catalogs| {
+            let mut snapshot = fleet_snapshot(Vec::new());
+            snapshot.group_catalogs = catalogs;
+            snapshot
+        };
+
+        let active_a = catalog(&authority_a, 1, false);
+        let mut base = crate::fleet::AuthorityAcceptanceLedger::default();
+        base.advance(active_a.snapshot.as_ref().expect("active authority A"))
+            .expect("accept active authority A");
+        crate::fleet::save_authority_acceptance_ledger(&path, &base).expect("persist handoff base");
+        app.authority_acceptance_ledger = base.clone();
+
+        let mut retiring = base;
+        retiring
+            .advance(
+                catalog(&authority_a, 2, true)
+                    .snapshot
+                    .as_ref()
+                    .expect("authority A tombstone"),
+            )
+            .expect("retiring server accepts tombstone");
+        let (retire_tx, retire_rx) = std::sync::mpsc::channel();
+        let (retired_tx, retired_rx) = std::sync::mpsc::channel();
+        let retiring_path = path.clone();
+        let retiring_writer = std::thread::spawn(move || {
+            retire_rx.recv().expect("release retiring writer");
+            crate::fleet::save_authority_acceptance_ledger(&retiring_path, &retiring)
+                .expect("retiring server persists tombstone after replacement");
+            retired_tx.send(()).expect("report retiring write");
+        });
+
+        let active_b = catalog(&authority_b, 1, false);
+        assert!(!app.install_fleet_snapshot(snapshot(vec![active_a.clone(), active_b.clone(),])));
+        let replacement_write = wait_for_app_event(&mut app, "replacement ledger completion");
+        retire_tx.send(()).expect("start retiring write");
+        retired_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("retiring writer completion");
+        retiring_writer.join().expect("join retiring writer");
+        app.handle_internal_event_with_render_impact(replacement_write);
+
+        assert!(!app.install_fleet_snapshot(snapshot(vec![active_a, active_b])));
+        assert!(
+            app.authority_acceptance_ledger_write_in_flight,
+            "an equality poll must reconcile the ledger written by the retiring server"
+        );
+        let reconciliation = wait_for_app_event(&mut app, "handoff reconciliation completion");
+        app.handle_internal_event_with_render_impact(reconciliation);
+
+        let durable = crate::fleet::load_authority_acceptance_ledger(&path)
+            .expect("reload reconciled handoff ledger");
+        assert_eq!(app.authority_acceptance_ledger, durable);
+        assert!(matches!(
+            durable
+                .accepted(&authority_a)
+                .expect("authority A retained history")
+                .groups[0]
+                .state,
+            crate::groups::GroupState::Deleted
+        ));
+        let shown_a = app
+            .state
+            .fleet_snapshot
+            .group_catalogs
+            .iter()
+            .find(|catalog| catalog.authority_id() == Some(&authority_a))
+            .expect("authority A catalog");
+        assert_eq!(shown_a.state, crate::fleet::GroupCatalogState::Stale);
+        std::fs::remove_dir_all(root).expect("remove reverse handoff fixture");
     }
 
     #[test]

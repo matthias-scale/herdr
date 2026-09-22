@@ -441,7 +441,7 @@ impl AuthorityAcceptanceLedger {
         self.authorities.values().cloned().collect()
     }
 
-    fn merge(&mut self, other: &Self) -> Result<(), String> {
+    pub(crate) fn merge(&mut self, other: &Self) -> Result<(), String> {
         for candidate in other.snapshots() {
             let retained = self.authorities.get(&candidate.authority_id).cloned();
             match self.advance(&candidate) {
@@ -489,8 +489,7 @@ pub(crate) fn load_authority_acceptance_ledger_with_legacy(
                         "cannot migrate legacy authority acceptance ledger to {}: {error}",
                         path.display()
                     )
-                })?;
-                Ok(ledger)
+                })
             }
             Ok(false) => Ok(AuthorityAcceptanceLedger::default()),
             Err(error) => Err(format!(
@@ -542,7 +541,7 @@ pub(crate) fn load_authority_acceptance_ledger(
 pub(crate) fn save_authority_acceptance_ledger(
     path: &Path,
     ledger: &AuthorityAcceptanceLedger,
-) -> std::io::Result<()> {
+) -> std::io::Result<AuthorityAcceptanceLedger> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -592,7 +591,7 @@ pub(crate) fn save_authority_acceptance_ledger(
         let _ = std::fs::remove_file(&temp);
         return Err(error);
     }
-    Ok(())
+    Ok(merged)
 }
 
 trait AuthorityAcceptanceLedgerTempFile {
@@ -624,8 +623,10 @@ struct AuthorityAcceptanceLedgerWrite {
     snapshot: Snapshot,
 }
 
-type AuthorityAcceptanceLedgerSave =
-    dyn Fn(&Path, &AuthorityAcceptanceLedger) -> std::io::Result<()> + Send + Sync + 'static;
+type AuthorityAcceptanceLedgerSave = dyn Fn(&Path, &AuthorityAcceptanceLedger) -> std::io::Result<AuthorityAcceptanceLedger>
+    + Send
+    + Sync
+    + 'static;
 
 /// Serial durable ledger writer. The app loop admits each candidate before it
 /// enters this queue and publishes it only after the matching completion.
@@ -647,7 +648,10 @@ impl AuthorityAcceptanceLedgerWriter {
     #[cfg(test)]
     pub(crate) fn with_save(
         event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
-        save: impl Fn(&Path, &AuthorityAcceptanceLedger) -> std::io::Result<()> + Send + Sync + 'static,
+        save: impl Fn(&Path, &AuthorityAcceptanceLedger) -> std::io::Result<AuthorityAcceptanceLedger>
+            + Send
+            + Sync
+            + 'static,
     ) -> Self {
         Self {
             sender: std::sync::Mutex::new(None),
@@ -674,23 +678,17 @@ impl AuthorityAcceptanceLedgerWriter {
                 .name("herdr-group-ledger".into())
                 .spawn(move || {
                     while let Ok(job) = write_rx.recv() {
-                        let mut persisted_ledger = job.ledger;
-                        let result = save(&job.path, &persisted_ledger)
-                            .map_err(|error| {
-                                format!(
-                                    "cannot persist authority acceptance ledger at {}: {error}",
-                                    job.path.display()
-                                )
-                            })
-                            .and_then(|()| {
-                                load_authority_acceptance_ledger(&job.path).map_err(|error| {
-                                    format!(
-                                        "cannot reload merged authority acceptance ledger at {}: {error}",
-                                        job.path.display()
-                                    )
-                                })
-                            })
-                            .map(|merged| persisted_ledger = merged);
+                        let requested_ledger = job.ledger;
+                        let persisted = save(&job.path, &requested_ledger).map_err(|error| {
+                            format!(
+                                "cannot persist authority acceptance ledger at {}: {error}",
+                                job.path.display()
+                            )
+                        });
+                        let (persisted_ledger, result) = match persisted {
+                            Ok(merged) => (merged, Ok(())),
+                            Err(error) => (requested_ledger, Err(error)),
+                        };
                         if event_tx
                             .blocking_send(
                                 crate::events::AppEvent::AuthorityAcceptanceLedgerPersisted {
@@ -844,6 +842,16 @@ impl AuthorityMutationRouter {
             ssh_program: program.into_os_string(),
             timeout,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_route_leases_for_test(&self) {
+        let route_leases = Arc::clone(&self.route_leases);
+        let _ = std::thread::spawn(move || {
+            let _guard = route_leases.lock().expect("route leases before poison");
+            panic!("poison route leases for enqueue failure");
+        })
+        .join();
     }
 
     pub(crate) fn reconfigure(&self, config_generation: u64) {
@@ -1235,6 +1243,14 @@ impl Snapshot {
             if catalog.observed_authority_id.as_ref() != Some(&incoming.authority_id) {
                 catalog.state = GroupCatalogState::Unavailable;
                 catalog.error = Some("reported authority does not match its snapshot".into());
+                continue;
+            }
+            if let Err(error) = crate::groups::admit_authority_snapshot(None, incoming) {
+                if let Some(snapshot) = catalog.snapshot.as_mut() {
+                    snapshot.memberships.clear();
+                }
+                catalog.state = GroupCatalogState::Stale;
+                catalog.error = Some(format!("catalog rejected: {error}"));
                 continue;
             }
             if let Err(error) = candidate.advance(incoming) {
@@ -3849,6 +3865,65 @@ mod tests {
             .fresh_group_catalog(&authority)
             .expect_err("collision cannot be routed")
             .contains("identity conflict"));
+    }
+
+    #[test]
+    fn catalog_admission_rejects_duplicate_pane_memberships_before_routing() {
+        let authority = crate::groups::AuthorityId::from_random_bytes([36; 16]);
+        let mut catalog = group_catalog(
+            "office",
+            "machine-a",
+            36,
+            1,
+            vec![group_record(36, 1, 1, false)],
+        );
+        catalog
+            .snapshot
+            .as_mut()
+            .expect("authority snapshot")
+            .memberships = vec![
+            crate::groups::OwnedPaneMembership {
+                pane_id: "workspace:pane".into(),
+                pane_incarnation: "first-incarnation".into(),
+                membership: crate::groups::PaneGroupMembership::default(),
+            },
+            crate::groups::OwnedPaneMembership {
+                pane_id: "workspace:pane".into(),
+                pane_incarnation: "second-incarnation".into(),
+                membership: crate::groups::PaneGroupMembership::default(),
+            },
+        ];
+        let mut snapshot = Snapshot {
+            group_catalogs: vec![catalog],
+            ..Snapshot::default()
+        };
+
+        snapshot.admit_group_catalogs(&AuthorityAcceptanceLedger::default());
+        let router = AuthorityMutationRouter::default();
+        router.observe_snapshot(&snapshot);
+
+        let catalog = &snapshot.group_catalogs[0];
+        assert_eq!(catalog.state, GroupCatalogState::Stale);
+        assert!(catalog
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("duplicate pane membership")));
+        assert!(catalog
+            .snapshot
+            .as_ref()
+            .expect("rejected snapshot remains observable")
+            .memberships
+            .is_empty());
+        assert!(snapshot.fresh_group_catalog(&authority).is_err());
+        let pane_route_count = router
+            .route_leases
+            .lock()
+            .expect("route leases")
+            .valid
+            .keys()
+            .filter(|route| matches!(route, MutationRoute::Pane { .. }))
+            .count();
+        assert_eq!(pane_route_count, 0);
     }
 
     #[test]

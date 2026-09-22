@@ -130,7 +130,12 @@ impl App {
                 params.expected_pane_incarnation = Some(reported_pane.pane_incarnation.clone());
                 if let Some(group_id) = params.group_id.as_ref() {
                     if let Err(message) = self.validate_group_target(group_id) {
-                        return encode_error(id, "authority_not_fresh", message);
+                        return pane_group_set_error(
+                            id,
+                            "authority_not_fresh",
+                            message,
+                            Some(&owner),
+                        );
                     }
                 }
                 self.route_authority_mutation(id, owner, AuthorityMutation::PaneGroupSet(params))
@@ -374,7 +379,12 @@ impl App {
                 }
                 if let Some(group_id) = params.group_id.as_ref() {
                     if let Err(message) = self.validate_group_target(group_id) {
-                        return encode_error(id, "authority_not_fresh", message);
+                        return pane_group_set_error(
+                            id,
+                            "authority_not_fresh",
+                            message,
+                            params.expected_pane_authority.as_ref(),
+                        );
                     }
                 }
                 self.apply_pane_group_set(id, params)
@@ -643,7 +653,12 @@ impl App {
                 params.expected_pane_incarnation = Some(reported_pane.pane_incarnation.clone());
                 if let Some(group_id) = params.group_id.as_ref() {
                     if let Err(message) = self.validate_group_target(group_id) {
-                        let _ = respond_to.send(encode_error(id, "authority_not_fresh", message));
+                        let _ = respond_to.send(pane_group_set_error(
+                            id,
+                            "authority_not_fresh",
+                            message,
+                            Some(&owner),
+                        ));
                         return;
                     }
                 }
@@ -665,13 +680,25 @@ impl App {
                 return;
             }
         };
+        let pane_authority = match &request.method {
+            crate::api::schema::Method::GroupAuthorityMutate(params) => match &params.mutation {
+                AuthorityMutation::PaneGroupSet(params) => params.expected_pane_authority.clone(),
+                _ => None,
+            },
+            _ => None,
+        };
         if let Err(error) = self.authority_mutation_router.enqueue(
             catalog,
             self.fleet_poller_config.generation(),
             request.clone(),
             respond_to.clone(),
         ) {
-            let _ = respond_to.send(encode_error(request.id, "authority_unreachable", error));
+            let _ = respond_to.send(pane_group_set_error(
+                request.id,
+                "authority_unreachable",
+                error,
+                pane_authority.as_ref(),
+            ));
         }
     }
 }
@@ -1658,12 +1685,120 @@ mod tests {
     }
 
     #[test]
+    fn remote_pane_move_target_refusals_name_the_pane_authority() {
+        let pane_owner = crate::groups::AuthorityId::from_random_bytes([33; 16]);
+        let group_owner = crate::groups::AuthorityId::from_random_bytes([34; 16]);
+        let (group_id, base_catalogs) = remote_pane_move_catalogs(&pane_owner, &group_owner);
+
+        let catalogs = ["missing", "stale", "deleted", "conflicted"]
+            .into_iter()
+            .map(|case| {
+                let mut catalogs = base_catalogs.clone();
+                match case {
+                    "missing" => catalogs[1]
+                        .snapshot
+                        .as_mut()
+                        .expect("group catalog snapshot")
+                        .groups
+                        .clear(),
+                    "stale" => catalogs[1].state = crate::fleet::GroupCatalogState::Stale,
+                    "deleted" => {
+                        catalogs[1]
+                            .snapshot
+                            .as_mut()
+                            .expect("group catalog snapshot")
+                            .groups[0]
+                            .state = GroupState::Deleted;
+                    }
+                    "conflicted" => {
+                        let mut duplicate = catalogs[1].clone();
+                        duplicate.host = "group-owner-copy".into();
+                        duplicate.target = "group-host-copy".into();
+                        duplicate.state = crate::fleet::GroupCatalogState::IdentityConflict;
+                        catalogs[1].state = crate::fleet::GroupCatalogState::IdentityConflict;
+                        catalogs.push(duplicate);
+                    }
+                    _ => unreachable!(),
+                }
+                (case, catalogs)
+            })
+            .collect::<Vec<_>>();
+
+        for (case, catalogs) in catalogs {
+            let (mut app, _dir, _) = app_with_groups(case);
+            app.state.fleet_snapshot.group_catalogs = catalogs;
+            let response: crate::api::schema::ErrorResponse =
+                serde_json::from_str(&app.handle_pane_group_set(
+                    case.into(),
+                    PaneGroupSetParams {
+                        pane_id: "remote-pane".into(),
+                        group_id: Some(group_id.clone()),
+                        expected_revision: 0,
+                        expected_pane_authority: Some(pane_owner.clone()),
+                        expected_pane_incarnation: None,
+                    },
+                ))
+                .expect("target preflight refusal");
+            assert_eq!(response.error.code, "authority_not_fresh", "{case}");
+            assert!(
+                response.error.message.contains(pane_owner.as_str()),
+                "{case} refusal named the group authority instead: {}",
+                response.error.message
+            );
+        }
+    }
+
+    #[test]
+    fn forwarded_pane_move_target_refusal_names_the_pane_authority() {
+        let (mut app, _dir, pane_id) = app_with_groups("forwarded-target-refusal");
+        let pane_owner = app
+            .group_runtime
+            .authority()
+            .expect("pane authority")
+            .authority_id()
+            .clone();
+        let pane = app.state.workspaces[0].tabs[0].root_pane;
+        let pane_incarnation = app.state.workspaces[0]
+            .pane_state(pane)
+            .expect("local pane")
+            .attached_terminal_id
+            .to_string();
+        let group_owner = crate::groups::AuthorityId::from_random_bytes([35; 16]);
+
+        let response: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&app.handle_group_authority_mutate(
+                "forwarded-target".into(),
+                AuthorityMutationParams {
+                    expected_authority: pane_owner.clone(),
+                    forwarded: true,
+                    mutation: AuthorityMutation::PaneGroupSet(PaneGroupSetParams {
+                        pane_id,
+                        group_id: Some(GroupId {
+                            owner: group_owner,
+                            local: 1,
+                        }),
+                        expected_revision: 0,
+                        expected_pane_authority: Some(pane_owner.clone()),
+                        expected_pane_incarnation: Some(pane_incarnation),
+                    }),
+                },
+            ))
+            .expect("receiver target refusal");
+
+        assert_eq!(response.error.code, "authority_not_fresh");
+        assert!(response.error.message.contains(pane_owner.as_str()));
+    }
+
+    #[test]
     fn remote_pane_move_lease_refusal_names_the_pane_authority() {
         let (mut app, _dir, _) = app_with_groups("remote-move-stale-lease");
         let pane_owner = crate::groups::AuthorityId::from_random_bytes([22; 16]);
         let group_owner = crate::groups::AuthorityId::from_random_bytes([23; 16]);
         let (group_id, catalogs) = remote_pane_move_catalogs(&pane_owner, &group_owner);
         app.state.fleet_snapshot.group_catalogs = catalogs;
+        app.authority_mutation_router
+            .observe_snapshot(&app.state.fleet_snapshot);
+        app.authority_mutation_router.poison_route_leases_for_test();
         let (respond_to, response_rx) = std::sync::mpsc::channel();
 
         app.handle_api_request_message(crate::api::ApiRequestMessage {
