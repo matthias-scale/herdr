@@ -9,7 +9,7 @@ const SESSION_SAVE_RETRY_MAX: Duration = Duration::from_secs(30);
 enum SessionSaveJob {
     Clear,
     Save {
-        snapshot: crate::persist::SessionSnapshot,
+        snapshot: Box<crate::persist::SessionSnapshot>,
         history: Option<crate::persist::SessionHistorySnapshot>,
     },
 }
@@ -46,7 +46,10 @@ impl App {
             crate::persist::save_to_paths(session_path, history_path, &snapshot, history.as_ref())
         } else {
             run_session_save_job(
-                SessionSaveJob::Save { snapshot, history },
+                SessionSaveJob::Save {
+                    snapshot: Box::new(snapshot),
+                    history,
+                },
                 revision,
                 &self.session_writer,
             )
@@ -54,7 +57,10 @@ impl App {
         };
         #[cfg(not(test))]
         let result = run_session_save_job(
-            SessionSaveJob::Save { snapshot, history },
+            SessionSaveJob::Save {
+                snapshot: Box::new(snapshot),
+                history,
+            },
             revision,
             &self.session_writer,
         )
@@ -177,7 +183,10 @@ impl App {
                     &self.terminal_runtimes,
                 )
             });
-            SessionSaveJob::Save { snapshot, history }
+            SessionSaveJob::Save {
+                snapshot: Box::new(snapshot),
+                history,
+            }
         }
     }
 

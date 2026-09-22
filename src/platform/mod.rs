@@ -5,38 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(crate) mod ssh_agent;
-
-pub(crate) struct HostShutdownMonitor {
-    task: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl HostShutdownMonitor {
-    pub(crate) fn start(
-        requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        wake: impl Fn() + Send + Sync + 'static,
-    ) -> Self {
-        let task = monitor_host_shutdown(requested, wake);
-        Self { task }
-    }
-}
-
-impl Drop for HostShutdownMonitor {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn monitor_host_shutdown(
-    _requested: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    _wake: impl Fn() + Send + Sync + 'static,
-) -> Option<tokio::task::JoinHandle<()>> {
-    None
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForegroundProcess {
@@ -65,25 +35,16 @@ pub enum Signal {
 pub enum ChildExitReason {
     Exited,
     Interrupted,
-    /// Imported runtimes have no child wait handle in the replacement server.
-    #[cfg(unix)]
-    Handoff,
-    WaitFailed,
 }
 
 impl ChildExitReason {
     pub(crate) fn requires_session_checkpoint(self) -> bool {
-        match self {
-            Self::Interrupted => true,
-            #[cfg(unix)]
-            Self::Handoff => true,
-            _ => false,
-        }
+        matches!(self, Self::Interrupted)
     }
 }
 
 #[cfg(unix)]
-pub(crate) use unix_common::{classify_child_exit, poll_fd_readable, read_fd};
+pub(crate) use unix_common::classify_child_exit;
 
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn classify_child_exit(_status: &portable_pty::ExitStatus) -> ChildExitReason {
@@ -109,31 +70,13 @@ pub(crate) fn apply_pane_runtime_marker(command: &mut portable_pty::CommandBuild
     apply_pane_runtime_marker_platform(command);
 }
 
-pub(crate) fn prepare_paste_text_for_pty(text: String) -> String {
-    prepare_paste_text_for_pty_platform(text)
-}
-
 pub(crate) fn plugin_runtime_path(path: &std::path::Path) -> std::path::PathBuf {
     plugin_runtime_path_platform(path)
-}
-
-pub(crate) fn normalize_cwd_for_launch(path: &std::path::Path) -> std::path::PathBuf {
-    normalize_cwd_for_launch_platform(path)
-}
-
-#[cfg(not(windows))]
-fn normalize_cwd_for_launch_platform(path: &std::path::Path) -> std::path::PathBuf {
-    path.to_path_buf()
 }
 
 #[cfg(not(windows))]
 fn plugin_runtime_path_platform(path: &std::path::Path) -> std::path::PathBuf {
     path.to_path_buf()
-}
-
-#[cfg(not(windows))]
-fn prepare_paste_text_for_pty_platform(text: String) -> String {
-    text
 }
 
 #[cfg(not(windows))]
@@ -161,31 +104,9 @@ pub(crate) const fn capabilities() -> PlatformCapabilities {
     }
 }
 
-pub(crate) fn terminal_grid_size() -> std::io::Result<(u16, u16)> {
-    #[cfg(unix)]
-    let (cols, rows) = unix_common::read_terminal_grid_size()?;
-    #[cfg(windows)]
-    let (cols, rows) = windows::read_terminal_grid_size()?;
-    #[cfg(not(any(unix, windows)))]
-    let (cols, rows) = fallback::read_terminal_grid_size()?;
-
-    if cols == 0 || rows == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "terminal reported a zero-sized grid",
-        ));
-    }
-    Ok((cols, rows))
-}
-
 #[cfg(not(windows))]
 pub fn launch_server_daemon_command(command: &mut std::process::Command) -> std::io::Result<u32> {
     command.spawn().map(|child| child.id())
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn prepare_server_process(_handoff_import: bool) -> std::io::Result<bool> {
-    Ok(false)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -339,9 +260,6 @@ pub(crate) struct RemoteSshConfigPaths {
     pub(crate) system_config: Option<std::path::PathBuf>,
     pub(crate) multiplexing: bool,
 }
-
-pub(crate) const REMOTE_BRIDGE_IDLE_TIMEOUT_SUPPORTED: bool =
-    cfg!(any(target_os = "linux", target_os = "macos"));
 
 #[cfg(unix)]
 mod remote_bridge;
@@ -647,7 +565,7 @@ impl PrefixInputSource for RealPrefixInputSource {
 /// Scaling keeps one budget in the source and gives the slower platform the
 /// headroom it needs. This is a pure policy constant -- both branches compile on
 /// every target -- so it uses `cfg!` rather than a compile gate.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn test_spawn_budget(base: std::time::Duration) -> std::time::Duration {
     if cfg!(target_os = "macos") {
         base * 20
@@ -730,9 +648,6 @@ fn child_exit_classification_only_checkpoints_interruptions() {
     let status = portable_pty::ExitStatus::with_signal("Terminated: 15");
     assert_eq!(classify_child_exit(&status), ChildExitReason::Interrupted);
     assert!(classify_child_exit(&status).requires_session_checkpoint());
-    #[cfg(unix)]
-    assert!(ChildExitReason::Handoff.requires_session_checkpoint());
-    assert!(!ChildExitReason::WaitFailed.requires_session_checkpoint());
 }
 
 #[cfg(all(test, unix))]

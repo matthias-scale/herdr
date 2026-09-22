@@ -242,8 +242,10 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::App;
 
+    #[cfg(unix)]
     fn scratch_dir() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "herdr-config-io-{}",

@@ -199,10 +199,6 @@ impl CursorPositionSettleState {
         self.candidate.is_some()
     }
 
-    pub(crate) fn render_delay(&self) -> Option<Duration> {
-        self.pending().then(|| self.candidate_hold())
-    }
-
     fn candidate_hold(&self) -> Duration {
         if self.candidate_jump {
             CURSOR_POSITION_MAX_HOLD

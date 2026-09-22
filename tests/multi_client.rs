@@ -1,5 +1,7 @@
 //! Integration tests for multi-client server behavior.
 
+#![cfg(unix)]
+
 mod support;
 
 use std::cell::Cell;

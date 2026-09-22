@@ -830,7 +830,7 @@ fn set_mouse_capture(enabled: bool, sgr_pixels: bool) -> io::Result<()> {
     crate::terminal_modes::clear_host_mouse_reporting(&mut io::stdout())?;
     #[cfg(windows)]
     if is_ssh_session() && windows_vti_input_backend_enabled() {
-        return crate::terminal_modes::set_windows_ssh_mouse_reporting(
+        return crate::terminal_modes::set_windows_mouse_reporting(
             &mut io::stdout(),
             enabled,
             sgr_pixels,
@@ -3271,7 +3271,7 @@ fn write_host_cell_size_query(mut writer: impl io::Write) -> io::Result<()> {
     writer.flush()
 }
 
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 fn store_reported_cell_size(reported_cell_size: &AtomicU64, width_px: u32, height_px: u32) {
     let packed = pack_cell_size(width_px, height_px);
     if reported_cell_size.swap(packed, Ordering::AcqRel) != packed {

@@ -1696,15 +1696,14 @@ mod tests {
                 panic!("expected retained Windows input events");
             };
             assert_eq!(events.len(), 1, "logical input batches must stay separate");
-            shortcut_preserved |=
-                crate::client::clipboard_images::should_bridge_clipboard_image_events(
-                    &events,
-                    true,
-                    Some((
-                        crossterm::event::KeyCode::Char('v'),
-                        crossterm::event::KeyModifiers::CONTROL,
-                    )),
-                );
+            shortcut_preserved |= crate::client::should_bridge_clipboard_image_events(
+                &events,
+                true,
+                Some((
+                    crossterm::event::KeyCode::Char('v'),
+                    crossterm::event::KeyModifiers::CONTROL,
+                )),
+            );
             delivered.extend(events);
         }
         assert_eq!(delivered, expected);

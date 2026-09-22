@@ -173,35 +173,6 @@ pub(super) fn clear_path(path: &Path) -> std::io::Result<()> {
     crate::platform::remove_file_durably(&target, &tombstone)
 }
 
-pub fn save(
-    snapshot: &SessionSnapshot,
-    history: Option<&SessionHistorySnapshot>,
-) -> std::io::Result<()> {
-    let path = session_path();
-    let history_path = session_history_path();
-    if let Err(err) = save_to_paths(&path, &history_path, snapshot, history) {
-        crate::logging::session_save_failed(&path, &err.to_string());
-        return Err(err);
-    }
-    crate::logging::session_saved(&path, snapshot.workspaces.len());
-    Ok(())
-}
-
-pub fn clear() -> std::io::Result<()> {
-    let path = session_path();
-    let history_path = session_history_path();
-    if let Err(err) = clear_path(&history_path) {
-        crate::logging::session_clear_failed(&history_path, &err.to_string());
-        return Err(err);
-    }
-    if let Err(err) = clear_path(&path) {
-        crate::logging::session_clear_failed(&path, &err.to_string());
-        return Err(err);
-    }
-    crate::logging::session_cleared(&path);
-    Ok(())
-}
-
 pub fn clear_history() {
     let path = session_history_path();
     if let Err(err) = clear_path(&path) {

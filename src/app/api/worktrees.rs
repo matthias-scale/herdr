@@ -2395,7 +2395,7 @@ mod tests {
             .insert(crate::worktree::canonical_or_original(&checkout), 7);
         let (respond_to, response_rx) = response_channel();
 
-        let _ = app.handle_api_worktree_remove_finished(WorktreeRemoveResult {
+        app.handle_api_worktree_remove_finished(WorktreeRemoveResult {
             workspace_id: child_id,
             path: checkout.clone(),
             workspace: Some(Box::new(workspace_snapshot)),
@@ -2457,7 +2457,7 @@ mod tests {
         });
         let (respond_to, response_rx) = response_channel();
 
-        let _ = app.handle_api_worktree_remove_finished(WorktreeRemoveResult {
+        app.handle_api_worktree_remove_finished(WorktreeRemoveResult {
             workspace_id: child_id,
             path: checkout.clone(),
             workspace: Some(Box::new(workspace_snapshot)),

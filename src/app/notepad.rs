@@ -239,9 +239,11 @@ impl super::App {
         }
         let stamp = crate::platform::local_datetime()
             .and_then(|now| {
-                time::format_description::parse("[year]-[month]-[day] [hour]:[minute]")
-                    .ok()
-                    .and_then(|format| now.format(&format).ok())
+                time::format_description::parse_borrowed::<1>(
+                    "[year]-[month]-[day] [hour]:[minute]",
+                )
+                .ok()
+                .and_then(|format| now.format(&format).ok())
             })
             .unwrap_or_default();
         let line = format!(

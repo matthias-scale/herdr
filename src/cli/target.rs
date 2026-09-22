@@ -316,21 +316,6 @@ fn validate_machine_command(args: &[String]) -> Result<(), String> {
 }
 
 #[cfg(test)]
-pub(super) fn with_test_client<T>(client: ApiClient, run: impl FnOnce() -> T) -> T {
-    let _scope = TARGET.with(|target| {
-        TargetScope(
-            target.replace(Some(MachineTarget {
-                profile: SavedSshEndpoint::new("test-machine", "unused", "remote-session")
-                    .expect("valid test profile"),
-                bridge: None,
-                client_override: Some(client),
-            })),
-        )
-    });
-    run()
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 

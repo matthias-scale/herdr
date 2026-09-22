@@ -67,6 +67,7 @@ impl KittyKeyboardTracker {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn modify_other_keys_level(&self) -> u8 {
         self.modify_other_keys_level
     }

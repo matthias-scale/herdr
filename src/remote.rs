@@ -1,4 +1,3 @@
-mod attach;
 mod control;
 #[cfg(unix)]
 mod host_unix;
@@ -112,18 +111,17 @@ impl RemoteFocusOperationState {
     }
 }
 
-pub(crate) use attach::*;
 pub(crate) use control::SshRemoteFocusTransport;
-pub(crate) use machine_attach::prepare_saved_ssh;
-pub(crate) use machine_saved::SavedSshApiBridge;
+pub(crate) use machine_args::*;
+pub(crate) use machine_attach::*;
+pub(crate) use machine_saved::*;
 
 const ENDPOINT_PROTOCOL_GENERATION: u32 = 1;
 const SURFACE_INTEREST_CAPABILITY: &str = "surface_interest";
 const PRESENTATION_EFFECTS_FENCE_CAPABILITY: &str = "presentation_effects_fence";
 const HEALTH_CHECK_CAPABILITY: &str = "health_check";
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 // Test-only transport seams are re-exported for the real socket handshake harness.
-#[allow(unused_imports)]
 pub(crate) use control::{ControlReadHalf, ControlStream, SshRunner, TimedRead};
 #[cfg(unix)]
 pub(crate) use host_unix::{run_remote_client_bridge, run_remote_control_bridge};

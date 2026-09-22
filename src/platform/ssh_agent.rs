@@ -170,10 +170,6 @@ impl Drop for State {
 }
 
 impl SshAgentLease {
-    pub(crate) fn refresh(&self) -> io::Result<()> {
-        self.refresh_at(Instant::now())
-    }
-
     fn refresh_at(&self, now: Instant) -> io::Result<()> {
         let mut state = self
             .registry
@@ -216,6 +212,9 @@ mod tests {
 
     #[test]
     fn server_without_an_agent_leaves_local_pane_agent_setup_alone() {
+        let _default_path = socket_path();
+        let mut pane_command = portable_pty::CommandBuilder::new("true");
+        apply_pane_env(&mut pane_command);
         let directory = std::env::temp_dir().join(format!("herdr-no-agent-{}", std::process::id()));
         fs::create_dir(&directory).unwrap();
         let stable = directory.join("agent");

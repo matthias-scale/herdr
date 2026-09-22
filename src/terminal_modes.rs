@@ -64,13 +64,14 @@ pub(crate) fn set_host_kitty_keyboard_report_all<W: Write>(
     Ok(())
 }
 
+#[cfg(test)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DirectHostKeyboardState {
     kitty_flags: Option<u16>,
     modify_other_keys_level: u8,
 }
 
-#[cfg(not(windows))]
+#[cfg(all(test, not(windows)))]
 pub(crate) fn set_direct_host_keyboard_protocol<W: Write>(
     writer: &mut W,
     active: &mut DirectHostKeyboardState,
@@ -103,7 +104,7 @@ pub(crate) fn set_direct_host_keyboard_protocol<W: Write>(
     Ok(())
 }
 
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 pub(crate) fn set_direct_host_keyboard_protocol<W: Write>(
     _writer: &mut W,
     active: &mut DirectHostKeyboardState,

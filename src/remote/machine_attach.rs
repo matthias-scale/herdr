@@ -1193,28 +1193,6 @@ pub(super) fn prepare_remote_herdr(
     })
 }
 
-pub(super) fn find_installed_remote_herdr(ssh: &RemoteSsh) -> io::Result<RemoteHerdr> {
-    let platform = detect_remote_platform(ssh)?;
-    let remote_herdr = RemoteHerdr::for_platform(platform);
-    let candidates = remote_binary_candidates(ssh, &remote_herdr)?;
-    for mut candidate in candidates {
-        if let Some(status) = remote_client_status(ssh, &candidate)? {
-            if status.supports_endpoint_requirement(&candidate.platform, true) {
-                candidate.bridge_idle_timeout = status.remote_bridge_idle_timeout;
-                return Ok(candidate);
-            }
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        format!(
-            "matching Herdr is not ready on {}; run `herdr --remote {}` interactively to install or update it",
-            ssh.target(),
-            ssh.target()
-        ),
-    ))
-}
-
 fn prepare_windows_remote_herdr(
     ssh: &RemoteSsh,
     remote_herdr: RemoteHerdr,
@@ -1976,6 +1954,7 @@ struct RemoteClientStatusJson {
     endpoint_capabilities: Vec<String>,
     #[serde(default)]
     remote_host_bridge: bool,
+    #[cfg(test)]
     #[serde(default)]
     remote_bridge_idle_timeout: bool,
 }
@@ -2797,37 +2776,6 @@ impl BridgeUploadStop {
     }
 }
 
-#[cfg(all(test, unix))]
-pub(crate) fn bridge_upload_cancellation_for_test(
-    stream: crate::ipc::LocalStream,
-    mut writer: impl io::Write + Send + 'static,
-) -> impl FnOnce() {
-    stream.set_nonblocking(true).unwrap();
-    let stop = Arc::new(BridgeUploadStop::new().unwrap());
-    let worker_stop = Arc::clone(&stop);
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
-    let worker = thread::spawn(move || {
-        let closed = AtomicBool::new(false);
-        let result = copy_local_stream_to_writer(
-            stream,
-            &mut writer,
-            &worker_stop,
-            &AtomicBool::new(false),
-            &closed,
-        );
-        done_tx
-            .send((result, closed.load(Ordering::Acquire)))
-            .unwrap();
-    });
-    move || {
-        stop.cancel();
-        let (result, closed) = done_rx.recv_timeout(Duration::from_secs(3)).unwrap();
-        worker.join().unwrap();
-        result.unwrap();
-        assert!(!closed, "upload cancellation must not report peer EOF");
-    }
-}
-
 fn bridge_connection(
     mut stream: crate::ipc::LocalStream,
     target: &str,
@@ -3153,19 +3101,8 @@ fn run_client_process(
     keybindings: RemoteKeybindings,
 ) -> io::Result<()> {
     let exe = std::env::current_exe()?;
-    let status = Command::new(exe)
-        .arg("client")
-        .env(
-            crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
-            local_socket,
-        )
-        .env(REATTACH_COMMAND_ENV_VAR, reattach_command)
-        .env(REMOTE_KEYBINDINGS_ENV_VAR, keybindings.as_str())
-        .env_remove(crate::api::SOCKET_PATH_ENV_VAR)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
+    let status =
+        client_process_command(&exe, local_socket, reattach_command, keybindings).status()?;
 
     if status.success() {
         Ok(())
@@ -3175,6 +3112,29 @@ fn run_client_process(
             format!("remote client exited with {status}"),
         ))
     }
+}
+
+fn client_process_command(
+    exe: &Path,
+    local_socket: &Path,
+    reattach_command: &str,
+    keybindings: RemoteKeybindings,
+) -> Command {
+    let mut command = Command::new(exe);
+    command
+        .arg("client")
+        .env(
+            crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
+            local_socket,
+        )
+        .env("HERDR_RENDER_ENCODING", "terminal-ansi")
+        .env(REATTACH_COMMAND_ENV_VAR, reattach_command)
+        .env(REMOTE_KEYBINDINGS_ENV_VAR, keybindings.as_str())
+        .env_remove(crate::api::SOCKET_PATH_ENV_VAR)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    command
 }
 
 fn local_forward_socket_path(target: &str, session_name: &str) -> PathBuf {
@@ -4429,16 +4389,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn reattach_command_includes_remote_and_session() {
+    fn ssh_client_launcher_preserves_render_encoding_and_reattach_contract() {
+        let reattach = reattach_command(
+            "target/release/herdr",
+            "user@host",
+            "work",
+            RemoteKeybindings::Local,
+            false,
+        );
         assert_eq!(
-            reattach_command(
-                "target/release/herdr",
-                "user@host",
-                "work",
-                RemoteKeybindings::Local,
-                false,
-            ),
+            reattach,
             "target/release/herdr --remote user@host --session work"
+        );
+        let command = client_process_command(
+            Path::new("target/release/herdr"),
+            Path::new("/tmp/herdr-remote.sock"),
+            &reattach,
+            RemoteKeybindings::Local,
+        );
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["client"]);
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(name, _)| *name == "HERDR_RENDER_ENCODING")
+                .and_then(|(_, value)| value),
+            Some(std::ffi::OsStr::new("terminal-ansi"))
         );
         assert_eq!(
             reattach_command(

@@ -169,11 +169,6 @@ impl TerminalKey {
         self
     }
 
-    pub(crate) fn with_physical_identity_hint(mut self, physical: bool) -> Self {
-        self.physical_identity_hint = physical;
-        self
-    }
-
     #[cfg(any(windows, test))]
     pub(crate) fn vt_bytes(&self) -> Option<&[u8]> {
         match &self.source {

@@ -58,12 +58,6 @@ impl fmt::Display for ProfileId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum ClientEndpointId {
-    Local,
-    Ssh(ProfileId),
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct EndpointNegotiation {
     methods: HashSet<String>,
@@ -71,6 +65,7 @@ pub(crate) struct EndpointNegotiation {
 }
 
 impl EndpointNegotiation {
+    #[cfg(test)]
     pub(crate) fn new(methods: Vec<String>, capabilities: Vec<String>) -> Self {
         Self {
             methods: methods.into_iter().collect(),

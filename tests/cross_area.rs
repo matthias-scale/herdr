@@ -1,5 +1,7 @@
 //! Cross-area integration tests for end-to-end persistence flows.
 
+#![cfg(unix)]
+
 mod support;
 
 use std::fs;

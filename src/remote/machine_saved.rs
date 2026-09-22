@@ -1,44 +1,7 @@
 use std::io;
 use std::path::PathBuf;
 
-use super::machine_attach::{find_installed_remote_herdr, RemoteSsh, SshStdioBridge};
-
-pub(crate) struct SavedSshBridge {
-    _bridge: SshStdioBridge,
-}
-
-pub(crate) struct SavedSshStream {
-    pub(crate) stream: crate::ipc::LocalStream,
-    pub(crate) bridge: SavedSshBridge,
-}
-
-pub(crate) fn connect_saved_ssh(
-    profile_id: &str,
-    target: &str,
-    session: &str,
-) -> io::Result<SavedSshStream> {
-    let ssh = validated_saved_ssh(profile_id, target, session)?;
-    let remote_herdr = find_installed_remote_herdr(&ssh)?;
-    let metadata = remote_herdr.machine_metadata();
-    let path = saved_bridge_path(profile_id);
-    let bridge = SshStdioBridge::start(
-        target.to_owned(),
-        remote_herdr,
-        path.clone(),
-        session.to_owned(),
-        ssh.options(),
-        true,
-    )?;
-    let stream = crate::ipc::connect_local_stream(&path)?;
-    if let Some(metadata) = metadata {
-        crate::client::endpoint::SshMetadataCache::new(profile_id, target, session)?
-            .store(&metadata);
-    }
-    Ok(SavedSshStream {
-        stream,
-        bridge: SavedSshBridge { _bridge: bridge },
-    })
-}
+use super::machine_attach::{RemoteSsh, SshStdioBridge};
 
 pub(crate) struct SavedSshApiBridge {
     path: PathBuf,
@@ -110,6 +73,7 @@ impl SavedSshApiBridge {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn saved_ssh_bootstrap_command(target: &str, session: &str) -> String {
     format!(
         "herdr --remote {} --session {}",
@@ -118,6 +82,7 @@ pub(crate) fn saved_ssh_bootstrap_command(target: &str, session: &str) -> String
     )
 }
 
+#[cfg(test)]
 pub(crate) fn saved_ssh_failure_needs_attention(error: &io::Error) -> bool {
     if matches!(
         error.kind(),
@@ -145,6 +110,7 @@ pub(crate) fn saved_ssh_failure_needs_attention(error: &io::Error) -> bool {
     .any(|needle| message.contains(needle))
 }
 
+#[cfg(test)]
 fn saved_bridge_path(profile_id: &str) -> PathBuf {
     let pid = std::process::id();
     let readable = format!("herdr-ssh-{pid}-{profile_id}.sock");

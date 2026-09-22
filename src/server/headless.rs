@@ -7551,9 +7551,12 @@ fn init_logging() {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     use crate::app::remote_focus::RemoteFocusTransport;
     use crate::app::AppState;
-    use crate::protocol::{CellData, CursorState, PROTOCOL_VERSION};
+    #[cfg(unix)]
+    use crate::protocol::PROTOCOL_VERSION;
+    use crate::protocol::{CellData, CursorState};
     use unicode_width::UnicodeWidthStr;
 
     #[path = "pane_graphics.rs"]

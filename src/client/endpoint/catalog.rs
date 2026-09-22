@@ -196,20 +196,7 @@ impl EndpointCatalog {
         self.ssh.len() != previous_len
     }
 
-    pub(crate) fn select_local(&mut self) {
-        self.selected_profile = None;
-    }
-
-    pub(crate) fn select_endpoint(&mut self, endpoint_id: &super::ClientEndpointId) -> bool {
-        match endpoint_id {
-            super::ClientEndpointId::Local => {
-                self.select_local();
-                true
-            }
-            super::ClientEndpointId::Ssh(profile_id) => self.select_ssh(profile_id),
-        }
-    }
-
+    #[cfg(test)]
     pub(crate) fn select_ssh(&mut self, id: &ProfileId) -> bool {
         if !self
             .ssh
@@ -220,10 +207,6 @@ impl EndpointCatalog {
         }
         self.selected_profile = Some(id.clone());
         true
-    }
-
-    pub(crate) fn has_enabled_ssh(&self) -> bool {
-        self.ssh.iter().any(|profile| profile.enabled)
     }
 
     pub(crate) fn contains_enabled_target_session(&self, target: &str, session: &str) -> bool {
