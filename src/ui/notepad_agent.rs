@@ -130,9 +130,15 @@ fn section_header(
             .add_modifier(Modifier::BOLD),
     )];
     if let Some(value) = value {
-        let pad = usize::from(width).saturating_sub(title_width + display_width(&value));
-        spans.push(Span::raw(" ".repeat(pad)));
-        spans.push(Span::styled(value, Style::default().fg(palette.overlay0)));
+        // The value is right-aligned after the title, so it gets whatever the
+        // title leaves minus one separating column; at the narrowest sidebar
+        // width that can be nothing, and then the header shows the title alone.
+        let value = truncate_end(&value, usize::from(width).saturating_sub(title_width + 1));
+        if !value.is_empty() {
+            let pad = usize::from(width).saturating_sub(title_width + display_width(&value));
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled(value, Style::default().fg(palette.overlay0)));
+        }
     }
     NotepadAgentRow {
         line: Line::from(spans),
@@ -561,6 +567,28 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_secs(BASE_SECS)
     }
 
+    #[test]
+    fn agent_rows_fit_the_minimum_sidebar_width() {
+        let (mut app, pane_id) = app_with_agent();
+        report(&mut app, pane_id);
+        app.agent_states.observe_links(
+            pane_id,
+            vec!["https://example.test/a-very-long-link-that-cannot-fit".to_string()],
+            AgentLinkSource::Output,
+            base(),
+        );
+
+        for width in [18, 26] {
+            for row in agent_rows(&app, width) {
+                let text = row_text(&row);
+                assert!(
+                    text.chars().count() <= usize::from(width),
+                    "width {width} row overflows: {text:?}"
+                );
+            }
+        }
+    }
+
     fn row_text(row: &NotepadAgentRow) -> String {
         row.line
             .spans
@@ -592,8 +620,8 @@ mod tests {
             .report(
                 pane_id,
                 AgentReportPayload {
-                    status_text: Some("checking tests".into()),
-                    goal: Some("ship MAT-160".into()),
+                    status_text: Some(Some("checking tests".into())),
+                    goal: Some(Some("ship MAT-160".into())),
                     tasks: Some(vec![
                         AgentTask {
                             text: "read transcript".into(),
@@ -604,7 +632,7 @@ mod tests {
                             status: AgentTaskStatus::InProgress,
                         },
                     ]),
-                    subagents: vec![
+                    subagents: Some(vec![
                         AgentSubagent {
                             name: "native worker".into(),
                             status: AgentStatus::Working,
@@ -619,7 +647,7 @@ mod tests {
                             pane_id: Some("w1:p2".into()),
                             source: AgentSubagentSource::Reported,
                         },
-                    ],
+                    ]),
                 },
                 base(),
             )
@@ -691,7 +719,7 @@ mod tests {
                     status_text: None,
                     goal: None,
                     tasks: None,
-                    subagents: Vec::new(),
+                    subagents: Some(Vec::new()),
                 },
                 SystemTime::now() - Duration::from_secs(10),
             )
@@ -726,7 +754,7 @@ mod tests {
                     status_text: None,
                     goal: None,
                     tasks: None,
-                    subagents: Vec::new(),
+                    subagents: Some(Vec::new()),
                 },
                 base(),
             )
