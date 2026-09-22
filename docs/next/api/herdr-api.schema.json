@@ -80,6 +80,52 @@
           ],
           "type": "string"
         },
+        "AuthorityCatalogInfo": {
+          "properties": {
+            "authority_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "connection": {
+              "type": "string"
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "snapshot": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/GroupAuthoritySnapshot"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "state": {
+              "$ref": "#/schemas/event/$defs/AuthorityCatalogStateInfo"
+            }
+          },
+          "required": [
+            "connection",
+            "state"
+          ],
+          "type": "object"
+        },
+        "AuthorityCatalogStateInfo": {
+          "enum": [
+            "fresh",
+            "stale",
+            "identity_conflict",
+            "unavailable"
+          ],
+          "type": "string"
+        },
         "ClosingBlockDecision": {
           "properties": {
             "decided_at": {
@@ -954,6 +1000,25 @@
             },
             {
               "properties": {
+                "catalogs": {
+                  "items": {
+                    "$ref": "#/schemas/event/$defs/AuthorityCatalogInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "authority_catalogs_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "catalogs"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "layout": {
                   "$ref": "#/schemas/event/$defs/PaneLayoutSnapshot"
                 },
@@ -1002,9 +1067,105 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
+            "authority.catalogs_updated",
             "layout_updated"
           ],
           "type": "string"
+        },
+        "GroupAuthoritySnapshot": {
+          "properties": {
+            "authority_id": {
+              "type": "string"
+            },
+            "groups": {
+              "items": {
+                "$ref": "#/schemas/event/$defs/GroupRecord"
+              },
+              "type": "array"
+            },
+            "memberships": {
+              "items": {
+                "$ref": "#/schemas/event/$defs/OwnedPaneMembership"
+              },
+              "type": "array"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "authority_id",
+            "revision",
+            "groups",
+            "memberships"
+          ],
+          "type": "object"
+        },
+        "GroupId": {
+          "properties": {
+            "local": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "owner": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "owner",
+            "local"
+          ],
+          "type": "object"
+        },
+        "GroupRecord": {
+          "oneOf": [
+            {
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "state": {
+                  "const": "active",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state",
+                "name"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "state": {
+                  "const": "deleted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "type": "object"
+            }
+          ],
+          "properties": {
+            "id": {
+              "$ref": "#/schemas/event/$defs/GroupId"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "revision"
+          ],
+          "type": "object"
         },
         "LoopGateInfo": {
           "properties": {
@@ -1139,6 +1300,45 @@
             "gates",
             "outcome"
           ],
+          "type": "object"
+        },
+        "OwnedPaneMembership": {
+          "properties": {
+            "membership": {
+              "$ref": "#/schemas/event/$defs/PaneGroupMembership"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "pane_incarnation": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "membership"
+          ],
+          "type": "object"
+        },
+        "PaneGroupMembership": {
+          "properties": {
+            "group_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/GroupId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "revision": {
+              "default": 0,
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
           "type": "object"
         },
         "PaneInfo": {
@@ -2476,6 +2676,63 @@
           ],
           "type": "object"
         },
+        "AuthorityMutationParams": {
+          "oneOf": [
+            {
+              "$ref": "#/schemas/request/$defs/GroupRenameParams",
+              "properties": {
+                "operation": {
+                  "const": "rename",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "operation"
+              ],
+              "type": "object"
+            },
+            {
+              "$ref": "#/schemas/request/$defs/GroupDeleteParams",
+              "properties": {
+                "operation": {
+                  "const": "delete",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "operation"
+              ],
+              "type": "object"
+            },
+            {
+              "$ref": "#/schemas/request/$defs/PaneGroupSetParams",
+              "properties": {
+                "operation": {
+                  "const": "pane_group_set",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "operation"
+              ],
+              "type": "object"
+            }
+          ],
+          "properties": {
+            "expected_authority": {
+              "type": "string"
+            },
+            "forwarded": {
+              "description": "Receiver-only marker. The receiving server rejects false and never\nforwards this method, which bounds routing to one hop.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "expected_authority",
+            "forwarded"
+          ],
+          "type": "object"
+        },
         "ClientWindowTitleSetParams": {
           "properties": {
             "title": {
@@ -3543,6 +3800,18 @@
         },
         "PaneGroupSetParams": {
           "properties": {
+            "expected_pane_authority": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expected_pane_incarnation": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "expected_revision": {
               "format": "uint64",
               "minimum": 0,
@@ -5489,6 +5758,18 @@
             },
             {
               "properties": {
+                "type": {
+                  "const": "authority.catalogs_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "pane_id": {
                   "type": "string"
                 },
@@ -6563,6 +6844,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/GroupDeleteParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "group.authority_mutate",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AuthorityMutationParams"
             }
           },
           "required": [
@@ -8729,6 +9026,52 @@
           ],
           "type": "string"
         },
+        "AuthorityCatalogInfo": {
+          "properties": {
+            "authority_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "connection": {
+              "type": "string"
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "snapshot": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/GroupAuthoritySnapshot"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "state": {
+              "$ref": "#/schemas/success_response/$defs/AuthorityCatalogStateInfo"
+            }
+          },
+          "required": [
+            "connection",
+            "state"
+          ],
+          "type": "object"
+        },
+        "AuthorityCatalogStateInfo": {
+          "enum": [
+            "fresh",
+            "stale",
+            "identity_conflict",
+            "unavailable"
+          ],
+          "type": "string"
+        },
         "ClientWindowTitleReason": {
           "enum": [
             "set",
@@ -9634,6 +9977,25 @@
             },
             {
               "properties": {
+                "catalogs": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/AuthorityCatalogInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "authority_catalogs_updated",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "catalogs"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "layout": {
                   "$ref": "#/schemas/success_response/$defs/PaneLayoutSnapshot"
                 },
@@ -9697,6 +10059,7 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
+            "authority.catalogs_updated",
             "layout_updated"
           ],
           "type": "string"
@@ -9816,6 +10179,12 @@
         },
         "FleetSnapshotInfo": {
           "properties": {
+            "authority_catalogs": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AuthorityCatalogInfo"
+              },
+              "type": "array"
+            },
             "hosts": {
               "items": {
                 "$ref": "#/schemas/success_response/$defs/FleetHostInfo"
@@ -10491,6 +10860,9 @@
               "$ref": "#/schemas/success_response/$defs/PaneGroupMembership"
             },
             "pane_id": {
+              "type": "string"
+            },
+            "pane_incarnation": {
               "type": "string"
             }
           },

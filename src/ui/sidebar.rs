@@ -8953,7 +8953,15 @@ fn render_workspace_list(
                         .is_some_and(|target| member_indices.contains(&target.ws_idx))
             })
             .count();
+        let repo_header = card.repo_header;
+        let expanded =
+            workspace_card_expanded(app, i, header.and_then(|(.., sort_key, _)| *sort_key));
         let state_counts = header.map(|(_, _, counts, ..)| *counts).unwrap_or_default();
+        let visible_state_counts = if repo_header && expanded {
+            &[]
+        } else {
+            state_counts
+        };
         let count_label = if state_counts.is_empty() {
             header.and_then(|(_, count, ..)| *count).map_or_else(
                 || format!(" ({agent_count}/{window_count})"),
@@ -8962,7 +8970,7 @@ fn render_workspace_list(
         } else {
             String::new()
         };
-        let state_count_width = state_counts
+        let state_count_width = visible_state_counts
             .iter()
             .map(|count| display_width(count.glyph) + count.count.to_string().len() + 1)
             .sum::<usize>();
@@ -8971,7 +8979,6 @@ fn render_workspace_list(
         let sort_width = header
             .and_then(|(.., sort_key, _)| sort_key.map(|_| 2))
             .unwrap_or(0);
-        let repo_header = card.repo_header;
         let prefix = if repo_header { "▾ " } else { " ▾ " };
         let fixed_width =
             display_width(prefix) + display_width(&count_label) + state_count_width + sort_width;
@@ -8984,11 +8991,7 @@ fn render_workspace_list(
             spans.push(Span::raw(" "));
         }
         spans.push(Span::styled(
-            if workspace_card_expanded(app, i, header.and_then(|(.., sort_key, _)| *sort_key)) {
-                "▾"
-            } else {
-                "▸"
-            },
+            if expanded { "▾" } else { "▸" },
             Style::default().fg(p.accent),
         ));
         spans.push(Span::raw(" "));
@@ -8997,7 +9000,7 @@ fn render_workspace_list(
             count_label,
             Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
         ));
-        for count in state_counts {
+        for count in visible_state_counts {
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
                 format!("{}{}", count.glyph, count.count),
@@ -21535,6 +21538,86 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(rendered.contains('…'), "{rendered:?}");
         assert!(rendered.contains(SIDEBAR_SORT_GLYPH), "{rendered:?}");
         assert!(display_width(&rendered) <= usize::from(header.rect.width));
+    }
+
+    #[test]
+    fn repo_group_state_summary_only_renders_when_collapsed() {
+        let mut app = app_with_agents(&["one", "two"]);
+        let repo = "owner/a-very-long-repository-name";
+        for (ws_idx, state) in [AgentState::Working, AgentState::Blocked]
+            .into_iter()
+            .enumerate()
+        {
+            replace_tab_context(
+                &mut app,
+                ws_idx,
+                0,
+                crate::work_context::PaneWorkContext {
+                    repo: Some(repo.into()),
+                    branch: Some("main".into()),
+                    ..Default::default()
+                },
+                Default::default(),
+            );
+            let pane = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane]
+                .attached_terminal_id
+                .clone();
+            app.terminals
+                .get_mut(&terminal_id)
+                .expect("repo fixture terminal")
+                .set_raw_agent_state_for_test(state);
+        }
+        app.set_sidebar_group_mode(SidebarGroupMode::Repo);
+        app.reconcile_sidebar_presentation();
+        app.sidebar_presentation
+            .expanded_workspace_ids
+            .insert(app.workspaces[0].id.clone());
+
+        let group_key = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Workspace {
+                    title,
+                    sort_key: Some(sort_key),
+                    ..
+                } if title == repo => Some(sort_key),
+                _ => None,
+            })
+            .expect("repo group key");
+        let collapse_key = format!(
+            "{}:{group_key}",
+            app.sidebar_group_mode.collapse_namespace()
+        );
+        let area = Rect::new(0, 0, 40, 12);
+        let render_header = |app: &AppState| {
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let header = compute_workspace_card_areas(app, area)
+                .into_iter()
+                .find(|card| card.repo_header)
+                .expect("repo header");
+            row_text(
+                terminal.backend().buffer(),
+                header.rect.y,
+                header.rect.width,
+            )
+        };
+
+        app.collapsed_sidebar_groups.insert(collapse_key.clone());
+        let collapsed = render_header(&app);
+        assert!(collapsed.contains("●1"), "{collapsed:?}");
+        assert!(collapsed.contains("○1"), "{collapsed:?}");
+        assert!(collapsed.contains('…'), "{collapsed:?}");
+
+        app.collapsed_sidebar_groups.remove(&collapse_key);
+        let expanded = render_header(&app);
+        assert!(!expanded.contains("●1"), "{expanded:?}");
+        assert!(!expanded.contains("○1"), "{expanded:?}");
+        assert!(expanded.contains(repo), "{expanded:?}");
+        assert!(!expanded.contains('…'), "{expanded:?}");
     }
 
     #[test]

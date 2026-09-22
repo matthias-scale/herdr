@@ -2104,7 +2104,10 @@ enum BlockedPaneTarget {
     Remote(crate::api::schema::AgentRef),
 }
 
-fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
+fn blocked_pane_cycle_in_order(
+    state: &AppState,
+    include_needs_you: bool,
+) -> Vec<(BlockedPaneTarget, bool)> {
     let visible_local = crate::ui::sidebar::sidebar_navigation_agent_entries(state)
         .into_iter()
         .filter_map(|entry| {
@@ -2142,6 +2145,35 @@ fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
     let mut panes = Vec::with_capacity(local.len() + remote.len());
     for row in crate::ui::sidebar_rows(state) {
         match row {
+            crate::ui::SidebarRow::NeedsYou { target, .. } if include_needs_you => match target {
+                crate::ui::NeedsYouTarget::Local(entry_target) => {
+                    if let Some(index) = local.iter().position(|(target, _)| {
+                        matches!(
+                            target,
+                            BlockedPaneTarget::Local { ws_idx, tab_idx, pane_id }
+                                if (*ws_idx, *tab_idx, *pane_id)
+                                    == (
+                                        entry_target.ws_idx,
+                                        entry_target.tab_idx,
+                                        entry_target.pane_id,
+                                    )
+                        )
+                    }) {
+                        panes.push(local.remove(index));
+                    }
+                }
+                crate::ui::NeedsYouTarget::Remote(entry_target) => {
+                    if let Some(index) = remote.iter().position(|(target, _)| {
+                        matches!(
+                            target,
+                            BlockedPaneTarget::Remote(agent_ref)
+                                if agent_ref == &entry_target
+                        )
+                    }) {
+                        panes.push(remote.remove(index));
+                    }
+                }
+            },
             crate::ui::SidebarRow::Tab { entry, .. } => {
                 let Some(entry_target) = entry.local_target() else {
                     continue;
@@ -2192,10 +2224,18 @@ fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
         }
     }
     // Collapsed or filtered local rows remain keyboard-reachable after the
-    // visible worklist. Remote rows have no local pane fallback, so only rows
-    // present in the current projection are valid navigation targets.
+    // visible worklist. Remote attention rows enter through the Needs-you
+    // strip even when their Fleet body row is absent.
     panes.extend(local);
     panes
+}
+
+fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
+    blocked_pane_cycle_in_order(state, true)
+}
+
+fn blocked_pane_body_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
+    blocked_pane_cycle_in_order(state, false)
 }
 
 fn next_blocked_window_target(state: &AppState) -> Option<BlockedPaneTarget> {
@@ -2213,11 +2253,70 @@ fn next_blocked_window_target(state: &AppState) -> Option<BlockedPaneTarget> {
             .and_then(|workspace| workspace.focused_pane_id())
             .map(|pane_id| (ws_idx, pane_id))
     });
+    let selected_remote = state.sidebar_selected_remote_agent.as_ref();
+    let current = selected_remote
+        .and_then(|selected| {
+            panes.iter().position(|(target, _)| {
+                matches!(target, BlockedPaneTarget::Remote(agent_ref) if agent_ref == selected)
+            })
+        })
+        .or_else(|| {
+            focused.and_then(|focused| {
+                panes.iter().position(|(target, _)| {
+                    matches!(
+                        target,
+                        BlockedPaneTarget::Local { ws_idx, pane_id, .. }
+                            if (*ws_idx, *pane_id) == focused
+                    )
+                })
+            })
+        });
+    // A non-attention row remains the operator's starting point in the body.
+    // After the first stop, the hoisted strip owns the lap order.
+    if current.is_none_or(|index| !panes[index].1) {
+        let body = blocked_pane_body_cycle(state);
+        let body_anchor = selected_remote
+            .and_then(|selected| {
+                body.iter().position(|(target, _)| {
+                    matches!(target, BlockedPaneTarget::Remote(agent_ref) if agent_ref == selected)
+                })
+            })
+            .or_else(|| {
+                focused
+                    .and_then(|focused| {
+                        body.iter().position(|(target, _)| {
+                            matches!(
+                                target,
+                                BlockedPaneTarget::Local { ws_idx, pane_id, .. }
+                                    if (*ws_idx, *pane_id) == focused
+                            )
+                        })
+                    })
+                    .or_else(|| {
+                        active_window.and_then(|window| {
+                            body.iter().rposition(|(target, _)| {
+                                matches!(
+                                    target,
+                                    BlockedPaneTarget::Local { ws_idx, tab_idx, .. }
+                                        if (*ws_idx, *tab_idx) == window
+                                )
+                            })
+                        })
+                    })
+            });
+        if let Some(anchor) = body_anchor {
+            if let Some(target) = (1..=body.len()).find_map(|offset| {
+                let (target, needs_attention) = &body[(anchor + offset) % body.len()];
+                needs_attention.then(|| target.clone())
+            }) {
+                return Some(target);
+            }
+        }
+    }
     // Walking forward from where the operator stands, rather than restarting at
     // the first blocked pane, is what keeps every blocked pane reachable when
     // one is skipped instead of answered. The active window is the fallback
     // anchor: a pane that carries no agent panel entry still has a position.
-    let selected_remote = state.sidebar_selected_remote_agent.as_ref();
     let start = selected_remote
         .and_then(|selected| {
             panes.iter().position(|(target, _)| {
@@ -3796,6 +3895,44 @@ mod tests {
         }];
     }
 
+    fn remote_blocker(
+        host: &str,
+        pane_id: &str,
+    ) -> std::sync::Arc<crate::ui::RemoteAgentPanelEntry> {
+        let info = serde_json::from_value(serde_json::json!({
+            "terminal_id": format!("terminal-{pane_id}"),
+            "name": pane_id,
+            "agent": "codex",
+            "agent_status": "blocked",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "pane_id": pane_id,
+            "focused": false,
+            "revision": 1
+        }))
+        .expect("valid remote agent fixture");
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![crate::fleet::HostSnapshot {
+                name: host.into(),
+                target: host.into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: crate::fleet::HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                remote_identity: None,
+                entries: vec![crate::fleet::FleetRow::test_agent_info_row(host, info)],
+            }],
+            ..crate::fleet::Snapshot::default()
+        };
+        crate::ui::remote_agent_panel_entries_at(&snapshot, 100)
+            .into_iter()
+            .next()
+            .expect("remote blocker entry")
+    }
+
     fn expand_all_workspaces_for_sidebar(state: &mut AppState) {
         for workspace in &state.workspaces {
             state
@@ -3841,7 +3978,7 @@ mod tests {
     }
 
     #[test]
-    fn next_blocked_window_follows_the_rendered_sidebar_group_order() {
+    fn next_blocked_window_follows_the_rendered_needs_you_order() {
         let mut app = app_with_test_workspaces(&["main", "other", "worktree"]);
         mark_worktree_space_member(&mut app.state, 0, "repo-key");
         mark_worktree_space_member(&mut app.state, 2, "repo-key");
@@ -3861,7 +3998,7 @@ mod tests {
         assert_tui_window_cycle(
             &mut app,
             NavigateAction::NextBlockedWindow,
-            &[(2, 0), (1, 0), (0, 0)],
+            &[(1, 0), (2, 0), (0, 0)],
         );
     }
 
@@ -3918,11 +4055,6 @@ mod tests {
                 BlockedPaneTarget::Local {
                     ws_idx: 0,
                     tab_idx: 0,
-                    pane_id: visible,
-                },
-                BlockedPaneTarget::Local {
-                    ws_idx: 0,
-                    tab_idx: 0,
                     pane_id: hidden,
                 },
                 BlockedPaneTarget::Local {
@@ -3930,12 +4062,17 @@ mod tests {
                     tab_idx: 0,
                     pane_id: later,
                 },
+                BlockedPaneTarget::Local {
+                    ws_idx: 0,
+                    tab_idx: 0,
+                    pane_id: visible,
+                },
             ]
         );
     }
 
     #[test]
-    fn next_blocked_window_skips_sidebar_query_hidden_sibling_until_visible_targets() {
+    fn next_blocked_window_follows_strip_for_query_matched_tab_sibling() {
         let mut app = app_with_test_workspaces(&["mixed", "later"]);
         let first = app.state.workspaces[0].tabs[0].root_pane;
         let hidden = app.state.workspaces[0].test_split(Direction::Horizontal);
@@ -3977,7 +4114,7 @@ mod tests {
                 BlockedPaneTarget::Local {
                     ws_idx: 0,
                     tab_idx: 0,
-                    pane_id: first,
+                    pane_id: hidden,
                 },
                 BlockedPaneTarget::Local {
                     ws_idx: 1,
@@ -3987,7 +4124,7 @@ mod tests {
                 BlockedPaneTarget::Local {
                     ws_idx: 0,
                     tab_idx: 0,
-                    pane_id: hidden,
+                    pane_id: first,
                 },
             ]
         );
@@ -4223,6 +4360,99 @@ mod tests {
                     .expect("valid visible remote reference")
             )]
         );
+    }
+
+    #[test]
+    fn next_blocked_window_reaches_remote_needs_you_row_when_fleet_is_collapsed() {
+        let mut state = AppState::test_new();
+        let remote = remote_blocker("ub2", "blocked-pane");
+        let agent_ref = remote.agent_ref.clone();
+        state.remote_agent_panel_entries = vec![remote];
+        state.collapsed_sidebar_groups.insert("repo:Fleet".into());
+
+        let rows = crate::ui::sidebar_rows(&state);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            crate::ui::SidebarRow::NeedsYou {
+                target: crate::ui::NeedsYouTarget::Remote(target),
+                ..
+            } if target == &agent_ref
+        )));
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            crate::ui::SidebarRow::RemoteAgent { entry, .. }
+                if entry.agent_ref == agent_ref
+        )));
+        assert_eq!(
+            next_blocked_window_target(&state),
+            Some(BlockedPaneTarget::Remote(agent_ref))
+        );
+    }
+
+    #[test]
+    fn next_blocked_window_visits_each_strip_target_once_per_lap() {
+        let mut state = AppState::test_new();
+        state.workspaces = vec![Workspace::test_new("local")];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        let local_pane = state.workspaces[0].tabs[0].root_pane;
+        set_pane_agent_state(
+            &mut state,
+            0,
+            0,
+            local_pane,
+            crate::detect::AgentState::Blocked,
+        );
+        let remote = remote_blocker("ub2", "blocked-pane");
+        let agent_ref = remote.agent_ref.clone();
+        state.remote_agent_panel_entries = vec![remote];
+        state.collapsed_sidebar_groups.remove("repo:Fleet");
+
+        let rows = crate::ui::sidebar_rows(&state);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            crate::ui::SidebarRow::RemoteAgent { entry, .. }
+                if entry.agent_ref == agent_ref
+        )));
+        let targets = blocked_pane_cycle(&state)
+            .into_iter()
+            .filter_map(|(target, needs_attention)| needs_attention.then_some(target))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            targets,
+            vec![
+                BlockedPaneTarget::Local {
+                    ws_idx: 0,
+                    tab_idx: 0,
+                    pane_id: local_pane,
+                },
+                BlockedPaneTarget::Remote(agent_ref.clone()),
+            ]
+        );
+
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::NextBlockedWindow,
+            ActionContext::Prefix,
+        );
+        assert_eq!(state.sidebar_selected_remote_agent, Some(agent_ref.clone()));
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::NextBlockedWindow,
+            ActionContext::Prefix,
+        );
+        assert!(state.sidebar_selected_remote_agent.is_none());
+        assert_eq!(state.workspaces[0].focused_pane_id(), Some(local_pane));
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::NextBlockedWindow,
+            ActionContext::Prefix,
+        );
+        assert_eq!(state.sidebar_selected_remote_agent, Some(agent_ref));
     }
 
     #[test]

@@ -50,8 +50,13 @@ pub(crate) const NOTEPAD_CONTEXT_TAB_LABEL: &str = "Context";
 
 /// Smallest and largest panel heights, header row included. Dragging the
 /// panel's top edge and `[notepad] height` both clamp to this range.
+///
+/// The ceiling is deliberately far above any real sidebar so it never binds on
+/// its own: what actually limits the panel is the sidebar's spare rows, applied
+/// by `ui::notepad::notepad_height`. Keeping a finite bound still stops a
+/// corrupt config or presentation file from storing a nonsense height.
 pub(crate) const MIN_HEIGHT: u16 = 3;
-pub(crate) const MAX_HEIGHT: u16 = 24;
+pub(crate) const MAX_HEIGHT: u16 = 200;
 
 /// One collapsible section of the agent tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

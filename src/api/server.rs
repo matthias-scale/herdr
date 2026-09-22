@@ -413,6 +413,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::GroupCreate(_) => "group.create",
         Method::GroupRename(_) => "group.rename",
         Method::GroupDelete(_) => "group.delete",
+        Method::GroupAuthorityMutate(_) => "group.authority_mutate",
         Method::WorktreeList(_) => "worktree.list",
         Method::WorktreeCreate(_) => "worktree.create",
         Method::WorktreeOpen(_) => "worktree.open",

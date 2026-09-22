@@ -1,5 +1,6 @@
 use crate::api::schema::{
-    FleetAgentInfo, FleetHostInfo, FleetHostStateInfo, FleetSnapshotInfo, ResponseResult,
+    AuthorityCatalogInfo, AuthorityCatalogStateInfo, FleetAgentInfo, FleetHostInfo,
+    FleetHostStateInfo, FleetSnapshotInfo, ResponseResult,
 };
 use crate::app::App;
 use crate::fleet::{EvidenceSource, HostState};
@@ -7,6 +8,30 @@ use crate::fleet::{EvidenceSource, HostState};
 use super::responses::encode_success;
 
 impl App {
+    pub(crate) fn authority_catalog_infos(&self) -> Vec<AuthorityCatalogInfo> {
+        self.state
+            .fleet_snapshot
+            .group_catalogs
+            .iter()
+            .map(|catalog| AuthorityCatalogInfo {
+                connection: catalog.host.clone(),
+                authority_id: catalog.authority_id().cloned(),
+                state: match catalog.state {
+                    crate::fleet::GroupCatalogState::Fresh => AuthorityCatalogStateInfo::Fresh,
+                    crate::fleet::GroupCatalogState::Stale => AuthorityCatalogStateInfo::Stale,
+                    crate::fleet::GroupCatalogState::IdentityConflict => {
+                        AuthorityCatalogStateInfo::IdentityConflict
+                    }
+                    crate::fleet::GroupCatalogState::Unavailable => {
+                        AuthorityCatalogStateInfo::Unavailable
+                    }
+                },
+                snapshot: catalog.snapshot.clone(),
+                error: catalog.error.clone(),
+            })
+            .collect()
+    }
+
     pub(super) fn handle_fleet_list(&self, id: String) -> String {
         let snapshot = &self.state.fleet_snapshot;
         let now_unix_s = std::time::SystemTime::now()
@@ -61,6 +86,7 @@ impl App {
                     polled: snapshot.polled,
                     refreshed_at_unix_ms: snapshot.refreshed_at_unix_ms,
                     hosts,
+                    authority_catalogs: self.authority_catalog_infos(),
                 },
             },
         )
@@ -123,6 +149,7 @@ mod tests {
                 remote_identity: None,
                 entries,
             }],
+            group_catalogs: Vec::new(),
         };
         app
     }
@@ -183,6 +210,7 @@ mod tests {
                     }
                 })
                 .collect(),
+            group_catalogs: Vec::new(),
         };
 
         let value: serde_json::Value =
