@@ -471,6 +471,17 @@ mod tests {
             Some(ConfigEdit::Integer {
                 section: "notepad",
                 key: "height",
+                value: 24
+            })
+        );
+
+        // The ladder wraps at its tallest step, not at the old 16-row end.
+        state.notepad.height = 40;
+        assert_eq!(
+            cycle_general_row(&state, GeneralRow::NotepadHeight),
+            Some(ConfigEdit::Integer {
+                section: "notepad",
+                key: "height",
                 value: 6
             })
         );
