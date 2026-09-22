@@ -1919,8 +1919,7 @@ mod tests {
             provider_color: app.palette.peach,
         };
         let mut aged = agent.clone();
-        aged.blocked_since =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(18 * 60));
+        aged.blocked_since = Some(std::time::Instant::now());
         let narrow = agent_line(&app, &aged, Some(&cells), false, 18);
         let text: String = narrow
             .spans

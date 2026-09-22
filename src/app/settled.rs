@@ -1472,12 +1472,15 @@ mod tests {
 
     #[test]
     fn done_resumable_pane_settles_once_the_done_window_passes() {
-        let now = Instant::now();
-        let (mut state, pane_id) = done_state(true, now - Duration::from_secs(29 * 60));
+        let done_since = Instant::now();
+        let now = done_since + Duration::from_secs(29 * 60);
+        let (mut state, pane_id) = done_state(true, done_since);
         assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_030), 0);
         assert!(!state.pane_is_settled(0, pane_id));
 
-        let (mut state, pane_id) = done_state(true, now - Duration::from_secs(31 * 60));
+        let done_since = Instant::now();
+        let now = done_since + Duration::from_secs(31 * 60);
+        let (mut state, pane_id) = done_state(true, done_since);
         assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_031), 1);
         assert!(state.pane_is_settled(0, pane_id));
     }
@@ -1502,8 +1505,8 @@ mod tests {
 
     #[test]
     fn informational_items_do_not_hold_quiet_settle() {
-        let now = Instant::now();
-        let quiet_since = now - Duration::from_secs(31 * 60);
+        let quiet_since = Instant::now();
+        let now = quiet_since + Duration::from_secs(31 * 60);
         let (mut state, pane_id) = done_state(true, quiet_since);
         let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
@@ -1640,8 +1643,8 @@ mod tests {
 
     #[test]
     fn stale_resolution_event_starts_the_quiet_window_at_the_evaluator() {
-        let now = Instant::now();
-        let old_activity = now - Duration::from_secs(2 * 60 * 60);
+        let old_activity = Instant::now();
+        let now = old_activity + Duration::from_secs(2 * 60 * 60);
         let (mut state, pane_id) = stale_state(Some(AgentState::Working), old_activity);
 
         state.handle_app_event(crate::events::AppEvent::PaneProcessStateChanged {
@@ -1668,8 +1671,8 @@ mod tests {
 
     #[test]
     fn held_shell_end_event_starts_the_quiet_window_at_the_evaluator() {
-        let now = Instant::now();
-        let old_activity = now - Duration::from_secs(2 * 60 * 60);
+        let old_activity = Instant::now();
+        let now = old_activity + Duration::from_secs(2 * 60 * 60);
         let (mut state, pane_id) = stale_state(Some(AgentState::Idle), old_activity);
         state.handle_app_event(crate::events::AppEvent::PaneProcessStateChanged {
             pane_id,
@@ -1831,8 +1834,9 @@ mod tests {
 
     #[test]
     fn quiet_pane_without_a_resume_plan_settles_and_remains_reapable() {
-        let now = Instant::now();
-        let (mut state, pane_id) = done_state(false, now - Duration::from_secs(5 * 60 * 60));
+        let done_since = Instant::now();
+        let now = done_since + Duration::from_secs(5 * 60 * 60);
+        let (mut state, pane_id) = done_state(false, done_since);
         assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_032), 1);
         assert!(state.pane_is_settled(0, pane_id));
         assert_eq!(
@@ -1845,8 +1849,8 @@ mod tests {
 
     #[test]
     fn done_settle_skips_the_active_pane_and_pinned_tabs() {
-        let now = Instant::now();
-        let done_since = now - Duration::from_secs(31 * 60);
+        let done_since = Instant::now();
+        let now = done_since + Duration::from_secs(31 * 60);
         let (mut state, pane_id) = done_state(true, done_since);
         state.active = Some(0);
         state.workspaces[0].tabs[0].panes.get_mut(&pane_id);
@@ -1866,8 +1870,8 @@ mod tests {
 
     #[test]
     fn quiet_settle_preserves_blocked_and_closing_gate_exclusions() {
-        let now = Instant::now();
-        let quiet_since = now - Duration::from_secs(31 * 60);
+        let quiet_since = Instant::now();
+        let now = quiet_since + Duration::from_secs(31 * 60);
         let (mut eligible, eligible_pane) = done_state(true, quiet_since);
         eligible.workspaces[0].tabs[0]
             .panes
@@ -1942,8 +1946,9 @@ mod tests {
 
     #[test]
     fn done_settle_can_be_turned_off() {
-        let now = Instant::now();
-        let (mut state, pane_id) = done_state(true, now - Duration::from_secs(5 * 60 * 60));
+        let done_since = Instant::now();
+        let now = done_since + Duration::from_secs(5 * 60 * 60);
+        let (mut state, pane_id) = done_state(true, done_since);
         state.auto_settle_done = false;
         assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_035), 0);
         assert!(!state.pane_is_settled(0, pane_id));
@@ -1952,8 +1957,9 @@ mod tests {
 
     #[test]
     fn done_settle_deadline_is_the_pane_done_window() {
-        let now = Instant::now();
-        let (state, _) = done_state(true, now - Duration::from_secs(10 * 60));
+        let done_since = Instant::now();
+        let now = done_since + Duration::from_secs(10 * 60);
+        let (state, _) = done_state(true, done_since);
         assert_eq!(
             state.next_done_settle_deadline(now),
             Some(now + Duration::from_secs(20 * 60))

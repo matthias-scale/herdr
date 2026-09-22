@@ -1630,8 +1630,8 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let url = "https://github.com/owner/repo/pull/21";
         let work = merged_work(url);
-        let now = Instant::now();
-        let old_activity = now - std::time::Duration::from_secs(2 * 60 * 60);
+        let old_activity = Instant::now();
+        let now = old_activity + std::time::Duration::from_secs(2 * 60 * 60);
         app.state.active = None;
         app.state.auto_settle_inactive = false;
         app.state.auto_settle_finished = true;
