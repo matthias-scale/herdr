@@ -525,13 +525,18 @@ fn assert_client_clipboard(control_rx: &std::sync::mpsc::Receiver<Vec<u8>>, expe
 fn assert_promoted_client_first_link_click(pixel_mouse: bool) {
     let (mut server, control_rx, (column, row), expected) =
         promoted_agent_link_fixture(pixel_mouse);
+    // This covers the promoted client's *geometry*, and the clipboard write is
+    // how the resolved row is observed. A plain click opens the link instead of
+    // copying it, so the click carries alt: that keeps the copy path, and with
+    // it the observable, while still hitting the same row. In SGR mouse
+    // encoding alt is button bit 8.
     let changed = if pixel_mouse {
         let geometry = crate::input::mouse::HostGeometry::new(80, 30, 800, 600).unwrap();
         let x = u32::from(column) * 10 + 1;
         let y = u32::from(row) * 20 + 1;
         server.handle_server_event(ServerEvent::ClientInputPixels {
             client_id: 2,
-            data: format!("\x1b[<0;{x};{y}M").into_bytes(),
+            data: format!("\x1b[<8;{x};{y}M").into_bytes(),
             geometry,
         })
     } else {
@@ -543,7 +548,7 @@ fn assert_promoted_client_first_link_click(pixel_mouse: bool) {
                 ),
                 column,
                 row,
-                modifiers: 0,
+                modifiers: crossterm::event::KeyModifiers::ALT.bits(),
             }],
         })
     };
@@ -575,13 +580,15 @@ fn assert_resized_client_first_link_click(pixel_mouse: bool) {
         cell_height_px: 20,
     }));
 
+    // Alt-click for the same reason as the promoted-client case above: this
+    // asserts geometry through the clipboard write, and only alt still copies.
     let changed = if pixel_mouse {
         let geometry = crate::input::mouse::HostGeometry::new(80, 30, 800, 600).unwrap();
         let x = u32::from(column) * 10 + 1;
         let y = u32::from(row) * 20 + 1;
         server.handle_server_event(ServerEvent::ClientInputPixels {
             client_id: 2,
-            data: format!("\x1b[<0;{x};{y}M").into_bytes(),
+            data: format!("\x1b[<8;{x};{y}M").into_bytes(),
             geometry,
         })
     } else {
@@ -593,7 +600,7 @@ fn assert_resized_client_first_link_click(pixel_mouse: bool) {
                 ),
                 column,
                 row,
-                modifiers: 0,
+                modifiers: crossterm::event::KeyModifiers::ALT.bits(),
             }],
         })
     };
