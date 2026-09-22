@@ -2394,9 +2394,8 @@ mod tests {
     #[test]
     fn loop_receipt_change_event_refreshes_cache_and_publishes_update() {
         let path = std::env::temp_dir().join(format!(
-            "herdr-loop-runs-app-refresh-{}-{}.jsonl",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            "herdr-loop-runs-app-refresh-{}.jsonl",
+            crate::config::test_unique_suffix()
         ));
         std::fs::write(
             &path,

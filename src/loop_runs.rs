@@ -1075,9 +1075,8 @@ not-json
     #[test]
     fn invalid_utf8_lines_are_skipped_instead_of_lossily_admitted() {
         let path = std::env::temp_dir().join(format!(
-            "herdr-loop-runs-invalid-utf8-{}-{}.jsonl",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            "herdr-loop-runs-invalid-utf8-{}.jsonl",
+            crate::config::test_unique_suffix()
         ));
         let bytes = b"{\"event\":\"start\",\"run_id\":\"valid\",\"skill\":\"aship\",\"start\":\"2026-08-10T10:00:00Z\"}\n{\"event\":\"start\",\"run_id\":\"bad\",\"skill\":\"bad\xFFskill\",\"start\":\"2026-08-10T10:01:00Z\"}\n";
         fs::write(&path, bytes).expect("write temporary receipt fixture");
@@ -1122,9 +1121,8 @@ not-json
     #[test]
     fn incremental_receipt_reader_consumes_only_appended_lines() {
         let path = std::env::temp_dir().join(format!(
-            "herdr-loop-runs-incremental-{}-{}.jsonl",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            "herdr-loop-runs-incremental-{}.jsonl",
+            crate::config::test_unique_suffix()
         ));
         fs::write(
             &path,
