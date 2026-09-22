@@ -6279,7 +6279,7 @@ mod tests {
             .report(
                 pane_id,
                 crate::agent_state::AgentReportPayload {
-                    goal: Some("remove on process death".into()),
+                    goal: Some(Some("remove on process death".into())),
                     ..crate::agent_state::AgentReportPayload::default()
                 },
                 std::time::SystemTime::now(),

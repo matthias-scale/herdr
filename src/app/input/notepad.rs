@@ -591,12 +591,12 @@ mod tests {
             .report(
                 pane_id,
                 crate::agent_state::AgentReportPayload {
-                    goal: Some("ship MAT-160".into()),
+                    goal: Some(Some("ship MAT-160".into())),
                     tasks: Some(vec![crate::agent_state::AgentTask {
                         text: "read transcript".into(),
                         status: crate::agent_state::AgentTaskStatus::Completed,
                     }]),
-                    subagents: vec![
+                    subagents: Some(vec![
                         crate::agent_state::AgentSubagent {
                             name: "native worker".into(),
                             status: crate::api::schema::AgentStatus::Working,
@@ -611,7 +611,7 @@ mod tests {
                             pane_id: Some("w1:p2".into()),
                             source: crate::agent_state::AgentSubagentSource::Reported,
                         },
-                    ],
+                    ]),
                     ..crate::agent_state::AgentReportPayload::default()
                 },
                 std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(AGENT_BASE_SECS),

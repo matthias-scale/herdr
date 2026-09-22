@@ -12,11 +12,32 @@ pub struct AgentStateParams {
     pub target: String,
 }
 
+/// Flattening filters unknown fields instead of rejecting them, so a typo
+/// through the socket API would report success and record nothing. The payload
+/// is kept whole and deserialized in one step to keep both paths strict.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct AgentReportParams {
     pub target: String,
-    #[serde(flatten)]
-    pub report: AgentReportPayload,
+    #[serde(default)]
+    pub status_text: Option<Option<String>>,
+    #[serde(default)]
+    pub goal: Option<Option<String>>,
+    #[serde(default)]
+    pub tasks: Option<Vec<crate::agent_state::AgentTask>>,
+    #[serde(default)]
+    pub subagents: Option<Vec<crate::agent_state::AgentSubagent>>,
+}
+
+impl AgentReportParams {
+    pub fn payload(&self) -> AgentReportPayload {
+        AgentReportPayload {
+            status_text: self.status_text.clone(),
+            goal: self.goal.clone(),
+            tasks: self.tasks.clone(),
+            subagents: self.subagents.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

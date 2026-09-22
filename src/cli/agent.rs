@@ -46,9 +46,14 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn agent_state(args: &[String]) -> std::io::Result<i32> {
-    let [target, json] = args else {
-        eprintln!("usage: herdr agent state <pane> --json");
-        return Ok(2);
+    // clap's rendered usage puts no order on the flag, so accept either.
+    let (target, json) = match args {
+        [first, second] if first == "--json" => (second, first),
+        [first, second] => (first, second),
+        _ => {
+            eprintln!("usage: herdr agent state <pane> --json");
+            return Ok(2);
+        }
     };
     if json != "--json" {
         eprintln!("usage: herdr agent state <pane> --json");
@@ -68,12 +73,23 @@ fn agent_report(args: &[String]) -> std::io::Result<i32> {
         eprintln!("usage: herdr agent report <pane> --json [payload]");
         return Ok(2);
     };
-    if args.get(1).map(String::as_str) != Some("--json") || args.len() > 3 {
+    // `--json PAYLOAD` and `--json=PAYLOAD` both appear in the rendered usage.
+    let inline_payload = args
+        .get(1)
+        .and_then(|arg| arg.strip_prefix("--json="))
+        .map(str::to_string);
+    if inline_payload.is_none()
+        && (args.get(1).map(String::as_str) != Some("--json") || args.len() > 3)
+    {
         eprintln!("usage: herdr agent report <pane> --json [payload]");
         return Ok(2);
     }
-    let input = if let Some(payload) = args.get(2) {
-        payload.clone()
+    if inline_payload.is_some() && args.len() > 2 {
+        eprintln!("usage: herdr agent report <pane> --json [payload]");
+        return Ok(2);
+    }
+    let input = if let Some(payload) = inline_payload.or_else(|| args.get(2).cloned()) {
+        payload
     } else {
         if io::stdin().is_terminal() {
             return print_agent_json_error(
@@ -100,7 +116,10 @@ fn agent_report(args: &[String]) -> std::io::Result<i32> {
         id: "cli:agent:report".into(),
         method: Method::AgentReport(AgentReportParams {
             target: target.clone(),
-            report,
+            status_text: report.status_text,
+            goal: report.goal,
+            tasks: report.tasks,
+            subagents: report.subagents,
         }),
     })?;
     print_agent_state_response(&response)

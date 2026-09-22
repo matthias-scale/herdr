@@ -1945,6 +1945,8 @@
           "type": "object"
         },
         "AgentReportParams": {
+          "additionalProperties": false,
+          "description": "Flattening filters unknown fields instead of rejecting them, so a typo\nthrough the socket API would report success and record nothing. The payload\nis kept whole and deserialized in one step to keep both paths strict.",
           "properties": {
             "goal": {
               "default": null,
@@ -1961,11 +1963,14 @@
               ]
             },
             "subagents": {
-              "default": [],
+              "default": null,
               "items": {
                 "$ref": "#/schemas/request/$defs/AgentSubagent"
               },
-              "type": "array"
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "target": {
               "type": "string"

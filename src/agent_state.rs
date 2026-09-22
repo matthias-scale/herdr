@@ -1017,14 +1017,27 @@ pub(crate) struct ObservedAgentLink {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentReportPayload {
-    #[serde(default)]
-    pub status_text: Option<String>,
-    #[serde(default)]
-    pub goal: Option<String>,
+    /// Absent keeps the stored value, `null` clears it.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    pub status_text: Option<Option<String>>,
+    /// Absent keeps the stored value, `null` clears it.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    pub goal: Option<Option<String>>,
+    /// Absent keeps the stored list, `[]` clears it.
     #[serde(default)]
     pub tasks: Option<Vec<AgentTask>>,
+    /// Absent keeps the stored list, `[]` clears it.
     #[serde(default)]
-    pub subagents: Vec<AgentSubagent>,
+    pub subagents: Option<Vec<AgentSubagent>>,
+}
+
+/// Distinguishes an absent field from an explicit `null`.
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1086,21 +1099,26 @@ impl AgentStateStore {
         validate_report(&payload)?;
 
         let pane = self.panes.entry(pane_id).or_default();
-        pane.status_text = payload.status_text;
-        pane.goal = payload.goal;
+        if let Some(status_text) = payload.status_text {
+            pane.status_text = status_text;
+        }
+        if let Some(goal) = payload.goal {
+            pane.goal = goal;
+        }
         pane.last_report_at = Some(observed_at);
         if let Some(tasks) = payload.tasks {
             pane.reported_tasks = tasks;
             pane.reported_tasks_at = Some(observed_at);
         }
-        pane.reported_subagents = payload
-            .subagents
-            .into_iter()
-            .map(|mut subagent| {
-                subagent.source = AgentSubagentSource::Reported;
-                subagent
-            })
-            .collect();
+        if let Some(subagents) = payload.subagents {
+            pane.reported_subagents = subagents
+                .into_iter()
+                .map(|mut subagent| {
+                    subagent.source = AgentSubagentSource::Reported;
+                    subagent
+                })
+                .collect();
+        }
         Ok(())
     }
 
@@ -1242,12 +1260,13 @@ fn validate_report(payload: &AgentReportPayload) -> Result<(), String> {
     {
         return Err("task text must not be empty or contain control characters".into());
     }
-    if payload.subagents.iter().any(|subagent| {
+    let subagents = payload.subagents.as_deref().unwrap_or_default();
+    if subagents.iter().any(|subagent| {
         subagent.name.trim().is_empty() || subagent.name.chars().any(char::is_control)
     }) {
         return Err("subagent name must not be empty or contain control characters".into());
     }
-    if payload.subagents.iter().any(|subagent| {
+    if subagents.iter().any(|subagent| {
         subagent
             .last_active_at
             .as_ref()
@@ -1560,19 +1579,19 @@ mod tests {
             .report(
                 pane_id,
                 AgentReportPayload {
-                    status_text: Some("checking tests".into()),
-                    goal: Some("ship MAT-160".into()),
+                    status_text: Some(Some("checking tests".into())),
+                    goal: Some(Some("ship MAT-160".into())),
                     tasks: Some(vec![AgentTask {
                         text: "run focused tests".into(),
                         status: AgentTaskStatus::InProgress,
                     }]),
-                    subagents: vec![AgentSubagent {
+                    subagents: Some(vec![AgentSubagent {
                         name: "reviewer".into(),
                         status: AgentStatus::Working,
                         last_active_at: None,
                         pane_id: None,
                         source: AgentSubagentSource::Reported,
-                    }],
+                    }]),
                 },
                 now,
             )
@@ -2012,7 +2031,7 @@ mod tests {
     }
 
     #[test]
-    fn round_10_styled_scheme_preserves_prefix_across_detection_cycle() {
+    fn styled_scheme_preserves_prefix_across_detection_cycle() {
         let styled = ParsedLinkHarness::default();
         styled.observe_chunk(b"h\x1b[31mttps:");
         assert!(styled.take_links().is_none());
@@ -2024,7 +2043,7 @@ mod tests {
     }
 
     #[test]
-    fn round_10_non_hyperlink_osc_hides_embedded_url() {
+    fn non_hyperlink_osc_hides_embedded_url() {
         let hidden = ParsedLinkHarness::default();
         hidden.observe_chunk(
             b"\x1b]0;title https://hidden.example/path\x07https://visible.example/path\n",
@@ -2039,7 +2058,7 @@ mod tests {
     }
 
     #[test]
-    fn round_10_unicode_whitespace_terminates_output_url() {
+    fn unicode_whitespace_terminates_output_url() {
         let gate = LinkExtractionGate::default();
         gate.observe_chunk("https://unicode.example/path\u{00a0}next words\n".as_bytes());
 
@@ -2052,7 +2071,7 @@ mod tests {
     }
 
     #[test]
-    fn round_10_punctuated_maximum_length_url_is_published() {
+    fn punctuated_maximum_length_url_is_published() {
         let prefix = "https://maximum.example/";
         let url = format!("{prefix}{}", "a".repeat(MAX_URL_BYTES - prefix.len()));
         let gate = LinkExtractionGate::default();
@@ -2067,7 +2086,7 @@ mod tests {
     }
 
     #[test]
-    fn round_10_link_queue_evicts_oldest_observation_before_store() {
+    fn link_queue_evicts_oldest_observation_before_store() {
         let pane_id = PaneId::from_raw(99);
         let base = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
         let mut ordered_store = AgentStateStore::default();
@@ -2162,7 +2181,7 @@ mod tests {
     }
 
     #[test]
-    fn round_10_unmatched_suffix_trimming_is_linear_enough_for_pty_ingest() {
+    fn unmatched_suffix_trimming_is_linear_enough_for_pty_ingest() {
         let prefix = "https://suffix.example/";
         let url = format!("{prefix}{}", ")".repeat(MAX_URL_BYTES - prefix.len()));
         let gate = LinkExtractionGate::default();
@@ -2217,7 +2236,7 @@ mod tests {
     }
 
     #[test]
-    fn round_10_generated_terminal_interleavings_match_visibility_contract() {
+    fn generated_terminal_interleavings_match_visibility_contract() {
         for seed in 0..32 {
             let stream = generated_terminal_stream(seed);
             let mut output_urls = vec![
@@ -2862,6 +2881,55 @@ mod tests {
     }
 
     #[test]
+    fn partial_report_keeps_fields_it_does_not_mention() {
+        let mut store = AgentStateStore::default();
+        let pane = PaneId::from_raw(91);
+        let now = SystemTime::now();
+        store
+            .report(
+                pane,
+                serde_json::from_str::<AgentReportPayload>(
+                    r#"{"goal":"ship MAT-160","subagents":[{"name":"reviewer","status":"working"}]}"#,
+                )
+                .expect("first payload"),
+                now,
+            )
+            .expect("valid report");
+        store
+            .report(
+                pane,
+                serde_json::from_str::<AgentReportPayload>(r#"{"status_text":"running tests"}"#)
+                    .expect("second payload"),
+                now,
+            )
+            .expect("valid report");
+
+        let snapshot = store.snapshot(pane, AgentStatus::Working);
+        assert_eq!(snapshot.goal.as_deref(), Some("ship MAT-160"));
+        assert_eq!(snapshot.status_text.as_deref(), Some("running tests"));
+        assert_eq!(
+            snapshot.subagents.len(),
+            1,
+            "subagents survive a partial report"
+        );
+
+        store
+            .report(
+                pane,
+                serde_json::from_str::<AgentReportPayload>(r#"{"goal":null,"subagents":[]}"#)
+                    .expect("clearing payload"),
+                now,
+            )
+            .expect("valid report");
+        let snapshot = store.snapshot(pane, AgentStatus::Working);
+        assert_eq!(snapshot.goal, None, "explicit null clears the goal");
+        assert!(
+            snapshot.subagents.is_empty(),
+            "explicit [] clears subagents"
+        );
+    }
+
+    #[test]
     fn explicit_empty_report_and_newer_empty_transcript_clear_tasks() {
         let pane_id = PaneId::from_raw(15);
         let base = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000);
@@ -2919,13 +2987,13 @@ mod tests {
             .report(
                 pane_id,
                 AgentReportPayload {
-                    subagents: vec![AgentSubagent {
+                    subagents: Some(vec![AgentSubagent {
                         name: "reported reviewer".into(),
                         status: AgentStatus::Blocked,
                         last_active_at: None,
                         pane_id: Some("w1:p2".into()),
                         source: AgentSubagentSource::Observed,
-                    }],
+                    }]),
                     ..AgentReportPayload::default()
                 },
                 now,
@@ -2961,7 +3029,7 @@ mod tests {
             .report(
                 pane_id,
                 AgentReportPayload {
-                    goal: Some("keep me".into()),
+                    goal: Some(Some("keep me".into())),
                     ..AgentReportPayload::default()
                 },
                 now,
@@ -2972,14 +3040,14 @@ mod tests {
             .report(
                 pane_id,
                 AgentReportPayload {
-                    goal: Some("replace me".into()),
-                    subagents: vec![AgentSubagent {
+                    goal: Some(Some("replace me".into())),
+                    subagents: Some(vec![AgentSubagent {
                         name: "reviewer".into(),
                         status: AgentStatus::Working,
                         last_active_at: Some("yesterday".into()),
                         pane_id: None,
                         source: AgentSubagentSource::Reported,
-                    }],
+                    }]),
                     ..AgentReportPayload::default()
                 },
                 now + std::time::Duration::from_secs(1),

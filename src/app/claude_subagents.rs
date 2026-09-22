@@ -2513,13 +2513,13 @@ mod tests {
             .report(
                 pane_id,
                 crate::agent_state::AgentReportPayload {
-                    subagents: vec![crate::agent_state::AgentSubagent {
+                    subagents: Some(vec![crate::agent_state::AgentSubagent {
                         name: "reported reviewer".into(),
                         status: crate::api::schema::AgentStatus::Blocked,
                         last_active_at: None,
                         pane_id: None,
                         source: crate::agent_state::AgentSubagentSource::Reported,
-                    }],
+                    }]),
                     ..crate::agent_state::AgentReportPayload::default()
                 },
                 SystemTime::now(),

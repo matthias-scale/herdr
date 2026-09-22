@@ -53,7 +53,7 @@ impl App {
         };
         if let Err(message) = self.state.agent_states.report(
             resolved.pane_id,
-            params.report,
+            params.payload(),
             std::time::SystemTime::now(),
         ) {
             return encode_error(id, "invalid_agent_report", message);

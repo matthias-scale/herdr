@@ -4637,7 +4637,7 @@ mod tests {
             .report(
                 pane_id,
                 crate::agent_state::AgentReportPayload {
-                    goal: Some("remove on close".into()),
+                    goal: Some(Some("remove on close".into())),
                     ..crate::agent_state::AgentReportPayload::default()
                 },
                 std::time::SystemTime::now(),

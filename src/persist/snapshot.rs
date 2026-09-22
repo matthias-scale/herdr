@@ -880,8 +880,8 @@ mod tests {
             .report(
                 pane_id,
                 crate::agent_state::AgentReportPayload {
-                    goal: Some("never-persist-this-goal".into()),
-                    status_text: Some("never-persist-this-status".into()),
+                    goal: Some(Some("never-persist-this-goal".into())),
+                    status_text: Some(Some("never-persist-this-status".into())),
                     ..crate::agent_state::AgentReportPayload::default()
                 },
                 SystemTime::now(),
