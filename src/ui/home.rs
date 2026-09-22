@@ -3092,11 +3092,15 @@ mod tests {
             "no collected usage must leave the lane names untouched: {bare:?}"
         );
 
-        app.provider_usage.claude.five_hour = Some(QuotaWindow {
+        app.provider_usage
+            .primary_usage_mut(crate::provider_usage::QuotaProvider::Claude)
+            .five_hour = Some(QuotaWindow {
             used_percent: 40,
             resets_at: None,
         });
-        app.provider_usage.claude.seven_day = Some(QuotaWindow {
+        app.provider_usage
+            .primary_usage_mut(crate::provider_usage::QuotaProvider::Claude)
+            .seven_day = Some(QuotaWindow {
             used_percent: 92,
             resets_at: None,
         });

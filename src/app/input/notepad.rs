@@ -14,6 +14,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use crate::app::state::AppState;
 use crate::ui::notepad::notepad_body_rect;
 use crate::ui::notepad_agent::NotepadAgentAction;
+use crate::ui::notepad_usage::NotepadUsageAction;
 
 /// Work the notepad's input handlers cannot do themselves because it touches
 /// the filesystem.
@@ -58,6 +59,7 @@ impl AppState {
             // The agent tab is read-only: taking the editor focus means going
             // back to the active note.
             self.notepad.agent_tab = false;
+            self.notepad.usage_tab = false;
         }
         if self.notepad.focused == focused {
             return;
@@ -124,7 +126,11 @@ impl AppState {
     /// Routes a key into the note buffer while the panel is focused. Unhandled
     /// modifier combinations fall through so global shortcuts keep working.
     pub(crate) fn handle_notepad_key(&mut self, key: KeyEvent, now: std::time::Instant) -> bool {
-        if !self.notepad.enabled || !self.notepad.focused || self.notepad.agent_tab {
+        if !self.notepad.enabled
+            || !self.notepad.focused
+            || self.notepad.agent_tab
+            || self.notepad.usage_tab
+        {
             return false;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -219,6 +225,9 @@ impl AppState {
                 if self.notepad.agent_tab {
                     self.notepad
                         .agent_scroll_by(delta, self.view.notepad_agent_max_scroll);
+                } else if self.notepad.usage_tab {
+                    self.notepad
+                        .usage_scroll_by(delta, self.view.notepad_usage_max_scroll);
                 } else if self.notepad.context_active {
                     self.dock_scroll = if delta < 0 {
                         self.dock_scroll.saturating_sub(1)
@@ -244,6 +253,7 @@ impl AppState {
                             if index != self.notepad.active
                                 || self.notepad.context_active
                                 || self.notepad.agent_tab
+                                || self.notepad.usage_tab
                             {
                                 self.request_notepad(NotepadRequest::Select(index));
                             }
@@ -256,6 +266,11 @@ impl AppState {
                         }
                         crate::notepad::NotepadTabTarget::Agent => {
                             if self.notepad.select_agent_tab() {
+                                self.request_notepad(NotepadRequest::Save);
+                            }
+                        }
+                        crate::notepad::NotepadTabTarget::Usage => {
+                            if self.notepad.select_usage_tab() {
                                 self.request_notepad(NotepadRequest::Save);
                             }
                         }
@@ -272,6 +287,10 @@ impl AppState {
                 }
                 if self.notepad.agent_tab {
                     self.handle_agent_tab_click(mouse);
+                    return true;
+                }
+                if self.notepad.usage_tab {
+                    self.handle_usage_tab_click(mouse);
                     return true;
                 }
                 self.set_notepad_focus(true);
@@ -320,6 +339,23 @@ impl AppState {
                 }
             }
             Some(NotepadAgentAction::CopyLinkIndex(_)) | Some(NotepadAgentAction::None) | None => {}
+        }
+    }
+
+    fn handle_usage_tab_click(&mut self, mouse: &MouseEvent) {
+        let body = notepad_body_rect(self.view.notepad_rect);
+        if !rect_contains(body, mouse.column, mouse.row) {
+            return;
+        }
+        let index = usize::from(mouse.row.saturating_sub(body.y));
+        if matches!(
+            self.view
+                .notepad_usage_rows
+                .get(index)
+                .map(|row| row.action),
+            Some(NotepadUsageAction::OpenDashboard)
+        ) {
+            self.toggle_usage_view();
         }
     }
 
@@ -863,6 +899,23 @@ mod tests {
             Some(NotepadRequest::Save),
             "the note it covered is flushed"
         );
+    }
+
+    #[test]
+    fn clicking_a_usage_row_opens_the_existing_dashboard() {
+        let mut state = state_with_notepad();
+        state.provider_usage = crate::provider_usage::ProviderUsageSnapshot::with_primary_accounts(
+            crate::provider_usage::AccountUsage::default(),
+            crate::provider_usage::AccountUsage::default(),
+            crate::provider_usage::AccountUsage::default(),
+        );
+        state.notepad.select_usage_tab();
+        crate::ui::compute_view(&mut state, Rect::new(0, 0, 120, 40));
+        let body = notepad_body_rect(state.view.notepad_rect);
+
+        assert!(state.handle_notepad_mouse(&click_at(body.x, body.y)));
+        assert!(state.usage_view.is_some());
+        assert!(state.request_usage_scan);
     }
 
     #[test]

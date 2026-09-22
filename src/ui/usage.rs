@@ -280,9 +280,21 @@ fn render_subscription_usage(
     frame: &mut Frame,
 ) {
     let providers = [
-        ("Claude Code", &snapshot.claude, palette.peach),
-        ("Codex", &snapshot.codex, palette.blue),
-        ("Kimi", &snapshot.kimi, palette.mauve),
+        (
+            "Claude Code",
+            snapshot.primary_usage(crate::provider_usage::QuotaProvider::Claude),
+            palette.peach,
+        ),
+        (
+            "Codex",
+            snapshot.primary_usage(crate::provider_usage::QuotaProvider::Codex),
+            palette.blue,
+        ),
+        (
+            "Kimi",
+            snapshot.primary_usage(crate::provider_usage::QuotaProvider::Kimi),
+            palette.mauve,
+        ),
     ];
     let rows = Layout::vertical([Constraint::Length(2); 3]).split(area);
     for ((label, usage, color), provider_area) in providers.into_iter().zip(rows.iter().copied()) {
@@ -1082,8 +1094,8 @@ mod tests {
     #[test]
     fn populated_provider_snapshot_renders_subscription_windows_resets_and_credits() {
         let now = 1_787_992_841;
-        let provider_usage = ProviderUsageSnapshot {
-            claude: AccountUsage {
+        let provider_usage = ProviderUsageSnapshot::with_primary_accounts(
+            AccountUsage {
                 five_hour: Some(QuotaWindow {
                     used_percent: 31,
                     resets_at: Some(now + 720),
@@ -1094,7 +1106,7 @@ mod tests {
                 }),
                 ..AccountUsage::default()
             },
-            codex: AccountUsage {
+            AccountUsage {
                 five_hour: Some(QuotaWindow {
                     used_percent: 6,
                     resets_at: Some(now + 720),
@@ -1106,7 +1118,7 @@ mod tests {
                 credits: Some(1_927.95),
                 ..AccountUsage::default()
             },
-            kimi: AccountUsage {
+            AccountUsage {
                 five_hour: Some(QuotaWindow {
                     used_percent: 0,
                     resets_at: None,
@@ -1117,7 +1129,7 @@ mod tests {
                 }),
                 ..AccountUsage::default()
             },
-        };
+        );
 
         let text = render_snapshot_with_provider_usage_at(120, 40, fixture(), provider_usage);
         for expected in [
@@ -1152,10 +1164,11 @@ mod tests {
             120,
             40,
             fixture(),
-            ProviderUsageSnapshot {
+            ProviderUsageSnapshot::with_primary_accounts(
                 claude,
-                ..ProviderUsageSnapshot::default()
-            },
+                AccountUsage::default(),
+                AccountUsage::default(),
+            ),
         );
         assert!(text.contains("cost: $56.68 · 66m left"), "{text}");
 
@@ -1163,16 +1176,17 @@ mod tests {
             120,
             40,
             fixture(),
-            ProviderUsageSnapshot {
-                claude: AccountUsage {
+            ProviderUsageSnapshot::with_primary_accounts(
+                AccountUsage {
                     five_hour: Some(QuotaWindow {
                         used_percent: 31,
                         resets_at: Some(now + 720),
                     }),
                     ..AccountUsage::default()
                 },
-                ..ProviderUsageSnapshot::default()
-            },
+                AccountUsage::default(),
+                AccountUsage::default(),
+            ),
         );
         assert!(text.contains("cost: — · —"), "{text}");
     }

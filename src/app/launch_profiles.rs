@@ -30,11 +30,12 @@ impl QuotaSource {
         self,
         snapshot: &crate::provider_usage::ProviderUsageSnapshot,
     ) -> &crate::provider_usage::AccountUsage {
-        match self {
-            Self::Claude => &snapshot.claude,
-            Self::Codex => &snapshot.codex,
-            Self::Kimi => &snapshot.kimi,
-        }
+        let provider = match self {
+            Self::Claude => crate::provider_usage::QuotaProvider::Claude,
+            Self::Codex => crate::provider_usage::QuotaProvider::Codex,
+            Self::Kimi => crate::provider_usage::QuotaProvider::Kimi,
+        };
+        snapshot.primary_usage(provider)
     }
 
     fn parse(name: &str) -> Option<Self> {

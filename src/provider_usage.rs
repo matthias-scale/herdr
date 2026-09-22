@@ -18,7 +18,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -40,6 +40,9 @@ const MAX_CCUSAGE_OUTPUT_BYTES: usize = 512 * 1024;
 const CCUSAGE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CLAUDE_USAGE_AMOUNT: f64 = 1_000_000.0;
 const MAX_CLAUDE_REMAINING_MINUTES: u64 = 24 * 60;
+const MAX_PROVIDER_PROFILES: usize = 32;
+const MAX_PROFILE_METADATA_BYTES: u64 = 64 * 1024;
+const MAX_CODEX_QUOTA_CACHE_ENTRIES: usize = MAX_PROVIDER_PROFILES * MAX_USAGE_FILES * 2;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 struct CodexRateLimits {
@@ -52,6 +55,12 @@ struct CodexUsageWindow {
     used_percent: f64,
     window_minutes: u64,
     resets_at: i64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedCodexRateLimits {
+    fingerprint: UsageFileFingerprint,
+    rate_limits: Option<CodexRateLimits>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -153,60 +162,9 @@ fn usage_window(usage: &CodexRateLimits, minutes: u64) -> Option<&CodexUsageWind
 }
 
 fn parse_utc_timestamp(value: &str) -> Option<i64> {
-    let value = value.strip_suffix('Z')?;
-    let (date, time) = value.split_once('T')?;
-    let mut date_parts = date.split('-');
-    let year = date_parts.next()?.parse::<i64>().ok()?;
-    let month = date_parts.next()?.parse::<i64>().ok()?;
-    let day = date_parts.next()?.parse::<i64>().ok()?;
-    if date_parts.next().is_some() || !(1..=12).contains(&month) {
-        return None;
-    }
-    let seconds = time.split(':').collect::<Vec<_>>();
-    if seconds.len() != 3 {
-        return None;
-    }
-    let hour = seconds[0].parse::<i64>().ok()?;
-    let minute = seconds[1].parse::<i64>().ok()?;
-    let second = seconds[2]
-        .split_once('.')
-        .map_or(seconds[2], |(whole, _)| whole)
-        .parse::<i64>()
-        .ok()?;
-    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=59).contains(&second) {
-        return None;
-    }
-    let days_in_month = match month {
-        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
-        2 => 28,
-        4 | 6 | 9 | 11 => 30,
-        _ => 31,
-    };
-    if !(1..=days_in_month).contains(&day) {
-        return None;
-    }
-    let days = days_from_civil(year, month, day)?;
-    days.checked_mul(86_400)?.checked_add(
-        hour.checked_mul(3_600)?
-            .checked_add(minute.checked_mul(60)?)?
-            .checked_add(second)?,
-    )
-}
-
-fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
-    let adjusted_year = year.checked_sub(i64::from(month <= 2))?;
-    let era = if adjusted_year >= 0 {
-        adjusted_year / 400
-    } else {
-        adjusted_year.checked_sub(399)? / 400
-    };
-    let year_of_era = adjusted_year.checked_sub(era.checked_mul(400)?)?;
-    let month_prime = month + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era.checked_mul(146_097)?
-        .checked_add(day_of_era)?
-        .checked_sub(719_468)
+    time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        .ok()
+        .map(|value| value.unix_timestamp())
 }
 
 fn parse_ccusage_output(output: &str, now: i64) -> Result<Option<ClaudeUsageDetails>, ()> {
@@ -532,19 +490,126 @@ impl AccountUsage {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum QuotaProvider {
+    Claude,
+    Codex,
+    Kimi,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProviderAccountUsage {
+    pub provider: QuotaProvider,
+    pub profile_id: String,
+    pub label: String,
+    pub usage: AccountUsage,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ProviderUsageSnapshot {
-    pub claude: AccountUsage,
-    pub codex: AccountUsage,
-    pub kimi: AccountUsage,
+    pub accounts: Vec<ProviderAccountUsage>,
+    primary_claude: String,
+    primary_codex: String,
+    primary_kimi: String,
+}
+
+impl ProviderUsageSnapshot {
+    #[cfg(test)]
+    pub(crate) fn with_primary_accounts(
+        claude: AccountUsage,
+        codex: AccountUsage,
+        kimi: AccountUsage,
+    ) -> Self {
+        Self {
+            accounts: vec![
+                ProviderAccountUsage {
+                    provider: QuotaProvider::Claude,
+                    profile_id: "default".into(),
+                    label: "Claude Code".into(),
+                    usage: claude,
+                },
+                ProviderAccountUsage {
+                    provider: QuotaProvider::Codex,
+                    profile_id: "default".into(),
+                    label: "Codex".into(),
+                    usage: codex,
+                },
+                ProviderAccountUsage {
+                    provider: QuotaProvider::Kimi,
+                    profile_id: "default".into(),
+                    label: "Kimi".into(),
+                    usage: kimi,
+                },
+            ],
+            primary_claude: "default".into(),
+            primary_codex: "default".into(),
+            primary_kimi: "default".into(),
+        }
+    }
+
+    pub(crate) fn primary(&self, provider: QuotaProvider) -> Option<&ProviderAccountUsage> {
+        let profile_id = match provider {
+            QuotaProvider::Claude => &self.primary_claude,
+            QuotaProvider::Codex => &self.primary_codex,
+            QuotaProvider::Kimi => &self.primary_kimi,
+        };
+        self.accounts
+            .iter()
+            .find(|account| account.provider == provider && account.profile_id == *profile_id)
+    }
+
+    pub(crate) fn primary_usage(&self, provider: QuotaProvider) -> &AccountUsage {
+        static EMPTY: OnceLock<AccountUsage> = OnceLock::new();
+        self.primary(provider)
+            .map(|account| &account.usage)
+            .unwrap_or_else(|| EMPTY.get_or_init(AccountUsage::default))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn primary_usage_mut(&mut self, provider: QuotaProvider) -> &mut AccountUsage {
+        let profile_id = match provider {
+            QuotaProvider::Claude => &mut self.primary_claude,
+            QuotaProvider::Codex => &mut self.primary_codex,
+            QuotaProvider::Kimi => &mut self.primary_kimi,
+        };
+        if profile_id.is_empty() {
+            *profile_id = "default".into();
+        }
+        let index = self
+            .accounts
+            .iter()
+            .position(|account| account.provider == provider && account.profile_id == *profile_id)
+            .unwrap_or_else(|| {
+                self.accounts.push(ProviderAccountUsage {
+                    provider,
+                    profile_id: profile_id.clone(),
+                    label: profile_id.clone(),
+                    usage: AccountUsage::default(),
+                });
+                self.accounts.len() - 1
+            });
+        &mut self.accounts[index].usage
+    }
 }
 
 /// Collects every provider. Blocking: callers run it off the render thread.
 pub(crate) fn collect(now_unix: Option<i64>, now: Instant) -> ProviderUsageSnapshot {
+    let (claude, primary_claude) = load_all_claude_usage(now_unix, now);
+    let (codex, primary_codex) = load_all_codex_usage(now_unix);
+    let kimi = ProviderAccountUsage {
+        provider: QuotaProvider::Kimi,
+        profile_id: "default".into(),
+        label: "Kimi".into(),
+        usage: load_kimi_usage(now_unix),
+    };
+    let mut accounts = claude;
+    accounts.extend(codex);
+    accounts.push(kimi);
     ProviderUsageSnapshot {
-        claude: load_claude_usage(now_unix, now),
-        codex: load_codex_usage(now_unix),
-        kimi: load_kimi_usage(now_unix),
+        accounts,
+        primary_claude,
+        primary_codex,
+        primary_kimi: "default".into(),
     }
 }
 
@@ -922,12 +987,39 @@ fn statusline_cache_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp/claude-statusline"))
 }
 
-/// Basename of the active config directory, which is how both CLIs name a
-/// profile. The default directory carries no profile, so it yields `None`.
-fn active_profile(env_var: &str, default_dir: &str) -> Option<String> {
-    let dir = std::env::var_os(env_var).map(PathBuf::from)?;
-    let name = dir.file_name()?.to_string_lossy().into_owned();
-    (name != default_dir).then_some(name)
+fn named_profile_dirs(root: &Path, marker_files: &[&str]) -> Vec<(String, PathBuf)> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut profiles = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let id = entry.file_name().to_string_lossy().into_owned();
+            if id.starts_with(".bak-")
+                || id.is_empty()
+                || !marker_files
+                    .iter()
+                    .any(|marker| entry.path().join(marker).is_file())
+            {
+                return None;
+            }
+            Some((id, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    profiles.sort_by(|left, right| left.0.cmp(&right.0));
+    profiles.truncate(MAX_PROVIDER_PROFILES);
+    profiles
+}
+
+fn active_profile_id(env_var: &str, profiles: &[(String, PathBuf)]) -> String {
+    let Some(active) = std::env::var_os(env_var).map(PathBuf::from) else {
+        return "default".into();
+    };
+    profiles
+        .iter()
+        .find(|(_, path)| *path == active)
+        .map(|(id, _)| id.clone())
+        .unwrap_or_else(|| "default".into())
 }
 
 /// `matthias@scalablehq.com` → `scalablehq.com` → `SHQ`.
@@ -967,7 +1059,10 @@ const MAX_CLAUDE_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 /// profile directories, so the server process itself usually has no
 /// `CLAUDE_CONFIG_DIR`, and without it the row would show a quota with no
 /// indication of whose it is.
-fn claude_account_code(profile: Option<&str>) -> Option<String> {
+fn claude_account_code(profile: Option<&str>, config_dir: Option<&Path>) -> Option<String> {
+    if let Some(code) = config_dir.and_then(claude_profile_account_code) {
+        return Some(code);
+    }
     if let Some(profile) = profile {
         let path = statusline_cache_dir().join(format!("acctdom-claude-{profile}.env"));
         if let Ok(contents) = std::fs::read_to_string(path) {
@@ -979,12 +1074,26 @@ fn claude_account_code(profile: Option<&str>) -> Option<String> {
             }
         }
     }
-    signed_in_claude_account_code()
+    signed_in_claude_account_code(config_dir)
 }
 
-fn signed_in_claude_account_code() -> Option<String> {
-    let path = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
+fn claude_profile_account_code(config_dir: &Path) -> Option<String> {
+    let path = config_dir.join("meta.env");
+    if fs::metadata(&path).ok()?.len() > MAX_PROFILE_METADATA_BYTES {
+        return None;
+    }
+    let contents = fs::read_to_string(path).ok()?;
+    contents.lines().find_map(|line| {
+        let email = line
+            .strip_prefix("EMAIL=")?
+            .trim()
+            .trim_matches(['\'', '"']);
+        account_code(email.split_once('@')?.1)
+    })
+}
+
+fn signed_in_claude_account_code(config_dir: Option<&Path>) -> Option<String> {
+    let path = config_dir
         .map(|dir| dir.join(".claude.json"))
         .or_else(|| home_path(".claude.json"))?;
     if std::fs::metadata(&path).ok()?.len() > MAX_CLAUDE_CONFIG_BYTES {
@@ -1019,7 +1128,14 @@ pub(crate) fn parse_claude_rate_limits(
             .filter(|value| (0..=100).contains(value))
             .map(|value| value as u8)
     };
-    let reset = |key: &str| fields.get(key).and_then(|value| value.parse::<i64>().ok());
+    let reset = |key: &str| {
+        fields.get(key).and_then(|value| {
+            value
+                .parse::<i64>()
+                .ok()
+                .or_else(|| parse_utc_timestamp(value))
+        })
+    };
     let window = |percent_key: &str, reset_key: &str| {
         let used_percent = percent(percent_key)?;
         let resets_at = reset(reset_key).filter(|resets_at| *resets_at > 0);
@@ -1046,18 +1162,74 @@ pub(crate) fn parse_claude_rate_limits(
     }
 }
 
-fn load_claude_usage(now_unix: Option<i64>, now: Instant) -> AccountUsage {
-    let path = statusline_cache_dir().join("rate-limits.env");
-    let mut usage = std::fs::read_to_string(&path).map_or_else(
+fn load_claude_usage_from(
+    path: &Path,
+    profile: Option<&str>,
+    config_dir: Option<&Path>,
+    now_unix: Option<i64>,
+    now: Instant,
+) -> AccountUsage {
+    let mut usage = std::fs::read_to_string(path).map_or_else(
         |_| AccountUsage::default(),
-        |contents| parse_claude_rate_limits(&contents, now_unix, file_age(&path, now)),
+        |contents| parse_claude_rate_limits(&contents, now_unix, file_age(path, now)),
     );
-    usage.account = claude_account_code(active_profile("CLAUDE_CONFIG_DIR", ".claude").as_deref());
-    if let Some(details) = now_unix.and_then(load_claude_usage_details) {
-        usage.cost_usd = Some(details.cost_usd);
-        usage.remaining_minutes = details.remaining_minutes;
-    }
+    usage.account = claude_account_code(profile, config_dir);
     usage
+}
+
+fn load_all_claude_usage(
+    now_unix: Option<i64>,
+    now: Instant,
+) -> (Vec<ProviderAccountUsage>, String) {
+    let profiles = home_path(".claude-profiles")
+        .map(|root| named_profile_dirs(&root, &["meta.env"]))
+        .unwrap_or_default();
+    let primary = active_profile_id("CLAUDE_CONFIG_DIR", &profiles);
+    let details = now_unix.and_then(load_claude_usage_details);
+    let mut default_usage = load_claude_usage_from(
+        &statusline_cache_dir().join("rate-limits.env"),
+        None,
+        None,
+        now_unix,
+        now,
+    );
+    if let Some(details) = details {
+        // ccusage follows the server's active Claude environment, so these
+        // optional details belong only to the selected primary account.
+        if primary == "default" {
+            default_usage.cost_usd = Some(details.cost_usd);
+            default_usage.remaining_minutes = details.remaining_minutes;
+        }
+    }
+    let default_label = default_usage
+        .account
+        .clone()
+        .unwrap_or_else(|| "Default".into());
+    let mut accounts = vec![ProviderAccountUsage {
+        provider: QuotaProvider::Claude,
+        profile_id: "default".into(),
+        label: default_label,
+        usage: default_usage,
+    }];
+    for (profile_id, config_dir) in profiles {
+        let path = statusline_cache_dir().join(format!("rate-limits-{profile_id}.env"));
+        let mut usage =
+            load_claude_usage_from(&path, Some(&profile_id), Some(&config_dir), now_unix, now);
+        if profile_id == primary {
+            if let Some(details) = details {
+                usage.cost_usd = Some(details.cost_usd);
+                usage.remaining_minutes = details.remaining_minutes;
+            }
+        }
+        let label = usage.account.clone().unwrap_or_else(|| profile_id.clone());
+        accounts.push(ProviderAccountUsage {
+            provider: QuotaProvider::Claude,
+            profile_id,
+            label,
+            usage,
+        });
+    }
+    (accounts, primary)
 }
 
 fn file_age(path: &Path, _now: Instant) -> Option<Duration> {
@@ -1067,12 +1239,9 @@ fn file_age(path: &Path, _now: Instant) -> Option<Duration> {
         .and_then(|modified| modified.elapsed().ok())
 }
 
-/// The Codex account behind the active `CODEX_HOME`, read from the `id_token`
+/// The Codex account behind one `CODEX_HOME`, read from the `id_token`
 /// the CLI already stores. No network call and no token is ever logged.
-fn codex_account_code() -> Option<String> {
-    let root = std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home_path(".codex"))?;
+fn codex_account_code(root: &Path) -> Option<String> {
     let contents = std::fs::read_to_string(root.join("auth.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
     let id_token = value.get("tokens")?.get("id_token")?.as_str()?;
@@ -1080,6 +1249,110 @@ fn codex_account_code() -> Option<String> {
     let email = claims.get("email")?.as_str()?;
     account_code(email.split_once('@')?.1)
 }
+
+fn cached_codex_record(path: &Path) -> Option<CodexRateLimits> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedCodexRateLimits>>> = OnceLock::new();
+    let fingerprint = usage_file_fingerprint(path).ok()?;
+    let cache_key = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(cache) = cache.lock() {
+        if let Some(cached) = cache
+            .get(&cache_key)
+            .filter(|cached| cached.fingerprint == fingerprint)
+        {
+            return cached.rate_limits.clone();
+        }
+    }
+    let rate_limits = read_file_tail(path)
+        .and_then(|contents| contents.lines().filter_map(parse_codex_record).next_back());
+    if let Ok(mut cache) = cache.lock() {
+        if cache.len() >= MAX_CODEX_QUOTA_CACHE_ENTRIES && !cache.contains_key(&cache_key) {
+            cache.clear();
+        }
+        cache.insert(
+            cache_key,
+            CachedCodexRateLimits {
+                fingerprint,
+                rate_limits: rate_limits.clone(),
+            },
+        );
+    }
+    rate_limits
+}
+
+fn load_codex_usage_from(root: &Path, now_unix: Option<i64>) -> AccountUsage {
+    let Ok(files) = recent_jsonl_files(&root.join("sessions"), MAX_USAGE_FILES) else {
+        return AccountUsage {
+            account: codex_account_code(root),
+            ..AccountUsage::default()
+        };
+    };
+
+    let mut usage = AccountUsage {
+        account: codex_account_code(root),
+        ..AccountUsage::default()
+    };
+    for path in files {
+        let Some(record) = cached_codex_record(&path) else {
+            continue;
+        };
+        let window = |minutes: u64| {
+            usage_window(&record, minutes).map(|window| QuotaWindow {
+                used_percent: window.used_percent.round().clamp(0.0, 100.0) as u8,
+                resets_at: Some(window.resets_at),
+            })
+        };
+        usage.five_hour = window(FIVE_HOUR_MINUTES);
+        usage.seven_day = window(SEVEN_DAY_MINUTES);
+        usage.credits = record.credits;
+        usage.stale = [usage.five_hour, usage.seven_day]
+            .into_iter()
+            .flatten()
+            .all(|window| {
+                matches!((window.resets_at, now_unix), (Some(resets_at), Some(now)) if resets_at <= now)
+            });
+        if !usage.is_empty() {
+            break;
+        }
+    }
+    usage
+}
+
+fn load_all_codex_usage(now_unix: Option<i64>) -> (Vec<ProviderAccountUsage>, String) {
+    let profiles = home_path(".codex-profiles")
+        .map(|root| named_profile_dirs(&root, &["config.toml", "auth.json"]))
+        .unwrap_or_default();
+    let primary = active_profile_id("CODEX_HOME", &profiles);
+    let default_root = home_path(".codex").unwrap_or_else(|| PathBuf::from(".codex"));
+    let default_usage = load_codex_usage_from(&default_root, now_unix);
+    let default_label = default_usage
+        .account
+        .clone()
+        .unwrap_or_else(|| "Default".into());
+    let mut accounts = vec![ProviderAccountUsage {
+        provider: QuotaProvider::Codex,
+        profile_id: "default".into(),
+        label: default_label,
+        usage: default_usage,
+    }];
+    for (profile_id, root) in profiles {
+        let usage = load_codex_usage_from(&root, now_unix);
+        let label = usage.account.clone().unwrap_or_else(|| profile_id.clone());
+        accounts.push(ProviderAccountUsage {
+            provider: QuotaProvider::Codex,
+            profile_id,
+            label,
+            usage,
+        });
+    }
+    (accounts, primary)
+}
+
+/*
+ * Account discovery above deliberately keeps the profile directory name as
+ * identity. Symlinked lanes may share credentials while remaining distinct
+ * launch choices, so labels and canonical paths are not deduplication keys.
+ */
 
 /// Decodes the payload segment of a JWT. Signature verification is pointless
 /// here: the file is already trusted local state, and the only field read is a
@@ -1108,54 +1381,6 @@ fn base64_url_decode(input: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
-}
-
-fn load_codex_usage(now_unix: Option<i64>) -> AccountUsage {
-    let Some(root) = std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join("sessions"))
-        .or_else(|| home_path(".codex/sessions"))
-    else {
-        return AccountUsage::default();
-    };
-    let Ok(files) = recent_jsonl_files(&root, MAX_USAGE_FILES) else {
-        return AccountUsage::default();
-    };
-
-    let mut usage = AccountUsage {
-        account: codex_account_code(),
-        ..AccountUsage::default()
-    };
-    for path in files {
-        let Some(contents) = read_file_tail(&path) else {
-            continue;
-        };
-        let Some(record) = contents.lines().filter_map(parse_codex_record).next_back() else {
-            continue;
-        };
-        let window = |minutes: u64| {
-            // A reset already in the past means this rollout is the newest
-            // record and still describes a window that has since rolled over.
-            // Report it as stale rather than as current truth.
-            usage_window(&record, minutes).map(|window| QuotaWindow {
-                used_percent: window.used_percent.round().clamp(0.0, 100.0) as u8,
-                resets_at: Some(window.resets_at),
-            })
-        };
-        usage.five_hour = window(FIVE_HOUR_MINUTES);
-        usage.seven_day = window(SEVEN_DAY_MINUTES);
-        usage.credits = record.credits;
-        usage.stale = [usage.five_hour, usage.seven_day]
-            .into_iter()
-            .flatten()
-            .all(|window| {
-                matches!((window.resets_at, now_unix), (Some(resets_at), Some(now)) if resets_at <= now)
-            });
-        if !usage.is_empty() {
-            break;
-        }
-    }
-    usage
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1294,6 +1519,7 @@ pub(crate) fn now_unix() -> Option<i64> {
 mod tests {
     use super::*;
 
+    // Fixed wall clock shared by quota parser fixtures.
     const NOW: i64 = 1_787_992_841;
 
     #[test]
@@ -1434,6 +1660,97 @@ mod tests {
         let expired = parse_claude_rate_limits(contents, Some(1_788_400_000), None);
         assert!(expired.five_hour.is_none());
         assert!(expired.seven_day.is_none());
+    }
+
+    #[test]
+    fn claude_cache_accepts_rfc3339_resets_and_epoch_resets() {
+        let rfc3339 = parse_claude_rate_limits(
+            "R5=6\nR7=56\nR5_RST=2026-08-29T11:30:00Z\nR7_RST=2026-09-02T00:00:00+00:00\n",
+            Some(NOW),
+            None,
+        );
+        let epoch = parse_claude_rate_limits(
+            "R5=6\nR7=56\nR5_RST=1788003000\nR7_RST=1788307200\n",
+            Some(NOW),
+            None,
+        );
+
+        assert_eq!(rfc3339.five_hour, epoch.five_hour);
+        assert_eq!(rfc3339.seven_day, epoch.seven_day);
+    }
+
+    #[test]
+    fn profile_discovery_requires_provider_markers_and_keeps_names() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-provider-profiles-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("scalable/sessions")).expect("profile tree");
+        fs::write(root.join("scalable/config.toml"), "").expect("profile marker");
+        fs::create_dir_all(root.join("sessions/2026/09")).expect("internal sessions tree");
+        fs::create_dir_all(root.join(".bak-old")).expect("backup profile");
+        fs::write(root.join(".bak-old/config.toml"), "").expect("backup marker");
+
+        let profiles = named_profile_dirs(&root, &["config.toml", "auth.json"]);
+
+        assert_eq!(profiles, vec![("scalable".into(), root.join("scalable"))]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn claude_profile_label_comes_from_the_meta_email_domain() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-claude-profile-label-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("profile root");
+        fs::write(
+            root.join("meta.env"),
+            "PROFILE=scalablehq\nEMAIL=matthias@scalablehq.com\n",
+        )
+        .expect("profile metadata");
+
+        assert_eq!(claude_profile_account_code(&root).as_deref(), Some("SHQ"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_discovery_preserves_each_symlink_name() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "herdr-provider-profile-links-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        let account = root.join("account");
+        fs::create_dir_all(&account).expect("account root");
+        fs::write(account.join("meta.env"), "").expect("profile marker");
+        symlink(&account, root.join("lane-a")).expect("first lane");
+        symlink(&account, root.join("lane-b")).expect("second lane");
+
+        let profiles = named_profile_dirs(&root, &["meta.env"]);
+
+        assert_eq!(
+            profiles
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["account", "lane-a", "lane-b"]
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

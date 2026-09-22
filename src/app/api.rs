@@ -353,9 +353,11 @@ impl App {
             AppEvent::ProviderUsageRefreshed { snapshot } => {
                 self.provider_usage_in_flight = false;
                 self.state.status_now_unix = crate::provider_usage::now_unix();
-                let changed = self.state.provider_usage != *snapshot;
                 self.state.provider_usage = *snapshot;
-                changed && self.state.status_bar_enabled
+                // Refresh is already bounded to once per minute. Repaint even when
+                // the payload is unchanged so attach-local countdowns advance without
+                // projecting per-client Usage-tab state into shared AppState.
+                true
             }
             AppEvent::RemoteFocusTransition {
                 operation_id,
@@ -2350,6 +2352,26 @@ mod tests {
                 Err(error) => panic!("{description} event unavailable: {error}"),
             }
         }
+    }
+
+    #[test]
+    fn unchanged_provider_usage_repaints_attach_local_countdowns() {
+        let mut config = crate::config::Config::default();
+        config.ui.status_bar.enabled = false;
+        let mut app = App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let snapshot = app.state.provider_usage.clone();
+
+        assert!(
+            app.handle_internal_event_with_render_impact(AppEvent::ProviderUsageRefreshed {
+                snapshot: Box::new(snapshot),
+            })
+        );
     }
 
     #[test]

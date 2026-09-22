@@ -811,15 +811,24 @@ impl App {
         // The same switch that silences native metric sampling silences these:
         // a test process must not spawn `kimi-usage` or open a socket to the
         // internet just because a frame was rendered.
-        if !self.status_metric_refresh_enabled || !self.state.status_bar_enabled {
+        if !self.status_metric_refresh_enabled {
             return;
         }
-        self.schedule_provider_usage(now);
-        self.schedule_connectivity_probe(now);
+        if self.state.status_bar_enabled
+            || self.state.notepad.enabled
+            || self.state.usage_view.is_some()
+            || self.state.home.is_some()
+        {
+            self.schedule_provider_usage(now);
+        }
+        if self.state.status_bar_enabled {
+            self.schedule_connectivity_probe(now);
+        }
     }
 
-    fn schedule_provider_usage(&mut self, now: Instant) {
-        if self.provider_usage_in_flight
+    pub(crate) fn schedule_provider_usage(&mut self, now: Instant) {
+        if !self.status_metric_refresh_enabled
+            || self.provider_usage_in_flight
             || !crate::provider_usage::snapshot_is_due(self.provider_usage_refreshed_at, now)
         {
             return;

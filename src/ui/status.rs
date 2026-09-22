@@ -633,7 +633,11 @@ pub(crate) fn provider_segment_text(
     Some(text)
 }
 
-fn provider_style(usage: &crate::provider_usage::AccountUsage, color: Color, p: &Palette) -> Style {
+pub(crate) fn provider_style(
+    usage: &crate::provider_usage::AccountUsage,
+    color: Color,
+    p: &Palette,
+) -> Style {
     if usage.stale {
         return Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
     }
@@ -655,11 +659,17 @@ fn status_segments(
 
     // Providers elide from the right of the group inwards: Kimi is the most
     // recent addition and the least load-bearing, Claude the most.
-    for (label, usage, color, rank) in [
-        ("CC", &app.provider_usage.claude, p.peach, 3u8),
-        ("CX", &app.provider_usage.codex, p.blue, 2),
-        ("KI", &app.provider_usage.kimi, p.mauve, 1),
+    for (label, provider, color, rank) in [
+        (
+            "CC",
+            crate::provider_usage::QuotaProvider::Claude,
+            p.peach,
+            3u8,
+        ),
+        ("CX", crate::provider_usage::QuotaProvider::Codex, p.blue, 2),
+        ("KI", crate::provider_usage::QuotaProvider::Kimi, p.mauve, 1),
     ] {
+        let usage = app.provider_usage.primary_usage(provider);
         if let Some(text) = provider_segment_text(label, usage, expanded, now_unix) {
             out.push(Segment {
                 text,
@@ -1905,8 +1915,8 @@ mod tests {
     /// assumed.
     fn usage_fixture() -> crate::provider_usage::ProviderUsageSnapshot {
         use crate::provider_usage::{AccountUsage, ProviderUsageSnapshot, QuotaWindow};
-        ProviderUsageSnapshot {
-            claude: AccountUsage {
+        ProviderUsageSnapshot::with_primary_accounts(
+            AccountUsage {
                 account: Some("SHQ".into()),
                 five_hour: Some(QuotaWindow {
                     used_percent: 6,
@@ -1920,7 +1930,7 @@ mod tests {
                 stale: false,
                 ..AccountUsage::default()
             },
-            codex: AccountUsage {
+            AccountUsage {
                 account: Some("SHQ".into()),
                 seven_day: Some(QuotaWindow {
                     used_percent: 19,
@@ -1928,14 +1938,14 @@ mod tests {
                 }),
                 ..AccountUsage::default()
             },
-            kimi: AccountUsage {
+            AccountUsage {
                 seven_day: Some(QuotaWindow {
                     used_percent: 24,
                     resets_at: Some(2_000_100_000),
                 }),
                 ..AccountUsage::default()
             },
-        }
+        )
     }
 
     #[test]
@@ -2082,7 +2092,9 @@ mod tests {
         // The one moment the exact figure matters, it appears unasked.
         let mut app = AppState::test_new();
         app.provider_usage = usage_fixture();
-        app.provider_usage.claude.seven_day = Some(crate::provider_usage::QuotaWindow {
+        app.provider_usage
+            .primary_usage_mut(crate::provider_usage::QuotaProvider::Claude)
+            .seven_day = Some(crate::provider_usage::QuotaWindow {
             used_percent: 94,
             resets_at: Some(1_999_999_999),
         });
@@ -2101,7 +2113,9 @@ mod tests {
     fn a_stale_source_renders_dim_instead_of_asserting_its_numbers() {
         let mut app = AppState::test_new();
         app.provider_usage = usage_fixture();
-        app.provider_usage.codex.stale = true;
+        app.provider_usage
+            .primary_usage_mut(crate::provider_usage::QuotaProvider::Codex)
+            .stale = true;
 
         let segments = status_segments(&app, &StatusMetrics::default(), &app.palette);
         let codex = segments
@@ -2231,6 +2245,17 @@ mod tests {
         );
         app.status_now_unix = crate::provider_usage::now_unix();
         app.status_disk_visible = true;
+        for account in &app.provider_usage.accounts {
+            println!(
+                "quota {:?} {} ({}) 5h={:?} 7d={:?} stale={}",
+                account.provider,
+                account.profile_id,
+                account.label,
+                account.usage.five_hour,
+                account.usage.seven_day,
+                account.usage.stale,
+            );
+        }
 
         // CPU is a delta, so it needs two samples a sampling interval apart.
         let mut sampler = crate::platform::status_metrics::StatusMetricSampler::new();

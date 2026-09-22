@@ -43,6 +43,8 @@ pub(crate) enum NotepadTabTarget {
     Context,
     /// The focused pane's agent state, read-only.
     Agent,
+    /// Live provider quotas for every local coding account, read-only.
+    Usage,
 }
 
 /// The Context tab's header label.
@@ -82,8 +84,10 @@ pub(crate) struct AgentSectionCollapse {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct NotepadPresentationState {
     pub(crate) agent_tab: bool,
+    pub(crate) usage_tab: bool,
     pub(crate) agent_collapsed: AgentSectionCollapse,
     pub(crate) agent_scroll: usize,
+    pub(crate) usage_scroll: usize,
 }
 
 impl AgentSectionCollapse {
@@ -136,10 +140,14 @@ pub(crate) struct NotepadState {
     /// the editor focus: there is no caret in a view the operator cannot type
     /// into.
     pub(crate) agent_tab: bool,
+    /// The read-only per-account quota list is showing instead of a note.
+    pub(crate) usage_tab: bool,
     /// Folded agent-tab sections, kept for the rest of the client session.
     pub(crate) agent_collapsed: AgentSectionCollapse,
     /// Scroll offset of the agent-tab body, clamped by view computation.
     pub(crate) agent_scroll: usize,
+    /// Scroll offset of the Usage tab, clamped by view computation.
+    pub(crate) usage_scroll: usize,
 }
 
 impl Default for NotepadState {
@@ -161,8 +169,10 @@ impl Default for NotepadState {
             error: None,
             save_due: None,
             agent_tab: false,
+            usage_tab: false,
             agent_collapsed: AgentSectionCollapse::default(),
             agent_scroll: 0,
+            usage_scroll: 0,
         }
     }
 }
@@ -170,8 +180,10 @@ impl Default for NotepadState {
 impl NotepadState {
     pub(crate) fn swap_presentation(&mut self, other: &mut NotepadPresentationState) {
         std::mem::swap(&mut self.agent_tab, &mut other.agent_tab);
+        std::mem::swap(&mut self.usage_tab, &mut other.usage_tab);
         std::mem::swap(&mut self.agent_collapsed, &mut other.agent_collapsed);
         std::mem::swap(&mut self.agent_scroll, &mut other.agent_scroll);
+        std::mem::swap(&mut self.usage_scroll, &mut other.usage_scroll);
     }
 
     pub(crate) fn from_config(config: &crate::config::NotepadConfig) -> Self {
@@ -225,12 +237,13 @@ impl NotepadState {
         if self.files.is_empty() || index >= self.files.len() {
             return false;
         }
-        if index == self.active && !self.context_active && !self.agent_tab {
+        if index == self.active && !self.context_active && !self.agent_tab && !self.usage_tab {
             return false;
         }
         self.active = index;
         self.context_active = false;
         self.agent_tab = false;
+        self.usage_tab = false;
         self.cursor_line = 0;
         self.cursor_col = 0;
         self.scroll = 0;
@@ -244,9 +257,22 @@ impl NotepadState {
             return false;
         }
         self.agent_tab = true;
+        self.usage_tab = false;
         self.context_active = false;
         self.focused = false;
         self.agent_scroll = 0;
+        true
+    }
+
+    pub(crate) fn select_usage_tab(&mut self) -> bool {
+        if self.usage_tab {
+            return false;
+        }
+        self.usage_tab = true;
+        self.agent_tab = false;
+        self.context_active = false;
+        self.focused = false;
+        self.usage_scroll = 0;
         true
     }
 
@@ -261,6 +287,11 @@ impl NotepadState {
         self.agent_scroll = (scroll.max(0) as usize).min(max);
     }
 
+    pub(crate) fn usage_scroll_by(&mut self, delta: isize, max: usize) {
+        let scroll = self.usage_scroll as isize + delta;
+        self.usage_scroll = (scroll.max(0) as usize).min(max);
+    }
+
     /// Shows the Context tab. The note buffer is untouched, so returning to a
     /// note needs no reload.
     pub(crate) fn select_context(&mut self) -> bool {
@@ -269,18 +300,22 @@ impl NotepadState {
         }
         self.context_active = true;
         self.agent_tab = false;
+        self.usage_tab = false;
         true
     }
 
     pub(crate) fn cycle(&mut self, backwards: bool) -> bool {
-        // The Context and agent tabs ride after the last note, in that order.
+        // The read-only tabs ride after the last note.
         let context_stop = self.files.len();
         let agent_stop = context_stop + 1;
-        let stops = agent_stop + 1;
+        let usage_stop = agent_stop + 1;
+        let stops = usage_stop + 1;
         if stops < 2 {
             return false;
         }
-        let current = if self.agent_tab {
+        let current = if self.usage_tab {
+            usage_stop
+        } else if self.agent_tab {
             agent_stop
         } else if self.context_active {
             context_stop
@@ -292,7 +327,9 @@ impl NotepadState {
         } else {
             (current + 1) % stops
         };
-        if next == agent_stop {
+        if next == usage_stop {
+            self.select_usage_tab()
+        } else if next == agent_stop {
             self.select_agent_tab()
         } else if next == context_stop {
             self.select_context()
@@ -828,7 +865,7 @@ mod tests {
                 name: "b".into(),
             },
         ]);
-        // The pane tabs are the last stops: a → b → Context → agent → a.
+        // The read-only tabs are the last stops.
         assert!(state.cycle(false));
         assert_eq!(state.active, 1);
         assert!(state.cycle(false));
@@ -837,9 +874,15 @@ mod tests {
         assert!(state.agent_tab);
         assert!(!state.context_active);
         assert!(state.cycle(false));
+        assert!(state.usage_tab);
+        assert!(!state.agent_tab);
+        assert!(state.cycle(false));
         assert_eq!(state.active, 0);
         assert!(!state.context_active);
         assert!(!state.agent_tab);
+        assert!(!state.usage_tab);
+        assert!(state.cycle(true));
+        assert!(state.usage_tab);
         assert!(state.cycle(true));
         assert!(state.agent_tab);
         assert!(state.cycle(true));

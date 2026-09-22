@@ -28,6 +28,7 @@ mod mobile;
 mod navigator;
 pub(crate) mod notepad;
 pub(crate) mod notepad_agent;
+pub(crate) mod notepad_usage;
 mod onboarding;
 mod panes;
 pub(crate) mod pomodoro;
@@ -651,6 +652,19 @@ fn compute_view_internal_at(
         app.notepad.agent_scroll = 0;
         (Vec::new(), 0)
     };
+    let (notepad_usage_rows, notepad_usage_max_scroll) = if app.notepad.usage_tab
+        && notepad_rect.height > 1
+    {
+        let body = notepad::notepad_body_rect(notepad_rect);
+        let visible = usize::from(body.height).max(1);
+        let (rows, max_scroll) =
+            notepad_usage::usage_rows_window(app, body.width, app.notepad.usage_scroll, visible);
+        app.notepad.usage_scroll = app.notepad.usage_scroll.min(max_scroll);
+        (rows, max_scroll)
+    } else {
+        app.notepad.usage_scroll = 0;
+        (Vec::new(), 0)
+    };
     let pomodoro_hit_area = pomodoro::pomodoro_hit_area(app, sidebar_area);
     let notification_hit_area = pomodoro::notification_hit_area(app, sidebar_area);
     let hyperspace_rect = sidebar::sidebar_animation_rect(app, sidebar_area);
@@ -824,6 +838,8 @@ fn compute_view_internal_at(
         notepad_tab_hit_areas,
         notepad_agent_rows,
         notepad_agent_max_scroll,
+        notepad_usage_rows,
+        notepad_usage_max_scroll,
         pomodoro_hit_area,
         notification_hit_area,
         hyperspace_rect,
@@ -1135,6 +1151,8 @@ fn compute_mobile_view(
         notepad_tab_hit_areas: Vec::new(),
         notepad_agent_rows: Vec::new(),
         notepad_agent_max_scroll: 0,
+        notepad_usage_rows: Vec::new(),
+        notepad_usage_max_scroll: 0,
         pomodoro_hit_area: Rect::default(),
         notification_hit_area: Rect::default(),
         hyperspace_rect: Rect::default(),
