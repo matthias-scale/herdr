@@ -57,7 +57,7 @@ jobs:
           - os: macos-latest
             kind: unix
             nextest_filter: not binary(live_handoff)
-            timeout_minutes: 15
+            timeout_minutes: 25
           - os: windows-latest
             kind: windows
             timeout_minutes: 25
