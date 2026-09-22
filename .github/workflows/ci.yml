@@ -61,8 +61,9 @@ jobs:
             timeout_minutes: 25
           - os: windows-latest
             kind: windows
-            # The Zig 0.16 vendor refresh exceeded 25 minutes on an uncached runner.
-            timeout_minutes: 35
+            # Headroom for a cold Zig 0.16 vendor rebuild; the test scope itself is
+            # the fork's targeted Windows set, not the full suite.
+            timeout_minutes: 25
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
     steps:
