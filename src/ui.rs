@@ -6,6 +6,7 @@ use ratatui::{
 };
 
 pub(crate) mod add_project;
+mod aloop_run;
 mod command_palette;
 mod dialogs;
 pub(crate) mod dock;
@@ -20,12 +21,13 @@ mod home;
 pub(crate) mod hyperspace;
 mod inbox;
 mod keybind_help;
-mod loop_runs;
+pub(crate) mod loop_runs;
 mod markdown;
 mod menus;
 mod mobile;
 mod navigator;
 pub(crate) mod notepad;
+pub(crate) mod notepad_agent;
 mod onboarding;
 mod panes;
 pub(crate) mod pomodoro;
@@ -146,9 +148,10 @@ pub(crate) use self::{
         agent_counts_by_workspace, agent_panel_entries, all_agent_panel_entries,
         collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
         collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
-        compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
-        relative_agent_navigation_entry, remote_agent_panel_entries, remote_agent_panel_entries_at,
-        remote_agent_row_at, sidebar_agent_run_at, sidebar_dim_header_at,
+        compute_workspace_card_areas, expanded_sidebar_toggle_rect, needs_you_row_at,
+        normalized_workspace_scroll, relative_agent_navigation_entry, remote_agent_panel_entries,
+        remote_agent_panel_entries_at, remote_agent_row_at, repo_group_focus_plan,
+        sidebar_agent_run_at, sidebar_aloop_target_at, sidebar_dim_header_at,
         sidebar_filter_anchor_rect, sidebar_filter_menu_layout, sidebar_filter_options,
         sidebar_group_menu_layout, sidebar_group_mode_anchor_rect, sidebar_header_new_menu_rect,
         sidebar_header_new_thread_rect, sidebar_header_overflow_rect, sidebar_header_search_rect,
@@ -164,7 +167,7 @@ pub(crate) use self::{
         sidebar_unassigned_spawn_at, sidebar_work_group_activation, workspace_agent_chevron_rect,
         workspace_drop_slots, workspace_list_entries, workspace_list_entries_expanded,
         workspace_list_rect_for_app, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
-        workspace_parent_group_state, AgentPanelEntry, AgentPanelLocalIdentity,
+        workspace_parent_group_state, AgentPanelEntry, AgentPanelLocalIdentity, NeedsYouTarget,
         RemoteAgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
         WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
@@ -322,8 +325,46 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
-    app.view_observed_at = std::time::Instant::now();
-    app.view_observed_unix_s = crate::app::settled::unix_seconds(std::time::SystemTime::now());
+    compute_view_internal_at(
+        app,
+        terminal_runtimes,
+        area,
+        resize_panes,
+        cell_size,
+        std::time::Instant::now(),
+        crate::app::settled::unix_seconds(std::time::SystemTime::now()),
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn compute_view_at(
+    app: &mut AppState,
+    area: Rect,
+    observed_at: std::time::Instant,
+    observed_unix_s: u64,
+) {
+    compute_view_internal_at(
+        app,
+        &TerminalRuntimeRegistry::new(),
+        area,
+        true,
+        crate::kitty_graphics::HostCellSize::default(),
+        observed_at,
+        observed_unix_s,
+    );
+}
+
+fn compute_view_internal_at(
+    app: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    area: Rect,
+    resize_panes: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+    observed_at: std::time::Instant,
+    observed_unix_s: u64,
+) {
+    app.view_observed_at = observed_at;
+    app.view_observed_unix_s = observed_unix_s;
     app.reconcile_sidebar_presentation();
     app.reconcile_dock_context_tabs();
     if !app.dock_collapsed {
@@ -363,6 +404,7 @@ fn compute_view_internal(
     let available_after_sidebar = body_area.width.saturating_sub(sidebar_w);
     let main_view_active = app.symphony_detail.is_some()
         || app.loop_run_history_detail.is_some()
+        || app.aloop_run_detail.is_some()
         || app.usage_view.is_some()
         || app.work_view.is_some()
         || app.dock_object_preview.is_some()
@@ -593,6 +635,22 @@ fn compute_view_internal(
     };
     let notepad_rect = sidebar::sidebar_notepad_rect(app, sidebar_area);
     let notepad_tab_hit_areas = notepad::notepad_tab_hit_areas(app, notepad_rect);
+    // The agent tab's rows live on the view so a click resolves to the exact
+    // row the operator saw. Deriving them takes a snapshot of the focused
+    // pane's agent state, so it only happens while the tab is showing.
+    let (notepad_agent_rows, notepad_agent_max_scroll) = if app.notepad.agent_tab
+        && notepad_rect.height > 1
+    {
+        let body = notepad::notepad_body_rect(notepad_rect);
+        let visible = usize::from(body.height).max(1);
+        let (rows, max_scroll) =
+            notepad_agent::agent_rows_window(app, body.width, app.notepad.agent_scroll, visible);
+        app.notepad.agent_scroll = app.notepad.agent_scroll.min(max_scroll);
+        (rows, max_scroll)
+    } else {
+        app.notepad.agent_scroll = 0;
+        (Vec::new(), 0)
+    };
     let pomodoro_hit_area = pomodoro::pomodoro_hit_area(app, sidebar_area);
     let notification_hit_area = pomodoro::notification_hit_area(app, sidebar_area);
     let hyperspace_rect = sidebar::sidebar_animation_rect(app, sidebar_area);
@@ -603,6 +661,25 @@ fn compute_view_internal(
         .sync_scroll(notepad::notepad_body_rect(notepad_rect).height);
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
+    let visible_notepad_agent_ages = if app.notepad.agent_tab {
+        let body = notepad::notepad_body_rect(notepad_rect);
+        notepad_agent_rows
+            .iter()
+            .take(usize::from(body.height))
+            .filter_map(|row| row.observed_at)
+            .filter_map(|observed_at| {
+                let observed_unix_s = observed_at
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .ok()?
+                    .as_secs();
+                Some(std::time::Duration::from_secs(
+                    app.view_observed_unix_s.saturating_sub(observed_unix_s),
+                ))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let DockGeometry {
         handle: dock_handle_rect,
         divider: dock_divider_rect,
@@ -745,6 +822,8 @@ fn compute_view_internal(
         sidebar_footer_missive_hit_area,
         notepad_rect,
         notepad_tab_hit_areas,
+        notepad_agent_rows,
+        notepad_agent_max_scroll,
         pomodoro_hit_area,
         notification_hit_area,
         hyperspace_rect,
@@ -754,6 +833,7 @@ fn compute_view_internal(
         agent_card_areas,
         sidebar_hover_targets,
         visible_agent_activity_instants,
+        visible_notepad_agent_ages,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
@@ -774,12 +854,22 @@ fn compute_view_internal(
         pane_toggle_below_hit_area,
         pane_toggle_right_hit_area,
         terminal_area,
-        work_context_link_rows: if !app.dock_collapsed
-            && app.dock_tab == Some(crate::app::DockSurface::Context)
-        {
-            dock_context::context_link_rows(app, dock_body_rect)
-        } else {
-            Vec::new()
+        work_context_link_rows: {
+            let mut rows =
+                if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Context) {
+                    dock_context::context_link_rows(app, dock_body_rect)
+                } else {
+                    Vec::new()
+                };
+            // The notepad strip's Context tab renders the same surface in the
+            // sidebar, so its link rows register their own geometry.
+            if app.notepad.context_active {
+                rows.extend(dock_context::context_link_rows(
+                    app,
+                    notepad::notepad_body_rect(notepad_rect),
+                ));
+            }
+            rows
         },
         status_buttons: Vec::new(),
         status_work_links: Vec::new(),
@@ -1043,6 +1133,8 @@ fn compute_mobile_view(
         sidebar_footer_missive_hit_area: Rect::default(),
         notepad_rect: Rect::default(),
         notepad_tab_hit_areas: Vec::new(),
+        notepad_agent_rows: Vec::new(),
+        notepad_agent_max_scroll: 0,
         pomodoro_hit_area: Rect::default(),
         notification_hit_area: Rect::default(),
         hyperspace_rect: Rect::default(),
@@ -1052,6 +1144,7 @@ fn compute_mobile_view(
         agent_card_areas: Vec::new(),
         sidebar_hover_targets: Vec::new(),
         visible_agent_activity_instants: Vec::new(),
+        visible_notepad_agent_ages: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
         tab_scroll_left_hit_area: Rect::default(),
@@ -1187,6 +1280,16 @@ fn render_with_runtime_registry_inner(
                 &detail.loop_id,
                 terminal_area,
                 detail.observed_at,
+                frame,
+            );
+        }
+        crate::app::state::TerminalAreaSurface::AloopRunLog(detail) => {
+            aloop_run::render_aloop_run_log(
+                &app.palette,
+                &detail.loop_name,
+                &detail.host,
+                &detail.run,
+                terminal_area,
                 frame,
             );
         }

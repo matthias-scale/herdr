@@ -1026,6 +1026,8 @@ pub struct KeysConfig {
     pub toggle_sidebar: BindingConfig,
     /// Focus the sidebar and expand it if collapsed. Unset by default.
     pub focus_sidebar: BindingConfig,
+    /// Collapse every repo group except the one owning the focused pane.
+    pub focus_owning_repo_group: BindingConfig,
     /// Cycle the sidebar grouping mode. Unset by default.
     pub sidebar_cycle_group_mode: BindingConfig,
     /// Refresh sidebar work and Git metadata. Unset by default.
@@ -1264,6 +1266,8 @@ pub(crate) struct KeysConfigOverlay {
     toggle_sidebar: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     focus_sidebar: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    focus_owning_repo_group: Option<BindingConfig>,
     sidebar_cycle_group_mode: Option<BindingConfig>,
     sidebar_refresh: Option<BindingConfig>,
     toggle_status_detail: Option<BindingConfig>,
@@ -1427,6 +1431,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(resize_pane_right);
         apply_field!(toggle_sidebar);
         apply_field!(focus_sidebar);
+        apply_field!(focus_owning_repo_group);
         apply_field!(sidebar_cycle_group_mode);
         apply_field!(sidebar_refresh);
         apply_field!(toggle_blocked_filter);
@@ -1586,6 +1591,7 @@ impl KeysConfig {
         copy_effective_action_field!(resize_pane_right, keybinds.resize_pane_right);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
         copy_effective_action_field!(focus_sidebar, keybinds.focus_sidebar);
+        copy_effective_action_field!(focus_owning_repo_group, keybinds.focus_owning_repo_group);
         copy_effective_action_field!(sidebar_cycle_group_mode, keybinds.sidebar_cycle_group_mode);
         copy_effective_action_field!(sidebar_refresh, keybinds.sidebar_refresh);
         copy_effective_action_field!(toggle_blocked_filter, keybinds.toggle_blocked_filter);
@@ -1927,6 +1933,10 @@ pub struct FleetConfig {
     pub heartbeat_stale_ms: u64,
     /// Optional configured host whose localhost Temporal service backs Symphony.
     pub symphony_host: Option<String>,
+    /// Host that produces aloop findings and run records. Read over SSH unless
+    /// it names this machine (`self_name`); then the local store is read.
+    /// Default: "ub2".
+    pub aloop_host: Option<String>,
     /// Configured local and SSH hosts. Empty by default.
     pub hosts: Vec<FleetHostConfig>,
 }
@@ -1939,6 +1949,7 @@ impl Default for FleetConfig {
             timeout_ms: 5_000,
             heartbeat_stale_ms: 30 * 60 * 1_000,
             symphony_host: None,
+            aloop_host: Some("ub2".to_string()),
             hosts: Vec::new(),
         }
     }
@@ -1947,6 +1958,17 @@ impl Default for FleetConfig {
 impl FleetConfig {
     pub(crate) fn resolved_self_name(&self) -> String {
         self.resolved_self_name_with_hostname(crate::platform::hostname())
+    }
+
+    /// The producer host for the Aloops sidebar section. An empty or absent
+    /// value falls back to the default rather than disabling the section.
+    pub(crate) fn resolved_aloop_host(&self) -> String {
+        self.aloop_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("ub2")
+            .to_string()
     }
 
     pub(crate) fn resolved_self_name_with_hostname(&self, hostname: Option<String>) -> String {
@@ -2125,6 +2147,7 @@ impl Default for KeysConfig {
             resize_pane_right: BindingConfig::empty(),
             toggle_sidebar: BindingConfig::one("prefix+shift+b"),
             focus_sidebar: BindingConfig::empty(),
+            focus_owning_repo_group: BindingConfig::one("prefix+i"),
             sidebar_cycle_group_mode: BindingConfig::empty(),
             sidebar_refresh: BindingConfig::empty(),
             toggle_blocked_filter: BindingConfig::one("prefix+f"),
@@ -2556,6 +2579,8 @@ default_surfaces = ["home", "pull_request", "hosts", "keys", "note"]
         assert!(!defaults.resolved_self_name().is_empty());
         assert_eq!(defaults.refresh_interval_ms, 15_000);
         assert!(defaults.hosts.is_empty());
+        // MAT-159 SCH2: the aloop producer host defaults to ub2.
+        assert_eq!(defaults.resolved_aloop_host(), "ub2");
 
         let config: Config = toml::from_str(
             r#"
@@ -2563,6 +2588,7 @@ default_surfaces = ["home", "pull_request", "hosts", "keys", "note"]
 self_name = "laptop"
 refresh_interval_ms = 30000
 symphony_host = "workbox"
+aloop_host = "buildbox"
 
 [[remote.fleet.hosts]]
 name = "workbox"
@@ -2577,10 +2603,15 @@ session = "agents"
             config.remote.fleet.symphony_host.as_deref(),
             Some("workbox")
         );
+        assert_eq!(config.remote.fleet.aloop_host.as_deref(), Some("buildbox"));
+        assert_eq!(config.remote.fleet.resolved_aloop_host(), "buildbox");
         assert_eq!(
             config.remote.fleet.hosts[0].session.as_deref(),
             Some("agents")
         );
+
+        let blank: FleetConfig = toml::from_str("aloop_host = \"  \"").expect("blank aloop host");
+        assert_eq!(blank.resolved_aloop_host(), "ub2");
     }
 
     #[test]

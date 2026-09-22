@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-use super::agents::AgentInfo;
+use super::agents::{AgentInfo, AgentStateSnapshot};
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
 use super::events::EventEnvelope;
 use super::fleet::FleetSnapshotInfo;
 use super::integrations::{
     IntegrationInstallResult, IntegrationTarget, IntegrationUninstallResult,
 };
-use super::loops::{LoopInfo, LoopRunInfo};
+use super::loops::{LoopFindingInfo, LoopInfo, LoopRunInfo};
 use super::panes::{
     LayoutDescription, PaneEdgesResult, PaneFocusDirectionResult, PaneInfo, PaneLayoutSnapshot,
     PaneMoveResult, PaneNeighborResult, PaneProcessInfo, PaneReadResult, PaneResizeResult,
@@ -74,6 +74,14 @@ pub enum ResponseResult {
         runs: Vec<LoopRunInfo>,
         skipped_lines: u64,
     },
+    LoopFindings {
+        /// The producer host the findings were read from.
+        host: String,
+        /// False when the producer host could not be read; findings is empty.
+        reachable: bool,
+        /// Pending findings, newest first, capped (MAT-159 AC2).
+        findings: Vec<LoopFindingInfo>,
+    },
     SymphonyList {
         workflows: Vec<SymphonyWorkflowInfo>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,6 +138,9 @@ pub enum ResponseResult {
     },
     AgentInfo {
         agent: AgentInfo,
+    },
+    AgentState {
+        state: AgentStateSnapshot,
     },
     AgentStarted {
         agent: AgentInfo,

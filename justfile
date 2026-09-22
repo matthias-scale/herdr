@@ -108,6 +108,10 @@ build:
 bench-render-scale:
     cargo test --release --locked --bin herdr render_scale_profile -- --ignored --nocapture --test-threads=1
 
+# Non-gating PTY parse scaling profile with and without link extraction
+bench-parse-scale:
+    cargo test --release --locked --bin herdr parse_scale_profile -- --ignored --nocapture --test-threads=1
+
 # ~3-5 minute CPU comparison; downloads stable unless HERDR_PERF_BASELINE_BIN is set
 bench-release-smoke:
     cargo build --release --locked

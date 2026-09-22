@@ -210,8 +210,16 @@ fn mobile_switcher_target_for_row(
         },
         SidebarRow::SectionHeader { .. }
         | SidebarRow::Divider
+        | SidebarRow::NeedsYou { .. }
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
+        | SidebarRow::AloopLoop { .. }
+        | SidebarRow::AloopRunLine { .. }
+        | SidebarRow::AloopFinding { .. }
+        | SidebarRow::AloopCleanRuns { .. }
+        | SidebarRow::AloopCleanRun { .. }
+        | SidebarRow::AloopUnreachable { .. }
+        | SidebarRow::AloopEmpty
         | SidebarRow::AgentRun { summary: None, .. } => return None,
     })
 }
@@ -233,11 +241,19 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
         | SidebarRow::Tab { .. }
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::Divider
+        | SidebarRow::NeedsYou { .. }
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
         | SidebarRow::Agent { .. }
         | SidebarRow::RemoteAgent { .. }
+        | SidebarRow::AloopLoop { .. }
+        | SidebarRow::AloopRunLine { .. }
+        | SidebarRow::AloopFinding { .. }
+        | SidebarRow::AloopCleanRuns { .. }
+        | SidebarRow::AloopCleanRun { .. }
+        | SidebarRow::AloopUnreachable { .. }
+        | SidebarRow::AloopEmpty
         | SidebarRow::AgentRun { .. } => 1,
     }
 }
@@ -882,10 +898,15 @@ fn render_mobile_switcher_content(
             SidebarRow::SectionHeader {
                 title,
                 count,
+                host_counts,
                 collapsed,
             } => {
+                let host_counts = host_counts
+                    .iter()
+                    .map(|count| format!(" {}:{}", count.host, count.count))
+                    .collect::<String>();
                 let label = format!(
-                    "  {} {} {title} ({count})",
+                    "  {} {} {title} ({count}){host_counts}",
                     if *collapsed { "▸" } else { "▾" },
                     section_header_glyph(title)
                 );
@@ -997,6 +1018,113 @@ fn render_mobile_switcher_content(
                     )),
                 );
             }
+            SidebarRow::AloopLoop {
+                name, collapsed, ..
+            } => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!("   {} {name}", if *collapsed { "▸" } else { "▾" }),
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
+            SidebarRow::AloopRunLine { run, .. } => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!(
+                            "     {} · {} findings",
+                            run.at.get(11..16).unwrap_or(&run.at),
+                            run.findings
+                        ),
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
+            SidebarRow::AloopFinding { finding, .. } => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!("     [{}] {}", finding.source, finding.title),
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
+            SidebarRow::AloopCleanRuns { count, .. } => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!("     {count} clean runs"),
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
+            SidebarRow::AloopCleanRun { run, .. } => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!(
+                            "       {} · 0 findings",
+                            run.at.get(11..16).unwrap_or(&run.at)
+                        ),
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
+            SidebarRow::AloopUnreachable { host, .. } => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!("   {host} unreachable"),
+                        Style::default().fg(p.red).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
+            SidebarRow::AloopEmpty => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        "   no pending findings".to_string(),
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
             SidebarRow::Tab { entry, depth } => {
                 let active = entry.local_target().is_some_and(|target| {
                     app.active == Some(target.ws_idx)
@@ -1017,6 +1145,9 @@ fn render_mobile_switcher_content(
                     }
                 }
             }
+            // The mobile switcher never receives strip rows; the projection
+            // gate in `compact_sidebar_rows_inner` keeps them desktop-only.
+            SidebarRow::NeedsYou { .. } => {}
         }
         doc_y += mobile_sidebar_row_height(row);
     }
@@ -2467,6 +2598,7 @@ mod tests {
         let entry = SidebarRow::SectionHeader {
             title: "Agents",
             count: 1,
+            host_counts: Vec::new(),
             collapsed: false,
         };
         assert_eq!(

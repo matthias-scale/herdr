@@ -997,6 +997,12 @@
           "description": "Move keyboard focus to the sidebar, expanding it if collapsed. Unset by default."
         },
         {
+          "key": "keys.focus_owning_repo_group",
+          "type": "keybinding",
+          "default": "\"prefix+i\"",
+          "description": "Collapse every repo group except the one owning the focused pane."
+        },
+        {
           "key": "keys.sidebar_cycle_group_mode",
           "type": "keybinding",
           "default": "unset",
@@ -2206,6 +2212,12 @@
           "type": "string",
           "default": "unset",
           "description": "Configured fleet host that runs Temporal for Symphony polling. Unset keeps localhost polling."
+        },
+        {
+          "key": "remote.fleet.aloop_host",
+          "type": "string",
+          "default": "ub2",
+          "description": "Fleet host that produces Aloops findings and run records. When it matches `self_name`, Herdr reads the local store instead of using SSH."
         }
       ]
     },

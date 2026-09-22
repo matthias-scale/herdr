@@ -4,7 +4,7 @@ use crate::config::{
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Direction, Rect};
 use ratatui::style::Color;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::detect::AgentState;
 use crate::layout::{PaneId, PaneInfo, SplitBorder};
@@ -1054,11 +1054,22 @@ pub struct TabCardArea {
 /// Per-view narrowing for work-item projections. This remains TUI-only state:
 /// provider observations are shared runtime facts, while each attached client
 /// chooses its own filters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) enum SidebarMachineScope {
+    #[serde(rename = "this_machine")]
+    ThisMachine,
+    #[serde(rename = "all_machines")]
+    #[default]
+    AllMachines,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub(crate) struct SidebarWorkFilter {
     /// Persisted row-search query shared by every sidebar view.
     pub(crate) query: String,
+    /// Whether the sidebar includes remote fleet sessions in its body.
+    pub(crate) machine_scope: SidebarMachineScope,
     /// Id of the `[[projects]]` entry the sidebar is scoped to. `None` shows
     /// every project, which is what an unconfigured Herdr always shows.
     pub(crate) project: Option<String>,
@@ -1246,6 +1257,7 @@ impl Default for SidebarWorkFilter {
     fn default() -> Self {
         Self {
             query: String::new(),
+            machine_scope: SidebarMachineScope::default(),
             project: None,
             team: Some("SCA".into()),
             assignee: Some("me".into()),
@@ -1772,6 +1784,7 @@ impl ServerInputOwner {
 pub(crate) enum SurfaceInputOwner {
     Symphony,
     LoopRunHistory,
+    AloopRunLog,
     Usage,
     Work,
     EditorPreview,
@@ -2614,8 +2627,14 @@ pub struct ViewState {
     pub(crate) sidebar_footer_missive_hit_area: Rect,
     /// The notepad panel at the bottom of the sidebar. Empty when it is off.
     pub(crate) notepad_rect: Rect,
-    /// Clickable note names in the notepad header, paired with their index.
-    pub(crate) notepad_tab_hit_areas: Vec<(usize, Rect)>,
+    /// Clickable tabs in the notepad header: note names, the Context tab and
+    /// the agent tab.
+    pub(crate) notepad_tab_hit_areas: Vec<(crate::notepad::NotepadTabTarget, Rect)>,
+    /// The agent tab's body rows, derived in view computation so clicks
+    /// resolve to the exact row the operator saw. Empty on the note tabs.
+    pub(crate) notepad_agent_rows: Vec<crate::ui::notepad_agent::NotepadAgentRow>,
+    /// Maximum attach-local agent-tab offset for the last computed geometry.
+    pub(crate) notepad_agent_max_scroll: usize,
     /// The break-timer countdown in the sidebar footer row.
     pub(crate) pomodoro_hit_area: Rect,
     /// Per-machine notification toggle beside the break timer.
@@ -2633,6 +2652,9 @@ pub struct ViewState {
     /// indexes them.
     pub(crate) sidebar_hover_targets: Vec<SidebarHoverTarget>,
     pub(crate) visible_agent_activity_instants: Vec<Instant>,
+    /// Elapsed wall-clock ages for visible notepad rows. Keeping the elapsed
+    /// value avoids constructing an `Instant` before host uptime on Windows.
+    pub(crate) visible_notepad_agent_ages: Vec<Duration>,
     pub tab_bar_rect: Rect,
     pub tab_hit_areas: Vec<Rect>,
     pub tab_scroll_left_hit_area: Rect,
@@ -3364,6 +3386,8 @@ pub(crate) enum DragTarget {
     },
     SidebarDivider,
     DockDivider,
+    /// The notepad strip's top edge, dragged vertically to resize the panel.
+    NotepadDivider,
 }
 
 /// Active mouse drag on a split border or sidebar divider.
@@ -4104,6 +4128,7 @@ pub(crate) enum TerminalAreaSurface<'a> {
     EditorPreview,
     Symphony(&'a SymphonyDetail),
     LoopRunHistory(&'a LoopRunHistoryDetail),
+    AloopRunLog(&'a AloopRunDetail),
     Usage,
     Work,
     DockObjectPreview,
@@ -4134,6 +4159,10 @@ pub struct AppState {
     pub(crate) loop_run_history: crate::loop_runs::RunHistory,
     pub(crate) loop_registry: crate::loop_runs::LoopRegistry,
     pub(crate) loop_run_history_detail: Option<LoopRunHistoryDetail>,
+    /// Full-screen log of one aloop run selected in the sidebar (MAT-159
+    /// AC7). TUI presentation state: the run record itself is server data in
+    /// the fleet snapshot.
+    pub(crate) aloop_run_detail: Option<AloopRunDetail>,
     pub(crate) symphony_snapshot: crate::symphony::Snapshot,
     /// Server-owned fleet inventory, refreshed off the render thread.
     pub(crate) fleet_snapshot: crate::fleet::Snapshot,
@@ -4144,6 +4173,10 @@ pub struct AppState {
         std::collections::HashMap<PaneId, crate::ui::AgentPanelLocalIdentity>,
     /// TUI projection materialized only when the fleet snapshot changes.
     pub(crate) remote_agent_panel_entries: Vec<std::sync::Arc<crate::ui::RemoteAgentPanelEntry>>,
+    /// Producer-derived aloop rows are immutable between fleet refreshes.
+    /// Keeping the projection here prevents layout and render passes from
+    /// repeating the nested run/finding/stable-id scan.
+    pub(crate) aloop_projection: Option<std::sync::Arc<crate::aloop::SectionProjection>>,
     /// Local panes backed by remote-focus operations. Agent identity remains
     /// owned by `RemoteFocusOperations`; this marker only hides proxy chrome.
     pub(crate) remote_focus_proxy_panes: std::collections::HashSet<crate::layout::PaneId>,
@@ -4249,6 +4282,9 @@ pub struct AppState {
     pub(crate) settle_done_after: std::time::Duration,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
+    /// Runtime-only facts reported or observed for each pane. Session snapshots
+    /// deliberately omit this cache.
+    pub(crate) agent_states: crate::agent_state::AgentStateStore,
     /// Terminal ids whose size is currently owned by a direct attach client.
     pub direct_attach_resize_locks: std::collections::HashSet<crate::terminal::TerminalId>,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
@@ -4305,6 +4341,8 @@ pub struct AppState {
     pub(crate) request_client_notification_config: Option<bool>,
     /// Width to persist in the attached client's local presentation state.
     pub(crate) dock_width_persistence_request: Option<u16>,
+    /// Notepad panel height to persist in the host's local presentation state.
+    pub(crate) notepad_height_persistence_request: Option<u16>,
     pub(crate) sidebar_group_mode_persistence_request: Option<SidebarGroupMode>,
     pub(crate) sidebar_group_sort_persistence_request: Option<(String, SidebarSortMode)>,
     pub(crate) sidebar_group_collapsed_persistence_request: Option<(String, bool)>,
@@ -4917,6 +4955,15 @@ impl AppState {
 pub(crate) struct LoopRunHistoryDetail {
     pub(crate) loop_id: String,
     pub(crate) history: crate::loop_runs::RunHistory,
+    pub(crate) observed_at: std::time::SystemTime,
+    pub(crate) producer_host: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AloopRunDetail {
+    pub(crate) loop_name: String,
+    pub(crate) host: String,
+    pub(crate) run: std::sync::Arc<crate::aloop::RunRecord>,
     pub(crate) observed_at: std::time::SystemTime,
 }
 
@@ -5604,6 +5651,10 @@ impl AppState {
         std::mem::swap(&mut self.loop_run_history_detail, other);
     }
 
+    pub(crate) fn swap_aloop_run_detail(&mut self, other: &mut Option<AloopRunDetail>) {
+        std::mem::swap(&mut self.aloop_run_detail, other);
+    }
+
     pub(crate) fn show_loop_run_history(
         &mut self,
         loop_id: String,
@@ -5614,11 +5665,38 @@ impl AppState {
             loop_id,
             history,
             observed_at,
+            producer_host: None,
         });
     }
 
     pub(crate) fn clear_loop_run_history(&mut self) {
         self.loop_run_history_detail = None;
+    }
+
+    pub(crate) fn show_aloop_run_detail(
+        &mut self,
+        loop_name: String,
+        host: String,
+        run: std::sync::Arc<crate::aloop::RunRecord>,
+    ) {
+        self.aloop_run_detail = Some(AloopRunDetail {
+            loop_name,
+            host,
+            run,
+            observed_at: std::time::SystemTime::now(),
+        });
+    }
+
+    pub(crate) fn clear_aloop_run_detail(&mut self) {
+        self.aloop_run_detail = None;
+    }
+
+    pub(crate) fn aloop_projection(
+        &self,
+    ) -> Option<std::sync::Arc<crate::aloop::SectionProjection>> {
+        self.aloop_projection
+            .clone()
+            .or_else(|| crate::aloop::project(&self.fleet_snapshot).map(std::sync::Arc::new))
     }
 
     /// Reveal the scratchpad without spawning an editor: the dock opens if it was
@@ -5672,6 +5750,17 @@ impl AppState {
         self.sidebar_settled_menu_delete_armed = false;
     }
 
+    /// Hand the keyboard to a terminal-area surface the sidebar just opened.
+    ///
+    /// `input_owner` answers `Sidebar` ahead of every terminal-area surface, so
+    /// a view opened from a sidebar row inherits a sidebar that still owns the
+    /// keyboard. The sidebar arm consumes Esc and returns, the view's own key
+    /// handler never runs, and the operator has no way to close what they just
+    /// opened.
+    pub(crate) fn release_sidebar_focus_to_surface(&mut self) {
+        self.sidebar_focused = false;
+    }
+
     pub(crate) fn toggle_loop_run_history(&mut self) {
         if self.loop_run_history_detail.is_some() {
             self.clear_loop_run_history();
@@ -5686,6 +5775,99 @@ impl AppState {
             std::time::SystemTime::now(),
         );
     }
+
+    /// MAT-159 AC8: a loop header in the Aloops sidebar section opens the
+    /// existing MAT-126 run-history table filtered to that loop.
+    pub(crate) fn open_aloop_loop_history(&mut self, loop_name: &str) {
+        self.clear_aloop_run_detail();
+        self.release_sidebar_focus_to_surface();
+        let producer_host = self
+            .fleet_snapshot
+            .aloop
+            .as_ref()
+            .map(|producer| producer.host.clone());
+        let history = self
+            .fleet_snapshot
+            .aloop
+            .as_ref()
+            .map(|producer| {
+                let runs = producer
+                    .data
+                    .loops
+                    .iter()
+                    .find(|loop_runs| loop_runs.loop_name == loop_name)
+                    .map(|loop_runs| {
+                        loop_runs
+                            .runs
+                            .iter()
+                            .map(|run| crate::loop_runs::RunRecord {
+                                run_id: run.at.clone(),
+                                skill: "aloop".to_string(),
+                                session: Some(producer.host.clone()),
+                                pr: None,
+                                ticket: None,
+                                loop_id: Some(loop_name.to_string()),
+                                start: run.at.clone(),
+                                end: None,
+                                wall_min: Some(run.duration_ms as f64 / 60_000.0),
+                                blocked_min: None,
+                                gates: Vec::new(),
+                                human_touches: None,
+                                touches_by_type: std::collections::BTreeMap::new(),
+                                interrupted_focus: None,
+                                review_rounds: None,
+                                out_tokens: None,
+                                outcome: crate::loop_runs::RunOutcome::Terminal(if run.exit == 0 {
+                                    "ok".to_string()
+                                } else {
+                                    format!("exit {}", run.exit)
+                                }),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                crate::loop_runs::RunHistory {
+                    runs,
+                    skipped_lines: producer
+                        .data
+                        .loops
+                        .iter()
+                        .find(|loop_runs| loop_runs.loop_name == loop_name)
+                        .map_or(0, |loop_runs| loop_runs.skipped_lines),
+                }
+            })
+            .unwrap_or_default();
+        self.show_loop_run_history(loop_name.to_string(), history, std::time::SystemTime::now());
+        if let Some(detail) = self.loop_run_history_detail.as_mut() {
+            detail.producer_host = producer_host;
+        }
+    }
+
+    /// MAT-159 AC7: selecting a run in the Aloops section opens its recorded
+    /// log excerpt. Resolves the record out of the fleet snapshot so the view
+    /// never reads the producer host from the input path.
+    pub(crate) fn open_aloop_run_log(&mut self, loop_name: &str, at: &str) -> bool {
+        let Some(snapshot) = self.fleet_snapshot.aloop.as_ref() else {
+            return false;
+        };
+        if !snapshot.reachable() {
+            return false;
+        }
+        let Some(run) = snapshot
+            .data
+            .loops
+            .iter()
+            .find(|loop_runs| loop_runs.loop_name == loop_name)
+            .and_then(|loop_runs| loop_runs.runs.iter().find(|run| run.at == at))
+        else {
+            return false;
+        };
+        let host = snapshot.host.clone();
+        let run = std::sync::Arc::clone(run);
+        self.release_sidebar_focus_to_surface();
+        self.show_aloop_run_detail(loop_name.to_string(), host, run);
+        true
+    }
 }
 
 impl AppState {
@@ -5698,6 +5880,10 @@ impl AppState {
 
     pub(crate) fn take_dock_width_persistence_request(&mut self) -> Option<u16> {
         self.dock_width_persistence_request.take()
+    }
+
+    pub(crate) fn take_notepad_height_persistence_request(&mut self) -> Option<u16> {
+        self.notepad_height_persistence_request.take()
     }
 
     pub(crate) fn set_sidebar_group_mode(&mut self, mode: SidebarGroupMode) {
@@ -5992,6 +6178,9 @@ impl AppState {
             }
             TerminalAreaSurface::LoopRunHistory(_) => {
                 return InputOwner::Surface(SurfaceInputOwner::LoopRunHistory)
+            }
+            TerminalAreaSurface::AloopRunLog(_) => {
+                return InputOwner::Surface(SurfaceInputOwner::AloopRunLog)
             }
             TerminalAreaSurface::Usage => return InputOwner::Surface(SurfaceInputOwner::Usage),
             TerminalAreaSurface::Work => return InputOwner::Surface(SurfaceInputOwner::Work),
@@ -6817,13 +7006,21 @@ impl AppState {
     }
 
     pub(crate) fn next_agent_activity_age_change(&self, now: Instant) -> Option<Instant> {
-        self.view
+        let sidebar = self
+            .view
             .visible_agent_activity_instants
             .iter()
             .filter_map(|observed_at| {
                 crate::activity_age::next_coarse_change_at(Some(*observed_at), now)
             })
-            .min()
+            .min();
+        let notepad = self
+            .view
+            .visible_notepad_agent_ages
+            .iter()
+            .filter_map(|age| crate::activity_age::next_change_after_elapsed(*age, now))
+            .min();
+        sidebar.into_iter().chain(notepad).min()
     }
 
     pub(crate) fn toggle_workspace_agent_disclosure(&mut self, ws_idx: usize) -> bool {
@@ -6932,6 +7129,8 @@ impl AppState {
             TerminalAreaSurface::Symphony(detail)
         } else if let Some(detail) = self.loop_run_history_detail.as_ref() {
             TerminalAreaSurface::LoopRunHistory(detail)
+        } else if let Some(detail) = self.aloop_run_detail.as_ref() {
+            TerminalAreaSurface::AloopRunLog(detail)
         } else if self.usage_view.is_some() {
             TerminalAreaSurface::Usage
         } else if self.work_view.is_some() {
@@ -7124,11 +7323,13 @@ impl AppState {
             loop_run_history: crate::loop_runs::RunHistory::default(),
             loop_registry: crate::loop_runs::LoopRegistry::default(),
             loop_run_history_detail: None,
+            aloop_run_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             fleet_snapshot: crate::fleet::Snapshot::default(),
             agent_host_name: "localhost".to_string(),
             local_agent_panel_identities: std::collections::HashMap::new(),
             remote_agent_panel_entries: Vec::new(),
+            aloop_projection: None,
             remote_focus_proxy_panes: std::collections::HashSet::new(),
             sidebar_selected_remote_agent: None,
             symphony_detail: None,
@@ -7183,6 +7384,7 @@ impl AppState {
             settle_finished_after: std::time::Duration::from_secs(10 * 60),
             settle_done_after: std::time::Duration::from_secs(30 * 60),
             terminals: std::collections::HashMap::new(),
+            agent_states: crate::agent_state::AgentStateStore::default(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
@@ -7218,6 +7420,7 @@ impl AppState {
             request_client_config_reload: false,
             request_client_notification_config: None,
             dock_width_persistence_request: None,
+            notepad_height_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
             sidebar_group_sort_persistence_request: None,
             sidebar_group_collapsed_persistence_request: None,
@@ -7296,6 +7499,8 @@ impl AppState {
                 sidebar_footer_missive_hit_area: Rect::default(),
                 notepad_rect: Rect::default(),
                 notepad_tab_hit_areas: Vec::new(),
+                notepad_agent_rows: Vec::new(),
+                notepad_agent_max_scroll: 0,
                 pomodoro_hit_area: Rect::default(),
                 notification_hit_area: Rect::default(),
                 hyperspace_rect: Rect::default(),
@@ -7305,6 +7510,7 @@ impl AppState {
                 agent_card_areas: Vec::new(),
                 sidebar_hover_targets: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
+                visible_notepad_agent_ages: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -7982,6 +8188,22 @@ mod tests {
         state.toggle_loop_run_history();
     }
 
+    fn show_aloop_run_log(state: &mut AppState) {
+        state.show_aloop_run_detail(
+            "nightly".into(),
+            "ub2".into(),
+            std::sync::Arc::new(crate::aloop::RunRecord {
+                at: "2026-09-18T09:59:00Z".into(),
+                at_unix_s: 1_758_186_740,
+                duration_ms: 1_200,
+                exit: 0,
+                findings: 0,
+                stable_ids: Vec::new(),
+                log_excerpt: "clean log tail".into(),
+            }),
+        );
+    }
+
     fn show_usage(state: &mut AppState) {
         state.toggle_usage_view();
     }
@@ -8109,11 +8331,12 @@ mod tests {
         }
     }
 
-    fn replacing_surface_setups() -> [SurfaceSetup; 8] {
+    fn replacing_surface_setups() -> [SurfaceSetup; 9] {
         [
             ("editor preview", show_editor_preview),
             ("symphony", show_symphony),
             ("loop history", show_loop_history),
+            ("aloop run log", show_aloop_run_log),
             ("usage", show_usage),
             ("work", show_work),
             ("dock object preview", show_dock_object_preview),
@@ -8470,7 +8693,7 @@ mod tests {
                     "{namespace}:{title}"
                 );
             }
-            for title in ["Snoozed", "Settled", "Fleet", "Runs", "Symphony"] {
+            for title in ["Snoozed", "Settled", "Fleet", "Runs", "Aloops", "Symphony"] {
                 let key = format!("{namespace}:{title}");
                 if key == "repo:Runs" {
                     assert!(!presentation.collapsed_groups.contains(&key));

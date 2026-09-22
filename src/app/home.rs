@@ -1889,6 +1889,17 @@ impl crate::app::state::AppState {
         home.missive = activation.missive;
         home.work_context_patch = activation.work_context_patch;
         home.selected_ref = activation.git_ref;
+        // MAT-159 AC4: an aloop finding launches on the producer host, not
+        // wherever the composer happened to point last.
+        if let Some(machine) = activation.machine.as_deref() {
+            if home.machines().iter().any(|entry| entry.name == machine) {
+                home.set_machine(machine);
+            } else if machine != self.agent_host_name {
+                return Err(format!(
+                    "aloop producer host `{machine}` is not a configured machine"
+                ));
+            }
+        }
         if let Some(directory) = activation.directory {
             home.directory = directory.clone();
             home.ref_directory = directory.clone();

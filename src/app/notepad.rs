@@ -129,6 +129,13 @@ impl super::App {
         true
     }
 
+    /// Switches the notepad to the Context tab, flushing the current note
+    /// first. The note buffer stays loaded, so switching back needs no read.
+    pub(crate) fn select_notepad_context(&mut self) -> bool {
+        self.write_notepad_now();
+        self.state.notepad.select_context()
+    }
+
     pub(crate) fn cycle_notepad_file(&mut self, backwards: bool) -> bool {
         self.write_notepad_now();
         if !self.state.notepad.cycle(backwards) {
@@ -262,16 +269,27 @@ impl super::App {
             std::time::Duration::from_secs(config.git_sync_interval_seconds.clamp(15, 3600));
 
         let next = NotepadState::from_config(config);
+        let next_height = next.height;
         if next.dir != self.state.notepad.dir || next.enabled != self.state.notepad.enabled {
             self.write_notepad_now();
             let focused = self.state.notepad.focused && next.enabled;
+            // The agent tab is a view choice, not note content: a config
+            // reload keeps it and its folded sections.
+            let agent_tab = self.state.notepad.agent_tab && next.enabled;
+            let agent_collapsed = self.state.notepad.agent_collapsed;
             self.state.notepad = next;
             self.state.notepad.focused = focused;
+            self.state.notepad.agent_tab = agent_tab;
+            self.state.notepad.agent_collapsed = agent_collapsed;
             self.notepad_watcher = None;
             self.notepad_watched_dir = None;
-        } else {
-            self.state.notepad.height = next.height;
+        } else if self.applied_notepad_config_height != Some(next_height) {
+            // A reload that left `[notepad] height` untouched must not stomp a
+            // height the operator dragged the panel to; one that changed it
+            // applies the new configured value.
+            self.state.notepad.height = next_height;
         }
+        self.applied_notepad_config_height = Some(next_height);
     }
 
     pub(crate) fn apply_pomodoro_config(&mut self, config: &crate::config::PomodoroConfig) {
@@ -390,6 +408,28 @@ mod tests {
             "unsaved\n"
         );
         assert_eq!(app.state.notepad.lines, vec!["an idea".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_config_reload_keeps_a_dragged_height_until_the_key_changes() {
+        let dir = temp_dir("height");
+        let mut app = app_with_notes(&dir);
+        app.ensure_notepad();
+        // The operator dragged the panel taller; a reload that leaves
+        // `[notepad] height` alone must not stomp it.
+        app.state.notepad.height = 12;
+        let same = crate::config::NotepadConfig {
+            enabled: true,
+            dir: dir.display().to_string(),
+            files: vec!["todo".into()],
+            ..Default::default()
+        };
+        app.apply_notepad_config(&same);
+        assert_eq!(app.state.notepad.height, 12);
+        let taller = crate::config::NotepadConfig { height: 20, ..same };
+        app.apply_notepad_config(&taller);
+        assert_eq!(app.state.notepad.height, 20);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -57,10 +57,10 @@ def resolve_state(
 ) -> str:
     """Counts imply the state unless a caller names one it knows better.
 
-    A mid-turn source -- the question gate closing itself -- knows the turn is
-    still running, which zero counts alone would read as `idle` and publish as a
-    finished turn. An unknown override is ignored rather than trusted, because a
-    junk state string would otherwise be pushed to the server verbatim.
+    A mid-turn source knows the turn is still running, which zero counts alone
+    would read as `idle` and publish as a finished turn. An unknown override is
+    ignored rather than trusted, because a junk state string would otherwise be
+    pushed to the server verbatim.
     """
     if isinstance(override, str) and override in STATES:
         return override

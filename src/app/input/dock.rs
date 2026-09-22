@@ -276,6 +276,7 @@ impl AppState {
         self.clear_usage_view();
         self.clear_symphony();
         self.clear_loop_run_history();
+        self.clear_aloop_run_detail();
         self.dock_object_preview = None;
         self.open_home_composer_in_directory(plan.directory.clone(), plan.workspace.clone());
         if let Some(home) = self.home.as_mut() {
@@ -286,6 +287,10 @@ impl AppState {
             home.ticket = plan.ticket;
             home.missive = plan.missive;
             home.work_context_patch = plan.work_context_patch;
+            // MAT-159 AC4: the composer targets the finding's producer host.
+            if let Some(remote) = plan.remote.as_ref() {
+                home.set_machine(&remote.name);
+            }
         }
         true
     }

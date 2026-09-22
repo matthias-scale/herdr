@@ -13,7 +13,7 @@ pub(crate) mod auto_nudge;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
 mod api_helpers;
-pub(crate) use api_helpers::read_terminal_snapshot;
+pub(crate) use api_helpers::{pane_agent_status_with_stale, read_terminal_snapshot};
 pub(crate) mod claude_subagents;
 mod command_palette;
 pub(crate) use command_palette::PaletteEntry;
@@ -235,6 +235,9 @@ pub struct App {
     pub(crate) notepad_watched_dir: Option<std::path::PathBuf>,
     /// Note names the operator wants offered first, from `[notepad] files`.
     pub(crate) notepad_preferred_files: Vec<String>,
+    /// The `[notepad] height` last applied from config. A reload that did not
+    /// change the key leaves a dragged panel height alone.
+    pub(crate) applied_notepad_config_height: Option<u16>,
     pub(crate) notepad_git_sync: bool,
     pub(crate) notepad_git_sync_interval: std::time::Duration,
     pub(crate) notepad_next_git_pull: Option<Instant>,
@@ -913,11 +916,13 @@ impl App {
             loop_run_history: initial_loop_history,
             loop_registry: crate::loop_runs::LoopRegistry::default(),
             loop_run_history_detail: None,
+            aloop_run_detail: None,
             symphony_snapshot: crate::symphony::Snapshot::default(),
             fleet_snapshot: crate::fleet::Snapshot::unpolled(&config.remote.fleet.hosts),
             agent_host_name,
             local_agent_panel_identities,
             remote_agent_panel_entries: Vec::new(),
+            aloop_projection: None,
             remote_focus_proxy_panes: std::collections::HashSet::new(),
             sidebar_selected_remote_agent: None,
             dock_symphony: None,
@@ -985,6 +990,7 @@ impl App {
                 config.session.settle_done_after_minutes.saturating_mul(60),
             ),
             terminals: std::collections::HashMap::new(),
+            agent_states: crate::agent_state::AgentStateStore::default(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
@@ -1018,6 +1024,7 @@ impl App {
             request_client_config_reload: false,
             request_client_notification_config: None,
             dock_width_persistence_request: None,
+            notepad_height_persistence_request: None,
             sidebar_group_mode_persistence_request: None,
             sidebar_group_sort_persistence_request: None,
             sidebar_group_collapsed_persistence_request: None,
@@ -1073,6 +1080,8 @@ impl App {
                 sidebar_footer_missive_hit_area: Rect::default(),
                 notepad_rect: Rect::default(),
                 notepad_tab_hit_areas: Vec::new(),
+                notepad_agent_rows: Vec::new(),
+                notepad_agent_max_scroll: 0,
                 pomodoro_hit_area: Rect::default(),
                 notification_hit_area: Rect::default(),
                 hyperspace_rect: Rect::default(),
@@ -1082,6 +1091,7 @@ impl App {
                 agent_card_areas: Vec::new(),
                 sidebar_hover_targets: Vec::new(),
                 visible_agent_activity_instants: Vec::new(),
+                visible_notepad_agent_ages: Vec::new(),
                 tab_bar_rect: Rect::default(),
                 tab_hit_areas: Vec::new(),
                 tab_scroll_left_hit_area: Rect::default(),
@@ -1381,6 +1391,13 @@ impl App {
 
         state.terminals = restored_terminals;
 
+        // The notepad's dragged height persists in the host's presentation
+        // file, next to the dock width.
+        #[cfg(not(test))]
+        if let Some(height) = crate::client::presentation::load_notepad_height() {
+            state.notepad.height = height;
+        }
+
         for ws_idx in 0..state.workspaces.len() {
             let cwd = state.workspaces[ws_idx]
                 .resolved_identity_cwd_from(&state.terminals, &restored_terminal_runtimes);
@@ -1512,6 +1529,12 @@ impl App {
             notepad_watcher: None,
             notepad_watched_dir: None,
             notepad_preferred_files: config.notepad.files.clone(),
+            applied_notepad_config_height: Some(
+                config
+                    .notepad
+                    .height
+                    .clamp(crate::notepad::MIN_HEIGHT, crate::notepad::MAX_HEIGHT),
+            ),
             notepad_git_sync: config.notepad.git_sync,
             notepad_git_sync_interval: std::time::Duration::from_secs(
                 config.notepad.git_sync_interval_seconds.clamp(15, 3600),
@@ -2139,6 +2162,9 @@ impl App {
             self.sync_host_keyboard_report_all(&mut host_keyboard_report_all_active)?;
             if let Some(width) = self.state.take_dock_width_persistence_request() {
                 crate::client::presentation::save_dock_width(width);
+            }
+            if let Some(height) = self.state.take_notepad_height_persistence_request() {
+                crate::client::presentation::save_notepad_height(height);
             }
             if let Some(mode) = self.state.take_sidebar_group_mode_persistence_request() {
                 crate::client::presentation::save_sidebar_group_mode(mode);
@@ -2989,6 +3015,7 @@ impl App {
         // to a selected pane, while Symphony and home consume them themselves.
         if self.state.symphony_detail.is_some()
             || self.state.loop_run_history_detail.is_some()
+            || self.state.aloop_run_detail.is_some()
             || self.state.work_view.is_some()
             || self.state.usage_view.is_some()
             || self.state.inbox.is_some()
@@ -3598,6 +3625,9 @@ impl App {
             }
             state::InputOwner::Surface(state::SurfaceInputOwner::LoopRunHistory) => {
                 self.handle_loop_run_history_key(key_event);
+            }
+            state::InputOwner::Surface(state::SurfaceInputOwner::AloopRunLog) => {
+                self.handle_aloop_run_detail_key(key_event);
             }
             state::InputOwner::Surface(state::SurfaceInputOwner::Usage) => {
                 self.handle_usage_view_key(key_event);

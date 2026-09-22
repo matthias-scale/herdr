@@ -23,6 +23,16 @@ const log = std.log.scoped(.stream_terminal);
 /// a Terminal and updates the Terminal state.
 pub const Stream = stream.Stream(Handler);
 
+/// Parsed output events exposed to terminal embedders. These are emitted from
+/// the same VT action stream that mutates the terminal.
+pub const ParsedOutputKind = enum(c_int) {
+    text = 0,
+    separator = 1,
+    hyperlink = 2,
+    boundary = 3,
+    _,
+};
+
 /// A stream handler that updates terminal state. By default, it is
 /// readonly in the sense that it only updates terminal state and ignores
 /// all other sequences that require a response or otherwise have side
@@ -45,6 +55,10 @@ pub const Handler = struct {
     /// to send commands to the terminal emulator. This is used by
     /// the kitty graphics protocol.
     apc_handler: apc.Handler = .{},
+
+    /// OSC 8 target awaiting a parser-confirmed terminator. The bytes remain
+    /// owned by the OSC parser until the next parser byte is consumed.
+    parsed_hyperlink_pending: ?[]const u8 = null,
 
     /// Default cursor style used by DECSCUSR reset (CSI 0 q).
     default_cursor: bool = true,
@@ -105,6 +119,10 @@ pub const Handler = struct {
         /// library has no way to mediate that with user consent.
         clipboard_write: ?*const fn (*Handler, clipboard.Write) clipboard.WriteResult,
 
+        /// Called for printable text, control boundaries, and OSC 8 targets after
+        /// the VT parser has classified the input.
+        parsed_output: ?*const fn (*Handler, ParsedOutputKind, []const u8) void,
+
         /// Called in response to an XTVERSION query. Returns the version
         /// string to report (e.g. "ghostty 1.2.3"). The returned memory
         /// must be valid for the lifetime of the call. The maximum length
@@ -117,6 +135,7 @@ pub const Handler = struct {
         pub const readonly: Effects = .{
             .bell = null,
             .clipboard_write = null,
+            .parsed_output = null,
             .color_scheme = null,
             .device_attributes = null,
             .enquiry = null,
@@ -143,9 +162,199 @@ pub const Handler = struct {
         comptime action: Action.Tag,
         value: Action.Value(action),
     ) void {
+        if (self.effects.parsed_output != null) {
+            const handled = self.vtParsedPrint(action, value) catch |err| {
+                log.warn("error handling VT action action={} err={}", .{ action, err });
+                return;
+            };
+            if (handled) return;
+        }
         self.vtFallible(action, value) catch |err| {
             log.warn("error handling VT action action={} err={}", .{ action, err });
+            return;
         };
+        self.emitParsedOutput(action, value);
+    }
+
+    /// Finalizes an OSC-derived callback using the parser transition that
+    /// ended the string. ESC remains pending until the following byte proves
+    /// it was ST rather than the start of another escape sequence.
+    pub fn vtParsedOscEnd(self: *Handler, terminator: u8) void {
+        if (self.effects.parsed_output) |callback| {
+            callback(self, .boundary, "");
+        }
+        switch (terminator) {
+            0x07, 0x9C => self.emitPendingHyperlink(),
+            0x1B => {},
+            else => self.parsed_hyperlink_pending = null,
+        }
+    }
+
+    /// Resolves the byte after an ESC that ended OSC. Only `ESC \\` is ST.
+    pub fn vtParsedEscapeByte(self: *Handler, byte: u8) void {
+        if (self.parsed_hyperlink_pending == null) return;
+        if (byte == '\\') {
+            self.emitPendingHyperlink();
+        } else {
+            self.parsed_hyperlink_pending = null;
+        }
+    }
+
+    fn emitPendingHyperlink(self: *Handler) void {
+        const uri = self.parsed_hyperlink_pending orelse return;
+        self.parsed_hyperlink_pending = null;
+        const callback = self.effects.parsed_output orelse return;
+        callback(self, .hyperlink, uri);
+    }
+
+    fn emitParsedOutput(
+        self: *Handler,
+        comptime action: Action.Tag,
+        value: Action.Value(action),
+    ) void {
+        const callback = self.effects.parsed_output orelse return;
+        switch (action) {
+            .start_hyperlink => self.parsed_hyperlink_pending = value.uri,
+
+            // Actions that cannot move rendered text: the next printed run
+            // still continues the last one. Everything else separates the
+            // runs, including cursor motion, erasure and scrolling, because
+            // the text around the cursor is no longer what it was. New
+            // upstream actions separate until they are classified here.
+            .print,
+            .print_slice,
+            .print_repeat,
+            .bell,
+            .enquiry,
+            .xtversion,
+            .device_attributes,
+            .device_status,
+            .size_report,
+            .request_mode,
+            .request_mode_unknown,
+            .save_mode,
+            .modify_key_format,
+            .mouse_shift_capture,
+            .mouse_shape,
+            .protected_mode_off,
+            .protected_mode_iso,
+            .protected_mode_dec,
+            .set_attribute,
+            .color_operation,
+            .kitty_color_report,
+            .kitty_keyboard_query,
+            .kitty_keyboard_push,
+            .kitty_keyboard_pop,
+            .kitty_keyboard_set,
+            .kitty_keyboard_set_or,
+            .kitty_keyboard_set_not,
+            .window_title,
+            .title_push,
+            .title_pop,
+            .report_pwd,
+            .show_desktop_notification,
+            .progress_report,
+            .semantic_prompt,
+            .clipboard_contents,
+            .end_hyperlink,
+            .cursor_style,
+            .configure_charset,
+            .invoke_charset,
+            .tab_set,
+            .tab_clear_current,
+            .tab_clear_all,
+            .tab_reset,
+            .dcs_hook,
+            .dcs_put,
+            .dcs_unhook,
+            .apc_start,
+            .apc_put,
+            .apc_put_slice,
+            .apc_end,
+            => {},
+
+            else => callback(self, .separator, ""),
+        }
+    }
+
+    /// Handle printable actions while reporting only codepoints the terminal
+    /// accepted into its rendered text. Ghostty's normal slice fast path is
+    /// preserved; its tracked fallback owns every suppression decision.
+    fn vtParsedPrint(
+        self: *Handler,
+        comptime action: Action.Tag,
+        value: Action.Value(action),
+    ) !bool {
+        const callback = self.effects.parsed_output orelse return false;
+        switch (action) {
+            .print => {
+                const cp = try self.terminal.printTracked(value.cp) orelse return true;
+                var buf: [4]u8 = undefined;
+                const len = std.unicode.utf8Encode(cp, &buf) catch return true;
+                callback(self, .text, buf[0..len]);
+                return true;
+            },
+            .print_slice => {
+                var start: usize = 0;
+                while (start < value.cps.len) {
+                    const result = try self.terminal.printSliceTracked(value.cps[start..]);
+                    if (result.consumed == 0) break;
+                    const end = start + result.consumed;
+                    switch (result.output) {
+                        .unchanged => self.emitParsedCodepoints(value.cps[start..end]),
+                        .codepoint => |cp| {
+                            var buf: [4]u8 = undefined;
+                            const len = std.unicode.utf8Encode(cp, &buf) catch {
+                                start = end;
+                                continue;
+                            };
+                            callback(self, .text, buf[0..len]);
+                        },
+                        .hidden => {},
+                    }
+                    start = end;
+                }
+                return true;
+            },
+            .print_repeat => {
+                const cp = self.terminal.previous_char orelse return true;
+                var buf: [4096]u8 = undefined;
+                var remaining = @max(value, 1);
+                var len: usize = 0;
+                while (remaining > 0) {
+                    remaining -= 1;
+                    const rendered = try self.terminal.printTracked(cp) orelse continue;
+                    var encoded: [4]u8 = undefined;
+                    const encoded_len = std.unicode.utf8Encode(rendered, &encoded) catch continue;
+                    if (len + encoded_len > buf.len) {
+                        callback(self, .text, buf[0..len]);
+                        len = 0;
+                    }
+                    @memcpy(buf[len..][0..encoded_len], encoded[0..encoded_len]);
+                    len += encoded_len;
+                }
+                if (len > 0) callback(self, .text, buf[0..len]);
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    fn emitParsedCodepoints(self: *Handler, cps: []const u32) void {
+        const callback = self.effects.parsed_output orelse return;
+        var buf: [4096]u8 = undefined;
+        var start: usize = 0;
+        while (start < cps.len) {
+            var len: usize = 0;
+            while (start < cps.len) : (start += 1) {
+                const cp: u21 = @intCast(cps[start]);
+                const cp_len = std.unicode.utf8CodepointSequenceLength(cp) catch break;
+                if (len + cp_len > buf.len) break;
+                len += std.unicode.utf8Encode(cp, buf[len..]) catch break;
+            }
+            if (len == 0) return;
+            callback(self, .text, buf[0..len]);
+        }
     }
 
     inline fn vtFallible(

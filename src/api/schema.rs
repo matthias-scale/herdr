@@ -101,6 +101,8 @@ pub enum Method {
     LoopList(EmptyParams),
     #[serde(rename = "loop.run_history")]
     LoopRunHistory(LoopRunHistoryParams),
+    #[serde(rename = "loop.findings")]
+    LoopFindings(EmptyParams),
     #[serde(rename = "symphony.list")]
     SymphonyList(EmptyParams),
     #[serde(rename = "fleet.list")]
@@ -147,6 +149,10 @@ pub enum Method {
     AgentList(EmptyParams),
     #[serde(rename = "agent.get")]
     AgentGet(AgentTarget),
+    #[serde(rename = "agent.state")]
+    AgentState(AgentStateParams),
+    #[serde(rename = "agent.report")]
+    AgentReport(AgentReportParams),
     #[serde(rename = "agent.read")]
     AgentRead(AgentReadParams),
     #[serde(rename = "agent.explain")]

@@ -496,6 +496,10 @@ impl App {
                 self.state.focus_client_on_sidebar();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::FocusOwningRepoGroup => {
+                self.state.focus_owning_repo_group();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::CycleSidebarGroupMode => {
                 self.state.cycle_sidebar_group_mode();
                 leave_navigate_mode(&mut self.state);
@@ -2127,6 +2131,7 @@ fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
     let mut remote = state
         .remote_agent_panel_entries
         .iter()
+        .filter(|entry| entry.snoozed_until.is_none())
         .map(|entry| {
             (
                 BlockedPaneTarget::Remote(entry.agent_ref.clone()),
@@ -2305,6 +2310,7 @@ pub(crate) enum NavigateAction {
     ResizePaneRight,
     ToggleSidebar,
     FocusSidebar,
+    FocusOwningRepoGroup,
     CycleSidebarGroupMode,
     RefreshSidebar,
     ToggleStatusDetail,
@@ -2589,6 +2595,10 @@ macro_rules! non_indexed_action_bindings {
             (&kb.resize_pane_right, NavigateAction::ResizePaneRight),
             (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
             (&kb.focus_sidebar, NavigateAction::FocusSidebar),
+            (
+                &kb.focus_owning_repo_group,
+                NavigateAction::FocusOwningRepoGroup,
+            ),
             (
                 &kb.sidebar_cycle_group_mode,
                 NavigateAction::CycleSidebarGroupMode,
@@ -3007,6 +3017,10 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::FocusSidebar => {
             state.focus_client_on_sidebar();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::FocusOwningRepoGroup => {
+            state.focus_owning_repo_group();
             leave_navigate_mode(state);
         }
         NavigateAction::CycleSidebarGroupMode => {
@@ -4196,6 +4210,7 @@ mod tests {
         let mut state = AppState::test_new();
         state.remote_agent_panel_entries = crate::ui::remote_agent_panel_entries_at(&snapshot, 100);
         state.view_observed_unix_s = 100;
+        state.collapsed_sidebar_groups.remove("repo:Fleet");
 
         let targets = blocked_pane_cycle(&state)
             .into_iter()
@@ -4229,7 +4244,8 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), remote),
         )];
-        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 10));
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 30));
         app.execute_tui_navigate_action(NavigateAction::NextBlockedWindow, ActionContext::Prefix);
 
         assert_eq!(active_window(&app.state), original_window);
@@ -5037,13 +5053,15 @@ mod tests {
             ),
             Some(NavigateAction::CopyWorkPreview)
         );
+        // The info panel's old `prefix+i` slot now collapses every repo group
+        // except the focused pane's.
         assert_eq!(
             action_for_key(
                 &state,
                 TerminalKey::new(KeyCode::Char('i'), KeyModifiers::empty()),
                 BindingDispatch::Prefix,
             ),
-            None
+            Some(NavigateAction::FocusOwningRepoGroup)
         );
     }
 

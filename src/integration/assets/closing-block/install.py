@@ -23,7 +23,6 @@ RUNTIME_FILES = (
     "herdr_status.py",
     "herdr-closing-block.py",
     "herdr-codex-notify.py",
-    "herdr-question-gate.py",
 )
 VERSION_RE = re.compile(r"^# HERDR_INTEGRATION_VERSION=(?P<version>\d+)$", re.MULTILINE)
 
