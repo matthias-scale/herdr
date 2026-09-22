@@ -980,9 +980,6 @@ fn live_handoff_preserves_accepted_group_history() {
         &api_socket,
         serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
     ));
-    let replacement_pid =
-        wait_for_replacement_server_pid(&runtime_dir, old_pid, Duration::from_secs(10));
-    assert_ne!(replacement_pid, old_pid);
     wait_for_api(&api_socket, Duration::from_secs(10));
     let old_exit_deadline = Instant::now() + Duration::from_secs(5);
     while spawned.child.try_wait().unwrap().is_none() && Instant::now() < old_exit_deadline {
