@@ -10,9 +10,9 @@ use ratatui::{
 use super::sidebar::agent_panel_entries;
 use super::sidebar::{
     dim_inactive_pane_row, mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout,
-    render_compact_agent_row, render_remote_compact_agent_row_with_identity,
-    sidebar_row_belongs_to_workspace, sidebar_space_member_indices, sidebar_thread_entries_from,
-    sidebar_workspace_labels, SidebarRow,
+    render_compact_agent_row, render_remote_compact_agent_row_with_identity, section_header_glyph,
+    section_row_style, sidebar_row_belongs_to_workspace, sidebar_space_member_indices,
+    sidebar_thread_entries_from, sidebar_workspace_labels, SidebarRow, SYMPHONY_SECTION_TITLE,
 };
 #[cfg(test)]
 use super::sidebar::{AgentPanelEntry, AgentPanelEntryData};
@@ -209,8 +209,17 @@ fn mobile_switcher_target_for_row(
             run_id: summary.run_id.clone(),
         },
         SidebarRow::SectionHeader { .. }
+        | SidebarRow::Divider
+        | SidebarRow::NeedsYou { .. }
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
+        | SidebarRow::AloopLoop { .. }
+        | SidebarRow::AloopRunLine { .. }
+        | SidebarRow::AloopFinding { .. }
+        | SidebarRow::AloopCleanRuns { .. }
+        | SidebarRow::AloopCleanRun { .. }
+        | SidebarRow::AloopUnreachable { .. }
+        | SidebarRow::AloopEmpty
         | SidebarRow::AgentRun { summary: None, .. } => return None,
     })
 }
@@ -231,11 +240,20 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
         SidebarRow::Workspace { .. }
         | SidebarRow::Tab { .. }
         | SidebarRow::SectionHeader { .. }
+        | SidebarRow::Divider
+        | SidebarRow::NeedsYou { .. }
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
         | SidebarRow::Agent { .. }
         | SidebarRow::RemoteAgent { .. }
+        | SidebarRow::AloopLoop { .. }
+        | SidebarRow::AloopRunLine { .. }
+        | SidebarRow::AloopFinding { .. }
+        | SidebarRow::AloopCleanRuns { .. }
+        | SidebarRow::AloopCleanRun { .. }
+        | SidebarRow::AloopUnreachable { .. }
+        | SidebarRow::AloopEmpty
         | SidebarRow::AgentRun { .. } => 1,
     }
 }
@@ -724,6 +742,7 @@ fn render_mobile_switcher_content(
                 ws_idx,
                 title,
                 count,
+                state_counts,
                 ..
             } => {
                 let Some(ws) = app.workspaces.get(*ws_idx) else {
@@ -735,7 +754,12 @@ fn render_mobile_switcher_content(
                     .is_some_and(|active| member_indices.contains(&active));
                 let selected = member_indices.contains(&app.selected);
                 let bg = mobile_item_bg(selected, active, p);
-                let mut title_spans = vec![Span::styled("  ", Style::default().bg(bg))];
+                let repo_header = !title.is_empty();
+                let mut title_spans = if repo_header {
+                    Vec::new()
+                } else {
+                    vec![Span::styled("  ", Style::default().bg(bg))]
+                };
                 let expanded = app.workspace_agents_expanded(*ws_idx);
                 title_spans.push(Span::styled(
                     if expanded { "▾" } else { "▸" },
@@ -768,11 +792,25 @@ fn render_mobile_switcher_content(
                         })
                     })
                     .count();
-                let count_label = count.map_or_else(
-                    || format!(" ({agent_count}/{window_count})"),
-                    |count| format!(" ({count})"),
-                );
-                let fixed_width = 4u16.saturating_add(display_width_u16(&count_label));
+                let count_label = if state_counts.is_empty() {
+                    count.map_or_else(
+                        || format!(" ({agent_count}/{window_count})"),
+                        |count| format!(" ({count})"),
+                    )
+                } else {
+                    String::new()
+                };
+                let state_count_width = state_counts.iter().fold(0u16, |width, count| {
+                    width.saturating_add(
+                        display_width_u16(count.glyph)
+                            .saturating_add(display_width_u16(&count.count.to_string()))
+                            .saturating_add(1),
+                    )
+                });
+                let prefix_width: u16 = if repo_header { 2 } else { 4 };
+                let fixed_width = prefix_width
+                    .saturating_add(display_width_u16(&count_label))
+                    .saturating_add(state_count_width);
                 let name_width = content.width.saturating_sub(fixed_width);
                 title_spans.push(Span::styled(
                     truncate_end(&name, name_width as usize),
@@ -794,6 +832,13 @@ fn render_mobile_switcher_content(
                         .bg(bg)
                         .add_modifier(Modifier::DIM),
                 ));
+                for count in state_counts {
+                    title_spans.push(Span::styled(" ", Style::default().bg(bg)));
+                    title_spans.push(Span::styled(
+                        format!("{}{}", count.glyph, count.count),
+                        Style::default().fg(count.color).bg(bg),
+                    ));
+                }
                 render_one_line_item(
                     frame,
                     viewport,
@@ -851,9 +896,21 @@ fn render_mobile_switcher_content(
                 }
             }
             SidebarRow::SectionHeader {
-                title, collapsed, ..
+                title,
+                count,
+                host_counts,
+                collapsed,
             } => {
-                let label = format!("  {} {title}", if *collapsed { "▸" } else { "▾" });
+                let host_counts = host_counts
+                    .iter()
+                    .map(|count| format!(" {}:{}", count.host, count.count))
+                    .collect::<String>();
+                let label = format!(
+                    "  {} {} {title} ({count}){host_counts}",
+                    if *collapsed { "▸" } else { "▾" },
+                    section_header_glyph(title)
+                );
+                let zero = *title == SYMPHONY_SECTION_TITLE && *count == 0;
                 render_one_line_item(
                     frame,
                     viewport,
@@ -863,7 +920,26 @@ fn render_mobile_switcher_content(
                     p.panel_bg,
                     Line::from(Span::styled(
                         label,
-                        Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+                        section_row_style(
+                            app,
+                            *collapsed,
+                            zero,
+                            Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+                        ),
+                    )),
+                );
+            }
+            SidebarRow::Divider => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        "─".repeat(usize::from(content.width)),
+                        Style::default().fg(p.surface_dim),
                     )),
                 );
             }
@@ -942,6 +1018,113 @@ fn render_mobile_switcher_content(
                     )),
                 );
             }
+            SidebarRow::AloopLoop {
+                name, collapsed, ..
+            } => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!("   {} {name}", if *collapsed { "▸" } else { "▾" }),
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
+            SidebarRow::AloopRunLine { run, .. } => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!(
+                            "     {} · {} findings",
+                            run.at.get(11..16).unwrap_or(&run.at),
+                            run.findings
+                        ),
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
+            SidebarRow::AloopFinding { finding, .. } => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!("     [{}] {}", finding.source, finding.title),
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
+            SidebarRow::AloopCleanRuns { count, .. } => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!("     {count} clean runs"),
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
+            SidebarRow::AloopCleanRun { run, .. } => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!(
+                            "       {} · 0 findings",
+                            run.at.get(11..16).unwrap_or(&run.at)
+                        ),
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
+            SidebarRow::AloopUnreachable { host, .. } => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        format!("   {host} unreachable"),
+                        Style::default().fg(p.red).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
+            SidebarRow::AloopEmpty => {
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(
+                        "   no pending findings".to_string(),
+                        Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                    )),
+                );
+            }
             SidebarRow::Tab { entry, depth } => {
                 let active = entry.local_target().is_some_and(|target| {
                     app.active == Some(target.ws_idx)
@@ -962,6 +1145,9 @@ fn render_mobile_switcher_content(
                     }
                 }
             }
+            // The mobile switcher never receives strip rows; the projection
+            // gate in `compact_sidebar_rows_inner` keeps them desktop-only.
+            SidebarRow::NeedsYou { .. } => {}
         }
         doc_y += mobile_sidebar_row_height(row);
     }
@@ -1583,6 +1769,7 @@ mod tests {
             Vec::new(),
         );
         assert!(app.settle_pane_at(0, pane, 1_725_000_000));
+        app.collapsed_sidebar_groups.remove("repo:Settled");
 
         let area = Rect::new(0, 0, 50, 20);
         let mut terminal =
@@ -1625,6 +1812,7 @@ mod tests {
             .detected_agent = Some(crate::detect::Agent::Codex);
         let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
         assert!(app.snooze_pane_at(0, pane, deadline));
+        app.collapsed_sidebar_groups.remove("repo:Snoozed");
 
         let area = Rect::new(0, 0, 50, 20);
         let mut terminal =
@@ -2410,6 +2598,7 @@ mod tests {
         let entry = SidebarRow::SectionHeader {
             title: "Agents",
             count: 1,
+            host_counts: Vec::new(),
             collapsed: false,
         };
         assert_eq!(

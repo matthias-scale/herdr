@@ -217,6 +217,9 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
         &[
             built_in("toggle_sidebar", "toggle sidebar", |kb| &kb.toggle_sidebar),
             built_in("focus_sidebar", "focus sidebar", |kb| &kb.focus_sidebar),
+            built_in("focus_owning_repo_group", "focus owning repo group", |kb| {
+                &kb.focus_owning_repo_group
+            }),
             built_in("sidebar_cycle_group_mode", "cycle sidebar grouping", |kb| {
                 &kb.sidebar_cycle_group_mode
             }),
@@ -236,9 +239,6 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
             built_in("next_dock_tab", "next dock tab", |kb| &kb.next_dock_tab),
             built_in("editor_open_repo", "editor.open_repo", |kb| {
                 &kb.editor_open_repo
-            }),
-            built_in("toggle_info_panel", "toggle info panel", |kb| {
-                &kb.toggle_info_panel
             }),
             built_in("toggle_status_detail", "toggle status detail", |kb| {
                 &kb.toggle_status_detail

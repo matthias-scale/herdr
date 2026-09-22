@@ -521,6 +521,33 @@ pub fn printRepeat(self: *Terminal, count_req: usize) !void {
     }
 }
 
+pub const PrintSliceTrackedResult = struct {
+    consumed: usize,
+    output: union(enum) {
+        unchanged,
+        codepoint: u21,
+        hidden,
+    },
+};
+
+/// Print the next slice segment using the normal fast path when possible and
+/// report whether that entire segment became rendered text. A slow-path
+/// codepoint is consumed individually so ignored characters remain observable
+/// to callers without duplicating the terminal's rendering rules.
+pub fn printSliceTracked(self: *Terminal, cps: []const u32) !PrintSliceTrackedResult {
+    if (cps.len == 0) return .{ .consumed = 0, .output = .hidden };
+    const consumed = if (self.printSliceFastConfig()) |config|
+        try self.printSliceFast(cps, config.grapheme_cluster, config.allow_unicode)
+    else
+        0;
+    if (consumed > 0) return .{ .consumed = consumed, .output = .unchanged };
+    const rendered = try self.printTracked(@intCast(cps[0]));
+    return .{
+        .consumed = 1,
+        .output = if (rendered) |cp| .{ .codepoint = cp } else .hidden,
+    };
+}
+
 /// Print multiple codepoints to the terminal at once. This is
 /// semantically identical to calling `print` for each codepoint in
 /// order, but is much faster because it can batch cell writes and
@@ -537,45 +564,10 @@ pub fn printRepeat(self: *Terminal, count_req: usize) !void {
 /// slower per-codepoint path. They're less common and this is optimized
 /// for the aforementioned cases.
 pub fn printSlice(self: *Terminal, cps: []const u32) !void {
-    // Check if we can do the fast path up front. If we can't
-    // we need to go back to scalar `print`.
-    const fast = fast: {
-        // Only the main display is supported.
-        if (self.status_display != .main) break :fast false;
-
-        // Modes that require per-codepoint handling in print().
-        // Wraparound is required (its the default) so that our
-        // row-fill logic below can assume soft-wrap semantics. Insert
-        // mode shifts cells per print.
-        if (self.modes.get(.insert)) break :fast false;
-        if (!self.modes.get(.wraparound)) break :fast false;
-
-        // Charset must map ASCII as-is (true unless a DEC special
-        // charset is actively invoked, which is rare).
-        const screen: *Screen = self.screens.active;
-        if (screen.charset.single_shift != null) break :fast false;
-        switch (screen.charset.charsets.get(screen.charset.gl)) {
-            .utf8, .ascii => {},
-            else => break :fast false,
-        }
-
-        // Hyperlinks require per-cell map bookkeeping.
-        if (screen.cursor.hyperlink_id != 0) break :fast false;
-
-        break :fast true;
-    };
-    if (!fast) {
+    const config = self.printSliceFastConfig() orelse {
         for (cps) |cp| try self.print(@intCast(cp));
         return;
-    }
-
-    const grapheme_cluster = self.modes.get(.grapheme_cluster);
-
-    // When grapheme clustering is enabled and a left margin is set,
-    // print() consults the cell left of the margin after wrapping,
-    // which we can't reason about here. Restrict the fast path to
-    // the [0x10, 0xFF] range in that case (those never cluster).
-    const allow_unicode = !grapheme_cluster or self.scrolling_region.left == 0;
+    };
 
     var i: usize = 0;
     while (i < cps.len) {
@@ -583,8 +575,8 @@ pub fn printSlice(self: *Terminal, cps: []const u32) !void {
         // codepoints it consumed.
         const consumed = try self.printSliceFast(
             cps[i..],
-            grapheme_cluster,
-            allow_unicode,
+            config.grapheme_cluster,
+            config.allow_unicode,
         );
         if (consumed > 0) {
             i += consumed;
@@ -598,6 +590,52 @@ pub fn printSlice(self: *Terminal, cps: []const u32) !void {
         try self.print(@intCast(cps[i]));
         i += 1;
     }
+}
+
+const PrintSliceFastConfig = struct {
+    grapheme_cluster: bool,
+    allow_unicode: bool,
+};
+
+fn printSliceFastConfig(self: *Terminal) ?PrintSliceFastConfig {
+    // Check if we can do the fast path up front. If we can't
+    // we need to go back to scalar `print`.
+    {
+        // Only the main display is supported.
+        if (self.status_display != .main) return null;
+
+        // Modes that require per-codepoint handling in print().
+        // Wraparound is required (its the default) so that our
+        // row-fill logic below can assume soft-wrap semantics. Insert
+        // mode shifts cells per print.
+        if (self.modes.get(.insert)) return null;
+        if (!self.modes.get(.wraparound)) return null;
+
+        // Charset must map ASCII as-is (true unless a DEC special
+        // charset is actively invoked, which is rare).
+        const screen: *Screen = self.screens.active;
+        if (screen.charset.single_shift != null) return null;
+        switch (screen.charset.charsets.get(screen.charset.gl)) {
+            .utf8, .ascii => {},
+            else => return null,
+        }
+
+        // Hyperlinks require per-cell map bookkeeping.
+        if (screen.cursor.hyperlink_id != 0) return null;
+    }
+
+    const grapheme_cluster = self.modes.get(.grapheme_cluster);
+
+    // When grapheme clustering is enabled and a left margin is set,
+    // print() consults the cell left of the margin after wrapping,
+    // which we can't reason about here. Restrict the fast path to
+    // the [0x10, 0xFF] range in that case (those never cluster).
+    const allow_unicode = !grapheme_cluster or self.scrolling_region.left == 0;
+
+    return .{
+        .grapheme_cluster = grapheme_cluster,
+        .allow_unicode = allow_unicode,
+    };
 }
 
 /// Attempt to print a prefix of `cps` using a batched fast path that
@@ -1199,12 +1237,19 @@ inline fn printSliceCheckExpected(style_id: style.Id) u64 {
 }
 
 pub fn print(self: *Terminal, c: u21) !void {
+    _ = try self.printTracked(c);
+}
+
+/// Print one codepoint and return the codepoint stored in rendered terminal
+/// text, or null when nothing was stored. This exposes both visibility and
+/// charset mapping without a second rendering predicate.
+pub fn printTracked(self: *Terminal, c: u21) !?u21 {
     // log.debug("print={x} y={} x={}", .{ c, self.screens.active.cursor.y, self.screens.active.cursor.x });
 
     // If we're not on the main display, do nothing for now
     if (self.status_display != .main) {
         @branchHint(.cold);
-        return;
+        return null;
     }
 
     // After doing any printing, wrapping, scrolling, etc. we want to ensure
@@ -1290,7 +1335,7 @@ pub fn print(self: *Terminal, c: u21) !void {
         // with the previous char.
         if (!grapheme_break) {
             switch (unicode.graphemeWidthEffect(previous_codepoint, c)) {
-                .ignore => return,
+                .ignore => return null,
                 .wide => wide: {
                     if (prev.cell.wide == .wide) break :wide;
 
@@ -1302,7 +1347,7 @@ pub fn print(self: *Terminal, c: u21) !void {
                     // insert spacers and wrap. We need special handling if the
                     // previous cell has grapheme data.
                     if (self.screens.active.cursor.x == right_limit - 1) {
-                        if (!self.modes.get(.wraparound)) return;
+                        if (!self.modes.get(.wraparound)) return null;
 
                         // This path can write a spacer_head before printWrap
                         // which can trigger integrity violations so mark
@@ -1320,7 +1365,7 @@ pub fn print(self: *Terminal, c: u21) !void {
                             prev.cell.content.codepoint.data = 0;
 
                             try self.printWrap();
-                            self.printCell(prev_cp, .wide);
+                            _ = self.printCell(prev_cp, .wide);
 
                             const new_pin = self.screens.active.cursor.page_pin.*;
                             const new_rac = new_pin.rowAndCell();
@@ -1357,12 +1402,12 @@ pub fn print(self: *Terminal, c: u21) !void {
                             // we'll be appending graphemes to
                             prev.cell = self.screens.active.cursor.page_cell;
                         } else {
-                            self.printCell(
+                            _ = self.printCell(
                                 0,
                                 if (row_wrap) .spacer_head else .narrow,
                             );
                             try self.printWrap();
-                            self.printCell(prev_cp, .wide);
+                            _ = self.printCell(prev_cp, .wide);
 
                             // Point prev.cell to our new previous cell that
                             // we'll be appending graphemes to
@@ -1374,7 +1419,6 @@ pub fn print(self: *Terminal, c: u21) !void {
 
                     // Write our spacer, since prev.cell is now wide
                     self.screens.active.cursorRight(1);
-
                     // Writing the spacer can grow the page to make room for
                     // the cursor hyperlink. Growing replaces the page, which
                     // invalidates `prev.cell`. Record the page identity first
@@ -1386,7 +1430,7 @@ pub fn print(self: *Terminal, c: u21) !void {
                     const spacer_node = self.screens.active.cursor.page_pin.node;
                     const spacer_serial = spacer_node.serial;
 
-                    self.printCell(0, .spacer_tail);
+                    _ = self.printCell(0, .spacer_tail);
 
                     if (self.screens.active.cursor.page_pin.node != spacer_node or
                         self.screens.active.cursor.page_pin.node.serial != spacer_serial)
@@ -1442,7 +1486,7 @@ pub fn print(self: *Terminal, c: u21) !void {
             });
             self.screens.active.cursorMarkDirty();
             try self.screens.active.appendGrapheme(prev.cell, c);
-            return;
+            return c;
         }
     }
 
@@ -1464,7 +1508,7 @@ pub fn print(self: *Terminal, c: u21) !void {
         // If we have grapheme clustering enabled, we don't blindly attach
         // any zero width character to our cells and we instead just ignore
         // it.
-        if (self.modes.get(.grapheme_cluster)) return;
+        if (self.modes.get(.grapheme_cluster)) return null;
 
         // If we have wraparound enabled and a pending wrap, the character
         // we're attaching to is still under the cursor. Otherwise, it's the
@@ -1477,7 +1521,7 @@ pub fn print(self: *Terminal, c: u21) !void {
         // character at the time of writing.
         if (self.screens.active.cursor.x == 0 and left == 1) {
             log.warn("zero-width character with no prior character, ignoring", .{});
-            return;
+            return null;
         }
 
         // Find our previous cell
@@ -1490,18 +1534,18 @@ pub fn print(self: *Terminal, c: u21) !void {
         // If our previous cell has no text, just ignore the zero-width character
         if (!prev.hasText()) {
             log.warn("zero-width character with no prior character, ignoring", .{});
-            return;
+            return null;
         }
 
         // If this is a emoji variation selector, prev must be an emoji
         if (c == 0xFE0F or c == 0xFE0E) {
             const prev_props = unicode.table.get(prev.content.codepoint.data);
             const emoji = prev_props.grapheme_break == .extended_pictographic;
-            if (!emoji) return;
+            if (!emoji) return null;
         }
 
         try self.screens.active.appendGrapheme(prev, c);
-        return;
+        return c;
     }
 
     // We have a printable character, save it
@@ -1520,19 +1564,19 @@ pub fn print(self: *Terminal, c: u21) !void {
         self.insertBlanks(width);
     }
 
-    switch (width) {
+    const rendered: u21 = switch (width) {
         // Single cell is very easy: just write in the cell
-        1 => {
+        1 => blk: {
             @branchHint(.likely);
             self.screens.active.cursorMarkDirty();
-            @call(.always_inline, printCell, .{ self, c, .narrow });
+            break :blk @call(.always_inline, printCell, .{ self, c, .narrow });
         },
 
         // Wide character requires a spacer. We print this by
         // using two cells: the first is flagged "wide" and has the
         // wide char. The second is guaranteed to be a spacer if
         // we're not at the end of the line.
-        2 => if ((right_limit - self.scrolling_region.left) > 1) {
+        2 => if ((right_limit - self.scrolling_region.left) > 1) blk: {
             // If we don't have space for the wide char, we need
             // to insert spacers and wrap. Then we just print the wide
             // char as normal.
@@ -1540,7 +1584,7 @@ pub fn print(self: *Terminal, c: u21) !void {
                 // If we don't have wraparound enabled then we don't print
                 // this character at all and don't move the cursor. This is
                 // how xterm behaves.
-                if (!self.modes.get(.wraparound)) return;
+                if (!self.modes.get(.wraparound)) return null;
 
                 // We only create a spacer head if we're at the real edge
                 // of the screen. Otherwise, we clear the space with a narrow.
@@ -1551,43 +1595,45 @@ pub fn print(self: *Terminal, c: u21) !void {
                     // a page resize during printCell then it'll fail
                     // integrity checks.
                     self.screens.active.cursor.page_row.wrap = true;
-                    self.printCell(0, .spacer_head);
+                    _ = self.printCell(0, .spacer_head);
                 } else {
-                    self.printCell(0, .narrow);
+                    _ = self.printCell(0, .narrow);
                 }
                 try self.printWrap();
             }
 
             self.screens.active.cursorMarkDirty();
-            self.printCell(c, .wide);
+            const mapped = self.printCell(c, .wide);
             self.screens.active.cursorRight(1);
-            self.printCell(0, .spacer_tail);
-        } else {
+            _ = self.printCell(0, .spacer_tail);
+            break :blk mapped;
+        } else blk: {
             // This is pretty broken, terminals should never be only 1-wide.
             // We should prevent this downstream.
             self.screens.active.cursorMarkDirty();
-            self.printCell(0, .narrow);
+            break :blk self.printCell(0, .narrow);
         },
 
         else => unreachable,
-    }
+    };
 
     // If we're at the column limit, then we need to wrap the next time.
     // In this case, we don't move the cursor.
     if (self.screens.active.cursor.x == right_limit - 1) {
         self.screens.active.cursor.pending_wrap = true;
-        return;
+        return rendered;
     }
 
     // Move the cursor
     self.screens.active.cursorRight(1);
+    return rendered;
 }
 
 fn printCell(
     self: *Terminal,
     unmapped_c: u21,
     wide: Cell.Wide,
-) void {
+) u21 {
     defer self.screens.active.assertIntegrity();
 
     // TODO: spacers should use a bgcolor only cell
@@ -1753,6 +1799,8 @@ fn printCell(
         page.clearHyperlink(cell);
         page.updateRowHyperlinkFlag(self.screens.active.cursor.page_row);
     }
+
+    return c;
 }
 
 fn printWrap(self: *Terminal) !void {

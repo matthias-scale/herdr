@@ -103,7 +103,7 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// Build the canonical, stable-order links shared by the picker and info panel.
+/// Build the canonical, stable-order links shared by the picker and dock context.
 /// Invalid values are omitted defensively even though effective contexts are
 /// normally normalized at their producer boundary.
 pub(crate) fn work_link_candidates(context: &PaneWorkContext) -> Vec<WorkLinkCandidate> {
@@ -172,7 +172,7 @@ pub(crate) fn work_link_candidates(context: &PaneWorkContext) -> Vec<WorkLinkCan
     candidates
 }
 
-/// Missive URLs are long and repetitive, so the panel shows the conversation
+/// Missive URLs are long and repetitive, so the dock shows the conversation
 /// segment rather than the whole hash route.
 fn missive_link_label(url: &str) -> String {
     url.rsplit('/')

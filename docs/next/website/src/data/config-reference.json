@@ -997,6 +997,12 @@
           "description": "Move keyboard focus to the sidebar, expanding it if collapsed. Unset by default."
         },
         {
+          "key": "keys.focus_owning_repo_group",
+          "type": "keybinding",
+          "default": "\"prefix+i\"",
+          "description": "Collapse every repo group except the one owning the focused pane."
+        },
+        {
           "key": "keys.sidebar_cycle_group_mode",
           "type": "keybinding",
           "default": "unset",
@@ -1133,12 +1139,6 @@
           "type": "keybinding",
           "default": "unset",
           "description": "Pin or unpin the active tab into the sidebar's Pinned group. Unset by default."
-        },
-        {
-          "key": "keys.toggle_info_panel",
-          "type": "keybinding",
-          "default": "\"prefix+i\"",
-          "description": "Toggle the focused pane's right-side work-context panel."
         },
         {
           "key": "keys.symphony",
@@ -1440,12 +1440,6 @@
           "type": "boolean",
           "default": "false",
           "description": "Show the split-below and split-right buttons in the top-right action row. Off by default; both splits have keybindings."
-        },
-        {
-          "key": "ui.show_subscription_usage",
-          "type": "boolean",
-          "default": "true",
-          "description": "Show local Codex and Claude Code subscription usage in the info panel."
         },
         {
           "key": "ui.tab_bar_right",
@@ -2218,6 +2212,12 @@
           "type": "string",
           "default": "unset",
           "description": "Configured fleet host that runs Temporal for Symphony polling. Unset keeps localhost polling."
+        },
+        {
+          "key": "remote.fleet.aloop_host",
+          "type": "string",
+          "default": "ub2",
+          "description": "Fleet host that produces Aloops findings and run records. When it matches `self_name`, Herdr reads the local store instead of using SSH."
         }
       ]
     },

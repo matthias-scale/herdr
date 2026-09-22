@@ -405,6 +405,7 @@ pub struct Keybinds {
     pub resize_pane_right: ActionKeybinds,
     pub toggle_sidebar: ActionKeybinds,
     pub focus_sidebar: ActionKeybinds,
+    pub focus_owning_repo_group: ActionKeybinds,
     pub sidebar_cycle_group_mode: ActionKeybinds,
     pub sidebar_refresh: ActionKeybinds,
     pub toggle_blocked_filter: ActionKeybinds,
@@ -416,7 +417,6 @@ pub struct Keybinds {
     pub show_scratchpad: ActionKeybinds,
     pub toggle_notepad: ActionKeybinds,
     pub toggle_pomodoro: ActionKeybinds,
-    pub toggle_info_panel: ActionKeybinds,
     pub symphony: ActionKeybinds,
     pub runs: ActionKeybinds,
     pub work: ActionKeybinds,
@@ -630,6 +630,7 @@ impl Config {
             resize_pane_right: empty_action!(),
             toggle_sidebar: empty_action!(),
             focus_sidebar: empty_action!(),
+            focus_owning_repo_group: empty_action!(),
             sidebar_cycle_group_mode: empty_action!(),
             sidebar_refresh: empty_action!(),
             toggle_blocked_filter: empty_action!(),
@@ -641,7 +642,6 @@ impl Config {
             show_scratchpad: empty_action!(),
             toggle_notepad: empty_action!(),
             toggle_pomodoro: empty_action!(),
-            toggle_info_panel: empty_action!(),
             symphony: empty_action!(),
             runs: empty_action!(),
             work: empty_action!(),
@@ -835,6 +835,11 @@ impl Config {
             apply_action!(keybinds.toggle_sidebar, toggle_sidebar, source);
             apply_action!(keybinds.focus_sidebar, focus_sidebar, source);
             apply_action!(
+                keybinds.focus_owning_repo_group,
+                focus_owning_repo_group,
+                source
+            );
+            apply_action!(
                 keybinds.sidebar_cycle_group_mode,
                 sidebar_cycle_group_mode,
                 source
@@ -853,7 +858,6 @@ impl Config {
             apply_action!(keybinds.show_scratchpad, show_scratchpad, source);
             apply_action!(keybinds.toggle_notepad, toggle_notepad, source);
             apply_action!(keybinds.toggle_pomodoro, toggle_pomodoro, source);
-            apply_action!(keybinds.toggle_info_panel, toggle_info_panel, source);
             apply_action!(keybinds.symphony, symphony, source);
             apply_action!(keybinds.runs, runs, source);
             apply_action!(keybinds.work, work, source);
@@ -2009,12 +2013,6 @@ next_tab = "prefix+n"
             .matches_prefix_key(&crate::input::TerminalKey::new(
                 KeyCode::Char('U'),
                 KeyModifiers::SHIFT,
-            )));
-        assert!(defaults
-            .toggle_info_panel
-            .matches_prefix_key(&crate::input::TerminalKey::new(
-                KeyCode::Char('i'),
-                KeyModifiers::empty(),
             )));
         assert!(defaults
             .open_work_url

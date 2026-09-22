@@ -298,6 +298,9 @@ impl App {
             InputOwner::Surface(SurfaceInputOwner::LoopRunHistory) => {
                 self.handle_loop_run_history_key(key_event);
             }
+            InputOwner::Surface(SurfaceInputOwner::AloopRunLog) => {
+                self.handle_aloop_run_detail_key(key_event);
+            }
             InputOwner::Surface(SurfaceInputOwner::Usage) => {
                 self.handle_usage_view_key(key_event);
             }
@@ -1117,6 +1120,10 @@ impl App {
             &plan.directory,
         );
 
+        if plan.remote.is_some() {
+            return self.start_home_checkout(plan);
+        }
+
         match plan.workspace {
             crate::app::home::HomeWorkspace::NewWorktree => self.start_home_worktree_add(plan),
             crate::app::home::HomeWorkspace::CurrentCheckout
@@ -1161,6 +1168,17 @@ impl App {
         }
         if key.code == KeyCode::Esc && key.modifiers.is_empty() {
             self.state.clear_loop_run_history();
+            self.state.set_server_mode(Mode::Terminal);
+        }
+        true
+    }
+
+    pub(crate) fn handle_aloop_run_detail_key(&mut self, key: KeyEvent) -> bool {
+        if self.state.aloop_run_detail.is_none() {
+            return false;
+        }
+        if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+            self.state.clear_aloop_run_detail();
             self.state.set_server_mode(Mode::Terminal);
         }
         true
@@ -5073,7 +5091,7 @@ impl App {
             if let Some(copy_value) = self
                 .state
                 .view
-                .info_panel_link_rows
+                .work_context_link_rows
                 .iter()
                 .find(|row| {
                     mouse.column >= row.rect.x
@@ -6163,6 +6181,53 @@ async fn wait_for_custom_command_reap(app: &mut App, pid: u32) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn home_dispatch_starts_on_the_plans_remote_machine() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.home = Some(crate::app::home::HomeState::default());
+        let plan = crate::app::home::HomeDispatchPlan {
+            agent: crate::detect::Agent::Codex,
+            model: "gpt-5.6-sol".into(),
+            effort: Some("high".into()),
+            directory: std::env::temp_dir(),
+            workspace: crate::app::home::HomeWorkspace::CurrentCheckout,
+            git_ref: None,
+            pr: None,
+            ticket: None,
+            missive: None,
+            work_context_patch: crate::work_context::PaneWorkContextPatch::default(),
+            target: crate::app::home::HomeTarget::NewSpace,
+            prompt: "repair the pending finding".into(),
+            argv: vec!["agent-that-must-not-start-locally".into()],
+            env: Vec::new(),
+            remote: Some(crate::app::machines::Machine {
+                name: "producer".into(),
+                target: Some("--invalid-target".into()),
+                socket: Some("/run/herdr-producer.sock".into()),
+            }),
+        };
+
+        app.dispatch_home_plan(plan.clone())
+            .expect("remote dispatch should start");
+
+        assert!(app.state.workspaces.is_empty(), "must not launch locally");
+        assert_eq!(
+            app.state
+                .home
+                .as_ref()
+                .and_then(|home| home.pending_dispatch.as_ref()),
+            Some(&plan),
+            "the producer-host launch must remain pending"
+        );
+    }
+
     fn hidden_sidebar_config_app() -> App {
         let mut env = crate::config::TestConfigEnvGuard::acquire();
         let directory = std::env::temp_dir().join(format!(
@@ -6620,6 +6685,206 @@ enabled = true
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[tokio::test]
+    async fn escape_closes_aloop_run_log_through_surface_input_owner() {
+        let mut app = test_app();
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.show_aloop_run_detail(
+            "nightly".into(),
+            "ub2".into(),
+            std::sync::Arc::new(crate::aloop::RunRecord {
+                at: "2026-09-18T09:59:00Z".into(),
+                at_unix_s: 1_758_186_740,
+                duration_ms: 1_200,
+                exit: 0,
+                findings: 0,
+                stable_ids: Vec::new(),
+                log_excerpt: "clean log tail".into(),
+            }),
+        );
+
+        assert_eq!(
+            app.state.input_owner(),
+            InputOwner::Surface(SurfaceInputOwner::AloopRunLog)
+        );
+        assert!(app.terminal_input_context().is_none());
+
+        app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+
+        assert!(app.state.aloop_run_detail.is_none());
+    }
+
+    /// Both Aloops views are reachable only from the sidebar, so a fixture that
+    /// opens one has to leave the sidebar focused the way the real path does.
+    fn aloop_sidebar_app() -> App {
+        let mut app = test_app();
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.fleet_snapshot = crate::fleet::Snapshot {
+            polled: true,
+            aloop: Some(crate::aloop::ProducerSnapshot::read(
+                "ub2".to_string(),
+                crate::aloop::HostData {
+                    loops: vec![crate::aloop::LoopRuns {
+                        loop_name: "nightly".to_string(),
+                        runs: vec![std::sync::Arc::new(crate::aloop::RunRecord {
+                            at: "2026-09-18T09:59:00Z".to_string(),
+                            at_unix_s: crate::fleet::parse_utc_timestamp("2026-09-18T09:59:00Z")
+                                .expect("timestamp"),
+                            duration_ms: 1_200,
+                            exit: 0,
+                            findings: 0,
+                            stable_ids: Vec::new(),
+                            log_excerpt: "clean log tail".to_string(),
+                        })],
+                        skipped_lines: 0,
+                    }],
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        app.state.view.sidebar_rect = ratatui::layout::Rect::new(0, 0, 30, 40);
+        // The section and the clean-run fold are both closed on a fresh state,
+        // so a click test has to open them the way the operator does.
+        app.state
+            .toggle_sidebar_group(crate::ui::sidebar::ALOOPS_SECTION_TITLE);
+        app.state.toggle_sidebar_group("aloop-clean:nightly");
+        app.state.focus_client_on_sidebar();
+        app
+    }
+
+    /// Walks the laid-out sidebar rows the way a click does, so the mouse tests
+    /// never hardcode a row offset that a row-order change would invalidate.
+    fn aloop_row_position(app: &crate::app::state::AppState, key_prefix: &str) -> (u16, u16) {
+        use crate::ui::sidebar::aloops::AloopTarget;
+        let rect = app.view.sidebar_rect;
+        // Six columns in clears the fold glyph, which owns the first three.
+        let col = rect.x.saturating_add(6);
+        for row in rect.y..rect.y + rect.height {
+            let Some(target) = crate::ui::sidebar_aloop_target_at(app, col, row) else {
+                continue;
+            };
+            let key = match &target {
+                AloopTarget::Finding { key }
+                | AloopTarget::RunLine { key }
+                | AloopTarget::CleanFold { key }
+                | AloopTarget::Loop { key, .. }
+                | AloopTarget::CleanRun { key, .. } => key.as_str(),
+            };
+            if key.starts_with(key_prefix) {
+                return (col, row);
+            }
+        }
+        panic!("no aloops row matching {key_prefix}");
+    }
+
+    fn left_click(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    // MAT-168 AC1/AC4: opening the run log from the sidebar has to hand input
+    // ownership to the view, or Esc stays with the sidebar and never closes it.
+    #[tokio::test]
+    async fn ac1_escape_closes_the_aloop_run_log_opened_from_the_sidebar() {
+        let mut app = aloop_sidebar_app();
+        app.state.sidebar_selected_work_group =
+            Some("aloop:cleanrun:nightly:2026-09-18T09:59:00Z".into());
+
+        app.handle_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+
+        assert!(
+            app.state.aloop_run_detail.is_some(),
+            "the sidebar Enter path opens the run log"
+        );
+        assert_eq!(
+            app.state.input_owner(),
+            InputOwner::Surface(SurfaceInputOwner::AloopRunLog)
+        );
+
+        app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+
+        assert!(app.state.aloop_run_detail.is_none());
+    }
+
+    // MAT-168 AC2/AC4.
+    #[tokio::test]
+    async fn ac2_escape_closes_the_aloop_loop_history_opened_from_the_sidebar() {
+        let mut app = aloop_sidebar_app();
+        app.state.sidebar_selected_work_group = Some("aloop:loop:nightly".into());
+
+        app.handle_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()))
+            .await;
+
+        assert!(
+            app.state.loop_run_history_detail.is_some(),
+            "the sidebar Enter path opens the loop history"
+        );
+        assert_eq!(
+            app.state.input_owner(),
+            InputOwner::Surface(SurfaceInputOwner::LoopRunHistory)
+        );
+
+        app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+
+        assert!(app.state.loop_run_history_detail.is_none());
+    }
+
+    // MAT-168 AC3: the click path opens the same two views and keeps the
+    // sidebar selection, so it needs the same ownership handover.
+    #[tokio::test]
+    async fn ac3_escape_closes_the_aloop_run_log_opened_by_mouse() {
+        let mut app = aloop_sidebar_app();
+        let (column, row) = aloop_row_position(&app.state, "aloop:cleanrun:nightly");
+
+        app.handle_mouse(left_click(column, row));
+
+        assert!(
+            app.state.aloop_run_detail.is_some(),
+            "clicking a clean run opens the run log"
+        );
+        assert_eq!(
+            app.state.input_owner(),
+            InputOwner::Surface(SurfaceInputOwner::AloopRunLog)
+        );
+
+        app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+
+        assert!(app.state.aloop_run_detail.is_none());
+    }
+
+    // MAT-168 AC3.
+    #[tokio::test]
+    async fn ac3_escape_closes_the_aloop_loop_history_opened_by_mouse() {
+        let mut app = aloop_sidebar_app();
+        let (column, row) = aloop_row_position(&app.state, "aloop:loop:nightly");
+
+        app.handle_mouse(left_click(column, row));
+
+        assert!(
+            app.state.loop_run_history_detail.is_some(),
+            "clicking a loop header opens the loop history"
+        );
+        assert_eq!(
+            app.state.input_owner(),
+            InputOwner::Surface(SurfaceInputOwner::LoopRunHistory)
+        );
+
+        app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+
+        assert!(app.state.loop_run_history_detail.is_none());
     }
 
     fn pr_action_test_app() -> (App, crate::app::state::WorkItemKey) {

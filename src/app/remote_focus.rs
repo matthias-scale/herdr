@@ -973,6 +973,7 @@ impl crate::app::App {
             .workspaces
             .get_mut(ws_idx)
             .is_some_and(|workspace| workspace.remove_pane(pane_id));
+        self.state.remove_plugin_pane_records([pane_id]);
         self.state.mark_session_dirty();
         if should_close_workspace {
             self.state.selected = ws_idx;
@@ -1204,6 +1205,7 @@ mod tests {
             ..crate::fleet::Snapshot::default()
         };
         app.state.remote_agent_panel_entries = crate::ui::remote_agent_panel_entries(&snapshot);
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
 
         let started = app
             .start_remote_focus_operation(source.clone())

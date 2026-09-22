@@ -57,6 +57,8 @@ fn set_host_color_scheme_reports(enabled: bool) -> io::Result<()> {
 mod activity_age;
 mod agent_resume;
 mod agent_runs;
+mod agent_state;
+mod aloop;
 mod api;
 mod app;
 mod build_info;
@@ -306,7 +308,6 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # sidebar_cycle_group_mode = ""
 # sidebar_refresh = ""
 # toggle_blocked_filter = "prefix+f"
-# toggle_info_panel = "prefix+i"
 # symphony = "prefix+shift+s"
 # runs = "prefix+alt+r"
 # work = "prefix+ctrl+w"         # work projection view: PRs / tickets / agents / review
@@ -458,8 +459,6 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Off by default: both splits have keybindings, and the buttons crowd the tab titles.
 # show_pane_toggle_buttons = false
 
-# Show local Codex and Claude Code subscription usage in the info panel.
-# show_subscription_usage = true
 # Open the home view on launch. Esc dismisses it. Off by default: the launch
 # screen hides the panes you asked for.
 # show_home_on_start = false
@@ -552,7 +551,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Resume supported AI-agent panes into their native conversation sessions after
 # a Herdr server restart. Requires official integrations that report session refs.
 # resume_agents_on_restore = true
-# Move Done panes into the collapsed Recently done section after this many minutes.
+# Move Done panes into the collapsed Settled section after this many minutes.
 # hide_done_after_minutes = 30
 # Close eligible Done panes after this many minutes. Default: 240 (4 hours).
 # reap_done_after_minutes = 240

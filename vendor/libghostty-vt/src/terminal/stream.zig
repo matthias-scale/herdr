@@ -899,6 +899,9 @@ pub fn Stream(comptime H: type) type {
                                 if (self.parser.osc_parser.end(
                                     std.ascii.control_code.esc,
                                 )) |cmd| self.oscDispatch(cmd.*);
+                                if (comptime @hasDecl(T, "vtParsedOscEnd")) {
+                                    self.handler.vtParsedOscEnd(std.ascii.control_code.esc);
+                                }
                                 self.parser.clear();
                                 self.parser.state = .escape;
                                 offset += 1;
@@ -909,6 +912,9 @@ pub fn Stream(comptime H: type) type {
                                 if (self.parser.osc_parser.end(
                                     std.ascii.control_code.bel,
                                 )) |cmd| self.oscDispatch(cmd.*);
+                                if (comptime @hasDecl(T, "vtParsedOscEnd")) {
+                                    self.handler.vtParsedOscEnd(std.ascii.control_code.bel);
+                                }
                                 self.parser.state = .ground;
                                 offset += 1;
                                 continue;
@@ -1090,7 +1096,8 @@ pub fn Stream(comptime H: type) type {
                 const ByteVector = @Vector(vector_len, u8);
                 while (end + vector_len <= input.len) {
                     const bytes: ByteVector = input[end..][0..vector_len].*;
-                    const stop = bytes < @as(ByteVector, @splat(0x20));
+                    const stop = (bytes < @as(ByteVector, @splat(0x20))) |
+                        (bytes == @as(ByteVector, @splat(0x9C)));
                     if (@reduce(.Or, stop)) break;
                     end += vector_len;
                 }
@@ -1099,7 +1106,7 @@ pub fn Stream(comptime H: type) type {
                 switch (input[end]) {
                     // Not osc_put bytes: BEL/CAN/SUB/ESC terminate or
                     // abort the state; other C0 bytes are ignored by it.
-                    0x00...0x1F => break,
+                    0x00...0x1F, 0x9C => break,
                     // Everything else is an osc_put byte.
                     else => end += 1,
                 }
@@ -1203,6 +1210,12 @@ pub fn Stream(comptime H: type) type {
         fn nextNonUtf8(self: *Self, c: u8) void {
             assert(self.parser.state != .ground);
 
+            if (comptime @hasDecl(T, "vtParsedEscapeByte")) {
+                if (self.parser.state == .escape) {
+                    self.handler.vtParsedEscapeByte(c);
+                }
+            }
+
             // Fast path for CSI entry.
             if (self.parser.state == .escape and c == '[') {
                 self.parser.state = .csi_entry;
@@ -1277,6 +1290,7 @@ pub fn Stream(comptime H: type) type {
             // that causes weird behavior in some tests- I'm not sure if they
             // miscompile or it's just very counter-intuitive comptime stuff,
             // but regardless, this is the easy solution.
+            const parser_state_before = self.parser.state;
             const actions = @call(.always_inline, Parser.next, .{ &self.parser, c });
 
             for (actions) |action_opt| {
@@ -1314,6 +1328,12 @@ pub fn Stream(comptime H: type) type {
                     .apc_end => self.handler.vt(.apc_end, .{
                         .terminated = c == std.ascii.control_code.esc or c == 0x9C,
                     }),
+                }
+            }
+
+            if (comptime @hasDecl(T, "vtParsedOscEnd")) {
+                if (parser_state_before == .osc_string and self.parser.state != .osc_string) {
+                    self.handler.vtParsedOscEnd(c);
                 }
             }
         }

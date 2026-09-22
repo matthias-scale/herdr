@@ -496,6 +496,10 @@ impl App {
                 self.state.focus_client_on_sidebar();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::FocusOwningRepoGroup => {
+                self.state.focus_owning_repo_group();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::CycleSidebarGroupMode => {
                 self.state.cycle_sidebar_group_mode();
                 leave_navigate_mode(&mut self.state);
@@ -708,10 +712,6 @@ impl App {
             }
             NavigateAction::GitCreatePr => {
                 request_git_action(&mut self.state, crate::app::state::GitAction::CreatePr);
-            }
-            NavigateAction::ToggleInfoPanel => {
-                self.state.info_panel_expanded = !self.state.info_panel_expanded;
-                leave_navigate_mode(&mut self.state);
             }
             NavigateAction::OpenSymphony => {
                 self.state.toggle_symphony();
@@ -2131,6 +2131,7 @@ fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
     let mut remote = state
         .remote_agent_panel_entries
         .iter()
+        .filter(|entry| entry.snoozed_until.is_none())
         .map(|entry| {
             (
                 BlockedPaneTarget::Remote(entry.agent_ref.clone()),
@@ -2309,6 +2310,7 @@ pub(crate) enum NavigateAction {
     ResizePaneRight,
     ToggleSidebar,
     FocusSidebar,
+    FocusOwningRepoGroup,
     CycleSidebarGroupMode,
     RefreshSidebar,
     ToggleStatusDetail,
@@ -2352,7 +2354,6 @@ pub(crate) enum NavigateAction {
     GitCommit,
     GitPush,
     GitCreatePr,
-    ToggleInfoPanel,
     OpenSymphony,
     OpenRuns,
     OpenWorkView,
@@ -2366,12 +2367,7 @@ pub(crate) enum NavigateAction {
 
 fn focus_runs_section(state: &mut AppState) {
     state.sidebar_collapsed = false;
-    let key = format!(
-        "{}:{}",
-        state.sidebar_group_mode.collapse_namespace(),
-        crate::ui::sidebar::RUNS_SECTION_TITLE
-    );
-    state.collapsed_sidebar_groups.remove(&key);
+    state.set_sidebar_group_collapsed(crate::ui::sidebar::RUNS_SECTION_TITLE, false);
     if let Some(index) = crate::ui::sidebar_rows(state).iter().position(|row| {
         matches!(row, crate::ui::SidebarRow::SectionHeader { title, .. } if *title == crate::ui::sidebar::RUNS_SECTION_TITLE)
     }) {
@@ -2600,6 +2596,10 @@ macro_rules! non_indexed_action_bindings {
             (&kb.toggle_sidebar, NavigateAction::ToggleSidebar),
             (&kb.focus_sidebar, NavigateAction::FocusSidebar),
             (
+                &kb.focus_owning_repo_group,
+                NavigateAction::FocusOwningRepoGroup,
+            ),
+            (
                 &kb.sidebar_cycle_group_mode,
                 NavigateAction::CycleSidebarGroupMode,
             ),
@@ -2624,7 +2624,6 @@ macro_rules! non_indexed_action_bindings {
             (&kb.show_scratchpad, NavigateAction::ShowScratchpad),
             (&kb.toggle_notepad, NavigateAction::ToggleNotepad),
             (&kb.toggle_pomodoro, NavigateAction::TogglePomodoro),
-            (&kb.toggle_info_panel, NavigateAction::ToggleInfoPanel),
             (&kb.symphony, NavigateAction::OpenSymphony),
             (&kb.runs, NavigateAction::OpenRuns),
             (&kb.work, NavigateAction::OpenWorkView),
@@ -3020,6 +3019,10 @@ pub(super) fn execute_navigate_action_in_context(
             state.focus_client_on_sidebar();
             leave_navigate_mode(state);
         }
+        NavigateAction::FocusOwningRepoGroup => {
+            state.focus_owning_repo_group();
+            leave_navigate_mode(state);
+        }
         NavigateAction::CycleSidebarGroupMode => {
             state.cycle_sidebar_group_mode();
             leave_navigate_mode(state);
@@ -3192,10 +3195,6 @@ pub(super) fn execute_navigate_action_in_context(
         }
         NavigateAction::GitCreatePr => {
             request_git_action(state, crate::app::state::GitAction::CreatePr);
-        }
-        NavigateAction::ToggleInfoPanel => {
-            state.info_panel_expanded = !state.info_panel_expanded;
-            leave_navigate_mode(state);
         }
         NavigateAction::OpenSymphony => {
             state.toggle_symphony();
@@ -4211,6 +4210,7 @@ mod tests {
         let mut state = AppState::test_new();
         state.remote_agent_panel_entries = crate::ui::remote_agent_panel_entries_at(&snapshot, 100);
         state.view_observed_unix_s = 100;
+        state.collapsed_sidebar_groups.remove("repo:Fleet");
 
         let targets = blocked_pane_cycle(&state)
             .into_iter()
@@ -4244,7 +4244,8 @@ mod tests {
         app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
             crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), remote),
         )];
-        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 10));
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
+        crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 30));
         app.execute_tui_navigate_action(NavigateAction::NextBlockedWindow, ActionContext::Prefix);
 
         assert_eq!(active_window(&app.state), original_window);
@@ -5052,13 +5053,15 @@ mod tests {
             ),
             Some(NavigateAction::CopyWorkPreview)
         );
+        // The info panel's old `prefix+i` slot now collapses every repo group
+        // except the focused pane's.
         assert_eq!(
             action_for_key(
                 &state,
                 TerminalKey::new(KeyCode::Char('i'), KeyModifiers::empty()),
                 BindingDispatch::Prefix,
             ),
-            Some(NavigateAction::ToggleInfoPanel)
+            Some(NavigateAction::FocusOwningRepoGroup)
         );
     }
 

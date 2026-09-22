@@ -1950,6 +1950,53 @@
           ],
           "type": "object"
         },
+        "AgentReportParams": {
+          "additionalProperties": false,
+          "description": "Flattening filters unknown fields instead of rejecting them, so a typo\nthrough the socket API would report success and record nothing. The payload\nis kept whole and deserialized in one step to keep both paths strict.",
+          "properties": {
+            "goal": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status_text": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subagents": {
+              "default": null,
+              "items": {
+                "$ref": "#/schemas/request/$defs/AgentSubagent"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "target": {
+              "type": "string"
+            },
+            "tasks": {
+              "default": null,
+              "items": {
+                "$ref": "#/schemas/request/$defs/AgentTask"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
         "AgentSendKeysParams": {
           "properties": {
             "keys": {
@@ -2032,6 +2079,17 @@
           ],
           "type": "object"
         },
+        "AgentStateParams": {
+          "properties": {
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
         "AgentStatus": {
           "enum": [
             "idle",
@@ -2040,6 +2098,45 @@
             "done",
             "stale",
             "unknown"
+          ],
+          "type": "string"
+        },
+        "AgentSubagent": {
+          "properties": {
+            "last_active_at": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "$ref": "#/schemas/request/$defs/AgentSubagentSource",
+              "default": "reported"
+            },
+            "status": {
+              "$ref": "#/schemas/request/$defs/AgentStatus"
+            }
+          },
+          "required": [
+            "name",
+            "status"
+          ],
+          "type": "object"
+        },
+        "AgentSubagentSource": {
+          "enum": [
+            "observed",
+            "reported"
           ],
           "type": "string"
         },
@@ -2053,6 +2150,29 @@
             "target"
           ],
           "type": "object"
+        },
+        "AgentTask": {
+          "properties": {
+            "status": {
+              "$ref": "#/schemas/request/$defs/AgentTaskStatus"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "status"
+          ],
+          "type": "object"
+        },
+        "AgentTaskStatus": {
+          "enum": [
+            "pending",
+            "in_progress",
+            "completed"
+          ],
+          "type": "string"
         },
         "AgentViewBuiltinField": {
           "enum": [
@@ -6342,6 +6462,22 @@
         {
           "properties": {
             "method": {
+              "const": "loop.findings",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "symphony.list",
               "type": "string"
             },
@@ -6683,6 +6819,38 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.state",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentStateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.report",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentReportParams"
             }
           },
           "required": [
@@ -8306,6 +8474,41 @@
           ],
           "type": "object"
         },
+        "AgentLink": {
+          "properties": {
+            "domain": {
+              "type": "string"
+            },
+            "first_seen": {
+              "type": "string"
+            },
+            "last_seen": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/schemas/success_response/$defs/AgentLinkSource"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "url",
+            "domain",
+            "first_seen",
+            "last_seen",
+            "source"
+          ],
+          "type": "object"
+        },
+        "AgentLinkSource": {
+          "enum": [
+            "output",
+            "osc8",
+            "transcript"
+          ],
+          "type": "string"
+        },
         "AgentManifestInfo": {
           "properties": {
             "active_version": {
@@ -8401,6 +8604,58 @@
           ],
           "type": "string"
         },
+        "AgentStateSnapshot": {
+          "properties": {
+            "goal": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_acted_at": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "links": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentLink"
+              },
+              "type": "array"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            },
+            "status_text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "subagents": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentSubagent"
+              },
+              "type": "array"
+            },
+            "tasks": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentTask"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "status",
+            "tasks",
+            "subagents",
+            "links"
+          ],
+          "type": "object"
+        },
         "AgentStatus": {
           "enum": [
             "idle",
@@ -8409,6 +8664,68 @@
             "done",
             "stale",
             "unknown"
+          ],
+          "type": "string"
+        },
+        "AgentSubagent": {
+          "properties": {
+            "last_active_at": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "$ref": "#/schemas/success_response/$defs/AgentSubagentSource",
+              "default": "reported"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            }
+          },
+          "required": [
+            "name",
+            "status"
+          ],
+          "type": "object"
+        },
+        "AgentSubagentSource": {
+          "enum": [
+            "observed",
+            "reported"
+          ],
+          "type": "string"
+        },
+        "AgentTask": {
+          "properties": {
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/AgentTaskStatus"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "status"
+          ],
+          "type": "object"
+        },
+        "AgentTaskStatus": {
+          "enum": [
+            "pending",
+            "in_progress",
+            "completed"
           ],
           "type": "string"
         },
@@ -9914,6 +10231,48 @@
               "type": "object"
             }
           ]
+        },
+        "LoopFindingInfo": {
+          "description": "One pending aloop finding (MAT-159 SCH1), as read from the producer host's\n`~/.agents/aloop/findings` store.",
+          "properties": {
+            "created_at": {
+              "type": "string"
+            },
+            "evidence": {
+              "type": "string"
+            },
+            "loop": {
+              "type": "string"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "stable_id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "loop",
+            "source",
+            "stable_id",
+            "title",
+            "evidence",
+            "prompt",
+            "created_at"
+          ],
+          "type": "object"
         },
         "LoopGateInfo": {
           "properties": {
@@ -12036,6 +12395,36 @@
             },
             {
               "properties": {
+                "findings": {
+                  "description": "Pending findings, newest first, capped (MAT-159 AC2).",
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/LoopFindingInfo"
+                  },
+                  "type": "array"
+                },
+                "host": {
+                  "description": "The producer host the findings were read from.",
+                  "type": "string"
+                },
+                "reachable": {
+                  "description": "False when the producer host could not be read; findings is empty.",
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "loop_findings",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "host",
+                "reachable",
+                "findings"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "type": {
                   "const": "symphony_list",
                   "type": "string"
@@ -12324,6 +12713,22 @@
               "required": [
                 "type",
                 "agent"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "state": {
+                  "$ref": "#/schemas/success_response/$defs/AgentStateSnapshot"
+                },
+                "type": {
+                  "const": "agent_state",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "state"
               ],
               "type": "object"
             },

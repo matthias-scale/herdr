@@ -392,6 +392,27 @@ fn agent_command() -> Command {
         .subcommand(Command::new("list").about("List agents"))
         .subcommand(id_command("get", "target", "Show an agent"))
         .subcommand(
+            Command::new("state")
+                .about("Show server-owned state for a pane")
+                .override_usage("herdr agent state <PANE> --json")
+                .arg(required("pane", "PANE"))
+                .arg(json_flag().required(true)),
+        )
+        .subcommand(
+            Command::new("report")
+                .about("Report agent-owned state for a pane")
+                .override_usage("herdr agent report <PANE> --json [PAYLOAD]")
+                .arg(required("pane", "PANE"))
+                .arg(
+                    Arg::new("json")
+                        .long("json")
+                        .value_name("PAYLOAD")
+                        .num_args(0..=1)
+                        .required(true)
+                        .help("JSON payload; omit the value to read stdin"),
+                ),
+        )
+        .subcommand(
             Command::new("read")
                 .about("Read agent terminal output")
                 .override_usage("herdr agent read <TARGET> [OPTIONS]")

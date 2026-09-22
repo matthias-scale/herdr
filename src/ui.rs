@@ -1,14 +1,12 @@
-use std::sync::Arc;
-
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::Span,
     Frame,
 };
-use tokio::sync::Notify;
 
 pub(crate) mod add_project;
+mod aloop_run;
 mod command_palette;
 mod dialogs;
 pub(crate) mod dock;
@@ -22,14 +20,14 @@ pub(crate) mod dropdown;
 mod home;
 pub(crate) mod hyperspace;
 mod inbox;
-pub(crate) mod info_panel;
 mod keybind_help;
-mod loop_runs;
+pub(crate) mod loop_runs;
 mod markdown;
 mod menus;
 mod mobile;
 mod navigator;
 pub(crate) mod notepad;
+pub(crate) mod notepad_agent;
 mod onboarding;
 mod panes;
 pub(crate) mod pomodoro;
@@ -70,7 +68,6 @@ use self::dialogs::{
     render_open_existing_worktree_overlay, render_remove_worktree_overlay, render_rename_overlay,
 };
 use self::dock::render_dock;
-use self::info_panel::{compute_link_rows, panel_width_for_main, render_info_panel};
 use self::keybind_help::render_keybind_help_overlay;
 use self::loop_runs::render_loop_run_history;
 use self::menus::{
@@ -98,17 +95,18 @@ pub(crate) use self::scrollbar::{
     scrollbar_offset_from_row, scrollbar_thumb_grab_offset, should_show_scrollbar,
 };
 use self::settings::render_settings_overlay;
-pub(crate) use self::sidebar::compute_sidebar_section_header_areas;
 pub(crate) use self::sidebar::compute_tab_card_areas;
 #[cfg(test)]
 pub(crate) use self::sidebar::sidebar_object_menu_layout as sidebar_object_menu_layout_for_test;
 #[cfg(test)]
 pub(crate) use self::sidebar::tests::sidebar_work_item_fixture;
-pub(crate) use self::sidebar::RECENTLY_DONE_SECTION_TITLE;
 #[cfg(test)]
 pub(crate) use self::sidebar::SPACES_SECTION_TITLE;
 #[cfg(test)]
 pub(crate) use self::sidebar::{compute_agent_card_areas, workspace_drop_indicator_row};
+pub(crate) use self::sidebar::{
+    compute_sidebar_section_header_areas, initial_collapsed_sidebar_groups,
+};
 use self::sidebar::{
     render_sidebar, render_sidebar_collapsed, render_sidebar_filter_menu,
     render_sidebar_group_menu, render_sidebar_new_menu, render_sidebar_new_thread,
@@ -150,9 +148,10 @@ pub(crate) use self::{
         agent_counts_by_workspace, agent_panel_entries, all_agent_panel_entries,
         collapsed_sidebar_row_scroll, collapsed_sidebar_scroll_for_target,
         collapsed_sidebar_sections, collapsed_sidebar_toggle_rect, compute_sidebar_row_areas,
-        compute_workspace_card_areas, expanded_sidebar_toggle_rect, normalized_workspace_scroll,
-        relative_agent_navigation_entry, remote_agent_panel_entries, remote_agent_panel_entries_at,
-        remote_agent_row_at, sidebar_agent_run_at, sidebar_dim_header_at,
+        compute_workspace_card_areas, expanded_sidebar_toggle_rect, needs_you_row_at,
+        normalized_workspace_scroll, relative_agent_navigation_entry, remote_agent_panel_entries,
+        remote_agent_panel_entries_at, remote_agent_row_at, repo_group_focus_plan,
+        sidebar_agent_run_at, sidebar_aloop_target_at, sidebar_dim_header_at,
         sidebar_filter_anchor_rect, sidebar_filter_menu_layout, sidebar_filter_options,
         sidebar_group_menu_layout, sidebar_group_mode_anchor_rect, sidebar_header_new_menu_rect,
         sidebar_header_new_thread_rect, sidebar_header_overflow_rect, sidebar_header_search_rect,
@@ -168,12 +167,11 @@ pub(crate) use self::{
         sidebar_unassigned_spawn_at, sidebar_work_group_activation, workspace_agent_chevron_rect,
         workspace_drop_slots, workspace_list_entries, workspace_list_entries_expanded,
         workspace_list_rect_for_app, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
-        workspace_parent_group_state, AgentPanelEntry, AgentPanelLocalIdentity,
+        workspace_parent_group_state, AgentPanelEntry, AgentPanelLocalIdentity, NeedsYouTarget,
         RemoteAgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
         WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
 };
-use crate::render_signal::RenderSignal;
 
 #[cfg(test)]
 pub(crate) use self::sidebar::compute_remote_agent_row_areas;
@@ -327,8 +325,46 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
-    app.view_observed_at = std::time::Instant::now();
-    app.view_observed_unix_s = crate::app::settled::unix_seconds(std::time::SystemTime::now());
+    compute_view_internal_at(
+        app,
+        terminal_runtimes,
+        area,
+        resize_panes,
+        cell_size,
+        std::time::Instant::now(),
+        crate::app::settled::unix_seconds(std::time::SystemTime::now()),
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn compute_view_at(
+    app: &mut AppState,
+    area: Rect,
+    observed_at: std::time::Instant,
+    observed_unix_s: u64,
+) {
+    compute_view_internal_at(
+        app,
+        &TerminalRuntimeRegistry::new(),
+        area,
+        true,
+        crate::kitty_graphics::HostCellSize::default(),
+        observed_at,
+        observed_unix_s,
+    );
+}
+
+fn compute_view_internal_at(
+    app: &mut AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    area: Rect,
+    resize_panes: bool,
+    cell_size: crate::kitty_graphics::HostCellSize,
+    observed_at: std::time::Instant,
+    observed_unix_s: u64,
+) {
+    app.view_observed_at = observed_at;
+    app.view_observed_unix_s = observed_unix_s;
     app.reconcile_sidebar_presentation();
     app.reconcile_dock_context_tabs();
     if !app.dock_collapsed {
@@ -368,6 +404,7 @@ fn compute_view_internal(
     let available_after_sidebar = body_area.width.saturating_sub(sidebar_w);
     let main_view_active = app.symphony_detail.is_some()
         || app.loop_run_history_detail.is_some()
+        || app.aloop_run_detail.is_some()
         || app.usage_view.is_some()
         || app.work_view.is_some()
         || app.dock_object_preview.is_some()
@@ -401,24 +438,11 @@ fn compute_view_internal(
     ])
     .areas(body_area);
 
-    let (content_area, info_panel_rect) = if app.info_panel_expanded {
-        if let Some(panel_width) = panel_width_for_main(main_area.width) {
-            let [content_area, panel_area] =
-                Layout::horizontal([Constraint::Min(1), Constraint::Length(panel_width)])
-                    .areas(main_area);
-            (content_area, panel_area)
-        } else {
-            (main_area, Rect::default())
-        }
-    } else {
-        (main_area, Rect::default())
-    };
-
     let (tab_bar_rect, terminal_area) = app
         .active
         .and_then(|i| app.workspaces.get(i))
-        .map(|ws| desktop_tab_bar_and_terminal_area(app, ws, content_area))
-        .unwrap_or((Rect::default(), content_area));
+        .map(|ws| desktop_tab_bar_and_terminal_area(app, ws, main_area))
+        .unwrap_or((Rect::default(), main_area));
 
     if !app.sidebar_collapsed {
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
@@ -542,7 +566,7 @@ fn compute_view_internal(
         cell_size,
     );
     if resize_panes {
-        resize_background_tab_panes_for_desktop(app, terminal_runtimes, content_area, cell_size);
+        resize_background_tab_panes_for_desktop(app, terminal_runtimes, main_area, cell_size);
         resize_popup_pane(app, terminal_runtimes, terminal_area, cell_size);
     }
 
@@ -611,6 +635,22 @@ fn compute_view_internal(
     };
     let notepad_rect = sidebar::sidebar_notepad_rect(app, sidebar_area);
     let notepad_tab_hit_areas = notepad::notepad_tab_hit_areas(app, notepad_rect);
+    // The agent tab's rows live on the view so a click resolves to the exact
+    // row the operator saw. Deriving them takes a snapshot of the focused
+    // pane's agent state, so it only happens while the tab is showing.
+    let (notepad_agent_rows, notepad_agent_max_scroll) = if app.notepad.agent_tab
+        && notepad_rect.height > 1
+    {
+        let body = notepad::notepad_body_rect(notepad_rect);
+        let visible = usize::from(body.height).max(1);
+        let (rows, max_scroll) =
+            notepad_agent::agent_rows_window(app, body.width, app.notepad.agent_scroll, visible);
+        app.notepad.agent_scroll = app.notepad.agent_scroll.min(max_scroll);
+        (rows, max_scroll)
+    } else {
+        app.notepad.agent_scroll = 0;
+        (Vec::new(), 0)
+    };
     let pomodoro_hit_area = pomodoro::pomodoro_hit_area(app, sidebar_area);
     let notification_hit_area = pomodoro::notification_hit_area(app, sidebar_area);
     let hyperspace_rect = sidebar::sidebar_animation_rect(app, sidebar_area);
@@ -621,6 +661,25 @@ fn compute_view_internal(
         .sync_scroll(notepad::notepad_body_rect(notepad_rect).height);
     let visible_agent_activity_instants =
         sidebar::visible_tab_activity_instants_from(app, terminal_runtimes, &tab_card_areas);
+    let visible_notepad_agent_ages = if app.notepad.agent_tab {
+        let body = notepad::notepad_body_rect(notepad_rect);
+        notepad_agent_rows
+            .iter()
+            .take(usize::from(body.height))
+            .filter_map(|row| row.observed_at)
+            .filter_map(|observed_at| {
+                let observed_unix_s = observed_at
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .ok()?
+                    .as_secs();
+                Some(std::time::Duration::from_secs(
+                    app.view_observed_unix_s.saturating_sub(observed_unix_s),
+                ))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let DockGeometry {
         handle: dock_handle_rect,
         divider: dock_divider_rect,
@@ -763,6 +822,8 @@ fn compute_view_internal(
         sidebar_footer_missive_hit_area,
         notepad_rect,
         notepad_tab_hit_areas,
+        notepad_agent_rows,
+        notepad_agent_max_scroll,
         pomodoro_hit_area,
         notification_hit_area,
         hyperspace_rect,
@@ -772,6 +833,7 @@ fn compute_view_internal(
         agent_card_areas,
         sidebar_hover_targets,
         visible_agent_activity_instants,
+        visible_notepad_agent_ages,
         tab_bar_rect,
         tab_hit_areas: tab_bar_view.tab_hit_areas,
         tab_scroll_left_hit_area: tab_bar_view.scroll_left_hit_area,
@@ -792,17 +854,20 @@ fn compute_view_internal(
         pane_toggle_below_hit_area,
         pane_toggle_right_hit_area,
         terminal_area,
-        info_panel_rect,
-        // Both surfaces feed one list because one click handler serves it: the panel
-        // and the dock's Context tab can be open at once, and each owns its own rows.
-        info_panel_link_rows: {
-            let mut rows = if info_panel_rect.width > 0 {
-                compute_link_rows(app, info_panel_rect)
-            } else {
-                Vec::new()
-            };
-            if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Context) {
-                rows.extend(dock_context::context_link_rows(app, dock_body_rect));
+        work_context_link_rows: {
+            let mut rows =
+                if !app.dock_collapsed && app.dock_tab == Some(crate::app::DockSurface::Context) {
+                    dock_context::context_link_rows(app, dock_body_rect)
+                } else {
+                    Vec::new()
+                };
+            // The notepad strip's Context tab renders the same surface in the
+            // sidebar, so its link rows register their own geometry.
+            if app.notepad.context_active {
+                rows.extend(dock_context::context_link_rows(
+                    app,
+                    notepad::notepad_body_rect(notepad_rect),
+                ));
             }
             rows
         },
@@ -1068,6 +1133,8 @@ fn compute_mobile_view(
         sidebar_footer_missive_hit_area: Rect::default(),
         notepad_rect: Rect::default(),
         notepad_tab_hit_areas: Vec::new(),
+        notepad_agent_rows: Vec::new(),
+        notepad_agent_max_scroll: 0,
         pomodoro_hit_area: Rect::default(),
         notification_hit_area: Rect::default(),
         hyperspace_rect: Rect::default(),
@@ -1077,6 +1144,7 @@ fn compute_mobile_view(
         agent_card_areas: Vec::new(),
         sidebar_hover_targets: Vec::new(),
         visible_agent_activity_instants: Vec::new(),
+        visible_notepad_agent_ages: Vec::new(),
         tab_bar_rect: Rect::default(),
         tab_hit_areas: Vec::new(),
         tab_scroll_left_hit_area: Rect::default(),
@@ -1100,8 +1168,7 @@ fn compute_mobile_view(
         pane_toggle_below_hit_area: Rect::default(),
         pane_toggle_right_hit_area: Rect::default(),
         terminal_area,
-        info_panel_rect: Rect::default(),
-        info_panel_link_rows: Vec::new(),
+        work_context_link_rows: Vec::new(),
         status_buttons: Vec::new(),
         status_work_links: Vec::new(),
         status_segments: Vec::new(),
@@ -1171,42 +1238,7 @@ pub(crate) fn render_with_runtime_registry_for_owner(
     frame: &mut Frame,
     input_owner: InputOwner,
 ) {
-    render_with_runtime_registry_inner(app, terminal_runtimes, frame, input_owner, None);
-}
-
-pub(crate) fn render_with_runtime_registry_and_handles(
-    app: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-    frame: &mut Frame,
-    render_notify: &Arc<Notify>,
-    render_dirty: &Arc<RenderSignal>,
-) {
-    let input_owner = app.input_owner();
-    render_with_runtime_registry_and_handles_for_owner(
-        app,
-        terminal_runtimes,
-        frame,
-        render_notify,
-        render_dirty,
-        input_owner,
-    );
-}
-
-pub(crate) fn render_with_runtime_registry_and_handles_for_owner(
-    app: &AppState,
-    terminal_runtimes: &TerminalRuntimeRegistry,
-    frame: &mut Frame,
-    render_notify: &Arc<Notify>,
-    render_dirty: &Arc<RenderSignal>,
-    input_owner: InputOwner,
-) {
-    render_with_runtime_registry_inner(
-        app,
-        terminal_runtimes,
-        frame,
-        input_owner,
-        Some((render_notify, render_dirty)),
-    );
+    render_with_runtime_registry_inner(app, terminal_runtimes, frame, input_owner);
 }
 
 fn render_with_runtime_registry_inner(
@@ -1214,7 +1246,6 @@ fn render_with_runtime_registry_inner(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
     input_owner: InputOwner,
-    render_handles: Option<(&Arc<Notify>, &Arc<RenderSignal>)>,
 ) {
     let tab_bar_area = app.view.tab_bar_rect;
     let terminal_area = app.view.terminal_area;
@@ -1252,6 +1283,16 @@ fn render_with_runtime_registry_inner(
                 frame,
             );
         }
+        crate::app::state::TerminalAreaSurface::AloopRunLog(detail) => {
+            aloop_run::render_aloop_run_log(
+                &app.palette,
+                &detail.loop_name,
+                &detail.host,
+                &detail.run,
+                terminal_area,
+                frame,
+            );
+        }
         crate::app::state::TerminalAreaSurface::Usage => render_usage(app, terminal_area, frame),
         crate::app::state::TerminalAreaSurface::Work => {
             render_work_view(app, terminal_area, frame);
@@ -1282,9 +1323,6 @@ fn render_with_runtime_registry_inner(
         crate::app::state::TerminalAreaSurface::Empty => render_empty(app, frame, terminal_area),
     }
 
-    if app.view.info_panel_rect.width > 0 {
-        render_info_panel(app, frame, app.view.info_panel_rect, render_handles);
-    }
     if app.view.layout != ViewLayout::Mobile {
         render_dock(app, terminal_runtimes, frame);
     }
@@ -1623,7 +1661,6 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
             terminal.draw(|frame| render(&app, frame)).unwrap();
             let buffer = terminal.backend().buffer();
-
             for rect in chrome_rects(&app) {
                 for y in rect.y..rect.y + rect.height {
                     for x in rect.x..rect.x + rect.width {
@@ -1695,6 +1732,11 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
             terminal.draw(|frame| render(&app, frame)).unwrap();
             let buffer = terminal.backend().buffer();
+            let section_header_rows =
+                compute_sidebar_section_header_areas(&app, app.view.sidebar_rect)
+                    .into_iter()
+                    .map(|header| header.rect.y)
+                    .collect::<std::collections::HashSet<_>>();
 
             let active_tab = app
                 .active
@@ -1707,7 +1749,10 @@ mod tests {
                 for y in rect.y..rect.y + rect.height {
                     for x in rect.x..rect.x + rect.width {
                         let cell = &buffer[(x, y)];
-                        if cell.symbol().trim().is_empty() {
+                        if cell.symbol().trim().is_empty()
+                            || cell.symbol() == "─"
+                            || section_header_rows.contains(&y)
+                        {
                             continue;
                         }
                         let (Some(fg), Some(bg)) = (cell.style().fg, cell.style().bg) else {
@@ -1818,26 +1863,6 @@ mod tests {
 
         assert!(screen.contains("nothing is waiting on you"), "{screen}");
         assert!(!screen.contains("nothing is blocked"), "{screen}");
-    }
-
-    #[test]
-    fn info_panel_toggle_reserves_desktop_width_and_hides_on_narrow_layout() {
-        let mut app = crate::app::state::AppState::test_new();
-        app.workspaces = vec![Workspace::test_new("one")];
-        app.active = Some(0);
-        app.selected = 0;
-        app.info_panel_expanded = true;
-
-        compute_view(&mut app, Rect::new(0, 0, 100, 24));
-        assert!(app.view.info_panel_rect.width >= info_panel::INFO_PANEL_MIN_WIDTH);
-        assert!(app.view.terminal_area.width < 74);
-
-        compute_view(&mut app, Rect::new(0, 0, 65, 24));
-        assert_eq!(app.view.info_panel_rect, Rect::default());
-        assert!(
-            app.info_panel_expanded,
-            "narrow layout must not discard the toggle"
-        );
     }
 
     #[test]

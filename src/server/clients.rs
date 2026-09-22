@@ -73,8 +73,13 @@ pub(crate) struct ClientConnection {
     pub(crate) sidebar_presentation: crate::app::state::SidebarPresentationState,
     /// Dock layout and focus state for this attach; editor PTYs are server-owned.
     pub(crate) dock_presentation: crate::app::state::DockPresentationState,
+    /// Selected notepad projection, folds, and scroll for this attach.
+    pub(crate) notepad_presentation: crate::notepad::NotepadPresentationState,
     /// Client-local run-history detail surface, separate from server-owned receipt facts.
     pub(crate) loop_run_history_detail: Option<crate::app::state::LoopRunHistoryDetail>,
+    /// Client-local aloop run-log surface (MAT-159 AC7); the run records
+    /// themselves are server-owned in the fleet snapshot.
+    pub(crate) aloop_run_detail: Option<crate::app::state::AloopRunDetail>,
     /// Client-local Symphony dashboard selection over the server-owned snapshot.
     pub(crate) symphony_detail: Option<crate::app::state::SymphonyDetail>,
     /// Client-local work projection view over the server-owned work index snapshot.
@@ -83,6 +88,9 @@ pub(crate) struct ClientConnection {
     pub(crate) usage_view: Option<crate::app::state::UsageViewState>,
     /// Last tiled-pane geometry rendered for this client. Capacity is reused across frames.
     pub(crate) retained_pane_infos: std::sync::Arc<Vec<crate::layout::PaneInfo>>,
+    /// The client resized after its attach-local presentation was last used to
+    /// compute input hit areas.
+    pub(crate) input_geometry_dirty: bool,
     /// Last terminal viewport geometry computed for this client.
     pub(crate) terminal_geometries: HashMap<crate::terminal::TerminalId, ClientTerminalGeometry>,
     /// Whether pane PTY output owns this client's cursor on its last full frame.
@@ -165,11 +173,14 @@ impl ClientConnection {
             pending_pomodoro_presentations: VecDeque::new(),
             sidebar_presentation: crate::app::state::SidebarPresentationState::default(),
             dock_presentation: crate::app::state::DockPresentationState::default(),
+            notepad_presentation: crate::notepad::NotepadPresentationState::default(),
             loop_run_history_detail: None,
+            aloop_run_detail: None,
             symphony_detail: None,
             work_view: None,
             usage_view: None,
             retained_pane_infos: std::sync::Arc::new(Vec::new()),
+            input_geometry_dirty: false,
             terminal_geometries: HashMap::new(),
             retained_pane_cursor: false,
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
@@ -280,6 +291,7 @@ impl ClientConnection {
         let tab_surface_replaced = (dock.editor_preview.is_some() && !preview_is_in_dock)
             || self.symphony_detail.is_some()
             || self.loop_run_history_detail.is_some()
+            || self.aloop_run_detail.is_some()
             || self.usage_view.is_some()
             || self.work_view.is_some()
             || (dock.collapsed && dock.object_preview.is_some())

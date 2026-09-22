@@ -14,7 +14,7 @@ use crate::{
         UsageViewState,
     },
     config::{UsageConfig, UsageModelPricing},
-    provider_usage::{UsageProvider, UsageSample},
+    provider_usage::{ProviderUsageSnapshot, QuotaWindow, UsageProvider, UsageSample},
 };
 
 const BAR_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -91,6 +91,7 @@ struct UsageProjection {
 pub(crate) struct UsageLayout {
     pub(crate) header: Rect,
     pub(crate) summary: Rect,
+    pub(crate) subscription: Rect,
     pub(crate) chart: Rect,
     pub(crate) totals: Rect,
     pub(crate) breakdown: Rect,
@@ -108,17 +109,24 @@ pub(crate) fn layout(area: Rect) -> UsageLayout {
         Constraint::Length(if narrow { 2 } else { 1 }),
     ])
     .split(outer);
-    let (summary, chart) = if narrow {
+    let (summary, subscription, chart) = if narrow {
         let stacked = Layout::vertical([Constraint::Length(6), Constraint::Min(4)]).split(rows[1]);
-        (stacked[0], stacked[1])
-    } else {
         let columns =
-            Layout::horizontal([Constraint::Length(34), Constraint::Min(24)]).split(rows[1]);
-        (columns[0], columns[1])
+            Layout::horizontal([Constraint::Length(34), Constraint::Min(20)]).split(stacked[0]);
+        (columns[0], columns[1], stacked[1])
+    } else {
+        let columns = Layout::horizontal([
+            Constraint::Length(34),
+            Constraint::Length(44),
+            Constraint::Min(24),
+        ])
+        .split(rows[1]);
+        (columns[0], columns[1], columns[2])
     };
     UsageLayout {
         header: rows[0],
         summary,
+        subscription,
         chart,
         totals: rows[2],
         breakdown: rows[3],
@@ -236,6 +244,13 @@ pub(crate) fn render(app: &AppState, area: Rect, frame: &mut Frame) {
             })
             .unwrap_or_default();
     render_header(state, layout.header, now, palette, frame);
+    render_subscription_usage(
+        &app.provider_usage,
+        now,
+        layout.subscription,
+        palette,
+        frame,
+    );
     let Some(snapshot) = state.snapshot.as_ref() else {
         frame.render_widget(
             Paragraph::new(if state.scanning {
@@ -255,6 +270,91 @@ pub(crate) fn render(app: &AppState, area: Rect, frame: &mut Frame) {
     render_totals(&projection, layout.totals, palette, frame);
     render_breakdown(&projection, state, layout.breakdown, palette, frame);
     render_footer(layout.footer, palette, frame);
+}
+
+fn render_subscription_usage(
+    snapshot: &ProviderUsageSnapshot,
+    now: i64,
+    area: Rect,
+    palette: &Palette,
+    frame: &mut Frame,
+) {
+    let providers = [
+        ("Claude Code", &snapshot.claude, palette.peach),
+        ("Codex", &snapshot.codex, palette.blue),
+        ("Kimi", &snapshot.kimi, palette.mauve),
+    ];
+    let rows = Layout::vertical([Constraint::Length(2); 3]).split(area);
+    for ((label, usage, color), provider_area) in providers.into_iter().zip(rows.iter().copied()) {
+        let style = if usage.stale {
+            Style::default()
+                .fg(palette.overlay0)
+                .add_modifier(Modifier::DIM)
+        } else {
+            Style::default().fg(palette.text)
+        };
+        let mut header = vec![Span::styled(
+            label,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )];
+        if label == "Claude Code" {
+            header.push(Span::raw("  "));
+            header.push(Span::styled(claude_details_text(usage), style));
+        } else if let Some(balance) = usage.credits {
+            let label_width = super::text::display_width(label);
+            let available = usize::from(provider_area.width).saturating_sub(label_width + 2);
+            header.push(Span::raw("  "));
+            header.push(Span::styled(credits_text(balance, available), style));
+        }
+        let windows = Line::from(vec![
+            Span::styled(subscription_window_text("5h", usage.five_hour, now), style),
+            Span::raw("  "),
+            Span::styled(
+                subscription_window_text("week", usage.seven_day, now),
+                style,
+            ),
+        ]);
+        frame.render_widget(
+            Paragraph::new(vec![Line::from(header), windows]),
+            provider_area,
+        );
+    }
+}
+
+fn claude_details_text(usage: &crate::provider_usage::AccountUsage) -> String {
+    let cost = usage
+        .cost_usd
+        .map_or_else(|| "—".to_string(), |cost| format!("${cost:.2}"));
+    let remaining = usage
+        .remaining_minutes
+        .map_or_else(|| "—".to_string(), |minutes| format!("{minutes}m left"));
+    format!("cost: {cost} · {remaining}")
+}
+
+fn subscription_window_text(label: &str, window: Option<QuotaWindow>, now: i64) -> String {
+    let Some(window) = window else {
+        return format!("{label} — · —");
+    };
+    let reset = window
+        .resets_at
+        .and_then(|resets_at| crate::provider_usage::reset_label(resets_at, now))
+        .unwrap_or_else(|| "—".to_string());
+    format!("{label} {}% · {reset}", window.used_percent)
+}
+
+// Kept byte-for-byte with the deleted info panel's credit formatting behavior.
+fn credits_text(balance: f64, width: usize) -> String {
+    let full = format!("credits: {balance:.2}");
+    if super::text::display_width(&full) <= width {
+        return full;
+    }
+
+    let compact = format!("credits: {balance:.0}");
+    if super::text::display_width(&compact) <= width {
+        return compact;
+    }
+
+    "credits: —".to_string()
 }
 
 fn project(
@@ -906,7 +1006,9 @@ fn truncate(value: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider_usage::{UsageProvider, UsageSample, UsageSnapshot};
+    use crate::provider_usage::{
+        AccountUsage, ProviderUsageSnapshot, QuotaWindow, UsageProvider, UsageSample, UsageSnapshot,
+    };
     use ratatui::{backend::TestBackend, Terminal};
 
     fn fixture() -> UsageSnapshot {
@@ -943,10 +1045,25 @@ mod tests {
     }
 
     fn render_snapshot_at(width: u16, height: u16, snapshot: UsageSnapshot) -> String {
+        render_snapshot_with_provider_usage_at(
+            width,
+            height,
+            snapshot,
+            ProviderUsageSnapshot::default(),
+        )
+    }
+
+    fn render_snapshot_with_provider_usage_at(
+        width: u16,
+        height: u16,
+        snapshot: UsageSnapshot,
+        provider_usage: ProviderUsageSnapshot,
+    ) -> String {
         let mut app = AppState::test_new();
         app.status_now_unix = Some(1_787_992_841);
         app.usage_snapshot = Some(snapshot);
         app.usage_view = Some(UsageViewState::new(app.usage_snapshot.clone()));
+        app.provider_usage = provider_usage;
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
@@ -960,6 +1077,133 @@ mod tests {
             .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn populated_provider_snapshot_renders_subscription_windows_resets_and_credits() {
+        let now = 1_787_992_841;
+        let provider_usage = ProviderUsageSnapshot {
+            claude: AccountUsage {
+                five_hour: Some(QuotaWindow {
+                    used_percent: 31,
+                    resets_at: Some(now + 720),
+                }),
+                seven_day: Some(QuotaWindow {
+                    used_percent: 52,
+                    resets_at: Some(now + 9_900),
+                }),
+                ..AccountUsage::default()
+            },
+            codex: AccountUsage {
+                five_hour: Some(QuotaWindow {
+                    used_percent: 6,
+                    resets_at: Some(now + 720),
+                }),
+                seven_day: Some(QuotaWindow {
+                    used_percent: 19,
+                    resets_at: Some(now + 313_200),
+                }),
+                credits: Some(1_927.95),
+                ..AccountUsage::default()
+            },
+            kimi: AccountUsage {
+                five_hour: Some(QuotaWindow {
+                    used_percent: 0,
+                    resets_at: None,
+                }),
+                seven_day: Some(QuotaWindow {
+                    used_percent: 24,
+                    resets_at: Some(now + 9_900),
+                }),
+                ..AccountUsage::default()
+            },
+        };
+
+        let text = render_snapshot_with_provider_usage_at(120, 40, fixture(), provider_usage);
+        for expected in [
+            "Claude Code",
+            "5h 31% · 12m",
+            "week 52% · 2h45",
+            "Codex",
+            "5h 6% · 12m",
+            "week 19% · 3d15h",
+            "credits: 1927.95",
+            "Kimi",
+            "5h 0% · —",
+            "week 24% · 2h45",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?}\n{text}");
+        }
+    }
+
+    #[test]
+    fn claude_cost_and_remaining_minutes_render_or_keep_placeholders() {
+        let now = 1_787_992_841;
+        let claude = AccountUsage {
+            five_hour: Some(QuotaWindow {
+                used_percent: 31,
+                resets_at: Some(now + 720),
+            }),
+            cost_usd: Some(56.68),
+            remaining_minutes: Some(66),
+            ..AccountUsage::default()
+        };
+        let text = render_snapshot_with_provider_usage_at(
+            120,
+            40,
+            fixture(),
+            ProviderUsageSnapshot {
+                claude,
+                ..ProviderUsageSnapshot::default()
+            },
+        );
+        assert!(text.contains("cost: $56.68 · 66m left"), "{text}");
+
+        let text = render_snapshot_with_provider_usage_at(
+            120,
+            40,
+            fixture(),
+            ProviderUsageSnapshot {
+                claude: AccountUsage {
+                    five_hour: Some(QuotaWindow {
+                        used_percent: 31,
+                        resets_at: Some(now + 720),
+                    }),
+                    ..AccountUsage::default()
+                },
+                ..ProviderUsageSnapshot::default()
+            },
+        );
+        assert!(text.contains("cost: — · —"), "{text}");
+    }
+
+    #[test]
+    fn empty_provider_snapshot_keeps_all_providers_and_placeholder_windows_visible() {
+        for (width, height) in [(120, 40), (56, 23)] {
+            let text = render_snapshot_with_provider_usage_at(
+                width,
+                height,
+                fixture(),
+                ProviderUsageSnapshot::default(),
+            );
+
+            for provider in ["Claude Code", "Codex", "Kimi"] {
+                assert!(
+                    text.contains(provider),
+                    "missing {provider:?} at {width}x{height}\n{text}"
+                );
+            }
+            assert_eq!(
+                text.matches("5h — · —").count(),
+                3,
+                "{width}x{height}\n{text}"
+            );
+            assert_eq!(
+                text.matches("week — · —").count(),
+                3,
+                "{width}x{height}\n{text}"
+            );
+        }
     }
 
     #[test]

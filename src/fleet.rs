@@ -27,6 +27,9 @@ type ParsedRemoteOutput = (
     Result<Vec<AgentInfo>, String>,
     Vec<Result<crate::agent_runs::Observation, String>>,
     HostRuntime,
+    // `None` when the host was not asked for aloop data; `Some(Err(_))` when
+    // it was asked but its output did not carry the aloop block.
+    Option<Result<crate::aloop::HostData, String>>,
 );
 
 pub(crate) fn run_fleet_command(args: &[String]) -> std::io::Result<i32> {
@@ -272,6 +275,10 @@ pub(crate) struct Snapshot {
     /// that raced a configuration reload.
     #[serde(skip)]
     pub(crate) config_generation: u64,
+    /// Aloops producer read (MAT-159), resolved once per poll from
+    /// `remote.fleet.aloop_host`. Process-local evidence, not wire data.
+    #[serde(skip)]
+    pub(crate) aloop: Option<crate::aloop::ProducerSnapshot>,
     pub(crate) configured_hosts: Vec<String>,
     pub(crate) hosts: Vec<HostSnapshot>,
 }
@@ -311,6 +318,12 @@ impl Snapshot {
             refreshed_at: self.refreshed_at,
             refreshed_at_unix_ms: self.refreshed_at_unix_ms,
             config_generation,
+            // Keep the aloop read only while it still names the same producer;
+            // the next poll repopulates it either way.
+            aloop: self
+                .aloop
+                .clone()
+                .filter(|aloop| aloop.host == fleet.resolved_aloop_host()),
             configured_hosts: fleet.hosts.iter().map(|host| host.name.clone()).collect(),
             hosts,
         }
@@ -425,6 +438,10 @@ fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
                     .ok()
                     .and_then(|duration| u64::try_from(duration.as_millis()).ok()),
                 config_generation: 0,
+                aloop: Some(crate::aloop::ProducerSnapshot::unreachable(
+                    polling_fleet.resolved_aloop_host(),
+                    error.clone(),
+                )),
                 configured_hosts: polling_fleet
                     .hosts
                     .iter()
@@ -618,6 +635,15 @@ impl FleetPollerConfig {
             .generation
     }
 
+    /// The aloop producer host from the poller's current configuration.
+    pub(crate) fn aloop_host(&self) -> String {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .fleet
+            .resolved_aloop_host()
+    }
+
     pub(crate) fn host(&self, name: &str) -> Option<FleetHostConfig> {
         let state = self
             .state
@@ -716,6 +742,9 @@ struct HostEvidence {
     agents: Result<Vec<AgentInfo>, String>,
     runs: Vec<Result<crate::agent_runs::Observation, String>>,
     runtime: HostRuntime,
+    /// Aloops producer data, requested only from the host named by
+    /// `remote.fleet.aloop_host`.
+    aloop: Option<Result<crate::aloop::HostData, String>>,
 }
 
 pub(crate) fn collect_rows(hosts: &[FleetHostConfig], fleet: &FleetConfig) -> Vec<FleetRow> {
@@ -741,6 +770,7 @@ fn collect_snapshot_with_implicit_local(
     implicit_local_name: Option<String>,
 ) -> Snapshot {
     let timeout = Duration::from_millis(fleet.timeout_ms);
+    let aloop_host = fleet.resolved_aloop_host();
     let evidence = std::thread::scope(|scope| {
         let handles = hosts
             .iter()
@@ -748,13 +778,14 @@ fn collect_snapshot_with_implicit_local(
             .map(|host| {
                 let name = host.name.clone();
                 let runs_only = host.local && implicit_local_name.as_deref() == Some(&host.name);
+                let include_aloop = host.name == aloop_host;
                 (
                     name,
                     scope.spawn(move || {
                         if runs_only {
-                            fetch_local_run_host(host)
+                            fetch_local_run_host(host, include_aloop)
                         } else {
-                            fetch_host_with(reader, host, timeout)
+                            fetch_host_with(reader, host, timeout, include_aloop)
                         }
                     }),
                 )
@@ -772,6 +803,7 @@ fn collect_snapshot_with_implicit_local(
                     agents: Err("host reader panicked".into()),
                     runs: Vec::new(),
                     runtime: HostRuntime::default(),
+                    aloop: None,
                 },
             })
             .collect::<Vec<_>>()
@@ -780,12 +812,13 @@ fn collect_snapshot_with_implicit_local(
     snapshot_from_evidence(hosts, fleet, evidence, SystemTime::now())
 }
 
-fn fetch_local_run_host(host: FleetHostConfig) -> HostEvidence {
+fn fetch_local_run_host(host: FleetHostConfig, include_aloop: bool) -> HostEvidence {
     HostEvidence {
         host,
         agents: Ok(Vec::new()),
         runs: local_run_states(),
         runtime: HostRuntime::default(),
+        aloop: include_aloop.then(crate::aloop::read_local_host_data),
     }
 }
 
@@ -797,6 +830,20 @@ fn snapshot_from_evidence(
 ) -> Snapshot {
     let now_s = unix_seconds(refreshed_at);
     let heartbeat_stale_s = fleet.heartbeat_stale_ms.div_ceil(1_000);
+    // Lift the aloop evidence out before the loop below consumes it. The
+    // producer is one host per poll; a config naming it twice reads it twice
+    // and the first match wins.
+    let aloop_host = fleet.resolved_aloop_host();
+    let aloop_evidence = evidence
+        .iter()
+        .position(|evidence| evidence.host.name == aloop_host)
+        .and_then(|index| {
+            let evidence = &evidence[index];
+            evidence
+                .aloop
+                .as_ref()
+                .map(|result| result.as_ref().map_err(Clone::clone).cloned())
+        });
     let mut hosts = Vec::with_capacity(evidence.len());
     for evidence in evidence {
         let error = evidence.agents.as_ref().err().cloned();
@@ -883,11 +930,39 @@ fn snapshot_from_evidence(
             .ok()
             .and_then(|duration| u64::try_from(duration.as_millis()).ok()),
         config_generation: 0,
+        aloop: aloop_snapshot_from_evidence(fleet, aloop_evidence),
         configured_hosts: configured_hosts
             .iter()
             .map(|host| host.name.clone())
             .collect(),
         hosts,
+    }
+}
+
+/// Fold the per-host aloop evidence into the snapshot's producer section.
+/// When the producer is this machine and no configured host carries its name
+/// (a differently named local host absorbs the implicit one), read the local
+/// store directly (SCH2).
+/// Per-host aloop evidence from its independent producer-store read.
+type AloopHostEvidence = Option<Result<crate::aloop::HostData, String>>;
+
+fn aloop_snapshot_from_evidence(
+    fleet: &FleetConfig,
+    evidence: AloopHostEvidence,
+) -> Option<crate::aloop::ProducerSnapshot> {
+    let aloop_host = fleet.resolved_aloop_host();
+    match evidence {
+        Some(Ok(data)) => Some(crate::aloop::ProducerSnapshot::read(aloop_host, data)),
+        Some(Err(error)) => Some(crate::aloop::ProducerSnapshot::unreachable(
+            aloop_host, error,
+        )),
+        None if aloop_host == fleet.resolved_self_name() => {
+            Some(match crate::aloop::read_local_host_data() {
+                Ok(data) => crate::aloop::ProducerSnapshot::read(aloop_host, data),
+                Err(error) => crate::aloop::ProducerSnapshot::unreachable(aloop_host, error),
+            })
+        }
+        None => Some(crate::aloop::ProducerSnapshot::unconfigured(aloop_host)),
     }
 }
 
@@ -910,19 +985,39 @@ fn remote_self_name(agents: &[AgentInfo]) -> Option<String> {
 }
 
 trait HostReader: Sync {
-    fn fetch_local(&self, host: FleetHostConfig, timeout: Duration) -> HostEvidence;
-    fn fetch_remote(&self, host: FleetHostConfig, timeout: Duration) -> HostEvidence;
+    fn fetch_local(
+        &self,
+        host: FleetHostConfig,
+        timeout: Duration,
+        include_aloop: bool,
+    ) -> HostEvidence;
+    fn fetch_remote(
+        &self,
+        host: FleetHostConfig,
+        timeout: Duration,
+        include_aloop: bool,
+    ) -> HostEvidence;
 }
 
 struct SystemHostReader;
 
 impl HostReader for SystemHostReader {
-    fn fetch_local(&self, host: FleetHostConfig, timeout: Duration) -> HostEvidence {
-        fetch_local_host(host, timeout)
+    fn fetch_local(
+        &self,
+        host: FleetHostConfig,
+        timeout: Duration,
+        include_aloop: bool,
+    ) -> HostEvidence {
+        fetch_local_host(host, timeout, include_aloop)
     }
 
-    fn fetch_remote(&self, host: FleetHostConfig, timeout: Duration) -> HostEvidence {
-        fetch_remote_host(host, timeout)
+    fn fetch_remote(
+        &self,
+        host: FleetHostConfig,
+        timeout: Duration,
+        include_aloop: bool,
+    ) -> HostEvidence {
+        fetch_remote_host(host, timeout, include_aloop)
     }
 }
 
@@ -930,15 +1025,16 @@ fn fetch_host_with(
     reader: &impl HostReader,
     host: FleetHostConfig,
     timeout: Duration,
+    include_aloop: bool,
 ) -> HostEvidence {
     if host.local {
-        reader.fetch_local(host, timeout)
+        reader.fetch_local(host, timeout, include_aloop)
     } else {
-        reader.fetch_remote(host, timeout)
+        reader.fetch_remote(host, timeout, include_aloop)
     }
 }
 
-fn fetch_local_host(host: FleetHostConfig, timeout: Duration) -> HostEvidence {
+fn fetch_local_host(host: FleetHostConfig, timeout: Duration, include_aloop: bool) -> HostEvidence {
     let client = host.socket.as_ref().map_or_else(
         || ApiClient::for_target(ConnectionTarget::LocalSession(host.session.clone())),
         |path| ApiClient::for_target(ConnectionTarget::SocketPath(PathBuf::from(path))),
@@ -960,11 +1056,13 @@ fn fetch_local_host(host: FleetHostConfig, timeout: Duration) -> HostEvidence {
         });
     let runtime = fetch_local_runtime(&client, timeout);
     let runs = local_run_states();
+    let aloop = include_aloop.then(crate::aloop::read_local_host_data);
     HostEvidence {
         host,
         agents,
         runs,
         runtime,
+        aloop,
     }
 }
 
@@ -1057,33 +1155,91 @@ fn read_run_state_file(path: &Path) -> Result<crate::agent_runs::Observation, St
     })
 }
 
-fn fetch_remote_host(host: FleetHostConfig, timeout: Duration) -> HostEvidence {
-    let script = remote_read_script(host.socket.as_deref(), host.session.as_deref());
+fn fetch_remote_host(
+    host: FleetHostConfig,
+    timeout: Duration,
+    include_aloop: bool,
+) -> HostEvidence {
+    let script = remote_read_script(host.socket.as_deref(), host.session.as_deref(), false);
     let output = run_ssh_with_timeout(&host.target, &script, timeout);
     let (agents, runs, runtime) = match output {
-        Ok(output) => parse_remote_output(&output),
+        Ok(output) => {
+            let (agents, runs, runtime, _) = parse_remote_output(&output, false);
+            (agents, runs, runtime)
+        }
         Err(error) => (Err(error), Vec::new(), HostRuntime::default()),
     };
+    let aloop = include_aloop.then(|| {
+        run_ssh_with_timeout(
+            &host.target,
+            &remote_aloop_read_script(host.socket.as_deref(), host.session.as_deref()),
+            timeout,
+        )
+        .and_then(|output| parse_remote_aloop_output(&output))
+    });
     HostEvidence {
         host,
         agents,
         runs,
         runtime,
+        aloop,
     }
 }
 
-fn remote_read_script(socket: Option<&str>, session: Option<&str>) -> String {
+fn remote_aloop_read_script(socket: Option<&str>, session: Option<&str>) -> String {
     let socket = socket
         .map(|path| format!("export HERDR_SOCKET_PATH={}\n", shell_quote(path)))
         .unwrap_or_default();
     let session = session
         .map(|name| format!("export HERDR_SESSION={}\n", shell_quote(name)))
         .unwrap_or_default();
+    format!("set -u\n{socket}{session}{}", remote_aloop_script())
+}
+
+fn parse_remote_aloop_output(output: &[u8]) -> Result<crate::aloop::HostData, String> {
+    let Some(marker_at) = output
+        .windows(crate::aloop::REMOTE_ALOOP_MARKER.len())
+        .position(|window| window == crate::aloop::REMOTE_ALOOP_MARKER)
+    else {
+        return Err("remote output did not include the aloop marker".to_string());
+    };
+    Ok(crate::aloop::parse_remote_block(
+        &output[marker_at + crate::aloop::REMOTE_ALOOP_MARKER.len()..],
+    ))
+}
+
+fn remote_read_script(socket: Option<&str>, session: Option<&str>, include_aloop: bool) -> String {
+    let socket = socket
+        .map(|path| format!("export HERDR_SOCKET_PATH={}\n", shell_quote(path)))
+        .unwrap_or_default();
+    let session = session
+        .map(|name| format!("export HERDR_SESSION={}\n", shell_quote(name)))
+        .unwrap_or_default();
+    let aloop = include_aloop.then(remote_aloop_script).unwrap_or_default();
     format!(
-        "set -u\n{socket}{session}herdr agent list || true\nprintf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  ls -1t \"$HOME\"/.agents/runs/*/state.json 2>/dev/null | sed -n '1,{}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    pid=$(head -c {} \"$file\" | sed -n 's/.*\"pid\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)\n    alive=0\n    if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then alive=1; fi\n    printf '\\036HERDR_FLEET_RUN_V1:%s\\036\\n' \"$alive\"\n    head -c {} \"$file\"\n    printf '\\n'\n  done\nfi\nprintf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n",
+        "set -u\n{socket}{session}herdr agent list || true\nprintf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  ls -1t \"$HOME\"/.agents/runs/*/state.json 2>/dev/null | sed -n '1,{}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    pid=$(head -c {} \"$file\" | sed -n 's/.*\"pid\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)\n    alive=0\n    if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then alive=1; fi\n    printf '\\036HERDR_FLEET_RUN_V1:%s\\036\\n' \"$alive\"\n    head -c {} \"$file\"\n    printf '\\n'\n  done\nfi\n{aloop}printf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n",
         crate::agent_runs::MAX_RUNS_PER_HOST,
         crate::agent_runs::MAX_RUN_STATE_BYTES + 1,
         crate::agent_runs::MAX_RUN_STATE_BYTES + 1,
+    )
+}
+
+/// The producer-only block of the read script (MAT-159). Every file read is
+/// capped in count, bytes, and lines here; the parser re-applies the same caps
+/// so a hostile store cannot grow the snapshot past them. Findings are filtered
+/// to pending before the count cap, like the local reader, so any number of
+/// newer launched or malformed files cannot hide a pending finding.
+fn remote_aloop_script() -> String {
+    format!(
+        "printf '\\036HERDR_FLEET_ALOOP_V1\\036\\n'\nadir=\"$HOME/.agents/aloop\"\nif [ -d \"$adir/findings\" ]; then\n  finding_count=0\n  ls -1t \"$adir\"/findings/*.json 2>/dev/null | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    finding_size=$(wc -c < \"$file\")\n    [ \"$finding_size\" -le {finding_bytes_max} ] || continue\n    head -c {finding_bytes} \"$file\" | grep -Eq '\"status\"[[:space:]]*:[[:space:]]*\"pending\"' || continue\n    printf '\\036HERDR_FLEET_ALOOP_FINDING_V1\\036\\n'\n    head -c {finding_bytes} \"$file\"\n    printf '\\n'\n    finding_count=$((finding_count + 1))\n    [ \"$finding_count\" -lt {findings_cap} ] || break\n  done\nfi\nprintf '\\036HERDR_FLEET_ALOOP_RUNS_V1\\036\\n'\nif [ -d \"$adir/runs\" ]; then\n  ls -1t \"$adir\"/runs/*.jsonl 2>/dev/null | sed -n '1,{run_files_cap}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    name=${{file##*/}}\n    name=${{name%.jsonl}}\n    printf '\\036HERDR_FLEET_ALOOP_RUN_V1:%s\\036\\n' \"$name\"\n    tail -c {run_bytes} \"$file\" | tail -n {run_lines}\n  done\nfi\nprintf '\\036HERDR_FLEET_ALOOP_REGISTRY_V1\\036\\n'\nif [ -f \"$HOME/{registry_path}\" ]; then\n  head -c {registry_bytes} \"$HOME/{registry_path}\"\nfi\nprintf '\\036HERDR_FLEET_ALOOP_END_V1\\036\\n'\n",
+        findings_cap = crate::aloop::MAX_FINDING_FILES,
+        finding_bytes_max = crate::aloop::MAX_FINDING_BYTES,
+        finding_bytes = crate::aloop::MAX_FINDING_BYTES + 1,
+        run_files_cap = crate::aloop::MAX_RUN_FILES,
+        run_bytes = crate::aloop::MAX_RUN_FILE_BYTES + 1,
+        run_lines = crate::aloop::MAX_RUN_TAIL_LINES,
+        registry_path = crate::loop_runs::LOOP_REGISTRY_RELATIVE_PATH,
+        registry_bytes = crate::aloop::MAX_REGISTRY_BYTES + 1,
     )
 }
 
@@ -1140,7 +1296,7 @@ fn run_ssh_program_with_timeout(
     Ok(output.stdout)
 }
 
-fn parse_remote_output(output: &[u8]) -> ParsedRemoteOutput {
+fn parse_remote_output(output: &[u8], include_aloop: bool) -> ParsedRemoteOutput {
     let Some(marker_at) = output
         .windows(REMOTE_RUNS_MARKER.len())
         .position(|window| window == REMOTE_RUNS_MARKER)
@@ -1149,6 +1305,8 @@ fn parse_remote_output(output: &[u8]) -> ParsedRemoteOutput {
             Err("remote output did not include the fleet read marker".into()),
             Vec::new(),
             HostRuntime::default(),
+            include_aloop
+                .then(|| Err("remote output did not include the fleet read marker".into())),
         );
     };
     let response = serde_json::from_slice(output[..marker_at].trim_ascii())
@@ -1173,8 +1331,24 @@ fn parse_remote_output(output: &[u8]) -> ParsedRemoteOutput {
                 ),
             )
         });
+    // Split the aloop block off before run-record parsing: the last run
+    // record otherwise swallows the block into its byte budget and errors out.
+    let (state_bytes, aloop_block) = state_bytes
+        .windows(crate::aloop::REMOTE_ALOOP_MARKER.len())
+        .position(|window| window == crate::aloop::REMOTE_ALOOP_MARKER)
+        .map_or((state_bytes, None), |aloop_at| {
+            (
+                &state_bytes[..aloop_at],
+                Some(&state_bytes[aloop_at + crate::aloop::REMOTE_ALOOP_MARKER.len()..]),
+            )
+        });
+    let aloop = include_aloop.then(|| {
+        aloop_block
+            .map(crate::aloop::parse_remote_block)
+            .ok_or_else(|| "remote output did not include the aloop marker".to_string())
+    });
     let runs = parse_remote_run_records(state_bytes);
-    (response, runs, runtime)
+    (response, runs, runtime, aloop)
 }
 
 fn parse_remote_run_records(bytes: &[u8]) -> Vec<Result<crate::agent_runs::Observation, String>> {
@@ -2162,7 +2336,23 @@ fn unix_seconds(now: SystemTime) -> u64 {
 }
 
 pub(crate) fn parse_utc_timestamp(value: &str) -> Option<u64> {
-    let value = value.strip_suffix('Z')?;
+    let (value, offset_seconds) = if let Some(value) = value.strip_suffix('Z') {
+        (value, 0i64)
+    } else {
+        let offset_at = value.rfind(['+', '-'])?;
+        let (value, offset) = value.split_at(offset_at);
+        let sign = if offset.starts_with('+') { 1 } else { -1 };
+        let offset = offset.get(1..)?.split_once(':')?;
+        if offset.0.len() != 2 || offset.1.len() != 2 {
+            return None;
+        }
+        let hours = offset.0.parse::<i64>().ok()?;
+        let minutes = offset.1.parse::<i64>().ok()?;
+        if hours > 23 || minutes > 59 {
+            return None;
+        }
+        (value, sign * (hours * 3_600 + minutes * 60))
+    };
     let (date, time) = value.split_once('T')?;
     let mut date = date.split('-').map(str::parse::<i64>);
     let (year, month, day) = (date.next()?.ok()?, date.next()?.ok()?, date.next()?.ok()?);
@@ -2172,7 +2362,18 @@ pub(crate) fn parse_utc_timestamp(value: &str) -> Option<u64> {
     let mut time = time.split(':');
     let hour = time.next()?.parse::<i64>().ok()?;
     let minute = time.next()?.parse::<i64>().ok()?;
-    let second = time.next()?.split('.').next()?.parse::<i64>().ok()?;
+    let second_part = time.next()?;
+    let (second_text, fraction) = second_part
+        .split_once('.')
+        .map_or((second_part, None), |(second, fraction)| {
+            (second, Some(fraction))
+        });
+    if fraction.is_some_and(|fraction| {
+        fraction.is_empty() || !fraction.chars().all(|ch| ch.is_ascii_digit())
+    }) {
+        return None;
+    }
+    let second = second_text.parse::<i64>().ok()?;
     if time.next().is_some()
         || !(0..=23).contains(&hour)
         || !(0..=59).contains(&minute)
@@ -2196,7 +2397,11 @@ pub(crate) fn parse_utc_timestamp(value: &str) -> Option<u64> {
     let day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     let days = era * 146_097 + day_of_era - 719_468;
-    u64::try_from(days * 86_400 + hour * 3_600 + minute * 60 + second).ok()
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(hour * 3_600 + minute * 60 + second)?
+        .checked_sub(offset_seconds)?;
+    u64::try_from(seconds).ok()
 }
 
 fn format_utc_timestamp(seconds: u64) -> String {
@@ -2262,23 +2467,35 @@ mod tests {
     }
 
     impl HostReader for FakeReader {
-        fn fetch_local(&self, host: FleetHostConfig, _timeout: Duration) -> HostEvidence {
+        fn fetch_local(
+            &self,
+            host: FleetHostConfig,
+            _timeout: Duration,
+            _include_aloop: bool,
+        ) -> HostEvidence {
             self.local_calls.fetch_add(1, Ordering::Relaxed);
             HostEvidence {
                 host,
                 agents: self.agents.clone(),
                 runs: Vec::new(),
                 runtime: self.runtime.clone(),
+                aloop: None,
             }
         }
 
-        fn fetch_remote(&self, host: FleetHostConfig, _timeout: Duration) -> HostEvidence {
+        fn fetch_remote(
+            &self,
+            host: FleetHostConfig,
+            _timeout: Duration,
+            _include_aloop: bool,
+        ) -> HostEvidence {
             self.remote_calls.fetch_add(1, Ordering::Relaxed);
             HostEvidence {
                 host,
                 agents: self.agents.clone(),
                 runs: Vec::new(),
                 runtime: self.runtime.clone(),
+                aloop: None,
             }
         }
     }
@@ -3082,6 +3299,7 @@ mod tests {
                 agents: Ok(Vec::new()),
                 runs: runs.into_iter().map(Ok).collect(),
                 runtime: HostRuntime::default(),
+                aloop: None,
             }],
             UNIX_EPOCH + Duration::from_secs(1_758_099_600), // 2025-09-17T09:00:00Z
         )
@@ -3168,6 +3386,7 @@ mod tests {
                 agents: Ok(Vec::new()),
                 runs: vec![rejected],
                 runtime: HostRuntime::default(),
+                aloop: None,
             }],
             SystemTime::UNIX_EPOCH,
         );
@@ -3224,7 +3443,7 @@ mod tests {
             serde_json::to_vec(&run).unwrap(),
         ]
         .concat();
-        let (agents, runs, runtime) = parse_remote_output(&output);
+        let (agents, runs, runtime, aloop) = parse_remote_output(&output, true);
         assert!(agents.unwrap().is_empty());
         assert_eq!(runs.len(), 1);
         assert_eq!(
@@ -3233,11 +3452,165 @@ mod tests {
         );
         assert!(runs[0].as_ref().unwrap().pid_alive);
         assert_eq!(runtime, HostRuntime::default());
+        // The host was asked for aloop data but the output has no block.
+        assert!(matches!(aloop, Some(Err(_))));
+    }
+
+    #[test]
+    fn remote_output_splits_the_aloop_block_off_the_run_records() {
+        let agent_response = serde_json::json!({
+            "id": "x",
+            "result": {"type": "agent_list", "agents": []}
+        });
+        let run = serde_json::json!({
+            "schema": 1,
+            "run_id": "ra-260826-test-a1b2c3d",
+            "host": "ub2",
+            "agent": "codex",
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+            "label": "[cx]",
+            "task": "test",
+            "cwd": "/tmp/test",
+            "repo": "repo",
+            "branch": "feat/test",
+            "pid": 1,
+            "started_at": "2026-08-26T14:00:00Z",
+            "last_heartbeat": "2026-08-26T14:00:01Z",
+            "phase": "implement",
+            "state": "active",
+            "log_path": "/tmp/out.log"
+        });
+        let output = [
+            serde_json::to_vec(&agent_response).unwrap(),
+            REMOTE_RUNS_MARKER.to_vec(),
+            b"\x1eHERDR_FLEET_RUN_V1:1\x1e\n".to_vec(),
+            serde_json::to_vec(&run).unwrap(),
+            b"\n".to_vec(),
+            crate::aloop::REMOTE_ALOOP_MARKER.to_vec(),
+            crate::aloop::REMOTE_ALOOP_FINDING_MARKER.to_vec(),
+            br#"{"loop":"loop-a","source":"sentry","stable_id":"f1","title":"boom","url":null,"evidence":"trace","prompt":"fix","created_at":"2026-09-18T09:50:00Z","status":"pending"}"#.to_vec(),
+            b"\n".to_vec(),
+            crate::aloop::REMOTE_ALOOP_RUNS_MARKER.to_vec(),
+            b"\x1eHERDR_FLEET_ALOOP_RUN_V1:loop-a\x1e\n".to_vec(),
+            br#"{"at":"2026-09-18T09:59:00Z","duration_ms":800,"exit":0,"findings":1,"stable_ids":["f1"],"log_excerpt":"done"}"#.to_vec(),
+            b"\n".to_vec(),
+            crate::aloop::REMOTE_ALOOP_REGISTRY_MARKER.to_vec(),
+            b"## Armed\n- `loop-a` title \xc2\xb7 every:10m\n".to_vec(),
+            crate::aloop::REMOTE_ALOOP_END_MARKER.to_vec(),
+            REMOTE_HOST_MARKER.to_vec(),
+            br#"{"version":"0.8.2","protocol":1}"#.to_vec(),
+        ]
+        .concat();
+        let (agents, runs, _, aloop) = parse_remote_output(&output, true);
+        assert!(agents.expect("agents").is_empty());
+        // The last run record must not swallow the aloop block into its byte
+        // budget: it parses, and the aloop data parses separately.
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].is_ok());
+        let data = aloop.expect("aloop requested").expect("aloop block parsed");
+        assert_eq!(data.findings.len(), 1);
+        assert_eq!(data.findings[0].stable_id, "f1");
+        assert_eq!(data.loops.len(), 1);
+        assert_eq!(data.loops[0].runs.len(), 1);
+        assert_eq!(data.registry.loops.len(), 1);
+    }
+
+    #[test]
+    fn aloop_block_is_only_in_the_script_for_the_producer_host() {
+        let plain = remote_read_script(None, None, false);
+        assert!(!plain.contains("HERDR_FLEET_ALOOP_V1"));
+        let with_aloop = remote_read_script(None, None, true);
+        assert!(with_aloop.contains("HERDR_FLEET_ALOOP_V1"));
+        assert!(with_aloop.contains(".agents/aloop"));
+        assert!(with_aloop.contains(&format!(
+            "[ \"$finding_count\" -lt {} ] || break",
+            crate::aloop::MAX_FINDING_FILES
+        )));
+        assert!(with_aloop.contains("\"status\"[[:space:]]*:[[:space:]]*\"pending\""));
+        assert!(with_aloop.contains(crate::loop_runs::LOOP_REGISTRY_RELATIVE_PATH));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_aloop_filters_non_pending_findings_before_the_wire_cap() {
+        let root = run_fixture_dir("aloop-filter-before-cap");
+        let findings = root.join(crate::aloop::FINDINGS_RELATIVE_DIR);
+        std::fs::create_dir_all(&findings).expect("create findings");
+        let finding_json = |stable_id: &str, status: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "loop": "loop-a",
+                "source": "sentry",
+                "stable_id": stable_id,
+                "title": "boom",
+                "url": null,
+                "evidence": "trace",
+                "prompt": "fix",
+                "created_at": "2026-09-18T09:50:00Z",
+                "status": status,
+            }))
+            .expect("finding JSON")
+        };
+        let pending = findings.join("old-pending.json");
+        std::fs::write(&pending, finding_json("still-pending", "pending"))
+            .expect("write pending finding");
+        std::fs::File::options()
+            .write(true)
+            .open(&pending)
+            .expect("open pending finding")
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+            )
+            .expect("set old pending mtime");
+        for index in 0..=crate::aloop::MAX_FINDING_FILES {
+            let path = findings.join(format!("newer-{index:02}.json"));
+            let contents = if index % 2 == 0 {
+                finding_json(&format!("launched-{index:02}"), "launched")
+            } else {
+                b"not json".to_vec()
+            };
+            std::fs::write(&path, contents).expect("write non-pending finding");
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .expect("open non-pending finding")
+                .set_times(
+                    std::fs::FileTimes::new()
+                        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2)),
+                )
+                .expect("set newer mtime");
+        }
+        let fake_ssh = root.join("ssh");
+        write_executable(
+            &fake_ssh,
+            &format!(
+                "#!/bin/sh\nHOME={} exec /bin/sh\n",
+                shell_quote(&root.display().to_string()),
+            ),
+        );
+
+        let output = run_ssh_program_with_timeout(
+            &fake_ssh,
+            "fixture",
+            &remote_aloop_read_script(None, None),
+            Duration::from_secs(10),
+        )
+        .expect("remote aloop read");
+        let data = parse_remote_aloop_output(&output).expect("parse remote aloop output");
+
+        assert_eq!(data.findings.len(), 1);
+        assert_eq!(data.findings[0].stable_id, "still-pending");
+        assert_eq!(
+            data.findings[0].status,
+            crate::aloop::FindingStatus::Pending
+        );
+        std::fs::remove_dir_all(root).expect("remove fixture");
     }
 
     #[test]
     fn remote_run_read_is_bounded_and_survives_an_unavailable_herdr_socket() {
-        let script = remote_read_script(None, None);
+        let script = remote_read_script(None, None, false);
 
         assert!(script.contains("herdr agent list || true"));
         assert!(script.contains(&format!(
@@ -3263,7 +3636,7 @@ mod tests {
                 REMOTE_RUNS_MARKER.to_vec(),
             ]
             .concat();
-            let (agents, runs, _) = parse_remote_output(&output);
+            let (agents, runs, _, _) = parse_remote_output(&output, false);
             assert!(runs.is_empty());
             FleetRow::from_agent(
                 "ub1",
@@ -3434,6 +3807,155 @@ mod tests {
         let timestamp = "2026-08-26T14:05:00Z";
         let seconds = parse_utc_timestamp(timestamp).unwrap();
         assert_eq!(format_utc_timestamp(seconds), timestamp);
+        assert_eq!(
+            parse_utc_timestamp("2026-08-26T16:05:00+02:00"),
+            Some(seconds)
+        );
+        assert_eq!(
+            parse_utc_timestamp("2026-08-26T09:05:00-05:00"),
+            Some(seconds)
+        );
+    }
+
+    #[test]
+    fn aloop_reachability_comes_from_its_own_read() {
+        let configured_host = host("ub2", false);
+        let fleet = FleetConfig {
+            hosts: vec![configured_host.clone()],
+            aloop_host: Some("ub2".to_string()),
+            ..FleetConfig::default()
+        };
+        let snapshot = snapshot_from_evidence(
+            std::slice::from_ref(&configured_host),
+            &fleet,
+            vec![HostEvidence {
+                host: configured_host.clone(),
+                agents: Err("agent list unavailable".to_string()),
+                runs: Vec::new(),
+                runtime: HostRuntime::default(),
+                aloop: Some(Ok(crate::aloop::HostData::default())),
+            }],
+            SystemTime::UNIX_EPOCH,
+        );
+        assert!(snapshot.aloop.expect("aloop snapshot").reachable());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maximum_fleet_and_aloop_payloads_each_fit_the_capture_budget() {
+        let root = run_fixture_dir("aloop-output-budget");
+        let bin = root.join("bin");
+        let agent_runs = root.join(".agents/runs");
+        let findings = root.join(crate::aloop::FINDINGS_RELATIVE_DIR);
+        let aloop_runs = root.join(crate::aloop::RUNS_RELATIVE_DIR);
+        let registry = root.join(crate::loop_runs::LOOP_REGISTRY_RELATIVE_PATH);
+        std::fs::create_dir_all(&bin).expect("create fake bin");
+        std::fs::create_dir_all(&agent_runs).expect("create agent runs");
+        std::fs::create_dir_all(&findings).expect("create findings");
+        std::fs::create_dir_all(&aloop_runs).expect("create aloop runs");
+        std::fs::create_dir_all(registry.parent().expect("registry parent"))
+            .expect("create registry parent");
+        for index in 0..crate::agent_runs::MAX_RUNS_PER_HOST {
+            let run = agent_runs.join(format!("run-{index:02}"));
+            std::fs::create_dir_all(&run).expect("create run directory");
+            std::fs::write(
+                run.join("state.json"),
+                vec![b'x'; crate::agent_runs::MAX_RUN_STATE_BYTES],
+            )
+            .expect("write run state");
+        }
+        for index in 0..crate::aloop::MAX_FINDING_FILES {
+            let mut finding = format!(
+                r#"{{"loop":"loop","source":"fixture","stable_id":"finding-{index}","title":"title","url":null,"evidence":"evidence","prompt":"prompt","created_at":"2026-09-18T09:50:00Z","status":"pending"}}"#
+            )
+            .into_bytes();
+            finding.resize(crate::aloop::MAX_FINDING_BYTES, b' ');
+            std::fs::write(findings.join(format!("loop-{index:02}.json")), finding)
+                .expect("write finding");
+        }
+        for index in 0..crate::aloop::MAX_RUN_FILES {
+            std::fs::write(
+                aloop_runs.join(format!("loop-{index:02}.jsonl")),
+                vec![b'r'; crate::aloop::MAX_RUN_FILE_BYTES],
+            )
+            .expect("write aloop run");
+        }
+        std::fs::write(&registry, vec![b'l'; crate::aloop::MAX_REGISTRY_BYTES])
+            .expect("write registry");
+        write_executable(&bin.join("herdr"), "#!/bin/sh\nexit 0\n");
+        let fake_ssh = root.join("ssh");
+        write_executable(
+            &fake_ssh,
+            &format!(
+                "#!/bin/sh\nHOME={} PATH={}:$PATH exec /bin/sh\n",
+                shell_quote(&root.display().to_string()),
+                shell_quote(&bin.display().to_string()),
+            ),
+        );
+        let fleet_read = run_ssh_program_with_timeout(
+            &fake_ssh,
+            "fixture",
+            &remote_read_script(None, None, false),
+            Duration::from_secs(10),
+        );
+        let aloop_read = run_ssh_program_with_timeout(
+            &fake_ssh,
+            "fixture",
+            &remote_aloop_read_script(None, None),
+            Duration::from_secs(10),
+        );
+        assert!(fleet_read.is_ok(), "fleet maximum payload must poll");
+        assert!(aloop_read.is_ok(), "aloop maximum payload must poll");
+        std::fs::remove_dir_all(root).expect("remove output-budget fixture");
+    }
+
+    /// The generated producer script is POSIX shell run on the remote host, so
+    /// a hypothetical about `find`, empty globs, or a missing store is only
+    /// settled by running it. This executes the real script against a fixture
+    /// home with no runs directory at all.
+    #[cfg(unix)]
+    #[test]
+    fn remote_aloop_script_filters_launched_findings_and_survives_a_missing_store() {
+        let root = run_fixture_dir("aloop-script-shell");
+        let findings = root.join(crate::aloop::FINDINGS_RELATIVE_DIR);
+        std::fs::create_dir_all(&findings).expect("create findings");
+        std::fs::write(
+            findings.join("nightly-pending.json"),
+            r#"{"loop":"nightly","source":"sentry","stable_id":"keep-1","title":"pending title","url":null,"evidence":"evidence","prompt":"prompt","created_at":"2026-09-18T09:50:00Z","status":"pending"}"#,
+        )
+        .expect("write pending finding");
+        std::fs::write(
+            findings.join("nightly-launched.json"),
+            r#"{"loop":"nightly","source":"sentry","stable_id":"drop-1","title":"launched title","url":null,"evidence":"evidence","prompt":"prompt","created_at":"2026-09-18T09:51:00Z","status":"launched"}"#,
+        )
+        .expect("write launched finding");
+        let fake_ssh = root.join("ssh");
+        write_executable(
+            &fake_ssh,
+            &format!(
+                "#!/bin/sh\nHOME={} exec /bin/sh\n",
+                shell_quote(&root.display().to_string()),
+            ),
+        );
+        let output = run_ssh_program_with_timeout(
+            &fake_ssh,
+            "fixture",
+            &remote_aloop_read_script(None, None),
+            Duration::from_secs(10),
+        )
+        .expect("script must exit cleanly without a runs directory");
+        let data = parse_remote_aloop_output(&output).expect("aloop marker present");
+        let ids: Vec<&str> = data
+            .findings
+            .iter()
+            .map(|finding| finding.stable_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["keep-1"], "only pending findings cross the wire");
+        assert!(
+            data.loops.is_empty(),
+            "a missing runs directory reads empty"
+        );
+        std::fs::remove_dir_all(root).expect("remove aloop script fixture");
     }
 
     #[test]

@@ -2952,6 +2952,33 @@ pub type GhosttyTerminalProgressReportFn = ::std::option::Option<
         report: *const GhosttyTerminalProgressReport,
     ),
 >;
+#[doc = " UTF-8 text accepted by the terminal parser for rendering."]
+pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_TEXT:
+    GhosttyTerminalParsedOutputKind = 0;
+#[doc = " A parsed C0 control that separates visible text."]
+pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_SEPARATOR:
+    GhosttyTerminalParsedOutputKind = 1;
+#[doc = " An OSC 8 hyperlink target."]
+pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_HYPERLINK:
+    GhosttyTerminalParsedOutputKind = 2;
+#[doc = " An OSC boundary that separates invalid prefixes but not styled text."]
+pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_BOUNDARY:
+    GhosttyTerminalParsedOutputKind = 3;
+#[doc = " An OSC boundary that separates invalid prefixes but not styled text."]
+pub const GhosttyTerminalParsedOutputKind_GHOSTTY_TERMINAL_PARSED_OUTPUT_MAX_VALUE:
+    GhosttyTerminalParsedOutputKind = 2147483647;
+#[doc = " Parser-classified output event kind."]
+pub type GhosttyTerminalParsedOutputKind = ::std::os::raw::c_int;
+#[doc = " Callback for output already classified by the terminal VT parser.\n Data is borrowed and valid only for the callback duration. Separator\n events carry zero bytes."]
+pub type GhosttyTerminalParsedOutputFn = ::std::option::Option<
+    unsafe extern "C" fn(
+        terminal: GhosttyTerminal,
+        userdata: *mut ::std::os::raw::c_void,
+        kind: GhosttyTerminalParsedOutputKind,
+        data: *const u8,
+        len: usize,
+    ),
+>;
 #[doc = " Callback function type for color scheme queries (CSI ? 996 n).\n\n Called when the terminal receives a color scheme device status report\n query. Return true and fill *out_scheme with the current color scheme,\n or return false to silently ignore the query.\n\n @param terminal The terminal handle\n @param userdata The userdata pointer set via GHOSTTY_TERMINAL_OPT_USERDATA\n @param[out] out_scheme Pointer to store the current color scheme\n @return true if the color scheme was filled, false to ignore the query\n\n @ingroup terminal"]
 pub type GhosttyTerminalColorSchemeFn = ::std::option::Option<
     unsafe extern "C" fn(
@@ -3119,7 +3146,9 @@ pub const GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ: GhosttyTerm
 #[doc = " Set the maximum total decoded bytes a single Kitty clipboard protocol\n (OSC 5522) write transaction may accumulate. The limit is captured\n when a transaction begins; an in-flight transaction keeps the limit\n it started with.\n\n Data beyond the limit fails the whole transaction with EFBIG. The\n transaction is discarded, later write-related packets are ignored\n until a new write begins, and nothing reaches the clipboard write\n callback.\n\n Transactions are buffered in memory, so this limit bounds how much\n memory a single write can make the terminal allocate. Pass SIZE_MAX\n to remove the limit. A NULL value pointer reverts to the built-in\n default of 64MiB, the minimum required by the protocol.\n\n This limit doesn't apply to OSC 52 writes, which are bounded by the\n maximum length of an escape sequence instead.\n\n Input type: size_t*"]
 pub const GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES:
     GhosttyTerminalOption = 39;
-#[doc = " Set the maximum total decoded bytes a single Kitty clipboard protocol\n (OSC 5522) write transaction may accumulate. The limit is captured\n when a transaction begins; an in-flight transaction keeps the limit\n it started with.\n\n Data beyond the limit fails the whole transaction with EFBIG. The\n transaction is discarded, later write-related packets are ignored\n until a new write begins, and nothing reaches the clipboard write\n callback.\n\n Transactions are buffered in memory, so this limit bounds how much\n memory a single write can make the terminal allocate. Pass SIZE_MAX\n to remove the limit. A NULL value pointer reverts to the built-in\n default of 64MiB, the minimum required by the protocol.\n\n This limit doesn't apply to OSC 52 writes, which are bounded by the\n maximum length of an escape sequence instead.\n\n Input type: size_t*"]
+#[doc = " Callback invoked for parser-classified printable text, control boundaries,\n and OSC 8 targets. Set to NULL to disable parsed output events.\n\n Input type: GhosttyTerminalParsedOutputFn"]
+pub const GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_PARSED_OUTPUT: GhosttyTerminalOption = 40;
+#[doc = " Callback invoked for parser-classified printable text, control boundaries,\n and OSC 8 targets. Set to NULL to disable parsed output events.\n\n Input type: GhosttyTerminalParsedOutputFn"]
 pub const GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_MAX_VALUE: GhosttyTerminalOption = 2147483647;
 #[doc = " Terminal option identifiers.\n\n These values are used with ghostty_terminal_set() to configure\n terminal callbacks and associated state.\n\n @ingroup terminal"]
 pub type GhosttyTerminalOption = ::std::os::raw::c_int;

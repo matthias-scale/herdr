@@ -24,7 +24,7 @@ use crate::events::AppEvent;
 use notify::Watcher;
 
 const RECEIPT_RELATIVE_PATH: &str = ".local/state/herdr/run-receipts.jsonl";
-const LOOP_REGISTRY_RELATIVE_PATH: &str = "workspaces/scalable/loops.md";
+pub(crate) const LOOP_REGISTRY_RELATIVE_PATH: &str = "workspaces/scalable/loops.md";
 const RECEIPT_CONTENT_GUARD_BYTES: u64 = 4096;
 const MAX_HISTORY_RUNS: usize = 10_000;
 const MAX_PENDING_LINE_BYTES: usize = 1_048_576;

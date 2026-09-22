@@ -36,6 +36,7 @@ const Result = @import("result.zig").Result;
 const assert = @import("../../quirks.zig").inlineAssert;
 
 const Handler = @import("../stream_terminal.zig").Handler;
+const ParsedOutputKind = @import("../stream_terminal.zig").ParsedOutputKind;
 
 const max_path_bytes = if (builtin.os.tag == .freestanding) 4096 else std.fs.max_path_bytes;
 
@@ -257,6 +258,7 @@ const Effects = struct {
     clipboard_write: ?ClipboardWriteFn = null,
     clipboard_read: ?ClipboardReadFn = null,
     unknown_sequence: ?UnknownSequenceFn = null,
+    parsed_output: ?ParsedOutputFn = null,
 
     /// Scratch buffer for DA1 feature codes. The device attributes
     /// trampoline converts C feature codes into this buffer and returns
@@ -300,6 +302,9 @@ const Effects = struct {
     /// C function pointer type for the desktop_notification callback. The
     /// request and its strings are borrowed for the callback duration.
     pub const DesktopNotificationFn = *const fn (Terminal, ?*anyopaque, *const DesktopNotification) callconv(lib.calling_conv) void;
+
+    /// C function pointer type for parser-classified output.
+    pub const ParsedOutputFn = *const fn (Terminal, ?*anyopaque, ParsedOutputKind, [*]const u8, usize) callconv(lib.calling_conv) void;
 
     /// C function pointer type for the title_changed callback.
     pub const TitleChangedFn = *const fn (Terminal, ?*anyopaque) callconv(lib.calling_conv) void;
@@ -528,6 +533,13 @@ const Effects = struct {
         func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
     }
 
+    fn parsedOutputTrampoline(handler: *Handler, kind: ParsedOutputKind, data: []const u8) void {
+        const stream_ptr: *Stream = @fieldParentPtr("handler", handler);
+        const wrapper: *TerminalWrapper = @fieldParentPtr("stream", stream_ptr);
+        const func = wrapper.effects.parsed_output orelse return;
+        func(@ptrCast(wrapper), wrapper.effects.userdata, kind, data.ptr, data.len);
+    }
+
     fn colorSchemeTrampoline(handler: *Handler) ?device_status.ColorScheme {
         const wrapper = TerminalWrapper.fromHandler(handler);
         const func = wrapper.effects.color_scheme orelse return null;
@@ -678,6 +690,7 @@ fn wrap(
         // Installed dynamically when the callback is set; see Effects.
         .clipboard_write = null,
         .clipboard_read = null,
+        .parsed_output = null,
     };
 
     wrapper.* = .{
@@ -1174,6 +1187,7 @@ pub const Option = enum(c_int) {
     terminfo_name = 37,
     clipboard_read = 38,
     clipboard_write_max_bytes = 39,
+    parsed_output = 40,
 
     /// Input type expected for setting the option.
     pub fn InType(comptime self: Option) type {
@@ -1193,6 +1207,7 @@ pub const Option = enum(c_int) {
             .clipboard_write => ?Effects.ClipboardWriteFn,
             .clipboard_read => ?Effects.ClipboardReadFn,
             .unknown_sequence => ?Effects.UnknownSequenceFn,
+            .parsed_output => ?Effects.ParsedOutputFn,
             .title, .pwd, .terminfo_name => ?*const lib.String,
             .color_foreground, .color_background, .color_cursor => ?*const color.RGB.C,
             .color_palette => ?*const color.PaletteC,
@@ -1280,6 +1295,11 @@ fn setTyped(
                 &Effects.unknownSequenceTrampoline
             else
                 null;
+        },
+        .parsed_output => {
+            wrapper.effects.parsed_output = value;
+            wrapper.stream.handler.effects.parsed_output =
+                if (value != null) &Effects.parsedOutputTrampoline else null;
         },
         .title_report => wrapper.stream.handler.title_report = if (value) |ptr|
             ptr.*

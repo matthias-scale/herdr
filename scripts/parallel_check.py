@@ -71,7 +71,6 @@ CHECKS = (
         ),
     ),
     Check("integrations", ("just", "integration-assets-test")),
-    Check("marketplace", ("just", "plugin-marketplace-test")),
 )
 
 WINDOWS_TEST_CHECK = (

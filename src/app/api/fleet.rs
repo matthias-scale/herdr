@@ -104,6 +104,7 @@ mod tests {
             crate::api::EventHub::default(),
         );
         app.state.fleet_snapshot = crate::fleet::Snapshot {
+            aloop: None,
             polled: true,
             refreshed_at: None,
             refreshed_at_unix_ms: Some(42),
@@ -155,6 +156,7 @@ mod tests {
             crate::api::EventHub::default(),
         );
         app.state.fleet_snapshot = crate::fleet::Snapshot {
+            aloop: None,
             polled: true,
             refreshed_at: None,
             refreshed_at_unix_ms: Some(42),
@@ -210,6 +212,7 @@ mod tests {
         };
         let agent_ref = agents[0].agent_ref.clone().expect("agent list identity");
         app.state.fleet_snapshot = crate::fleet::Snapshot {
+            aloop: None,
             polled: true,
             hosts: vec![crate::fleet::HostSnapshot {
                 name: "local".into(),

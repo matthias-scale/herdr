@@ -311,6 +311,12 @@ pub const Parser = struct {
     /// OSC input is untrusted, so these captures must have a finite bound.
     pub const MAX_ALLOCATING_BUF = 8 * 1024 * 1024;
 
+    /// Maximum accepted OSC 8 params or URI component.
+    pub const MAX_HYPERLINK_COMPONENT = 8 * 1024;
+
+    /// Maximum accepted OSC 8 `params;URI` payload.
+    pub const MAX_HYPERLINK_CAPTURE = 2 * MAX_HYPERLINK_COMPONENT + 1;
+
     /// Optional allocator used to accept data longer than MAX_BUF.
     /// This only applies to some commands (e.g. OSC 52) that can
     /// reasonably exceed MAX_BUF.
@@ -606,25 +612,29 @@ pub const Parser = struct {
             ),
 
             .allocating => {
-                const alloc = self.alloc orelse {
-                    // We don't have an allocator - fall back to a fixed buffer and hope
-                    // that it's big enough.
-                    self.captureTrailing(.fixed);
-                    return;
-                };
-
-                Capture.allocating(
-                    &self.capture,
-                    alloc,
-                    self.max_allocating_bytes,
-                ) catch {
-                    // The allocator failed for some reason, fall back to a fixed buffer
-                    // and hope that it's big enough.
-                    self.captureTrailing(.fixed);
-                    return;
-                };
+                self.captureTrailingAllocating(self.max_allocating_bytes);
             },
         }
+    }
+
+    inline fn captureTrailingAllocating(self: *Parser, max_bytes: usize) void {
+        const alloc = self.alloc orelse {
+            // We don't have an allocator - fall back to a fixed buffer and hope
+            // that it's big enough.
+            self.captureTrailing(.fixed);
+            return;
+        };
+
+        Capture.allocating(
+            &self.capture,
+            alloc,
+            @min(self.max_allocating_bytes, max_bytes),
+        ) catch {
+            // The allocator failed for some reason, fall back to a fixed buffer
+            // and hope that it's big enough.
+            self.captureTrailing(.fixed);
+            return;
+        };
     }
 
     /// Consume a slice of bytes, advancing the parser state. This is
@@ -869,9 +879,13 @@ pub const Parser = struct {
             .@"0",
             .@"22",
             .@"777",
-            .@"8",
             => switch (c) {
                 ';' => self.captureTrailing(.fixed),
+                else => self.state = .invalid,
+            },
+
+            .@"8" => switch (c) {
+                ';' => self.captureTrailingAllocating(MAX_HYPERLINK_CAPTURE),
                 else => self.state = .invalid,
             },
         }

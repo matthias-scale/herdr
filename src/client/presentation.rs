@@ -12,12 +12,16 @@ struct ClientPresentationFile {
     #[serde(default)]
     dock_width: Option<u16>,
     #[serde(default)]
+    notepad_height: Option<u16>,
+    #[serde(default)]
     sidebar_group_mode: Option<crate::app::state::SidebarGroupMode>,
     #[serde(default)]
     sidebar_work_filter: Option<crate::app::state::SidebarWorkFilter>,
     #[serde(default)]
     sidebar_group_sorts:
         Option<std::collections::HashMap<String, crate::app::state::SidebarSortMode>>,
+    #[serde(default)]
+    sidebar_group_collapsed: Option<std::collections::HashMap<String, bool>>,
 }
 
 fn presentation_path() -> PathBuf {
@@ -46,6 +50,35 @@ pub(crate) fn save_dock_width(width: u16) {
     let path = presentation_path();
     if let Err(err) = update_path(&path, |state| {
         state.dock_width = Some(clamp_dock_width(width));
+    }) {
+        warn!(path = %path.display(), err = %err, "failed to save client presentation state");
+    }
+}
+
+fn clamp_notepad_height(height: u16) -> u16 {
+    height.clamp(crate::notepad::MIN_HEIGHT, crate::notepad::MAX_HEIGHT)
+}
+
+/// The dragged notepad panel height, when the operator ever dragged it. The
+/// configured `[notepad] height` stays the default until then.
+// The only caller is `#[cfg(not(test))]` in App::new, so tests would flag this
+// as dead.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn load_notepad_height() -> Option<u16> {
+    let path = presentation_path();
+    match load_from_path(&path) {
+        Ok(state) => state.notepad_height.map(clamp_notepad_height),
+        Err(err) => {
+            warn!(path = %path.display(), err = %err, "failed to load client presentation state");
+            None
+        }
+    }
+}
+
+pub(crate) fn save_notepad_height(height: u16) {
+    let path = presentation_path();
+    if let Err(err) = update_path(&path, |state| {
+        state.notepad_height = Some(clamp_notepad_height(height));
     }) {
         warn!(path = %path.display(), err = %err, "failed to save client presentation state");
     }
@@ -124,6 +157,29 @@ fn apply_sidebar_group_sort(
 pub(crate) fn save_sidebar_group_sort(key: &str, mode: crate::app::state::SidebarSortMode) {
     let path = presentation_path();
     if let Err(err) = update_path(&path, |state| apply_sidebar_group_sort(state, key, mode)) {
+        warn!(path = %path.display(), err = %err, "failed to save client presentation state");
+    }
+}
+
+pub(crate) fn load_sidebar_group_collapsed() -> std::collections::HashMap<String, bool> {
+    let path = presentation_path();
+    match load_from_path(&path) {
+        Ok(state) => state.sidebar_group_collapsed.unwrap_or_default(),
+        Err(err) => {
+            warn!(path = %path.display(), err = %err, "failed to load client presentation state");
+            std::collections::HashMap::new()
+        }
+    }
+}
+
+pub(crate) fn save_sidebar_group_collapsed(key: &str, collapsed: bool) {
+    let path = presentation_path();
+    if let Err(err) = update_path(&path, |state| {
+        state
+            .sidebar_group_collapsed
+            .get_or_insert_with(Default::default)
+            .insert(key.to_string(), collapsed);
+    }) {
         warn!(path = %path.display(), err = %err, "failed to save client presentation state");
     }
 }
@@ -224,6 +280,33 @@ mod tests {
         std::fs::write(&path, "not json").expect("write invalid state");
         assert!(load_from_path(&path).is_err());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn notepad_height_round_trips_without_erasing_dock_width() {
+        let path = temp_path();
+        update_path(&path, |state| state.dock_width = Some(25)).expect("save dock width");
+        update_path(&path, |state| state.notepad_height = Some(12)).expect("save notepad height");
+        let state = load_from_path(&path).expect("load client presentation state");
+        assert_eq!(state.dock_width, Some(25));
+        assert_eq!(state.notepad_height.map(clamp_notepad_height), Some(12));
+        // A dragged height outside the config range clamps to it.
+        update_path(&path, |state| state.notepad_height = Some(1)).expect("save");
+        assert_eq!(
+            load_from_path(&path)
+                .expect("load")
+                .notepad_height
+                .map(clamp_notepad_height),
+            Some(crate::notepad::MIN_HEIGHT)
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_presentation_files_have_no_notepad_height() {
+        let state: ClientPresentationFile =
+            serde_json::from_str(r#"{"dock_width":31}"#).expect("legacy presentation state");
+        assert!(state.notepad_height.is_none());
     }
 
     #[test]
@@ -353,5 +436,40 @@ mod tests {
             serde_json::from_str(r#"{"sidebar_group_mode":"repo_pr"}"#)
                 .expect("legacy presentation state");
         assert!(state.sidebar_group_sorts.is_none());
+    }
+
+    #[test]
+    fn sidebar_collapse_overrides_round_trip_true_and_false_without_erasing_width() {
+        let path = temp_path();
+        update_path(&path, |state| {
+            state.dock_width = Some(29);
+            state.sidebar_group_collapsed = Some(std::collections::HashMap::from([
+                ("repo:Runs".to_string(), true),
+                ("repo:Settled".to_string(), false),
+            ]));
+        })
+        .expect("save sidebar collapse overrides");
+        update_path(&path, |state| {
+            state.sidebar_group_mode = Some(crate::app::state::SidebarGroupMode::Missive);
+        })
+        .expect("save unrelated presentation field");
+
+        let state = load_from_path(&path).expect("load client presentation state");
+        assert_eq!(state.dock_width, Some(29));
+        assert_eq!(
+            state.sidebar_group_collapsed,
+            Some(std::collections::HashMap::from([
+                ("repo:Runs".to_string(), true),
+                ("repo:Settled".to_string(), false),
+            ]))
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_presentation_files_have_no_collapse_overrides() {
+        let state: ClientPresentationFile =
+            serde_json::from_str(r#"{"dock_width":31}"#).expect("legacy presentation state");
+        assert!(state.sidebar_group_collapsed.is_none());
     }
 }

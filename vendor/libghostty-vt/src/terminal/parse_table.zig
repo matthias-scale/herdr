@@ -213,6 +213,9 @@ fn genTable() Table {
         // an ignored DCS could otherwise begin a live sequence mid-string
         // (e.g. 0x9B => csi_entry).
         range(&result, 0x80, 0xFF, source, source, .ignore);
+
+        // Herdr's parser-classified output contract also accepts raw 8-bit ST.
+        single(&result, 0x9C, source, .ground, .none);
     }
 
     // dcs_param
@@ -263,6 +266,9 @@ fn genTable() Table {
         // DCS strings terminate via 7-bit ST (ESC \) and abort via
         // CAN/SUB, which are unaffected here.
         range(&result, 0x80, 0xFF, source, source, .put);
+
+        // Herdr's parser-classified output contract also accepts raw 8-bit ST.
+        single(&result, 0x9C, source, .ground, .none);
     }
 
     // csi_param
@@ -357,6 +363,9 @@ fn genTable() Table {
         range(&result, 0x1C, 0x1F, source, source, .ignore);
         range(&result, 0x20, 0xFF, source, source, .osc_put);
 
+        // Herdr's parser-classified output contract also accepts raw 8-bit ST.
+        single(&result, 0x9C, source, .ground, .none);
+
         // XTerm accepts either BEL  or ST  for terminating OSC
         // sequences, and when returning information, uses the same
         // terminator used in a query.
@@ -409,14 +418,17 @@ test {
     _ = table;
 }
 
-test "dcs_passthrough: high bytes are payload data" {
+test "dcs_passthrough: high bytes except 8-bit ST are payload data" {
     // Bytes 0x80-0xFF within a DCS string are payload data, not C1
-    // controls. This includes 0x9C (8-bit ST): a raw 0x9C is
-    // indistinguishable from a UTF-8 continuation byte (e.g. "Ü" is
-    // 0xC3 0x9C) and Ghostty doesn't support 8-bit C1 controls
-    // anywhere else.
+    // controls. Herdr deliberately retains raw 8-bit ST as a terminator for
+    // its parser-classified output contract.
     for (0x80..0x100) |c| {
         const entry = table[c][@intFromEnum(State.dcs_passthrough)];
+        if (c == 0x9C) {
+            try std.testing.expectEqual(State.ground, entry.state);
+            try std.testing.expectEqual(Action.none, entry.action);
+            continue;
+        }
         try std.testing.expectEqual(State.dcs_passthrough, entry.state);
         try std.testing.expectEqual(Action.put, entry.action);
     }
@@ -428,6 +440,11 @@ test "dcs_ignore: high bytes are ignored payload data" {
     // a CSI mid-string).
     for (0x80..0x100) |c| {
         const entry = table[c][@intFromEnum(State.dcs_ignore)];
+        if (c == 0x9C) {
+            try std.testing.expectEqual(State.ground, entry.state);
+            try std.testing.expectEqual(Action.none, entry.action);
+            continue;
+        }
         try std.testing.expectEqual(State.dcs_ignore, entry.state);
         try std.testing.expectEqual(Action.ignore, entry.action);
     }

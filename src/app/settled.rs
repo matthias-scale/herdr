@@ -798,6 +798,7 @@ mod tests {
         state.remote_agent_panel_entries =
             crate::ui::remote_agent_panel_entries_at(&state.fleet_snapshot, 199);
         state.view_observed_unix_s = 199;
+        state.collapsed_sidebar_groups.remove("repo:Fleet");
         let now = Instant::now();
 
         assert_eq!(
@@ -806,7 +807,7 @@ mod tests {
         );
         assert!(crate::ui::sidebar_rows(&state)
             .iter()
-            .all(|row| !matches!(row, crate::ui::SidebarRow::RemoteAgent { .. })));
+            .any(|row| matches!(row, crate::ui::SidebarRow::RemoteAgent { .. })));
 
         assert!(state.refresh_remote_snoozes_at(200));
         state.view_observed_unix_s = 200;

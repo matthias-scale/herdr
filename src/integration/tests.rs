@@ -5049,3 +5049,87 @@ fn grok_dir_honors_grok_home_after_config_dir_seam() {
     clear_integration_path_env();
     let _ = fs::remove_dir_all(base);
 }
+
+fn agent_state_test_app() -> (crate::app::App, String) {
+    let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = crate::app::App::new(
+        &crate::config::Config::default(),
+        true,
+        None,
+        api_rx,
+        crate::api::EventHub::default(),
+    );
+    let workspace = crate::workspace::Workspace::test_new("agent-state-integration");
+    let pane_id = workspace.tabs[0].root_pane;
+    app.state.workspaces = vec![workspace];
+    app.state.ensure_test_terminals();
+    app.state.active = Some(0);
+    let pane_number = app.state.workspaces[0]
+        .public_pane_number(pane_id)
+        .expect("public pane number");
+    let public_pane_id =
+        crate::workspace::public_pane_id_for_number(&app.state.workspaces[0].id, pane_number);
+    (app, public_pane_id)
+}
+
+#[test]
+fn agent_state_api_returns_schema_for_existing_pane_and_error_for_unknown_pane() {
+    let (mut app, pane_id) = agent_state_test_app();
+    let response: Value =
+        serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+            id: "state-existing".into(),
+            method: crate::api::schema::Method::AgentState(crate::api::schema::AgentStateParams {
+                target: pane_id,
+            }),
+        }))
+        .unwrap();
+    let state = &response["result"]["state"];
+    for key in [
+        "status",
+        "goal",
+        "last_acted_at",
+        "tasks",
+        "subagents",
+        "links",
+    ] {
+        assert!(state.get(key).is_some(), "missing {key}");
+    }
+
+    let unknown: Value =
+        serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+            id: "state-unknown".into(),
+            method: crate::api::schema::Method::AgentState(crate::api::schema::AgentStateParams {
+                target: "w999:p999".into(),
+            }),
+        }))
+        .unwrap();
+    assert!(unknown["error"].is_object());
+}
+
+#[test]
+fn agent_report_api_round_trips_and_malformed_json_leaves_state_unchanged() {
+    let (mut app, pane_id) = agent_state_test_app();
+    let report_json = format!(
+        r#"{{"id":"report","method":"agent.report","params":{{"target":{pane_id:?},"goal":"ship MAT-160","status_text":"testing","tasks":[{{"text":"run tests","status":"in_progress"}}],"subagents":[{{"name":"reviewer","status":"working"}}]}}}}"#
+    );
+    let report: crate::api::schema::Request = serde_json::from_str(&report_json).unwrap();
+    let reported: Value = serde_json::from_str(&app.handle_api_request(report)).unwrap();
+    assert_eq!(reported["result"]["state"]["goal"], "ship MAT-160");
+    assert_eq!(
+        reported["result"]["state"]["subagents"][0]["source"],
+        "reported"
+    );
+
+    let malformed = format!(
+        r#"{{"id":"bad","method":"agent.report","params":{{"target":{pane_id:?},"goal":17}}}}"#
+    );
+    assert!(serde_json::from_str::<crate::api::schema::Request>(&malformed).is_err());
+    let state: Value = serde_json::from_str(&app.handle_api_request(crate::api::schema::Request {
+        id: "after-bad".into(),
+        method: crate::api::schema::Method::AgentState(crate::api::schema::AgentStateParams {
+            target: pane_id,
+        }),
+    }))
+    .unwrap();
+    assert_eq!(state["result"]["state"]["goal"], "ship MAT-160");
+}

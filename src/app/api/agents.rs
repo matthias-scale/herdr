@@ -4,7 +4,8 @@ use bytes::Bytes;
 
 use crate::api::schema::{
     AgentFocusParams, AgentFocusStatusParams, AgentPromptParams, AgentRenameParams,
-    AgentSendKeysParams, AgentStartParams, AgentTarget, PaneReadResult, ResponseResult,
+    AgentReportParams, AgentSendKeysParams, AgentStartParams, AgentStateParams, AgentTarget,
+    PaneReadResult, ResponseResult,
 };
 use crate::app::App;
 
@@ -30,6 +31,40 @@ impl App {
         };
 
         encode_success(id, ResponseResult::AgentInfo { agent })
+    }
+
+    pub(super) fn handle_agent_state(&mut self, id: String, params: AgentStateParams) -> String {
+        let resolved = match self.resolve_terminal_target(&params.target) {
+            Ok(resolved) => resolved,
+            Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
+        };
+        let status = self
+            .pane_info(resolved.ws_idx, resolved.pane_id)
+            .map(|pane| pane.agent_status)
+            .unwrap_or(crate::api::schema::AgentStatus::Unknown);
+        let state = self.state.agent_states.snapshot(resolved.pane_id, status);
+        encode_success(id, ResponseResult::AgentState { state })
+    }
+
+    pub(super) fn handle_agent_report(&mut self, id: String, params: AgentReportParams) -> String {
+        let resolved = match self.resolve_terminal_target(&params.target) {
+            Ok(resolved) => resolved,
+            Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
+        };
+        if let Err(message) = self.state.agent_states.report(
+            resolved.pane_id,
+            params.payload(),
+            std::time::SystemTime::now(),
+        ) {
+            return encode_error(id, "invalid_agent_report", message);
+        }
+        self.emit_pane_updated(resolved.ws_idx, resolved.pane_id);
+        let status = self
+            .pane_info(resolved.ws_idx, resolved.pane_id)
+            .map(|pane| pane.agent_status)
+            .unwrap_or(crate::api::schema::AgentStatus::Unknown);
+        let state = self.state.agent_states.snapshot(resolved.pane_id, status);
+        encode_success(id, ResponseResult::AgentState { state })
     }
 
     pub(super) fn handle_agent_focus(&mut self, id: String, target: AgentTarget) -> String {
