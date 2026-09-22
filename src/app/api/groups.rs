@@ -98,7 +98,17 @@ impl App {
     ) -> String {
         let expected_owner = params.expected_pane_authority.clone();
         match expected_owner {
-            None => self.apply_local_pane_group_set(id, params),
+            None => {
+                // A caller that omits the pane authority still gets refusals
+                // named after the pane's own authority, matching the supplied
+                // and forwarded paths.
+                params.expected_pane_authority = self
+                    .group_runtime
+                    .authority()
+                    .ok()
+                    .map(|local| local.authority_id().clone());
+                self.apply_local_pane_group_set(id, params)
+            }
             Some(owner) if self.local_group_owner(&owner) => {
                 self.apply_local_pane_group_set(id, params)
             }
@@ -1819,8 +1829,22 @@ mod tests {
             error: None,
         };
 
-        for case in ["missing", "stale", "deleted", "conflicted"] {
-            let (mut app, _dir, pane_id) = app_with_groups(case);
+        for (kind, supplied) in [
+            ("missing", true),
+            ("stale", true),
+            ("deleted", true),
+            ("conflicted", true),
+            ("missing", false),
+            ("stale", false),
+            ("deleted", false),
+            ("conflicted", false),
+        ] {
+            let case = if supplied {
+                format!("{kind}-supplied")
+            } else {
+                format!("{kind}-omitted")
+            };
+            let (mut app, _dir, pane_id) = app_with_groups(&case);
             let pane_owner = app
                 .group_runtime
                 .authority()
@@ -1828,7 +1852,7 @@ mod tests {
                 .authority_id()
                 .clone();
             let mut catalog = base_catalog.clone();
-            match case {
+            match kind {
                 "missing" => catalog
                     .snapshot
                     .as_mut()
@@ -1851,12 +1875,12 @@ mod tests {
 
             let response: crate::api::schema::ErrorResponse =
                 serde_json::from_str(&app.handle_pane_group_set(
-                    case.into(),
+                    case.clone(),
                     PaneGroupSetParams {
                         pane_id,
                         group_id: Some(group_id.clone()),
                         expected_revision: 0,
-                        expected_pane_authority: Some(pane_owner.clone()),
+                        expected_pane_authority: supplied.then(|| pane_owner.clone()),
                         expected_pane_incarnation: None,
                     },
                 ))
@@ -1868,6 +1892,36 @@ mod tests {
                 response.error.message
             );
         }
+    }
+
+    #[test]
+    fn local_pane_move_revision_refusal_names_the_pane_authority_without_one_supplied() {
+        let (mut app, _dir, pane_id) = app_with_groups("omitted-revision");
+        let pane_owner = app
+            .group_runtime
+            .authority()
+            .expect("pane authority")
+            .authority_id()
+            .clone();
+
+        let response: crate::api::schema::ErrorResponse =
+            serde_json::from_str(&app.handle_pane_group_set(
+                "clear".into(),
+                PaneGroupSetParams {
+                    pane_id,
+                    group_id: None,
+                    expected_revision: 99,
+                    expected_pane_authority: None,
+                    expected_pane_incarnation: None,
+                },
+            ))
+            .expect("local revision refusal");
+        assert_eq!(response.error.code, "revision_conflict");
+        assert!(
+            response.error.message.contains(pane_owner.as_str()),
+            "refusal omitted the local pane authority: {}",
+            response.error.message
+        );
     }
 
     #[test]
