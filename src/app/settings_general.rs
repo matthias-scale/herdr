@@ -40,7 +40,7 @@ const SETTLE_DONE_MINUTE_LADDER: [u64; 5] = [5, 15, 30, 60, 240];
 
 /// Sidebar rows the notepad may occupy. Small enough to stay a list, large
 /// enough to hold a short to-do list without scrolling.
-const NOTEPAD_HEIGHT_LADDER: [u64; 4] = [6, 8, 12, 16];
+const NOTEPAD_HEIGHT_LADDER: [u64; 6] = [6, 8, 12, 16, 24, 40];
 
 /// Minutes per focus interval, per short break, and per long break.
 const WORK_MINUTE_LADDER: [u64; 5] = [20, 25, 30, 45, 50];

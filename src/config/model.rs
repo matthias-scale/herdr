@@ -525,7 +525,8 @@ pub struct NotepadConfig {
     pub dir: String,
     /// Note names to offer first, in this order. Others follow alphabetically.
     pub files: Vec<String>,
-    /// Sidebar rows the panel occupies, header included. Clamped to 3..=24.
+    /// Sidebar rows the panel occupies, header included. Clamped to 3..=200,
+    /// then capped at render time by the rows the sidebar can spare.
     pub height: u16,
     /// Pull and push the notes directory as a git checkout.
     pub git_sync: bool,

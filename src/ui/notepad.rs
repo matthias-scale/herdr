@@ -19,7 +19,9 @@ use crate::app::state::Palette;
 use crate::app::AppState;
 
 /// Rows the workspace list keeps for itself before the notepad may claim any.
-const MIN_LIST_ROWS_BESIDE_NOTEPAD: u16 = 6;
+/// This is the real ceiling on the panel, so it stays small enough that the
+/// operator can drag the notepad to most of the sidebar.
+const MIN_LIST_ROWS_BESIDE_NOTEPAD: u16 = 3;
 /// Header row plus at least one body row.
 const MIN_NOTEPAD_ROWS: u16 = 2;
 
@@ -340,10 +342,23 @@ mod tests {
     #[test]
     fn the_panel_never_squeezes_the_workspace_list_below_its_floor() {
         let app = state();
-        assert_eq!(notepad_height(&app, Rect::new(0, 0, 26, 8)), 2);
-        assert_eq!(notepad_height(&app, Rect::new(0, 0, 26, 13)), 7);
-        assert_eq!(notepad_height(&app, Rect::new(0, 0, 26, 7)), 0);
+        // The list keeps MIN_LIST_ROWS_BESIDE_NOTEPAD rows; the panel takes the
+        // rest, up to its own configured height.
+        assert_eq!(notepad_height(&app, Rect::new(0, 0, 26, 8)), 5);
+        assert_eq!(notepad_height(&app, Rect::new(0, 0, 26, 13)), 8);
         assert_eq!(notepad_height(&app, Rect::new(0, 0, 26, 40)), 8);
+        // Below the floor plus one usable panel row there is nothing to give.
+        assert_eq!(notepad_height(&app, Rect::new(0, 0, 26, 4)), 0);
+    }
+
+    #[test]
+    fn a_tall_panel_is_limited_only_by_the_rows_the_sidebar_can_spare() {
+        let mut app = state();
+        // Past the old fixed ceiling of 24 rows.
+        app.notepad.height = 60;
+        assert_eq!(notepad_height(&app, Rect::new(0, 0, 26, 80)), 60);
+        // And the sidebar's spare rows still win when the panel wants more.
+        assert_eq!(notepad_height(&app, Rect::new(0, 0, 26, 40)), 37);
     }
 
     #[test]
