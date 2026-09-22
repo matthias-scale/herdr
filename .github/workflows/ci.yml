@@ -61,7 +61,8 @@ jobs:
             timeout_minutes: 25
           - os: windows-latest
             kind: windows
-            timeout_minutes: 25
+            # The Zig 0.16 vendor refresh exceeded 25 minutes on an uncached runner.
+            timeout_minutes: 35
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
     steps:
