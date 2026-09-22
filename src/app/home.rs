@@ -1244,6 +1244,36 @@ impl HomeState {
         self.dispatch_error = None;
     }
 
+    /// Point the composer at a directory and align its project fields with the
+    /// most specific configured checkout that contains it.
+    pub(crate) fn set_directory(&mut self, directory: PathBuf) {
+        let canonical_directory = crate::worktree::canonical_or_original(&directory);
+        let matched = self
+            .projects
+            .iter()
+            .flat_map(|project| {
+                project.repos.iter().filter_map(|repo| {
+                    let path = crate::worktree::canonical_or_original(&repo.path);
+                    canonical_directory.starts_with(&path).then(|| {
+                        (
+                            path.components().count(),
+                            project.id.clone(),
+                            repo.name.clone(),
+                        )
+                    })
+                })
+            })
+            .max_by_key(|(depth, _, _)| *depth);
+
+        self.directory = directory;
+        if let Some((_, project, repo)) = matched {
+            self.set_project(&project);
+            self.repo = Some(repo);
+        } else {
+            self.repo = None;
+        }
+    }
+
     pub(crate) fn move_focus(&mut self, backwards: bool) {
         let current = self.focus.unwrap_or(HomeFocus::Prompt);
         let visibility = self.field_visibility();
@@ -1439,7 +1469,7 @@ impl HomeState {
                 matches!(context, DEFAULT_CONTEXT_WINDOW | LARGE_CONTEXT_WINDOW)
             });
             if !selected_is_valid {
-                self.context_window = Some(DEFAULT_CONTEXT_WINDOW.into());
+                self.context_window = Some(LARGE_CONTEXT_WINDOW.into());
             }
         } else {
             self.context_window = None;
@@ -1901,7 +1931,7 @@ impl crate::app::state::AppState {
             }
         }
         if let Some(directory) = activation.directory {
-            home.directory = directory.clone();
+            home.set_directory(directory.clone());
             home.ref_directory = directory.clone();
             if home.workspace == HomeWorkspace::CurrentCheckout {
                 home.target = self.home_target_for_directory(&directory);
@@ -1922,7 +1952,7 @@ impl crate::app::state::AppState {
         self.release_surface_focus_to_pane();
         let mut home = self.home.take().unwrap_or_else(|| self.new_home_state());
         home.prompt.clear();
-        home.directory = directory.clone();
+        home.set_directory(directory.clone());
         home.workspace = workspace;
         if home.workspace == HomeWorkspace::CurrentCheckout {
             home.target = self.home_target_for_directory(&directory);
@@ -2598,7 +2628,7 @@ impl crate::app::state::AppState {
 
     pub(crate) fn home_set_directory(&mut self, directory: PathBuf) {
         if let Some(home) = self.home.as_mut() {
-            home.directory = directory;
+            home.set_directory(directory);
             home.browse = None;
             home.directory_filter.set_query("");
         }
@@ -3237,7 +3267,7 @@ mod tests {
             vec![
                 "claude",
                 "--model",
-                "claude-opus-5",
+                "claude-opus-5[1m]",
                 "--dangerously-skip-permissions",
                 "implement the retry cap"
             ]
@@ -3413,7 +3443,7 @@ mod tests {
         let expected_argv = [
             "claude",
             "--model",
-            "claude-opus-5",
+            "claude-opus-5[1m]",
             "--permission-mode",
             "acceptEdits",
             "run the checks",
@@ -3465,7 +3495,7 @@ mod tests {
             vec![
                 "claude",
                 "--model",
-                "claude-fable-5-1",
+                "claude-fable-5-1[1m]",
                 "--effort",
                 "high",
                 "--dangerously-skip-permissions",
@@ -3537,6 +3567,123 @@ mod tests {
             !home.repo_visible(),
             "a group with no checkouts offers no repo chip"
         );
+    }
+
+    #[test]
+    fn composer_directory_selects_its_configured_project_and_repo() {
+        use crate::app::projects::{Project, ProjectRepo};
+
+        let root = browse_fixture("project-selection");
+        let checkout = root.join("alpha");
+        let nested = checkout.join("src");
+        std::fs::create_dir_all(&nested).expect("nested checkout directory");
+        let configured_path = checkout.join("..").join("alpha");
+        let mut app = crate::app::state::AppState::test_new();
+        app.projects = vec![
+            Project {
+                id: "personal".into(),
+                label: "personal".into(),
+                repos: vec![ProjectRepo {
+                    name: "notes".into(),
+                    path: root.join("beta"),
+                }],
+            },
+            Project {
+                id: "work".into(),
+                label: "work".into(),
+                repos: vec![ProjectRepo {
+                    name: "herdr".into(),
+                    path: configured_path,
+                }],
+            },
+        ];
+        let mut home = app.new_home_state();
+        home.repo = Some("notes".into());
+        app.home = Some(home);
+
+        app.home_set_directory(crate::worktree::canonical_or_original(&nested));
+
+        let home = app.home.as_ref().expect("composer");
+        assert_eq!(home.project, "work");
+        assert_eq!(home.repo.as_deref(), Some("herdr"));
+
+        app.home_set_directory(root.join("alpine"));
+        let home = app.home.as_ref().expect("composer");
+        assert_eq!(
+            home.project, "work",
+            "an unmatched directory keeps the group"
+        );
+        assert_eq!(
+            home.repo, None,
+            "an unmatched directory clears a stale repo"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn opening_composer_in_a_repo_preselects_its_project_and_repo() {
+        use crate::app::projects::{Project, ProjectRepo};
+
+        let root = browse_fixture("open-project-selection");
+        let checkout = root.join("alpha");
+        let mut app = crate::app::state::AppState::test_new();
+        app.projects = vec![
+            Project {
+                id: "personal".into(),
+                label: "personal".into(),
+                repos: Vec::new(),
+            },
+            Project {
+                id: "work".into(),
+                label: "work".into(),
+                repos: vec![ProjectRepo {
+                    name: "herdr".into(),
+                    path: checkout.clone(),
+                }],
+            },
+        ];
+
+        app.open_home_composer_in_directory(checkout, HomeWorkspace::CurrentCheckout);
+
+        let home = app.home.as_ref().expect("composer");
+        assert_eq!(home.project, "work");
+        assert_eq!(home.repo.as_deref(), Some("herdr"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn accepting_a_repo_keeps_its_selection_after_canonicalizing_the_directory() {
+        use crate::app::projects::{Project, ProjectRepo};
+
+        let root = browse_fixture("repo-picker-selection");
+        let checkout = root.join("alpha");
+        let configured_path = checkout.join("..").join("alpha");
+        let mut app = crate::app::state::AppState::test_new();
+        app.projects = vec![Project {
+            id: "work".into(),
+            label: "work".into(),
+            repos: vec![ProjectRepo {
+                name: "herdr".into(),
+                path: configured_path,
+            }],
+        }];
+        let mut home = app.new_home_state();
+        home.picker = Some(HomePicker::Repo);
+        home.picker_selected = 0;
+        app.home = Some(home);
+
+        app.home_accept_picker();
+
+        let home = app.home.as_ref().expect("composer");
+        assert_eq!(
+            home.directory,
+            crate::worktree::canonical_or_original(&checkout)
+        );
+        assert_eq!(home.repo.as_deref(), Some("herdr"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3695,7 +3842,7 @@ mod tests {
         assert!(!home.context_visible());
 
         home.set_model("claude-fable-5-1");
-        assert_eq!(home.context_window.as_deref(), Some(DEFAULT_CONTEXT_WINDOW));
+        assert_eq!(home.context_window.as_deref(), Some(LARGE_CONTEXT_WINDOW));
         assert_eq!(
             home.context_options(),
             [DEFAULT_CONTEXT_WINDOW, LARGE_CONTEXT_WINDOW]
@@ -3705,6 +3852,20 @@ mod tests {
         assert!(!home.context_visible());
         home.set_agent(Agent::Codex);
         assert!(!home.context_visible());
+    }
+
+    #[test]
+    fn explicit_narrow_context_survives_agent_and_large_model_switches() {
+        let mut home = home_with_codex_catalog();
+        home.set_context_window(Some(DEFAULT_CONTEXT_WINDOW.into()));
+        home.set_model("claude-fable-5-1");
+
+        home.set_agent(Agent::Codex);
+        home.set_agent(Agent::Claude);
+        assert_eq!(home.context_window.as_deref(), Some(DEFAULT_CONTEXT_WINDOW));
+
+        home.set_model("claude-opus-5");
+        assert_eq!(home.context_window.as_deref(), Some(DEFAULT_CONTEXT_WINDOW));
     }
 
     #[test]
@@ -4188,6 +4349,7 @@ mod tests {
         assert_eq!(home.agent, Agent::Claude);
         assert_eq!(home.model, "claude-opus-5");
         assert_eq!(home.access, Some(HomeAccess::ClaudeBypass));
+        assert_eq!(home.context_window.as_deref(), Some(LARGE_CONTEXT_WINDOW));
         assert!(
             home.context_visible(),
             "opus carries a 1M window, so the composer must offer the choice"
