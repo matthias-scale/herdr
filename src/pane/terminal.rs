@@ -3889,6 +3889,38 @@ mod tests {
     }
 
     #[test]
+    fn osc_title_with_star_continuation_byte_stays_hidden() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(16, 4, 100).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+
+        pane.process_pty_bytes(
+            PaneId::from_raw(1),
+            0,
+            b"X\x1b]0;\xe2\x9c\xb3 List files\x07Y",
+            &tx,
+        );
+
+        assert_eq!(pane.visible_text().trim(), "XY");
+        assert_eq!(
+            pane.terminal_title().as_deref(),
+            Some("\u{2733} List files")
+        );
+    }
+
+    #[test]
+    fn osc_title_with_umlaut_continuation_byte_stays_hidden() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(16, 4, 100).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+
+        pane.process_pty_bytes(PaneId::from_raw(1), 0, b"X\x1b]2;\xc3\x9cber\x07Y", &tx);
+
+        assert_eq!(pane.visible_text().trim(), "XY");
+        assert_eq!(pane.terminal_title().as_deref(), Some("\u{dc}ber"));
+    }
+
+    #[test]
     fn process_pty_bytes_surfaces_clipboard_writes_without_other_results() {
         let (tx, _rx) = mpsc::channel(4);
         let terminal = crate::ghostty::Terminal::new(80, 24, 100).unwrap();
