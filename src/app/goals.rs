@@ -19,7 +19,10 @@ impl App {
                 workspace.focused_cwd_from(&self.state.terminals, &self.terminal_runtimes)
             });
         let focus_changed = self.goals_focused_cwd != cwd;
+        // Only a reset of already-visible goals needs a redraw.
+        let mut visible_reset = false;
         if focus_changed {
+            visible_reset = !matches!(self.state.goals.load, crate::goals::GoalsLoad::Missing);
             self.goals_focused_cwd = cwd.clone();
             self.goals_observation = None;
             self.goals_refresh_in_flight = false;
@@ -28,10 +31,10 @@ impl App {
             self.state.goals.load = crate::goals::GoalsLoad::Missing;
         }
         let Some(cwd) = cwd else {
-            return focus_changed;
+            return visible_reset;
         };
         if self.goals_refresh_in_flight || now < self.next_goals_refresh {
-            return focus_changed;
+            return visible_reset;
         }
         self.next_goals_refresh = now + GOALS_REFRESH_INTERVAL;
 
@@ -47,7 +50,7 @@ impl App {
                 refresh,
             });
         });
-        focus_changed
+        visible_reset
     }
 
     pub(super) fn finish_goals_refresh(
