@@ -48,15 +48,11 @@ pub(super) enum MouseAction {
     AgentPickerSelect(usize),
     FocusLiveSettledPane(crate::app::state::PaneFocusTarget),
     OpenSnoozeMenu {
-        ws_idx: usize,
-        pane_id: PaneId,
+        target: crate::app::state::SidebarPaneLifecycleTarget,
         column: u16,
         row: u16,
     },
-    SettlePane {
-        ws_idx: usize,
-        pane_id: PaneId,
-    },
+    SettlePane(crate::app::state::SidebarPaneLifecycleTarget),
     SidebarNewMenu {
         action: crate::app::state::SidebarNewMenuAction,
     },
@@ -742,16 +738,15 @@ impl AppState {
                 .and_then(|target| target.action.clone())
             {
                 return Some(match action {
-                    crate::app::state::SidebarHoverAction::Snooze { ws_idx, pane_id } => {
+                    crate::app::state::SidebarHoverAction::Snooze { target } => {
                         MouseAction::OpenSnoozeMenu {
-                            ws_idx,
-                            pane_id,
+                            target,
                             column: mouse.column,
                             row: mouse.row,
                         }
                     }
-                    crate::app::state::SidebarHoverAction::Settle { ws_idx, pane_id } => {
-                        MouseAction::SettlePane { ws_idx, pane_id }
+                    crate::app::state::SidebarHoverAction::Settle { target } => {
+                        MouseAction::SettlePane(target)
                     }
                 });
             }
@@ -2458,12 +2453,8 @@ impl AppState {
         if matches!(mouse.kind, MouseEventKind::Moved) {
             if let Some(index) = self.sidebar_snooze_menu_item_at(mouse.column, mouse.row) {
                 let action = self.sidebar_snooze.as_ref().and_then(|snooze| {
-                    let ws_idx = self
-                        .workspaces
-                        .iter()
-                        .position(|workspace| workspace.id == snooze.target.workspace_id)?;
                     crate::app::state::sidebar_snooze_menu_items(
-                        self.pane_is_snoozed(ws_idx, snooze.target.pane_id),
+                        self.sidebar_lifecycle_target_snoozed(&snooze.target)?,
                     )
                     .get(index)
                     .map(|(_, action)| *action)
@@ -2479,12 +2470,8 @@ impl AppState {
                 .sidebar_snooze_menu_item_at(mouse.column, mouse.row)
                 .and_then(|index| {
                     let snooze = self.sidebar_snooze.as_ref()?;
-                    let ws_idx = self
-                        .workspaces
-                        .iter()
-                        .position(|workspace| workspace.id == snooze.target.workspace_id)?;
                     crate::app::state::sidebar_snooze_menu_items(
-                        self.pane_is_snoozed(ws_idx, snooze.target.pane_id),
+                        self.sidebar_lifecycle_target_snoozed(&snooze.target)?,
                     )
                     .get(index)
                     .map(|(_, action)| *action)
@@ -2812,17 +2799,16 @@ impl AppState {
                 self.close_workspace_picker();
                 return MobileMouseResult::Action(MouseAction::FocusPane { ws_idx, pane_id });
             }
-            Some(crate::ui::MobileSwitcherTarget::Snooze { ws_idx, pane_id }) => {
+            Some(crate::ui::MobileSwitcherTarget::Snooze(target)) => {
                 return MobileMouseResult::Action(MouseAction::OpenSnoozeMenu {
-                    ws_idx,
-                    pane_id,
+                    target,
                     column: mouse.column,
                     row: mouse.row,
                 });
             }
-            Some(crate::ui::MobileSwitcherTarget::Settle { ws_idx, pane_id }) => {
+            Some(crate::ui::MobileSwitcherTarget::Settle(target)) => {
                 self.close_workspace_picker();
-                return MobileMouseResult::Action(MouseAction::SettlePane { ws_idx, pane_id });
+                return MobileMouseResult::Action(MouseAction::SettlePane(target));
             }
             Some(crate::ui::MobileSwitcherTarget::NestedHeader(key)) => {
                 self.toggle_sidebar_group(&key);
@@ -4398,13 +4384,29 @@ mod tests {
             toast.context
         );
         let local_pane = app.state.workspaces[0].tabs[0].root_pane;
-        for key in ['z', 's'] {
-            assert!(!app.handle_sidebar_session_action_key(KeyEvent::new(
-                KeyCode::Char(key),
-                KeyModifiers::empty(),
-            )));
-        }
-        assert!(app.state.sidebar_snooze.is_none());
+        assert!(app.handle_sidebar_session_action_key(KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::empty(),
+        )));
+        assert!(app.state.sidebar_snooze.as_ref().is_some_and(|menu| {
+            matches!(
+                &menu.target,
+                crate::app::state::SidebarPaneLifecycleTarget::Remote(target)
+                    if target == &agent_ref
+            )
+        }));
+        app.state.sidebar_snooze = None;
+        assert!(app.handle_sidebar_session_action_key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::empty(),
+        )));
+        let refusal = app
+            .state
+            .toast
+            .as_ref()
+            .expect("settle revalidates the remote owner");
+        assert_eq!(refusal.title, "ub2 pane action failed");
+        assert!(refusal.context.contains("owner ub2 is unreachable"));
         assert!(!app.state.pane_is_settled(0, local_pane));
     }
 
@@ -4470,7 +4472,7 @@ mod tests {
             .find(|(column, row)| {
                 matches!(
                     crate::ui::mobile_switcher_target_at(&app.state, *column, *row),
-                    Some(crate::ui::MobileSwitcherTarget::Snooze { .. })
+                    Some(crate::ui::MobileSwitcherTarget::Snooze(..))
                 )
             })
             .expect("mobile snooze control");
@@ -4486,7 +4488,7 @@ mod tests {
             .sidebar_snooze
             .as_ref()
             .expect("snooze duration menu");
-        let pane_id = menu.target.pane_id;
+        let pane_id = menu.target.local().expect("local mobile target").pane_id;
         assert_eq!(
             menu.selected,
             crate::app::state::SidebarSnoozeMenuAction::Preset(
@@ -4569,6 +4571,68 @@ mod tests {
                 .is_none(),
             "one press can produce only one open action"
         );
+    }
+
+    #[test]
+    fn c5_remote_desktop_control_precedes_the_rows_attach_target() {
+        let mut app = app_for_mouse_test();
+        let (remote, entry) = crate::ui::sidebar::tests::remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+            false,
+        );
+        app.state.remote_agent_panel_entries = remote.remote_agent_panel_entries;
+        app.state.sidebar_selected_remote_agent = remote.sidebar_selected_remote_agent;
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
+        app.state.sidebar_width = 60;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+
+        let control = app
+            .state
+            .view
+            .sidebar_hover_targets
+            .iter()
+            .find(|target| {
+                matches!(
+                    target.action.as_ref(),
+                    Some(crate::app::state::SidebarHoverAction::Snooze {
+                        target: crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref),
+                    }) if agent_ref == &entry.agent_ref
+                )
+            })
+            .expect("remote snooze control")
+            .rect;
+        assert!(
+            crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
+                .iter()
+                .any(|row| {
+                    row.agent_ref == entry.agent_ref
+                        && control.x >= row.rect.x
+                        && control.x < row.rect.right()
+                        && control.y >= row.rect.y
+                        && control.y < row.rect.bottom()
+                })
+        );
+
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                control.x,
+                control.y,
+            ),
+        );
+
+        assert!(matches!(
+            action,
+            Some(MouseAction::OpenSnoozeMenu {
+                target: crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref),
+                ..
+            }) if agent_ref == entry.agent_ref
+        ));
     }
 
     #[test]
@@ -11291,10 +11355,12 @@ mod tests {
         app.state.selected = 0;
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         app.state.sidebar_snooze = Some(crate::app::state::SidebarSnoozeUiState {
-            target: crate::app::state::PaneFocusTarget {
-                workspace_id: app.state.workspaces[0].id.clone(),
-                pane_id,
-            },
+            target: crate::app::state::SidebarPaneLifecycleTarget::Local(
+                crate::app::state::PaneFocusTarget {
+                    workspace_id: app.state.workspaces[0].id.clone(),
+                    pane_id,
+                },
+            ),
             anchor: (1, 1),
             selected: crate::app::state::sidebar_snooze_menu_items(false)[0].1,
             time_draft: None,

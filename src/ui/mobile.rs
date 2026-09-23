@@ -56,14 +56,8 @@ pub(crate) enum MobileSwitcherTarget {
         tab_idx: usize,
         pane_id: PaneId,
     },
-    Snooze {
-        ws_idx: usize,
-        pane_id: PaneId,
-    },
-    Settle {
-        ws_idx: usize,
-        pane_id: PaneId,
-    },
+    Snooze(crate::app::state::SidebarPaneLifecycleTarget),
+    Settle(crate::app::state::SidebarPaneLifecycleTarget),
     NestedHeader(String),
     RemoteAgent(crate::api::schema::AgentRef),
     AgentRun {
@@ -158,15 +152,27 @@ fn mobile_switcher_target_for_row(
             true,
             col,
         ),
+        SidebarRow::RemoteAgent {
+            entry,
+            depth,
+            show_host_identity,
+        } => super::sidebar::selected_remote_row_control_at(
+            app,
+            entry,
+            Rect::new(content.x, content.y, content.width, 1),
+            *depth,
+            *show_host_identity,
+            col,
+        ),
         _ => None,
     };
     if let Some(control) = control {
         return Some(match control {
-            crate::app::state::SidebarHoverAction::Snooze { ws_idx, pane_id } => {
-                MobileSwitcherTarget::Snooze { ws_idx, pane_id }
+            crate::app::state::SidebarHoverAction::Snooze { target } => {
+                MobileSwitcherTarget::Snooze(target)
             }
-            crate::app::state::SidebarHoverAction::Settle { ws_idx, pane_id } => {
-                MobileSwitcherTarget::Settle { ws_idx, pane_id }
+            crate::app::state::SidebarHoverAction::Settle { target } => {
+                MobileSwitcherTarget::Settle(target)
             }
         });
     }
@@ -2396,16 +2402,16 @@ mod tests {
             if width == 18 {
                 assert!(!targets.iter().any(|target| matches!(
                     target,
-                    MobileSwitcherTarget::Snooze { .. } | MobileSwitcherTarget::Settle { .. }
+                    MobileSwitcherTarget::Snooze(..) | MobileSwitcherTarget::Settle(..)
                 )));
                 assert!(!rendered.contains('✓'), "{rendered:?}");
             } else {
                 assert!(targets
                     .iter()
-                    .any(|target| matches!(target, MobileSwitcherTarget::Snooze { .. })));
+                    .any(|target| matches!(target, MobileSwitcherTarget::Snooze(..))));
                 assert!(targets
                     .iter()
-                    .any(|target| matches!(target, MobileSwitcherTarget::Settle { .. })));
+                    .any(|target| matches!(target, MobileSwitcherTarget::Settle(..))));
                 assert!(rendered.contains('◷'), "{rendered:?}");
                 assert!(rendered.contains('✓'), "{rendered:?}");
             }
@@ -3168,5 +3174,45 @@ mod tests {
             !row.contains("issue-264-nix-support"),
             "header row: {row:?}"
         );
+    }
+
+    #[test]
+    fn c4_c5_remote_mobile_control_geometry_precedes_the_host_target_with_suffix() {
+        let (app, entry) = crate::ui::sidebar::tests::remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+            false,
+        );
+        let content = Rect::new(0, 0, 60, 1);
+        let row = SidebarRow::RemoteAgent {
+            entry: entry.clone(),
+            depth: 0,
+            show_host_identity: true,
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 1)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_remote_compact_agent_row_with_identity(
+                    &app, frame, &entry, content, 0, None, true,
+                )
+            })
+            .expect("render remote row");
+        let snooze_column = (content.x..content.right())
+            .find(|column| terminal.backend().buffer()[(*column, 0)].symbol() == "◷")
+            .expect("rendered snooze glyph");
+
+        assert!(matches!(
+            mobile_switcher_target_for_row(&app, content, snooze_column, 0, 0, &row),
+            Some(MobileSwitcherTarget::Snooze(
+                crate::app::state::SidebarPaneLifecycleTarget::Remote(_)
+            ))
+        ));
+        assert!(matches!(
+            mobile_switcher_target_for_row(&app, content, content.x, 0, 0, &row),
+            Some(MobileSwitcherTarget::RemoteAgent(_))
+        ));
     }
 }

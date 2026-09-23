@@ -1561,21 +1561,12 @@ impl App {
         snooze: crate::app::state::SidebarSnoozeUiState,
         deadline: u64,
     ) {
-        let Some(ws_idx) = self
-            .state
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.id == snooze.target.workspace_id)
-        else {
+        let Some(pane_id) = self.sidebar_pane_lifecycle_public_id(&snooze.target) else {
             self.state.sidebar_snooze = None;
             return;
         };
-        let Some(pane_id) = self.public_pane_id(ws_idx, snooze.target.pane_id) else {
-            self.state.sidebar_snooze = None;
-            return;
-        };
-        self.runtime_pane_snooze(
-            "tui.snooze.set-time",
+        self.dispatch_sidebar_pane_snooze(
+            snooze.target,
             crate::api::schema::PaneSnoozeParams {
                 pane_id,
                 duration_s: None,
@@ -1876,7 +1867,9 @@ impl App {
                 Some(crate::app::state::SNOOZE_ITEM),
             ) => {
                 self.state.close_client_overlay();
-                self.open_sidebar_snooze_menu(ws_idx, target, menu_x, menu_y);
+                if let Some(target) = self.local_sidebar_pane_lifecycle_target(ws_idx, target) {
+                    self.open_sidebar_snooze_menu(target, menu_x, menu_y);
+                }
             }
             (
                 ContextMenuKind::Tab {
@@ -1887,7 +1880,9 @@ impl App {
                 Some(crate::app::state::SET_TIME_ITEM | crate::app::state::CHANGE_TIME_ITEM),
             ) => {
                 self.state.close_client_overlay();
-                self.open_snooze_time_input(ws_idx, target);
+                if let Some(target) = self.local_sidebar_pane_lifecycle_target(ws_idx, target) {
+                    self.open_snooze_time_input(target);
+                }
             }
             (
                 ContextMenuKind::Tab {
@@ -1944,7 +1939,9 @@ impl App {
                 Some(crate::app::state::SNOOZE_ITEM),
             ) => {
                 self.state.close_client_overlay();
-                self.open_sidebar_snooze_menu(ws_idx, pane_id, menu_x, menu_y);
+                if let Some(target) = self.local_sidebar_pane_lifecycle_target(ws_idx, pane_id) {
+                    self.open_sidebar_snooze_menu(target, menu_x, menu_y);
+                }
             }
             (
                 ContextMenuKind::Pane {
@@ -1953,7 +1950,9 @@ impl App {
                 Some(crate::app::state::SET_TIME_ITEM | crate::app::state::CHANGE_TIME_ITEM),
             ) => {
                 self.state.close_client_overlay();
-                self.open_snooze_time_input(ws_idx, pane_id);
+                if let Some(target) = self.local_sidebar_pane_lifecycle_target(ws_idx, pane_id) {
+                    self.open_snooze_time_input(target);
+                }
             }
             (
                 ContextMenuKind::Pane {
@@ -3699,7 +3698,10 @@ mod tests {
     fn concurrent_snooze_does_not_rebind_dropdown_enter_to_unsnooze() {
         let mut app = app_with_test_workspaces(&["main"]);
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
-        app.open_sidebar_snooze_menu(0, pane_id, 3, 2);
+        let target = app
+            .local_sidebar_pane_lifecycle_target(0, pane_id)
+            .expect("local lifecycle target");
+        app.open_sidebar_snooze_menu(target, 3, 2);
         let selected = app
             .state
             .sidebar_snooze
@@ -3838,10 +3840,12 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 300;
         let input = crate::app::state::SidebarSnoozeUiState {
-            target: crate::app::state::PaneFocusTarget {
-                workspace_id: app.state.workspaces[0].id.clone(),
-                pane_id,
-            },
+            target: crate::app::state::SidebarPaneLifecycleTarget::Local(
+                crate::app::state::PaneFocusTarget {
+                    workspace_id: app.state.workspaces[0].id.clone(),
+                    pane_id,
+                },
+            ),
             anchor: (0, 0),
             selected: crate::app::state::SidebarSnoozeMenuAction::SetTime,
             time_draft: Some("12:30".into()),
@@ -3901,7 +3905,10 @@ mod tests {
             .expect("client A snooze menu")
             .target
             .clone();
-        assert_eq!(target.pane_id, first_pane);
+        assert_eq!(
+            target.local().map(|target| target.pane_id),
+            Some(first_pane)
+        );
         assert!(app
             .handle_sidebar_snooze_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty(),)));
         assert!(app.state.pane_is_snoozed(0, first_pane));
@@ -3929,7 +3936,7 @@ mod tests {
             app.state
                 .sidebar_snooze
                 .as_ref()
-                .map(|snooze| snooze.target.pane_id),
+                .and_then(|snooze| snooze.target.local().map(|target| target.pane_id)),
             Some(first_pane)
         );
     }

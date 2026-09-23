@@ -1126,10 +1126,12 @@ mod tests {
     fn snooze_time_error_is_visible_in_the_input_modal() {
         let mut app = AppState::test_new();
         app.sidebar_snooze = Some(crate::app::state::SidebarSnoozeUiState {
-            target: crate::app::state::PaneFocusTarget {
-                workspace_id: "workspace".into(),
-                pane_id: crate::layout::PaneId::alloc(),
-            },
+            target: crate::app::state::SidebarPaneLifecycleTarget::Local(
+                crate::app::state::PaneFocusTarget {
+                    workspace_id: "workspace".into(),
+                    pane_id: crate::layout::PaneId::alloc(),
+                },
+            ),
             anchor: (0, 0),
             selected: crate::app::state::SidebarSnoozeMenuAction::SetTime,
             time_draft: Some("12:30".into()),

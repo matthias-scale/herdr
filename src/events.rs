@@ -73,6 +73,12 @@ pub struct WorktreeRemoveResult {
 pub enum AppEvent {
     /// A read-only fleet host inventory poll completed.
     FleetRefreshed { snapshot: crate::fleet::Snapshot },
+    /// A one-shot request to the host owning a remote pane completed. Fleet
+    /// polling remains the only source of rendered remote lifecycle state.
+    RemoteApiRequestFinished {
+        agent_ref: crate::api::schema::AgentRef,
+        response: String,
+    },
     /// An authority admission advance finished its durable ledger write.
     AuthorityAcceptanceLedgerPersisted {
         ledger: crate::fleet::AuthorityAcceptanceLedger,

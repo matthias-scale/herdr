@@ -5296,14 +5296,11 @@ impl App {
                     }
                     MouseAction::FocusLiveSettledPane(target) => self.focus_settled_pane(target),
                     MouseAction::OpenSnoozeMenu {
-                        ws_idx,
-                        pane_id,
+                        target,
                         column,
                         row,
-                    } => self.open_sidebar_snooze_menu(ws_idx, pane_id, column, row),
-                    MouseAction::SettlePane { ws_idx, pane_id } => {
-                        self.settle_sidebar_pane(ws_idx, pane_id)
-                    }
+                    } => self.open_sidebar_snooze_menu(target, column, row),
+                    MouseAction::SettlePane(target) => self.settle_sidebar_pane(target),
                     MouseAction::SidebarNewMenu { action } => {
                         if action == crate::app::state::SidebarNewMenuAction::NewSpace {
                             self.begin_tui_workspace_create("tui.mouse.workspace.create");

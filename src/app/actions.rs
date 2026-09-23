@@ -3735,6 +3735,7 @@ impl AppState {
             AppEvent::TabBarCommandFinished { .. } => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),
             AppEvent::PaneExitCheckpoint { .. } => Vec::new(),
+            AppEvent::RemoteApiRequestFinished { .. } => Vec::new(),
         }
     }
 
