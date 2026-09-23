@@ -9,6 +9,10 @@ use super::{
     background_update_check_enabled, App, AUTO_UPDATE_CHECK_INTERVAL, MIN_RENDER_INTERVAL,
     RESIZE_POLL_INTERVAL, SELECTION_AUTOSCROLL_INTERVAL,
 };
+
+fn provider_usage_disabled_for_test_execution() -> bool {
+    !cfg!(test) && std::env::var_os("NEXTEST").is_some()
+}
 fn retain_detached_process_after_wait(
     pid: u32,
     result: std::io::Result<Option<std::process::ExitStatus>>,
@@ -838,6 +842,12 @@ impl App {
             // spawning the external Kimi helper.
             self.provider_usage_in_flight = true;
             self.provider_usage_refreshed_at = Some(now);
+            return;
+        }
+        // Integration tests execute the normal Herdr binary, so cfg!(test) is
+        // false there. Nextest exports this marker to each test and its child
+        // processes; keep those binaries from launching real provider tools.
+        if provider_usage_disabled_for_test_execution() {
             return;
         }
         let tx = self.event_tx.clone();
