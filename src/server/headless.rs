@@ -7646,7 +7646,8 @@ mod tests {
     }
 
     fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServer {
-        let config = crate::config::Config::default();
+        let mut config = crate::config::Config::default();
+        config.work_index.enabled = false;
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::app::App::new(&config, true, None, api_rx, event_hub);
         app.state.local_sound_playback = false;

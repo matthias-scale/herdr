@@ -4074,13 +4074,9 @@ mod tests {
 
     fn test_app() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        App::new(
-            &Config::default(),
-            true,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        )
+        let mut config = Config::default();
+        config.work_index.enabled = false;
+        App::new(&config, true, None, api_rx, crate::api::EventHub::default())
     }
 
     #[test]
