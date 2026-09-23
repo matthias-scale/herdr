@@ -38,6 +38,7 @@ const MAX_CREDIT_BALANCE: f64 = 1_000_000.0;
 const MAX_CCUSAGE_DISCOVERY_ENTRIES: usize = 256;
 const MAX_CCUSAGE_OUTPUT_BYTES: usize = 512 * 1024;
 const CCUSAGE_TIMEOUT: Duration = Duration::from_secs(10);
+const CCUSAGE_FAILURE_RETRY_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const MAX_CLAUDE_USAGE_AMOUNT: f64 = 1_000_000.0;
 const MAX_CLAUDE_REMAINING_MINUTES: u64 = 24 * 60;
 const MAX_PROVIDER_PROFILES: usize = 32;
@@ -108,6 +109,33 @@ struct RawCcusageProjection {
 struct ClaudeUsageDetails {
     cost_usd: f64,
     remaining_minutes: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct CcusageFailureBackoff {
+    retry_at: Option<Instant>,
+}
+
+impl CcusageFailureBackoff {
+    fn poll(
+        &mut self,
+        now: Instant,
+        attempt: impl FnOnce() -> Result<ClaudeUsageDetails, ()>,
+    ) -> Option<ClaudeUsageDetails> {
+        if self.retry_at.is_some_and(|retry_at| now < retry_at) {
+            return None;
+        }
+        match attempt() {
+            Ok(details) => {
+                self.retry_at = None;
+                Some(details)
+            }
+            Err(()) => {
+                self.retry_at = now.checked_add(CCUSAGE_FAILURE_RETRY_INTERVAL);
+                None
+            }
+        }
+    }
 }
 
 fn parse_codex_record(line: &str) -> Option<CodexRateLimits> {
@@ -255,8 +283,8 @@ fn resolve_ccusage() -> Option<PathBuf> {
     CCUSAGE_PATH.get_or_init(discover_ccusage).clone()
 }
 
-fn load_claude_usage_details(now: i64) -> Option<ClaudeUsageDetails> {
-    let binary = resolve_ccusage()?;
+fn fetch_claude_usage_details(now: i64) -> Result<ClaudeUsageDetails, ()> {
+    let binary = resolve_ccusage().ok_or(())?;
     let mut command = crate::noninteractive_process::command(binary);
     command.args(["blocks", "--active", "--json", "--offline"]);
     let output = crate::noninteractive_process::output_with_deadline_limited(
@@ -264,12 +292,21 @@ fn load_claude_usage_details(now: i64) -> Option<ClaudeUsageDetails> {
         Instant::now() + CCUSAGE_TIMEOUT,
         MAX_CCUSAGE_OUTPUT_BYTES,
     )
-    .ok()?;
+    .map_err(|_| ())?;
     if !output.status.success() {
-        return None;
+        return Err(());
     }
-    let output = String::from_utf8(output.stdout).ok()?;
-    parse_ccusage_output(&output, now).ok().flatten()
+    let output = String::from_utf8(output.stdout).map_err(|_| ())?;
+    parse_ccusage_output(&output, now)?.ok_or(())
+}
+
+fn load_claude_usage_details(now_unix: i64, now: Instant) -> Option<ClaudeUsageDetails> {
+    static FAILURE_BACKOFF: OnceLock<Mutex<CcusageFailureBackoff>> = OnceLock::new();
+    FAILURE_BACKOFF
+        .get_or_init(|| Mutex::new(CcusageFailureBackoff::default()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .poll(now, || fetch_claude_usage_details(now_unix))
 }
 
 fn recent_jsonl_files(root: &Path, max_files: usize) -> Result<Vec<PathBuf>, ()> {
@@ -1185,7 +1222,7 @@ fn load_all_claude_usage(
         .map(|root| named_profile_dirs(&root, &["meta.env"]))
         .unwrap_or_default();
     let primary = active_profile_id("CLAUDE_CONFIG_DIR", &profiles);
-    let details = now_unix.and_then(load_claude_usage_details);
+    let details = now_unix.and_then(|now_unix| load_claude_usage_details(now_unix, now));
     let mut default_usage = load_claude_usage_from(
         &statusline_cache_dir().join("rate-limits.env"),
         None,
@@ -1574,6 +1611,44 @@ mod tests {
                 .expect("valid ccusage JSON"),
             None
         );
+    }
+
+    #[test]
+    fn failed_ccusage_attempt_backs_off_for_thirty_minutes() {
+        let start = Instant::now();
+        let details = ClaudeUsageDetails {
+            cost_usd: 12.5,
+            remaining_minutes: Some(45),
+        };
+        let mut backoff = CcusageFailureBackoff::default();
+        let mut attempts = 0;
+
+        assert_eq!(
+            backoff.poll(start, || {
+                attempts += 1;
+                Err(())
+            }),
+            None
+        );
+        assert_eq!(
+            backoff.poll(
+                start + CCUSAGE_FAILURE_RETRY_INTERVAL - Duration::from_millis(1),
+                || {
+                    attempts += 1;
+                    Ok(details)
+                }
+            ),
+            None
+        );
+        assert_eq!(attempts, 1, "backoff must skip the helper entirely");
+        assert_eq!(
+            backoff.poll(start + CCUSAGE_FAILURE_RETRY_INTERVAL, || {
+                attempts += 1;
+                Ok(details)
+            }),
+            Some(details)
+        );
+        assert_eq!(attempts, 2);
     }
 
     struct UsageFixture {

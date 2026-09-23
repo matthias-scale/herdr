@@ -19,6 +19,7 @@ const READER_JOIN_GRACE: Duration = Duration::from_millis(250);
 pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
     let mut command = Command::new(program);
     crate::platform::configure_background_command(&mut command);
+    crate::platform::configure_noninteractive_command(&mut command);
     command
 }
 
@@ -476,6 +477,71 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("{what} (pid {pid}) still exists after the deadline");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parent_sigkill_kills_running_helper() {
+        const CHILD_ROLE: &str = "HERDR_TEST_NONINTERACTIVE_PARENT_DEATH_CHILD";
+
+        if std::env::var_os(CHILD_ROLE).is_some() {
+            let pid_file = std::env::var_os("HERDR_TEST_HELPER_PID_FILE")
+                .map(std::path::PathBuf::from)
+                .expect("helper pid file");
+            let mut helper = command("sleep").arg("30").spawn().expect("spawn helper");
+            std::fs::write(pid_file, helper.id().to_string()).expect("record helper pid");
+            let _ = helper.wait();
+            return;
+        }
+
+        let _guard = process_test_lock().lock().expect("process test lock");
+        let fixture_dir = fixture_dir("parent-death");
+        let pid_file = fixture_dir.join("helper-pid");
+        let current_test = std::env::current_exe().expect("current test binary");
+        let mut launcher = std::process::Command::new(current_test)
+            .args([
+                "--exact",
+                "noninteractive_process::tests::parent_sigkill_kills_running_helper",
+                "--nocapture",
+            ])
+            .env(CHILD_ROLE, "1")
+            .env("HERDR_TEST_HELPER_PID_FILE", &pid_file)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn helper launcher");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !pid_file.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let helper_pid = std::fs::read_to_string(&pid_file).expect("launcher recorded helper pid");
+        // SAFETY: launcher is a child owned by this test and has not been reaped.
+        assert_eq!(
+            unsafe { libc::kill(launcher.id() as libc::pid_t, libc::SIGKILL) },
+            0
+        );
+        launcher.wait().expect("reap killed launcher");
+
+        let helper_died = {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let mut died = false;
+            while Instant::now() < deadline {
+                if pid_is_dead(helper_pid.trim()) {
+                    died = true;
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            died
+        };
+        if !helper_died {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", helper_pid.trim()])
+                .status();
+        }
+        std::fs::remove_dir_all(fixture_dir).expect("remove parent-death fixture");
+        assert!(helper_died, "helper survived the launcher's SIGKILL");
     }
 
     // ac1: a refresh-path subprocess that exceeds its hard deadline is killed and reaped.

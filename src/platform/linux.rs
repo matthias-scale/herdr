@@ -39,6 +39,30 @@ use super::{
     LimitedRead, Signal,
 };
 
+/// Makes a noninteractive helper die with the Herdr process that spawned it.
+///
+/// The parent check closes the fork-to-prctl race: if Herdr died before the
+/// child armed the signal, the child aborts instead of continuing under init.
+pub(crate) fn configure_noninteractive_command_platform(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: getpid reads process metadata and has no preconditions.
+    let expected_parent = unsafe { libc::getpid() };
+    // SAFETY: the callback only uses async-signal-safe Linux syscalls and
+    // constructs allocation-free OS errors before exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != expected_parent {
+                return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+            }
+            Ok(())
+        });
+    }
+}
+
 /// Resolve the server's effective UID through the kernel user database.
 /// Environment variables are deliberately not consulted for identity checks.
 pub(crate) fn effective_user_name() -> Option<String> {

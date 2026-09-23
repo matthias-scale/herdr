@@ -86,6 +86,18 @@ pub(crate) fn configure_background_command(command: &mut std::process::Command) 
     configure_background_command_platform(command);
 }
 
+pub(crate) fn configure_noninteractive_command(command: &mut std::process::Command) {
+    configure_noninteractive_command_platform(command);
+}
+
+#[cfg(target_os = "linux")]
+fn configure_noninteractive_command_platform(command: &mut std::process::Command) {
+    linux::configure_noninteractive_command_platform(command);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_noninteractive_command_platform(_command: &mut std::process::Command) {}
+
 #[cfg(not(windows))]
 fn configure_background_command_platform(_command: &mut std::process::Command) {}
 
