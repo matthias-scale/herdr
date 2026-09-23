@@ -1094,10 +1094,10 @@ fn remote_row_control(app: &AppState, entry: &RemoteAgentPanelEntry) -> Option<S
     }
     let snoozed = entry.snoozed_until.is_some();
     if !snoozed
-        && !app
+        && app
             .sidebar_selected_remote_agent
             .as_ref()
-            .is_some_and(|selected| selected == &entry.agent_ref)
+            .is_none_or(|selected| selected != &entry.agent_ref)
     {
         return None;
     }
