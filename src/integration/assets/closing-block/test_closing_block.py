@@ -2485,12 +2485,18 @@ class BundleInstallerTests(unittest.TestCase):
         return module
 
     def setUp(self):
+        import os
         import pathlib
         import shutil
         import tempfile
 
         self.root = pathlib.Path(tempfile.mkdtemp(prefix="herdr-closing-install-test-"))
         self.addCleanup(shutil.rmtree, self.root)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self._home_patch = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        self._home_patch.start()
+        self.addCleanup(self._home_patch.stop)
         self.source = pathlib.Path(__file__).parent
         self.target = self.root / "share" / "herdr-closing-block"
         self.target.mkdir(parents=True)
@@ -2502,6 +2508,66 @@ class BundleInstallerTests(unittest.TestCase):
         (self.target / "codex-notify-chain.sh").write_text(
             "preserve existing notify wiring\n", encoding="utf-8"
         )
+
+    def _write_config(self, relative, content, mode=0o600):
+        path = self.home / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        path.chmod(mode)
+        return path
+
+    def test_install_wires_deduplicated_configs_and_preserves_safe_cases(self):
+        installer = self._installer_module()
+        root_config = self._write_config(".codex/config.toml", 'model = "root"\n', 0o640)
+        profile_root = self.home / ".codex-profiles"
+        real_profile = profile_root / "real"
+        real_profile.mkdir(parents=True)
+        (profile_root / "alias").symlink_to(real_profile, target_is_directory=True)
+        table_config = self._write_config(
+            ".codex-profiles/real/config.toml", '[model]\nname = "table"\n'
+        )
+        conflict = self._write_config(
+            ".codex-profiles/conflict/config.toml",
+            'notify = ["other-notify"]\n',
+        )
+        already = self._write_config(
+            ".codex-profiles/already/config.toml",
+            f'notify = ["python3", "{self.target / "herdr-codex-notify.py"}"]\n',
+        )
+        invalid = self._write_config(".codex-profiles/invalid/config.toml", "[broken\n")
+        before_mode = root_config.stat().st_mode & 0o7777
+
+        result = installer.install_bundle(self.source, self.target, dry_run=False)
+        notify = result["codex_notify"]
+
+        self.assertEqual(set(notify["wired"]), {str(root_config.resolve()), str(table_config.resolve())})
+        self.assertEqual(notify["notify_conflict"], [str(conflict.resolve())])
+        self.assertEqual(notify["already_wired"], [str(already.resolve())])
+        self.assertEqual(notify["skipped"], [str(invalid.resolve())])
+        self.assertEqual(root_config.stat().st_mode & 0o7777, before_mode)
+        self.assertEqual(table_config.read_text(encoding="utf-8").splitlines()[0].startswith("notify = "), True)
+        import tomllib
+        for path in (root_config, table_config, conflict, already):
+            with path.open("rb") as stream:
+                tomllib.load(stream)
+        self.assertTrue(list(root_config.parent.glob("config.toml.backup-*")))
+
+    def test_install_notify_dry_run_and_second_run_are_idempotent(self):
+        installer = self._installer_module()
+        config = self._write_config(".codex/config.toml", 'model = "root"\n')
+        original = config.read_bytes()
+
+        dry_run = installer.install_bundle(self.source, self.target, dry_run=True)
+        self.assertEqual(dry_run["codex_notify"]["wired"], [str(config.resolve())])
+        self.assertEqual(config.read_bytes(), original)
+        self.assertEqual(list(config.parent.glob("config.toml.backup-*")), [])
+
+        installer.install_bundle(self.source, self.target, dry_run=False)
+        backup_count = len(list(config.parent.glob("config.toml.backup-*")))
+        second = installer.install_bundle(self.source, self.target, dry_run=False)
+        self.assertEqual(second["codex_notify"]["wired"], [])
+        self.assertEqual(second["codex_notify"]["already_wired"], [str(config.resolve())])
+        self.assertEqual(len(list(config.parent.glob("config.toml.backup-*"))), backup_count)
 
     def _bundle_source(self, label):
         source = self.root / f"source-{label}"
