@@ -6562,18 +6562,16 @@ fn expanded_sidebar_body(app: &AppState, area: Rect) -> Rect {
 /// here shrinks with it.
 pub(crate) fn workspace_list_rect_for_app(app: &AppState, area: Rect) -> Rect {
     let content = expanded_sidebar_body(app, area);
-    let notepad = crate::ui::notepad::notepad_height(app, content);
-    Rect::new(
-        content.x,
-        content.y,
-        content.width,
-        content.height.saturating_sub(notepad),
-    )
+    crate::ui::goals::split_sidebar_panels(app, content).workspaces
 }
 
 /// The notepad panel's rows inside the sidebar.
 pub(crate) fn sidebar_notepad_rect(app: &AppState, area: Rect) -> Rect {
-    crate::ui::notepad::notepad_panel_rect(app, expanded_sidebar_body(app, area))
+    crate::ui::goals::split_sidebar_panels(app, expanded_sidebar_body(app, area)).notepad
+}
+
+fn sidebar_goals_rect(app: &AppState, area: Rect) -> Rect {
+    crate::ui::goals::split_sidebar_panels(app, expanded_sidebar_body(app, area)).goals
 }
 
 /// The idle animation's box, in the bottom-left corner of the sidebar's content
@@ -8913,6 +8911,7 @@ pub(super) fn render_sidebar(
     // here takes them twice and clips rows compute_view considers visible.
     render_workspace_list(app, terminal_runtimes, frame, area, is_navigating);
     crate::ui::notepad::render_notepad(app, frame, sidebar_notepad_rect(app, area));
+    crate::ui::goals::render_goals(app, frame, sidebar_goals_rect(app, area));
     crate::ui::hyperspace::render_animation(app, frame, sidebar_animation_rect(app, area));
     render_sidebar_header(app, frame, area, p);
     let settings = sidebar_footer_settings_hit_area(area);

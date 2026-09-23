@@ -24,6 +24,7 @@ mod files;
 pub(crate) mod foreground_process;
 mod git_actions;
 mod git_refresh;
+mod goals;
 pub(crate) mod home;
 pub(crate) mod home_catalog;
 pub(crate) mod home_refs;
@@ -241,6 +242,11 @@ pub struct App {
     pub(crate) notepad_git_sync: bool,
     pub(crate) notepad_git_sync_interval: std::time::Duration,
     pub(crate) notepad_next_git_pull: Option<Instant>,
+    pub(crate) goals_observation: Option<crate::goals::GoalsObservation>,
+    pub(crate) goals_focused_cwd: Option<std::path::PathBuf>,
+    pub(crate) goals_refresh_in_flight: bool,
+    pub(crate) goals_refresh_generation: u64,
+    pub(crate) next_goals_refresh: Instant,
     /// `[pomodoro] log_file`; empty disables the break log.
     pub(crate) pomodoro_log_file: String,
     pub(crate) loop_receipt_fallback_deadline: Option<Instant>,
@@ -1272,6 +1278,7 @@ impl App {
             dock_editor_requested_paths: std::collections::HashMap::new(),
             scratchpad: crate::scratchpad::ScratchpadDoc::default(),
             notepad: crate::notepad::NotepadState::from_config(&config.notepad),
+            goals: crate::goals::GoalsPanelState::from_config(&config.goals_panel),
             pomodoro: crate::pomodoro::PomodoroState::from_config(&config.pomodoro, Instant::now()),
             hyperspace: crate::hyperspace::HyperspaceState::new(
                 config.ui.sidebar_animation,
@@ -1552,6 +1559,11 @@ impl App {
                 config.notepad.git_sync_interval_seconds.clamp(15, 3600),
             ),
             notepad_next_git_pull: None,
+            goals_observation: None,
+            goals_focused_cwd: None,
+            goals_refresh_in_flight: false,
+            goals_refresh_generation: 0,
+            next_goals_refresh: Instant::now(),
             pomodoro_log_file: config.pomodoro.log_file.clone(),
             loop_receipt_fallback_deadline,
             loop_receipt_watch_degraded: false,
@@ -2828,10 +2840,13 @@ impl App {
             }
         }
 
-        // Their own gates: the notepad and the break timer read nothing out of
-        // `[ui]`, so a broken `[ui]` section must not freeze either of them.
+        // Their own gates: these sidebar companions read nothing out of `[ui]`,
+        // so a broken `[ui]` section must not freeze any of them.
         if !invalid_section("notepad") {
             self.apply_notepad_config(&config.notepad);
+        }
+        if !invalid_section("goals_panel") {
+            self.apply_goals_config(&config.goals_panel);
         }
         if !invalid_section("pomodoro") {
             self.apply_pomodoro_config(&config.pomodoro);

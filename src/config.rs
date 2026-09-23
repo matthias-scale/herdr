@@ -25,9 +25,9 @@ pub use self::{
     },
     model::{
         validated_sidebar_bounds, ActionConfig, AgentPanelSortConfig, Config, ConfigReloadReport,
-        ConfigReloadStatus, FilesIconConfig, FleetConfig, FleetHostConfig, HostCursorModeConfig,
-        LaunchProfileConfig, LinearLayoutConfig, MergeMethodConfig, MissiveConfig,
-        NewTerminalCwdConfig, NewThreadWorkspaceConfig, NotepadConfig, PanelConfig,
+        ConfigReloadStatus, FilesIconConfig, FleetConfig, FleetHostConfig, GoalsPanelConfig,
+        HostCursorModeConfig, LaunchProfileConfig, LinearLayoutConfig, MergeMethodConfig,
+        MissiveConfig, NewTerminalCwdConfig, NewThreadWorkspaceConfig, NotepadConfig, PanelConfig,
         PanelSurfaceConfig, PomodoroConfig, ProjectConfig, ShellModeConfig,
         SidebarCollapsedModeConfig, StatusIndicatorStyle, TabBarPositionConfig,
         TerminalNotificationBackend, ToastClipboardPosition, ToastConfig, ToastDelivery,

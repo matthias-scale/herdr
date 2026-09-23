@@ -2351,6 +2351,19 @@
       ]
     },
     {
+      "id": "goals-panel",
+      "title": "Goals panel",
+      "description": "Read-only goals and work streams for the focused session, loaded from its .streams.json file.",
+      "keys": [
+        {
+          "key": "goals_panel.enabled",
+          "type": "boolean",
+          "default": "true",
+          "description": "Show the focused session's goals panel at the bottom of the sidebar."
+        }
+      ]
+    },
+    {
       "id": "pomodoro",
       "title": "Break timer",
       "description": "A pomodoro cycle whose reminder is an overlay that has to be answered in writing before it goes away.",

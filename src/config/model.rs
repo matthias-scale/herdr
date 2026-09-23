@@ -442,6 +442,7 @@ pub struct Config {
     pub panel: PanelConfig,
     pub linear: LinearConfig,
     pub notepad: NotepadConfig,
+    pub goals_panel: GoalsPanelConfig,
     pub pomodoro: PomodoroConfig,
     pub actions: Vec<ActionConfig>,
     pub launch_profiles: Vec<LaunchProfileConfig>,
@@ -544,6 +545,20 @@ impl Default for NotepadConfig {
             git_sync: false,
             git_sync_interval_seconds: 120,
         }
+    }
+}
+
+/// `[goals_panel]` - the focused session's read-only goals panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct GoalsPanelConfig {
+    /// Show goals and work streams from `.streams.json` in the sidebar.
+    pub enabled: bool,
+}
+
+impl Default for GoalsPanelConfig {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
