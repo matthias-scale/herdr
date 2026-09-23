@@ -54,12 +54,6 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::AgentStart(_)
             | Method::AgentPrompt(_)
             | Method::AgentSendKeys(_)
-            | Method::DayAdd(_)
-            | Method::DayBind(_)
-            | Method::DayLink(_)
-            | Method::DayNote(_)
-            | Method::DayDone(_)
-            | Method::DayDismiss(_)
             | Method::PaneSplit(_)
             | Method::PaneSwap(_)
             | Method::PaneMove(_)
@@ -183,5 +177,17 @@ mod tests {
                 method,
             }));
         }
+    }
+
+    #[test]
+    fn day_mutations_do_not_trigger_client_rendering() {
+        let request = Request {
+            id: "day-done".into(),
+            method: Method::DayDone(crate::api::schema::DayItemTarget {
+                id: "01K5DAYITEM".into(),
+            }),
+        };
+
+        assert!(!request_changes_ui(&request));
     }
 }
