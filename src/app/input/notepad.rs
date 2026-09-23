@@ -914,6 +914,8 @@ mod tests {
         let body = notepad_body_rect(state.view.notepad_rect);
 
         assert!(state.handle_notepad_mouse(&click_at(body.x, body.y)));
+        assert!(state.usage_view.is_none(), "the provider header is inert");
+        assert!(state.handle_notepad_mouse(&click_at(body.x, body.y + 1)));
         assert!(state.usage_view.is_some());
         assert!(state.request_usage_scan);
     }

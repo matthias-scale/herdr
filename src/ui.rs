@@ -51,6 +51,7 @@ mod tabs;
 mod tooltip;
 pub(crate) use tooltip::hovered_control_at;
 pub(crate) mod agent_picker;
+mod bar;
 pub(crate) mod text;
 pub(crate) mod ticket_actions;
 pub(crate) mod usage;

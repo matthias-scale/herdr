@@ -8551,7 +8551,7 @@ esac
         ));
         assert!(first_text.contains("▸ Tasks"), "{first_text}");
         assert!(!first_text.contains("note"), "{first_text}");
-        assert!(second_text.contains("CX"), "{second_text}");
+        assert!(second_text.contains("CCE 5"), "{second_text}");
         assert!(!second_text.contains("note"), "{second_text}");
         assert!(third_text.contains("note"), "{third_text}");
         assert!(

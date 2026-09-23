@@ -74,7 +74,7 @@ fn read_only_tab_labels(width: u16) -> (&'static str, &'static str, &'static str
             super::notepad_usage::TAB_LABEL,
         )
     } else {
-        ("C", "A", "U")
+        ("c", "a", "u")
     }
 }
 
@@ -511,10 +511,43 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             header.chars().skip(12).take(7).collect::<String>(),
-            "Context"
+            "context"
         );
         assert_eq!(header.chars().skip(20).take(5).collect::<String>(), "agent");
         assert_eq!(header.chars().skip(26).take(5).collect::<String>(), "usage");
+    }
+
+    #[test]
+    fn tab_hit_areas_never_extend_past_the_visible_header() {
+        let mut app = state();
+        app.notepad.set_files(vec![crate::notepad::NotepadFile {
+            path: "/notes/a-very-long-note.md".into(),
+            name: "a-very-long-note".into(),
+        }]);
+        for width in [1, 8, 12, 18, 26, 32] {
+            let panel = Rect::new(4, 10, width, 8);
+            let areas = notepad_tab_hit_areas(&app, panel);
+            assert!(
+                areas.iter().all(|(_, area)| {
+                    area.x >= panel.x && area.right() <= panel.right() && area.width > 0
+                }),
+                "width {width}: {areas:?}"
+            );
+            if width >= 18 {
+                let header = header_spans(&app, &app.palette, width)
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>();
+                assert!(display_width_u16(&header) <= width, "width {width}");
+                let labels = if width >= 32 {
+                    "│ context agent usage"
+                } else {
+                    "│ c a u"
+                };
+                assert!(header.contains(labels), "width {width}: {header}");
+            }
+        }
     }
 }
 
@@ -535,8 +568,8 @@ mod render_tests {
     }
 
     #[test]
-    fn read_only_tabs_render_at_minimum_and_normal_sidebar_widths() {
-        for width in [18, 26] {
+    fn read_only_tabs_render_lowercase_fallback_and_full_labels() {
+        for width in [18, 26, 32] {
             let mut app = AppState::test_new();
             app.notepad.enabled = true;
             app.notepad.set_files(vec![
@@ -555,7 +588,12 @@ mod render_tests {
                 .draw(|frame| render_notepad(&app, frame, panel))
                 .expect("render");
             let header = buffer_text(&terminal)[0].clone();
-            assert!(header.contains("│ C A U"), "width {width}: {header}");
+            let labels = if width >= 32 {
+                "│ context agent usage"
+            } else {
+                "│ c a u"
+            };
+            assert!(header.contains(labels), "width {width}: {header}");
             assert_eq!(
                 notepad_tab_hit_areas(&app, panel)
                     .last()
@@ -608,7 +646,7 @@ mod render_tests {
         let panel_rows = &rows
             [usize::from(app.view.notepad_rect.y)..usize::from(app.view.notepad_rect.bottom())];
         assert!(
-            panel_rows[0].contains("todo") && panel_rows[0].contains("│ C A U"),
+            panel_rows[0].contains("todo") && panel_rows[0].contains("│ c a u"),
             "header lists the notes that fit and compact read-only tabs: {:?}",
             panel_rows[0]
         );
@@ -679,7 +717,7 @@ mod render_tests {
         let rows = buffer_text(&terminal);
         let panel_rows = &rows[usize::from(panel.y)..usize::from(panel.bottom())];
         assert!(
-            panel_rows[0].contains("│ C A U"),
+            panel_rows[0].contains("│ c a u"),
             "header carries the Context tab: {:?}",
             panel_rows[0]
         );

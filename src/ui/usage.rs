@@ -17,7 +17,6 @@ use crate::{
     provider_usage::{ProviderUsageSnapshot, QuotaWindow, UsageProvider, UsageSample},
 };
 
-const BAR_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const HEADER_CONTROLS: [(UsageHitTarget, u16); 7] = [
     (UsageHitTarget::Cost, 6),
     (UsageHitTarget::Tokens, 8),
@@ -619,14 +618,7 @@ fn render_chart(
     let tallest = visible.iter().copied().fold(0.0_f64, f64::max);
     let bars: String = visible
         .iter()
-        .map(|value| {
-            if tallest <= 0.0 {
-                BAR_GLYPHS[0]
-            } else {
-                let index = ((value / tallest) * 7.0).round().clamp(0.0, 7.0) as usize;
-                BAR_GLYPHS[index]
-            }
-        })
+        .map(|value| super::bar::bar_glyph(*value, tallest))
         .collect();
     let middle = projection
         .start
@@ -714,14 +706,7 @@ fn render_provider_chart(
     for (provider, values) in visible {
         let bars = values
             .iter()
-            .map(|value| {
-                if tallest <= 0.0 {
-                    BAR_GLYPHS[0]
-                } else {
-                    let index = ((value / tallest) * 7.0).round().clamp(0.0, 7.0) as usize;
-                    BAR_GLYPHS[index]
-                }
-            })
+            .map(|value| super::bar::bar_glyph(*value, tallest))
             .collect::<String>();
         lines.push(Line::from(vec![
             Span::styled(
@@ -1232,7 +1217,7 @@ mod tests {
     fn usage_chart_scales_with_block_glyphs_and_three_axis_labels_at_both_widths() {
         for (width, height) in [(120, 40), (80, 24)] {
             let text = render_at(width, height);
-            assert!(BAR_GLYPHS.iter().any(|glyph| text.contains(*glyph)));
+            assert!(text.chars().any(crate::ui::bar::is_bar_glyph));
             assert!(
                 text.matches("2026-").count() >= 3,
                 "{width}x{height}\n{text}"
@@ -1356,10 +1341,7 @@ mod tests {
             .retain(|sample| sample.provider == UsageProvider::ClaudeCode);
         let text = render_snapshot_at(120, 40, snapshot);
         assert!(text.contains("Daily cost"), "{text}");
-        assert!(
-            BAR_GLYPHS.iter().any(|glyph| text.contains(*glyph)),
-            "{text}"
-        );
+        assert!(text.chars().any(crate::ui::bar::is_bar_glyph), "{text}");
         assert!(!text.contains("◆ Claude Code  ● Codex"), "{text}");
         assert!(text.matches("2026-").count() >= 3, "{text}");
     }
