@@ -199,7 +199,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 [work_index]
 # Enable repo-wide GitHub, Linear, agent-pane, and day-link work indexing.
-# enabled = true
+# Day items complete themselves from linked merged PRs and done tickets only
+# while this is on.
+# enabled = false
 # Refresh interval in seconds.
 # refresh_interval_seconds = 300
 # Linear team key, for example "SCA".

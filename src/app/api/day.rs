@@ -219,7 +219,7 @@ impl App {
         });
         let prs_closed = item.links.prs.iter().all(|pr| {
             snapshot.items.iter().any(|work| {
-                work.pr_url.as_deref() == Some(pr)
+                work.pr_url.as_deref().map(same_pull_request) == Some(same_pull_request(pr))
                     && work
                         .pr_state
                         .as_deref()
@@ -228,6 +228,13 @@ impl App {
         });
         tickets_closed && prs_closed
     }
+}
+
+/// GitHub reports canonical PR urls, while a stored link may carry a trailing
+/// slash. The work index already trims one for lookup, so compare the same way
+/// or a slashed link never closes.
+fn same_pull_request(url: &str) -> &str {
+    url.trim_end_matches('/')
 }
 
 fn ticket_state_for_link<'a>(
@@ -285,6 +292,17 @@ mod tests {
 
     fn response(raw: &str) -> SuccessResponse {
         serde_json::from_str(raw).expect("success response")
+    }
+
+    #[test]
+    fn a_trailing_slash_pull_request_link_still_completes() {
+        // GitHub returns the canonical url; the stored link may carry a slash.
+        let stored = "https://github.com/acme/app/pull/9/";
+        let canonical = "https://github.com/acme/app/pull/9";
+        assert_eq!(
+            super::same_pull_request(stored),
+            super::same_pull_request(canonical)
+        );
     }
 
     #[test]
