@@ -17,6 +17,14 @@ pub(crate) const DECLARED_WAIT_GRACE: Duration = Duration::from_secs(30);
 #[cfg(test)]
 pub(crate) const DEFAULT_SUBAGENT_STALE_SILENCE: Duration = Duration::from_secs(60 * 60);
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum SubagentTranscriptActivity {
+    #[default]
+    Unknown,
+    Fresh,
+    Stale,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompletionTier {
     ContractSatisfied,
@@ -709,6 +717,10 @@ pub struct TerminalState {
     /// `active_subagents`. It is not persisted or exposed through the API.
     pub(crate) claude_subagent_observations:
         Option<Vec<crate::app::claude_subagents::ClaudeSubagentObservation>>,
+    /// Runtime-only liveness evidence collected by the background Claude
+    /// subagent transcript refresh. Unknown preserves the declared wait budget.
+    claude_subagent_transcript_activity: SubagentTranscriptActivity,
+    claude_subagent_activity_observed_at: Option<Instant>,
     /// Last background observation of the pane's distinct foreground process.
     pub(crate) foreground_process_name: Option<String>,
     foreground_process_active: bool,
@@ -790,6 +802,8 @@ impl TerminalState {
             stale_resolution: None,
             active_subagents: None,
             claude_subagent_observations: None,
+            claude_subagent_transcript_activity: SubagentTranscriptActivity::Unknown,
+            claude_subagent_activity_observed_at: None,
             foreground_process_name: None,
             foreground_process_active: false,
             last_agent_state_change_seq: None,
@@ -1579,15 +1593,20 @@ impl TerminalState {
                 self.revision = self.revision.wrapping_add(1);
                 return true;
             }
-            if count.is_none() && self.claude_subagent_observations.take().is_some() {
-                self.revision = self.revision.wrapping_add(1);
-                return true;
+            if count.is_none() {
+                let observations_changed = self.claude_subagent_observations.take().is_some();
+                let activity_changed = self.clear_claude_subagent_transcript_activity();
+                if observations_changed || activity_changed {
+                    self.revision = self.revision.wrapping_add(1);
+                    return true;
+                }
             }
             return false;
         }
         self.active_subagents = count;
         if count.is_none() {
             self.claude_subagent_observations = None;
+            self.clear_claude_subagent_transcript_activity();
         } else {
             self.supervisor_stale = false;
             self.stale_resolution = None;
@@ -1651,11 +1670,38 @@ impl TerminalState {
         true
     }
 
+    pub(crate) fn set_claude_subagent_transcript_activity_at(
+        &mut self,
+        activity: SubagentTranscriptActivity,
+        observed_at: Instant,
+    ) -> bool {
+        if activity == SubagentTranscriptActivity::Unknown {
+            return false;
+        }
+        let changed = self.claude_subagent_transcript_activity != activity;
+        self.claude_subagent_transcript_activity = activity;
+        self.claude_subagent_activity_observed_at =
+            (activity == SubagentTranscriptActivity::Fresh).then_some(observed_at);
+        changed
+    }
+
+    fn clear_claude_subagent_transcript_activity(&mut self) -> bool {
+        let changed = self.claude_subagent_transcript_activity
+            != SubagentTranscriptActivity::Unknown
+            || self.claude_subagent_activity_observed_at.is_some();
+        self.claude_subagent_transcript_activity = SubagentTranscriptActivity::Unknown;
+        self.claude_subagent_activity_observed_at = None;
+        changed
+    }
+
     pub(crate) fn set_claude_transcript_target(
         &mut self,
         session_id: Option<String>,
         path: Option<PathBuf>,
     ) {
+        if self.claude_transcript_session_id != session_id || self.claude_transcript_path != path {
+            self.clear_claude_subagent_transcript_activity();
+        }
         self.claude_transcript_session_id = session_id;
         self.claude_transcript_path = path;
     }
@@ -2210,6 +2256,7 @@ impl TerminalState {
         self.unreported_turn_started_at = starts_turn.then_some(now);
         if starts_turn {
             self.agent_turn_generation = self.agent_turn_generation.wrapping_add(1);
+            self.clear_claude_subagent_transcript_activity();
         }
         if closing_report_is_older {
             self.clear_closing_task_report(now);
@@ -2416,6 +2463,7 @@ impl TerminalState {
         }
         if starts_hook_turn {
             self.agent_turn_generation = self.agent_turn_generation.wrapping_add(1);
+            self.clear_claude_subagent_transcript_activity();
         }
         self.replace_hook_authority(Some(HookAuthority {
             source,
@@ -2589,10 +2637,24 @@ impl TerminalState {
             .as_ref()
             .filter(|authority| authority.retired_at.is_none())?;
         if self.waiting_on_agents() {
-            let quiet_since = pane_activity_at
+            let mut quiet_since = pane_activity_at
                 .filter(|activity_at| *activity_at > authority.reported_at)
                 .unwrap_or(authority.reported_at);
-            return quiet_since.checked_add(subagent_stale_after);
+            if self.claude_subagent_transcript_activity == SubagentTranscriptActivity::Fresh {
+                if let Some(observed_at) = self
+                    .claude_subagent_activity_observed_at
+                    .filter(|observed_at| *observed_at > quiet_since)
+                {
+                    quiet_since = observed_at;
+                }
+            }
+            let age =
+                if self.claude_subagent_transcript_activity == SubagentTranscriptActivity::Stale {
+                    stale_after
+                } else {
+                    subagent_stale_after
+                };
+            return quiet_since.checked_add(age);
         }
         let age = match authority.state {
             AgentState::Working => authority
@@ -7548,6 +7610,121 @@ mod tests {
                 Some(now),
             ),
             now.checked_add(Duration::from_secs(60 * 60))
+        );
+    }
+
+    #[test]
+    fn a_fresh_subagent_transcript_keeps_the_long_watchdog_budget() {
+        let now = Instant::now();
+        let witness_at = now + Duration::from_secs(4 * 60);
+        let mut terminal = subagent_claim_terminal(now);
+        terminal.set_claude_subagent_transcript_activity_at(
+            SubagentTranscriptActivity::Fresh,
+            witness_at,
+        );
+
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            ),
+            witness_at.checked_add(TEST_SUBAGENT_STALE_AFTER)
+        );
+    }
+
+    #[test]
+    fn stale_subagent_transcripts_fall_back_to_the_ordinary_budget() {
+        let now = Instant::now();
+        let mut terminal = subagent_claim_terminal(now);
+        terminal.set_claude_subagent_transcript_activity_at(
+            SubagentTranscriptActivity::Stale,
+            now + Duration::from_secs(4 * 60),
+        );
+
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            ),
+            now.checked_add(TEST_AGENT_STALE_AFTER)
+        );
+        assert!(terminal
+            .mark_agent_status_stale_at_with_activity(
+                now + TEST_AGENT_STALE_AFTER,
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            )
+            .is_some());
+        assert!(terminal.supervisor_stale);
+    }
+
+    #[test]
+    fn stale_evidence_does_not_restart_the_parent_silence_clock() {
+        let now = Instant::now();
+        let mut terminal = subagent_claim_terminal(now);
+        let witness_at = now + Duration::from_secs(4 * 60);
+        terminal.set_claude_subagent_transcript_activity_at(
+            SubagentTranscriptActivity::Fresh,
+            witness_at,
+        );
+        terminal.set_claude_subagent_transcript_activity_at(
+            SubagentTranscriptActivity::Stale,
+            witness_at + Duration::from_secs(1),
+        );
+
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            ),
+            now.checked_add(TEST_AGENT_STALE_AFTER)
+        );
+        assert_eq!(terminal.effective_active_subagents(), Some(3));
+        assert!(!terminal.supervisor_stale);
+    }
+
+    #[test]
+    fn unknown_transcript_evidence_cannot_change_an_existing_budget_decision() {
+        let now = Instant::now();
+        let witness_at = now + Duration::from_secs(4 * 60);
+        let mut fresh = subagent_claim_terminal(now);
+        fresh.set_claude_subagent_transcript_activity_at(
+            SubagentTranscriptActivity::Fresh,
+            witness_at,
+        );
+        assert!(!fresh.set_claude_subagent_transcript_activity_at(
+            SubagentTranscriptActivity::Unknown,
+            witness_at + Duration::from_secs(1),
+        ));
+        assert_eq!(
+            fresh.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            ),
+            witness_at.checked_add(TEST_SUBAGENT_STALE_AFTER)
+        );
+
+        let mut stale = subagent_claim_terminal(now);
+        stale.set_claude_subagent_transcript_activity_at(
+            SubagentTranscriptActivity::Stale,
+            witness_at,
+        );
+        assert!(!stale.set_claude_subagent_transcript_activity_at(
+            SubagentTranscriptActivity::Unknown,
+            witness_at + Duration::from_secs(1),
+        ));
+        assert_eq!(
+            stale.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            ),
+            now.checked_add(TEST_AGENT_STALE_AFTER)
         );
     }
 

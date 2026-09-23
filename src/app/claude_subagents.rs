@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
@@ -130,6 +130,7 @@ pub(crate) struct RefreshObservation {
     pub(crate) tracker: TranscriptTracker,
     pub(crate) count: Option<u32>,
     pub(crate) observations: Option<Vec<ClaudeSubagentObservation>>,
+    pub(crate) transcript_activity: crate::terminal::state::SubagentTranscriptActivity,
     pub(crate) stats: ScanStats,
 }
 
@@ -569,16 +570,53 @@ impl TranscriptTracker {
             .flatten()
     }
 
-    fn refresh_transcript_paths(&mut self) {
+    fn refresh_transcript_paths_and_activity(
+        &mut self,
+        freshness_window: std::time::Duration,
+        deadline: Instant,
+    ) -> crate::terminal::state::SubagentTranscriptActivity {
+        let wall_clock_now = SystemTime::now();
+        let mut saw_known_transcript = false;
+        let mut saw_fresh_transcript = false;
+        let mut completed = true;
         for observation in &mut self.cursor.observations {
-            if observation.transcript_path.is_none()
-                && (!self.transcript_paths_initialized || observation.state != AgentState::Idle)
-            {
-                observation.transcript_path =
-                    known_subagent_transcript_path(&self.path, &observation.id);
+            if Instant::now() >= deadline {
+                completed = false;
+                break;
+            }
+            let active = self.cursor.active_ids.contains(&observation.id);
+            let metadata = if let Some(path) = observation.transcript_path.as_ref() {
+                active.then(|| regular_file_metadata(path)).flatten()
+            } else if !self.transcript_paths_initialized || observation.state != AgentState::Idle {
+                known_subagent_transcript(&self.path, &observation.id).map(|(path, metadata)| {
+                    observation.transcript_path = Some(path);
+                    metadata
+                })
+            } else {
+                None
+            };
+            if !active {
+                continue;
+            }
+            let Some(modified_at) = metadata.and_then(|metadata| metadata.modified().ok()) else {
+                continue;
+            };
+            saw_known_transcript = true;
+            if match wall_clock_now.duration_since(modified_at) {
+                Ok(age) => age <= freshness_window,
+                Err(_) => true,
+            } {
+                saw_fresh_transcript = true;
             }
         }
-        self.transcript_paths_initialized = true;
+        self.transcript_paths_initialized = completed;
+        if saw_fresh_transcript {
+            crate::terminal::state::SubagentTranscriptActivity::Fresh
+        } else if saw_known_transcript && completed {
+            crate::terminal::state::SubagentTranscriptActivity::Stale
+        } else {
+            crate::terminal::state::SubagentTranscriptActivity::Unknown
+        }
     }
 
     fn retained_bytes(&self) -> usize {
@@ -664,6 +702,7 @@ impl TranscriptTracker {
 pub(crate) fn refresh_trackers(
     work: Vec<RefreshWorkItem>,
     deadline: Instant,
+    freshness_window: std::time::Duration,
 ) -> (Vec<RefreshObservation>, BatchStats) {
     let started = Instant::now();
     let mut budget = BATCH_READ_BUDGET;
@@ -712,7 +751,9 @@ pub(crate) fn refresh_trackers(
         } else {
             total_carry = total_carry.saturating_add(retained);
         }
-        item.tracker.refresh_transcript_paths();
+        let transcript_activity = item
+            .tracker
+            .refresh_transcript_paths_and_activity(freshness_window, deadline);
         let count = item.tracker.count();
         let subagents = item.tracker.observations();
         observations.push(RefreshObservation {
@@ -720,6 +761,7 @@ pub(crate) fn refresh_trackers(
             tracker: item.tracker,
             count,
             observations: subagents,
+            transcript_activity,
             stats,
         });
     }
@@ -820,11 +862,12 @@ impl crate::app::App {
             generation,
             deadline,
         });
+        let freshness_window = self.state.agent_stale_after;
         let event_tx = self.event_tx.clone();
         let _ = std::thread::Builder::new()
             .name("herdr-claude-subagents".into())
             .spawn(move || {
-                let (observations, stats) = refresh_trackers(work, deadline);
+                let (observations, stats) = refresh_trackers(work, deadline, freshness_window);
                 let _ = event_tx.blocking_send(crate::events::AppEvent::ClaudeSubagentsRefreshed {
                     generation,
                     observations,
@@ -864,6 +907,7 @@ impl crate::app::App {
         self.last_applied_claude_subagent_refresh_generation = generation;
 
         let mut updated_terminal_ids = Vec::new();
+        let mut transcript_activities = HashMap::new();
         for observation in observations {
             let current_matches = self
                 .state
@@ -888,6 +932,10 @@ impl crate::app::App {
             }
             self.claude_subagent_trackers
                 .insert(observation.target.terminal_id.clone(), observation.tracker);
+            transcript_activities.insert(
+                observation.target.terminal_id.clone(),
+                observation.transcript_activity,
+            );
             let _ = (observation.count, observation.observations);
             updated_terminal_ids.push(observation.target.terminal_id);
             let _ = observation.stats;
@@ -919,6 +967,7 @@ impl crate::app::App {
         updated_terminal_ids.dedup();
         let mut counts_changed = 0_u64;
         let mut observations_changed = 0_u64;
+        let mut transcript_activities_changed = 0_u64;
         let mut changed_panes = Vec::new();
         let mut pane_updates = Vec::new();
         let previous_toast = self.state.toast.clone();
@@ -962,6 +1011,7 @@ impl crate::app::App {
                 .claude_subagent_trackers
                 .get(&terminal_id)
                 .map(|tracker| tracker.session_id.clone());
+            let transcript_activity = transcript_activities.remove(&terminal_id);
             let location =
                 self.state
                     .workspaces
@@ -977,22 +1027,42 @@ impl crate::app::App {
                     });
             let mut count_changed = false;
             let mut observation_changed = false;
+            let mut transcript_activity_changed = false;
             let state_update = if let Some((_, pane_id, seen)) = location {
                 let now = Instant::now();
                 self.state
                     .update_terminal_state_at(pane_id, now, |terminal| {
-                        let (changed, mutation) =
-                            terminal.set_active_subagents_with_projection_at(count, seen, now);
-                        count_changed = changed;
+                        let (count_changed_now, mutation) = if transcript_activity
+                            != Some(crate::terminal::state::SubagentTranscriptActivity::Fresh)
+                            && terminal.active_subagents == count
+                        {
+                            (false, None)
+                        } else {
+                            terminal.set_active_subagents_with_projection_at(count, seen, now)
+                        };
+                        count_changed = count_changed_now;
                         observation_changed =
                             terminal.set_claude_subagent_observations(observations.clone());
+                        if let Some(activity) = transcript_activity {
+                            transcript_activity_changed =
+                                terminal.set_claude_subagent_transcript_activity_at(activity, now);
+                        }
                         mutation
                     })
             } else {
                 if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
-                    count_changed = terminal.set_active_subagents(count);
+                    if transcript_activity
+                        == Some(crate::terminal::state::SubagentTranscriptActivity::Fresh)
+                        || terminal.active_subagents != count
+                    {
+                        count_changed = terminal.set_active_subagents(count);
+                    }
                     observation_changed =
                         terminal.set_claude_subagent_observations(observations.clone());
+                    if let Some(activity) = transcript_activity {
+                        transcript_activity_changed = terminal
+                            .set_claude_subagent_transcript_activity_at(activity, Instant::now());
+                    }
                 }
                 None
             };
@@ -1001,6 +1071,9 @@ impl crate::app::App {
             }
             if observation_changed {
                 observations_changed = observations_changed.saturating_add(1);
+            }
+            if transcript_activity_changed {
+                transcript_activities_changed = transcript_activities_changed.saturating_add(1);
             }
             let transcript_changed = location.is_some_and(|(_, pane_id, _)| {
                 let subagents = observations
@@ -1037,7 +1110,11 @@ impl crate::app::App {
                 );
                 session_changed || observation_changed
             });
-            if !count_changed && !observation_changed && !transcript_changed {
+            if !count_changed
+                && !observation_changed
+                && !transcript_activity_changed
+                && !transcript_changed
+            {
                 continue;
             }
             if let Some((ws_idx, pane_id, _)) = location {
@@ -1081,10 +1158,11 @@ impl crate::app::App {
             max_target_us = stats.max_target_us,
             counts_changed,
             observations_changed,
+            transcript_activities_changed,
             active_subagents_total,
             "refreshed Claude subagent transcripts"
         );
-        counts_changed > 0 || observations_changed > 0
+        counts_changed > 0 || observations_changed > 0 || transcript_activities_changed > 0
     }
 }
 
@@ -1337,13 +1415,18 @@ fn valid_subagent_name(value: &str) -> Option<String> {
     Some(value.chars().take(120).collect())
 }
 
-fn known_subagent_transcript_path(parent: &Path, id: &str) -> Option<PathBuf> {
+fn known_subagent_transcript(parent: &Path, id: &str) -> Option<(PathBuf, Metadata)> {
     let path = parent
         .with_extension("")
         .join("subagents")
         .join(format!("agent-{id}.jsonl"));
-    let metadata = std::fs::symlink_metadata(&path).ok()?;
-    (!metadata.file_type().is_symlink() && metadata.is_file()).then_some(path)
+    let metadata = regular_file_metadata(&path)?;
+    Some((path, metadata))
+}
+
+fn regular_file_metadata(path: &Path) -> Option<Metadata> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    (!metadata.file_type().is_symlink() && metadata.is_file()).then_some(metadata)
 }
 
 #[cfg(test)]
@@ -1890,11 +1973,18 @@ mod tests {
         let mut tracker = TranscriptTracker::new(SESSION_ID.into(), path, 1);
         tracker.cursor.ingest(&launch(AGENT_A), true);
         tracker.cursor.ingest(&launch(AGENT_B), true);
-        tracker.refresh_transcript_paths();
+        let activity = tracker.refresh_transcript_paths_and_activity(
+            std::time::Duration::from_secs(5 * 60),
+            Instant::now() + WORKER_TIMEOUT,
+        );
 
         let observations = tracker.observations().expect("authoritative replay");
         assert_eq!(observations[0].transcript_path.as_ref(), Some(&child));
         assert_eq!(observations[1].transcript_path, None);
+        assert_eq!(
+            activity,
+            crate::terminal::state::SubagentTranscriptActivity::Fresh
+        );
     }
 
     #[test]
@@ -2131,8 +2221,11 @@ mod tests {
             })
             .collect();
 
-        let (observations, stats) =
-            refresh_trackers(work, Instant::now() + std::time::Duration::from_secs(5));
+        let (observations, stats) = refresh_trackers(
+            work,
+            Instant::now() + std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5 * 60),
+        );
         assert_eq!(stats.targets_total, 41);
         assert_eq!(stats.targets_attempted, 16);
         assert_eq!(observations.len(), 16);
@@ -2163,8 +2256,11 @@ mod tests {
                 }
             })
             .collect();
-        let (initial, initial_stats) =
-            refresh_trackers(work, Instant::now() + std::time::Duration::from_secs(5));
+        let (initial, initial_stats) = refresh_trackers(
+            work,
+            Instant::now() + std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5 * 60),
+        );
         let steady_work = initial
             .into_iter()
             .map(|observation| RefreshWorkItem {
@@ -2175,6 +2271,7 @@ mod tests {
         let (_, steady_stats) = refresh_trackers(
             steady_work,
             Instant::now() + std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5 * 60),
         );
         assert_eq!(initial_stats.targets_attempted, 41);
         assert_eq!(steady_stats.targets_attempted, 41);
@@ -2303,6 +2400,7 @@ mod tests {
             },
             count: tracker.count(),
             observations: tracker.observations(),
+            transcript_activity: crate::terminal::state::SubagentTranscriptActivity::Unknown,
             tracker,
             stats: ScanStats::default(),
         }
@@ -2329,9 +2427,37 @@ mod tests {
             },
             count: tracker.count(),
             observations: tracker.observations(),
+            transcript_activity: crate::terminal::state::SubagentTranscriptActivity::Unknown,
             tracker,
             stats: ScanStats::default(),
         }
+    }
+
+    #[test]
+    fn stale_transcript_refresh_preserves_an_existing_watchdog_mark() {
+        let dir = TestDir::new("stale-refresh-preserves-watchdog");
+        let path = dir.transcript();
+        let (mut app, terminal_id) = app_with_claude_target(path.clone());
+        let mut refresh = observation(terminal_id.clone(), path.clone(), 7, AGENT_A);
+        refresh.transcript_activity = crate::terminal::state::SubagentTranscriptActivity::Stale;
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_active_subagents(Some(1));
+        terminal.supervisor_stale = true;
+        terminal.stale_resolution = Some((AgentState::Unknown, true));
+        app.claude_subagent_trackers.insert(
+            terminal_id.clone(),
+            TranscriptTracker::new(SESSION_ID.into(), path, 7),
+        );
+        app.last_claude_subagent_refresh_generation = 1;
+        app.claude_subagent_refresh_in_flight = Some(RefreshInFlight {
+            generation: 1,
+            deadline: Instant::now() + WORKER_TIMEOUT,
+        });
+
+        assert!(app.handle_claude_subagents_refreshed(1, vec![refresh], BatchStats::default(),));
+        let terminal = &app.state.terminals[&terminal_id];
+        assert!(terminal.supervisor_stale);
+        assert_eq!(terminal.active_subagents, Some(1));
     }
 
     #[test]
@@ -2651,6 +2777,7 @@ mod tests {
             },
             count: tracker.count(),
             observations: tracker.observations(),
+            transcript_activity: crate::terminal::state::SubagentTranscriptActivity::Unknown,
             tracker: tracker.clone(),
             stats: ScanStats::default(),
         };
