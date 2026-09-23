@@ -143,11 +143,13 @@ impl DayBoard {
             tickets: self
                 .items
                 .values()
+                .filter(|item| item.done_at.is_none() && !item.dismissed)
                 .flat_map(|item| item.links.tickets.iter().cloned())
                 .collect(),
             prs: self
                 .items
                 .values()
+                .filter(|item| item.done_at.is_none() && !item.dismissed)
                 .flat_map(|item| item.links.prs.iter().cloned())
                 .collect(),
         };
@@ -563,6 +565,35 @@ mod tests {
         );
         assert_eq!(load(&root).items.len(), 2);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn board_links_only_include_unresolved_visible_items() {
+        let active = item("01K5ACTIVE", "Active");
+        let mut done = item("01K5DONE", "Done");
+        done.done_at = Some(1_800_000_000);
+        done.links.tickets = vec!["SCA-8".into()];
+        done.links.prs = vec!["https://github.com/acme/app/pull/8".into()];
+        let mut dismissed = item("01K5DISMISSED", "Dismissed");
+        dismissed.dismissed = true;
+        dismissed.links.tickets = vec!["SCA-9".into()];
+        dismissed.links.prs = vec!["https://github.com/acme/app/pull/10".into()];
+        let board = DayBoard {
+            items: BTreeMap::from([
+                (active.id.clone(), active),
+                (done.id.clone(), done),
+                (dismissed.id.clone(), dismissed),
+            ]),
+            load_errors: Vec::new(),
+        };
+
+        assert_eq!(
+            board.links(),
+            DayLinks {
+                tickets: vec!["SCA-7".into()],
+                prs: vec!["https://github.com/acme/app/pull/9".into()],
+            }
+        );
     }
 
     #[test]
