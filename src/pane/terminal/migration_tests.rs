@@ -238,13 +238,33 @@ fn erase_display_preserves_screen_and_history_boundaries() {
 }
 
 #[test]
+fn osc_title_with_star_continuation_byte_stays_hidden() {
+    let mut harness = Harness::new(16, 4);
+    harness.write(b"X\x1b]0;\xe2\x9c\xb3 List files\x07Y");
+
+    let observed = harness.observe();
+    assert_eq!(observed.visible.trim(), "XY");
+    assert_eq!(observed.title.as_deref(), Some("✳ List files"));
+}
+
+#[test]
+fn osc_title_with_umlaut_continuation_byte_stays_hidden() {
+    let mut harness = Harness::new(16, 4);
+    harness.write(b"X\x1b]2;\xc3\x9cber\x07Y");
+
+    let observed = harness.observe();
+    assert_eq!(observed.visible.trim(), "XY");
+    assert_eq!(observed.title.as_deref(), Some("Über"));
+}
+
+#[test]
 fn short_streams_are_invariant_at_every_byte_boundary() {
     let fixtures: &[&[u8]] = &[
         "a界e\u{301}🇯🇵!".as_bytes(),
         b"a\x1b[31;1mB\x1b[0m\x1b[2;3HZ\x1b[6n\x1b[?2004h",
         b"\x1b]8;;https://example.test/a\x1b\\link\x1b]8;;\x1b\\!",
         b"\x1b]52;c;aGk=\x07\x1b]2;migration\x1b\\\x07",
-        b"\x1bP+q5463\x1b\\\x1bP+q6E6F7065\x9c\x1b[6n",
+        b"\x1bP+q5463\x1b\\\x1bP+q6E6F7065\x1b\\\x1b[6n",
     ];
     for bytes in fixtures {
         let mut whole = Harness::new(16, 4);

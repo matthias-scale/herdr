@@ -115,9 +115,9 @@ pub const Handler = struct {
     /// silently ignored.
     terminfo_name: ?[]const u8 = null,
 
-    /// OSC 8 target awaiting a parser-confirmed terminator. BEL and 8-bit ST
-    /// consume the borrowed parser bytes immediately. ESC copies them until
-    /// the following byte confirms or rejects 7-bit ST.
+    /// OSC 8 target awaiting a parser-confirmed terminator. BEL consumes the
+    /// borrowed parser bytes immediately. ESC copies them until the following
+    /// byte confirms or rejects 7-bit ST.
     parsed_hyperlink_pending: ?struct {
         uri: []const u8,
         owned: bool,
@@ -388,7 +388,7 @@ pub const Handler = struct {
             callback(self, .boundary, "");
         }
         switch (terminator) {
-            0x07, 0x9C => self.emitPendingHyperlink(),
+            0x07 => self.emitPendingHyperlink(),
             0x1B => {
                 const pending = self.parsed_hyperlink_pending orelse return;
                 if (pending.owned) return;

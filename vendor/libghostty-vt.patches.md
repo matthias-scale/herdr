@@ -26,7 +26,6 @@ local files:
 - `vendor/libghostty-vt/src/terminal/c/terminal.zig`
 - `vendor/libghostty-vt/src/terminal/osc.zig`
 - `vendor/libghostty-vt/src/terminal/osc/parsers/hyperlink.zig`
-- `vendor/libghostty-vt/src/terminal/parse_table.zig`
 - `vendor/libghostty-vt/src/terminal/stream.zig`
 - `vendor/libghostty-vt/src/terminal/stream_terminal.zig`
 
@@ -43,12 +42,11 @@ rendered them. Actions that cannot move rendered text keep two printed runs
 joined; every other action separates them, including cursor motion, erasure,
 and scrolling. An unclassified new upstream action separates by default.
 
-The refreshed base treats high bytes as UTF-8 payload inside DCS and OSC.
-This patch deliberately retains raw 8-bit ST as a terminator because confirmed
-8-bit ST is part of the Herdr callback contract above.
+The refreshed base treats high bytes as UTF-8 payload inside DCS and OSC, and
+the parser-classified output callbacks preserve that behavior.
 
 remove when: the vendored source exposes equivalent post-parse text and OSC 8
-events, including confirmed BEL, 8-bit ST, and split `ESC \\` termination, with
+events, including confirmed BEL and split `ESC \\` termination, with
 bounded 8 KiB targets and suppression for non-rendered status-display text and
 discarded codepoints, charset-mapped glyph reporting, and continuity across
 non-rendering controls, screen-motion separation, and the Herdr visibility
@@ -59,6 +57,8 @@ verification:
 ```sh
 just test-one matches_ghostty_rendered_text
 just test-one c1_introducers_and_st_match_ghostty_rendered_text
+just test-one osc_title_with_star_continuation_byte_stays_hidden
+just test-one osc_title_with_umlaut_continuation_byte_stays_hidden
 just test-one cancelled_osc_capture_matches_ghostty_visible_output
 just test-one osc8_target_bound_excludes_split_and_unsplit_st_bytes
 just test-one screen_motion_between_runs_does_not_join_one_url

@@ -1096,8 +1096,7 @@ pub fn Stream(comptime H: type) type {
                 const ByteVector = @Vector(vector_len, u8);
                 while (end + vector_len <= input.len) {
                     const bytes: ByteVector = input[end..][0..vector_len].*;
-                    const stop = (bytes < @as(ByteVector, @splat(0x20))) |
-                        (bytes == @as(ByteVector, @splat(0x9C)));
+                    const stop = bytes < @as(ByteVector, @splat(0x20));
                     if (@reduce(.Or, stop)) break;
                     end += vector_len;
                 }
@@ -1106,7 +1105,7 @@ pub fn Stream(comptime H: type) type {
                 switch (input[end]) {
                     // Not osc_put bytes: BEL/CAN/SUB/ESC terminate or
                     // abort the state; other C0 bytes are ignored by it.
-                    0x00...0x1F, 0x9C => break,
+                    0x00...0x1F => break,
                     // Everything else is an osc_put byte.
                     else => end += 1,
                 }
