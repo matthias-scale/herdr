@@ -48,7 +48,7 @@ pub(crate) enum NotepadTabTarget {
 }
 
 /// The Context tab's header label.
-pub(crate) const NOTEPAD_CONTEXT_TAB_LABEL: &str = "Context";
+pub(crate) const NOTEPAD_CONTEXT_TAB_LABEL: &str = "context";
 
 /// Smallest and largest panel heights, header row included. Dragging the
 /// panel's top edge and `[notepad] height` both clamp to this range.

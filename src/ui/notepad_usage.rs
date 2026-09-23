@@ -30,21 +30,10 @@ pub(crate) struct NotepadUsageRow {
 
 fn provider_presentation(provider: QuotaProvider, app: &AppState) -> (&'static str, Color) {
     match provider {
-        QuotaProvider::Claude => ("CC", app.palette.peach),
-        QuotaProvider::Codex => ("CX", app.palette.blue),
-        QuotaProvider::Kimi => ("KI", app.palette.mauve),
+        QuotaProvider::Claude => ("claude", app.palette.peach),
+        QuotaProvider::Codex => ("codex", app.palette.blue),
+        QuotaProvider::Kimi => ("opencode", app.palette.mauve),
     }
-}
-
-fn window_text(label: &str, window: Option<QuotaWindow>, now: i64) -> String {
-    let Some(window) = window else {
-        return format!("{label} —");
-    };
-    let reset = window
-        .resets_at
-        .and_then(|at| crate::provider_usage::reset_label(at, now))
-        .unwrap_or_else(|| "—".into());
-    format!("{label} {}% {reset}", window.used_percent)
 }
 
 fn account_label(account: &ProviderAccountUsage) -> String {
@@ -55,21 +44,24 @@ fn account_label(account: &ProviderAccountUsage) -> String {
     }
 }
 
-fn window_percent(window: Option<QuotaWindow>) -> String {
-    window.map_or_else(|| "—".into(), |window| window.used_percent.to_string())
+fn window_percent(window: Option<QuotaWindow>, suffix: bool) -> String {
+    window.map_or_else(
+        || "—".into(),
+        |window| {
+            if suffix {
+                format!("{}%", window.used_percent)
+            } else {
+                window.used_percent.to_string()
+            }
+        },
+    )
 }
 
-fn compact_window_text(label: &str, window: Option<QuotaWindow>, now: i64) -> String {
-    let Some(window) = window else {
-        return format!("{label}—");
-    };
-    let reset = window
-        .resets_at
-        .and_then(|at| crate::provider_usage::reset_label(at, now));
-    reset.map_or_else(
-        || format!("{label}{}", window.used_percent),
-        |reset| format!("{label}{}@{reset}", window.used_percent),
-    )
+fn reset_text(window: Option<QuotaWindow>, now: i64) -> String {
+    window
+        .and_then(|window| window.resets_at)
+        .and_then(|at| crate::provider_usage::reset_label(at, now))
+        .unwrap_or_else(|| "—".into())
 }
 
 fn narrow_reset_text(window: Option<QuotaWindow>, now: i64) -> String {
@@ -135,66 +127,102 @@ fn narrow_account_labels(accounts: &[ProviderAccountUsage]) -> Vec<String> {
         .collect()
 }
 
+fn window_meter(window: Option<QuotaWindow>, width: usize) -> String {
+    window.map_or_else(
+        || "·".repeat(width),
+        |window| super::bar::percent_meter(window.used_percent, width),
+    )
+}
+
+fn account_row_text(
+    account: &ProviderAccountUsage,
+    narrow_label: &str,
+    width: u16,
+    now: i64,
+) -> String {
+    let stale = if account.usage.stale { " stale" } else { "" };
+    let stale_mark = if account.usage.stale { "~" } else { "" };
+    let full_identity = account_label(account);
+    for meter_width in [8, 6, 4] {
+        let text = format!(
+            "  {full_identity}  5h {} {} {} · 7d {} {} {}{stale}",
+            window_meter(account.usage.five_hour, meter_width),
+            window_percent(account.usage.five_hour, true),
+            reset_text(account.usage.five_hour, now),
+            window_meter(account.usage.seven_day, meter_width),
+            window_percent(account.usage.seven_day, true),
+            reset_text(account.usage.seven_day, now),
+        );
+        if display_width(&text) <= usize::from(width) {
+            return text;
+        }
+    }
+    let medium = format!(
+        "  {narrow_label} 5h {} {} 7d {} {}{stale_mark}",
+        window_meter(account.usage.five_hour, 2),
+        window_percent(account.usage.five_hour, false),
+        window_meter(account.usage.seven_day, 2),
+        window_percent(account.usage.seven_day, false),
+    );
+    if width >= 32 && display_width(&medium) <= usize::from(width) {
+        return medium;
+    }
+    let compact = format!(
+        "  {narrow_label} 5{}{}/7{}{}@{}/{}{stale_mark}",
+        window_meter(account.usage.five_hour, 1),
+        window_percent(account.usage.five_hour, false),
+        window_meter(account.usage.seven_day, 1),
+        window_percent(account.usage.seven_day, false),
+        narrow_reset_text(account.usage.five_hour, now),
+        narrow_reset_text(account.usage.seven_day, now),
+    );
+    if display_width(&compact) <= usize::from(width) {
+        return compact;
+    }
+    let minimum = format!(
+        "  {narrow_label} 5{}{}/7{}{}{stale_mark}",
+        window_meter(account.usage.five_hour, 1),
+        window_percent(account.usage.five_hour, false),
+        window_meter(account.usage.seven_day, 1),
+        window_percent(account.usage.seven_day, false),
+    );
+    truncate_end(&minimum, usize::from(width))
+}
+
 fn account_row(
     app: &AppState,
     account: &ProviderAccountUsage,
     narrow_label: &str,
     width: u16,
 ) -> NotepadUsageRow {
-    let (provider, color) = provider_presentation(account.provider, app);
+    let (_, color) = provider_presentation(account.provider, app);
     let now = app
         .status_now_unix
         .unwrap_or_else(|| app.view_observed_unix_s.min(i64::MAX as u64) as i64);
-    let stale = if account.usage.stale { " stale" } else { "" };
-    let stale_mark = if account.usage.stale { "~" } else { "" };
-    let stats = [
-        format!(
-            "{} · {}{stale}",
-            window_text("5h", account.usage.five_hour, now),
-            window_text("7d", account.usage.seven_day, now),
-        ),
-        format!(
-            "{} {} {stale_mark}",
-            compact_window_text("5h", account.usage.five_hour, now),
-            compact_window_text("7d", account.usage.seven_day, now),
-        )
-        .trim_end()
-        .to_string(),
-    ]
-    .into_iter()
-    .find(|stats| display_width(stats) + display_width(provider) + 5 <= usize::from(width))
-    .unwrap_or_else(|| {
-        format!(
-            "{}/{}@{}/{}{stale_mark}",
-            window_percent(account.usage.five_hour),
-            window_percent(account.usage.seven_day),
-            narrow_reset_text(account.usage.five_hour, now),
-            narrow_reset_text(account.usage.seven_day, now),
-        )
-    });
-    if display_width(&stats) + display_width(provider) + 5 > usize::from(width) {
-        return NotepadUsageRow {
-            line: Line::from(Span::styled(
-                truncate_end(&format!("{narrow_label} {stats}"), usize::from(width)),
-                super::status::provider_style(&account.usage, color, &app.palette),
-            )),
-            action: NotepadUsageAction::OpenDashboard,
-        };
-    }
-    let identity_width =
-        usize::from(width).saturating_sub(display_width(provider) + display_width(&stats) + 2);
-    let full_identity = account_label(account);
-    let identity = if display_width(&full_identity) <= identity_width {
-        full_identity
-    } else {
-        narrow_label.to_string()
-    };
-    let text = format!("{provider} {identity} {stats}");
+    let text = account_row_text(account, narrow_label, width, now);
     let style = super::status::provider_style(&account.usage, color, &app.palette);
     NotepadUsageRow {
-        line: Line::from(Span::styled(truncate_end(&text, usize::from(width)), style)),
+        line: Line::from(Span::styled(text, style)),
         action: NotepadUsageAction::OpenDashboard,
     }
+}
+
+fn provider_header_row(app: &AppState, provider: QuotaProvider, width: u16) -> NotepadUsageRow {
+    let (label, color) = provider_presentation(provider, app);
+    NotepadUsageRow {
+        line: Line::from(Span::styled(
+            truncate_end(label, usize::from(width)),
+            Style::default()
+                .fg(color)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )),
+        action: NotepadUsageAction::None,
+    }
+}
+
+enum UsageRowSource<'a> {
+    Provider(QuotaProvider),
+    Account(&'a str, &'a ProviderAccountUsage),
 }
 
 pub(crate) fn usage_rows_window(
@@ -203,9 +231,6 @@ pub(crate) fn usage_rows_window(
     scroll: usize,
     visible: usize,
 ) -> (Vec<NotepadUsageRow>, usize) {
-    let visible = visible.max(1);
-    let max_scroll = app.provider_usage.accounts.len().saturating_sub(visible);
-    let scroll = scroll.min(max_scroll);
     if app.provider_usage.accounts.is_empty() {
         return (
             vec![NotepadUsageRow {
@@ -218,13 +243,43 @@ pub(crate) fn usage_rows_window(
             0,
         );
     }
+    let visible = visible.max(1);
+    let narrow_labels = narrow_account_labels(&app.provider_usage.accounts);
+    let mut sources = Vec::with_capacity(app.provider_usage.accounts.len().saturating_add(3));
+    for provider in [
+        QuotaProvider::Claude,
+        QuotaProvider::Codex,
+        QuotaProvider::Kimi,
+    ] {
+        if app
+            .provider_usage
+            .accounts
+            .iter()
+            .any(|account| account.provider == provider)
+        {
+            sources.push(UsageRowSource::Provider(provider));
+            sources.extend(
+                narrow_labels
+                    .iter()
+                    .zip(app.provider_usage.accounts.iter())
+                    .filter(|(_, account)| account.provider == provider)
+                    .map(|(label, account)| UsageRowSource::Account(label, account)),
+            );
+        }
+    }
+    let max_scroll = sources.len().saturating_sub(visible);
+    let scroll = scroll.min(max_scroll);
     (
-        narrow_account_labels(&app.provider_usage.accounts)
+        sources
             .into_iter()
-            .zip(app.provider_usage.accounts.iter())
             .skip(scroll)
             .take(visible)
-            .map(|(narrow_label, account)| account_row(app, account, &narrow_label, width))
+            .map(|source| match source {
+                UsageRowSource::Provider(provider) => provider_header_row(app, provider, width),
+                UsageRowSource::Account(narrow_label, account) => {
+                    account_row(app, account, narrow_label, width)
+                }
+            })
             .collect(),
         max_scroll,
     )
@@ -250,41 +305,58 @@ mod tests {
     use super::*;
     use crate::provider_usage::{AccountUsage, ProviderUsageSnapshot, QuotaWindow};
 
-    #[test]
-    fn rows_keep_every_account_even_when_labels_match() {
-        let mut app = AppState::test_new();
-        app.provider_usage = ProviderUsageSnapshot::with_primary_accounts(
-            AccountUsage {
-                five_hour: Some(QuotaWindow {
-                    used_percent: 91,
-                    resets_at: Some(1_800_000_000),
-                }),
-                ..AccountUsage::default()
-            },
-            AccountUsage::default(),
-            AccountUsage::default(),
-        );
-        app.provider_usage.accounts[0].label = "same".into();
-        app.provider_usage.accounts[1].label = "same".into();
-        app.provider_usage.accounts[0].profile_id = "lane-a".into();
-        app.provider_usage.accounts[1].profile_id = "lane-b".into();
-
-        let (rows, max_scroll) = usage_rows_window(&app, 80, 0, 10);
-
-        assert_eq!(rows.len(), 3);
-        assert_eq!(max_scroll, 0);
-        assert_eq!(rows[0].action, NotepadUsageAction::OpenDashboard);
-        let text = rows
+    fn row_text(row: &NotepadUsageRow) -> String {
+        row.line
+            .spans
             .iter()
-            .map(|row| row.line.spans[0].content.as_ref())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains("same/lane-a"), "{text}");
-        assert!(text.contains("same/lane-b"), "{text}");
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 
     #[test]
-    fn a_wide_row_names_both_windows_resets_and_staleness() {
+    fn rows_group_multiple_accounts_under_provider_headers() {
+        let mut app = AppState::test_new();
+        app.provider_usage = ProviderUsageSnapshot::with_primary_accounts(
+            AccountUsage::default(),
+            AccountUsage::default(),
+            AccountUsage::default(),
+        );
+        let claude = app.provider_usage.accounts[0].clone();
+        let codex = app.provider_usage.accounts[1].clone();
+        let kimi = app.provider_usage.accounts[2].clone();
+        let mut claude_work = claude.clone();
+        claude_work.profile_id = "work".into();
+        let mut codex_work = codex.clone();
+        codex_work.profile_id = "work".into();
+        app.provider_usage.accounts = vec![claude, codex, kimi, claude_work, codex_work];
+
+        let (rows, max_scroll) = usage_rows_window(&app, 100, 0, 20);
+        let text = rows.iter().map(row_text).collect::<Vec<_>>();
+
+        assert_eq!(rows.len(), 8);
+        assert_eq!(max_scroll, 0);
+        assert_eq!(
+            text.iter().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "claude",
+                "  Claude Code  5h ········ — — · 7d ········ — —",
+                "  Claude Code/work  5h ········ — — · 7d ········ — —",
+                "codex",
+                "  Codex  5h ········ — — · 7d ········ — —",
+                "  Codex/work  5h ········ — — · 7d ········ — —",
+                "opencode",
+                "  Kimi  5h ········ — — · 7d ········ — —",
+            ]
+        );
+        assert_eq!(rows[0].action, NotepadUsageAction::None);
+        assert_eq!(rows[1].action, NotepadUsageAction::OpenDashboard);
+        assert_eq!(rows[2].action, NotepadUsageAction::OpenDashboard);
+        assert_eq!(rows[3].action, NotepadUsageAction::None);
+        assert_eq!(rows[6].action, NotepadUsageAction::None);
+    }
+
+    #[test]
+    fn account_meters_degrade_at_wide_narrow_and_minimum_widths() {
         let mut app = AppState::test_new();
         app.status_now_unix = Some(1_800_000_000);
         app.provider_usage = ProviderUsageSnapshot::with_primary_accounts(
@@ -305,17 +377,33 @@ mod tests {
         );
         app.provider_usage.accounts[0].label = "SHQ".into();
         app.provider_usage.accounts[0].profile_id = "scalablehq".into();
+        app.provider_usage
+            .accounts
+            .retain(|account| account.provider == QuotaProvider::Claude);
 
         let (wide, _) = usage_rows_window(&app, 80, 0, 10);
-        let text = wide[0].line.spans[0].content.as_ref();
-        for expected in ["SHQ/scalablehq", "5h 81% 12m", "7d 92% 2h45", "stale"] {
+        assert_eq!(row_text(&wide[0]), "claude");
+        let text = row_text(&wide[1]);
+        for expected in [
+            "SHQ/scalablehq",
+            "5h ██████▄· 81% 12m",
+            "7d ███████▄ 92% 2h45",
+            "stale",
+        ] {
             assert!(text.contains(expected), "missing {expected:?}: {text}");
         }
-        let (narrow, _) = usage_rows_window(&app, 18, 0, 10);
-        let narrow = narrow[0].line.spans[0].content.as_ref();
-        assert!(narrow.chars().count() <= 18);
-        assert!(narrow.contains("81/92@1h/3h~"), "{narrow}");
-        assert!(narrow.starts_with("CSQ "), "{narrow}");
+        let (narrow, _) = usage_rows_window(&app, 26, 0, 10);
+        assert_eq!(row_text(&narrow[1]), "  CSQ 5▇81/7▇92@1h/3h~");
+        let (minimum, _) = usage_rows_window(&app, 18, 0, 10);
+        assert_eq!(row_text(&minimum[1]), "  CSQ 5▇81/7▇92~");
+        for (width, rows) in [(80u16, wide), (26, narrow), (18, minimum)] {
+            assert!(
+                rows.iter()
+                    .all(|row| display_width(&row_text(row)) <= usize::from(width)),
+                "width {width}: {:?}",
+                rows.iter().map(row_text).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
@@ -355,24 +443,52 @@ mod tests {
             matthias_scalable_so,
         ];
 
-        let (rows, _) = usage_rows_window(&app, 18, 0, 10);
+        let (rows, _) = usage_rows_window(&app, 26, 0, 10);
         let labels = rows
             .iter()
-            .map(|row| row.line.spans[0].content.split(' ').next().unwrap_or(""))
+            .skip(1)
+            .map(|row| {
+                row.line.spans[0]
+                    .content
+                    .trim_start()
+                    .split(' ')
+                    .next()
+                    .unwrap_or("")
+            })
             .collect::<Vec<_>>();
         assert_eq!(labels, ["XSO", "XS0", "XSQ", "XS1"]);
         assert!(rows
             .iter()
-            .all(|row| row.line.spans[0].content.ends_with("100/100@1h/2d~")));
+            .skip(1)
+            .all(|row| row.line.spans[0].content.ends_with("5█100/7█100@1h/2d~")));
+        let compact = rows.iter().skip(1).map(row_text).collect::<Vec<_>>();
+        assert!(compact[0].contains("XSO"), "{}", compact[0]);
+        assert!(compact[1].contains("XS0"), "{}", compact[1]);
+        assert!(compact[2].contains("XSQ"), "{}", compact[2]);
+        assert!(compact[3].contains("XS1"), "{}", compact[3]);
+    }
 
-        let (medium_rows, _) = usage_rows_window(&app, 26, 0, 10);
-        let medium = medium_rows
-            .iter()
-            .map(|row| row.line.spans[0].content.as_ref())
-            .collect::<Vec<_>>();
-        assert!(medium[0].contains("XSO"), "{}", medium[0]);
-        assert!(medium[1].contains("XS0"), "{}", medium[1]);
-        assert!(medium[2].contains("XSQ"), "{}", medium[2]);
-        assert!(medium[3].contains("XS1"), "{}", medium[3]);
+    #[test]
+    fn scrolling_counts_headers_and_empty_usage_stays_inert() {
+        let mut app = AppState::test_new();
+        app.provider_usage = ProviderUsageSnapshot::with_primary_accounts(
+            AccountUsage::default(),
+            AccountUsage::default(),
+            AccountUsage::default(),
+        );
+        let (rows, max_scroll) = usage_rows_window(&app, 18, usize::MAX, 2);
+        assert_eq!(max_scroll, 4);
+        assert_eq!(
+            rows.iter().map(row_text).collect::<Vec<_>>(),
+            ["opencode", "  KKI 5·—/7·—@—/—"]
+        );
+        assert_eq!(rows[0].action, NotepadUsageAction::None);
+        assert_eq!(rows[1].action, NotepadUsageAction::OpenDashboard);
+
+        app.provider_usage.accounts.clear();
+        let (rows, max_scroll) = usage_rows_window(&app, 8, 0, 3);
+        assert_eq!(max_scroll, 0);
+        assert_eq!(row_text(&rows[0]), "no acco…");
+        assert_eq!(rows[0].action, NotepadUsageAction::None);
     }
 }
