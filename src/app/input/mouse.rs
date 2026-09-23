@@ -2453,12 +2453,8 @@ impl AppState {
         if matches!(mouse.kind, MouseEventKind::Moved) {
             if let Some(index) = self.sidebar_snooze_menu_item_at(mouse.column, mouse.row) {
                 let action = self.sidebar_snooze.as_ref().and_then(|snooze| {
-                    let ws_idx = self
-                        .workspaces
-                        .iter()
-                        .position(|workspace| workspace.id == snooze.target.workspace_id)?;
                     crate::app::state::sidebar_snooze_menu_items(
-                        self.pane_is_snoozed(ws_idx, snooze.target.pane_id),
+                        self.sidebar_lifecycle_target_snoozed(&snooze.target)?,
                     )
                     .get(index)
                     .map(|(_, action)| *action)
@@ -2474,12 +2470,8 @@ impl AppState {
                 .sidebar_snooze_menu_item_at(mouse.column, mouse.row)
                 .and_then(|index| {
                     let snooze = self.sidebar_snooze.as_ref()?;
-                    let ws_idx = self
-                        .workspaces
-                        .iter()
-                        .position(|workspace| workspace.id == snooze.target.workspace_id)?;
                     crate::app::state::sidebar_snooze_menu_items(
-                        self.pane_is_snoozed(ws_idx, snooze.target.pane_id),
+                        self.sidebar_lifecycle_target_snoozed(&snooze.target)?,
                     )
                     .get(index)
                     .map(|(_, action)| *action)
@@ -4464,7 +4456,7 @@ mod tests {
             .find(|(column, row)| {
                 matches!(
                     crate::ui::mobile_switcher_target_at(&app.state, *column, *row),
-                    Some(crate::ui::MobileSwitcherTarget::Snooze { .. })
+                    Some(crate::ui::MobileSwitcherTarget::Snooze(..))
                 )
             })
             .expect("mobile snooze control");
@@ -4480,7 +4472,7 @@ mod tests {
             .sidebar_snooze
             .as_ref()
             .expect("snooze duration menu");
-        let pane_id = menu.target.pane_id;
+        let pane_id = menu.target.local().expect("local mobile target").pane_id;
         assert_eq!(
             menu.selected,
             crate::app::state::SidebarSnoozeMenuAction::Preset(
@@ -11285,10 +11277,12 @@ mod tests {
         app.state.selected = 0;
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         app.state.sidebar_snooze = Some(crate::app::state::SidebarSnoozeUiState {
-            target: crate::app::state::PaneFocusTarget {
-                workspace_id: app.state.workspaces[0].id.clone(),
-                pane_id,
-            },
+            target: crate::app::state::SidebarPaneLifecycleTarget::Local(
+                crate::app::state::PaneFocusTarget {
+                    workspace_id: app.state.workspaces[0].id.clone(),
+                    pane_id,
+                },
+            ),
             anchor: (1, 1),
             selected: crate::app::state::sidebar_snooze_menu_items(false)[0].1,
             time_draft: None,

@@ -152,15 +152,18 @@ fn mobile_switcher_target_for_row(
             true,
             col,
         ),
-        SidebarRow::RemoteAgent { entry, depth, .. } => {
-            super::sidebar::selected_remote_row_control_at(
-                app,
-                entry,
-                Rect::new(content.x, content.y, content.width, 1),
-                *depth,
-                col,
-            )
-        }
+        SidebarRow::RemoteAgent {
+            entry,
+            depth,
+            show_host_identity,
+        } => super::sidebar::selected_remote_row_control_at(
+            app,
+            entry,
+            Rect::new(content.x, content.y, content.width, 1),
+            *depth,
+            *show_host_identity,
+            col,
+        ),
         _ => None,
     };
     if let Some(control) = control {
@@ -2399,16 +2402,16 @@ mod tests {
             if width == 18 {
                 assert!(!targets.iter().any(|target| matches!(
                     target,
-                    MobileSwitcherTarget::Snooze { .. } | MobileSwitcherTarget::Settle { .. }
+                    MobileSwitcherTarget::Snooze(..) | MobileSwitcherTarget::Settle(..)
                 )));
                 assert!(!rendered.contains('✓'), "{rendered:?}");
             } else {
                 assert!(targets
                     .iter()
-                    .any(|target| matches!(target, MobileSwitcherTarget::Snooze { .. })));
+                    .any(|target| matches!(target, MobileSwitcherTarget::Snooze(..))));
                 assert!(targets
                     .iter()
-                    .any(|target| matches!(target, MobileSwitcherTarget::Settle { .. })));
+                    .any(|target| matches!(target, MobileSwitcherTarget::Settle(..))));
                 assert!(rendered.contains('◷'), "{rendered:?}");
                 assert!(rendered.contains('✓'), "{rendered:?}");
             }

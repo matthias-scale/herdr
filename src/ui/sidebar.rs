@@ -1176,23 +1176,28 @@ pub(crate) fn selected_remote_row_control_at(
     entry: &RemoteAgentPanelEntry,
     rect: Rect,
     depth: u16,
+    show_host_identity: bool,
     column: u16,
 ) -> Option<crate::app::state::SidebarHoverAction> {
     let requested_prefix = usize::from(depth) * 3 + 1;
+    let total_width = usize::from(rect.width);
+    let max_host_width = total_width.saturating_sub(
+        SIDEBAR_DOT_FIELD_WIDTH + SIDEBAR_HOST_TOKEN_MIN_TITLE_WIDTH + display_width(" · "),
+    );
+    let host_width = show_host_identity
+        .then(|| entry.host_suffix_for_width(max_host_width))
+        .flatten()
+        .map_or(0, |(_, width)| width);
+    let row_width = total_width.saturating_sub(host_width);
     let title = compact_row_title_for_width(
         &entry.render_title,
         &entry.render_provider,
-        usize::from(rect.width),
+        row_width,
         requested_prefix,
     );
-    let widths = compact_row_widths(
-        title,
-        &entry.render_provider,
-        usize::from(rect.width),
-        requested_prefix,
-    );
+    let widths = compact_row_widths(title, &entry.render_provider, row_width, requested_prefix);
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
-    let title_width = usize::from(rect.width).saturating_sub(fixed_width);
+    let title_width = row_width.saturating_sub(fixed_width);
     let control = remote_row_control(app, entry);
     let controls_width = selected_row_controls_width(control.as_ref(), title_width, rect.width);
     if controls_width == 0 {
@@ -1436,7 +1441,7 @@ pub(crate) struct RemoteAgentPanelEntry {
     search_key_lowercase: String,
     work_context: crate::work_context::PaneWorkContext,
     workspace_id: String,
-    settled: bool,
+    pub(crate) settled: bool,
     pub(crate) snoozed_until: Option<u64>,
     pub(crate) host_fresh: bool,
     show_host_identity: bool,
@@ -7608,7 +7613,11 @@ pub(crate) fn compute_sidebar_hover_targets(
                     }
                 }
             }
-            SidebarRow::RemoteAgent { entry, depth, .. } => {
+            SidebarRow::RemoteAgent {
+                entry,
+                depth,
+                show_host_identity,
+            } => {
                 let requested_prefix = usize::from(*depth) * 3 + 1;
                 let total_width = usize::from(body.width);
                 let max_host_width = total_width.saturating_sub(
@@ -7616,8 +7625,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                         + SIDEBAR_HOST_TOKEN_MIN_TITLE_WIDTH
                         + display_width(" · "),
                 );
-                let host_width = entry
-                    .show_host_identity
+                let host_width = (*show_host_identity)
                     .then(|| entry.host_suffix_for_width(max_host_width))
                     .flatten()
                     .map_or(0, |(_, width)| width);
@@ -11226,22 +11234,27 @@ pub(crate) fn sidebar_snooze_menu_layout(
     if menu.time_draft.is_some() {
         return None;
     }
-    let ws_idx = app
-        .workspaces
-        .iter()
-        .position(|workspace| workspace.id == menu.target.workspace_id)?;
-    let anchor = compute_tab_card_areas(app, app.view.sidebar_rect)
-        .into_iter()
-        .find(|card| card.ws_idx == ws_idx && card.pane_id == menu.target.pane_id)
-        .map(|card| card.rect)
-        .or_else(|| {
-            compute_agent_card_areas(app, app.view.sidebar_rect)
+    let anchor = match &menu.target {
+        crate::app::state::SidebarPaneLifecycleTarget::Local(target) => {
+            let ws_idx = app
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == target.workspace_id)?;
+            compute_tab_card_areas(app, app.view.sidebar_rect)
                 .into_iter()
-                .find(|card| card.ws_idx == ws_idx && card.pane_id == menu.target.pane_id)
+                .find(|card| card.ws_idx == ws_idx && card.pane_id == target.pane_id)
                 .map(|card| card.rect)
-        })
-        .unwrap_or_else(|| Rect::new(menu.anchor.0, menu.anchor.1, 1, 1));
-    let snoozed = app.pane_is_snoozed(ws_idx, menu.target.pane_id);
+                .or_else(|| {
+                    compute_agent_card_areas(app, app.view.sidebar_rect)
+                        .into_iter()
+                        .find(|card| card.ws_idx == ws_idx && card.pane_id == target.pane_id)
+                        .map(|card| card.rect)
+                })
+        }
+        crate::app::state::SidebarPaneLifecycleTarget::Remote(_) => None,
+    }
+    .unwrap_or_else(|| Rect::new(menu.anchor.0, menu.anchor.1, 1, 1));
+    let snoozed = app.sidebar_lifecycle_target_snoozed(&menu.target)?;
     let items = crate::app::state::sidebar_snooze_menu_items(snoozed);
     let selected = items
         .iter()
@@ -11271,14 +11284,9 @@ pub(super) fn render_sidebar_snooze_menu(app: &AppState, frame: &mut Frame) {
         return;
     };
     frame.render_widget(ratatui::widgets::Clear, layout.rect);
-    let Some(ws_idx) = app
-        .workspaces
-        .iter()
-        .position(|workspace| workspace.id == menu.target.workspace_id)
-    else {
+    let Some(snoozed) = app.sidebar_lifecycle_target_snoozed(&menu.target) else {
         return;
     };
-    let snoozed = app.pane_is_snoozed(ws_idx, menu.target.pane_id);
     let lines = crate::app::state::sidebar_snooze_menu_items(snoozed)
         .iter()
         .enumerate()
@@ -25985,10 +25993,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         assert!(!actions.is_empty());
         assert!(actions.iter().all(|action| match action {
-            crate::app::state::SidebarHoverAction::Snooze { pane_id, .. }
-            | crate::app::state::SidebarHoverAction::Settle { pane_id, .. } => {
-                *pane_id == active_pane
+            crate::app::state::SidebarHoverAction::Snooze {
+                target: crate::app::state::SidebarPaneLifecycleTarget::Local(target),
             }
+            | crate::app::state::SidebarHoverAction::Settle {
+                target: crate::app::state::SidebarPaneLifecycleTarget::Local(target),
+            } => target.pane_id == active_pane,
+            _ => false,
         }));
     }
 
@@ -26013,10 +26024,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             default_at: None,
         }];
         app.sidebar_snooze = Some(crate::app::state::SidebarSnoozeUiState {
-            target: crate::app::state::PaneFocusTarget {
-                workspace_id: app.workspaces[0].id.clone(),
-                pane_id,
-            },
+            target: crate::app::state::SidebarPaneLifecycleTarget::Local(
+                crate::app::state::PaneFocusTarget {
+                    workspace_id: app.workspaces[0].id.clone(),
+                    pane_id,
+                },
+            ),
             anchor: (2, 2),
             selected: crate::app::state::SidebarSnoozeMenuAction::SetTime,
             time_draft: None,
@@ -26768,10 +26781,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.ensure_test_terminals();
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         app.sidebar_snooze = Some(crate::app::state::SidebarSnoozeUiState {
-            target: crate::app::state::PaneFocusTarget {
-                workspace_id: app.workspaces[0].id.clone(),
-                pane_id,
-            },
+            target: crate::app::state::SidebarPaneLifecycleTarget::Local(
+                crate::app::state::PaneFocusTarget {
+                    workspace_id: app.workspaces[0].id.clone(),
+                    pane_id,
+                },
+            ),
             anchor: (10, 3),
             selected: crate::app::state::SidebarSnoozeMenuAction::Preset(
                 crate::app::state::SidebarSnoozePreset::Duration(15 * 60),

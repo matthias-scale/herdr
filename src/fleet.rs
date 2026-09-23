@@ -788,7 +788,7 @@ impl RoutedApiResponder {
                 event_tx,
                 agent_ref,
             } => {
-                let _ = event_tx.blocking_send(crate::events::AppEvent::RemoteApiRequestFinished {
+                let _ = event_tx.try_send(crate::events::AppEvent::RemoteApiRequestFinished {
                     agent_ref,
                     response,
                 });
@@ -988,7 +988,12 @@ impl AuthorityMutationRouter {
         {
             let route = HostApiRoute::from_host(host);
             for row in &host.entries {
-                if row.agent_ref.host == host.name {
+                if row.host == host.name
+                    && row.agent_ref.host == host.name
+                    && row
+                        .agent_info()
+                        .is_some_and(|agent| agent.pane_id == row.agent_ref.agent)
+                {
                     routes.insert(
                         MutationRoute::PaneLifecycle {
                             route: route.clone(),
@@ -1081,7 +1086,7 @@ impl AuthorityMutationRouter {
             .valid
             .get(&mutation_route)
             .copied()
-            .ok_or_else(|| format!("host {} route is no longer fresh", route.host))?;
+            .ok_or_else(|| format!("{route_label} route is no longer fresh"))?;
         let mut sender = self
             .sender
             .lock()
@@ -1149,10 +1154,7 @@ impl AuthorityMutationRouter {
                                 id,
                                 error: crate::api::schema::ErrorBody {
                                     code: "authority_unreachable".into(),
-                                    message: format!(
-                                        "owner {} is unreachable: {error}",
-                                        job.route.host
-                                    ),
+                                    message: format!("{} is unreachable: {error}", job.route_label),
                                 },
                             })
                             .unwrap_or_else(|_| "{}".to_string())
@@ -1272,7 +1274,13 @@ impl Snapshot {
             .find(|host| {
                 host.name == agent_ref.host
                     && host.state == HostState::Reachable
-                    && host.entries.iter().any(|row| &row.agent_ref == agent_ref)
+                    && host.entries.iter().any(|row| {
+                        row.host == host.name
+                            && &row.agent_ref == agent_ref
+                            && row
+                                .agent_info()
+                                .is_some_and(|agent| agent.pane_id == agent_ref.agent)
+                    })
             })
             .map(HostApiRoute::from_host)
     }
@@ -6033,7 +6041,9 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
         };
 
         let response = route_api_request_with_ssh_program(
-            &catalog,
+            &AuthorityRoute::from_catalog(&catalog)
+                .expect("authority route")
+                .api,
             &request,
             Duration::from_secs(2),
             &fake_ssh,

@@ -190,6 +190,52 @@ impl App {
         self.dispatch_runtime_mutation(id, Method::PaneUnsnooze(PaneTarget { pane_id }))
     }
 
+    pub(crate) fn dispatch_remote_pane_lifecycle(
+        &mut self,
+        agent_ref: crate::api::schema::AgentRef,
+        method: Method,
+    ) -> Result<(), String> {
+        let route = self
+            .state
+            .fleet_snapshot
+            .fresh_agent_host(&agent_ref)
+            .ok_or_else(|| format!("owner {} is unreachable", agent_ref.host))?;
+        self.authority_mutation_router.enqueue_pane_lifecycle(
+            route,
+            agent_ref,
+            self.state.fleet_snapshot.config_generation,
+            crate::api::schema::Request {
+                id: "tui.remote-pane-lifecycle".into(),
+                method,
+            },
+            self.event_tx.clone(),
+        )
+    }
+
+    pub(crate) fn remote_pane_settle(
+        &mut self,
+        agent_ref: crate::api::schema::AgentRef,
+    ) -> Result<(), String> {
+        let pane_id = agent_ref.agent.clone();
+        self.dispatch_remote_pane_lifecycle(agent_ref, Method::PaneSettle(PaneTarget { pane_id }))
+    }
+
+    pub(crate) fn remote_pane_snooze(
+        &mut self,
+        agent_ref: crate::api::schema::AgentRef,
+        params: PaneSnoozeParams,
+    ) -> Result<(), String> {
+        self.dispatch_remote_pane_lifecycle(agent_ref, Method::PaneSnooze(params))
+    }
+
+    pub(crate) fn remote_pane_unsnooze(
+        &mut self,
+        agent_ref: crate::api::schema::AgentRef,
+    ) -> Result<(), String> {
+        let pane_id = agent_ref.agent.clone();
+        self.dispatch_remote_pane_lifecycle(agent_ref, Method::PaneUnsnooze(PaneTarget { pane_id }))
+    }
+
     pub(crate) fn runtime_pane_rename(
         &mut self,
         id: &'static str,

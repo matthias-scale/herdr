@@ -316,9 +316,40 @@ impl App {
         response_rx.try_recv().ok()
     }
 
+    fn finish_remote_api_request(
+        &mut self,
+        agent_ref: crate::api::schema::AgentRef,
+        response: String,
+    ) -> bool {
+        if let Ok(error) = serde_json::from_str::<crate::api::schema::ErrorResponse>(&response) {
+            self.show_remote_pane_lifecycle_error(
+                &agent_ref,
+                format!(
+                    "owner {}: {}: {}",
+                    agent_ref.host, error.error.code, error.error.message
+                ),
+            );
+            return true;
+        }
+        if serde_json::from_str::<serde_json::Value>(&response)
+            .is_ok_and(|value| value.get("result").is_some())
+        {
+            return false;
+        }
+        self.show_remote_pane_lifecycle_error(
+            &agent_ref,
+            format!("owner {} returned an invalid response", agent_ref.host),
+        );
+        true
+    }
+
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
             AppEvent::FleetRefreshed { snapshot } => self.install_fleet_snapshot(snapshot),
+            AppEvent::RemoteApiRequestFinished {
+                agent_ref,
+                response,
+            } => self.finish_remote_api_request(agent_ref, response),
             AppEvent::AuthorityAcceptanceLedgerPersisted {
                 ledger,
                 snapshot,
@@ -587,6 +618,14 @@ impl App {
 
         if let AppEvent::FleetRefreshed { snapshot } = ev {
             return Some(self.install_fleet_snapshot(snapshot));
+        }
+
+        if let AppEvent::RemoteApiRequestFinished {
+            agent_ref,
+            response,
+        } = ev
+        {
+            return Some(self.finish_remote_api_request(agent_ref, response));
         }
 
         if let AppEvent::AuthorityAcceptanceLedgerPersisted {

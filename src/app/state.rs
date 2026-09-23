@@ -1048,6 +1048,15 @@ pub(crate) enum SidebarPaneLifecycleTarget {
     Remote(crate::api::schema::AgentRef),
 }
 
+impl SidebarPaneLifecycleTarget {
+    pub(crate) fn local(&self) -> Option<&PaneFocusTarget> {
+        match self {
+            Self::Local(target) => Some(target),
+            Self::Remote(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabCardArea {
     pub ws_idx: usize,
@@ -6361,21 +6370,37 @@ impl AppState {
         }
 
         if self.sidebar_snooze.as_ref().is_some_and(|snooze| {
-            let target = self
-                .workspaces
-                .iter()
-                .enumerate()
-                .find(|(_, workspace)| workspace.id == snooze.target.workspace_id)
-                .and_then(|(ws_idx, workspace)| {
-                    workspace
-                        .pane_state(snooze.target.pane_id)
-                        .map(|_| (ws_idx, snooze.target.pane_id))
-                });
-            target.is_none_or(|(ws_idx, pane_id)| {
-                !self.pane_is_snoozed(ws_idx, pane_id) && !self.pane_can_snooze(ws_idx, pane_id)
-            })
+            self.sidebar_lifecycle_target_snoozed(&snooze.target)
+                .is_none()
         }) {
             self.sidebar_snooze = None;
+        }
+    }
+
+    pub(crate) fn sidebar_lifecycle_target_snoozed(
+        &self,
+        target: &SidebarPaneLifecycleTarget,
+    ) -> Option<bool> {
+        match target {
+            SidebarPaneLifecycleTarget::Local(target) => {
+                let ws_idx = self
+                    .workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == target.workspace_id)?;
+                let pane = self.workspaces.get(ws_idx)?.pane_state(target.pane_id)?;
+                let snoozed = pane.snoozed_until().is_some();
+                (snoozed || self.pane_can_snooze(ws_idx, target.pane_id)).then_some(snoozed)
+            }
+            SidebarPaneLifecycleTarget::Remote(agent_ref) => self
+                .remote_agent_panel_entries
+                .iter()
+                .find(|entry| {
+                    entry.agent_ref == *agent_ref
+                        && entry.host_fresh
+                        && !entry.settled
+                        && !crate::ui::sidebar::entry_needs_human_attention(entry)
+                })
+                .map(|entry| entry.snoozed_until.is_some()),
         }
     }
 
@@ -8177,14 +8202,10 @@ impl AppState {
             assert_tab_index(press.ws_idx, press.tab_idx, "tab press");
         }
         if let Some(snooze) = &self.sidebar_snooze {
-            let workspace = self
-                .workspaces
-                .iter()
-                .find(|workspace| workspace.id == snooze.target.workspace_id)
-                .expect("snooze UI workspace must exist");
             assert!(
-                workspace.pane_state(snooze.target.pane_id).is_some(),
-                "snooze UI pane must exist in its workspace"
+                self.sidebar_lifecycle_target_snoozed(&snooze.target)
+                    .is_some(),
+                "snooze UI target must remain actionable"
             );
         }
         if let Some(menu) = &self.context_menu {
@@ -8337,7 +8358,7 @@ mod tests {
             ClientInputOwner::Overlay(overlay) => state.open_client_overlay(overlay),
             ClientInputOwner::SnoozeMenu | ClientInputOwner::SnoozeTime => {
                 state.sidebar_snooze = Some(SidebarSnoozeUiState {
-                    target,
+                    target: SidebarPaneLifecycleTarget::Local(target),
                     anchor: (1, 1),
                     selected: SidebarSnoozeMenuAction::SetTime,
                     time_draft: (owner == ClientInputOwner::SnoozeTime).then(String::new),
@@ -8798,7 +8819,7 @@ mod tests {
         app.swap_sidebar_presentation(&mut first_client);
         app.sidebar_focused = true;
         app.sidebar_snooze = Some(SidebarSnoozeUiState {
-            target: target.clone(),
+            target: SidebarPaneLifecycleTarget::Local(target.clone()),
             anchor: (9, 3),
             selected: SidebarSnoozeMenuAction::SetTime,
             time_draft: Some("14:30".to_string()),
@@ -8821,7 +8842,7 @@ mod tests {
                 snooze.error.as_deref(),
             )),
             Some((
-                &target,
+                &SidebarPaneLifecycleTarget::Local(target),
                 (9, 3),
                 SidebarSnoozeMenuAction::SetTime,
                 Some("14:30"),
@@ -9095,10 +9116,10 @@ mod tests {
             app.close_client_overlay();
 
             app.sidebar_snooze = Some(SidebarSnoozeUiState {
-                target: PaneFocusTarget {
+                target: SidebarPaneLifecycleTarget::Local(PaneFocusTarget {
                     workspace_id,
                     pane_id,
-                },
+                }),
                 anchor: (3, 2),
                 selected: SidebarSnoozeMenuAction::SetTime,
                 time_draft: None,

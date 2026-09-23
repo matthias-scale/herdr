@@ -1562,7 +1562,7 @@ impl super::super::App {
         &self,
         target: &crate::app::state::SidebarPaneLifecycleTarget,
     ) -> Option<(bool, Option<u64>)> {
-        match target {
+        match &target {
             crate::app::state::SidebarPaneLifecycleTarget::Local(target) => {
                 let ws_idx = self
                     .state
@@ -1586,13 +1586,13 @@ impl super::super::App {
                     entry.agent_ref == *agent_ref
                         && entry.host_fresh
                         && !entry.settled
-                        && !crate::ui::entry_needs_human_attention(entry)
+                        && !crate::ui::sidebar::entry_needs_human_attention(entry)
                 })
                 .map(|entry| (entry.snoozed_until.is_some(), entry.snoozed_until)),
         }
     }
 
-    fn local_sidebar_pane_lifecycle_target(
+    pub(crate) fn local_sidebar_pane_lifecycle_target(
         &self,
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
@@ -1603,6 +1603,87 @@ impl super::super::App {
                 pane_id,
             },
         ))
+    }
+
+    pub(crate) fn sidebar_pane_lifecycle_public_id(
+        &self,
+        target: &crate::app::state::SidebarPaneLifecycleTarget,
+    ) -> Option<String> {
+        match &target {
+            crate::app::state::SidebarPaneLifecycleTarget::Local(target) => {
+                let ws_idx = self
+                    .state
+                    .workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == target.workspace_id)?;
+                self.public_pane_id(ws_idx, target.pane_id)
+            }
+            crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref) => {
+                Some(agent_ref.agent.clone())
+            }
+        }
+    }
+
+    pub(crate) fn show_remote_pane_lifecycle_error(
+        &mut self,
+        agent_ref: &crate::api::schema::AgentRef,
+        message: String,
+    ) {
+        self.state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::NeedsAttention,
+            title: format!("{} pane action failed", agent_ref.host),
+            context: message,
+            position: None,
+            target: None,
+        });
+    }
+
+    pub(crate) fn remote_pane_lifecycle_refused(
+        &mut self,
+        target: &crate::app::state::SidebarPaneLifecycleTarget,
+    ) {
+        let crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref) = target else {
+            return;
+        };
+        self.show_remote_pane_lifecycle_error(
+            agent_ref,
+            format!("owner {} is unreachable", agent_ref.host),
+        );
+    }
+
+    pub(crate) fn dispatch_sidebar_pane_snooze(
+        &mut self,
+        target: crate::app::state::SidebarPaneLifecycleTarget,
+        params: crate::api::schema::PaneSnoozeParams,
+    ) {
+        match target {
+            crate::app::state::SidebarPaneLifecycleTarget::Local(_) => {
+                self.runtime_pane_snooze("tui.sidebar.snooze", params);
+            }
+            crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref) => {
+                if let Err(error) = self.remote_pane_snooze(agent_ref.clone(), params) {
+                    self.show_remote_pane_lifecycle_error(&agent_ref, error);
+                }
+            }
+        }
+    }
+
+    fn dispatch_sidebar_pane_unsnooze(
+        &mut self,
+        target: crate::app::state::SidebarPaneLifecycleTarget,
+    ) {
+        match &target {
+            crate::app::state::SidebarPaneLifecycleTarget::Local(_) => {
+                if let Some(pane_id) = self.sidebar_pane_lifecycle_public_id(&target) {
+                    self.runtime_pane_unsnooze("tui.sidebar.unsnooze", pane_id);
+                }
+            }
+            crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref) => {
+                if let Err(error) = self.remote_pane_unsnooze(agent_ref.clone()) {
+                    self.show_remote_pane_lifecycle_error(&agent_ref, error);
+                }
+            }
+        }
     }
 
     pub(crate) fn open_sidebar_snooze_menu(
@@ -1667,6 +1748,7 @@ impl super::super::App {
         }
         let target = snooze.target.clone();
         let Some((snoozed, _)) = self.sidebar_pane_lifecycle_state(&target) else {
+            self.state.sidebar_snooze = None;
             self.remote_pane_lifecycle_refused(&target);
             return;
         };
@@ -1683,11 +1765,11 @@ impl super::super::App {
                 )
                 .then(crate::platform::tomorrow_morning_unix)
                 .flatten();
-                let Some(params) = sidebar_snooze_params(
-                    self.sidebar_pane_lifecycle_public_id(&target)?,
-                    *preset,
-                    tomorrow_morning,
-                ) else {
+                let Some(public_pane_id) = self.sidebar_pane_lifecycle_public_id(&target) else {
+                    return;
+                };
+                let Some(params) = sidebar_snooze_params(public_pane_id, *preset, tomorrow_morning)
+                else {
                     return;
                 };
                 self.state.sidebar_snooze = None;
@@ -1766,7 +1848,6 @@ impl super::super::App {
             || !key.modifiers.is_empty()
             || self.state.sidebar_settled_menu_target.is_some()
             || self.state.sidebar_selected_settled.is_some()
-            || self.state.sidebar_selected_remote_agent.is_some()
             || self.state.sidebar_object_menu.is_some()
             || self.state.sidebar_sort_menu.is_some()
             || self.state.sidebar_group_menu_open
@@ -1780,33 +1861,39 @@ impl super::super::App {
         {
             return false;
         }
-        let Some(ws_idx) = self.state.active else {
-            return false;
+        let target = if let Some(agent_ref) = self.state.sidebar_selected_remote_agent.clone() {
+            crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref)
+        } else {
+            let Some(ws_idx) = self.state.active else {
+                return false;
+            };
+            let Some(pane_id) = self
+                .state
+                .workspaces
+                .get(ws_idx)
+                .and_then(crate::workspace::Workspace::focused_pane_id)
+            else {
+                return false;
+            };
+            let Some(target) = self.local_sidebar_pane_lifecycle_target(ws_idx, pane_id) else {
+                return false;
+            };
+            target
         };
-        let Some(pane_id) = self
-            .state
-            .workspaces
-            .get(ws_idx)
-            .and_then(crate::workspace::Workspace::focused_pane_id)
-        else {
+        let Some((snoozed, _)) = self.sidebar_pane_lifecycle_state(&target) else {
             return false;
         };
         match key.code {
             KeyCode::Char('z') => {
-                let anchor =
-                    crate::ui::compute_tab_card_areas(&self.state, self.state.view.sidebar_rect)
-                        .into_iter()
-                        .find(|card| card.ws_idx == ws_idx && card.pane_id == pane_id)
-                        .map(|card| (card.rect.right().saturating_sub(4), card.rect.y))
-                        .unwrap_or((
-                            self.state.view.sidebar_rect.x,
-                            self.state.view.sidebar_rect.y,
-                        ));
-                self.open_sidebar_snooze_menu(ws_idx, pane_id, anchor.0, anchor.1);
+                let anchor = (
+                    self.state.view.sidebar_rect.right().saturating_sub(4),
+                    self.state.view.sidebar_rect.y,
+                );
+                self.open_sidebar_snooze_menu(target, anchor.0, anchor.1);
                 self.state.sidebar_snooze.is_some()
             }
-            KeyCode::Char('s') => {
-                self.settle_sidebar_pane(ws_idx, pane_id);
+            KeyCode::Char('s') if !snoozed => {
+                self.settle_sidebar_pane(target);
                 true
             }
             _ => false,
@@ -2219,17 +2306,29 @@ impl super::super::App {
         self.flush_pane_settlement_events();
     }
 
-    pub(crate) fn settle_sidebar_pane(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
-        let Some(workspace) = self.state.workspaces.get(ws_idx) else {
+    pub(crate) fn settle_sidebar_pane(
+        &mut self,
+        target: crate::app::state::SidebarPaneLifecycleTarget,
+    ) {
+        let Some((snoozed, _)) = self.sidebar_pane_lifecycle_state(&target) else {
+            self.remote_pane_lifecycle_refused(&target);
             return;
         };
-        if workspace.pane_state(pane_id).is_none() || self.state.pane_is_settled(ws_idx, pane_id) {
+        if snoozed {
             return;
         }
-        let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
-            return;
-        };
-        self.runtime_pane_settle("tui.sidebar.settle", public_pane_id);
+        match &target {
+            crate::app::state::SidebarPaneLifecycleTarget::Local(_) => {
+                if let Some(public_pane_id) = self.sidebar_pane_lifecycle_public_id(&target) {
+                    self.runtime_pane_settle("tui.sidebar.settle", public_pane_id);
+                }
+            }
+            crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref) => {
+                if let Err(error) = self.remote_pane_settle(agent_ref.clone()) {
+                    self.show_remote_pane_lifecycle_error(&agent_ref, error);
+                }
+            }
+        }
     }
 
     pub(crate) fn resume_settled_pane_before_input(&mut self, pane_id: crate::layout::PaneId) {
@@ -2758,11 +2857,23 @@ mod tests {
             .find(|target| target.label == "Settle")
             .cloned()
             .expect("settle icon target");
-        let crate::app::state::SidebarHoverAction::Settle { ws_idx, pane_id } =
-            target.action.expect("settle action")
+        let crate::app::state::SidebarHoverAction::Settle {
+            target: lifecycle_target,
+        } = target.action.expect("settle action")
         else {
             panic!("settle target carried a different action");
         };
+        let crate::app::state::SidebarPaneLifecycleTarget::Local(target_pane) = lifecycle_target
+        else {
+            panic!("local row carried a remote target");
+        };
+        let ws_idx = app
+            .state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == target_pane.workspace_id)
+            .expect("target workspace");
+        let pane_id = target_pane.pane_id;
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -2786,11 +2897,23 @@ mod tests {
             .find(|target| target.label == "Set time")
             .cloned()
             .expect("snooze control target");
-        let crate::app::state::SidebarHoverAction::Snooze { ws_idx, pane_id } =
-            target.action.expect("snooze action")
+        let crate::app::state::SidebarHoverAction::Snooze {
+            target: lifecycle_target,
+        } = target.action.expect("snooze action")
         else {
             panic!("snooze target carried a different action");
         };
+        let crate::app::state::SidebarPaneLifecycleTarget::Local(target_pane) = lifecycle_target
+        else {
+            panic!("local row carried a remote target");
+        };
+        let ws_idx = app
+            .state
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == target_pane.workspace_id)
+            .expect("target workspace");
+        let pane_id = target_pane.pane_id;
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
@@ -2834,9 +2957,8 @@ mod tests {
                     && matches!(
                         target.action.as_ref(),
                         Some(crate::app::state::SidebarHoverAction::Snooze {
-                            pane_id: target_pane,
-                            ..
-                        }) if *target_pane == pane_id
+                            target: crate::app::state::SidebarPaneLifecycleTarget::Local(target_pane),
+                        }) if target_pane.pane_id == pane_id
                     )
             })
             .cloned()
@@ -2848,7 +2970,12 @@ mod tests {
             target.rect.y,
         ));
         assert!(app.state.sidebar_snooze.as_ref().is_some_and(|snooze| {
-            snooze.time_draft.is_none() && app.state.pane_is_snoozed(0, snooze.target.pane_id)
+            snooze.time_draft.is_none()
+                && matches!(
+                    &snooze.target,
+                    crate::app::state::SidebarPaneLifecycleTarget::Local(target)
+                        if app.state.pane_is_snoozed(0, target.pane_id)
+                )
         }));
         app.handle_sidebar_snooze_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
         assert!(!app.state.pane_is_snoozed(0, pane_id));
@@ -2932,7 +3059,10 @@ mod tests {
 
         app.state.swap_sidebar_presentation(&mut client_a);
         app.state.focus_client_on_sidebar();
-        app.open_snooze_time_input(0, editor_pane);
+        let target = app
+            .local_sidebar_pane_lifecycle_target(0, editor_pane)
+            .expect("local lifecycle target");
+        app.open_snooze_time_input(target);
         if let Some(snooze) = app.state.sidebar_snooze.as_mut() {
             snooze.time_draft = Some("14:30".into());
             snooze.error = Some("client A only".into());
@@ -2962,7 +3092,10 @@ mod tests {
         app.state.swap_sidebar_presentation(&mut client_a);
         assert!(app.state.sidebar_focused);
         let editor = app.state.sidebar_snooze.as_ref().expect("client A editor");
-        assert_eq!(editor.target.pane_id, editor_pane);
+        assert_eq!(
+            editor.target.local().map(|target| target.pane_id),
+            Some(editor_pane)
+        );
         assert_eq!(editor.time_draft.as_deref(), Some("14:30"));
         assert_eq!(editor.error.as_deref(), Some("client A only"));
     }

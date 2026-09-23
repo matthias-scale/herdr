@@ -15648,7 +15648,7 @@ next_tab = ""
             .sidebar_presentation
             .overlay
             .snooze = Some(crate::app::state::SidebarSnoozeUiState {
-            target,
+            target: crate::app::state::SidebarPaneLifecycleTarget::Local(target),
             anchor: (4, 3),
             selected: crate::app::state::SidebarSnoozeMenuAction::SetTime,
             time_draft: None,
@@ -16439,10 +16439,12 @@ next_tab = ""
         client_a.sidebar_presentation.focused = true;
         client_a.sidebar_presentation.overlay.snooze =
             Some(crate::app::state::SidebarSnoozeUiState {
-                target: crate::app::state::PaneFocusTarget {
-                    workspace_id,
-                    pane_id: editor_pane,
-                },
+                target: crate::app::state::SidebarPaneLifecycleTarget::Local(
+                    crate::app::state::PaneFocusTarget {
+                        workspace_id,
+                        pane_id: editor_pane,
+                    },
+                ),
                 anchor: (2, 2),
                 selected: crate::app::state::SidebarSnoozeMenuAction::SetTime,
                 time_draft: Some(String::new()),
@@ -16502,7 +16504,10 @@ next_tab = ""
             .snooze
             .as_ref()
             .expect("client A editor");
-        assert_eq!(editor.target.pane_id, editor_pane);
+        assert_eq!(
+            editor.target.local().map(|target| target.pane_id),
+            Some(editor_pane)
+        );
         assert_eq!(editor.time_draft.as_deref(), Some("14:30"));
         assert_eq!(editor.error.as_deref(), Some("client A only"));
     }
