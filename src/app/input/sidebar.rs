@@ -1680,7 +1680,7 @@ impl super::super::App {
             }
             crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref) => {
                 if let Err(error) = self.remote_pane_unsnooze(agent_ref.clone()) {
-                    self.show_remote_pane_lifecycle_error(&agent_ref, error);
+                    self.show_remote_pane_lifecycle_error(agent_ref, error);
                 }
             }
         }
@@ -2325,7 +2325,7 @@ impl super::super::App {
             }
             crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref) => {
                 if let Err(error) = self.remote_pane_settle(agent_ref.clone()) {
-                    self.show_remote_pane_lifecycle_error(&agent_ref, error);
+                    self.show_remote_pane_lifecycle_error(agent_ref, error);
                 }
             }
         }
