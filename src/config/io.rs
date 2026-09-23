@@ -1277,12 +1277,15 @@ agent_panel_sort = "priority"
     }
 
     #[test]
-    fn load_live_config_reads_the_notepad_and_break_timer_sections() {
+    fn load_live_config_reads_the_sidebar_companion_sections() {
         let loaded = load_live_config_from_str(
             r#"
 [notepad]
 enabled = true
 height = 12
+
+[goals_panel]
+enabled = false
 
 [pomodoro]
 enabled = true
@@ -1295,6 +1298,7 @@ work_minutes = 20
         assert!(loaded.invalid_sections.is_empty());
         assert!(loaded.config.notepad.enabled);
         assert_eq!(loaded.config.notepad.height, 12);
+        assert!(!loaded.config.goals_panel.enabled);
         assert!(loaded.config.pomodoro.enabled);
         assert_eq!(loaded.config.pomodoro.work_minutes, 20);
     }

@@ -73,6 +73,7 @@ mod events;
 mod files;
 mod fleet;
 mod ghostty;
+mod goals;
 mod groups;
 mod handoff_runtime;
 mod hyperspace;
@@ -229,6 +230,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Pull and push the notes directory as a git checkout.
 # git_sync = false
 # git_sync_interval_seconds = 120
+
+[goals_panel]
+# Show goals and work streams from the focused session's .streams.json file.
+# enabled = true
 
 [pomodoro]
 # Break reminder. The overlay it raises has to be answered in writing.
