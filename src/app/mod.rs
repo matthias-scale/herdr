@@ -4267,6 +4267,7 @@ mod tests {
     #[test]
     fn disabled_work_index_does_not_start_a_refresh() {
         let mut app = test_app();
+        app.work_index_config.enabled = false;
         app.start_work_index_refresh_if_due(Instant::now());
         assert!(app.work_index_refresh_in_flight.is_none());
     }

@@ -43,7 +43,15 @@ impl App {
         self.encode_day_item(id, &item)
     }
 
-    pub(super) fn handle_day_list(&self, id: String, params: DayListParams) -> String {
+    pub(super) fn handle_day_list(&mut self, id: String, params: DayListParams) -> String {
+        let Some(root) = self.day_store_root.as_deref() else {
+            return super::responses::encode_error(
+                id,
+                "store_error",
+                "day item store is unavailable",
+            );
+        };
+        self.state.day_board = crate::day::load(root);
         let items = self
             .state
             .day_board
@@ -80,17 +88,16 @@ impl App {
                 format!("pane not found: {}", params.pane_id),
             );
         };
-        let Some(mut item) = self.state.day_board.items.get(&params.id).cloned() else {
-            return day_item_not_found(id, &params.id);
-        };
-        item.bindings.insert(
-            self.state.agent_host_name.clone(),
-            crate::day::DayBinding {
-                pane_id: canonical_pane_id,
-                bound_at: crate::day::unix_seconds_now(),
-            },
-        );
-        self.persist_and_publish(id, item)
+        let host = self.state.agent_host_name.clone();
+        self.update_and_publish(id, &params.id, move |item| {
+            item.bindings.insert(
+                host,
+                crate::day::DayBinding {
+                    pane_id: canonical_pane_id,
+                    bound_at: crate::day::unix_seconds_now(),
+                },
+            );
+        })
     }
 
     pub(super) fn handle_day_link(&mut self, id: String, params: DayLinkParams) -> String {
@@ -103,54 +110,71 @@ impl App {
                 "day.link requires --ticket or --pr",
             );
         }
-        let Some(mut item) = self.state.day_board.items.get(&params.id).cloned() else {
-            return day_item_not_found(id, &params.id);
-        };
-        if let Some(ticket) = params.ticket.filter(|ticket| !ticket.is_empty()) {
-            if !item.links.tickets.contains(&ticket) {
-                item.links.tickets.push(ticket);
+        let ticket = params.ticket.filter(|ticket| !ticket.is_empty());
+        let pr = params.pr.filter(|pr| !pr.is_empty());
+        let response = self.update_and_publish(id, &params.id, move |item| {
+            if let Some(ticket) = ticket {
+                if !item.links.tickets.contains(&ticket) {
+                    item.links.tickets.push(ticket);
+                }
             }
-        }
-        if let Some(pr) = params.pr.filter(|pr| !pr.is_empty()) {
-            if !item.links.prs.contains(&pr) {
-                item.links.prs.push(pr);
+            if let Some(pr) = pr {
+                if !item.links.prs.contains(&pr) {
+                    item.links.prs.push(pr);
+                }
             }
+        });
+        if self.work_index_config.enabled {
+            self.next_work_index_refresh = std::time::Instant::now();
         }
-        self.persist_and_publish(id, item)
+        response
     }
 
     pub(super) fn handle_day_note(&mut self, id: String, params: DayNoteParams) -> String {
-        let Some(mut item) = self.state.day_board.items.get(&params.id).cloned() else {
-            return day_item_not_found(id, &params.id);
-        };
-        item.note = params.note.filter(|note| !note.is_empty());
-        self.persist_and_publish(id, item)
+        let note = params.note.filter(|note| !note.is_empty());
+        self.update_and_publish(id, &params.id, move |item| item.note = note)
     }
 
     pub(super) fn handle_day_done(&mut self, id: String, params: DayItemTarget) -> String {
-        let Some(mut item) = self.state.day_board.items.get(&params.id).cloned() else {
-            return day_item_not_found(id, &params.id);
-        };
-        item.done_at = Some(crate::day::unix_seconds_now());
-        self.persist_and_publish(id, item)
+        self.update_and_publish(id, &params.id, |item| {
+            item.done_at = Some(crate::day::unix_seconds_now());
+        })
     }
 
     pub(super) fn handle_day_dismiss(&mut self, id: String, params: DayItemTarget) -> String {
-        let Some(mut item) = self.state.day_board.items.get(&params.id).cloned() else {
-            return day_item_not_found(id, &params.id);
-        };
-        item.dismissed = true;
-        self.persist_and_publish(id, item)
+        self.update_and_publish(id, &params.id, |item| item.dismissed = true)
     }
 
-    fn persist_and_publish(&mut self, id: String, item: crate::day::DayItem) -> String {
-        if let Err(error) = self.persist_day_item(&item) {
-            return super::responses::encode_error(id, "store_error", error);
-        }
-        self.state
-            .day_board
-            .items
-            .insert(item.id.clone(), item.clone());
+    fn update_and_publish(
+        &mut self,
+        id: String,
+        item_id: &str,
+        update: impl FnOnce(&mut crate::day::DayItem),
+    ) -> String {
+        let Some(root) = self.day_store_root.as_deref() else {
+            return super::responses::encode_error(
+                id,
+                "store_error",
+                "day item store is unavailable",
+            );
+        };
+        let board = match crate::day::update_item(root, item_id, update) {
+            Ok(board) => board,
+            Err(crate::day::DayItemUpdateError::NotFound) => {
+                return day_item_not_found(id, item_id);
+            }
+            Err(crate::day::DayItemUpdateError::Store(error)) => {
+                return super::responses::encode_error(id, "store_error", error);
+            }
+        };
+        let Some(item) = board.items.get(item_id).cloned() else {
+            return super::responses::encode_error(
+                id,
+                "store_error",
+                "updated day item disappeared from the loaded board",
+            );
+        };
+        self.state.day_board = board;
         self.encode_day_item(id, &item)
     }
 
@@ -181,7 +205,7 @@ impl App {
     }
 
     fn day_item_links_closed(&self, item: &crate::day::DayItem) -> bool {
-        if item.links.is_empty() {
+        if !self.work_index_config.enabled || item.links.is_empty() {
             return false;
         }
         let Some(snapshot) = self.work_index_snapshot.as_ref() else {
@@ -286,6 +310,143 @@ mod tests {
 
         work.ticket_ids = vec!["SCA-7".into()];
         assert_eq!(super::ticket_state_for_link(&work, "SCA-7"), Some("Done"));
+    }
+
+    #[test]
+    fn two_servers_share_fresh_reads_and_mutations() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-day-api-two-servers-{}",
+            crate::config::test_unique_suffix()
+        ));
+        let mut first = app();
+        first.day_store_root = Some(root.clone());
+        let mut second = app();
+        second.day_store_root = Some(root.clone());
+
+        let added = first.handle_api_request(Request {
+            id: "add".into(),
+            method: Method::DayAdd(DayAddParams {
+                title: "Shared item".into(),
+                kind: DayItemKind::Task,
+                source: DayItemSource::Manual,
+                note: None,
+            }),
+        });
+        let ResponseResult::DayItem { item } = response(&added).result else {
+            panic!("unexpected response: {added}");
+        };
+        let item_id = item.item.id;
+
+        let linked = second.handle_api_request(Request {
+            id: "link".into(),
+            method: Method::DayLink(crate::api::schema::DayLinkParams {
+                id: item_id.clone(),
+                ticket: None,
+                pr: Some("https://github.com/acme/app/pull/9".into()),
+            }),
+        });
+        assert!(matches!(
+            response(&linked).result,
+            ResponseResult::DayItem { .. }
+        ));
+
+        let noted = first.handle_api_request(Request {
+            id: "note".into(),
+            method: Method::DayNote(crate::api::schema::DayNoteParams {
+                id: item_id,
+                note: Some("preserve the other server's link".into()),
+            }),
+        });
+        assert!(matches!(
+            response(&noted).result,
+            ResponseResult::DayItem { .. }
+        ));
+
+        let listed = second.handle_api_request(Request {
+            id: "list".into(),
+            method: Method::DayList(DayListParams::default()),
+        });
+        let ResponseResult::DayList { items, load_errors } = response(&listed).result else {
+            panic!("unexpected response: {listed}");
+        };
+        assert!(load_errors.is_empty());
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].item.note.as_deref(),
+            Some("preserve the other server's link")
+        );
+        assert_eq!(
+            items[0].item.links.prs,
+            ["https://github.com/acme/app/pull/9"]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn linked_work_completion_requires_an_enabled_index() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-day-api-linked-done-{}",
+            crate::config::test_unique_suffix()
+        ));
+        let mut app = app();
+        app.day_store_root = Some(root.clone());
+        let added = app.handle_api_request(Request {
+            id: "add".into(),
+            method: Method::DayAdd(DayAddParams {
+                title: "Close linked work".into(),
+                kind: DayItemKind::Task,
+                source: DayItemSource::Manual,
+                note: None,
+            }),
+        });
+        let ResponseResult::DayItem { item } = response(&added).result else {
+            panic!("unexpected response: {added}");
+        };
+        let linked = app.handle_api_request(Request {
+            id: "link".into(),
+            method: Method::DayLink(crate::api::schema::DayLinkParams {
+                id: item.item.id,
+                ticket: Some("SCA-42".into()),
+                pr: Some("https://github.com/acme/app/pull/9".into()),
+            }),
+        });
+        assert!(matches!(
+            response(&linked).result,
+            ResponseResult::DayItem { .. }
+        ));
+
+        let mut work = work_item_with_tickets(vec!["SCA-42".into()]);
+        work.pr_url = Some("https://github.com/acme/app/pull/9".into());
+        work.pr_state = Some("merged".into());
+        work.ticket_details = vec![work_ticket("SCA-42", Some("Done"))];
+        app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items: vec![work],
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: std::time::SystemTime::now(),
+        });
+
+        app.work_index_config.enabled = false;
+        let disabled = app.handle_api_request(Request {
+            id: "disabled".into(),
+            method: Method::DayList(DayListParams::default()),
+        });
+        let ResponseResult::DayList { items, .. } = response(&disabled).result else {
+            panic!("unexpected response: {disabled}");
+        };
+        assert_eq!(items[0].column, crate::day::DayColumn::Todo);
+
+        app.work_index_config.enabled = true;
+        let enabled = app.handle_api_request(Request {
+            id: "enabled".into(),
+            method: Method::DayList(DayListParams::default()),
+        });
+        let ResponseResult::DayList { items, .. } = response(&enabled).result else {
+            panic!("unexpected response: {enabled}");
+        };
+        assert_eq!(items[0].column, crate::day::DayColumn::Done);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -2085,8 +2085,8 @@
         {
           "key": "work_index.enabled",
           "type": "boolean",
-          "default": "false",
-          "description": "Enable repo-wide GitHub, Linear, and agent-pane work indexing."
+          "default": "true",
+          "description": "Enable repo-wide GitHub, Linear, agent-pane, and day-link work indexing."
         },
         {
           "key": "work_index.refresh_interval_seconds",

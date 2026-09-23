@@ -2005,7 +2005,7 @@ impl FleetConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct WorkIndexConfig {
-    /// Enable repo-wide GitHub, Linear, and agent-pane work indexing. Default: false.
+    /// Enable repo-wide GitHub, Linear, agent-pane, and day-link work indexing. Default: true.
     pub enabled: bool,
     /// Refresh interval in seconds. Default: 300.
     pub refresh_interval_seconds: u64,
@@ -2018,7 +2018,7 @@ pub struct WorkIndexConfig {
 impl Default for WorkIndexConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             refresh_interval_seconds: 300,
             linear_team: None,
             repos: Vec::new(),
@@ -2548,6 +2548,11 @@ settle_done_after_minutes = 45
         let config: Config =
             toml::from_str("[day_board]\nstale_after = 90\n").expect("day board config");
         assert_eq!(config.day_board.stale_after, 90);
+    }
+
+    #[test]
+    fn work_index_defaults_enabled_for_link_derived_day_completion() {
+        assert!(Config::default().work_index.enabled);
     }
 
     #[test]

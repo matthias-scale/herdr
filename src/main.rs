@@ -198,8 +198,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # manifest_check = true
 
 [work_index]
-# Enable repo-wide GitHub, Linear, and agent-pane work indexing.
-# enabled = false
+# Enable repo-wide GitHub, Linear, agent-pane, and day-link work indexing.
+# enabled = true
 # Refresh interval in seconds.
 # refresh_interval_seconds = 300
 # Linear team key, for example "SCA".

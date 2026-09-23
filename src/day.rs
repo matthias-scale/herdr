@@ -137,6 +137,34 @@ pub struct DayBoard {
     pub load_errors: Vec<DayItemLoadError>,
 }
 
+impl DayBoard {
+    pub fn links(&self) -> DayLinks {
+        let mut links = DayLinks {
+            tickets: self
+                .items
+                .values()
+                .flat_map(|item| item.links.tickets.iter().cloned())
+                .collect(),
+            prs: self
+                .items
+                .values()
+                .flat_map(|item| item.links.prs.iter().cloned())
+                .collect(),
+        };
+        links.tickets.sort();
+        links.tickets.dedup();
+        links.prs.sort();
+        links.prs.dedup();
+        links
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum DayItemUpdateError {
+    NotFound,
+    Store(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DayColumn {
@@ -254,6 +282,11 @@ pub fn load(root: &Path) -> DayBoard {
 }
 
 pub fn write_item(root: &Path, item: &DayItem) -> Result<(), String> {
+    let _lock = lock_store(root)?;
+    write_item_unlocked(root, item)
+}
+
+fn write_item_unlocked(root: &Path, item: &DayItem) -> Result<(), String> {
     validate_item(item)?;
     let items_dir = root.join("items");
     fs::create_dir_all(&items_dir).map_err(|error| {
@@ -288,6 +321,42 @@ pub fn write_item(root: &Path, item: &DayItem) -> Result<(), String> {
     write_result
 }
 
+fn lock_store(root: &Path) -> Result<fs::File, String> {
+    fs::create_dir_all(root)
+        .map_err(|error| format!("cannot create day item store {}: {error}", root.display()))?;
+    let lock_path = root.join(".items.lock");
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| format!("cannot open {}: {error}", lock_path.display()))?;
+    lock.lock()
+        .map_err(|error| format!("cannot lock {}: {error}", lock_path.display()))?;
+    Ok(lock)
+}
+
+/// Serialize cross-process read-modify-write operations through one store lock.
+/// The item is loaded after the lock is held, so two named servers cannot write
+/// mutations built from different cached copies of the same file.
+pub fn update_item(
+    root: &Path,
+    id: &str,
+    update: impl FnOnce(&mut DayItem),
+) -> Result<DayBoard, DayItemUpdateError> {
+    let _lock = lock_store(root).map_err(DayItemUpdateError::Store)?;
+
+    let mut board = load(root);
+    let item = board
+        .items
+        .get_mut(id)
+        .ok_or(DayItemUpdateError::NotFound)?;
+    update(item);
+    write_item_unlocked(root, item).map_err(DayItemUpdateError::Store)?;
+    Ok(board)
+}
+
 fn format_item_file(item: &DayItem) -> Result<String, String> {
     let front_matter = serde_json::to_string_pretty(&DayItemFrontMatter::from_item(item))
         .map_err(|error| format!("cannot encode day item {}: {error}", item.id))?;
@@ -296,13 +365,13 @@ fn format_item_file(item: &DayItem) -> Result<String, String> {
 
 fn parse_item_file(path: &Path, contents: &str) -> Result<DayItem, String> {
     let Some(contents) = contents.strip_prefix("---\n") else {
-        return Err("missing YAML front matter opening delimiter".to_string());
+        return Err("missing JSON front matter opening delimiter".to_string());
     };
     let Some((front_matter, body)) = contents.split_once("\n---\n") else {
-        return Err("missing YAML front matter closing delimiter".to_string());
+        return Err("missing JSON front matter closing delimiter".to_string());
     };
     let metadata: DayItemFrontMatter = serde_json::from_str(front_matter)
-        .map_err(|error| format!("invalid YAML front matter: {error}"))?;
+        .map_err(|error| format!("invalid JSON front matter: {error}"))?;
     let title = body.strip_suffix('\n').unwrap_or(body).to_string();
     let item = metadata.into_item(title);
     validate_item(&item)?;
@@ -459,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn item_file_round_trips_yaml_front_matter_and_title_body() {
+    fn item_file_round_trips_json_front_matter_and_title_body() {
         let root = temp_root("round-trip");
         let expected = item("01K5DAYITEM", "Reply to refund thread");
 
@@ -509,6 +578,9 @@ mod tests {
         assert!(loaded.items.is_empty());
         assert_eq!(loaded.load_errors.len(), 1);
         assert_eq!(loaded.load_errors[0].path, items.join("broken.md"));
+        assert!(loaded.load_errors[0]
+            .message
+            .contains("missing JSON front matter opening delimiter"));
         let _ = std::fs::remove_dir_all(root);
     }
 
