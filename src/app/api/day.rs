@@ -219,7 +219,9 @@ impl App {
         });
         let prs_closed = item.links.prs.iter().all(|pr| {
             snapshot.items.iter().any(|work| {
-                work.pr_url.as_deref().is_some_and(|url| same_pull_request(url, pr))
+                work.pr_url
+                    .as_deref()
+                    .is_some_and(|url| same_pull_request(url, pr))
                     && work
                         .pr_state
                         .as_deref()
