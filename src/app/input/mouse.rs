@@ -4384,13 +4384,29 @@ mod tests {
             toast.context
         );
         let local_pane = app.state.workspaces[0].tabs[0].root_pane;
-        for key in ['z', 's'] {
-            assert!(!app.handle_sidebar_session_action_key(KeyEvent::new(
-                KeyCode::Char(key),
-                KeyModifiers::empty(),
-            )));
-        }
-        assert!(app.state.sidebar_snooze.is_none());
+        assert!(app.handle_sidebar_session_action_key(KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::empty(),
+        )));
+        assert!(app.state.sidebar_snooze.as_ref().is_some_and(|menu| {
+            matches!(
+                &menu.target,
+                crate::app::state::SidebarPaneLifecycleTarget::Remote(target)
+                    if target == &agent_ref
+            )
+        }));
+        app.state.sidebar_snooze = None;
+        assert!(app.handle_sidebar_session_action_key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::empty(),
+        )));
+        let refusal = app
+            .state
+            .toast
+            .as_ref()
+            .expect("settle revalidates the remote owner");
+        assert_eq!(refusal.title, "ub2 pane action failed");
+        assert!(refusal.context.contains("owner ub2 is unreachable"));
         assert!(!app.state.pane_is_settled(0, local_pane));
     }
 
