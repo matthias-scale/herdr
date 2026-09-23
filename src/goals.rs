@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use serde::Deserialize;
@@ -25,6 +26,7 @@ pub(crate) struct GoalsFile {
 pub(crate) struct Goal {
     pub(crate) text: String,
     pub(crate) done_when: String,
+    #[serde(default, deserialize_with = "deserialize_present")]
     pub(crate) link: Option<String>,
 }
 
@@ -35,7 +37,16 @@ pub(crate) struct Stream {
     pub(crate) what: String,
     pub(crate) state: StreamState,
     pub(crate) owner: String,
+    #[serde(default, deserialize_with = "deserialize_present")]
     pub(crate) needs: Option<Vec<u64>>,
+}
+
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -54,6 +65,48 @@ pub(crate) enum GoalsLoad {
     Ready(GoalsFile),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GoalsPanelState {
+    pub(crate) enabled: bool,
+    pub(crate) load: GoalsLoad,
+}
+
+impl GoalsPanelState {
+    pub(crate) fn from_config(config: &crate::config::GoalsPanelConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            load: GoalsLoad::Missing,
+        }
+    }
+}
+
+impl Default for GoalsPanelState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            load: GoalsLoad::Missing,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GoalsObservation {
+    pub(crate) path: PathBuf,
+    stamp: Option<FileStamp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GoalsRefresh {
+    pub(crate) observation: GoalsObservation,
+    pub(crate) load: Option<GoalsLoad>,
+}
+
 pub(crate) fn session_root(cwd: &Path) -> PathBuf {
     session_root_with(cwd, |path| path.exists())
 }
@@ -65,8 +118,13 @@ fn session_root_with(cwd: &Path, is_git_marker: impl Fn(&Path) -> bool) -> PathB
         .to_path_buf()
 }
 
+#[cfg(test)]
 pub(crate) fn load_from_cwd(cwd: &Path) -> GoalsLoad {
     let path = session_root(cwd).join(STREAMS_FILE_NAME);
+    load_path(&path)
+}
+
+fn load_path(path: &Path) -> GoalsLoad {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return GoalsLoad::Missing,
@@ -77,6 +135,17 @@ pub(crate) fn load_from_cwd(cwd: &Path) -> GoalsLoad {
         Ok(file) => GoalsLoad::Ready(file),
         Err(error) => GoalsLoad::Malformed(error),
     }
+}
+
+pub(crate) fn refresh_from_cwd(cwd: &Path, previous: Option<&GoalsObservation>) -> GoalsRefresh {
+    let path = session_root(cwd).join(STREAMS_FILE_NAME);
+    let stamp = fs::metadata(&path).ok().map(|metadata| FileStamp {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+    });
+    let observation = GoalsObservation { path, stamp };
+    let load = (previous != Some(&observation)).then(|| load_path(&observation.path));
+    GoalsRefresh { observation, load }
 }
 
 pub(crate) fn parse(contents: &str) -> Result<GoalsFile, String> {
@@ -218,6 +287,12 @@ mod tests {
             "\"done_when\": \"Replies stay plain\", \"extra\": true",
         );
         assert!(parse(&unknown).is_err());
+
+        let null_link = VALID.replace("\"link\": \"https://example.test\"", "\"link\": null");
+        assert!(parse(&null_link).is_err());
+
+        let null_needs = VALID.replace("\"needs\": [1, 2]", "\"needs\": null");
+        assert!(parse(&null_needs).is_err());
     }
 
     #[test]
@@ -258,5 +333,21 @@ mod tests {
             load_from_cwd(&temp.0),
             GoalsLoad::Malformed(error) if !error.is_empty()
         ));
+    }
+
+    #[test]
+    fn refresh_skips_unchanged_files_and_reloads_changed_ones() {
+        let temp = TestDir::new("refresh");
+        fs::write(temp.0.join(".git"), "gitdir: /elsewhere\n").expect("write worktree git file");
+        fs::write(temp.0.join(STREAMS_FILE_NAME), VALID).expect("write goals file");
+
+        let first = refresh_from_cwd(&temp.0, None);
+        assert!(matches!(first.load, Some(GoalsLoad::Ready(_))));
+        let unchanged = refresh_from_cwd(&temp.0, Some(&first.observation));
+        assert_eq!(unchanged.load, None);
+
+        fs::write(temp.0.join(STREAMS_FILE_NAME), format!("{VALID}\n")).expect("change goals file");
+        let changed = refresh_from_cwd(&temp.0, Some(&unchanged.observation));
+        assert!(matches!(changed.load, Some(GoalsLoad::Ready(_))));
     }
 }

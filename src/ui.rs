@@ -17,6 +17,7 @@ mod dock_scratchpad;
 #[path = "ui/dock/shortcuts.rs"]
 mod dock_shortcuts;
 pub(crate) mod dropdown;
+pub(crate) mod goals;
 mod home;
 pub(crate) mod hyperspace;
 mod inbox;

@@ -4693,6 +4693,8 @@ pub struct AppState {
     pub(crate) scratchpad: crate::scratchpad::ScratchpadDoc,
     /// The sidebar notepad: a folder of Markdown notes edited in place.
     pub(crate) notepad: crate::notepad::NotepadState,
+    /// Cached goals for the focused session. Rendering never reads the file.
+    pub(crate) goals: crate::goals::GoalsPanelState,
     /// The break reminder shown next to it.
     pub(crate) pomodoro: crate::pomodoro::PomodoroState,
     /// The idle star field pinned under both of them.
@@ -7775,6 +7777,7 @@ impl AppState {
             dock_editor_requested_paths: std::collections::HashMap::new(),
             scratchpad: crate::scratchpad::ScratchpadDoc::default(),
             notepad: crate::notepad::NotepadState::default(),
+            goals: crate::goals::GoalsPanelState::default(),
             pomodoro: crate::pomodoro::PomodoroState::default(),
             // Off in fixtures, the way the break timer is: a decorative panel
             // must not silently move every existing sidebar layout assertion.

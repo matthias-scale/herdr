@@ -3376,6 +3376,7 @@ impl AppState {
             AppEvent::SymphonyWorkflowsRefreshed { .. } => Vec::new(),
             AppEvent::ScratchpadChanged => Vec::new(),
             AppEvent::NotepadChanged => Vec::new(),
+            AppEvent::GoalsRefreshed { .. } => Vec::new(),
             AppEvent::LoopRunHistoryChanged => Vec::new(),
             AppEvent::StatusMetricsRefreshed { .. }
             | AppEvent::ProviderUsageRefreshed { .. }

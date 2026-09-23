@@ -365,6 +365,10 @@ impl App {
             }
             AppEvent::ScratchpadChanged => self.reload_scratchpad(),
             AppEvent::NotepadChanged => self.reload_notepad(),
+            AppEvent::GoalsRefreshed {
+                generation,
+                refresh,
+            } => self.finish_goals_refresh(generation, refresh),
             AppEvent::LoopRunHistoryChanged => self.refresh_loop_run_history(),
             AppEvent::StatusMetricsRefreshed { snapshot } => {
                 let should_repaint = self
@@ -654,6 +658,14 @@ impl App {
 
         if let AppEvent::NotepadChanged = ev {
             return Some(self.reload_notepad());
+        }
+
+        if let AppEvent::GoalsRefreshed {
+            generation,
+            refresh,
+        } = ev
+        {
+            return Some(self.finish_goals_refresh(generation, refresh.clone()));
         }
 
         if let AppEvent::LoopRunHistoryChanged = ev {

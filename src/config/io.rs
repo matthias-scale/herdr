@@ -14,6 +14,7 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "agent_detection",
     "experimental",
     "files",
+    "goals_panel",
     "keys",
     "launch_profiles",
     "linear",
@@ -318,6 +319,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut diagnostics,
         &mut invalid_sections,
         |section| config.notepad = section,
+    );
+    load_live_section(
+        table,
+        "goals_panel",
+        "goals panel config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.goals_panel = section,
     );
     load_live_section(
         table,

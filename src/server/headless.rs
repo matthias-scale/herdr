@@ -6870,6 +6870,7 @@ impl HeadlessServer {
         changed |= self.app.handle_loop_receipt_fallback(now);
         changed |= self.app.tick_notepad(now);
         if has_app_client {
+            changed |= self.app.schedule_goals_refresh(now);
             let host_focused = self.app_clients_host_focused();
             changed |= self.app.tick_pomodoro(now, host_focused);
             changed |= self.pomodoro_animation_due(now);

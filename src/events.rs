@@ -116,6 +116,11 @@ pub enum AppEvent {
     ScratchpadChanged,
     /// A note in the notepad directory changed on disk; rescan and reload.
     NotepadChanged,
+    /// The focused session's goals file was checked off the render thread.
+    GoalsRefreshed {
+        generation: u64,
+        refresh: crate::goals::GoalsRefresh,
+    },
     /// The append-only loop receipt source changed; refresh its cursor.
     LoopRunHistoryChanged,
     /// A bounded background native-metric sample completed.
