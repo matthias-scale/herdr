@@ -2163,32 +2163,17 @@ async fn run_client_loop(
             }
             ClientLoopEvent::ServerMessage(msg) => match msg {
                 ServerMessage::Frame(frame_data) => {
-                    let frame_data = if state.draw_host_cursor {
-                        render_ansi::frame_with_drawn_cursor(frame_data)
-                    } else {
-                        frame_data
-                    };
-                    let encoded = if state.draw_host_cursor {
-                        state.blit_encoder.encode_with_suppressed_visible_cursor(
-                            &frame_data,
-                            state.repaint_pending,
-                        )
-                    } else {
-                        state
-                            .blit_encoder
-                            .encode(&frame_data, state.repaint_pending)
-                    };
                     let mut stdout = io::stdout();
-                    let graphics = if state.kitty_graphics_enabled {
-                        frame_data.graphics.as_slice()
-                    } else {
-                        &[]
-                    };
-                    let _ =
-                        write_encoded_frame_with_graphics(&mut stdout, &encoded.bytes, graphics);
-                    let _ = stdout.flush();
-                    state.blit_encoder.commit(frame_data, encoded);
-                    state.repaint_pending = false;
+                    if let Err(err) = write_semantic_frame(
+                        &mut stdout,
+                        &mut state.blit_encoder,
+                        frame_data,
+                        &mut state.repaint_pending,
+                        state.draw_host_cursor,
+                        state.kitty_graphics_enabled,
+                    ) {
+                        warn!(%err, "failed to write semantic frame to host terminal");
+                    }
                     if !state.first_frame_received {
                         state.first_frame_received = true;
                         crate::logging::client_first_frame();
@@ -2982,6 +2967,43 @@ fn write_encoded_frame_with_graphics(
     writer.write_all(&encoded[insertion..])
 }
 
+fn write_semantic_frame(
+    writer: &mut impl io::Write,
+    encoder: &mut render_ansi::BlitEncoder,
+    frame: protocol::FrameData,
+    repaint_pending: &mut bool,
+    draw_host_cursor: bool,
+    kitty_graphics_enabled: bool,
+) -> io::Result<()> {
+    let frame = if draw_host_cursor {
+        render_ansi::frame_with_drawn_cursor(frame)
+    } else {
+        frame
+    };
+    let encoded = if draw_host_cursor {
+        encoder.encode_with_suppressed_visible_cursor(&frame, *repaint_pending)
+    } else {
+        encoder.encode(&frame, *repaint_pending)
+    };
+    let graphics = if kitty_graphics_enabled {
+        frame.graphics.as_slice()
+    } else {
+        &[]
+    };
+
+    let result = write_encoded_frame_with_graphics(&mut *writer, &encoded.bytes, graphics)
+        .and_then(|()| writer.flush());
+    if result.is_ok() {
+        encoder.commit(frame, encoded);
+        *repaint_pending = false;
+    } else {
+        // A partial host write leaves the physical screen between frames. Keep the last
+        // delivered baseline and make the next semantic frame overwrite every cell.
+        *repaint_pending = true;
+    }
+    result
+}
+
 fn contains_kitty_graphics_bytes(bytes: &[u8]) -> bool {
     bytes.windows(3).any(|window| window == b"\x1b_G")
 }
@@ -3730,6 +3752,143 @@ mod tests {
         write_encoded_frame_with_graphics(&mut output, b"text", b"").unwrap();
 
         assert_eq!(output, b"text");
+    }
+
+    struct PrefixThenError {
+        remaining: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl io::Write for PrefixThenError {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            }
+            let written = bytes.len().min(self.remaining);
+            self.bytes.extend_from_slice(&bytes[..written]);
+            self.remaining -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn ascii_frame(symbols: &[char]) -> protocol::FrameData {
+        protocol::FrameData {
+            cells: symbols
+                .iter()
+                .map(|symbol| protocol::CellData {
+                    symbol: symbol.to_string(),
+                    fg: 0,
+                    bg: 0,
+                    modifier: 0,
+                    skip: false,
+                    hyperlink: None,
+                })
+                .collect(),
+            width: symbols.len() as u16,
+            height: 1,
+            cursor: None,
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        }
+    }
+
+    fn replayed_row(width: u16, writes: &[&[u8]]) -> String {
+        let mut terminal = crate::ghostty::Terminal::new(width, 1, 0).unwrap();
+        for write in writes {
+            terminal.write(write);
+        }
+        (0..width)
+            .flat_map(|col| terminal.screen_cell(col, 0).unwrap().1)
+            .filter_map(char::from_u32)
+            .collect()
+    }
+
+    #[test]
+    fn partial_host_write_does_not_advance_diff_baseline() {
+        const WIDTH: usize = 40;
+        let mut old = vec![' '; WIDTH];
+        for (index, symbol) in [(2, 'H'), (3, 'e'), (6, 'r'), (8, 'i'), (14, 'e'), (22, 'n')] {
+            old[index] = symbol;
+        }
+        old[27..34].copy_from_slice(&['a', 'g', 'e', ' ', 't', 'a', 'b']);
+        let mut current = "1a  2a 3 first explain this".chars().collect::<Vec<_>>();
+        current.resize(WIDTH, ' ');
+        let blank = ascii_frame(&[' '; WIDTH]);
+        let current_frame = ascii_frame(&current);
+
+        let mut drifted_encoder = render_ansi::BlitEncoder::new();
+        let old_frame = ascii_frame(&old);
+        let old_encoded = drifted_encoder.encode(&old_frame, false);
+        let old_bytes = old_encoded.bytes.clone();
+        drifted_encoder.commit(old_frame.clone(), old_encoded);
+        let blank_encoded = drifted_encoder.encode(&blank, false);
+        let first_paint = blank_encoded
+            .bytes
+            .windows(b"\x1b[1;3H".len())
+            .position(|bytes| bytes == b"\x1b[1;3H")
+            .expect("blanking diff should paint the first stale glyph");
+        let interrupted_prefix = blank_encoded.bytes[..first_paint].to_vec();
+        drifted_encoder.commit(blank.clone(), blank_encoded);
+        let drifted_current = drifted_encoder.encode(&current_frame, false);
+        let corrupted = replayed_row(
+            WIDTH as u16,
+            &[&old_bytes, &interrupted_prefix, &drifted_current.bytes],
+        );
+        assert_eq!(
+            corrupted.trim_end(),
+            "1aHe2ar3ifirsteexplainnthisage tab",
+            "an advanced baseline skips spaces and the cleared tail"
+        );
+
+        let mut encoder = render_ansi::BlitEncoder::new();
+        let mut repaint_pending = false;
+        let mut delivered = Vec::new();
+        write_semantic_frame(
+            &mut delivered,
+            &mut encoder,
+            old_frame.clone(),
+            &mut repaint_pending,
+            false,
+            false,
+        )
+        .unwrap();
+        let baseline_before_failure = encoder.last_frame().cloned();
+        let mut interrupted = PrefixThenError {
+            remaining: first_paint,
+            bytes: Vec::new(),
+        };
+        assert!(write_semantic_frame(
+            &mut interrupted,
+            &mut encoder,
+            blank,
+            &mut repaint_pending,
+            false,
+            false,
+        )
+        .is_err());
+        delivered.extend_from_slice(&interrupted.bytes);
+
+        assert_eq!(encoder.last_frame(), baseline_before_failure.as_ref());
+        assert!(repaint_pending);
+        assert!(encoder.encode(&current_frame, repaint_pending).full);
+
+        write_semantic_frame(
+            &mut delivered,
+            &mut encoder,
+            current_frame,
+            &mut repaint_pending,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            replayed_row(WIDTH as u16, &[&delivered]),
+            current.into_iter().collect::<String>()
+        );
     }
 
     #[test]
