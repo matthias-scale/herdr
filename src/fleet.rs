@@ -6130,6 +6130,320 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
         std::fs::remove_dir_all(root).expect("remove mutation order fixture");
     }
 
+    fn pane_lifecycle_snapshot(state: HostState) -> (Snapshot, crate::api::schema::AgentRef) {
+        let mut info = agent(AgentStatus::Working, serde_json::json!([]));
+        info.pane_id = "workspace:pane".into();
+        let row = FleetRow::test_agent_info_row("office", info);
+        let agent_ref = row.agent_ref.clone();
+        (
+            Snapshot {
+                config_generation: 7,
+                hosts: vec![HostSnapshot {
+                    name: "office".into(),
+                    target: "fixture".into(),
+                    local: false,
+                    session: None,
+                    socket: None,
+                    state,
+                    version: None,
+                    protocol: None,
+                    error: None,
+                    remote_identity: None,
+                    entries: vec![row],
+                }],
+                ..Snapshot::default()
+            },
+            agent_ref,
+        )
+    }
+
+    fn pane_request(id: &str, method: &str, pane_id: &str) -> Request {
+        let target = crate::api::schema::PaneTarget {
+            pane_id: pane_id.into(),
+        };
+        let method = match method {
+            "settle" => Method::PaneSettle(target),
+            "unsettle" => Method::PaneUnsettle(target),
+            "unsnooze" => Method::PaneUnsnooze(target),
+            "snooze" => Method::PaneSnooze(crate::api::schema::PaneSnoozeParams {
+                pane_id: pane_id.into(),
+                duration_s: Some(60),
+                snoozed_until: None,
+            }),
+            _ => Method::PaneFocus(target),
+        };
+        Request {
+            id: id.into(),
+            method,
+        }
+    }
+
+    #[test]
+    fn r4_version_skew_is_not_a_fresh_pane_lifecycle_route_even_when_not_stale() {
+        let (snapshot, agent_ref) = pane_lifecycle_snapshot(HostState::VersionSkew);
+        let row = &snapshot.hosts[0].entries[0];
+
+        assert!(
+            !row.effective_remote_lifecycle(HostState::VersionSkew, 0)
+                .stale
+        );
+        assert!(snapshot.fresh_agent_host(&agent_ref).is_none());
+        let router = AuthorityMutationRouter::default();
+        router.observe_snapshot(&snapshot);
+        assert!(!router
+            .route_leases
+            .lock()
+            .expect("route leases")
+            .valid
+            .keys()
+            .any(|route| matches!(route, MutationRoute::PaneLifecycle { .. })));
+    }
+
+    #[test]
+    fn r3_pane_lifecycle_refuses_a_mismatched_agent_before_send() {
+        let (snapshot, agent_ref) = pane_lifecycle_snapshot(HostState::Reachable);
+        let route = snapshot
+            .fresh_agent_host(&agent_ref)
+            .expect("fresh owner route");
+        let router = AuthorityMutationRouter::default();
+        router.observe_snapshot(&snapshot);
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(4);
+
+        let error = router
+            .enqueue_pane_lifecycle(
+                route,
+                agent_ref,
+                7,
+                pane_request("mismatch", "settle", "another:pane"),
+                event_tx,
+            )
+            .expect_err("mismatched pane id must be refused");
+
+        assert!(error.contains("expected workspace:pane"));
+        assert!(router.sender.lock().expect("router sender").is_none());
+    }
+
+    #[test]
+    fn r5_pane_lifecycle_route_allowlists_exactly_four_existing_methods() {
+        let (snapshot, agent_ref) = pane_lifecycle_snapshot(HostState::Reachable);
+        let route = snapshot
+            .fresh_agent_host(&agent_ref)
+            .expect("fresh owner route");
+        let router = AuthorityMutationRouter::default();
+        router.observe_snapshot(&snapshot);
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(4);
+
+        let error = router
+            .enqueue_pane_lifecycle(
+                route,
+                agent_ref,
+                7,
+                pane_request("focus", "focus", "workspace:pane"),
+                event_tx,
+            )
+            .expect_err("non-lifecycle method must be refused");
+
+        assert!(error.contains("not a pane lifecycle mutation"));
+        assert!(router.sender.lock().expect("router sender").is_none());
+        for allowed in ["settle", "unsettle", "snooze", "unsnooze"] {
+            assert!(pane_lifecycle_request_id(
+                &pane_request("ok", allowed, "workspace:pane").method
+            )
+            .is_some());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r1_r2_r6_pane_lifecycle_uses_existing_method_once_without_retry() {
+        let root = run_fixture_dir("pane-lifecycle-once");
+        let fake_ssh = root.join("ssh");
+        let log = root.join("requests");
+        write_executable(
+            &fake_ssh,
+            &format!(
+                "#!/bin/sh\ncat >> '{}'\nprintf '%s\\n' '{{\"id\":\"settle\",\"result\":{{\"type\":\"ok\"}}}}'\n",
+                log.display()
+            ),
+        );
+        let (snapshot, agent_ref) = pane_lifecycle_snapshot(HostState::Reachable);
+        let route = snapshot
+            .fresh_agent_host(&agent_ref)
+            .expect("fresh owner route");
+        let router = AuthorityMutationRouter::with_ssh_program(fake_ssh, Duration::from_secs(2));
+        router.observe_snapshot(&snapshot);
+        router.reconfigure(7);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+
+        for method in ["settle", "snooze", "unsnooze", "unsettle"] {
+            router
+                .enqueue_pane_lifecycle(
+                    route.clone(),
+                    agent_ref.clone(),
+                    7,
+                    pane_request(method, method, &agent_ref.agent),
+                    event_tx.clone(),
+                )
+                .expect("enqueue pane lifecycle request");
+            let event = event_rx.blocking_recv().expect("completion event");
+            assert!(matches!(
+                event,
+                crate::events::AppEvent::RemoteApiRequestFinished { agent_ref: completed, .. }
+                    if completed == agent_ref
+            ));
+        }
+        let requests = std::fs::read_to_string(&log).expect("captured request");
+        assert_eq!(requests.matches("pane.settle").count(), 1);
+        assert_eq!(requests.matches("pane.snooze").count(), 1);
+        assert_eq!(requests.matches("pane.unsnooze").count(), 1);
+        assert_eq!(requests.matches("pane.unsettle").count(), 1);
+        std::fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r6_transport_failure_makes_one_attempt_even_for_unsnooze() {
+        let root = run_fixture_dir("pane-lifecycle-no-retry");
+        let fake_ssh = root.join("ssh");
+        let log = root.join("attempts");
+        write_executable(
+            &fake_ssh,
+            &format!("#!/bin/sh\necho attempt >> '{}'\nexit 9\n", log.display()),
+        );
+        let (snapshot, agent_ref) = pane_lifecycle_snapshot(HostState::Reachable);
+        let route = snapshot
+            .fresh_agent_host(&agent_ref)
+            .expect("fresh owner route");
+        let router = AuthorityMutationRouter::with_ssh_program(fake_ssh, Duration::from_secs(2));
+        router.observe_snapshot(&snapshot);
+        router.reconfigure(7);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+
+        router
+            .enqueue_pane_lifecycle(
+                route,
+                agent_ref.clone(),
+                7,
+                pane_request("unsnooze", "unsnooze", &agent_ref.agent),
+                event_tx,
+            )
+            .expect("enqueue unsnooze");
+        let event = event_rx.blocking_recv().expect("failure completion");
+        let crate::events::AppEvent::RemoteApiRequestFinished { response, .. } = event else {
+            panic!("unexpected completion event");
+        };
+        assert!(response.contains("owner office is unreachable"));
+        assert_eq!(
+            std::fs::read_to_string(&log)
+                .expect("attempt log")
+                .lines()
+                .count(),
+            1
+        );
+        std::fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn f4_config_generation_change_aborts_pane_lifecycle_before_send() {
+        let root = run_fixture_dir("pane-lifecycle-generation-race");
+        let fake_ssh = root.join("ssh");
+        let log = root.join("unexpected-send");
+        write_executable(
+            &fake_ssh,
+            &format!("#!/bin/sh\necho sent >> '{}'\n", log.display()),
+        );
+        let (snapshot, agent_ref) = pane_lifecycle_snapshot(HostState::Reachable);
+        let route = snapshot
+            .fresh_agent_host(&agent_ref)
+            .expect("fresh owner route");
+        let router = AuthorityMutationRouter::with_ssh_program(fake_ssh, Duration::from_secs(2));
+        router.observe_snapshot(&snapshot);
+        router.reconfigure(8);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+
+        router
+            .enqueue_pane_lifecycle(
+                route,
+                agent_ref.clone(),
+                7,
+                pane_request("settle", "settle", &agent_ref.agent),
+                event_tx,
+            )
+            .expect("enqueue stale-generation request");
+        let event = event_rx.blocking_recv().expect("generation completion");
+        let crate::events::AppEvent::RemoteApiRequestFinished { response, .. } = event else {
+            panic!("unexpected completion event");
+        };
+        assert!(response.contains("fleet configuration changed"));
+        assert!(
+            !log.exists(),
+            "transport must not run after generation change"
+        );
+        std::fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn f4_lease_change_aborts_queued_pane_lifecycle_before_send() {
+        let root = run_fixture_dir("pane-lifecycle-lease-race");
+        let fake_ssh = root.join("ssh");
+        let first_started = root.join("first-started");
+        let release_first = root.join("release-first");
+        let second_started = root.join("second-started");
+        write_executable(
+            &fake_ssh,
+            &format!(
+                "#!/bin/sh\ncat >/dev/null\nif [ ! -e '{}' ]; then\n  touch '{}'\n  while [ ! -e '{}' ]; do sleep 0.01; done\nelse\n  touch '{}'\nfi\nprintf '%s\\n' '{{\"id\":\"ok\",\"result\":{{\"type\":\"ok\"}}}}'\n",
+                first_started.display(),
+                first_started.display(),
+                release_first.display(),
+                second_started.display(),
+            ),
+        );
+        let (snapshot, agent_ref) = pane_lifecycle_snapshot(HostState::Reachable);
+        let route = snapshot
+            .fresh_agent_host(&agent_ref)
+            .expect("fresh owner route");
+        let router = AuthorityMutationRouter::with_ssh_program(fake_ssh, Duration::from_secs(2));
+        router.observe_snapshot(&snapshot);
+        router.reconfigure(7);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        for id in ["first", "second"] {
+            router
+                .enqueue_pane_lifecycle(
+                    route.clone(),
+                    agent_ref.clone(),
+                    7,
+                    pane_request(id, "settle", &agent_ref.agent),
+                    event_tx.clone(),
+                )
+                .expect("enqueue pane settle");
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !first_started.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            first_started.exists(),
+            "first request did not reach transport"
+        );
+
+        router.observe_snapshot(&Snapshot::default());
+        std::fs::write(&release_first, b"").expect("release first request");
+        let _first = event_rx.blocking_recv().expect("first completion");
+        let second = event_rx.blocking_recv().expect("second completion");
+        let crate::events::AppEvent::RemoteApiRequestFinished { response, .. } = second else {
+            panic!("unexpected completion event");
+        };
+        assert!(response.contains("route changed"));
+        assert!(
+            !second_started.exists(),
+            "invalidated route reached transport"
+        );
+        std::fs::remove_dir_all(root).expect("remove fixture");
+    }
+
     #[test]
     fn remote_run_read_is_bounded_and_survives_an_unavailable_herdr_socket() {
         let script = remote_read_script(None, None, true, false);

@@ -26809,4 +26809,248 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             );
         }
     }
+
+    pub(crate) fn remote_control_fixture(
+        host_state: crate::fleet::HostState,
+        status: crate::api::schema::AgentStatus,
+        gated: bool,
+        settled: bool,
+        snoozed: bool,
+    ) -> (AppState, std::sync::Arc<RemoteAgentPanelEntry>) {
+        let mut info = remote_agent_info("remote-pane", "remote pane", status, gated, false);
+        info.settled_at = settled.then_some(1);
+        info.snoozed_until = snoozed.then_some(u64::MAX);
+        let mut host = fleet_host_snapshot(
+            "remote",
+            false,
+            vec![crate::fleet::FleetRow::test_agent_info_row("remote", info)],
+        );
+        host.state = host_state;
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![host],
+            ..crate::fleet::Snapshot::default()
+        };
+        let mut app = AppState::test_new();
+        app.remote_agent_panel_entries = remote_agent_panel_entries_at(&snapshot, 2);
+        let entry = app.remote_agent_panel_entries[0].clone();
+        app.sidebar_selected_remote_agent = Some(entry.agent_ref.clone());
+        (app, entry)
+    }
+
+    #[test]
+    fn c1_remote_controls_use_local_glyphs_widths_and_hit_rectangles() {
+        let (app, entry) = remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+            false,
+        );
+        let rect = Rect::new(0, 0, 60, 1);
+        let actions = (rect.x..rect.right())
+            .filter_map(|column| {
+                selected_remote_row_control_at(&app, &entry, rect, 0, false, column)
+                    .map(|action| (column, action))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|(_, action)| matches!(
+                    action,
+                    crate::app::state::SidebarHoverAction::Snooze { .. }
+                ))
+                .count(),
+            SIDEBAR_SNOOZE_CONTROL_WIDTH
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|(_, action)| matches!(
+                    action,
+                    crate::app::state::SidebarHoverAction::Settle { .. }
+                ))
+                .count(),
+            SIDEBAR_SETTLE_CONTROL_WIDTH
+        );
+        let mut terminal = Terminal::new(TestBackend::new(rect.width, 1)).expect("terminal");
+        terminal
+            .draw(|frame| render_remote_compact_agent_row(&app, frame, &entry, rect, 0, None))
+            .expect("render remote row");
+        let rendered = (0..rect.width)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+            .collect::<String>();
+        assert!(rendered.contains('◷'));
+        assert!(rendered.contains('✓'));
+    }
+
+    #[test]
+    fn c2_remote_controls_preserve_lifecycle_and_selection_eligibility() {
+        let rect = Rect::new(0, 0, 60, 1);
+        let action_count = |app: &AppState, entry: &RemoteAgentPanelEntry| {
+            (rect.x..rect.right())
+                .filter_map(|column| {
+                    selected_remote_row_control_at(app, entry, rect, 0, false, column)
+                })
+                .count()
+        };
+        let (mut active, active_entry) = remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(action_count(&active, &active_entry), 5);
+        active.sidebar_selected_remote_agent = None;
+        assert_eq!(action_count(&active, &active_entry), 0);
+        let (snoozed, snoozed_entry) = remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+            true,
+        );
+        assert_eq!(action_count(&snoozed, &snoozed_entry), 3);
+        let (settled, settled_entry) = remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Done,
+            false,
+            true,
+            false,
+        );
+        assert_eq!(action_count(&settled, &settled_entry), 0);
+        let (attention, attention_entry) = remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Blocked,
+            true,
+            false,
+            false,
+        );
+        assert_eq!(action_count(&attention, &attention_entry), 0);
+    }
+
+    #[test]
+    fn c3_unfresh_remote_owner_hides_controls_but_retains_inventory() {
+        for state in [
+            crate::fleet::HostState::Unreachable,
+            crate::fleet::HostState::VersionSkew,
+        ] {
+            let (app, entry) = remote_control_fixture(
+                state,
+                crate::api::schema::AgentStatus::Working,
+                false,
+                false,
+                false,
+            );
+            assert_eq!(app.remote_agent_panel_entries.len(), 1);
+            assert!(!entry.host_fresh);
+            assert!((0..60).all(|column| {
+                selected_remote_row_control_at(
+                    &app,
+                    &entry,
+                    Rect::new(0, 0, 60, 1),
+                    0,
+                    false,
+                    column,
+                )
+                .is_none()
+            }));
+        }
+    }
+
+    #[test]
+    fn c4_remote_control_is_projected_into_desktop_hover_targets() {
+        let (mut app, entry) = remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+            false,
+        );
+        expand_fleet(&mut app);
+        app.sidebar_width = 60;
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
+
+        assert!(app.view.sidebar_hover_targets.iter().any(|target| matches!(
+            target.action.as_ref(),
+            Some(crate::app::state::SidebarHoverAction::Snooze {
+                target: crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref),
+            }) if agent_ref == &entry.agent_ref
+        )));
+        assert!(app.view.sidebar_hover_targets.iter().any(|target| matches!(
+            target.action.as_ref(),
+            Some(crate::app::state::SidebarHoverAction::Settle {
+                target: crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref),
+            }) if agent_ref == &entry.agent_ref
+        )));
+    }
+
+    #[test]
+    fn c6_remote_controls_keep_narrow_width_suppression() {
+        let (app, entry) = remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+            false,
+        );
+        let rect = Rect::new(0, 0, SIDEBAR_MIN_CONTROLS_ROW_WIDTH - 1, 1);
+        assert!((rect.x..rect.right()).all(|column| {
+            selected_remote_row_control_at(&app, &entry, rect, 0, false, column).is_none()
+        }));
+    }
+
+    #[test]
+    fn s1_remote_controls_add_no_unsettle_affordance() {
+        let (app, entry) = remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+            false,
+        );
+        let rect = Rect::new(0, 0, 60, 1);
+        let actions = (rect.x..rect.right())
+            .filter_map(|column| {
+                selected_remote_row_control_at(&app, &entry, rect, 0, false, column)
+            })
+            .collect::<Vec<_>>();
+        assert!(actions.iter().all(|action| matches!(
+            action,
+            crate::app::state::SidebarHoverAction::Snooze { .. }
+                | crate::app::state::SidebarHoverAction::Settle { .. }
+        )));
+    }
+
+    #[test]
+    fn s2_runtime_route_name_stays_neutral_and_sidebar_target_stays_client_owned() {
+        let route = std::any::type_name::<crate::fleet::HostApiRoute>();
+        let target = std::any::type_name::<crate::app::state::SidebarPaneLifecycleTarget>();
+        assert!(route.ends_with("fleet::HostApiRoute"));
+        assert!(!route.to_ascii_lowercase().contains("sidebar"));
+        assert!(target.contains("app::state::SidebarPaneLifecycleTarget"));
+    }
+
+    #[test]
+    fn s3_remote_control_reads_cached_host_fresh_without_a_fleet_lookup() {
+        let (mut app, _) = remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+            false,
+        );
+        let rect = Rect::new(0, 0, 60, 1);
+        let entry = app.remote_agent_panel_entries[0].clone();
+        assert!((0..60).any(|column| {
+            selected_remote_row_control_at(&app, &entry, rect, 0, false, column).is_some()
+        }));
+        std::sync::Arc::make_mut(&mut app.remote_agent_panel_entries[0]).host_fresh = false;
+        let entry = app.remote_agent_panel_entries[0].clone();
+        assert!((0..60).all(|column| {
+            selected_remote_row_control_at(&app, &entry, rect, 0, false, column).is_none()
+        }));
+    }
 }

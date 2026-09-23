@@ -3175,4 +3175,44 @@ mod tests {
             "header row: {row:?}"
         );
     }
+
+    #[test]
+    fn c4_c5_remote_mobile_control_geometry_precedes_the_host_target_with_suffix() {
+        let (app, entry) = crate::ui::sidebar::tests::remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+            false,
+        );
+        let content = Rect::new(0, 0, 60, 1);
+        let row = SidebarRow::RemoteAgent {
+            entry: entry.clone(),
+            depth: 0,
+            show_host_identity: true,
+        };
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 1)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_remote_compact_agent_row_with_identity(
+                    &app, frame, &entry, content, 0, None, true,
+                )
+            })
+            .expect("render remote row");
+        let snooze_column = (content.x..content.right())
+            .find(|column| terminal.backend().buffer()[(*column, 0)].symbol() == "◷")
+            .expect("rendered snooze glyph");
+
+        assert!(matches!(
+            mobile_switcher_target_for_row(&app, content, snooze_column, 0, 0, &row),
+            Some(MobileSwitcherTarget::Snooze(
+                crate::app::state::SidebarPaneLifecycleTarget::Remote(_)
+            ))
+        ));
+        assert!(matches!(
+            mobile_switcher_target_for_row(&app, content, content.x, 0, 0, &row),
+            Some(MobileSwitcherTarget::RemoteAgent(_))
+        ));
+    }
 }

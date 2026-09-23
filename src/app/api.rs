@@ -2351,6 +2351,92 @@ mod tests {
         }
     }
 
+    fn app_with_remote_lifecycle_entry() -> (App, crate::api::schema::AgentRef) {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let (remote, entry) = crate::ui::sidebar::tests::remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+            false,
+        );
+        app.state.remote_agent_panel_entries = remote.remote_agent_panel_entries;
+        (app, entry.agent_ref.clone())
+    }
+
+    #[test]
+    fn n1_remote_completion_success_and_error_never_mutate_cached_lifecycle() {
+        let (mut app, agent_ref) = app_with_remote_lifecycle_entry();
+        let before = app.state.remote_agent_panel_entries[0].clone();
+
+        assert!(!app.finish_remote_api_request(
+            agent_ref.clone(),
+            r#"{"id":"ok","result":{"type":"pane"}}"#.into(),
+        ));
+        assert!(app.finish_remote_api_request(
+            agent_ref,
+            r#"{"id":"error","error":{"code":"pane_snoozed","message":"snoozed"}}"#.into(),
+        ));
+
+        let after = &app.state.remote_agent_panel_entries[0];
+        assert_eq!(after.settled, before.settled);
+        assert_eq!(after.snoozed_until, before.snoozed_until);
+    }
+
+    #[test]
+    fn n2_successful_remote_settle_discards_returned_pane_projection() {
+        let (mut app, agent_ref) = app_with_remote_lifecycle_entry();
+
+        assert!(!app.finish_remote_api_request(
+            agent_ref,
+            r#"{"id":"ok","result":{"type":"pane","settled_at":123,"snoozed_until":456}}"#.into(),
+        ));
+
+        assert!(!app.state.remote_agent_panel_entries[0].settled);
+        assert_eq!(app.state.remote_agent_panel_entries[0].snoozed_until, None);
+    }
+
+    #[test]
+    fn f2_invalid_remote_transport_response_names_owner_without_retry_state() {
+        let (mut app, agent_ref) = app_with_remote_lifecycle_entry();
+
+        assert!(app.finish_remote_api_request(agent_ref, "{}".into()));
+
+        assert!(app.state.toast.as_ref().is_some_and(|toast| {
+            toast.context.contains("owner remote") && toast.context.contains("invalid response")
+        }));
+    }
+
+    #[test]
+    fn f3_receiver_error_codes_keep_owner_context() {
+        for code in [
+            "pane_not_found",
+            "pane_snoozed",
+            "pane_settled",
+            "pane_needs_attention",
+            "invalid_duration",
+            "invalid_deadline",
+        ] {
+            let (mut app, agent_ref) = app_with_remote_lifecycle_entry();
+            let response = serde_json::json!({
+                "id": "error",
+                "error": {"code": code, "message": "rejected"}
+            })
+            .to_string();
+            assert!(app.finish_remote_api_request(agent_ref, response));
+            assert!(app.state.toast.as_ref().is_some_and(|toast| {
+                toast.context.contains("owner remote") && toast.context.contains(code)
+            }));
+        }
+    }
+
     fn catalog_with_duplicate_pane_memberships(
         host: &str,
         authority: &crate::groups::AuthorityId,

@@ -1049,6 +1049,7 @@ pub(crate) enum SidebarPaneLifecycleTarget {
 }
 
 impl SidebarPaneLifecycleTarget {
+    #[cfg(test)]
     pub(crate) fn local(&self) -> Option<&PaneFocusTarget> {
         match self {
             Self::Local(target) => Some(target),
