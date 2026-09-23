@@ -26832,6 +26832,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         };
         let mut app = AppState::test_new();
         app.remote_agent_panel_entries = remote_agent_panel_entries_at(&snapshot, 2);
+        app.fleet_snapshot = snapshot;
         let entry = app.remote_agent_panel_entries[0].clone();
         app.sidebar_selected_remote_agent = Some(entry.agent_ref.clone());
         (app, entry)

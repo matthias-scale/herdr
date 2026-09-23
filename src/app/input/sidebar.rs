@@ -1645,10 +1645,26 @@ impl super::super::App {
         let crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref) = target else {
             return;
         };
-        self.show_remote_pane_lifecycle_error(
-            agent_ref,
-            format!("owner {} is unreachable", agent_ref.host),
-        );
+        let message = self
+            .state
+            .remote_agent_panel_entries
+            .iter()
+            .find(|entry| entry.agent_ref == *agent_ref)
+            .map_or_else(
+                || format!("pane {} is no longer available", agent_ref.agent),
+                |entry| {
+                    if !entry.host_fresh {
+                        format!("owner {} is not available for pane actions", agent_ref.host)
+                    } else if entry.settled {
+                        format!("pane {} is already settled", agent_ref.agent)
+                    } else if crate::ui::sidebar::entry_needs_human_attention(entry) {
+                        format!("pane {} needs attention", agent_ref.agent)
+                    } else {
+                        format!("pane {} lifecycle state changed", agent_ref.agent)
+                    }
+                },
+            );
+        self.show_remote_pane_lifecycle_error(agent_ref, message);
     }
 
     pub(crate) fn dispatch_sidebar_pane_snooze(
@@ -1880,22 +1896,55 @@ impl super::super::App {
             };
             target
         };
-        let Some((snoozed, _)) = self.sidebar_pane_lifecycle_state(&target) else {
-            return false;
-        };
         match key.code {
             KeyCode::Char('z') => {
-                let anchor = (
-                    self.state.view.sidebar_rect.right().saturating_sub(4),
-                    self.state.view.sidebar_rect.y,
-                );
+                if self.sidebar_pane_lifecycle_state(&target).is_none() {
+                    return false;
+                }
+                let anchor = match &target {
+                    crate::app::state::SidebarPaneLifecycleTarget::Local(target) => self
+                        .state
+                        .workspaces
+                        .iter()
+                        .position(|workspace| workspace.id == target.workspace_id)
+                        .and_then(|ws_idx| {
+                            crate::ui::compute_tab_card_areas(
+                                &self.state,
+                                self.state.view.sidebar_rect,
+                            )
+                            .into_iter()
+                            .find(|card| card.ws_idx == ws_idx && card.pane_id == target.pane_id)
+                        })
+                        .map(|card| (card.rect.right().saturating_sub(4), card.rect.y))
+                        .unwrap_or((
+                            self.state.view.sidebar_rect.x,
+                            self.state.view.sidebar_rect.y,
+                        )),
+                    crate::app::state::SidebarPaneLifecycleTarget::Remote(_) => (
+                        self.state.view.sidebar_rect.right().saturating_sub(4),
+                        self.state.view.sidebar_rect.y,
+                    ),
+                };
                 self.open_sidebar_snooze_menu(target, anchor.0, anchor.1);
                 self.state.sidebar_snooze.is_some()
             }
-            KeyCode::Char('s') if !snoozed => {
-                self.settle_sidebar_pane(target);
-                true
-            }
+            KeyCode::Char('s') => match &target {
+                crate::app::state::SidebarPaneLifecycleTarget::Local(_) => {
+                    self.settle_sidebar_pane(target);
+                    true
+                }
+                crate::app::state::SidebarPaneLifecycleTarget::Remote(_) => {
+                    let Some((snoozed, _)) = self.sidebar_pane_lifecycle_state(&target) else {
+                        return false;
+                    };
+                    if snoozed {
+                        false
+                    } else {
+                        self.settle_sidebar_pane(target);
+                        true
+                    }
+                }
+            },
             _ => false,
         }
     }
@@ -2310,20 +2359,22 @@ impl super::super::App {
         &mut self,
         target: crate::app::state::SidebarPaneLifecycleTarget,
     ) {
-        let Some((snoozed, _)) = self.sidebar_pane_lifecycle_state(&target) else {
-            self.remote_pane_lifecycle_refused(&target);
-            return;
-        };
-        if snoozed {
-            return;
-        }
         match &target {
             crate::app::state::SidebarPaneLifecycleTarget::Local(_) => {
+                // Keep the pre-remote-control keyboard behavior: local `s`
+                // always reaches pane.settle, whose API owns snoozed refusal.
                 if let Some(public_pane_id) = self.sidebar_pane_lifecycle_public_id(&target) {
                     self.runtime_pane_settle("tui.sidebar.settle", public_pane_id);
                 }
             }
             crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref) => {
+                let Some((snoozed, _)) = self.sidebar_pane_lifecycle_state(&target) else {
+                    self.remote_pane_lifecycle_refused(&target);
+                    return;
+                };
+                if snoozed {
+                    return;
+                }
                 if let Err(error) = self.remote_pane_settle(agent_ref.clone()) {
                     self.show_remote_pane_lifecycle_error(agent_ref, error);
                 }
@@ -3012,6 +3063,92 @@ mod tests {
         }
     }
 
+    #[test]
+    fn keyboard_s_settles_a_local_pane_that_needs_attention() {
+        let mut app = sidebar_order_app(false);
+        let pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(pane_id)
+            .expect("focused pane state")
+            .attached_terminal_id
+            .clone();
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("focused pane terminal");
+        terminal.set_raw_agent_state_for_test(AgentState::Blocked);
+        terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose one".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        app.state.sidebar_focused = true;
+        assert!(!app.state.pane_can_snooze(0, pane_id));
+
+        assert!(app.handle_sidebar_session_action_key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::empty(),
+        )));
+
+        assert!(app.state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn keyboard_s_keeps_the_local_pane_api_refusal_when_already_snoozed() {
+        let mut app = sidebar_order_app(false);
+        let pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        assert!(app.state.snooze_pane_at(0, pane_id, u64::MAX));
+        app.state.sidebar_focused = true;
+
+        assert!(app.handle_sidebar_session_action_key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::empty(),
+        )));
+
+        assert!(app.state.pane_is_snoozed(0, pane_id));
+        assert!(!app.state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn keyboard_z_anchors_a_local_snooze_menu_to_the_focused_card() {
+        let mut app = sidebar_order_app(false);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        let card = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
+            .into_iter()
+            .find(|card| card.ws_idx == 0 && card.pane_id == pane_id)
+            .expect("focused pane card");
+        let expected_anchor = (card.rect.right().saturating_sub(4), card.rect.y);
+        app.state.sidebar_focused = true;
+
+        assert!(app.handle_sidebar_session_action_key(KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::empty(),
+        )));
+
+        assert_eq!(
+            app.state
+                .sidebar_snooze
+                .as_ref()
+                .expect("local snooze menu")
+                .anchor,
+            expected_anchor
+        );
+    }
+
     #[tokio::test]
     async fn sidebar_keyboard_reaches_snooze_and_settle_controls_through_input_routing() {
         let mut snooze = sidebar_order_app(false);
@@ -3123,7 +3260,6 @@ mod tests {
     #[test]
     fn c7_f1_fresh_remote_shortcuts_resolve_remote_target_and_revalidate_before_enqueue() {
         let mut app = sidebar_order_app(false);
-        let local_pane = app.state.workspaces[0].tabs[0].root_pane;
         let (remote_state, entry) = crate::ui::sidebar::tests::remote_control_fixture(
             crate::fleet::HostState::Reachable,
             crate::api::schema::AgentStatus::Working,
@@ -3131,9 +3267,13 @@ mod tests {
             false,
             false,
         );
+        app.state.fleet_snapshot = remote_state.fleet_snapshot;
         app.state.remote_agent_panel_entries = remote_state.remote_agent_panel_entries;
+        app.authority_mutation_router
+            .observe_snapshot(&app.state.fleet_snapshot);
         app.state.sidebar_focused = true;
         app.state.sidebar_selected_remote_agent = Some(entry.agent_ref.clone());
+        let before = app.state.remote_agent_panel_entries[0].clone();
 
         assert!(app.handle_sidebar_session_action_key(KeyEvent::new(
             KeyCode::Char('z'),
@@ -3145,6 +3285,7 @@ mod tests {
                 if target == &entry.agent_ref
         ));
         app.state.sidebar_snooze = None;
+        app.state.fleet_snapshot.hosts[0].state = crate::fleet::HostState::Unreachable;
         assert!(app.handle_sidebar_session_action_key(KeyEvent::new(
             KeyCode::Char('s'),
             KeyModifiers::empty(),
@@ -3154,7 +3295,48 @@ mod tests {
             .toast
             .as_ref()
             .is_some_and(|toast| toast.context.contains("owner remote is unreachable")));
-        assert!(!app.state.pane_is_settled(0, local_pane));
+        assert!(!app.authority_mutation_router.worker_started_for_test());
+        let after = &app.state.remote_agent_panel_entries[0];
+        assert_eq!(after.settled, before.settled);
+        assert_eq!(after.snoozed_until, before.snoozed_until);
+    }
+
+    #[test]
+    fn remote_lifecycle_refusal_names_settled_and_attention_states() {
+        for (status, gated, settled, expected) in [
+            (
+                crate::api::schema::AgentStatus::Done,
+                false,
+                true,
+                "already settled",
+            ),
+            (
+                crate::api::schema::AgentStatus::Blocked,
+                true,
+                false,
+                "needs attention",
+            ),
+        ] {
+            let mut app = sidebar_order_app(false);
+            let (remote_state, entry) = crate::ui::sidebar::tests::remote_control_fixture(
+                crate::fleet::HostState::Reachable,
+                status,
+                gated,
+                settled,
+                false,
+            );
+            app.state.remote_agent_panel_entries = remote_state.remote_agent_panel_entries;
+            let target =
+                crate::app::state::SidebarPaneLifecycleTarget::Remote(entry.agent_ref.clone());
+
+            app.remote_pane_lifecycle_refused(&target);
+
+            assert!(app
+                .state
+                .toast
+                .as_ref()
+                .is_some_and(|toast| toast.context.contains(expected)));
+        }
     }
 
     #[test]

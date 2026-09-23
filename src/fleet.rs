@@ -946,6 +946,11 @@ impl AuthorityMutationRouter {
         .join();
     }
 
+    #[cfg(test)]
+    pub(crate) fn worker_started_for_test(&self) -> bool {
+        self.sender.lock().map_or(true, |sender| sender.is_some())
+    }
+
     pub(crate) fn reconfigure(&self, config_generation: u64) {
         self.config_generation
             .store(config_generation, std::sync::atomic::Ordering::Release);
