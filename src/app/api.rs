@@ -2367,14 +2367,57 @@ mod tests {
             false,
             false,
         );
+        app.state.fleet_snapshot = remote.fleet_snapshot;
         app.state.remote_agent_panel_entries = remote.remote_agent_panel_entries;
+        app.authority_mutation_router
+            .observe_snapshot(&app.state.fleet_snapshot);
         (app, entry.agent_ref.clone())
     }
 
+    #[cfg(unix)]
+    fn install_failing_pane_lifecycle_transport(app: &mut App) {
+        app.authority_mutation_router = crate::fleet::AuthorityMutationRouter::with_ssh_program(
+            "/usr/bin/false".into(),
+            std::time::Duration::from_secs(1),
+        );
+        app.authority_mutation_router
+            .observe_snapshot(&app.state.fleet_snapshot);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn n1_remote_completion_success_and_error_never_mutate_cached_lifecycle() {
         let (mut app, agent_ref) = app_with_remote_lifecycle_entry();
+        install_failing_pane_lifecycle_transport(&mut app);
         let before = app.state.remote_agent_panel_entries[0].clone();
+
+        assert!(app
+            .remote_pane_snooze(
+                agent_ref.clone(),
+                crate::api::schema::PaneSnoozeParams {
+                    pane_id: agent_ref.agent.clone(),
+                    duration_s: Some(60),
+                    snoozed_until: None,
+                },
+            )
+            .is_ok());
+        assert_eq!(
+            app.state.remote_agent_panel_entries[0].settled,
+            before.settled
+        );
+        assert_eq!(
+            app.state.remote_agent_panel_entries[0].snoozed_until,
+            before.snoozed_until
+        );
+        assert!(app.remote_pane_unsnooze(agent_ref.clone()).is_ok());
+        assert_eq!(
+            app.state.remote_agent_panel_entries[0].settled,
+            before.settled
+        );
+        assert_eq!(
+            app.state.remote_agent_panel_entries[0].snoozed_until,
+            before.snoozed_until
+        );
 
         assert!(!app.finish_remote_api_request(
             agent_ref.clone(),
@@ -2390,9 +2433,22 @@ mod tests {
         assert_eq!(after.snoozed_until, before.snoozed_until);
     }
 
+    #[cfg(unix)]
     #[test]
     fn n2_successful_remote_settle_discards_returned_pane_projection() {
         let (mut app, agent_ref) = app_with_remote_lifecycle_entry();
+        install_failing_pane_lifecycle_transport(&mut app);
+        let before = app.state.remote_agent_panel_entries[0].clone();
+
+        assert!(app.remote_pane_settle(agent_ref.clone()).is_ok());
+        assert_eq!(
+            app.state.remote_agent_panel_entries[0].settled,
+            before.settled
+        );
+        assert_eq!(
+            app.state.remote_agent_panel_entries[0].snoozed_until,
+            before.snoozed_until
+        );
 
         assert!(!app.finish_remote_api_request(
             agent_ref,

@@ -6216,15 +6216,32 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
 
         let error = router
             .enqueue_pane_lifecycle(
-                route,
-                agent_ref,
+                route.clone(),
+                agent_ref.clone(),
                 7,
                 pane_request("mismatch", "settle", "another:pane"),
-                event_tx,
+                event_tx.clone(),
             )
             .expect_err("mismatched pane id must be refused");
 
         assert!(error.contains("expected workspace:pane"));
+        assert!(router.sender.lock().expect("router sender").is_none());
+
+        let wrong_host_route = HostApiRoute {
+            host: "another-owner".into(),
+            ..route
+        };
+        let error = router
+            .enqueue_pane_lifecycle(
+                wrong_host_route,
+                agent_ref,
+                7,
+                pane_request("wrong-owner", "settle", "workspace:pane"),
+                event_tx,
+            )
+            .expect_err("mismatched owning host must be refused");
+
+        assert!(error.contains("route names another-owner, expected office"));
         assert!(router.sender.lock().expect("router sender").is_none());
     }
 

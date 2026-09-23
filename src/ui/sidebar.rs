@@ -26840,50 +26840,60 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
     #[test]
     fn c1_remote_controls_use_local_glyphs_widths_and_hit_rectangles() {
-        let (app, entry) = remote_control_fixture(
-            crate::fleet::HostState::Reachable,
-            crate::api::schema::AgentStatus::Working,
-            false,
-            false,
-            false,
-        );
+        let mut app = app_with_agents(&["alpha"]);
+        let (entry, depth, tab) = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Agent { entry, depth } => Some((*entry, depth, false)),
+                SidebarRow::Tab { entry, depth } => Some((*entry, depth, true)),
+                _ => None,
+            })
+            .expect("local control row");
+        let agent_ref = crate::api::schema::AgentRef::new("remote", "remote-pane")
+            .expect("valid remote reference");
+        let remote = RemoteAgentPanelEntry::new(agent_ref.clone(), entry.clone());
+        app.sidebar_selected_remote_agent = Some(agent_ref);
         let rect = Rect::new(0, 0, 60, 1);
-        let actions = (rect.x..rect.right())
+        let action_kind = |action: crate::app::state::SidebarHoverAction| match action {
+            crate::app::state::SidebarHoverAction::Snooze { .. } => "snooze",
+            crate::app::state::SidebarHoverAction::Settle { .. } => "settle",
+        };
+        let local_actions = (rect.x..rect.right())
             .filter_map(|column| {
-                selected_remote_row_control_at(&app, &entry, rect, 0, false, column)
-                    .map(|action| (column, action))
+                selected_row_control_at(&app, &entry, rect, depth, tab, column)
+                    .map(|action| (column, action_kind(action)))
             })
             .collect::<Vec<_>>();
+        let remote_actions = (rect.x..rect.right())
+            .filter_map(|column| {
+                selected_remote_row_control_at(&app, &remote, rect, depth, false, column)
+                    .map(|action| (column, action_kind(action)))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(remote_actions, local_actions);
 
-        assert_eq!(
-            actions
-                .iter()
-                .filter(|(_, action)| matches!(
-                    action,
-                    crate::app::state::SidebarHoverAction::Snooze { .. }
-                ))
-                .count(),
-            SIDEBAR_SNOOZE_CONTROL_WIDTH
-        );
-        assert_eq!(
-            actions
-                .iter()
-                .filter(|(_, action)| matches!(
-                    action,
-                    crate::app::state::SidebarHoverAction::Settle { .. }
-                ))
-                .count(),
-            SIDEBAR_SETTLE_CONTROL_WIDTH
-        );
-        let mut terminal = Terminal::new(TestBackend::new(rect.width, 1)).expect("terminal");
-        terminal
-            .draw(|frame| render_remote_compact_agent_row(&app, frame, &entry, rect, 0, None))
+        let mut local_terminal =
+            Terminal::new(TestBackend::new(rect.width, 1)).expect("local terminal");
+        local_terminal
+            .draw(|frame| render_compact_agent_row(&app, frame, &entry, rect, depth, tab, None))
+            .expect("render local row");
+        let mut remote_terminal =
+            Terminal::new(TestBackend::new(rect.width, 1)).expect("remote terminal");
+        remote_terminal
+            .draw(|frame| render_remote_compact_agent_row(&app, frame, &remote, rect, depth, None))
             .expect("render remote row");
-        let rendered = (0..rect.width)
-            .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
-            .collect::<String>();
-        assert!(rendered.contains('◷'));
-        assert!(rendered.contains('✓'));
+        let control_glyphs = |terminal: &Terminal<TestBackend>| {
+            (0..rect.width)
+                .filter_map(|x| {
+                    let symbol = terminal.backend().buffer()[(x, 0)].symbol();
+                    matches!(symbol, "◷" | "✓").then_some((x, symbol.to_string()))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            control_glyphs(&remote_terminal),
+            control_glyphs(&local_terminal)
+        );
     }
 
     #[test]
