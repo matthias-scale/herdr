@@ -219,7 +219,7 @@ impl App {
         });
         let prs_closed = item.links.prs.iter().all(|pr| {
             snapshot.items.iter().any(|work| {
-                work.pr_url.as_deref().map(same_pull_request) == Some(same_pull_request(pr))
+                work.pr_url.as_deref().is_some_and(|url| same_pull_request(url, pr))
                     && work
                         .pr_state
                         .as_deref()
@@ -230,12 +230,7 @@ impl App {
     }
 }
 
-/// GitHub reports canonical PR urls, while a stored link may carry a trailing
-/// slash. The work index already trims one for lookup, so compare the same way
-/// or a slashed link never closes.
-fn same_pull_request(url: &str) -> &str {
-    url.trim_end_matches('/')
-}
+use crate::work_index::same_pull_request_url as same_pull_request;
 
 fn ticket_state_for_link<'a>(
     work: &'a crate::work_index::WorkItem,
@@ -295,14 +290,12 @@ mod tests {
     }
 
     #[test]
-    fn a_trailing_slash_pull_request_link_still_completes() {
-        // GitHub returns the canonical url; the stored link may carry a slash.
-        let stored = "https://github.com/acme/app/pull/9/";
-        let canonical = "https://github.com/acme/app/pull/9";
-        assert_eq!(
-            super::same_pull_request(stored),
-            super::same_pull_request(canonical)
-        );
+    fn a_trailing_slash_or_rewritten_case_pull_request_link_still_completes() {
+        // GitHub returns the canonical url; the stored link may differ in
+        // trailing slash and in owner or repo case.
+        let stored = "https://github.com/BurntSushi/ripgrep/pull/9/";
+        let canonical = "https://github.com/burntsushi/ripgrep/pull/9";
+        assert!(super::same_pull_request(stored, canonical));
     }
 
     #[test]

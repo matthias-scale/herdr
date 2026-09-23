@@ -1360,6 +1360,13 @@ fn direct_pr_urls(
     urls
 }
 
+/// GitHub rewrites owner and repo case and may drop a trailing slash, so a
+/// stored url and the reported one can differ while naming the same PR.
+pub(crate) fn same_pull_request_url(left: &str, right: &str) -> bool {
+    left.trim_end_matches('/')
+        .eq_ignore_ascii_case(right.trim_end_matches('/'))
+}
+
 fn pane_pr_target(url: &str) -> Option<(String, u64)> {
     let repo = repo_slug_from_pr_url(url)?;
     let number = url.trim_end_matches('/').rsplit('/').next()?.parse().ok()?;
@@ -1578,7 +1585,7 @@ pub(crate) fn refresh_work_index_with_missive(
                 );
                 if let Some(pull_request) = previous_github
                     .iter()
-                    .find(|pull_request| pull_request.url == url)
+                    .find(|pull_request| same_pull_request_url(&pull_request.url, &url))
                 {
                     upsert_github(&mut github, pull_request.clone());
                 }
@@ -1587,7 +1594,7 @@ pub(crate) fn refresh_work_index_with_missive(
                 degraded.record(WorkIndexSource::Github, message);
                 if let Some(pull_request) = previous_github
                     .iter()
-                    .find(|pull_request| pull_request.url == url)
+                    .find(|pull_request| same_pull_request_url(&pull_request.url, &url))
                 {
                     upsert_github(&mut github, pull_request.clone());
                 }
