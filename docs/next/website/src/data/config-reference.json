@@ -2085,8 +2085,8 @@
         {
           "key": "work_index.enabled",
           "type": "boolean",
-          "default": "true",
-          "description": "Enable repo-wide GitHub, Linear, agent-pane, and day-link work indexing."
+          "default": "false",
+          "description": "Enable repo-wide GitHub, Linear, agent-pane, and day-link work indexing. Day items complete themselves from linked merged PRs and done tickets only while this is on."
         },
         {
           "key": "work_index.refresh_interval_seconds",
