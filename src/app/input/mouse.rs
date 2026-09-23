@@ -4558,6 +4558,68 @@ mod tests {
     }
 
     #[test]
+    fn c5_remote_desktop_control_precedes_the_rows_attach_target() {
+        let mut app = app_for_mouse_test();
+        let (remote, entry) = crate::ui::sidebar::tests::remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+            false,
+        );
+        app.state.remote_agent_panel_entries = remote.remote_agent_panel_entries;
+        app.state.sidebar_selected_remote_agent = remote.sidebar_selected_remote_agent;
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
+        app.state.sidebar_width = 60;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+
+        let control = app
+            .state
+            .view
+            .sidebar_hover_targets
+            .iter()
+            .find(|target| {
+                matches!(
+                    target.action.as_ref(),
+                    Some(crate::app::state::SidebarHoverAction::Snooze {
+                        target: crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref),
+                    }) if agent_ref == &entry.agent_ref
+                )
+            })
+            .expect("remote snooze control")
+            .rect;
+        assert!(
+            crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect)
+                .iter()
+                .any(|row| {
+                    row.agent_ref == entry.agent_ref
+                        && control.x >= row.rect.x
+                        && control.x < row.rect.right()
+                        && control.y >= row.rect.y
+                        && control.y < row.rect.bottom()
+                })
+        );
+
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                control.x,
+                control.y,
+            ),
+        );
+
+        assert!(matches!(
+            action,
+            Some(MouseAction::OpenSnoozeMenu {
+                target: crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref),
+                ..
+            }) if agent_ref == entry.agent_ref
+        ));
+    }
+
+    #[test]
     fn collapsed_fleet_row_click_opens_the_same_remote_agent() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one")];
