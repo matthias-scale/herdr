@@ -70,9 +70,11 @@ fn goals_height(app: &AppState, content: Rect) -> u16 {
     }
     .clamp(MIN_PANEL_ROWS, MAX_PANEL_ROWS);
     let spare = content.height.saturating_sub(MIN_WORKSPACE_ROWS);
-    (spare >= MIN_PANEL_ROWS)
-        .then_some(wanted.min(spare))
-        .unwrap_or(0)
+    if spare >= MIN_PANEL_ROWS {
+        wanted.min(spare)
+    } else {
+        0
+    }
 }
 
 fn visible_line_count(file: &GoalsFile) -> usize {

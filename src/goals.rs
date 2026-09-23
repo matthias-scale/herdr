@@ -177,7 +177,7 @@ fn validate(file: &GoalsFile) -> Result<(), String> {
         validate_line(&stream.what, "stream what")?;
         validate_nonempty(&stream.owner, "stream owner")?;
         if let Some(needs) = &stream.needs {
-            if needs.iter().any(|need| *need == 0) {
+            if needs.contains(&0) {
                 return Err("stream needs entries must be positive".into());
             }
             let unique: BTreeSet<_> = needs.iter().collect();
