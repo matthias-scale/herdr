@@ -13,6 +13,7 @@ import shutil
 import sys
 import tempfile
 import time
+import tomllib
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -177,6 +178,106 @@ def _rollback_runtime_files(
             raise
 
 
+def _codex_config_paths() -> list[Path]:
+    """Return existing Codex configs once, following profile symlinks."""
+    home = Path.home()
+    candidates = [home / ".codex" / "config.toml"]
+    profiles = home / ".codex-profiles"
+    if profiles.is_dir():
+        candidates.extend(
+            profile / "config.toml"
+            for profile in sorted(profiles.iterdir())
+            if profile.is_dir()
+        )
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        resolved = candidate.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            paths.append(resolved)
+    return paths
+
+
+def _notify_values(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    return []
+
+
+def _notify_is_herdr(values: list[str], target: Path) -> bool:
+    handlers = {
+        str(target / "herdr-codex-notify.py"),
+        str(target / "codex-notify-chain.sh"),
+    }
+    return any(Path(value).expanduser().absolute().as_posix() in handlers for value in values)
+
+
+def _config_backup_path(config: Path) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    candidate = config.parent / f"{config.name}.backup-{timestamp}"
+    suffix = 1
+    while candidate.exists():
+        candidate = config.parent / f"{config.name}.backup-{timestamp}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _wire_codex_notify(target: Path, *, dry_run: bool) -> dict[str, list[str]]:
+    result = {
+        "wired": [],
+        "already_wired": [],
+        "notify_conflict": [],
+        "skipped": [],
+    }
+    for config in _codex_config_paths():
+        try:
+            data = config.read_bytes()
+            parsed = tomllib.loads(data.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            result["skipped"].append(str(config))
+            continue
+
+        if "notify" in parsed:
+            values = _notify_values(parsed["notify"])
+            if _notify_is_herdr(values, target):
+                result["already_wired"].append(str(config))
+            else:
+                result["notify_conflict"].append(str(config))
+            continue
+
+        result["wired"].append(str(config))
+        if dry_run:
+            continue
+        mode = config.stat().st_mode & 0o7777
+        backup = _config_backup_path(config)
+        shutil.copy2(config, backup)
+        content = data.decode("utf-8")
+        notify = json.dumps(["python3", str(target / "herdr-codex-notify.py")])
+        updated = f"notify = {notify}\n" + content
+        fd, temporary = tempfile.mkstemp(prefix=f".{config.name}.", dir=config.parent)
+        temporary_path = Path(temporary)
+        try:
+            os.fchmod(fd, mode)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+                stream.write(updated)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_path, config)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            temporary_path.unlink(missing_ok=True)
+            raise
+    return result
+
+
 def install_bundle(source_dir: Path, target: Path, *, dry_run: bool) -> dict:
     source_dir = Path(source_dir).resolve()
     target = Path(target).expanduser().absolute()
@@ -190,18 +291,29 @@ def install_bundle(source_dir: Path, target: Path, *, dry_run: bool) -> dict:
             "backup": backup.name if backup else None,
             "files": expected,
         }
+        result["codex_notify"] = _wire_codex_notify(target, dry_run=True)
         return result
 
     target.parent.mkdir(parents=True, exist_ok=True)
     with _exclusive_install_lock(target):
         _validate_target(target)
-        backup = _backup_path(target) if target.exists() else None
+        bundle_needs_update = not target.exists()
+        if target.exists():
+            try:
+                bundle_needs_update = bundle_manifest(target) != expected
+            except BundleValidationError:
+                bundle_needs_update = True
+        backup = _backup_path(target) if target.exists() and bundle_needs_update else None
         result = {
             "mode": "installed",
             "target": str(target),
             "backup": backup.name if backup else None,
             "files": expected,
         }
+        if not bundle_needs_update:
+            result["codex_notify"] = _wire_codex_notify(target, dry_run=False)
+            return result
+
         stage = Path(
             tempfile.mkdtemp(prefix=f".{target.name}.stage-", dir=target.parent)
         )
@@ -229,6 +341,7 @@ def install_bundle(source_dir: Path, target: Path, *, dry_run: bool) -> dict:
             except (BundleValidationError, OSError):
                 _rollback_runtime_files(backup, target, written)
                 raise
+            result["codex_notify"] = _wire_codex_notify(target, dry_run=False)
             return result
         finally:
             if stage.exists():
