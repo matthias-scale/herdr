@@ -134,12 +134,114 @@ fn window_meter(window: Option<QuotaWindow>, width: usize) -> String {
     )
 }
 
+fn codex_reset_count(account: &ProviderAccountUsage, now: i64) -> Option<String> {
+    crate::provider_usage::five_hour_cycles_until_reset(
+        account.usage.seven_day.and_then(|window| window.resets_at),
+        now,
+    )
+    .map(|cycles| format!("{cycles}× 5h"))
+}
+
+fn codex_window_text(
+    account: &ProviderAccountUsage,
+    identity: &str,
+    meter_width: usize,
+    now: i64,
+    include_count: bool,
+    stale: &str,
+) -> String {
+    let weekly = account.usage.seven_day.map(|window| {
+        format!(
+            "7d {} {} {}",
+            window_meter(Some(window), meter_width),
+            window_percent(Some(window), true),
+            reset_text(Some(window), now),
+        )
+    });
+    let count = include_count
+        .then(|| codex_reset_count(account, now))
+        .flatten();
+    let five_hour = account.usage.five_hour.map(|window| {
+        format!(
+            "5h {} {} {}",
+            window_meter(Some(window), meter_width),
+            window_percent(Some(window), true),
+            reset_text(Some(window), now),
+        )
+    });
+    let mut parts = Vec::new();
+    if let Some(weekly) = weekly {
+        parts.push(weekly);
+    }
+    if let Some(count) = count {
+        parts.push(count);
+    }
+    if let Some(five_hour) = five_hour {
+        parts.push(five_hour);
+    }
+    if parts.is_empty() {
+        // An account that reports no window at all still needs a visible row.
+        parts.push(format!(
+            "7d {} {} {}",
+            window_meter(None, meter_width),
+            window_percent(None, true),
+            reset_text(None, now),
+        ));
+    }
+    format!("  {identity}  {}{stale}", parts.join(" · "))
+}
+
+fn codex_row_text(
+    account: &ProviderAccountUsage,
+    narrow_label: &str,
+    width: u16,
+    now: i64,
+) -> String {
+    let stale = if account.usage.stale { " stale" } else { "" };
+    for meter_width in [8, 6, 4] {
+        let text = codex_window_text(
+            account,
+            &account_label(account),
+            meter_width,
+            now,
+            true,
+            stale,
+        );
+        if display_width(&text) <= usize::from(width) {
+            return text;
+        }
+    }
+    let stale_mark = if account.usage.stale { "~" } else { "" };
+    let medium = codex_window_text(account, narrow_label, 2, now, false, stale_mark);
+    if width >= 32 && display_width(&medium) <= usize::from(width) {
+        return medium;
+    }
+    let compact = format!(
+        "  {narrow_label} 7{}{}@{}{stale_mark}",
+        window_meter(account.usage.seven_day, 1),
+        window_percent(account.usage.seven_day, false),
+        narrow_reset_text(account.usage.seven_day, now),
+    );
+    if display_width(&compact) <= usize::from(width) {
+        return compact;
+    }
+    let minimum = format!(
+        "  {narrow_label} 7{}{}{stale_mark}",
+        window_meter(account.usage.seven_day, 1),
+        window_percent(account.usage.seven_day, false),
+    );
+    truncate_end(&minimum, usize::from(width))
+}
+
 fn account_row_text(
     account: &ProviderAccountUsage,
     narrow_label: &str,
     width: u16,
     now: i64,
 ) -> String {
+    if account.provider == QuotaProvider::Codex {
+        return codex_row_text(account, narrow_label, width, now);
+    }
     let stale = if account.usage.stale { " stale" } else { "" };
     let stale_mark = if account.usage.stale { "~" } else { "" };
     let full_identity = account_label(account);
@@ -342,8 +444,8 @@ mod tests {
                 "  Claude Code  5h ········ — — · 7d ········ — —",
                 "  Claude Code/work  5h ········ — — · 7d ········ — —",
                 "codex",
-                "  Codex  5h ········ — — · 7d ········ — —",
-                "  Codex/work  5h ········ — — · 7d ········ — —",
+                "  Codex  7d ········ — —",
+                "  Codex/work  7d ········ — —",
                 "opencode",
                 "  Kimi  5h ········ — — · 7d ········ — —",
             ]
@@ -407,6 +509,93 @@ mod tests {
     }
 
     #[test]
+    fn codex_rows_show_weekly_count_and_only_reported_windows() {
+        let mut app = AppState::test_new();
+        app.status_now_unix = Some(1_800_000_000);
+        app.provider_usage = ProviderUsageSnapshot::with_primary_accounts(
+            AccountUsage::default(),
+            AccountUsage {
+                seven_day: Some(QuotaWindow {
+                    used_percent: 70,
+                    resets_at: Some(1_800_432_000),
+                }),
+                ..AccountUsage::default()
+            },
+            AccountUsage::default(),
+        );
+        app.provider_usage.accounts[1].label = "scalable-so".into();
+        app.provider_usage.accounts[1].profile_id = "default".into();
+
+        let (rows, _) = usage_rows_window(&app, 100, 0, 10);
+        let text = row_text(&rows[3]);
+        assert!(text.starts_with("  scalable-so  7d "), "{text}");
+        assert!(text.contains("70% 5d0h · 24× 5h"), "{text}");
+    }
+
+    #[test]
+    fn codex_team_rows_keep_both_windows_and_reset_count() {
+        let mut app = AppState::test_new();
+        app.status_now_unix = Some(1_800_000_000);
+        app.provider_usage = ProviderUsageSnapshot::with_primary_accounts(
+            AccountUsage::default(),
+            AccountUsage {
+                five_hour: Some(QuotaWindow {
+                    used_percent: 20,
+                    resets_at: Some(1_800_007_200),
+                }),
+                seven_day: Some(QuotaWindow {
+                    used_percent: 70,
+                    resets_at: Some(1_800_432_000),
+                }),
+                ..AccountUsage::default()
+            },
+            AccountUsage::default(),
+        );
+
+        let (rows, _) = usage_rows_window(&app, 120, 0, 10);
+        let text = row_text(&rows[3]);
+        assert!(text.contains("7d "), "{text}");
+        assert!(text.contains("70% 5d0h"), "{text}");
+        assert!(text.contains("24× 5h"), "{text}");
+        assert!(text.contains("5h █▅······ 20% 2h00"), "{text}");
+    }
+
+    #[test]
+    fn codex_rows_drop_count_before_weekly_details_as_width_shrinks() {
+        let mut app = AppState::test_new();
+        app.status_now_unix = Some(1_800_000_000);
+        app.provider_usage = ProviderUsageSnapshot::with_primary_accounts(
+            AccountUsage::default(),
+            AccountUsage {
+                seven_day: Some(QuotaWindow {
+                    used_percent: 70,
+                    resets_at: Some(1_800_432_000),
+                }),
+                ..AccountUsage::default()
+            },
+            AccountUsage::default(),
+        );
+        let (wide, _) = usage_rows_window(&app, 100, 0, 10);
+        let (narrow, _) = usage_rows_window(&app, 32, 0, 10);
+        let (minimum, _) = usage_rows_window(&app, 18, 0, 10);
+        let wide_text = row_text(&wide[3]);
+        let narrow_text = row_text(&narrow[3]);
+        let minimum_text = row_text(&minimum[3]);
+        assert!(wide_text.contains("24× 5h"), "{wide_text}");
+        assert!(!narrow_text.contains("24× 5h"), "{narrow_text}");
+        assert!(narrow_text.contains("7d"), "{narrow_text}");
+        assert!(minimum_text.contains("7"), "{minimum_text}");
+        for (width, rows) in [(100u16, wide), (32, narrow), (18, minimum)] {
+            assert!(
+                rows.iter()
+                    .all(|row| display_width(&row_text(row)) <= usize::from(width)),
+                "width {width}: {:?}",
+                rows.iter().map(row_text).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
     fn narrow_rows_distinguish_similar_profile_ids() {
         let mut app = AppState::test_new();
         app.status_now_unix = Some(1_800_000_000);
@@ -460,7 +649,7 @@ mod tests {
         assert!(rows
             .iter()
             .skip(1)
-            .all(|row| row.line.spans[0].content.ends_with("5█100/7█100@1h/2d~")));
+            .all(|row| row.line.spans[0].content.ends_with("7█100@2d~")));
         let compact = rows.iter().skip(1).map(row_text).collect::<Vec<_>>();
         assert!(compact[0].contains("XSO"), "{}", compact[0]);
         assert!(compact[1].contains("XS0"), "{}", compact[1]);
