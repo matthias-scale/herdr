@@ -788,7 +788,7 @@ impl RoutedApiResponder {
                 event_tx,
                 agent_ref,
             } => {
-                let _ = event_tx.try_send(crate::events::AppEvent::RemoteApiRequestFinished {
+                let _ = event_tx.blocking_send(crate::events::AppEvent::RemoteApiRequestFinished {
                     agent_ref,
                     response,
                 });
@@ -6221,6 +6221,55 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
 
         assert!(error.contains("expected workspace:pane"));
         assert!(router.sender.lock().expect("router sender").is_none());
+    }
+
+    #[test]
+    fn pane_lifecycle_completion_waits_for_capacity_instead_of_being_dropped() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
+        event_tx
+            .blocking_send(crate::events::AppEvent::ScratchpadChanged)
+            .expect("fill app event channel");
+        let agent_ref = crate::api::schema::AgentRef::new("office", "workspace:pane")
+            .expect("valid agent reference");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+
+        let sender = std::thread::spawn({
+            let agent_ref = agent_ref.clone();
+            move || {
+                started_tx.send(()).expect("announce sender start");
+                RoutedApiResponder::App {
+                    event_tx,
+                    agent_ref,
+                }
+                .send(r#"{"id":"settle","result":{"type":"ok"}}"#.into());
+                finished_tx.send(()).expect("announce sender finish");
+            }
+        });
+
+        started_rx.recv().expect("sender started");
+        assert!(
+            finished_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "completion sender must wait while the app event channel is full"
+        );
+        assert!(matches!(
+            event_rx.blocking_recv(),
+            Some(crate::events::AppEvent::ScratchpadChanged)
+        ));
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("completion sender resumed after capacity became available");
+        let event = event_rx.blocking_recv().expect("completion event");
+        assert!(matches!(
+            event,
+            crate::events::AppEvent::RemoteApiRequestFinished {
+                agent_ref: completed,
+                ..
+            } if completed == agent_ref
+        ));
+        sender.join().expect("completion sender thread");
     }
 
     #[test]
