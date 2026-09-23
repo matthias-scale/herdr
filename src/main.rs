@@ -591,7 +591,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # after this many minutes. Working reports keep the 20-minute budget.
 # agent_stale_after_minutes = 5
 # Parents waiting on declared sub-agents use a longer quiet budget.
-# agent_subagent_stale_after_minutes = 60
+# agent_subagent_stale_after_minutes = 30
 # Initial quiet period and maximum sends in one stale-status episode.
 # nudge_after_minutes = 5
 # max_nudges = 3
@@ -1226,7 +1226,7 @@ mod tests {
     fn default_config_documents_stalled_agent_nudge_and_status_alternative() {
         assert!(DEFAULT_CONFIG.contains("# auto_nudge_stalled_agents = false"));
         assert!(DEFAULT_CONFIG.contains("# agent_stale_after_minutes = 5"));
-        assert!(DEFAULT_CONFIG.contains("# agent_subagent_stale_after_minutes = 60"));
+        assert!(DEFAULT_CONFIG.contains("# agent_subagent_stale_after_minutes = 30"));
         assert!(DEFAULT_CONFIG.contains("# nudge_after_minutes = 5"));
         assert!(DEFAULT_CONFIG.contains("# max_nudges = 3"));
         assert!(DEFAULT_CONFIG.contains(

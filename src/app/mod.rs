@@ -347,6 +347,10 @@ pub struct App {
     pub(crate) agent_metadata_deadline: Option<Instant>,
     pub(crate) agent_activity_refresh_deadline: Option<Instant>,
     pub(crate) pending_agent_resume_deadline: Option<Instant>,
+    pub(crate) pending_agent_resume_retries: std::collections::HashMap<
+        crate::terminal::TerminalId,
+        agent_resume::PendingAgentResumeRetry,
+    >,
     /// Agents that were just resumed into a native session and are waiting to
     /// be nudged back into their work, keyed by the terminal they run in.
     pub(crate) pending_resume_nudges:
@@ -1645,6 +1649,7 @@ impl App {
             agent_metadata_deadline: None,
             agent_activity_refresh_deadline: None,
             pending_agent_resume_deadline: None,
+            pending_agent_resume_retries: std::collections::HashMap::new(),
             pending_resume_nudges: std::collections::HashMap::new(),
             stall_nudge_episodes: std::collections::HashMap::new(),
             pending_stall_nudge_submissions: std::collections::HashMap::new(),
@@ -2285,7 +2290,7 @@ impl App {
                         self.state.view_observed_at,
                     ));
                 self.sync_pending_agent_resume_deadline(now);
-                if self.start_pending_agent_resumes(self.pending_agent_resume_due(now)) {
+                if self.start_pending_agent_resumes_at(self.pending_agent_resume_due(now), now) {
                     self.render_dirty.request_generic();
                     self.render_notify.notify_one();
                 }

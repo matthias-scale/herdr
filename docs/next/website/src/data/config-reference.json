@@ -2043,7 +2043,7 @@
         {
           "key": "session.agent_subagent_stale_after_minutes",
           "type": "integer",
-          "default": "60",
+          "default": "30",
           "description": "Quiet period before Herdr marks a parent waiting on declared running subagents stale. Changed detection-buffer output and fresh reports restart this budget; input alone does not."
         },
         {

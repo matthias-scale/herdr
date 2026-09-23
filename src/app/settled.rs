@@ -417,16 +417,16 @@ impl AppState {
                         }
                         continue;
                     }
-                    if projection.needs_human_attention()
+                    if projection.state == crate::detect::AgentState::Working
+                        || projection.needs_human_attention()
                         || projection.open_blockers
                         || terminal.declares_running_subagents()
                         || terminal.holds_shell
                     {
-                        // Settling suspends the agent and would bury an
-                        // unanswered question or stop work below the parent.
-                        // A pane waiting on the human is never a settle
-                        // candidate, no matter its severity. Do not age the
-                        // finished-work grace behind a guard.
+                        // Settling suspends the agent. Never let an external
+                        // finished or inactivity signal stop visible work,
+                        // bury a question, or stop work below the parent. Do
+                        // not age the finished-work grace behind this guard.
                         if pane.finished_since.is_some() || quiet_observation_changed {
                             arm_writes.push((ws_idx, *pane_id, None, quiet));
                         }
@@ -1082,6 +1082,77 @@ mod tests {
             0,
             "resuming completed work must consume the trigger"
         );
+    }
+
+    #[test]
+    fn working_agent_is_not_settled_by_finished_or_inactive_triggers() {
+        let url = "https://github.com/owner/repo/pull/7";
+        let now = Instant::now();
+        let mut merged_item = item();
+        merged_item.pr_url = Some(url.into());
+        merged_item.pr_state = Some("merged".into());
+
+        let (mut finished, finished_pane) =
+            state_with_context(crate::work_context::PaneWorkContext {
+                pr_urls: vec![url.into()],
+                ..Default::default()
+            });
+        let finished_terminal = finished.workspaces[0].tabs[0].panes[&finished_pane]
+            .attached_terminal_id
+            .clone();
+        finished
+            .terminals
+            .get_mut(&finished_terminal)
+            .expect("root terminal")
+            .set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Working);
+        finished.auto_settle_inactive = false;
+        finished.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&finished_pane)
+            .expect("root pane")
+            .activity
+            .set_last_at(now - finished.settle_finished_after);
+
+        assert_eq!(
+            finished.refresh_settled_panes_at(
+                Some(&snapshot(merged_item.clone())),
+                now,
+                1_725_000_000,
+            ),
+            0
+        );
+        assert_eq!(
+            finished.refresh_settled_panes_at(
+                Some(&snapshot(merged_item)),
+                now + finished.settle_finished_after,
+                1_725_000_001,
+            ),
+            0
+        );
+        assert!(!finished.pane_is_settled(0, finished_pane));
+
+        let (mut inactive, inactive_pane) = state_with_context(Default::default());
+        let inactive_terminal = inactive.workspaces[0].tabs[0].panes[&inactive_pane]
+            .attached_terminal_id
+            .clone();
+        inactive
+            .terminals
+            .get_mut(&inactive_terminal)
+            .expect("root terminal")
+            .set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Working);
+        inactive.auto_settle_finished = false;
+        inactive.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&inactive_pane)
+            .expect("root pane")
+            .activity
+            .set_last_at(now - inactive.settle_after);
+
+        assert_eq!(
+            inactive.refresh_settled_panes_at(None, now, 1_725_000_002),
+            0
+        );
+        assert!(!inactive.pane_is_settled(0, inactive_pane));
     }
 
     #[test]
@@ -1983,30 +2054,6 @@ mod tests {
 
         assert!(state.observe_pane_detection_snapshot_at(pane_id, 2, None, "after", now));
         assert!(!state.pane_is_settled(0, pane_id));
-    }
-
-    #[test]
-    fn inactivity_still_settles_a_stale_working_pane() {
-        let (mut state, pane_id) = state_with_context(Default::default());
-        let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        let now = Instant::now();
-        state.settle_after = Duration::from_secs(3 * 24 * 60 * 60);
-        state
-            .terminals
-            .get_mut(&terminal_id)
-            .expect("root terminal")
-            .set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Working);
-        state.workspaces[0].tabs[0]
-            .panes
-            .get_mut(&pane_id)
-            .expect("root pane")
-            .activity
-            .set_last_at(now - state.settle_after);
-
-        assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_003), 1);
-        assert!(state.pane_is_settled(0, pane_id));
     }
 
     #[test]

@@ -76,6 +76,7 @@ fn server_live_handoff_bypasses_protocol_guard() {
             .unwrap();
         let request: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(request["method"], "server.live_handoff");
+        assert_eq!(request["params"]["import_exe"], "/tmp/herdr-next");
         stream
             .write_all(br#"{"id":"cli:server:live-handoff","result":{"type":"ok"}}"#)
             .unwrap();
@@ -83,12 +84,49 @@ fn server_live_handoff_bypasses_protocol_guard() {
         stream.flush().unwrap();
     });
 
-    let handoff = run_cli(&socket_path, &["server", "live-handoff"]);
+    let handoff = run_cli(
+        &socket_path,
+        &["server", "live-handoff", "--import-exe", "/tmp/herdr-next"],
+    );
     assert!(
         handoff.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&handoff.stderr)
     );
+    server.join().unwrap();
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn server_live_handoff_exits_nonzero_with_the_server_reason() {
+    let base = unique_test_dir();
+    fs::create_dir_all(&base).unwrap();
+    let socket_path = base.join("herdr.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(stream.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], "server.live_handoff");
+        stream
+            .write_all(
+                br#"{"id":"cli:server:live-handoff","error":{"code":"handoff_failed","message":"replacement refused import"}}"#,
+            )
+            .unwrap();
+        stream.write_all(b"\n").unwrap();
+        stream.flush().unwrap();
+    });
+
+    let handoff = run_cli(&socket_path, &["server", "live-handoff"]);
+    assert_eq!(handoff.status.code(), Some(1));
+    assert!(handoff.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&handoff.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "handoff_failed");
+    assert_eq!(error["error"]["message"], "replacement refused import");
     server.join().unwrap();
     cleanup_test_base(&base);
 }

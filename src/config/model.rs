@@ -354,7 +354,7 @@ pub struct SessionConfig {
     /// working report keeps the 20-minute busy budget. Default: 5.
     pub agent_stale_after_minutes: u64,
     /// Quiet period before a parent waiting on declared subagents becomes
-    /// stale. Default: 60.
+    /// stale. Default: 30.
     pub agent_subagent_stale_after_minutes: u64,
     /// Initial quiet period before a stalled pane is nudged. Default: 5.
     pub nudge_after_minutes: u64,
@@ -382,7 +382,7 @@ impl Default for SessionConfig {
             resume_nudge_message: "continue".to_string(),
             auto_nudge_stalled_agents: false,
             agent_stale_after_minutes: 5,
-            agent_subagent_stale_after_minutes: 60,
+            agent_subagent_stale_after_minutes: 30,
             nudge_after_minutes: 5,
             max_nudges: 3,
             stall_nudge_message:
@@ -2379,7 +2379,7 @@ mod tests {
         let session = SessionConfig::default();
         assert!(!session.auto_nudge_stalled_agents);
         assert_eq!(session.agent_stale_after_minutes, 5);
-        assert_eq!(session.agent_subagent_stale_after_minutes, 60);
+        assert_eq!(session.agent_subagent_stale_after_minutes, 30);
         assert_eq!(session.nudge_after_minutes, 5);
         assert_eq!(session.max_nudges, 3);
         assert_eq!(

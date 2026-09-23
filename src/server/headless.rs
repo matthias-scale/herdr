@@ -95,6 +95,32 @@ fn wait_for_live_handoff_response_write(
     }
 }
 
+fn live_handoff_api_response(id: String, handoff_result: io::Result<()>) -> (String, bool) {
+    let (response, succeeded) = match handoff_result {
+        Ok(()) => (
+            serde_json::to_string(&api::schema::SuccessResponse {
+                id,
+                result: api::schema::ResponseResult::Ok {},
+            }),
+            true,
+        ),
+        Err(err) => {
+            warn!(error = %err, "live handoff failed");
+            (
+                serde_json::to_string(&api::schema::ErrorResponse {
+                    id,
+                    error: api::schema::ErrorBody {
+                        code: "handoff_failed".into(),
+                        message: err.to_string(),
+                    },
+                }),
+                false,
+            )
+        }
+    };
+    (response.unwrap_or_else(|_| "{}".to_string()), succeeded)
+}
+
 fn sound_notify_message(sound: crate::sound::Sound) -> &'static str {
     match sound {
         crate::sound::Sound::Done => "agent done",
@@ -5557,22 +5583,10 @@ impl HeadlessServer {
         let stream_active = msg.stream_active.clone();
 
         if let api::schema::Method::ServerLiveHandoff(params) = &msg.request.method {
-            let handoff_result = self.perform_live_handoff(params.clone());
-            let handoff_succeeded = handoff_result.is_ok();
-            let response = match handoff_result {
-                Ok(()) => serde_json::to_string(&api::schema::SuccessResponse {
-                    id: msg.request.id,
-                    result: api::schema::ResponseResult::Ok {},
-                }),
-                Err(err) => serde_json::to_string(&api::schema::ErrorResponse {
-                    id: msg.request.id,
-                    error: api::schema::ErrorBody {
-                        code: "handoff_failed".into(),
-                        message: err.to_string(),
-                    },
-                }),
-            }
-            .unwrap_or_else(|_| "{}".to_string());
+            let (response, handoff_succeeded) = live_handoff_api_response(
+                msg.request.id,
+                self.perform_live_handoff(params.clone()),
+            );
             let _ = msg.respond_to.send(response);
             if handoff_succeeded {
                 wait_for_live_handoff_response_write(msg.response_write_complete);
@@ -7593,6 +7607,7 @@ fn init_logging() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
 
     #[cfg(unix)]
@@ -7605,6 +7620,55 @@ mod tests {
 
     #[path = "pane_graphics.rs"]
     mod pane_graphics_tests;
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("captured log lock").write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedLogWriter(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn failed_live_handoff_warns_with_the_error_reason() {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(logs.clone())
+            .finish();
+
+        let (response, succeeded) = tracing::subscriber::with_default(subscriber, || {
+            live_handoff_api_response(
+                "test:handoff".into(),
+                Err(io::Error::other("replacement refused import")),
+            )
+        });
+
+        assert!(!succeeded);
+        assert!(response.contains("replacement refused import"));
+        let output = String::from_utf8(logs.0.lock().expect("captured log lock").clone())
+            .expect("logs are utf-8");
+        assert!(output.contains("WARN"));
+        assert!(output.contains("live handoff failed"));
+        assert!(output.contains("replacement refused import"));
+    }
 
     #[test]
     fn retained_render_plan_covers_each_render_path() {
