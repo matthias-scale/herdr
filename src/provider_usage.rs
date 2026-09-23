@@ -1496,6 +1496,16 @@ pub(crate) fn reset_label(resets_at: i64, now_unix: i64) -> Option<String> {
     })
 }
 
+/// Number of whole five-hour windows remaining before a weekly quota resets.
+pub(crate) fn five_hour_cycles_until_reset(resets_at: Option<i64>, now_unix: i64) -> Option<i64> {
+    resets_at.map(|resets_at| {
+        resets_at
+            .saturating_sub(now_unix)
+            .max(0)
+            .saturating_div(5 * 60 * 60)
+    })
+}
+
 /// Refresh cadence. Quota windows move in minutes, not seconds, and the Kimi
 /// read costs a process spawn, so a minute is the right price.
 pub(crate) const PROVIDER_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
@@ -1815,6 +1825,24 @@ mod tests {
         assert_eq!(reset_label(NOW + 9_900, NOW).as_deref(), Some("2h45"));
         assert_eq!(reset_label(NOW + 313_200, NOW).as_deref(), Some("3d15h"));
         assert_eq!(reset_label(NOW - 1, NOW), None);
+    }
+
+    #[test]
+    fn five_hour_cycles_until_reset_round_down_and_handle_boundaries() {
+        assert_eq!(five_hour_cycles_until_reset(None, NOW), None);
+        assert_eq!(five_hour_cycles_until_reset(Some(NOW - 1), NOW), Some(0));
+        assert_eq!(
+            five_hour_cycles_until_reset(Some(NOW - 30 * 60 * 60), NOW),
+            Some(0)
+        );
+        assert_eq!(
+            five_hour_cycles_until_reset(Some(NOW + 10 * 60 * 60), NOW),
+            Some(2)
+        );
+        assert_eq!(
+            five_hour_cycles_until_reset(Some(NOW + 10 * 60 * 60 - 1), NOW),
+            Some(1)
+        );
     }
 
     #[test]
