@@ -1020,6 +1020,35 @@ fn claude_background_shell_summary_is_working() {
 }
 
 #[test]
+fn claude_tasks_hint_reports_background_subagents_working() {
+    let with_tasks = bundled_explain(
+        Agent::Claude,
+        "  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · /tasks to see subagents · ← for agents",
+    );
+    assert_eq!(with_tasks.state, AgentState::Working);
+    assert_eq!(
+        with_tasks
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("background_subagents_working")
+    );
+
+    let without_tasks = bundled_explain(
+        Agent::Claude,
+        "  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+    );
+    assert_ne!(without_tasks.state, AgentState::Working);
+    assert_ne!(
+        without_tasks
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("background_subagents_working")
+    );
+}
+
+#[test]
 fn claude_login_method_prompt_is_blocked() {
     let result = bundled_explain(
         Agent::Claude,
@@ -1080,6 +1109,23 @@ fn claude_wrap_tolerant_blocker_leaves_neighbouring_screens_alone() {
         Some("transcript_viewer")
     );
     assert!(transcript.skip_state_update);
+}
+
+#[test]
+fn claude_vim_mode_lines_are_live_turn_working_signals() {
+    for screen in [
+        "  -- INSERT -- ⏵⏵ bypass permissions on · esc to interrupt",
+        "⏵⏵ bypass permissions on · esc to interrupt",
+    ] {
+        let result = bundled_explain(Agent::Claude, screen);
+        assert_eq!(result.state, AgentState::Working, "{screen:?}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("live_turn_working"),
+            "{screen:?}"
+        );
+        assert!(result.visible_working, "{screen:?}");
+    }
 }
 
 #[test]
@@ -1309,7 +1355,7 @@ fn fresh_hook_working_overrides_stale_native_claude_permission() {
 fn bundled_manifest_versions_cover_deployed_and_upstream_floors() {
     let claude: toml::Value = toml::from_str(include_str!("../manifests/claude.toml")).unwrap();
     let kimi: toml::Value = toml::from_str(include_str!("../manifests/kimi.toml")).unwrap();
-    assert_eq!(claude["version"].as_str(), Some("2026.09.11.1"));
+    assert_eq!(claude["version"].as_str(), Some("2026.09.23.1"));
     assert!(kimi["version"]
         .as_str()
         .is_some_and(|version| version > "2026.06.10.1"));

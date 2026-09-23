@@ -2227,6 +2227,27 @@ impl TerminalState {
                 && self.hook_authority_is_effective(authority)
                 && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
         });
+        let current_session = self.current_session_identity_for_persistence();
+        // A closing-block source has no session identity of its own. Keep its
+        // worker claim only when the agent's integration anchors it to the
+        // current session; unanchored legacy evidence is retired whole.
+        let closing_report_matches_current_session = self
+            .hook_authority
+            .as_ref()
+            .zip(current_session.as_ref())
+            .is_some_and(
+                |(authority, (_, session_agent, session_kind, session_value))| {
+                    authority.agent_label == *session_agent
+                        && self
+                            .closing_report
+                            .as_ref()
+                            .and_then(|report| report.scope.session_id.as_deref())
+                            .is_none_or(|report_session_id| {
+                                *session_kind == crate::agent_resume::AgentSessionRefKind::Id
+                                    && report_session_id == session_value
+                            })
+                },
+            );
         let starts_reported_turn = visible_working
             && closing_report_is_older
             && previous_screen_settled_after_report
@@ -2259,7 +2280,15 @@ impl TerminalState {
             self.clear_claude_subagent_transcript_activity();
         }
         if closing_report_is_older {
+            let active_subagents = closing_report_matches_current_session
+                .then(|| self.current_direct_closing_report_subagents())
+                .flatten();
             self.clear_closing_task_report(now);
+            if let Some(active_subagents) = active_subagents {
+                self.closing_report
+                    .get_or_insert_default()
+                    .closing_report_subagents = Some(active_subagents);
+            }
         }
         self.revision = self.revision.wrapping_add(1);
         true
@@ -2553,11 +2582,6 @@ impl TerminalState {
     /// parent stalls. So a parent that said "3 agents running" keeps reading busy
     /// forever unless the watchdog ages the claim out.
     fn current_direct_closing_report_subagents(&self) -> Option<u32> {
-        self.hook_authority.as_ref().filter(|authority| {
-            authority.retired_at.is_none()
-                && self.hook_authority_is_effective(authority)
-                && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
-        })?;
         self.closing_report
             .as_ref()
             .and_then(|report| report.closing_report_subagents)
@@ -2585,8 +2609,7 @@ impl TerminalState {
     pub(crate) fn waiting_on_agents(&self) -> bool {
         !self.supervisor_stale
             && self.hook_authority.as_ref().is_some_and(|authority| {
-                authority.retired_at.is_none()
-                    && authority.state != AgentState::Blocked
+                authority.state != AgentState::Blocked
                     && self.hook_authority_is_effective(authority)
                     && crate::detect::is_closing_block_source(
                         &authority.source,
@@ -2629,17 +2652,18 @@ impl TerminalState {
         {
             return None;
         }
-        if let Some(turn_started_at) = self.unreported_turn_started_at {
-            return turn_started_at.checked_add(AGENT_BUSY_STALE_SILENCE);
-        }
-        let authority = self
-            .hook_authority
-            .as_ref()
-            .filter(|authority| authority.retired_at.is_none())?;
         if self.waiting_on_agents() {
-            let mut quiet_since = pane_activity_at
-                .filter(|activity_at| *activity_at > authority.reported_at)
+            let authority = self.hook_authority.as_ref()?;
+            // Retirement ends the hook's lifecycle authority, not its direct
+            // claim that child work remains. Give that claim a fresh silence
+            // budget from the later lifecycle boundary.
+            let claim_started_at = authority
+                .retired_at
+                .map(|retired_at| retired_at.max(authority.reported_at))
                 .unwrap_or(authority.reported_at);
+            let mut quiet_since = pane_activity_at
+                .filter(|activity_at| *activity_at > claim_started_at)
+                .unwrap_or(claim_started_at);
             if self.claude_subagent_transcript_activity == SubagentTranscriptActivity::Fresh {
                 if let Some(observed_at) = self
                     .claude_subagent_activity_observed_at
@@ -2656,6 +2680,12 @@ impl TerminalState {
                 };
             return quiet_since.checked_add(age);
         }
+        if let Some(turn_started_at) = self.unreported_turn_started_at {
+            return turn_started_at.checked_add(AGENT_BUSY_STALE_SILENCE);
+        }
+        let authority = self.hook_authority.as_ref().filter(|authority| {
+            authority.retired_at.is_none() && self.hook_authority_is_effective(authority)
+        })?;
         let age = match authority.state {
             AgentState::Working => authority
                 .wait
@@ -2704,6 +2734,23 @@ impl TerminalState {
             return None;
         }
         let expired_subagent_wait = self.waiting_on_agents();
+        let expired_retired_direct_claim = expired_subagent_wait
+            && self.active_subagents.is_none()
+            && self
+                .current_direct_closing_report_subagents()
+                .is_some_and(|count| count > 0)
+            && self
+                .hook_authority
+                .as_ref()
+                .is_some_and(|authority| authority.retired_at.is_some());
+        if expired_retired_direct_claim {
+            // No live supervisor remains to reconcile this claim. Expiry is
+            // therefore its terminal zero report, which lets the pane settle.
+            if self.fallback_state != AgentState::Working {
+                self.unreported_turn_started_at = None;
+            }
+            return self.apply_closing_report_subagents_at(Some(0), now);
+        }
         self.supervisor_stale = true;
         if expired_subagent_wait {
             self.closing_report
@@ -8134,6 +8181,133 @@ mod tests {
             terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
             refreshed_at.checked_add(TEST_SUBAGENT_STALE_AFTER)
         );
+    }
+
+    #[test]
+    fn a_retired_direct_subagent_claim_keeps_its_watchdog_until_expiry() {
+        let reported_at = Instant::now();
+        let mut terminal = subagent_claim_terminal(reported_at);
+
+        let settled_at = reported_at + Duration::from_secs(1);
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            settled_at,
+        );
+        let retired_at = settled_at + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH;
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            retired_at,
+        );
+
+        assert_eq!(terminal.verified_active_subagents(), Some(3));
+        assert_eq!(terminal.effective_active_subagents(), Some(3));
+        assert!(terminal.declares_running_subagents());
+        assert!(terminal.waiting_on_agents());
+        assert_eq!(
+            terminal.sidebar_projection(true),
+            (AgentState::Working, true)
+        );
+        assert_eq!(
+            terminal.hook_authority.as_ref().unwrap().retired_at,
+            Some(retired_at)
+        );
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
+            retired_at.checked_add(TEST_SUBAGENT_STALE_AFTER)
+        );
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            retired_at + Duration::from_secs(1),
+        );
+        assert_eq!(
+            terminal.sidebar_projection(true),
+            (AgentState::Working, true)
+        );
+
+        terminal
+            .mark_agent_status_stale_at(
+                retired_at + TEST_SUBAGENT_STALE_AFTER,
+                TEST_AGENT_STALE_AFTER,
+            )
+            .expect("watchdog expires the retired direct claim");
+
+        assert_eq!(terminal.effective_active_subagents(), Some(0));
+        assert!(!terminal.declares_running_subagents());
+        assert!(!terminal.waiting_on_agents());
+        assert!(!terminal.supervisor_stale);
+        assert_eq!(terminal.sidebar_projection(true), (AgentState::Idle, true));
+        assert!(terminal
+            .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+            .is_none());
+    }
+
+    #[test]
+    fn every_running_declaration_has_a_watchdog_except_documented_exits() {
+        fn assert_watchdog_invariant(terminal: &TerminalState) {
+            assert!(terminal.declares_running_subagents());
+            let authority = terminal
+                .hook_authority
+                .as_ref()
+                .expect("direct declaration has hook authority");
+            let documented_exit = terminal.supervisor_stale
+                || terminal.state == AgentState::Blocked
+                || terminal.closing_external_wait().is_some()
+                || !terminal.hook_authority_is_effective(authority);
+            assert_eq!(
+                terminal
+                    .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+                    .is_none(),
+                documented_exit
+            );
+        }
+
+        let now = Instant::now();
+        let live = subagent_claim_terminal(now);
+        assert_watchdog_invariant(&live);
+
+        let mut stale = subagent_claim_terminal(now);
+        stale.supervisor_stale = true;
+        assert_watchdog_invariant(&stale);
+
+        let mut blocked = subagent_claim_terminal(now);
+        blocked.state = AgentState::Blocked;
+        assert_watchdog_invariant(&blocked);
+
+        let mut external_wait = subagent_claim_terminal(now);
+        external_wait.apply_closing_task_report(
+            None,
+            Some("CI".into()),
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
+        assert_watchdog_invariant(&external_wait);
+
+        let mut ineffective = subagent_claim_terminal(now);
+        ineffective.recent_agent_process_exit = Some(RecentAgentProcessExit {
+            agent: Agent::Claude,
+            observed_at: now,
+        });
+        assert_watchdog_invariant(&ineffective);
     }
 
     #[test]
