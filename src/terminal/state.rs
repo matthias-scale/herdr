@@ -2652,6 +2652,15 @@ impl TerminalState {
         {
             return None;
         }
+        if self.active_subagents.is_some_and(|count| count > 0)
+            && self.claude_subagent_transcript_activity == SubagentTranscriptActivity::Fresh
+        {
+            let observed_at = self.claude_subagent_activity_observed_at?;
+            let quiet_since = pane_activity_at
+                .filter(|activity_at| *activity_at > observed_at)
+                .unwrap_or(observed_at);
+            return quiet_since.checked_add(subagent_stale_after);
+        }
         if self.waiting_on_agents() {
             let authority = self.hook_authority.as_ref()?;
             // Retirement ends the hook's lifecycle authority, not its direct
@@ -7681,6 +7690,30 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_transcript_observed_subagent_gets_the_long_watchdog_budget_without_a_hook() {
+        let now = Instant::now();
+        let witness_at = now + Duration::from_secs(4 * 60);
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_active_subagents_with_projection_at(Some(2), true, now);
+        terminal.set_claude_subagent_transcript_activity_at(
+            SubagentTranscriptActivity::Fresh,
+            witness_at,
+        );
+
+        assert!(terminal.hook_authority.is_none());
+        assert!(!terminal.waiting_on_agents());
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            ),
+            witness_at.checked_add(TEST_SUBAGENT_STALE_AFTER)
+        );
+    }
+
+    #[test]
     fn stale_subagent_transcripts_fall_back_to_the_ordinary_budget() {
         let now = Instant::now();
         let mut terminal = subagent_claim_terminal(now);
@@ -7706,6 +7739,77 @@ mod tests {
             )
             .is_some());
         assert!(terminal.supervisor_stale);
+    }
+
+    #[test]
+    fn a_stale_transcript_observed_subagent_keeps_the_ordinary_watchdog_budget() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.unreported_turn_started_at = Some(now);
+        terminal.set_active_subagents_with_projection_at(Some(2), true, now);
+        terminal.set_claude_subagent_transcript_activity_at(
+            SubagentTranscriptActivity::Stale,
+            now + Duration::from_secs(4 * 60),
+        );
+
+        assert!(terminal.hook_authority.is_none());
+        assert!(!terminal.waiting_on_agents());
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            ),
+            now.checked_add(AGENT_BUSY_STALE_SILENCE)
+        );
+    }
+
+    #[test]
+    fn every_fresh_transcript_observed_subagent_has_a_watchdog_except_documented_exits() {
+        fn transcript_observed_terminal(now: Instant) -> TerminalState {
+            let mut terminal = test_terminal();
+            terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+            terminal.set_active_subagents_with_projection_at(Some(2), true, now);
+            terminal
+                .set_claude_subagent_transcript_activity_at(SubagentTranscriptActivity::Fresh, now);
+            terminal
+        }
+
+        fn assert_watchdog_invariant(terminal: &TerminalState) {
+            assert!(terminal.active_subagents.is_some_and(|count| count > 0));
+            let documented_exit = terminal.supervisor_stale
+                || terminal.state == AgentState::Blocked
+                || terminal.closing_external_wait().is_some();
+            assert_eq!(
+                terminal
+                    .agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER)
+                    .is_none(),
+                documented_exit
+            );
+        }
+
+        let now = Instant::now();
+        let live = transcript_observed_terminal(now);
+        assert_watchdog_invariant(&live);
+
+        let mut stale = transcript_observed_terminal(now);
+        stale.supervisor_stale = true;
+        assert_watchdog_invariant(&stale);
+
+        let mut blocked = transcript_observed_terminal(now);
+        blocked.state = AgentState::Blocked;
+        assert_watchdog_invariant(&blocked);
+
+        let mut external_wait = transcript_observed_terminal(now);
+        external_wait.apply_closing_task_report(
+            None,
+            Some("CI".into()),
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
+        assert_watchdog_invariant(&external_wait);
     }
 
     #[test]
