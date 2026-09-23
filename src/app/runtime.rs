@@ -1886,6 +1886,7 @@ mod tests {
         fn app_without_other_deadlines() -> super::super::App {
             let mut config = crate::config::Config::default();
             config.ui.status_bar.enabled = false;
+            config.work_index.enabled = false;
             super::super::App::new(
                 &config,
                 true,
