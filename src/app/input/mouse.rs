@@ -48,15 +48,11 @@ pub(super) enum MouseAction {
     AgentPickerSelect(usize),
     FocusLiveSettledPane(crate::app::state::PaneFocusTarget),
     OpenSnoozeMenu {
-        ws_idx: usize,
-        pane_id: PaneId,
+        target: crate::app::state::SidebarPaneLifecycleTarget,
         column: u16,
         row: u16,
     },
-    SettlePane {
-        ws_idx: usize,
-        pane_id: PaneId,
-    },
+    SettlePane(crate::app::state::SidebarPaneLifecycleTarget),
     SidebarNewMenu {
         action: crate::app::state::SidebarNewMenuAction,
     },
@@ -742,16 +738,15 @@ impl AppState {
                 .and_then(|target| target.action.clone())
             {
                 return Some(match action {
-                    crate::app::state::SidebarHoverAction::Snooze { ws_idx, pane_id } => {
+                    crate::app::state::SidebarHoverAction::Snooze { target } => {
                         MouseAction::OpenSnoozeMenu {
-                            ws_idx,
-                            pane_id,
+                            target,
                             column: mouse.column,
                             row: mouse.row,
                         }
                     }
-                    crate::app::state::SidebarHoverAction::Settle { ws_idx, pane_id } => {
-                        MouseAction::SettlePane { ws_idx, pane_id }
+                    crate::app::state::SidebarHoverAction::Settle { target } => {
+                        MouseAction::SettlePane(target)
                     }
                 });
             }
@@ -2812,17 +2807,16 @@ impl AppState {
                 self.close_workspace_picker();
                 return MobileMouseResult::Action(MouseAction::FocusPane { ws_idx, pane_id });
             }
-            Some(crate::ui::MobileSwitcherTarget::Snooze { ws_idx, pane_id }) => {
+            Some(crate::ui::MobileSwitcherTarget::Snooze(target)) => {
                 return MobileMouseResult::Action(MouseAction::OpenSnoozeMenu {
-                    ws_idx,
-                    pane_id,
+                    target,
                     column: mouse.column,
                     row: mouse.row,
                 });
             }
-            Some(crate::ui::MobileSwitcherTarget::Settle { ws_idx, pane_id }) => {
+            Some(crate::ui::MobileSwitcherTarget::Settle(target)) => {
                 self.close_workspace_picker();
-                return MobileMouseResult::Action(MouseAction::SettlePane { ws_idx, pane_id });
+                return MobileMouseResult::Action(MouseAction::SettlePane(target));
             }
             Some(crate::ui::MobileSwitcherTarget::NestedHeader(key)) => {
                 self.toggle_sidebar_group(&key);

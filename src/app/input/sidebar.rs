@@ -1558,47 +1558,79 @@ impl App {
 }
 
 impl super::super::App {
-    pub(crate) fn open_sidebar_snooze_menu(
-        &mut self,
+    fn sidebar_pane_lifecycle_state(
+        &self,
+        target: &crate::app::state::SidebarPaneLifecycleTarget,
+    ) -> Option<(bool, Option<u64>)> {
+        match target {
+            crate::app::state::SidebarPaneLifecycleTarget::Local(target) => {
+                let ws_idx = self
+                    .state
+                    .workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == target.workspace_id)?;
+                let pane = self
+                    .state
+                    .workspaces
+                    .get(ws_idx)?
+                    .pane_state(target.pane_id)?;
+                let snoozed_until = pane.snoozed_until();
+                (snoozed_until.is_some() || self.state.pane_can_snooze(ws_idx, target.pane_id))
+                    .then_some((snoozed_until.is_some(), snoozed_until))
+            }
+            crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref) => self
+                .state
+                .remote_agent_panel_entries
+                .iter()
+                .find(|entry| {
+                    entry.agent_ref == *agent_ref
+                        && entry.host_fresh
+                        && !entry.settled
+                        && !crate::ui::entry_needs_human_attention(entry)
+                })
+                .map(|entry| (entry.snoozed_until.is_some(), entry.snoozed_until)),
+        }
+    }
+
+    fn local_sidebar_pane_lifecycle_target(
+        &self,
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
+    ) -> Option<crate::app::state::SidebarPaneLifecycleTarget> {
+        Some(crate::app::state::SidebarPaneLifecycleTarget::Local(
+            crate::app::state::PaneFocusTarget {
+                workspace_id: self.state.workspaces.get(ws_idx)?.id.clone(),
+                pane_id,
+            },
+        ))
+    }
+
+    pub(crate) fn open_sidebar_snooze_menu(
+        &mut self,
+        target: crate::app::state::SidebarPaneLifecycleTarget,
         column: u16,
         row: u16,
     ) {
-        if !self.state.pane_is_snoozed(ws_idx, pane_id)
-            && !self.state.pane_can_snooze(ws_idx, pane_id)
-        {
+        let Some((snoozed, _)) = self.sidebar_pane_lifecycle_state(&target) else {
             return;
-        }
+        };
         self.state.sidebar_snooze = Some(crate::app::state::SidebarSnoozeUiState {
-            target: crate::app::state::PaneFocusTarget {
-                workspace_id: self.state.workspaces[ws_idx].id.clone(),
-                pane_id,
-            },
+            target,
             anchor: (column, row),
-            selected: crate::app::state::sidebar_snooze_menu_items(
-                self.state.pane_is_snoozed(ws_idx, pane_id),
-            )[0]
-            .1,
+            selected: crate::app::state::sidebar_snooze_menu_items(snoozed)[0].1,
             time_draft: None,
             error: None,
         });
     }
 
-    pub(crate) fn open_snooze_time_input(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
-        if !self.state.pane_is_snoozed(ws_idx, pane_id)
-            && !self.state.pane_can_snooze(ws_idx, pane_id)
-        {
-            return;
-        }
-        let Some(workspace) = self.state.workspaces.get(ws_idx) else {
+    pub(crate) fn open_snooze_time_input(
+        &mut self,
+        target: crate::app::state::SidebarPaneLifecycleTarget,
+    ) {
+        let Some((_, snoozed_until)) = self.sidebar_pane_lifecycle_state(&target) else {
             return;
         };
-        let Some(pane) = workspace.pane_state(pane_id) else {
-            return;
-        };
-        let prefill = pane
-            .snoozed_until()
+        let prefill = snoozed_until
             .and_then(crate::platform::local_datetime_at)
             .map(|deadline| format!("{:02}:{:02}", deadline.hour(), deadline.minute()))
             .unwrap_or_default();
@@ -1606,9 +1638,7 @@ impl super::super::App {
             .state
             .sidebar_snooze
             .as_ref()
-            .filter(|snooze| {
-                snooze.target.workspace_id == workspace.id && snooze.target.pane_id == pane_id
-            })
+            .filter(|snooze| snooze.target == target)
             .map_or(
                 (
                     self.state.view.sidebar_rect.x,
@@ -1617,10 +1647,7 @@ impl super::super::App {
                 |snooze| snooze.anchor,
             );
         self.state.sidebar_snooze = Some(crate::app::state::SidebarSnoozeUiState {
-            target: crate::app::state::PaneFocusTarget {
-                workspace_id: workspace.id.clone(),
-                pane_id,
-            },
+            target,
             anchor,
             selected: crate::app::state::SidebarSnoozeMenuAction::SetTime,
             time_draft: Some(prefill),
@@ -1639,21 +1666,13 @@ impl super::super::App {
             return;
         }
         let target = snooze.target.clone();
-        let Some(ws_idx) = self
-            .state
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.id == target.workspace_id)
-        else {
+        let Some((snoozed, _)) = self.sidebar_pane_lifecycle_state(&target) else {
+            self.remote_pane_lifecycle_refused(&target);
             return;
         };
-        let snoozed = self.state.pane_is_snoozed(ws_idx, target.pane_id);
         let actions = crate::app::state::sidebar_snooze_menu_items(snoozed);
         let Some((_, action)) = actions.iter().find(|(_, action)| *action == selected) else {
             self.state.sidebar_snooze = None;
-            return;
-        };
-        let Some(public_pane_id) = self.public_pane_id(ws_idx, target.pane_id) else {
             return;
         };
         match action {
@@ -1664,19 +1683,22 @@ impl super::super::App {
                 )
                 .then(crate::platform::tomorrow_morning_unix)
                 .flatten();
-                let Some(params) = sidebar_snooze_params(public_pane_id, *preset, tomorrow_morning)
-                else {
+                let Some(params) = sidebar_snooze_params(
+                    self.sidebar_pane_lifecycle_public_id(&target)?,
+                    *preset,
+                    tomorrow_morning,
+                ) else {
                     return;
                 };
                 self.state.sidebar_snooze = None;
-                self.runtime_pane_snooze("tui.sidebar.snooze", params);
+                self.dispatch_sidebar_pane_snooze(target, params);
             }
             crate::app::state::SidebarSnoozeMenuAction::SetTime => {
-                self.open_snooze_time_input(ws_idx, target.pane_id);
+                self.open_snooze_time_input(target);
             }
             crate::app::state::SidebarSnoozeMenuAction::Unsnooze => {
                 self.state.sidebar_snooze = None;
-                self.runtime_pane_unsnooze("tui.sidebar.unsnooze", public_pane_id);
+                self.dispatch_sidebar_pane_unsnooze(target);
             }
         }
     }
@@ -1688,18 +1710,11 @@ impl super::super::App {
         if snooze.time_draft.is_some() {
             return false;
         }
-        let Some(ws_idx) = self
-            .state
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.id == snooze.target.workspace_id)
-        else {
+        let Some((snoozed, _)) = self.sidebar_pane_lifecycle_state(&snooze.target) else {
             self.state.sidebar_snooze = None;
             return true;
         };
-        let item_count = crate::app::state::sidebar_snooze_menu_items(
-            self.state.pane_is_snoozed(ws_idx, snooze.target.pane_id),
-        );
+        let item_count = crate::app::state::sidebar_snooze_menu_items(snoozed);
         match key.code {
             KeyCode::Esc => self.state.sidebar_snooze = None,
             KeyCode::Up | KeyCode::Char('k') => {

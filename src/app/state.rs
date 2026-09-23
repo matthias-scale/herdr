@@ -1038,8 +1038,14 @@ pub struct SidebarHoverTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarHoverAction {
-    Snooze { ws_idx: usize, pane_id: PaneId },
-    Settle { ws_idx: usize, pane_id: PaneId },
+    Snooze { target: SidebarPaneLifecycleTarget },
+    Settle { target: SidebarPaneLifecycleTarget },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SidebarPaneLifecycleTarget {
+    Local(PaneFocusTarget),
+    Remote(crate::api::schema::AgentRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1870,7 +1876,7 @@ pub(crate) struct ClientOverlayState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SidebarSnoozeUiState {
-    pub(crate) target: PaneFocusTarget,
+    pub(crate) target: SidebarPaneLifecycleTarget,
     pub(crate) anchor: (u16, u16),
     pub(crate) selected: SidebarSnoozeMenuAction,
     pub(crate) time_draft: Option<String>,

@@ -803,6 +803,10 @@ fn render_remote_compact_agent_row_with_prefix(
     let age_width = widths.age;
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + provider_width + age_width;
     let title_width = row_width.saturating_sub(fixed_width);
+    let control = remote_row_control(app, remote);
+    let controls_width = selected_row_controls_width(control.as_ref(), title_width, rect.width);
+    let title_text_width = title_width.saturating_sub(controls_width);
+    let title_text = truncate_end(title, title_text_width);
     let selected = app
         .sidebar_selected_remote_agent
         .as_ref()
@@ -839,12 +843,32 @@ fn render_remote_compact_agent_row_with_prefix(
     x = x.saturating_add(SIDEBAR_DOT_FIELD_WIDTH as u16);
     frame.render_widget(
         Paragraph::new(Span::styled(
-            title,
+            title_text,
             working_row_style(app, fade, title_style, bg),
         )),
-        Rect::new(x, rect.y, title_width as u16, rect.height),
+        Rect::new(x, rect.y, title_text_width as u16, rect.height),
     );
-    x = x.saturating_add(title_width as u16);
+    x = x.saturating_add(title_text_width as u16);
+    if controls_width > 0 {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " ◷ ",
+                working_row_style(app, fade, Style::default().fg(p.mauve), bg),
+            )),
+            Rect::new(x, rect.y, SIDEBAR_SNOOZE_CONTROL_WIDTH as u16, rect.height),
+        );
+        x = x.saturating_add(SIDEBAR_SNOOZE_CONTROL_WIDTH as u16);
+        if control.as_ref().is_some_and(|control| control.show_settle) {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    " ✓",
+                    working_row_style(app, fade, Style::default().fg(p.overlay0), bg),
+                )),
+                Rect::new(x, rect.y, SIDEBAR_SETTLE_CONTROL_WIDTH as u16, rect.height),
+            );
+            x = x.saturating_add(SIDEBAR_SETTLE_CONTROL_WIDTH as u16);
+        }
+    }
     if provider_width > 0 {
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -925,9 +949,9 @@ fn render_compact_agent_row_with_prefix(
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
     let control_pane = row_control_pane(app, entry, tab);
-    let controls_width = selected_row_controls_width(control_pane, title_width, rect.width);
-    let snoozed =
-        control_pane.is_some_and(|(pane_id, _)| app.pane_is_snoozed(target.ws_idx, pane_id));
+    let controls_width =
+        selected_row_controls_width(control_pane.as_ref(), title_width, rect.width);
+    let snoozed = control_pane.as_ref().is_some_and(|control| control.snoozed);
     // The star sits inside the title field, right after the name, so it reads as
     // part of the session's label rather than as another right-hand column.
     let star_suffix = (entry.starred
@@ -1019,40 +1043,86 @@ fn selected_local_row_pane(
         .then_some(target.pane_id)
 }
 
+#[derive(Clone)]
+struct SidebarRowControl {
+    target: crate::app::state::SidebarPaneLifecycleTarget,
+    snoozed: bool,
+    show_settle: bool,
+}
+
 fn row_control_pane(
     app: &AppState,
     entry: &AgentPanelEntry,
     tab: bool,
-) -> Option<(crate::layout::PaneId, bool)> {
+) -> Option<SidebarRowControl> {
     let target = entry.local_target()?;
     if !app.pane_can_snooze(target.ws_idx, target.pane_id) {
         return None;
     }
     if app.pane_is_snoozed(target.ws_idx, target.pane_id) {
-        return Some((target.pane_id, false));
+        return Some(SidebarRowControl {
+            target: crate::app::state::SidebarPaneLifecycleTarget::Local(
+                crate::app::state::PaneFocusTarget {
+                    workspace_id: app.workspaces.get(target.ws_idx)?.id.clone(),
+                    pane_id: target.pane_id,
+                },
+            ),
+            snoozed: true,
+            show_settle: false,
+        });
     }
     let pane_id = selected_local_row_pane(app, entry, tab)?;
     if app.pane_can_snooze(target.ws_idx, pane_id) {
-        Some((pane_id, !app.pane_is_snoozed(target.ws_idx, pane_id)))
+        Some(SidebarRowControl {
+            target: crate::app::state::SidebarPaneLifecycleTarget::Local(
+                crate::app::state::PaneFocusTarget {
+                    workspace_id: app.workspaces.get(target.ws_idx)?.id.clone(),
+                    pane_id,
+                },
+            ),
+            snoozed: false,
+            show_settle: true,
+        })
     } else {
         None
     }
 }
 
+fn remote_row_control(app: &AppState, entry: &RemoteAgentPanelEntry) -> Option<SidebarRowControl> {
+    if !entry.host_fresh || entry.settled || entry_needs_human_attention(entry) {
+        return None;
+    }
+    let snoozed = entry.snoozed_until.is_some();
+    if !snoozed
+        && !app
+            .sidebar_selected_remote_agent
+            .as_ref()
+            .is_some_and(|selected| selected == &entry.agent_ref)
+    {
+        return None;
+    }
+    Some(SidebarRowControl {
+        target: crate::app::state::SidebarPaneLifecycleTarget::Remote(entry.agent_ref.clone()),
+        snoozed,
+        show_settle: !snoozed,
+    })
+}
+
 fn selected_row_controls_width(
-    control_pane: Option<(crate::layout::PaneId, bool)>,
+    control_pane: Option<&SidebarRowControl>,
     title_width: usize,
     row_width: u16,
 ) -> usize {
     control_pane
         .filter(|_| row_width >= SIDEBAR_MIN_CONTROLS_ROW_WIDTH)
-        .filter(|(_, show_settle)| {
+        .filter(|control| {
             let controls_width = SIDEBAR_SNOOZE_CONTROL_WIDTH
-                + usize::from(*show_settle) * SIDEBAR_SETTLE_CONTROL_WIDTH;
+                + usize::from(control.show_settle) * SIDEBAR_SETTLE_CONTROL_WIDTH;
             title_width >= SIDEBAR_SELECTED_MIN_TITLE_WIDTH + controls_width
         })
-        .map_or(0, |(_, show_settle)| {
-            SIDEBAR_SNOOZE_CONTROL_WIDTH + usize::from(show_settle) * SIDEBAR_SETTLE_CONTROL_WIDTH
+        .map_or(0, |control| {
+            SIDEBAR_SNOOZE_CONTROL_WIDTH
+                + usize::from(control.show_settle) * SIDEBAR_SETTLE_CONTROL_WIDTH
         })
 }
 
@@ -1076,7 +1146,8 @@ pub(crate) fn selected_row_control_at(
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
     let control_pane = row_control_pane(app, entry, tab);
-    let controls_width = selected_row_controls_width(control_pane, title_width, rect.width);
+    let controls_width =
+        selected_row_controls_width(control_pane.as_ref(), title_width, rect.width);
     if controls_width == 0 {
         return None;
     }
@@ -1086,17 +1157,61 @@ pub(crate) fn selected_row_control_at(
     if column < start || column >= start.saturating_add(controls_width as u16) {
         return None;
     }
-    let (pane_id, show_settle) = control_pane?;
-    let target = entry.local_target()?;
+    let control = control_pane?;
     if column < start.saturating_add(SIDEBAR_SNOOZE_CONTROL_WIDTH as u16) {
         Some(crate::app::state::SidebarHoverAction::Snooze {
-            ws_idx: target.ws_idx,
-            pane_id,
+            target: control.target,
         })
-    } else if show_settle {
+    } else if control.show_settle {
         Some(crate::app::state::SidebarHoverAction::Settle {
-            ws_idx: target.ws_idx,
-            pane_id,
+            target: control.target,
+        })
+    } else {
+        None
+    }
+}
+
+pub(crate) fn selected_remote_row_control_at(
+    app: &AppState,
+    entry: &RemoteAgentPanelEntry,
+    rect: Rect,
+    depth: u16,
+    column: u16,
+) -> Option<crate::app::state::SidebarHoverAction> {
+    let requested_prefix = usize::from(depth) * 3 + 1;
+    let title = compact_row_title_for_width(
+        &entry.render_title,
+        &entry.render_provider,
+        usize::from(rect.width),
+        requested_prefix,
+    );
+    let widths = compact_row_widths(
+        title,
+        &entry.render_provider,
+        usize::from(rect.width),
+        requested_prefix,
+    );
+    let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+    let title_width = usize::from(rect.width).saturating_sub(fixed_width);
+    let control = remote_row_control(app, entry);
+    let controls_width = selected_row_controls_width(control.as_ref(), title_width, rect.width);
+    if controls_width == 0 {
+        return None;
+    }
+    let start = rect.x.saturating_add(
+        (widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - controls_width) as u16,
+    );
+    if column < start || column >= start.saturating_add(controls_width as u16) {
+        return None;
+    }
+    let control = control?;
+    if column < start.saturating_add(SIDEBAR_SNOOZE_CONTROL_WIDTH as u16) {
+        Some(crate::app::state::SidebarHoverAction::Snooze {
+            target: control.target,
+        })
+    } else if control.show_settle {
+        Some(crate::app::state::SidebarHoverAction::Settle {
+            target: control.target,
         })
     } else {
         None
@@ -1323,6 +1438,7 @@ pub(crate) struct RemoteAgentPanelEntry {
     workspace_id: String,
     settled: bool,
     pub(crate) snoozed_until: Option<u64>,
+    pub(crate) host_fresh: bool,
     show_host_identity: bool,
 }
 
@@ -1340,6 +1456,7 @@ impl RemoteAgentPanelEntry {
             String::new(),
             false,
             None,
+            true,
         )
     }
 
@@ -1351,6 +1468,7 @@ impl RemoteAgentPanelEntry {
         workspace_id: String,
         settled: bool,
         snoozed_until: Option<u64>,
+        host_fresh: bool,
     ) -> Self {
         let render_dot = compact_row_dot(&entry);
         let render_title = compact_row_title(&entry, false).to_string();
@@ -1380,6 +1498,7 @@ impl RemoteAgentPanelEntry {
             workspace_id,
             settled,
             snoozed_until,
+            host_fresh,
             show_host_identity: false,
             entry,
         }
@@ -1919,6 +2038,7 @@ pub(crate) fn remote_agent_panel_entries_at(
                     workspace_id,
                     lifecycle.settled,
                     lifecycle.snoozed_until,
+                    host.state == crate::fleet::HostState::Reachable,
                 ),
             ))
         })
@@ -7364,6 +7484,19 @@ fn snooze_control_tooltip(app: &AppState, ws_idx: usize, pane_id: crate::layout:
     }
 }
 
+fn remote_snooze_control_tooltip(entry: &RemoteAgentPanelEntry) -> String {
+    let Some(deadline) = entry.snoozed_until else {
+        return "Set time".to_string();
+    };
+    match (
+        crate::platform::local_datetime(),
+        crate::platform::local_datetime_at(deadline),
+    ) {
+        (Some(now), Some(deadline)) => snooze_deadline_tooltip(now, deadline),
+        _ => format!("Unsnoozes at UNIX {deadline}"),
+    }
+}
+
 /// Hover explanations for the parts of a sidebar row that are a glyph or a
 /// truncation rather than words: status glyphs, agent dots, and work titles the
 /// row was too narrow to spell out.
@@ -7440,9 +7573,9 @@ pub(crate) fn compute_sidebar_hover_targets(
                 let title_width = usize::from(body.width).saturating_sub(fixed_width);
                 let control_pane = row_control_pane(app, entry, tab);
                 let controls_width =
-                    selected_row_controls_width(control_pane, title_width, body.width);
+                    selected_row_controls_width(control_pane.as_ref(), title_width, body.width);
                 if controls_width > 0 {
-                    let Some((pane_id, show_settle)) = control_pane else {
+                    let Some(control) = control_pane else {
                         continue;
                     };
                     let start = prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - controls_width;
@@ -7451,14 +7584,13 @@ pub(crate) fn compute_sidebar_hover_targets(
                     {
                         targets.push(crate::app::state::SidebarHoverTarget {
                             rect,
-                            label: snooze_control_tooltip(app, target.ws_idx, pane_id),
+                            label: snooze_control_tooltip(app, target.ws_idx, target.pane_id),
                             action: Some(crate::app::state::SidebarHoverAction::Snooze {
-                                ws_idx: target.ws_idx,
-                                pane_id,
+                                target: control.target.clone(),
                             }),
                         });
                     }
-                    if show_settle {
+                    if control.show_settle {
                         if let Some(rect) = clamp_row_cells(
                             body,
                             row_y,
@@ -7469,11 +7601,82 @@ pub(crate) fn compute_sidebar_hover_targets(
                                 rect,
                                 label: "Settle".into(),
                                 action: Some(crate::app::state::SidebarHoverAction::Settle {
-                                    ws_idx: target.ws_idx,
-                                    pane_id,
+                                    target: control.target,
                                 }),
                             });
                         }
+                    }
+                }
+            }
+            SidebarRow::RemoteAgent { entry, depth, .. } => {
+                let requested_prefix = usize::from(*depth) * 3 + 1;
+                let total_width = usize::from(body.width);
+                let max_host_width = total_width.saturating_sub(
+                    SIDEBAR_DOT_FIELD_WIDTH
+                        + SIDEBAR_HOST_TOKEN_MIN_TITLE_WIDTH
+                        + display_width(" · "),
+                );
+                let host_width = entry
+                    .show_host_identity
+                    .then(|| entry.host_suffix_for_width(max_host_width))
+                    .flatten()
+                    .map_or(0, |(_, width)| width);
+                let row_width = total_width.saturating_sub(host_width);
+                let title = compact_row_title_for_width(
+                    &entry.render_title,
+                    &entry.render_provider,
+                    row_width,
+                    requested_prefix,
+                );
+                let widths =
+                    compact_row_widths(title, &entry.render_provider, row_width, requested_prefix);
+                if let Some(rect) =
+                    clamp_row_cells(body, row_y, widths.prefix, SIDEBAR_DOT_FIELD_WIDTH)
+                {
+                    targets.push(crate::app::state::SidebarHoverTarget {
+                        rect,
+                        label: agent_dot_tooltip(entry),
+                        action: None,
+                    });
+                }
+                let fixed_width =
+                    widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+                let title_width = row_width.saturating_sub(fixed_width);
+                let control = remote_row_control(app, entry);
+                let controls_width =
+                    selected_row_controls_width(control.as_ref(), title_width, body.width);
+                if controls_width == 0 {
+                    continue;
+                }
+                let Some(control) = control else {
+                    continue;
+                };
+                let start = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - controls_width;
+                if let Some(rect) =
+                    clamp_row_cells(body, row_y, start, SIDEBAR_SNOOZE_CONTROL_WIDTH)
+                {
+                    targets.push(crate::app::state::SidebarHoverTarget {
+                        rect,
+                        label: remote_snooze_control_tooltip(entry),
+                        action: Some(crate::app::state::SidebarHoverAction::Snooze {
+                            target: control.target.clone(),
+                        }),
+                    });
+                }
+                if control.show_settle {
+                    if let Some(rect) = clamp_row_cells(
+                        body,
+                        row_y,
+                        start + SIDEBAR_SNOOZE_CONTROL_WIDTH,
+                        SIDEBAR_SETTLE_CONTROL_WIDTH,
+                    ) {
+                        targets.push(crate::app::state::SidebarHoverTarget {
+                            rect,
+                            label: "Settle".into(),
+                            action: Some(crate::app::state::SidebarHoverAction::Settle {
+                                target: control.target,
+                            }),
+                        });
                     }
                 }
             }

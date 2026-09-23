@@ -56,14 +56,8 @@ pub(crate) enum MobileSwitcherTarget {
         tab_idx: usize,
         pane_id: PaneId,
     },
-    Snooze {
-        ws_idx: usize,
-        pane_id: PaneId,
-    },
-    Settle {
-        ws_idx: usize,
-        pane_id: PaneId,
-    },
+    Snooze(crate::app::state::SidebarPaneLifecycleTarget),
+    Settle(crate::app::state::SidebarPaneLifecycleTarget),
     NestedHeader(String),
     RemoteAgent(crate::api::schema::AgentRef),
     AgentRun {
@@ -158,15 +152,24 @@ fn mobile_switcher_target_for_row(
             true,
             col,
         ),
+        SidebarRow::RemoteAgent { entry, depth, .. } => {
+            super::sidebar::selected_remote_row_control_at(
+                app,
+                entry,
+                Rect::new(content.x, content.y, content.width, 1),
+                *depth,
+                col,
+            )
+        }
         _ => None,
     };
     if let Some(control) = control {
         return Some(match control {
-            crate::app::state::SidebarHoverAction::Snooze { ws_idx, pane_id } => {
-                MobileSwitcherTarget::Snooze { ws_idx, pane_id }
+            crate::app::state::SidebarHoverAction::Snooze { target } => {
+                MobileSwitcherTarget::Snooze(target)
             }
-            crate::app::state::SidebarHoverAction::Settle { ws_idx, pane_id } => {
-                MobileSwitcherTarget::Settle { ws_idx, pane_id }
+            crate::app::state::SidebarHoverAction::Settle { target } => {
+                MobileSwitcherTarget::Settle(target)
             }
         });
     }

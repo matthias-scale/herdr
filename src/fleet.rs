@@ -761,13 +761,40 @@ impl AuthorityAcceptanceLedgerWriter {
 }
 
 struct RoutedApiRequest {
-    catalog: GroupCatalog,
     config_generation: u64,
-    route: AuthorityRoute,
+    route: HostApiRoute,
+    route_label: String,
     mutation_route: MutationRoute,
     route_lease: u64,
     request: Request,
-    respond_to: std::sync::mpsc::Sender<String>,
+    respond_to: RoutedApiResponder,
+}
+
+enum RoutedApiResponder {
+    Api(std::sync::mpsc::Sender<String>),
+    App {
+        event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+        agent_ref: crate::api::schema::AgentRef,
+    },
+}
+
+impl RoutedApiResponder {
+    fn send(self, response: String) {
+        match self {
+            Self::Api(sender) => {
+                let _ = sender.send(response);
+            }
+            Self::App {
+                event_tx,
+                agent_ref,
+            } => {
+                let _ = event_tx.blocking_send(crate::events::AppEvent::RemoteApiRequestFinished {
+                    agent_ref,
+                    response,
+                });
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -777,6 +804,10 @@ enum MutationRoute {
         route: AuthorityRoute,
         pane_id: String,
         pane_incarnation: String,
+    },
+    PaneLifecycle {
+        route: HostApiRoute,
+        agent_ref: crate::api::schema::AgentRef,
     },
 }
 
@@ -803,6 +834,12 @@ impl MutationRoute {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct AuthorityRoute {
     authority: crate::groups::AuthorityId,
+    api: HostApiRoute,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct HostApiRoute {
+    pub(crate) host: String,
     target: String,
     local: bool,
     session: Option<String>,
@@ -813,11 +850,26 @@ impl AuthorityRoute {
     fn from_catalog(catalog: &GroupCatalog) -> Option<Self> {
         Some(Self {
             authority: catalog.observed_authority_id.clone()?,
-            target: catalog.target.clone(),
-            local: catalog.local,
-            session: catalog.session.clone(),
-            socket: catalog.socket.clone(),
+            api: HostApiRoute {
+                host: catalog.host.clone(),
+                target: catalog.target.clone(),
+                local: catalog.local,
+                session: catalog.session.clone(),
+                socket: catalog.socket.clone(),
+            },
         })
+    }
+}
+
+impl HostApiRoute {
+    fn from_host(host: &HostSnapshot) -> Self {
+        Self {
+            host: host.name.clone(),
+            target: host.target.clone(),
+            local: host.local,
+            session: host.session.clone(),
+            socket: host.socket.clone(),
+        }
     }
 }
 
@@ -929,6 +981,24 @@ impl AuthorityMutationRouter {
                 );
             }
         }
+        for host in snapshot
+            .hosts
+            .iter()
+            .filter(|host| host.state == HostState::Reachable)
+        {
+            let route = HostApiRoute::from_host(host);
+            for row in &host.entries {
+                if row.agent_ref.host == host.name {
+                    routes.insert(
+                        MutationRoute::PaneLifecycle {
+                            route: route.clone(),
+                            agent_ref: row.agent_ref.clone(),
+                        },
+                        (),
+                    );
+                }
+            }
+        }
         if let Ok(mut leases) = self.route_leases.lock() {
             leases.observe(routes);
         }
@@ -944,6 +1014,66 @@ impl AuthorityMutationRouter {
         let route = AuthorityRoute::from_catalog(&catalog)
             .ok_or_else(|| "authority route has no observed authority".to_string())?;
         let mutation_route = MutationRoute::from_request(route.clone(), &request)?;
+        let route_label = format!("authority {}", route.authority);
+        self.enqueue_routed(
+            config_generation,
+            route.api.clone(),
+            route_label,
+            mutation_route,
+            request,
+            RoutedApiResponder::Api(respond_to),
+        )
+    }
+
+    pub(crate) fn enqueue_pane_lifecycle(
+        &self,
+        route: HostApiRoute,
+        agent_ref: crate::api::schema::AgentRef,
+        config_generation: u64,
+        request: Request,
+        event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    ) -> Result<(), String> {
+        let pane_id = pane_lifecycle_request_id(&request.method)
+            .ok_or_else(|| "method is not a pane lifecycle mutation".to_string())?;
+        if pane_id != agent_ref.agent {
+            return Err(format!(
+                "pane lifecycle request names {pane_id}, expected {}",
+                agent_ref.agent
+            ));
+        }
+        if route.host != agent_ref.host {
+            return Err(format!(
+                "pane lifecycle route names {}, expected {}",
+                route.host, agent_ref.host
+            ));
+        }
+        let mutation_route = MutationRoute::PaneLifecycle {
+            route: route.clone(),
+            agent_ref: agent_ref.clone(),
+        };
+        let route_label = format!("owner {}", route.host);
+        self.enqueue_routed(
+            config_generation,
+            route,
+            route_label,
+            mutation_route,
+            request,
+            RoutedApiResponder::App {
+                event_tx,
+                agent_ref,
+            },
+        )
+    }
+
+    fn enqueue_routed(
+        &self,
+        config_generation: u64,
+        route: HostApiRoute,
+        route_label: String,
+        mutation_route: MutationRoute,
+        request: Request,
+        respond_to: RoutedApiResponder,
+    ) -> Result<(), String> {
         let route_lease = self
             .route_leases
             .lock()
@@ -951,7 +1081,7 @@ impl AuthorityMutationRouter {
             .valid
             .get(&mutation_route)
             .copied()
-            .ok_or_else(|| format!("authority {} route is no longer fresh", route.authority))?;
+            .ok_or_else(|| format!("host {} route is no longer fresh", route.host))?;
         let mut sender = self
             .sender
             .lock()
@@ -976,14 +1106,14 @@ impl AuthorityMutationRouter {
                                     error: crate::api::schema::ErrorBody {
                                         code: "authority_not_fresh".into(),
                                         message: format!(
-                                            "authority {} fleet configuration changed before the queued mutation could run",
-                                            job.route.authority
+                                            "{} fleet configuration changed before the queued mutation could run",
+                                            job.route_label
                                         ),
                                     },
                                 },
                             )
                             .unwrap_or_else(|_| "{}".to_string());
-                            let _ = job.respond_to.send(response);
+                            job.respond_to.send(response);
                             continue;
                         }
                         let route_is_current = current_route_leases
@@ -998,18 +1128,18 @@ impl AuthorityMutationRouter {
                                     error: crate::api::schema::ErrorBody {
                                         code: "authority_not_fresh".into(),
                                         message: format!(
-                                            "authority {} route changed before the queued mutation could run",
-                                            job.route.authority
+                                            "{} route changed before the queued mutation could run",
+                                            job.route_label
                                         ),
                                     },
                                 },
                             )
                             .unwrap_or_else(|_| "{}".to_string());
-                            let _ = job.respond_to.send(response);
+                            job.respond_to.send(response);
                             continue;
                         }
                         let response = route_api_request_with_ssh_program(
-                            &job.catalog,
+                            &job.route,
                             &job.request,
                             timeout,
                             &ssh_program,
@@ -1020,14 +1150,14 @@ impl AuthorityMutationRouter {
                                 error: crate::api::schema::ErrorBody {
                                     code: "authority_unreachable".into(),
                                     message: format!(
-                                        "authority {} is unreachable: {error}",
-                                        job.route.authority
+                                        "owner {} is unreachable: {error}",
+                                        job.route.host
                                     ),
                                 },
                             })
                             .unwrap_or_else(|_| "{}".to_string())
                         });
-                        let _ = job.respond_to.send(response);
+                        job.respond_to.send(response);
                     }
                 })
                 .map_err(|error| {
@@ -1040,9 +1170,9 @@ impl AuthorityMutationRouter {
         };
         sender
             .send(RoutedApiRequest {
-                catalog,
                 config_generation,
                 route,
+                route_label,
                 mutation_route,
                 route_lease,
                 request,
@@ -1052,24 +1182,34 @@ impl AuthorityMutationRouter {
     }
 }
 
+fn pane_lifecycle_request_id(method: &Method) -> Option<&str> {
+    match method {
+        Method::PaneSettle(params)
+        | Method::PaneUnsettle(params)
+        | Method::PaneUnsnooze(params) => Some(&params.pane_id),
+        Method::PaneSnooze(params) => Some(&params.pane_id),
+        _ => None,
+    }
+}
+
 fn route_api_request_with_ssh_program(
-    catalog: &GroupCatalog,
+    route: &HostApiRoute,
     request: &Request,
     timeout: Duration,
     ssh_program: impl AsRef<OsStr>,
 ) -> Result<String, String> {
-    let mut value = if catalog.local {
-        api_client_for_catalog(catalog)
+    let mut value = if route.local {
+        api_client_for_route(route)
             .request_value_with_timeout(request, timeout)
             .map_err(|error| error.to_string())?
     } else {
         let request_json = serde_json::to_string(request).map_err(|error| error.to_string())?;
-        let socket = catalog
+        let socket = route
             .socket
             .as_deref()
             .map(|path| format!("export HERDR_SOCKET_PATH={}\n", shell_quote(path)))
             .unwrap_or_default();
-        let session = catalog
+        let session = route
             .session
             .as_deref()
             .map(|name| format!("export HERDR_SESSION={}\n", shell_quote(name)))
@@ -1078,7 +1218,7 @@ fn route_api_request_with_ssh_program(
             "set -u\n{socket}{session}printf '%s\\n' {} | herdr api relay\n",
             shell_quote(&request_json)
         );
-        let output = run_ssh_program_with_timeout(ssh_program, &catalog.target, &script, timeout)?;
+        let output = run_ssh_program_with_timeout(ssh_program, &route.target, &script, timeout)?;
         serde_json::from_slice(output.trim_ascii())
             .map_err(|error| format!("invalid authority mutation response: {error}"))?
     };
@@ -1115,14 +1255,28 @@ fn name_forwarded_pane_authority(value: &mut serde_json::Value, request: &Reques
     value["error"]["message"] = serde_json::Value::String(named);
 }
 
-fn api_client_for_catalog(catalog: &GroupCatalog) -> ApiClient {
-    catalog.socket.as_ref().map_or_else(
-        || ApiClient::for_target(ConnectionTarget::LocalSession(catalog.session.clone())),
+fn api_client_for_route(route: &HostApiRoute) -> ApiClient {
+    route.socket.as_ref().map_or_else(
+        || ApiClient::for_target(ConnectionTarget::LocalSession(route.session.clone())),
         |path| ApiClient::for_target(ConnectionTarget::SocketPath(PathBuf::from(path))),
     )
 }
 
 impl Snapshot {
+    pub(crate) fn fresh_agent_host(
+        &self,
+        agent_ref: &crate::api::schema::AgentRef,
+    ) -> Option<HostApiRoute> {
+        self.hosts
+            .iter()
+            .find(|host| {
+                host.name == agent_ref.host
+                    && host.state == HostState::Reachable
+                    && host.entries.iter().any(|row| &row.agent_ref == agent_ref)
+            })
+            .map(HostApiRoute::from_host)
+    }
+
     /// Drop ambiguous pane projection before any catalog state classification.
     /// Group records remain observable, but no consumer or router can choose
     /// between two memberships for the same public pane address.
