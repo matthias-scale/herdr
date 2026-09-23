@@ -2227,6 +2227,27 @@ impl TerminalState {
                 && self.hook_authority_is_effective(authority)
                 && crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
         });
+        let current_session = self.current_session_identity_for_persistence();
+        // A closing-block source has no session identity of its own. Keep its
+        // worker claim only when the agent's integration anchors it to the
+        // current session; unanchored legacy evidence is retired whole.
+        let closing_report_matches_current_session = self
+            .hook_authority
+            .as_ref()
+            .zip(current_session.as_ref())
+            .is_some_and(
+                |(authority, (_, session_agent, session_kind, session_value))| {
+                    authority.agent_label == *session_agent
+                        && self
+                            .closing_report
+                            .as_ref()
+                            .and_then(|report| report.scope.session_id.as_deref())
+                            .is_none_or(|report_session_id| {
+                                *session_kind == crate::agent_resume::AgentSessionRefKind::Id
+                                    && report_session_id == session_value
+                            })
+                },
+            );
         let starts_reported_turn = visible_working
             && closing_report_is_older
             && previous_screen_settled_after_report
@@ -2259,11 +2280,15 @@ impl TerminalState {
             self.clear_claude_subagent_transcript_activity();
         }
         if closing_report_is_older {
-            let active_subagents = self.current_direct_closing_report_subagents();
+            let active_subagents = closing_report_matches_current_session
+                .then(|| self.current_direct_closing_report_subagents())
+                .flatten();
             self.clear_closing_task_report(now);
-            self.closing_report
-                .get_or_insert_default()
-                .closing_report_subagents = active_subagents;
+            if let Some(active_subagents) = active_subagents {
+                self.closing_report
+                    .get_or_insert_default()
+                    .closing_report_subagents = Some(active_subagents);
+            }
         }
         self.revision = self.revision.wrapping_add(1);
         true

@@ -1020,6 +1020,35 @@ fn claude_background_shell_summary_is_working() {
 }
 
 #[test]
+fn claude_tasks_hint_reports_background_subagents_working() {
+    let with_tasks = bundled_explain(
+        Agent::Claude,
+        "  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · /tasks to see subagents · ← for agents",
+    );
+    assert_eq!(with_tasks.state, AgentState::Working);
+    assert_eq!(
+        with_tasks
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("background_subagents_working")
+    );
+
+    let without_tasks = bundled_explain(
+        Agent::Claude,
+        "  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+    );
+    assert_ne!(without_tasks.state, AgentState::Working);
+    assert_ne!(
+        without_tasks
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("background_subagents_working")
+    );
+}
+
+#[test]
 fn claude_login_method_prompt_is_blocked() {
     let result = bundled_explain(
         Agent::Claude,
