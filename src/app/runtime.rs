@@ -1862,6 +1862,7 @@ mod tests {
     fn disabled_status_bar_suppresses_metric_sampling_and_deadline() {
         let mut config = crate::config::Config::default();
         config.ui.status_bar.enabled = false;
+        config.work_index.enabled = false;
         let mut app = super::super::App::new(
             &config,
             true,
