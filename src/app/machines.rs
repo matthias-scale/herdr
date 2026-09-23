@@ -79,6 +79,8 @@ pub(crate) fn resolve(fleet: &FleetConfig) -> Vec<Machine> {
             socket: None,
         });
     }
+    // A fleet may declare more than one local host. Keep the first as the local
+    // entry so the list has exactly one, then append the remotes behind it.
     machines.truncate(1);
     machines.extend(remote);
     machines
@@ -121,6 +123,9 @@ fn ssh_argv(target: &str, remote_command: String) -> Vec<String> {
         "BatchMode=yes".into(),
         "-o".into(),
         "ConnectTimeout=5".into(),
+        // Terminate option parsing: a target that begins with a dash would
+        // otherwise reach ssh as an option. `src/remote/control.rs` does the same.
+        "--".into(),
         target.into(),
         remote_command,
     ]
@@ -294,6 +299,11 @@ mod tests {
         let argv = create_workspace_command(&dispatch_for_test());
         assert_eq!(argv[0], "ssh");
         assert!(argv.contains(&"BatchMode=yes".to_string()));
+        let terminator = argv
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("option terminator");
+        assert_eq!(argv[terminator + 1], dispatch_for_test().target);
         let remote = argv.last().expect("remote command");
         assert_eq!(
             remote,
