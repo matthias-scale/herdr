@@ -195,6 +195,9 @@ pub struct App {
     pub(crate) fleet_poller_config: crate::fleet::FleetPollerHandle,
     /// Server-owned group authority. Persistence is separate from client presentation state.
     pub(crate) group_runtime: crate::groups::Runtime,
+    /// Local durable root for server-owned day items. Tests opt in with an
+    /// isolated path so AppState construction remains filesystem-free.
+    pub(crate) day_store_root: Option<std::path::PathBuf>,
     /// Advance-only authority history, independent from current fleet routes.
     pub(crate) authority_acceptance_ledger: crate::fleet::AuthorityAcceptanceLedger,
     pub(crate) authority_acceptance_ledger_path: Option<std::path::PathBuf>,
@@ -929,6 +932,12 @@ impl App {
             fleet_snapshot: crate::fleet::Snapshot::unpolled(&config.remote.fleet.hosts),
             local_group_snapshot: None,
             agent_host_name,
+            day_board: if cfg!(test) {
+                crate::day::DayBoard::default()
+            } else {
+                crate::day::load(&crate::day::default_root())
+            },
+            day_stale_after: Duration::from_secs(config.day_board.stale_after),
             local_agent_panel_identities,
             remote_agent_panel_entries: Vec::new(),
             aloop_projection: None,
@@ -1517,6 +1526,7 @@ impl App {
             )),
             fleet_poller_config,
             group_runtime,
+            day_store_root: (!cfg!(test)).then(crate::day::default_root),
             authority_acceptance_ledger,
             authority_acceptance_ledger_path,
             authority_acceptance_ledger_error,
@@ -2945,6 +2955,10 @@ impl App {
             if !self.work_index_config.enabled {
                 self.work_index_refresh_in_flight = None;
             }
+        }
+
+        if !invalid_section("day_board") {
+            self.state.day_stale_after = Duration::from_secs(config.day_board.stale_after);
         }
 
         if !invalid_section("missive") {

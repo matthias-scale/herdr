@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 mod agent_view;
 mod agents;
+mod day;
 mod env;
 mod fleet;
 mod groups;
@@ -1980,6 +1981,13 @@ impl App {
             Method::AgentGet(target) => return self.handle_agent_get(request.id, target),
             Method::AgentState(params) => return self.handle_agent_state(request.id, params),
             Method::AgentReport(params) => return self.handle_agent_report(request.id, params),
+            Method::DayAdd(params) => return self.handle_day_add(request.id, params),
+            Method::DayList(params) => return self.handle_day_list(request.id, params),
+            Method::DayBind(params) => return self.handle_day_bind(request.id, params),
+            Method::DayLink(params) => return self.handle_day_link(request.id, params),
+            Method::DayNote(params) => return self.handle_day_note(request.id, params),
+            Method::DayDone(params) => return self.handle_day_done(request.id, params),
+            Method::DayDismiss(params) => return self.handle_day_dismiss(request.id, params),
             Method::AgentFocus(params) => {
                 return self.handle_agent_focus_params(request.id, params)
             }

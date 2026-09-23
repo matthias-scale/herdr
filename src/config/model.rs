@@ -435,6 +435,7 @@ pub struct Config {
     pub remote: RemoteConfig,
     pub agent_detection: AgentDetectionConfig,
     pub work_index: WorkIndexConfig,
+    pub day_board: DayBoardConfig,
     pub missive: MissiveConfig,
     pub usage: UsageConfig,
     pub source_control: SourceControlConfig,
@@ -446,6 +447,19 @@ pub struct Config {
     pub actions: Vec<ActionConfig>,
     pub launch_profiles: Vec<LaunchProfileConfig>,
     pub projects: Vec<ProjectConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DayBoardConfig {
+    /// Quiet seconds after which a working bound pane is stale. Default: 600.
+    pub stale_after: u64,
+}
+
+impl Default for DayBoardConfig {
+    fn default() -> Self {
+        Self { stale_after: 600 }
+    }
 }
 
 impl Config {
@@ -2526,6 +2540,14 @@ settle_done_after_minutes = 45
         assert!(!config.session.settle_stops_agent);
         assert!(!config.session.auto_settle_done);
         assert_eq!(config.session.settle_done_after_minutes, 45);
+    }
+
+    #[test]
+    fn day_board_stale_after_defaults_to_ten_minutes_and_parses_seconds() {
+        assert_eq!(Config::default().day_board.stale_after, 600);
+        let config: Config =
+            toml::from_str("[day_board]\nstale_after = 90\n").expect("day board config");
+        assert_eq!(config.day_board.stale_after, 90);
     }
 
     #[test]

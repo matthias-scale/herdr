@@ -35,6 +35,7 @@ pub(super) fn command() -> Command {
         .subcommand(config_command())
         .subcommand(fleet_command())
         .subcommand(work_index_command())
+        .subcommand(day_command())
         .subcommand(channel_command())
         .subcommand(machine::command())
         .subcommand(server_command())
@@ -167,6 +168,48 @@ fn work_index_command() -> Command {
                 .about("List indexed work items")
                 .arg(json_flag().help("Print structured rows as JSON")),
         )
+}
+
+fn day_command() -> Command {
+    Command::new("day")
+        .about("Manage server-owned day items")
+        .subcommand(
+            Command::new("add")
+                .about("Add one day item")
+                .arg(required("title", "TITLE"))
+                .arg(option("kind", "KIND").value_parser(["task", "noticed"]))
+                .arg(option("note", "TEXT")),
+        )
+        .subcommand(
+            Command::new("list")
+                .about("List day items with derived state")
+                .arg(json_flag())
+                .arg(flag("all")),
+        )
+        .subcommand(
+            Command::new("bind")
+                .about("Bind an item to a pane on this host")
+                .arg(required("id", "ID"))
+                .arg(Arg::new("pane_id").value_name("PANE_ID"))
+                .arg(option("pane", "PANE_ID"))
+                .arg(flag("current")),
+        )
+        .subcommand(
+            Command::new("link")
+                .about("Add a ticket or pull request link")
+                .arg(required("id", "ID"))
+                .arg(option("ticket", "ID"))
+                .arg(option("pr", "URL")),
+        )
+        .subcommand(
+            Command::new("note")
+                .about("Set or clear an item note")
+                .arg(required("id", "ID"))
+                .arg(Arg::new("text").value_name("TEXT"))
+                .arg(flag("clear")),
+        )
+        .subcommand(id_command("done", "id", "Complete an item"))
+        .subcommand(id_command("dismiss", "id", "Dismiss an item"))
 }
 
 fn channel_command() -> Command {
