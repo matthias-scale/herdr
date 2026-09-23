@@ -1183,10 +1183,10 @@ impl TerminalState {
         state: AgentState,
         has_pending_human_input: bool,
     ) -> (AgentState, &'static str) {
-        if self.closing_external_wait().is_some() && state != AgentState::Blocked {
-            (AgentState::Working, "closing_external_wait")
-        } else if state != AgentState::Working && has_pending_human_input {
+        if state != AgentState::Working && has_pending_human_input {
             (AgentState::Blocked, "closing_human_input")
+        } else if self.closing_external_wait().is_some() && state != AgentState::Blocked {
+            (AgentState::Working, "closing_external_wait")
         } else if state == AgentState::Idle
             && (self.closing_task_reported() && !self.closing_task_complete()
                 || self.active_subagents.is_none()
@@ -8165,6 +8165,29 @@ mod tests {
 
         assert_eq!(terminal.raw_agent_state(), AgentState::Blocked);
         assert_eq!(terminal.sidebar_projection(true).0, AgentState::Blocked);
+    }
+
+    #[test]
+    fn pending_human_input_outranks_external_wait_on_an_idle_screen() {
+        let now = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Incomplete),
+            Some("CI run 4123".into()),
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(false),
+            now,
+        );
+
+        assert_eq!(
+            terminal.sidebar_projection_with_pending_human_input(false, true),
+            (AgentState::Blocked, false)
+        );
+        assert_eq!(
+            terminal.sidebar_projection_with_pending_human_input(false, false),
+            (AgentState::Working, false)
+        );
     }
 
     /// Pins that a stale unverified subagent claim blocks the armed Done auto-settle trigger.

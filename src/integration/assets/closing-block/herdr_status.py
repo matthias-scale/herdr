@@ -41,10 +41,10 @@ def state_for(
     action_points: int = 0,
     external_wait: str | None = None,
 ) -> str:
-    if agents > 0 or external_wait:
-        return "working"
     if blocking > 0 or action_points > 0:
         return "blocked"
+    if agents > 0 or external_wait:
+        return "working"
     return "idle"
 
 
