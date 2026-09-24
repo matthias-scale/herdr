@@ -1043,20 +1043,25 @@ mod tests {
 
         // One server reached through a symlinked parent is spelled two ways.
         // Comparing the text alone would send the caller's own pane away.
-        let real = config_home.join("real");
-        let linked = config_home.join("linked");
-        std::fs::create_dir_all(real.join(crate::config::app_dir_name())).expect("config home");
-        let _ = std::fs::remove_file(&linked);
-        std::os::unix::fs::symlink(&real, &linked).expect("symlink");
-        std::env::set_var("XDG_CONFIG_HOME", &real);
-        let through_link = linked
-            .join(crate::config::app_dir_name())
-            .join("herdr.sock");
-        assert!(configure(
-            None,
-            through_link.to_str(),
-            Some(DEFAULT_SESSION_NAME)
-        ));
+        // Windows needs a privilege to create a symlink, so pin this where a
+        // plain user can.
+        #[cfg(unix)]
+        {
+            let real = config_home.join("real");
+            let linked = config_home.join("linked");
+            std::fs::create_dir_all(real.join(crate::config::app_dir_name())).expect("config home");
+            let _ = std::fs::remove_file(&linked);
+            std::os::unix::fs::symlink(&real, &linked).expect("symlink");
+            std::env::set_var("XDG_CONFIG_HOME", &real);
+            let through_link = linked
+                .join(crate::config::app_dir_name())
+                .join("herdr.sock");
+            assert!(configure(
+                None,
+                through_link.to_str(),
+                Some(DEFAULT_SESSION_NAME)
+            ));
+        }
 
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var(SESSION_ENV_VAR);
