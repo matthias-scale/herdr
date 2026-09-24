@@ -203,18 +203,16 @@ pub struct DerivedDayItem {
 /// client to one server. A session name is not: `HERDR_SOCKET_PATH` overrides
 /// routing while an inherited `HERDR_SESSION` keeps naming the same session, so
 /// two servers a client reaches separately would otherwise claim each other's
-/// pane ids. The name only rides along so the value stays readable. The path is
-/// a home directory, so hash it rather than write it into an item file that
-/// syncs to other machines.
-pub fn server_id_for(session_name: Option<&str>, socket_path: &Path) -> String {
+/// pane ids. The path is a home directory, so hash it rather than write it into
+/// an item file that syncs to other machines.
+///
+/// Nothing else may enter the value. A session name was readable but not stable:
+/// restarting one socket path with `HERDR_SESSION` unset would rename the same
+/// server and silently orphan every binding it had written.
+pub fn server_id_for(socket_path: &Path) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(socket_identity_key(socket_path).as_encoded_bytes());
-    let digest = format!("{digest:x}");
-    let digest = &digest[..12];
-    match session_name {
-        Some(name) => format!("{name}-{digest}"),
-        None => format!("sock-{digest}"),
-    }
+    format!("sock-{:.12}", format!("{digest:x}"))
 }
 
 /// Two spellings of one socket path are one server, and a relative or
@@ -884,19 +882,19 @@ mod tests {
     }
 
     #[test]
-    fn server_id_separates_socket_overridden_servers_sharing_one_session_name() {
+    fn server_id_separates_servers_reached_through_different_socket_paths() {
         let root = temp_root("server-id-socket");
         fs::create_dir_all(root.join("one")).expect("one");
         fs::create_dir_all(root.join("two")).expect("two");
 
         // `HERDR_SOCKET_PATH` decides which server a client reaches, so these are
-        // two servers even though both inherited the same `HERDR_SESSION`.
-        let left = server_id_for(Some("work"), &root.join("one/herdr.sock"));
-        let right = server_id_for(Some("work"), &root.join("two/herdr.sock"));
+        // two servers however their sessions are named.
+        let left = server_id_for(&root.join("one/herdr.sock"));
+        let right = server_id_for(&root.join("two/herdr.sock"));
 
         assert_ne!(left, right);
-        assert!(left.starts_with("work-"), "{left}");
-        assert!(right.starts_with("work-"), "{right}");
+        assert!(left.starts_with("sock-"), "{left}");
+        assert!(right.starts_with("sock-"), "{right}");
 
         fs::remove_dir_all(&root).ok();
     }
@@ -910,8 +908,8 @@ mod tests {
         let cwd = std::env::current_dir().expect("cwd");
 
         assert_eq!(
-            server_id_for(Some("work"), Path::new("herdr.sock")),
-            server_id_for(Some("work"), &cwd.join("herdr.sock"))
+            server_id_for(Path::new("herdr.sock")),
+            server_id_for(&cwd.join("herdr.sock"))
         );
     }
 
@@ -921,8 +919,8 @@ mod tests {
         let dir = root.join("nested");
         fs::create_dir_all(&dir).expect("dir");
 
-        let plain = server_id_for(None, &dir.join("herdr.sock"));
-        let indirect = server_id_for(None, &root.join("nested/../nested/herdr.sock"));
+        let plain = server_id_for(&dir.join("herdr.sock"));
+        let indirect = server_id_for(&root.join("nested/../nested/herdr.sock"));
 
         assert_eq!(plain, indirect);
         assert!(plain.starts_with("sock-"), "{plain}");
@@ -936,7 +934,7 @@ mod tests {
         fs::create_dir_all(&root).expect("root");
         let socket = root.join("herdr.sock");
 
-        let id = server_id_for(Some("work"), &socket);
+        let id = server_id_for(&socket);
 
         // Item files sync to other machines, so the home directory must not ride
         // along in one.
