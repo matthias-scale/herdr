@@ -82,7 +82,15 @@ fn day_list(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn day_bind(args: &[String]) -> std::io::Result<i32> {
-    let (id, pane_id) = match parse_bind(args, super::target::caller_pane_id()) {
+    // `HERDR_PANE_ID` names a pane of the server this process was started under.
+    // `--session` points the request at a different server, where the same public
+    // id belongs to an unrelated pane, so the inherited value means nothing there.
+    let caller_pane = if crate::session::explicit_session_requested() {
+        None
+    } else {
+        super::target::caller_pane_id()
+    };
+    let (id, pane_id) = match parse_bind(args, caller_pane) {
         Ok(parsed) => parsed,
         Err(message) => {
             eprintln!("{message}");
