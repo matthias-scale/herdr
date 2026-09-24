@@ -110,20 +110,23 @@ impl App {
         // happily and then matches nothing, and the item reports success while
         // its automatic completion is quietly broken forever. Store the form the
         // lookup can use, and refuse what it could never resolve.
-        let ticket = params
+        let raw_ticket = params
             .ticket
             .map(|ticket| ticket.trim().to_string())
             .filter(|ticket| !ticket.is_empty());
-        if ticket
-            .as_deref()
-            .is_some_and(|ticket| ticket.split_whitespace().count() != 1)
-        {
-            return super::responses::encode_error(
-                id,
-                "invalid_params",
-                "day.link --ticket takes one ticket identifier, such as ENG-123",
-            );
-        }
+        let ticket = match raw_ticket {
+            // Validate with the same normalizer the lookup uses, so a ticket this
+            // accepts is one the work index can actually resolve. It recognizes
+            // the configured teams only, and anything else would be dropped there
+            // in silence.
+            Some(raw) => match crate::work_context::normalize_ticket_id(&raw) {
+                Ok(ticket) => Some(ticket),
+                Err(error) => {
+                    return super::responses::encode_error(id, "invalid_params", &error);
+                }
+            },
+            None => None,
+        };
         let raw_pr = params
             .pr
             .map(|pr| pr.trim().to_string())
@@ -135,7 +138,7 @@ impl App {
                     return super::responses::encode_error(
                         id,
                         "invalid_params",
-                        "day.link --pr takes a GitHub pull request url, such as https://github.com/owner/repo/pull/1",
+                        &format!("invalid pull request url: {raw}"),
                     );
                 }
             },
@@ -260,7 +263,13 @@ impl App {
                 entry.column == crate::day::DayColumn::Done
                     && entry.item.done_at.is_none()
                     && !entry.item.dismissed
-                    && !entry.item.links.is_empty()
+                    && !entry.item.links.prs.is_empty()
+                    // A merged pull request stays merged, so evidence of one
+                    // cannot become wrong later however it was read. A ticket
+                    // reopens, and settling would make that answer permanent, so
+                    // an item with any linked ticket only ever derives its
+                    // column and never writes it down.
+                    && entry.item.links.tickets.is_empty()
             })
             .map(|entry| (entry.item.id.clone(), entry.item.links.clone()))
             .collect();
@@ -287,15 +296,20 @@ impl App {
     /// Showing an item as done from an old snapshot is harmless; derivation runs
     /// again and corrects it. Settling is not. It persists `done_at`, which
     /// removes the item from the refresh input set, so nothing ever looks at
-    /// those links again and a ticket reopened afterwards stays done forever. A
-    /// snapshot restored from disk at startup, or one left behind by a provider
-    /// call that failed, is exactly the evidence that would make that permanent
-    /// mistake, so require a reading this server actually took recently.
+    /// those links again. Only merged pull requests are settled, and a merge is
+    /// terminal, so the remaining risk is a snapshot that never described this
+    /// item at all: one restored from disk at startup, or one a failed GitHub
+    /// call left behind. Require a reading this server took recently, and one
+    /// GitHub actually answered. A Linear or Missive outage says nothing about a
+    /// pull request, so it must not hold a verified item open forever.
     fn work_index_evidence_is_settleable(&self) -> bool {
         let Some(snapshot) = self.work_index_snapshot.as_ref() else {
             return false;
         };
-        if snapshot.unavailable.is_some() {
+        if snapshot
+            .unavailable_reason(crate::work_index::WorkIndexSource::Github)
+            .is_some()
+        {
             return false;
         }
         let max_age =
@@ -568,37 +582,23 @@ mod tests {
         };
         assert_eq!(items[0].column, crate::day::DayColumn::Done);
 
-        // Completion settles into the file, so the item stops costing a provider
-        // read on every refresh, and settling again is a no-op.
+        // A linked ticket can reopen, so this item's column is derived on every
+        // list and never written down. It keeps costing a provider read, which is
+        // the price of an answer that stays correctable.
         let stored = crate::day::load(&root);
-        let settled = stored.items.values().next().expect("one item");
-        let settled_at = settled.done_at.expect("link completion settles done_at");
-        assert!(!stored
+        assert_eq!(
+            stored.items.values().next().and_then(|item| item.done_at),
+            None
+        );
+        assert!(stored
             .links()
             .prs
             .contains(&"https://github.com/acme/app/pull/9".to_string()));
-
-        let again = app.handle_api_request(Request {
-            id: "again".into(),
-            method: Method::DayList(DayListParams::default()),
-        });
-        let ResponseResult::DayList { items, .. } = response(&again).result else {
-            panic!("unexpected response: {again}");
-        };
-        assert_eq!(items[0].column, crate::day::DayColumn::Done);
-        assert_eq!(
-            crate::day::load(&root)
-                .items
-                .values()
-                .next()
-                .and_then(|item| item.done_at),
-            Some(settled_at)
-        );
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn stale_or_degraded_work_index_evidence_never_settles_a_completion() {
+    fn only_a_merged_pull_request_read_freshly_from_github_settles_a_completion() {
         let root = std::env::temp_dir().join(format!(
             "herdr-day-api-stale-settle-{}",
             crate::config::test_unique_suffix()
@@ -622,13 +622,14 @@ mod tests {
             id: "link".into(),
             method: Method::DayLink(crate::api::schema::DayLinkParams {
                 id: item.item.id,
-                ticket: Some("SCA-42".into()),
-                pr: None,
+                ticket: None,
+                pr: Some("https://github.com/acme/app/pull/9".into()),
             }),
         });
 
-        let mut work = work_item_with_tickets(vec!["SCA-42".into()]);
-        work.ticket_details = vec![work_ticket("SCA-42", Some("Done"))];
+        let mut work = work_item_with_tickets(Vec::new());
+        work.pr_url = Some("https://github.com/acme/app/pull/9".into());
+        work.pr_state = Some("merged".into());
         let stale_age =
             std::time::Duration::from_secs(app.work_index_config.refresh_interval_seconds * 4);
         let snapshot = |unavailable, observed_at| crate::work_index::Snapshot {
@@ -638,30 +639,55 @@ mod tests {
             unavailable,
             observed_at,
         };
-
-        // A snapshot restored from disk at startup proves nothing about now, and
-        // `done_at` is permanent: the item leaves the refresh input set, so a
-        // ticket reopened afterwards would never be looked at again.
-        app.work_index_snapshot = Some(snapshot(None, std::time::SystemTime::now() - stale_age));
-        let listed = app.handle_api_request(Request {
-            id: "stale".into(),
-            method: Method::DayList(DayListParams::default()),
-        });
-        let ResponseResult::DayList { items, .. } = response(&listed).result else {
-            panic!("unexpected response: {listed}");
-        };
-        assert_eq!(items[0].column, crate::day::DayColumn::Done);
-        assert_eq!(
-            crate::day::load(&root)
+        let done_at = |root: &std::path::Path| {
+            crate::day::load(root)
                 .items
                 .values()
                 .next()
-                .and_then(|item| item.done_at),
+                .and_then(|item| item.done_at)
+        };
+        let list = |app: &mut crate::app::App, id: &str| {
+            let raw = app.handle_api_request(Request {
+                id: id.into(),
+                method: Method::DayList(DayListParams::default()),
+            });
+            let ResponseResult::DayList { items, .. } = response(&raw).result else {
+                panic!("unexpected response: {raw}");
+            };
+            items
+        };
+
+        // A snapshot restored from disk at startup never described this item, and
+        // `done_at` is permanent: the item leaves the refresh input set, so
+        // nothing looks at the link again.
+        app.work_index_snapshot = Some(snapshot(None, std::time::SystemTime::now() - stale_age));
+        assert_eq!(
+            list(&mut app, "stale")[0].column,
+            crate::day::DayColumn::Done
+        );
+        assert_eq!(
+            done_at(&root),
             None,
             "a stale snapshot must not be written down as a permanent answer"
         );
 
-        // Same for evidence a failed provider call left behind.
+        // Same for a snapshot a failed GitHub call left behind.
+        app.work_index_snapshot = Some(snapshot(
+            Some(crate::work_index::WorkIndexUnavailable::only(
+                crate::work_index::WorkIndexSource::Github,
+                "github request failed",
+            )),
+            std::time::SystemTime::now(),
+        ));
+        list(&mut app, "degraded");
+        assert_eq!(
+            done_at(&root),
+            None,
+            "evidence GitHub did not answer must not be written down"
+        );
+
+        // A Linear outage says nothing about a pull request, so it must not hold
+        // a verified item open forever.
         app.work_index_snapshot = Some(snapshot(
             Some(crate::work_index::WorkIndexUnavailable::only(
                 crate::work_index::WorkIndexSource::Linear,
@@ -669,32 +695,20 @@ mod tests {
             )),
             std::time::SystemTime::now(),
         ));
-        app.handle_api_request(Request {
-            id: "degraded".into(),
-            method: Method::DayList(DayListParams::default()),
-        });
-        assert_eq!(
-            crate::day::load(&root)
-                .items
-                .values()
-                .next()
-                .and_then(|item| item.done_at),
-            None,
-            "degraded evidence must not be written down as a permanent answer"
-        );
+        list(&mut app, "unrelated-outage");
+        let settled_at = done_at(&root).expect("a merged pull request read freshly settles");
 
-        // A reading this server actually took settles it.
+        // Settling again keeps the first answer.
         app.work_index_snapshot = Some(snapshot(None, std::time::SystemTime::now()));
-        app.handle_api_request(Request {
-            id: "fresh".into(),
-            method: Method::DayList(DayListParams::default()),
-        });
-        assert!(crate::day::load(&root)
-            .items
-            .values()
-            .next()
-            .and_then(|item| item.done_at)
-            .is_some());
+        assert_eq!(
+            list(&mut app, "again")[0].column,
+            crate::day::DayColumn::Done
+        );
+        assert_eq!(done_at(&root), Some(settled_at));
+        assert!(!crate::day::load(&root)
+            .links()
+            .prs
+            .contains(&"https://github.com/acme/app/pull/9".to_string()));
         let _ = std::fs::remove_dir_all(root);
     }
 
