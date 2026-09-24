@@ -1895,7 +1895,7 @@ mod tests {
             libc::shm_open(
                 name.as_ptr(),
                 libc::O_CREAT | libc::O_RDWR,
-                libc::S_IRUSR | libc::S_IWUSR,
+                (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
             )
         };
         assert!(fd >= 0, "create awrit-style shared memory frame");
