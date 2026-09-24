@@ -306,6 +306,11 @@ pub fn write_item(root: &Path, item: &DayItem) -> Result<(), String> {
 /// A component that already exists is left as the user has it. The store may sit
 /// under a directory they chose to share, and tightening it would reach outside
 /// what this call was asked to create.
+///
+/// Known limit: creating a directory is not synced into its own parent, so power
+/// loss just after the first item can lose it. Writing the item itself is
+/// durable. This is the same contract the session snapshot keeps in
+/// `crate::persist::io`, and closing it belongs there rather than in one store.
 fn create_dir_all_owner_only(path: &Path) -> std::io::Result<()> {
     if path.is_dir() {
         return Ok(());
@@ -347,6 +352,10 @@ fn restrict_file_to_owner(file: &fs::File) -> std::io::Result<()> {
 }
 
 /// The store holds what a person wrote down, so keep it to its owner.
+///
+/// Unix only. Windows has no equivalent here, so a store placed under a
+/// directory shared with another local account inherits that directory's ACLs.
+/// Restricting it needs the platform's own security APIs rather than a mode.
 ///
 /// This is not only about who else can read it. The mode a create requests is an
 /// upper bound the umask subtracts from, so under a permissive setting the bits
