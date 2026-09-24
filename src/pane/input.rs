@@ -103,7 +103,7 @@ pub(super) fn ghostty_mouse_position_for_terminal(
             let rows = terminal.rows().ok()? as u32;
             let width_px = terminal.width_px().ok()?;
             let height_px = terminal.height_px().ok()?;
-            if width_px == 0 || height_px == 0 {
+            if width_px == 0 || height_px == 0 || cols == 0 || rows == 0 {
                 return None;
             }
             let x = u64::from(column) * u64::from(width_px) / u64::from(cols) + 1;
