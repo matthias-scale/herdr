@@ -1350,6 +1350,9 @@ pub fn canonical_pull_request_url(raw: &str) -> Option<String> {
         return None;
     }
     let number: u64 = parts.next()?.parse().ok()?;
+    if number == 0 {
+        return None;
+    }
     Some(format!("https://github.com/{owner}/{repo}/pull/{number}"))
 }
 
