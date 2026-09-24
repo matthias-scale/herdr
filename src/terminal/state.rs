@@ -15,7 +15,7 @@ use crate::terminal::TerminalId;
 pub(crate) const AGENT_BUSY_STALE_SILENCE: Duration = Duration::from_secs(20 * 60);
 pub(crate) const DECLARED_WAIT_GRACE: Duration = Duration::from_secs(30);
 #[cfg(test)]
-pub(crate) const DEFAULT_SUBAGENT_STALE_SILENCE: Duration = Duration::from_secs(60 * 60);
+pub(crate) const DEFAULT_SUBAGENT_STALE_SILENCE: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum SubagentTranscriptActivity {
@@ -5015,7 +5015,7 @@ mod tests {
     }
 
     const TEST_AGENT_STALE_AFTER: Duration = Duration::from_secs(5 * 60);
-    const TEST_SUBAGENT_STALE_AFTER: Duration = Duration::from_secs(60 * 60);
+    const TEST_SUBAGENT_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
@@ -7599,6 +7599,34 @@ mod tests {
             .mark_agent_status_stale_at(now + TEST_SUBAGENT_STALE_AFTER, TEST_AGENT_STALE_AFTER,)
             .is_some());
         assert!(terminal.supervisor_stale);
+    }
+
+    #[test]
+    fn transcript_declared_claude_subagent_claim_uses_the_thirty_minute_default_budget() {
+        let now = Instant::now();
+        let stale_after = Duration::from_secs(30 * 60);
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_active_subagents_with_projection_at(Some(3), true, now);
+        terminal.set_claude_subagent_transcript_activity_at(SubagentTranscriptActivity::Fresh, now);
+
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
+            now.checked_add(stale_after)
+        );
+        assert!(terminal
+            .mark_agent_status_stale_at(
+                now + stale_after - Duration::from_secs(1),
+                TEST_AGENT_STALE_AFTER,
+            )
+            .is_none());
+        assert_eq!(terminal.effective_active_subagents(), Some(3));
+
+        assert!(terminal
+            .mark_agent_status_stale_at(now + stale_after, TEST_AGENT_STALE_AFTER)
+            .is_some());
+        assert!(terminal.supervisor_stale);
+        assert_eq!(terminal.active_subagents, Some(3));
     }
 
     #[test]

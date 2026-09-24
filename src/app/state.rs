@@ -7817,7 +7817,7 @@ impl AppState {
             resume_nudge_message: "continue".to_string(),
             auto_nudge_stalled_agents: false,
             agent_stale_after: std::time::Duration::from_secs(5 * 60),
-            agent_subagent_stale_after: std::time::Duration::from_secs(60 * 60),
+            agent_subagent_stale_after: std::time::Duration::from_secs(30 * 60),
             nudge_after: std::time::Duration::from_secs(5 * 60),
             max_nudges: 3,
             stall_nudge_message:

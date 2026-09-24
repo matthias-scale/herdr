@@ -719,7 +719,7 @@ impl App {
             self.pending_agent_resume_deadline = None;
         } else {
             self.sync_pending_agent_resume_deadline(now);
-            changed |= self.start_pending_agent_resumes(self.pending_agent_resume_due(now));
+            changed |= self.start_pending_agent_resumes_at(self.pending_agent_resume_due(now), now);
         }
         changed |= self.tick_resume_nudges(now);
         changed |= self.tick_auto_nudges(now);

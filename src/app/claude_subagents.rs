@@ -862,7 +862,7 @@ impl crate::app::App {
             generation,
             deadline,
         });
-        let freshness_window = self.state.agent_stale_after;
+        let freshness_window = self.state.agent_subagent_stale_after;
         let event_tx = self.event_tx.clone();
         let _ = std::thread::Builder::new()
             .name("herdr-claude-subagents".into())
@@ -1984,6 +1984,57 @@ mod tests {
         assert_eq!(
             activity,
             crate::terminal::state::SubagentTranscriptActivity::Fresh
+        );
+    }
+
+    #[test]
+    fn declared_subagent_count_survives_thirty_minutes_without_transcript_writes() {
+        let dir = TestDir::new("subagent-freshness");
+        let path = dir.transcript();
+        let child = path
+            .with_extension("")
+            .join("subagents")
+            .join(format!("agent-{AGENT_A}.jsonl"));
+        std::fs::create_dir_all(child.parent().expect("subagent directory")).unwrap();
+        std::fs::write(&child, b"{}\n").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&child)
+            .unwrap();
+        let mut tracker = TranscriptTracker::new(SESSION_ID.into(), path, 1);
+        tracker.cursor.ingest(&launch(AGENT_A), true);
+        let freshness_window = std::time::Duration::from_secs(30 * 60);
+
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(SystemTime::now() - std::time::Duration::from_secs(29 * 60)),
+        )
+        .unwrap();
+        assert_eq!(
+            tracker.refresh_transcript_paths_and_activity(
+                freshness_window,
+                Instant::now() + WORKER_TIMEOUT,
+            ),
+            crate::terminal::state::SubagentTranscriptActivity::Fresh
+        );
+        assert_eq!(tracker.count(), Some(1));
+
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(SystemTime::now() - std::time::Duration::from_secs(31 * 60)),
+        )
+        .unwrap();
+        assert_eq!(
+            tracker.refresh_transcript_paths_and_activity(
+                freshness_window,
+                Instant::now() + WORKER_TIMEOUT,
+            ),
+            crate::terminal::state::SubagentTranscriptActivity::Stale
+        );
+        assert_eq!(
+            tracker.count(),
+            Some(1),
+            "staleness must not invent a zero worker report"
         );
     }
 
