@@ -195,9 +195,29 @@ pub fn addresses_own_server() -> bool {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
     match inherited {
-        Some(inherited) => inherited == active_api_socket_path(),
+        Some(inherited) => {
+            resolved_socket_path(&inherited) == resolved_socket_path(&active_api_socket_path())
+        }
         // Arguments were never parsed, so nothing was inherited to protect.
         None => true,
+    }
+}
+
+/// Resolve the directory holding a socket so two spellings of one path compare
+/// equal.
+///
+/// The same live server is reachable through a symlinked parent under more than
+/// one name, and comparing the text alone would call one of them somewhere else.
+/// The socket itself is not resolved, because it may not exist yet and because a
+/// socket is not a symlink. A directory that does not resolve is left as written,
+/// which at worst declines to trust a pane rather than trusting the wrong one.
+fn resolved_socket_path(path: &Path) -> PathBuf {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return path.to_path_buf();
+    };
+    match std::fs::canonicalize(parent) {
+        Ok(parent) => parent.join(name),
+        Err(_) => path.to_path_buf(),
     }
 }
 
@@ -1020,6 +1040,23 @@ mod tests {
         ));
         // The same request from a pane that really is on the default server.
         assert!(configure(None, None, Some(DEFAULT_SESSION_NAME)));
+
+        // One server reached through a symlinked parent is spelled two ways.
+        // Comparing the text alone would send the caller's own pane away.
+        let real = config_home.join("real");
+        let linked = config_home.join("linked");
+        std::fs::create_dir_all(real.join(crate::config::app_dir_name())).expect("config home");
+        let _ = std::fs::remove_file(&linked);
+        std::os::unix::fs::symlink(&real, &linked).expect("symlink");
+        std::env::set_var("XDG_CONFIG_HOME", &real);
+        let through_link = linked
+            .join(crate::config::app_dir_name())
+            .join("herdr.sock");
+        assert!(configure(
+            None,
+            through_link.to_str(),
+            Some(DEFAULT_SESSION_NAME)
+        ));
 
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var(SESSION_ENV_VAR);
