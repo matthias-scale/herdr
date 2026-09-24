@@ -85,6 +85,11 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
         index += 1;
     }
 
+    // Record what this process inherited before any override replaces it, so a
+    // caller can still tell whether a request addresses the server it was
+    // started under.
+    let _ = INHERITED_SESSION.set(std::env::var(SESSION_ENV_VAR).ok());
+
     if let Some(session) = requested_session {
         apply_explicit_name(&session)?;
     } else if std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some() {
@@ -100,6 +105,8 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
 
     Ok(cleaned)
 }
+
+static INHERITED_SESSION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
 pub fn active_name() -> Option<String> {
     std::env::var(SESSION_ENV_VAR)
@@ -155,6 +162,25 @@ pub fn active_restart_after_update_guidance() -> String {
 
 pub fn explicit_session_requested() -> bool {
     EXPLICIT_SESSION_REQUESTED.load(Ordering::Relaxed)
+}
+
+/// Whether a request addresses the server this process was started under.
+///
+/// `HERDR_PANE_ID` and other inherited facts describe that server's panes. They
+/// carry over unchanged when `--session` points the request somewhere else,
+/// where the same public id belongs to an unrelated pane, so a caller has to ask
+/// before trusting one. Naming the session it is already in is not pointing
+/// somewhere else.
+pub fn addresses_own_server() -> bool {
+    if !explicit_session_requested() {
+        return true;
+    }
+    let inherited = INHERITED_SESSION
+        .get()
+        .cloned()
+        .flatten()
+        .filter(|name| name != DEFAULT_SESSION_NAME);
+    inherited.as_deref() == active_name().as_deref()
 }
 
 #[cfg(test)]
