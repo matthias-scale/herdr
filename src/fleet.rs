@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -21,9 +22,6 @@ const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const MIN_TIMEOUT_MS: u64 = 100;
 const MAX_TIMEOUT_MS: u64 = 60_000;
 const MIN_REFRESH_INTERVAL_MS: u64 = 100;
-// ub2 currently carries more than 3,000 retained runs. Inspect enough entries
-// to select its newest records while keeping malformed stores capped.
-const MAX_RUN_DIRECTORY_ENTRIES: usize = 8_192;
 const MAX_REMOTE_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const AUTHORITY_ACCEPTANCE_LEDGER_VERSION: u32 = 2;
 #[cfg(not(test))]
@@ -2404,25 +2402,30 @@ fn read_run_state_dir(root: &Path) -> Vec<Result<crate::agent_runs::Observation,
 fn recent_run_state_paths(
     entries: impl IntoIterator<Item = std::io::Result<PathBuf>>,
 ) -> Vec<PathBuf> {
-    let mut paths = entries
+    let mut paths = BinaryHeap::new();
+    for path in entries
         .into_iter()
-        .take(MAX_RUN_DIRECTORY_ENTRIES)
         .filter_map(Result::ok)
         .map(|path| path.join("state.json"))
-        .filter_map(|path| {
-            let modified = path
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .ok()?;
-            Some((modified, path))
-        })
-        .collect::<Vec<_>>();
-    paths.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
-    paths
-        .into_iter()
-        .take(crate::agent_runs::MAX_RUNS_PER_HOST)
-        .map(|(_, path)| path)
-        .collect()
+    {
+        let Some(modified) = path
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+        else {
+            continue;
+        };
+        let candidate = (Reverse(modified), path);
+        if paths.len() < crate::agent_runs::MAX_RUNS_PER_HOST {
+            paths.push(candidate);
+        } else if paths.peek().is_some_and(|worst| candidate < *worst) {
+            paths.pop();
+            paths.push(candidate);
+        }
+    }
+    let mut paths = paths.into_vec();
+    paths.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    paths.into_iter().map(|(_, path)| path).collect()
 }
 
 fn read_run_state_file(path: &Path) -> Result<crate::agent_runs::Observation, String> {
@@ -3597,22 +3600,16 @@ fn watch_status(
     let signal = Arc::clone(&running);
     ctrlc::set_handler(move || signal.store(false, Ordering::SeqCst))
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let initial = collect_rows(&hosts, &fleet);
-    let mut previous = initial
-        .iter()
-        .map(|row| (row.handle.clone(), ObservedState::from(row)))
-        .collect::<HashMap<_, _>>();
+    let mut previous_snapshot = collect_snapshot(&hosts, &fleet);
+    let mut previous = observed_states(&previous_snapshot);
 
     while running.load(Ordering::SeqCst) {
         std::thread::sleep(WATCH_INTERVAL);
         if !running.load(Ordering::SeqCst) {
             break;
         }
-        let current_rows = collect_rows(&hosts, &fleet);
-        let current = current_rows
-            .iter()
-            .map(|row| (row.handle.clone(), ObservedState::from(row)))
-            .collect::<HashMap<_, _>>();
+        let mut current_snapshot = collect_snapshot(&hosts, &fleet);
+        let current = watch_observed_states(&mut current_snapshot, &previous_snapshot);
 
         for (handle, observed) in &current {
             let Some(old) = previous.get(handle) else {
@@ -3659,8 +3656,26 @@ fn watch_status(
             next.insert(handle, unknown);
         }
         previous = next;
+        previous_snapshot = current_snapshot;
     }
     Ok(0)
+}
+
+fn observed_states(snapshot: &Snapshot) -> HashMap<String, ObservedState> {
+    snapshot
+        .hosts
+        .iter()
+        .flat_map(|host| host.entries.iter())
+        .map(|row| (row.handle.clone(), ObservedState::from(row)))
+        .collect()
+}
+
+fn watch_observed_states(
+    snapshot: &mut Snapshot,
+    previous_snapshot: &Snapshot,
+) -> HashMap<String, ObservedState> {
+    snapshot.retain_unreachable_inventory_from(previous_snapshot);
+    observed_states(snapshot)
 }
 
 fn same_observed_state(left: &ObservedState, right: &ObservedState) -> bool {
@@ -4891,6 +4906,40 @@ mod tests {
     }
 
     #[test]
+    fn watch_retains_active_run_as_stale_when_host_becomes_unreachable() {
+        let previous_snapshot = run_snapshot(vec![legacy_run(
+            "ra-active",
+            "active",
+            "2025-09-17T08:59:30Z",
+            None,
+            None,
+        )]);
+        let previous = observed_states(&previous_snapshot);
+        assert_eq!(previous["probe::ra-active"].state, "active");
+
+        let mut current_snapshot = Snapshot {
+            refreshed_at_unix_ms: Some(1_758_099_630_000),
+            hosts: vec![HostSnapshot {
+                name: "probe".into(),
+                target: "probe".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: HostState::Unreachable,
+                version: None,
+                protocol: None,
+                error: Some("offline".into()),
+                remote_identity: None,
+                entries: Vec::new(),
+            }],
+            ..Snapshot::default()
+        };
+        let current = watch_observed_states(&mut current_snapshot, &previous_snapshot);
+        assert_eq!(current["probe::ra-active"].state, "stale");
+        assert_eq!(current["probe::ra-active"].liveness, Liveness::Unknown);
+    }
+
+    #[test]
     fn stale_agent_with_gate_is_blocked_with_unknown_liveness() {
         let agent = agent(
             AgentStatus::Stale,
@@ -5439,18 +5488,9 @@ mod tests {
     }
 
     #[test]
-    fn local_run_scan_is_bounded_and_keeps_true_newest_results_past_2048_entries() {
-        let inspected = std::sync::Arc::new(AtomicUsize::new(0));
-        let observed = std::sync::Arc::clone(&inspected);
-        let entries = (0..MAX_RUN_DIRECTORY_ENTRIES + 20).map(move |index| {
-            observed.fetch_add(1, Ordering::Relaxed);
-            Ok(PathBuf::from(format!("/missing/run-{index}")))
-        });
-        assert!(recent_run_state_paths(entries).is_empty());
-        assert_eq!(inspected.load(Ordering::Relaxed), MAX_RUN_DIRECTORY_ENTRIES);
-
+    fn local_run_scan_keeps_true_newest_results_past_the_old_directory_cap() {
         let root = run_fixture_dir("newest-runs");
-        let entry_count = 3_280;
+        let entry_count = 8_300;
         let mut entries = Vec::with_capacity(entry_count);
         for index in 0..entry_count {
             let run = root.join(format!("run-{index:02}"));
@@ -5463,27 +5503,27 @@ mod tests {
                 .expect("set run state mtime");
             entries.push(Ok(run));
         }
+        let mut expected = entries
+            .iter()
+            .map(|entry| {
+                let path = entry.as_ref().expect("run directory").join("state.json");
+                (
+                    path.metadata()
+                        .expect("state metadata")
+                        .modified()
+                        .expect("state mtime"),
+                    path,
+                )
+            })
+            .collect::<Vec<_>>();
+        expected.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+        let expected = expected
+            .into_iter()
+            .take(crate::agent_runs::MAX_RUNS_PER_HOST)
+            .map(|(_, path)| path)
+            .collect::<Vec<_>>();
         let newest = recent_run_state_paths(entries);
-        assert_eq!(newest.len(), crate::agent_runs::MAX_RUNS_PER_HOST);
-        assert!(newest.contains(
-            &root
-                .join(format!("run-{}", entry_count - 1))
-                .join("state.json")
-        ));
-        assert!(newest.iter().all(|path| {
-            let run_name = path
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(OsStr::to_str)
-                .expect("run directory name");
-            let index = run_name
-                .strip_prefix("run-")
-                .expect("run prefix")
-                .parse::<usize>()
-                .expect("run index");
-            index >= entry_count - crate::agent_runs::MAX_RUNS_PER_HOST
-        }));
-        assert!(!newest.contains(&root.join("run-00").join("state.json")));
+        assert_eq!(newest, expected);
         std::fs::remove_dir_all(root).expect("remove newest-runs fixture");
     }
 
