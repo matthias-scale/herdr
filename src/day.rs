@@ -219,14 +219,25 @@ pub fn server_id_for(session_name: Option<&str>, socket_path: &Path) -> String {
 
 /// Two spellings of one socket path are one server, and a relative or
 /// symlinked spelling would otherwise orphan the bindings a previous start
-/// wrote. The socket file usually does not exist yet when identity is computed,
-/// so resolve the directory and keep the file name.
+/// wrote. A relative spelling is worse than that: `herdr.sock` names a
+/// different socket in every working directory, so leaving it relative would
+/// give two unrelated servers one identity. Anchor it to the working directory
+/// first, then resolve the parent, since the socket file usually does not exist
+/// yet when identity is computed.
 fn socket_identity_key(socket_path: &Path) -> std::ffi::OsString {
-    match (socket_path.parent(), socket_path.file_name()) {
-        (Some(parent), Some(name)) => fs::canonicalize(parent)
+    let absolute = if socket_path.is_absolute() {
+        socket_path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(socket_path),
+            Err(_) => socket_path.to_path_buf(),
+        }
+    };
+    match (absolute.parent(), absolute.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => fs::canonicalize(parent)
             .map(|dir| dir.join(name))
-            .unwrap_or_else(|_| socket_path.to_path_buf()),
-        _ => socket_path.to_path_buf(),
+            .unwrap_or(absolute),
+        _ => absolute,
     }
     .into_os_string()
 }
@@ -888,6 +899,20 @@ mod tests {
         assert!(right.starts_with("work-"), "{right}");
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_relative_socket_path_is_anchored_to_the_working_directory() {
+        // `HERDR_SOCKET_PATH=herdr.sock` names a different socket in every
+        // working directory, so the bare string cannot be the identity. Anchored,
+        // it is the absolute path, which the test above shows differs per
+        // directory. Asserting the equality avoids moving the process cwd.
+        let cwd = std::env::current_dir().expect("cwd");
+
+        assert_eq!(
+            server_id_for(Some("work"), Path::new("herdr.sock")),
+            server_id_for(Some("work"), &cwd.join("herdr.sock"))
+        );
     }
 
     #[test]
