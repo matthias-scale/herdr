@@ -299,7 +299,13 @@ pub fn write_item(root: &Path, item: &DayItem) -> Result<(), String> {
 ///
 /// `create_dir_all` applies the umask to what it creates, so a permissive
 /// setting yields a directory the process cannot afterwards enter, and the next
-/// component underneath fails outright. Restrict each one as it appears.
+/// component underneath fails outright. Create each one at `0700` so it is never
+/// briefly world-reachable, then set that mode exactly because the umask can
+/// only have taken bits away.
+///
+/// A component that already exists is left as the user has it. The store may sit
+/// under a directory they chose to share, and tightening it would reach outside
+/// what this call was asked to create.
 fn create_dir_all_owner_only(path: &Path) -> std::io::Result<()> {
     if path.is_dir() {
         return Ok(());
@@ -309,11 +315,14 @@ fn create_dir_all_owner_only(path: &Path) -> std::io::Result<()> {
             create_dir_all_owner_only(parent)?;
         }
     }
-    match fs::create_dir(path) {
-        Ok(()) => {
-            restrict_to_owner(path);
-            Ok(())
-        }
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
+        Ok(()) => restrict_to_owner(path),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(error),
     }
@@ -321,27 +330,37 @@ fn create_dir_all_owner_only(path: &Path) -> std::io::Result<()> {
 
 /// See `restrict_to_owner`. Applied to the open handle so it cannot race a
 /// replacement of the path.
-fn restrict_file_to_owner(file: &fs::File) {
+fn restrict_file_to_owner(file: &fs::File) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+        file.set_permissions(fs::Permissions::from_mode(0o600))
     }
     #[cfg(not(unix))]
-    let _ = file;
+    {
+        let _ = file;
+        Ok(())
+    }
 }
 
-/// The store holds what a person wrote down, so keep it to its owner. A failure
-/// here is not worth refusing the write over: the content is already saved, and
-/// the directory may be one the user deliberately shares.
-fn restrict_to_owner(path: &Path) {
+/// The store holds what a person wrote down, so keep it to its owner.
+///
+/// This is not only about who else can read it. The mode a create requests is an
+/// upper bound the umask subtracts from, so under a permissive setting the bits
+/// restored here are the ones that let the owner read their own board back. A
+/// filesystem that refuses the change would leave an item nothing can open, so
+/// say so rather than reporting a write that cannot be undone.
+fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
     }
     #[cfg(not(unix))]
-    let _ = path;
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 fn write_item_unlocked(root: &Path, item: &DayItem) -> Result<(), String> {
@@ -379,7 +398,12 @@ fn write_item_unlocked(root: &Path, item: &DayItem) -> Result<(), String> {
         // it, and a permissive umask would leave the file unreadable to its own
         // owner. Set it exactly. The create mode still bounds the window above,
         // so nothing sees the file wider than this.
-        restrict_file_to_owner(&file);
+        restrict_file_to_owner(&file).map_err(|error| {
+            format!(
+                "cannot restrict {} to its owner: {error}",
+                temporary.display()
+            )
+        })?;
         file.write_all(contents.as_bytes())
             .and_then(|()| file.sync_all())
             .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
@@ -408,7 +432,12 @@ fn lock_store(root: &Path) -> Result<fs::File, String> {
         .map_err(|error| format!("cannot open {}: {error}", lock_path.display()))?;
     // The create mode is umask-filtered, so a permissive umask would leave a
     // lock nothing can reopen, including this process on its next mutation.
-    restrict_file_to_owner(&lock);
+    restrict_file_to_owner(&lock).map_err(|error| {
+        format!(
+            "cannot restrict {} to its owner: {error}",
+            lock_path.display()
+        )
+    })?;
     lock.lock()
         .map_err(|error| format!("cannot lock {}: {error}", lock_path.display()))?;
     Ok(lock)
