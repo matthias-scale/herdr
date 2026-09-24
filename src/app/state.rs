@@ -4221,8 +4221,6 @@ pub struct AppState {
     pub(crate) local_group_snapshot: Option<crate::groups::GroupAuthoritySnapshot>,
     /// This server's configured component in cross-host agent references.
     pub(crate) agent_host_name: String,
-    /// Names this server among the ones sharing the host-global day store.
-    pub(crate) day_server_id: String,
     /// Server-owned day items. Columns and stale flags are derived from this
     /// durable membership plus current pane facts and are never stored here.
     pub(crate) day_board: crate::day::DayBoard,
@@ -7426,7 +7424,6 @@ impl AppState {
             fleet_snapshot: crate::fleet::Snapshot::default(),
             local_group_snapshot: None,
             agent_host_name: "localhost".to_string(),
-            day_server_id: crate::session::DEFAULT_SESSION_NAME.to_string(),
             day_board: crate::day::DayBoard::default(),
             day_stale_after: Duration::from_secs(600),
             local_agent_panel_identities: std::collections::HashMap::new(),

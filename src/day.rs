@@ -29,11 +29,12 @@ pub enum DayItemSource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DayBinding {
-    /// Which server owns the bound pane. Pane ids restart at 1 in every server
-    /// process, so two named sessions on one host both own `w1:p1`. `None` is a
-    /// binding written before this field existed; it stays host-scoped.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub server_id: Option<String>,
+    /// Known limit: a binding is scoped to the host, not to the server that
+    /// issued the pane id. Pane ids restart at 1 in every server process, so two
+    /// named servers on one host both own `w1:p1` and an item bound in one can
+    /// report the other's column. Naming the server needs an identity that
+    /// survives restart with the panes it describes, which the sync work owns
+    /// along with binding identity across machines.
     pub pane_id: String,
     pub bound_at: u64,
 }
@@ -197,55 +198,6 @@ pub struct DerivedDayItem {
     pub notice: Option<String>,
 }
 
-/// Names one server among those sharing the host-global store.
-///
-/// A binding records a pane id, and pane ids restart at 1 in every server
-/// process, so the id is only meaningful next to the server that issued it.
-/// Two facts decide whether a pane id still means what it meant: the api socket
-/// path, because that is what routes a client to a server, and the data
-/// directory, because `persist::io::session_path` restores the workspaces and
-/// panes from there. `HERDR_SOCKET_PATH` can vary one while `HERDR_SESSION`
-/// varies the other, so either alone lets two unrelated servers claim each
-/// other's pane ids, and neither alone is stable across a restart of the same
-/// server. Both paths are home directories, so hash them rather than write one
-/// into an item file that syncs to other machines.
-pub fn server_id_for(data_dir: &Path, socket_path: &Path) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(path_identity_key(data_dir).as_encoded_bytes());
-    hasher.update([0]);
-    hasher.update(path_identity_key(socket_path).as_encoded_bytes());
-    format!("srv-{:.12}", format!("{:x}", hasher.finalize()))
-}
-
-/// Two spellings of one path are one server, and a relative or symlinked
-/// spelling would otherwise orphan the bindings a previous start wrote. A
-/// relative spelling is worse than that: `herdr.sock` names a different socket
-/// in every working directory, so leaving it relative would give two unrelated
-/// servers one identity. Anchor it to the working directory first, then resolve
-/// it, falling back to the parent because a socket file usually does not exist
-/// yet when identity is computed.
-fn path_identity_key(path: &Path) -> std::ffi::OsString {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        match std::env::current_dir() {
-            Ok(cwd) => cwd.join(path),
-            Err(_) => path.to_path_buf(),
-        }
-    };
-    if let Ok(resolved) = fs::canonicalize(&absolute) {
-        return resolved.into_os_string();
-    }
-    match (absolute.parent(), absolute.file_name()) {
-        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => fs::canonicalize(parent)
-            .map(|dir| dir.join(name))
-            .unwrap_or(absolute),
-        _ => absolute,
-    }
-    .into_os_string()
-}
-
 pub fn default_root() -> PathBuf {
     crate::config::state_dir().join("day-board")
 }
@@ -261,7 +213,6 @@ impl crate::app::state::AppState {
         derive(
             item,
             &self.agent_host_name,
-            &self.day_server_id,
             stale_after,
             links_closed,
             |public_id| {
@@ -524,7 +475,6 @@ pub fn new_id(now_ms: u64) -> Result<String, String> {
 pub fn derive(
     item: &DayItem,
     local_host: &str,
-    local_server: &str,
     stale_after: Duration,
     links_closed: bool,
     pane: impl Fn(&str) -> Option<DayPaneEvidence>,
@@ -546,20 +496,6 @@ pub fn derive(
             notice: None,
         };
     };
-    if binding
-        .server_id
-        .as_deref()
-        .is_some_and(|server| server != local_server)
-    {
-        // Another server's pane id means nothing here, and resolving it against
-        // this server's panes would report a stranger's column.
-        return DerivedDayItem {
-            item: item.clone(),
-            column: DayColumn::Todo,
-            stale: false,
-            notice: None,
-        };
-    }
     let Some(evidence) = pane(&binding.pane_id) else {
         return DerivedDayItem {
             item: item.clone(),
@@ -611,7 +547,6 @@ mod tests {
             bindings: BTreeMap::from([(
                 "ub1".to_string(),
                 DayBinding {
-                    server_id: Some("default".to_string()),
                     pane_id: "w_main:p1".to_string(),
                     bound_at: 1_790_000_000,
                 },
@@ -727,7 +662,6 @@ mod tests {
             derive(
                 &candidate,
                 "ub1",
-                "default",
                 stale_after,
                 false,
                 evidence(crate::detect::AgentState::Working)
@@ -741,7 +675,6 @@ mod tests {
             derive(
                 &candidate,
                 "ub1",
-                "default",
                 stale_after,
                 true,
                 evidence(crate::detect::AgentState::Blocked)
@@ -753,7 +686,6 @@ mod tests {
             derive(
                 &candidate,
                 "ub1",
-                "default",
                 stale_after,
                 false,
                 evidence(crate::detect::AgentState::Working)
@@ -765,7 +697,6 @@ mod tests {
             derive(
                 &candidate,
                 "ub1",
-                "default",
                 stale_after,
                 false,
                 evidence(crate::detect::AgentState::Blocked)
@@ -779,7 +710,6 @@ mod tests {
             derive(
                 &candidate,
                 "ub1",
-                "default",
                 stale_after,
                 false,
                 evidence(crate::detect::AgentState::Working)
@@ -797,7 +727,6 @@ mod tests {
             derive(
                 &candidate,
                 "ub1",
-                "default",
                 Duration::from_secs(600),
                 false,
                 move |_| {
@@ -815,80 +744,12 @@ mod tests {
     }
 
     #[test]
-    fn binding_resolves_only_on_the_server_that_created_it() {
-        let mut bound_server = crate::app::state::AppState::test_with_adversarial_identity_state();
-        let mut other_server = crate::app::state::AppState::test_with_adversarial_identity_state();
-        other_server.workspaces[0].id = bound_server.workspaces[0].id.clone();
-        bound_server.day_server_id = "session-a".to_string();
-        other_server.day_server_id = "session-b".to_string();
-        bound_server.assert_invariants_for_test();
-        other_server.assert_invariants_for_test();
-
-        let pane_id = bound_server.workspaces[0].tabs[0].root_pane;
-        let public_pane_id = crate::workspace::public_pane_id_for_number(
-            &bound_server.workspaces[0].id,
-            bound_server.workspaces[0]
-                .public_pane_number(pane_id)
-                .expect("public pane number"),
-        );
-        let terminal_id = bound_server.workspaces[0]
-            .terminal_id(pane_id)
-            .expect("terminal id")
-            .clone();
-        bound_server
-            .terminals
-            .get_mut(&terminal_id)
-            .expect("terminal")
-            .set_raw_agent_state_for_test(crate::detect::AgentState::Working);
-        let other_pane_id = other_server.workspaces[0].tabs[0].root_pane;
-        let other_terminal_id = other_server.workspaces[0]
-            .terminal_id(other_pane_id)
-            .expect("terminal id")
-            .clone();
-        other_server
-            .terminals
-            .get_mut(&other_terminal_id)
-            .expect("terminal")
-            .set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
-
-        let mut candidate = item("01K5SERVER", "Stay on one server");
-        candidate.bindings = BTreeMap::from([(
-            bound_server.agent_host_name.clone(),
-            DayBinding {
-                server_id: Some(bound_server.day_server_id.clone()),
-                pane_id: public_pane_id,
-                bound_at: 1_790_000_000,
-            },
-        )]);
-
-        let bound = bound_server.derive_day_item(
-            &candidate,
-            Duration::from_secs(600),
-            false,
-            Instant::now(),
-        );
-        let mismatched = other_server.derive_day_item(
-            &candidate,
-            Duration::from_secs(600),
-            false,
-            Instant::now(),
-        );
-
-        assert_eq!(bound.column, DayColumn::Working);
-        assert_eq!(mismatched.column, DayColumn::Todo);
-        assert_eq!(mismatched.notice, None);
-        bound_server.assert_invariants_for_test();
-        other_server.assert_invariants_for_test();
-    }
-
-    #[test]
     fn adversarial_state_keeps_missing_pane_binding_as_todo_with_notice() {
         let mut state = crate::app::state::AppState::test_with_adversarial_identity_state();
         let mut candidate = item("01K5MISSING", "Keep me visible");
         candidate.bindings = BTreeMap::from([(
             state.agent_host_name.clone(),
             DayBinding {
-                server_id: Some(state.day_server_id.clone()),
                 pane_id: "w_missing:p9".to_string(),
                 bound_at: 1_790_000_000,
             },
@@ -908,106 +769,5 @@ mod tests {
         }));
         assert_eq!(state.day_board.items.get(&candidate.id), Some(&candidate));
         state.assert_invariants_for_test();
-    }
-
-    #[test]
-    fn server_id_separates_servers_reached_through_different_socket_paths() {
-        let root = temp_root("server-id-socket");
-        let data = root.join("data");
-        fs::create_dir_all(root.join("one")).expect("one");
-        fs::create_dir_all(root.join("two")).expect("two");
-        fs::create_dir_all(&data).expect("data");
-
-        // `HERDR_SOCKET_PATH` decides which server a client reaches, so these are
-        // two servers however their sessions are named.
-        let left = server_id_for(&data, &root.join("one/herdr.sock"));
-        let right = server_id_for(&data, &root.join("two/herdr.sock"));
-
-        assert_ne!(left, right);
-        assert!(left.starts_with("srv-"), "{left}");
-
-        fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn server_id_separates_servers_restoring_different_panes_on_one_socket() {
-        let root = temp_root("server-id-data");
-        let socket = root.join("herdr.sock");
-        let plain = root.join("data");
-        let named = root.join("data/sessions/work");
-        fs::create_dir_all(&plain).expect("plain");
-        fs::create_dir_all(&named).expect("named");
-
-        // `HERDR_SESSION` moves the data directory that `persist::io` restores
-        // workspaces and panes from, so the same socket path serves a different
-        // set of panes and its pane ids mean something else.
-        let left = server_id_for(&plain, &socket);
-        let right = server_id_for(&named, &socket);
-
-        assert_ne!(left, right);
-
-        fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn server_id_is_stable_when_one_server_restarts() {
-        let root = temp_root("server-id-restart");
-        let data = root.join("data");
-        fs::create_dir_all(&data).expect("data");
-
-        // Nothing but the two paths may enter the value, or a restart would
-        // rename the server and silently orphan every binding it wrote.
-        assert_eq!(
-            server_id_for(&data, &root.join("herdr.sock")),
-            server_id_for(&data, &root.join("herdr.sock"))
-        );
-
-        fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn server_id_is_stable_across_spellings_of_one_path() {
-        let root = temp_root("server-id-spelling");
-        let dir = root.join("nested");
-        fs::create_dir_all(&dir).expect("dir");
-
-        let plain = server_id_for(&dir, &dir.join("herdr.sock"));
-        let indirect = server_id_for(
-            &root.join("nested/../nested"),
-            &root.join("nested/../nested/herdr.sock"),
-        );
-
-        assert_eq!(plain, indirect);
-
-        fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn a_relative_socket_path_is_anchored_to_the_working_directory() {
-        // `HERDR_SOCKET_PATH=herdr.sock` names a different socket in every
-        // working directory, so the bare string cannot be the identity. Anchored,
-        // it is the absolute path, which the test above shows differs per
-        // directory. Asserting the equality avoids moving the process cwd.
-        let cwd = std::env::current_dir().expect("cwd");
-
-        assert_eq!(
-            server_id_for(&cwd, Path::new("herdr.sock")),
-            server_id_for(&cwd, &cwd.join("herdr.sock"))
-        );
-    }
-
-    #[test]
-    fn server_id_never_carries_the_paths_themselves() {
-        let root = temp_root("server-id-secret");
-        fs::create_dir_all(&root).expect("root");
-
-        let id = server_id_for(&root, &root.join("herdr.sock"));
-
-        // Item files sync to other machines, so the home directory must not ride
-        // along in one.
-        assert!(!id.contains(&root.to_string_lossy().to_string()), "{id}");
-        assert!(!id.contains("herdr.sock"), "{id}");
-
-        fs::remove_dir_all(&root).ok();
     }
 }

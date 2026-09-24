@@ -9420,14 +9420,8 @@
               "type": "integer"
             },
             "pane_id": {
+              "description": "Known limit: a binding is scoped to the host, not to the server that\nissued the pane id. Pane ids restart at 1 in every server process, so two\nnamed servers on one host both own `w1:p1` and an item bound in one can\nreport the other's column. Naming the server needs an identity that\nsurvives restart with the panes it describes, which the sync work owns\nalong with binding identity across machines.",
               "type": "string"
-            },
-            "server_id": {
-              "description": "Which server owns the bound pane. Pane ids restart at 1 in every server\nprocess, so two named sessions on one host both own `w1:p1`. `None` is a\nbinding written before this field existed; it stays host-scoped.",
-              "type": [
-                "string",
-                "null"
-              ]
             }
           },
           "required": [
