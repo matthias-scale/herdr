@@ -82,7 +82,19 @@ struct PendingAgentResumeCandidate {
 }
 
 impl App {
+    pub(crate) fn has_pending_agent_resumes(&self) -> bool {
+        self.state
+            .terminals
+            .values()
+            .any(|terminal| terminal.pending_agent_resume_plan.is_some())
+    }
+
     pub(crate) fn sync_pending_agent_resume_deadline(&mut self, now: Instant) {
+        if !self.has_pending_agent_resumes() {
+            self.pending_agent_resume_retries.clear();
+            self.pending_agent_resume_deadline = None;
+            return;
+        }
         let candidates = self.pending_agent_resume_candidates();
         let terminals = &self.state.terminals;
         self.pending_agent_resume_retries
@@ -1341,6 +1353,35 @@ mod tests {
         );
         assert_eq!(pending_resume_retry_delay(6), Duration::from_secs(30));
         assert_eq!(pending_resume_retry_delay(u8::MAX), Duration::from_secs(30));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn syncing_without_pending_resumes_clears_failed_retry_state() {
+        let mut app = test_app();
+        let workspace = crate::workspace::Workspace::test_new("retry-cleared");
+        let pane_id = workspace.tabs[0].root_pane;
+        let terminal_id = workspace.terminal_id(pane_id).cloned().unwrap();
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let now = Instant::now();
+
+        app.record_pending_agent_resume_failure(
+            pane_id,
+            &terminal_id,
+            "codex",
+            "retry-cleared",
+            "test failure".into(),
+            now,
+        );
+        assert!(!app.pending_agent_resume_retries.is_empty());
+        assert!(app.pending_agent_resume_deadline.is_some());
+
+        app.sync_pending_agent_resume_deadline(now);
+
+        assert!(app.pending_agent_resume_retries.is_empty());
+        assert!(app.pending_agent_resume_deadline.is_none());
     }
 
     #[cfg(unix)]
