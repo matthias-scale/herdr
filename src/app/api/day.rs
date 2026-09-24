@@ -173,7 +173,11 @@ impl App {
 
     pub(super) fn handle_day_done(&mut self, id: String, params: DayItemTarget) -> String {
         self.update_and_publish(id, &params.id, |item| {
-            item.done_at = Some(crate::day::unix_seconds_now());
+            // Keep the first answer. A retried call, or one racing the settling
+            // that link completion does, would otherwise move a completion time
+            // that has already been recorded.
+            item.done_at
+                .get_or_insert_with(crate::day::unix_seconds_now);
         })
     }
 
@@ -247,6 +251,9 @@ impl App {
         let Some(root) = self.day_store_root.clone() else {
             return;
         };
+        if !self.work_index_evidence_is_settleable() {
+            return;
+        }
         let settling: Vec<(String, crate::day::DayLinks)> = derived
             .iter()
             .filter(|entry| {
@@ -272,6 +279,30 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Whether the work index evidence is good enough to write down as a
+    /// permanent answer.
+    ///
+    /// Showing an item as done from an old snapshot is harmless; derivation runs
+    /// again and corrects it. Settling is not. It persists `done_at`, which
+    /// removes the item from the refresh input set, so nothing ever looks at
+    /// those links again and a ticket reopened afterwards stays done forever. A
+    /// snapshot restored from disk at startup, or one left behind by a provider
+    /// call that failed, is exactly the evidence that would make that permanent
+    /// mistake, so require a reading this server actually took recently.
+    fn work_index_evidence_is_settleable(&self) -> bool {
+        let Some(snapshot) = self.work_index_snapshot.as_ref() else {
+            return false;
+        };
+        if snapshot.unavailable.is_some() {
+            return false;
+        }
+        let max_age =
+            std::time::Duration::from_secs(self.work_index_config.refresh_interval_seconds.max(1));
+        std::time::SystemTime::now()
+            .duration_since(snapshot.observed_at)
+            .is_ok_and(|age| age <= max_age)
     }
 
     fn day_item_links_closed(&self, item: &crate::day::DayItem) -> bool {
@@ -563,6 +594,107 @@ mod tests {
                 .and_then(|item| item.done_at),
             Some(settled_at)
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stale_or_degraded_work_index_evidence_never_settles_a_completion() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-day-api-stale-settle-{}",
+            crate::config::test_unique_suffix()
+        ));
+        let mut app = app();
+        app.day_store_root = Some(root.clone());
+        app.work_index_config.enabled = true;
+        let added = app.handle_api_request(Request {
+            id: "add".into(),
+            method: Method::DayAdd(DayAddParams {
+                title: "Linked work".into(),
+                kind: DayItemKind::Task,
+                source: DayItemSource::Manual,
+                note: None,
+            }),
+        });
+        let ResponseResult::DayItem { item } = response(&added).result else {
+            panic!("unexpected response: {added}");
+        };
+        app.handle_api_request(Request {
+            id: "link".into(),
+            method: Method::DayLink(crate::api::schema::DayLinkParams {
+                id: item.item.id,
+                ticket: Some("SCA-42".into()),
+                pr: None,
+            }),
+        });
+
+        let mut work = work_item_with_tickets(vec!["SCA-42".into()]);
+        work.ticket_details = vec![work_ticket("SCA-42", Some("Done"))];
+        let stale_age =
+            std::time::Duration::from_secs(app.work_index_config.refresh_interval_seconds * 4);
+        let snapshot = |unavailable, observed_at| crate::work_index::Snapshot {
+            items: vec![work.clone()],
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable,
+            observed_at,
+        };
+
+        // A snapshot restored from disk at startup proves nothing about now, and
+        // `done_at` is permanent: the item leaves the refresh input set, so a
+        // ticket reopened afterwards would never be looked at again.
+        app.work_index_snapshot = Some(snapshot(None, std::time::SystemTime::now() - stale_age));
+        let listed = app.handle_api_request(Request {
+            id: "stale".into(),
+            method: Method::DayList(DayListParams::default()),
+        });
+        let ResponseResult::DayList { items, .. } = response(&listed).result else {
+            panic!("unexpected response: {listed}");
+        };
+        assert_eq!(items[0].column, crate::day::DayColumn::Done);
+        assert_eq!(
+            crate::day::load(&root)
+                .items
+                .values()
+                .next()
+                .and_then(|item| item.done_at),
+            None,
+            "a stale snapshot must not be written down as a permanent answer"
+        );
+
+        // Same for evidence a failed provider call left behind.
+        app.work_index_snapshot = Some(snapshot(
+            Some(crate::work_index::WorkIndexUnavailable::only(
+                crate::work_index::WorkIndexSource::Linear,
+                "linear request failed",
+            )),
+            std::time::SystemTime::now(),
+        ));
+        app.handle_api_request(Request {
+            id: "degraded".into(),
+            method: Method::DayList(DayListParams::default()),
+        });
+        assert_eq!(
+            crate::day::load(&root)
+                .items
+                .values()
+                .next()
+                .and_then(|item| item.done_at),
+            None,
+            "degraded evidence must not be written down as a permanent answer"
+        );
+
+        // A reading this server actually took settles it.
+        app.work_index_snapshot = Some(snapshot(None, std::time::SystemTime::now()));
+        app.handle_api_request(Request {
+            id: "fresh".into(),
+            method: Method::DayList(DayListParams::default()),
+        });
+        assert!(crate::day::load(&root)
+            .items
+            .values()
+            .next()
+            .and_then(|item| item.done_at)
+            .is_some());
         let _ = std::fs::remove_dir_all(root);
     }
 
