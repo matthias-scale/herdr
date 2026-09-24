@@ -211,7 +211,10 @@ impl App {
     /// in the work index input set forever and cost a provider read on every
     /// refresh. Write the completion down once so it settles and drops out.
     fn settle_link_completed_items(&mut self, derived: &[crate::day::DerivedDayItem]) {
-        let settling: Vec<crate::day::DayItem> = derived
+        let Some(root) = self.day_store_root.clone() else {
+            return;
+        };
+        let settling: Vec<String> = derived
             .iter()
             .filter(|entry| {
                 entry.column == crate::day::DayColumn::Done
@@ -219,19 +222,21 @@ impl App {
                     && !entry.item.dismissed
                     && !entry.item.links.is_empty()
             })
-            .map(|entry| {
-                let mut item = entry.item.clone();
-                item.done_at = Some(crate::day::unix_seconds_now());
-                item
-            })
+            .map(|entry| entry.item.id.clone())
             .collect();
-        for item in settling {
-            let id = item.id.clone();
-            if let Err(message) = self.persist_day_item(&item) {
-                tracing::warn!(item = %id, %message, "cannot settle link-completed day item");
-                continue;
+        for id in settling {
+            // Re-read under the store lock: another server may have dismissed or
+            // completed this item since the list snapshot was taken.
+            match crate::day::update_item(&root, &id, |item| {
+                if item.done_at.is_none() && !item.dismissed {
+                    item.done_at = Some(crate::day::unix_seconds_now());
+                }
+            }) {
+                Ok(board) => self.state.day_board = board,
+                Err(error) => {
+                    tracing::warn!(item = %id, ?error, "cannot settle link-completed day item");
+                }
             }
-            self.state.day_board.items.insert(id, item);
         }
     }
 
