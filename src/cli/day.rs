@@ -102,12 +102,16 @@ fn day_bind(args: &[String]) -> std::io::Result<i32> {
     };
     let pane_id = match pane_id {
         Some(pane_id) => pane_id,
-        // Report a missing pane the way every other argument problem is
-        // reported, rather than as a debug-formatted io error.
-        None => match current_pane_id() {
-            Ok(pane_id) => pane_id,
-            Err(message) => {
-                eprintln!("{message}");
+        // A server that answered without a pane is an argument problem, and is
+        // reported the way every other one in this command is. A server that
+        // could not be reached is not, so it keeps the ordinary transport error
+        // and its exit status.
+        None => match current_pane_id()? {
+            Some(pane_id) => pane_id,
+            None => {
+                eprintln!(
+                    "cannot resolve the current pane; name one as `herdr day bind <id> <pane>`"
+                );
                 return Ok(2);
             }
         },
@@ -118,20 +122,16 @@ fn day_bind(args: &[String]) -> std::io::Result<i32> {
     )
 }
 
-fn current_pane_id() -> Result<String, String> {
+fn current_pane_id() -> std::io::Result<Option<String>> {
     let response = super::send_request(&Request {
         id: "cli:day:bind:current".into(),
         method: Method::PaneCurrent(PaneCurrentParams {
             caller_pane_id: None,
         }),
-    })
-    .map_err(|error| format!("cannot reach the server: {error}"))?;
-    response["result"]["pane"]["pane_id"]
+    })?;
+    Ok(response["result"]["pane"]["pane_id"]
         .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| {
-            "cannot resolve the current pane; name one as `herdr day bind <id> <pane>`".to_string()
-        })
+        .map(str::to_string))
 }
 
 fn day_link(args: &[String]) -> std::io::Result<i32> {

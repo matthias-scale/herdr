@@ -156,7 +156,15 @@ impl App {
                 }
             }
             if let Some(pr) = pr {
-                if !item.links.prs.contains(&pr) {
+                // GitHub rewrites owner and repo case, so the same pull request
+                // reaches here spelled two ways. Storing both would cost a
+                // provider read each on every refresh.
+                if !item
+                    .links
+                    .prs
+                    .iter()
+                    .any(|stored| crate::work_index::same_pull_request_url(stored, &pr))
+                {
                     item.links.prs.push(pr);
                 }
             }
@@ -763,6 +771,18 @@ mod tests {
         assert_eq!(links.tickets, vec!["SCA-42".to_string()]);
         assert_eq!(
             links.prs,
+            vec!["https://github.com/acme/app/pull/9".to_string()]
+        );
+
+        // GitHub rewrites owner and repo case, so the same pull request arrives
+        // spelled two ways. Storing both would cost a provider read each.
+        let again = link(&mut app, None, Some("https://github.com/ACME/App/pull/9"));
+        assert!(matches!(
+            response(&again).result,
+            ResponseResult::DayItem { .. }
+        ));
+        assert_eq!(
+            crate::day::load(&root).links().prs,
             vec!["https://github.com/acme/app/pull/9".to_string()]
         );
 
