@@ -197,6 +197,19 @@ pub struct DerivedDayItem {
     pub notice: Option<String>,
 }
 
+/// Names one server among those sharing the host-global store. A named session
+/// is already unique and readable. Unnamed servers differ only by socket path,
+/// so hash it: the raw path is a home directory that would otherwise be written
+/// into an item file and synced to other machines.
+pub fn server_id_for(session_name: Option<&str>, socket_path: &Path) -> String {
+    if let Some(name) = session_name {
+        return name.to_string();
+    }
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(socket_path.as_os_str().as_encoded_bytes());
+    format!("sock-{:x}", digest)[..17].to_string()
+}
+
 pub fn default_root() -> PathBuf {
     crate::config::state_dir().join("day-board")
 }
