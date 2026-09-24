@@ -62,13 +62,18 @@ impl App {
             .collect();
         self.settle_link_completed_items(&items);
         // A CLI-only user reads the board here and nowhere else, so this is the
-        // only sign that anybody is watching it. Say so while an item is still
-        // waiting on its links: a detached server stops polling by itself, and
-        // the merge that would complete the item is never seen. This does not
-        // ask the providers anything; the refresh interval still decides that.
+        // only sign that anybody is watching it. Say so while any item still
+        // takes its column from live evidence: a detached server stops polling by
+        // itself, and nothing it would have seen is ever seen. This does not ask
+        // the providers anything; the refresh interval still decides that.
+        //
+        // A written completion is the one answer that cannot change, so those
+        // items renew nothing. Reaching `done` without one does not count: a
+        // ticket-linked item never settles, because a ticket can reopen, and it
+        // is exactly the item that has to keep looking.
         if self.work_index_config.enabled
             && items.iter().any(|entry| {
-                entry.column != crate::day::DayColumn::Done
+                entry.item.done_at.is_none()
                     && !entry.item.dismissed
                     && !(entry.item.links.prs.is_empty() && entry.item.links.tickets.is_empty())
             })
@@ -602,10 +607,13 @@ mod tests {
         });
         assert!(app.work_index_refresh_requested);
 
-        // Once it is done there is nothing left to wait for.
+        // Once the completion is written down it cannot change, so nothing is
+        // left to wait for.
         app.handle_api_request(Request {
             id: "done".into(),
-            method: Method::DayDone(crate::api::schema::DayItemTarget { id: item_id }),
+            method: Method::DayDone(crate::api::schema::DayItemTarget {
+                id: item_id.clone(),
+            }),
         });
         app.work_index_refresh_requested = false;
         app.handle_api_request(Request {
@@ -615,6 +623,65 @@ mod tests {
             }),
         });
         assert!(!app.work_index_refresh_requested);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_ticket_that_reads_done_keeps_looking_because_a_ticket_can_reopen() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-day-api-ticket-reopen-{}",
+            crate::config::test_unique_suffix()
+        ));
+        let mut app = app();
+        app.day_store_root = Some(root.clone());
+        app.work_index_config.enabled = true;
+        let added = app.handle_api_request(Request {
+            id: "add".into(),
+            method: Method::DayAdd(DayAddParams {
+                title: "Waiting on a ticket".into(),
+                kind: DayItemKind::Task,
+                source: DayItemSource::Manual,
+                note: None,
+            }),
+        });
+        let ResponseResult::DayItem { item } = response(&added).result else {
+            panic!("unexpected response: {added}");
+        };
+        app.handle_api_request(Request {
+            id: "link".into(),
+            method: Method::DayLink(crate::api::schema::DayLinkParams {
+                id: item.item.id,
+                ticket: Some("SCA-42".into()),
+                pr: None,
+            }),
+        });
+
+        let mut work = work_item_with_tickets(vec!["SCA-42".into()]);
+        work.ticket_state = Some("Done".into());
+        app.work_index_snapshot = Some(crate::work_index::Snapshot {
+            items: vec![work],
+            conversations: Vec::new(),
+            missive_users: Vec::new(),
+            unavailable: None,
+            observed_at: std::time::SystemTime::now(),
+        });
+
+        app.work_index_refresh_requested = false;
+        let raw = app.handle_api_request(Request {
+            id: "list".into(),
+            method: Method::DayList(DayListParams::default()),
+        });
+        let ResponseResult::DayList { items, .. } = response(&raw).result else {
+            panic!("unexpected response: {raw}");
+        };
+
+        // The item reads done, but nothing wrote that down: a ticket can reopen,
+        // so the column is only ever derived. Reading it has to keep the server
+        // looking, or a detached one shows this stale `done` forever.
+        assert_eq!(items[0].column, crate::day::DayColumn::Done);
+        assert!(items[0].item.done_at.is_none());
+        assert!(app.work_index_refresh_requested);
 
         let _ = std::fs::remove_dir_all(root);
     }
