@@ -330,6 +330,12 @@ impl App {
                 .iter()
                 .any(|work| ticket_state_for_link(work, ticket).is_some_and(ticket_state_is_done))
         });
+        // Known limit: a link is matched by url. GitHub answers a request for a
+        // renamed or transferred repository with the new url, so a link stored
+        // before the rename stops matching and the item never completes from it.
+        // Recognizing it needs the producer to remember which request produced
+        // each work item, which reaches every construction of one. Until then the
+        // item simply stays open and can be completed by hand.
         let prs_closed = item.links.prs.iter().all(|pr| {
             snapshot.items.iter().any(|work| {
                 work.pr_url
