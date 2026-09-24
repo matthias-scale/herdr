@@ -199,38 +199,44 @@ pub struct DerivedDayItem {
 
 /// Names one server among those sharing the host-global store.
 ///
-/// The api socket path is the identity, because that is what actually routes a
-/// client to one server. A session name is not: `HERDR_SOCKET_PATH` overrides
-/// routing while an inherited `HERDR_SESSION` keeps naming the same session, so
-/// two servers a client reaches separately would otherwise claim each other's
-/// pane ids. The path is a home directory, so hash it rather than write it into
-/// an item file that syncs to other machines.
-///
-/// Nothing else may enter the value. A session name was readable but not stable:
-/// restarting one socket path with `HERDR_SESSION` unset would rename the same
-/// server and silently orphan every binding it had written.
-pub fn server_id_for(socket_path: &Path) -> String {
+/// A binding records a pane id, and pane ids restart at 1 in every server
+/// process, so the id is only meaningful next to the server that issued it.
+/// Two facts decide whether a pane id still means what it meant: the api socket
+/// path, because that is what routes a client to a server, and the data
+/// directory, because `persist::io::session_path` restores the workspaces and
+/// panes from there. `HERDR_SOCKET_PATH` can vary one while `HERDR_SESSION`
+/// varies the other, so either alone lets two unrelated servers claim each
+/// other's pane ids, and neither alone is stable across a restart of the same
+/// server. Both paths are home directories, so hash them rather than write one
+/// into an item file that syncs to other machines.
+pub fn server_id_for(data_dir: &Path, socket_path: &Path) -> String {
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(socket_identity_key(socket_path).as_encoded_bytes());
-    format!("sock-{:.12}", format!("{digest:x}"))
+    let mut hasher = Sha256::new();
+    hasher.update(path_identity_key(data_dir).as_encoded_bytes());
+    hasher.update([0]);
+    hasher.update(path_identity_key(socket_path).as_encoded_bytes());
+    format!("srv-{:.12}", format!("{:x}", hasher.finalize()))
 }
 
-/// Two spellings of one socket path are one server, and a relative or
-/// symlinked spelling would otherwise orphan the bindings a previous start
-/// wrote. A relative spelling is worse than that: `herdr.sock` names a
-/// different socket in every working directory, so leaving it relative would
-/// give two unrelated servers one identity. Anchor it to the working directory
-/// first, then resolve the parent, since the socket file usually does not exist
+/// Two spellings of one path are one server, and a relative or symlinked
+/// spelling would otherwise orphan the bindings a previous start wrote. A
+/// relative spelling is worse than that: `herdr.sock` names a different socket
+/// in every working directory, so leaving it relative would give two unrelated
+/// servers one identity. Anchor it to the working directory first, then resolve
+/// it, falling back to the parent because a socket file usually does not exist
 /// yet when identity is computed.
-fn socket_identity_key(socket_path: &Path) -> std::ffi::OsString {
-    let absolute = if socket_path.is_absolute() {
-        socket_path.to_path_buf()
+fn path_identity_key(path: &Path) -> std::ffi::OsString {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
     } else {
         match std::env::current_dir() {
-            Ok(cwd) => cwd.join(socket_path),
-            Err(_) => socket_path.to_path_buf(),
+            Ok(cwd) => cwd.join(path),
+            Err(_) => path.to_path_buf(),
         }
     };
+    if let Ok(resolved) = fs::canonicalize(&absolute) {
+        return resolved.into_os_string();
+    }
     match (absolute.parent(), absolute.file_name()) {
         (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => fs::canonicalize(parent)
             .map(|dir| dir.join(name))
@@ -884,17 +890,71 @@ mod tests {
     #[test]
     fn server_id_separates_servers_reached_through_different_socket_paths() {
         let root = temp_root("server-id-socket");
+        let data = root.join("data");
         fs::create_dir_all(root.join("one")).expect("one");
         fs::create_dir_all(root.join("two")).expect("two");
+        fs::create_dir_all(&data).expect("data");
 
         // `HERDR_SOCKET_PATH` decides which server a client reaches, so these are
         // two servers however their sessions are named.
-        let left = server_id_for(&root.join("one/herdr.sock"));
-        let right = server_id_for(&root.join("two/herdr.sock"));
+        let left = server_id_for(&data, &root.join("one/herdr.sock"));
+        let right = server_id_for(&data, &root.join("two/herdr.sock"));
 
         assert_ne!(left, right);
-        assert!(left.starts_with("sock-"), "{left}");
-        assert!(right.starts_with("sock-"), "{right}");
+        assert!(left.starts_with("srv-"), "{left}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn server_id_separates_servers_restoring_different_panes_on_one_socket() {
+        let root = temp_root("server-id-data");
+        let socket = root.join("herdr.sock");
+        let plain = root.join("data");
+        let named = root.join("data/sessions/work");
+        fs::create_dir_all(&plain).expect("plain");
+        fs::create_dir_all(&named).expect("named");
+
+        // `HERDR_SESSION` moves the data directory that `persist::io` restores
+        // workspaces and panes from, so the same socket path serves a different
+        // set of panes and its pane ids mean something else.
+        let left = server_id_for(&plain, &socket);
+        let right = server_id_for(&named, &socket);
+
+        assert_ne!(left, right);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn server_id_is_stable_when_one_server_restarts() {
+        let root = temp_root("server-id-restart");
+        let data = root.join("data");
+        fs::create_dir_all(&data).expect("data");
+
+        // Nothing but the two paths may enter the value, or a restart would
+        // rename the server and silently orphan every binding it wrote.
+        assert_eq!(
+            server_id_for(&data, &root.join("herdr.sock")),
+            server_id_for(&data, &root.join("herdr.sock"))
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn server_id_is_stable_across_spellings_of_one_path() {
+        let root = temp_root("server-id-spelling");
+        let dir = root.join("nested");
+        fs::create_dir_all(&dir).expect("dir");
+
+        let plain = server_id_for(&dir, &dir.join("herdr.sock"));
+        let indirect = server_id_for(
+            &root.join("nested/../nested"),
+            &root.join("nested/../nested/herdr.sock"),
+        );
+
+        assert_eq!(plain, indirect);
 
         fs::remove_dir_all(&root).ok();
     }
@@ -908,33 +968,17 @@ mod tests {
         let cwd = std::env::current_dir().expect("cwd");
 
         assert_eq!(
-            server_id_for(Path::new("herdr.sock")),
-            server_id_for(&cwd.join("herdr.sock"))
+            server_id_for(&cwd, Path::new("herdr.sock")),
+            server_id_for(&cwd, &cwd.join("herdr.sock"))
         );
     }
 
     #[test]
-    fn server_id_is_stable_across_spellings_of_one_socket_path() {
-        let root = temp_root("server-id-spelling");
-        let dir = root.join("nested");
-        fs::create_dir_all(&dir).expect("dir");
-
-        let plain = server_id_for(&dir.join("herdr.sock"));
-        let indirect = server_id_for(&root.join("nested/../nested/herdr.sock"));
-
-        assert_eq!(plain, indirect);
-        assert!(plain.starts_with("sock-"), "{plain}");
-
-        fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn server_id_never_carries_the_socket_path_itself() {
+    fn server_id_never_carries_the_paths_themselves() {
         let root = temp_root("server-id-secret");
         fs::create_dir_all(&root).expect("root");
-        let socket = root.join("herdr.sock");
 
-        let id = server_id_for(&socket);
+        let id = server_id_for(&root, &root.join("herdr.sock"));
 
         // Item files sync to other machines, so the home directory must not ride
         // along in one.
