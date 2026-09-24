@@ -1355,8 +1355,18 @@ fn direct_pr_urls(
                 .flat_map(|links| links.prs.iter().cloned()),
         )
         .collect::<Vec<_>>();
-    urls.sort();
-    urls.dedup();
+    // One pull request reaches here spelled more than one way: a pane's work
+    // context and a day link can disagree on owner and repo case, and GitHub
+    // rewrites that case itself. Each spelling that survives costs its own
+    // provider read on every refresh.
+    // Sort on a case-folded key so the spellings `dedup_by` must compare land
+    // next to each other; a plain sort can leave an unrelated url between them.
+    urls.sort_by(|left, right| {
+        left.to_ascii_lowercase()
+            .cmp(&right.to_ascii_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+    urls.dedup_by(|left, right| same_pull_request_url(left, right));
     urls
 }
 
@@ -4478,6 +4488,26 @@ impl crate::app::App {
 
 #[cfg(all(test, unix))]
 mod tests {
+
+    #[test]
+    fn one_pull_request_spelled_two_ways_is_read_once() {
+        let links = crate::day::DayLinks {
+            tickets: Vec::new(),
+            // The case GitHub rewrote, the case a person typed, and a trailing
+            // slash a browser left behind. Every survivor costs a provider read.
+            prs: vec![
+                "https://github.com/acme/app/pull/9".into(),
+                "https://github.com/ACME/App/pull/9".into(),
+                "https://github.com/acme/app/pull/9/".into(),
+                "https://github.com/acme/app/pull/90".into(),
+            ],
+        };
+
+        let urls = super::direct_pr_urls(&[], Some(&links));
+
+        assert_eq!(urls.len(), 2, "{urls:?}");
+        assert!(urls.iter().any(|url| url.ends_with("/pull/90")), "{urls:?}");
+    }
 
     #[test]
     fn resolve_program_finds_a_tool_on_path_and_names_it_when_missing() {
