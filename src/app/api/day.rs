@@ -214,7 +214,7 @@ impl App {
         let Some(root) = self.day_store_root.clone() else {
             return;
         };
-        let settling: Vec<String> = derived
+        let settling: Vec<(String, crate::day::DayLinks)> = derived
             .iter()
             .filter(|entry| {
                 entry.column == crate::day::DayColumn::Done
@@ -222,13 +222,14 @@ impl App {
                     && !entry.item.dismissed
                     && !entry.item.links.is_empty()
             })
-            .map(|entry| entry.item.id.clone())
+            .map(|entry| (entry.item.id.clone(), entry.item.links.clone()))
             .collect();
-        for id in settling {
-            // Re-read under the store lock: another server may have dismissed or
-            // completed this item since the list snapshot was taken.
+        for (id, observed_links) in settling {
+            // Re-read under the store lock: since the list snapshot another server
+            // may have dismissed or completed this item, or added a link that is
+            // still open, and completion was only ever proven for the links seen.
             match crate::day::update_item(&root, &id, |item| {
-                if item.done_at.is_none() && !item.dismissed {
+                if should_settle(item, &observed_links) {
                     item.done_at = Some(crate::day::unix_seconds_now());
                 }
             }) {
@@ -269,6 +270,13 @@ impl App {
 }
 
 use crate::work_index::same_pull_request_url as same_pull_request;
+
+/// Completion was proven for the links the list saw. Another server may have
+/// dismissed or completed the item since, or added a link that is still open, so
+/// settle only when the item still looks exactly like the one that was proven done.
+fn should_settle(item: &crate::day::DayItem, observed_links: &crate::day::DayLinks) -> bool {
+    item.done_at.is_none() && !item.dismissed && &item.links == observed_links
+}
 
 fn ticket_state_for_link<'a>(
     work: &'a crate::work_index::WorkItem,
@@ -523,6 +531,40 @@ mod tests {
             Some(settled_at)
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn settling_waits_for_links_that_appeared_since_the_snapshot() {
+        let observed = crate::day::DayLinks {
+            tickets: vec!["SCA-42".into()],
+            prs: Vec::new(),
+        };
+        let mut item = crate::day::DayItem {
+            id: "01K5SETTLE".into(),
+            title: "Ship the store".into(),
+            kind: crate::day::DayItemKind::default(),
+            source: crate::day::DayItemSource::default(),
+            note: None,
+            links: observed.clone(),
+            bindings: std::collections::BTreeMap::new(),
+            added_at: 1_790_000_000,
+            done_at: None,
+            dismissed: false,
+            stale_after_seconds: None,
+        };
+        assert!(super::should_settle(&item, &observed));
+
+        // another server linked a second ticket while this list was being served
+        item.links.tickets.push("SCA-43".into());
+        assert!(!super::should_settle(&item, &observed));
+
+        item.links = observed.clone();
+        item.dismissed = true;
+        assert!(!super::should_settle(&item, &observed));
+
+        item.dismissed = false;
+        item.done_at = Some(1_800_000_000);
+        assert!(!super::should_settle(&item, &observed));
     }
 
     #[test]
