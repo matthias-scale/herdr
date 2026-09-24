@@ -411,7 +411,7 @@ The build needs Zig exactly 0.16.0, which is usually not the system Zig:
 | --- | --- |
 | air | `~/.local/zig-0.16.0/zig` |
 | mbpro | `$(brew --prefix zig@0.16)/bin/zig` |
-| ub1 | `~/.local/zig-0.16.0/zig` |
+| ub1 | `~/.local/zig-0.16.0/zig-x86_64-linux-0.16.0/zig` |
 | ub2 | `~/.local/bin/zig` |
 
 Pass it as `ZIG=<path>` or put it first on `PATH`; `cargo build` otherwise fails in
