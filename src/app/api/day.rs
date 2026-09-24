@@ -104,17 +104,50 @@ impl App {
     }
 
     pub(super) fn handle_day_link(&mut self, id: String, params: DayLinkParams) -> String {
-        if params.ticket.as_deref().is_none_or(str::is_empty)
-            && params.pr.as_deref().is_none_or(str::is_empty)
+        // A link only ever completes an item through the work index, which looks
+        // tickets up by identifier and pull requests up by `owner/repo` and
+        // number. A pasted browser location or a padded identifier is stored
+        // happily and then matches nothing, and the item reports success while
+        // its automatic completion is quietly broken forever. Store the form the
+        // lookup can use, and refuse what it could never resolve.
+        let ticket = params
+            .ticket
+            .map(|ticket| ticket.trim().to_string())
+            .filter(|ticket| !ticket.is_empty());
+        if ticket
+            .as_deref()
+            .is_some_and(|ticket| ticket.split_whitespace().count() != 1)
         {
+            return super::responses::encode_error(
+                id,
+                "invalid_params",
+                "day.link --ticket takes one ticket identifier, such as ENG-123",
+            );
+        }
+        let raw_pr = params
+            .pr
+            .map(|pr| pr.trim().to_string())
+            .filter(|pr| !pr.is_empty());
+        let pr = match raw_pr {
+            Some(raw) => match crate::work_context::canonical_pull_request_url(&raw) {
+                Some(url) => Some(url),
+                None => {
+                    return super::responses::encode_error(
+                        id,
+                        "invalid_params",
+                        "day.link --pr takes a GitHub pull request url, such as https://github.com/owner/repo/pull/1",
+                    );
+                }
+            },
+            None => None,
+        };
+        if ticket.is_none() && pr.is_none() {
             return super::responses::encode_error(
                 id,
                 "invalid_params",
                 "day.link requires --ticket or --pr",
             );
         }
-        let ticket = params.ticket.filter(|ticket| !ticket.is_empty());
-        let pr = params.pr.filter(|pr| !pr.is_empty());
         let response = self.update_and_publish(id, &params.id, move |item| {
             if let Some(ticket) = ticket {
                 if !item.links.tickets.contains(&ticket) {
@@ -530,6 +563,74 @@ mod tests {
                 .and_then(|item| item.done_at),
             Some(settled_at)
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_link_the_work_index_could_never_resolve_is_refused_rather_than_stored() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-day-api-link-canonical-{}",
+            crate::config::test_unique_suffix()
+        ));
+        let mut app = app();
+        app.day_store_root = Some(root.clone());
+        let added = app.handle_api_request(Request {
+            id: "add".into(),
+            method: Method::DayAdd(DayAddParams {
+                title: "Linked work".into(),
+                kind: DayItemKind::Task,
+                source: DayItemSource::Manual,
+                note: None,
+            }),
+        });
+        let ResponseResult::DayItem { item } = response(&added).result else {
+            panic!("unexpected response: {added}");
+        };
+        let item_id = item.item.id;
+        let link = |app: &mut crate::app::App, ticket: Option<&str>, pr: Option<&str>| {
+            app.handle_api_request(Request {
+                id: "link".into(),
+                method: Method::DayLink(crate::api::schema::DayLinkParams {
+                    id: item_id.clone(),
+                    ticket: ticket.map(str::to_string),
+                    pr: pr.map(str::to_string),
+                }),
+            })
+        };
+
+        // The browser location a person copies, and an identifier a shell pasted
+        // with padding. Both would be stored happily and then match nothing.
+        let stored = link(
+            &mut app,
+            Some("  SCA-42 "),
+            Some("https://github.com/acme/app/pull/9/files#diff-1"),
+        );
+        assert!(matches!(
+            response(&stored).result,
+            ResponseResult::DayItem { .. }
+        ));
+        let links = crate::day::load(&root).links();
+        assert_eq!(links.tickets, vec!["SCA-42".to_string()]);
+        assert_eq!(
+            links.prs,
+            vec!["https://github.com/acme/app/pull/9".to_string()]
+        );
+
+        // Nothing the lookup could resolve, so it is refused instead of stored.
+        for bad in [
+            "https://github.com/acme/app/pull/not-a-number",
+            "https://gitlab.com/acme/app/merge_requests/9",
+            "acme/app#9",
+        ] {
+            let refused = link(&mut app, None, Some(bad));
+            assert!(refused.contains("invalid_params"), "{bad}: {refused}");
+        }
+        let refused = link(&mut app, Some("SCA-42 SCA-43"), None);
+        assert!(refused.contains("invalid_params"), "{refused}");
+        let refused = link(&mut app, Some("   "), None);
+        assert!(refused.contains("invalid_params"), "{refused}");
+
+        assert_eq!(crate::day::load(&root).links(), links);
         let _ = std::fs::remove_dir_all(root);
     }
 
