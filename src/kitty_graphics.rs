@@ -1899,14 +1899,31 @@ mod tests {
             )
         };
         assert!(fd >= 0, "create awrit-style shared memory frame");
-        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
         let mut rgba = vec![0; AWRIT_FRAME_WIDTH * AWRIT_FRAME_HEIGHT * 4];
         for pixel in rgba.chunks_exact_mut(4) {
             pixel.copy_from_slice(&[frame, 0, 0, 255]);
         }
         file.set_len(rgba.len() as u64).unwrap();
-        file.write_all(&rgba).unwrap();
-        file.flush().unwrap();
+        let mapping = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                rgba.len(),
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+        assert_ne!(
+            mapping,
+            libc::MAP_FAILED,
+            "map awrit-style shared memory frame"
+        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(rgba.as_ptr(), mapping.cast(), rgba.len());
+        }
+        assert_eq!(unsafe { libc::munmap(mapping, rgba.len()) }, 0);
     }
 
     #[cfg(unix)]
