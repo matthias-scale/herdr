@@ -61,6 +61,20 @@ impl App {
             .map(|item| self.derived_day_item(item))
             .collect();
         self.settle_link_completed_items(&items);
+        // A CLI-only user reads the board here and nowhere else, so this is the
+        // only sign that anybody is watching it. Say so while an item is still
+        // waiting on its links: a detached server stops polling by itself, and
+        // the merge that would complete the item is never seen. This does not
+        // ask the providers anything; the refresh interval still decides that.
+        if self.work_index_config.enabled
+            && items.iter().any(|entry| {
+                entry.column != crate::day::DayColumn::Done
+                    && !entry.item.dismissed
+                    && !(entry.item.links.prs.is_empty() && entry.item.links.tickets.is_empty())
+            })
+        {
+            self.work_index_refresh_requested = true;
+        }
         let load_errors = self
             .state
             .day_board
@@ -531,6 +545,77 @@ mod tests {
             items[0].item.links.prs,
             ["https://github.com/acme/app/pull/9"]
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn listing_an_item_that_is_still_waiting_keeps_a_detached_server_looking() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-day-api-list-wakes-{}",
+            crate::config::test_unique_suffix()
+        ));
+        let mut app = app();
+        app.day_store_root = Some(root.clone());
+        app.work_index_config.enabled = true;
+        let added = app.handle_api_request(Request {
+            id: "add".into(),
+            method: Method::DayAdd(DayAddParams {
+                title: "Waiting on a merge".into(),
+                kind: DayItemKind::Task,
+                source: DayItemSource::Manual,
+                note: None,
+            }),
+        });
+        let ResponseResult::DayItem { item } = response(&added).result else {
+            panic!("unexpected response: {added}");
+        };
+        let item_id = item.item.id;
+
+        // Nothing is linked yet, so there is nothing to watch for.
+        app.work_index_refresh_requested = false;
+        app.handle_api_request(Request {
+            id: "list".into(),
+            method: Method::DayList(DayListParams {
+                include_dismissed: false,
+            }),
+        });
+        assert!(!app.work_index_refresh_requested);
+
+        app.handle_api_request(Request {
+            id: "link".into(),
+            method: Method::DayLink(crate::api::schema::DayLinkParams {
+                id: item_id.clone(),
+                ticket: None,
+                pr: Some("https://github.com/acme/app/pull/9".into()),
+            }),
+        });
+
+        // The link's own request is spent once a refresh runs. Reading the board
+        // while the item is still open has to renew it, or a detached server
+        // never sees the merge that completes it.
+        app.work_index_refresh_requested = false;
+        app.handle_api_request(Request {
+            id: "list".into(),
+            method: Method::DayList(DayListParams {
+                include_dismissed: false,
+            }),
+        });
+        assert!(app.work_index_refresh_requested);
+
+        // Once it is done there is nothing left to wait for.
+        app.handle_api_request(Request {
+            id: "done".into(),
+            method: Method::DayDone(crate::api::schema::DayItemTarget { id: item_id }),
+        });
+        app.work_index_refresh_requested = false;
+        app.handle_api_request(Request {
+            id: "list".into(),
+            method: Method::DayList(DayListParams {
+                include_dismissed: false,
+            }),
+        });
+        assert!(!app.work_index_refresh_requested);
+
         let _ = std::fs::remove_dir_all(root);
     }
 
