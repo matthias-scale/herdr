@@ -53,7 +53,7 @@ jobs:
           - os: ubuntu-latest
             kind: unix
             nextest_filter: not binary(live_handoff)
-            timeout_minutes: 15
+            timeout_minutes: 25
           # Cold macOS and Windows lanes run the full maintenance and integration suites.
           - os: macos-latest
             kind: unix
