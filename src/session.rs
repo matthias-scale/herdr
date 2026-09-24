@@ -212,12 +212,15 @@ pub fn addresses_own_server() -> bool {
 /// socket is not a symlink. A directory that does not resolve is left as written,
 /// which at worst declines to trust a pane rather than trusting the wrong one.
 fn resolved_socket_path(path: &Path) -> PathBuf {
+    // A relative override names the same socket as its absolute spelling, and
+    // `canonicalize` on an empty parent would not reconcile them.
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-        return path.to_path_buf();
+        return path;
     };
     match std::fs::canonicalize(parent) {
         Ok(parent) => parent.join(name),
-        Err(_) => path.to_path_buf(),
+        Err(_) => path.clone(),
     }
 }
 
