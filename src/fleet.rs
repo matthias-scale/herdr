@@ -3242,7 +3242,18 @@ impl FleetRow {
     }
 
     fn mark_unreachable(&mut self) {
-        if self.source != EvidenceSource::RunState || self.error.is_some() {
+        if self.error.is_some() {
+            return;
+        }
+        if self.source != EvidenceSource::RunState {
+            self.state = "status_unknown".into();
+            self.raw_state = "unknown".into();
+            self.liveness = Liveness::Unknown;
+            self.blocked = false;
+            self.closure_liveness = Liveness::Unknown;
+            self.closure_blocked = false;
+            self.gates.clear();
+            self.gate_summary = None;
             return;
         }
         self.state = "stale".into();
@@ -4937,6 +4948,54 @@ mod tests {
         let current = watch_observed_states(&mut current_snapshot, &previous_snapshot);
         assert_eq!(current["probe::ra-active"].state, "stale");
         assert_eq!(current["probe::ra-active"].liveness, Liveness::Unknown);
+    }
+
+    #[test]
+    fn watch_retains_working_pane_as_unknown_when_host_becomes_unreachable() {
+        let pane = FleetRow::test_agent_row("probe", "working-pane");
+        let handle = pane.handle.clone();
+        let previous_snapshot = Snapshot {
+            hosts: vec![HostSnapshot {
+                name: "probe".into(),
+                target: "probe".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                remote_identity: None,
+                entries: vec![pane],
+            }],
+            ..Snapshot::default()
+        };
+        assert_eq!(
+            observed_states(&previous_snapshot)[&handle].state,
+            "working"
+        );
+
+        let mut current_snapshot = Snapshot {
+            refreshed_at_unix_ms: Some(1_758_099_630_000),
+            hosts: vec![HostSnapshot {
+                name: "probe".into(),
+                target: "probe".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: HostState::Unreachable,
+                version: None,
+                protocol: None,
+                error: Some("offline".into()),
+                remote_identity: None,
+                entries: Vec::new(),
+            }],
+            ..Snapshot::default()
+        };
+        let current = watch_observed_states(&mut current_snapshot, &previous_snapshot);
+        assert_eq!(current[&handle].state, "status_unknown");
+        assert_eq!(current[&handle].liveness, Liveness::Unknown);
+        assert!(!current[&handle].blocked);
     }
 
     #[test]
