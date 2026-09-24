@@ -9421,6 +9421,13 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "server_id": {
+              "description": "Which server owns the bound pane. Pane ids restart at 1 in every server\nprocess, so two named sessions on one host both own `w1:p1`. `None` is a\nbinding written before this field existed; it stays host-scoped.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
