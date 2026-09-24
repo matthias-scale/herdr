@@ -52,7 +52,7 @@ impl App {
             );
         };
         self.state.day_board = crate::day::load(root);
-        let items = self
+        let items: Vec<_> = self
             .state
             .day_board
             .items
@@ -60,6 +60,7 @@ impl App {
             .filter(|item| params.include_dismissed || !item.dismissed)
             .map(|item| self.derived_day_item(item))
             .collect();
+        self.settle_link_completed_items(&items);
         let load_errors = self
             .state
             .day_board
@@ -204,6 +205,34 @@ impl App {
             self.day_item_links_closed(item),
             std::time::Instant::now(),
         )
+    }
+
+    /// An item completed from its links carries no `done_at`, so it would stay
+    /// in the work index input set forever and cost a provider read on every
+    /// refresh. Write the completion down once so it settles and drops out.
+    fn settle_link_completed_items(&mut self, derived: &[crate::day::DerivedDayItem]) {
+        let settling: Vec<crate::day::DayItem> = derived
+            .iter()
+            .filter(|entry| {
+                entry.column == crate::day::DayColumn::Done
+                    && entry.item.done_at.is_none()
+                    && !entry.item.dismissed
+                    && !entry.item.links.is_empty()
+            })
+            .map(|entry| {
+                let mut item = entry.item.clone();
+                item.done_at = Some(crate::day::unix_seconds_now());
+                item
+            })
+            .collect();
+        for item in settling {
+            let id = item.id.clone();
+            if let Err(message) = self.persist_day_item(&item) {
+                tracing::warn!(item = %id, %message, "cannot settle link-completed day item");
+                continue;
+            }
+            self.state.day_board.items.insert(id, item);
+        }
     }
 
     fn day_item_links_closed(&self, item: &crate::day::DayItem) -> bool {
@@ -462,6 +491,32 @@ mod tests {
         };
         assert_eq!(items[0].column, crate::day::DayColumn::Done);
 
+        // Completion settles into the file, so the item stops costing a provider
+        // read on every refresh, and settling again is a no-op.
+        let stored = crate::day::load(&root);
+        let settled = stored.items.values().next().expect("one item");
+        let settled_at = settled.done_at.expect("link completion settles done_at");
+        assert!(!stored
+            .links()
+            .prs
+            .contains(&"https://github.com/acme/app/pull/9".to_string()));
+
+        let again = app.handle_api_request(Request {
+            id: "again".into(),
+            method: Method::DayList(DayListParams::default()),
+        });
+        let ResponseResult::DayList { items, .. } = response(&again).result else {
+            panic!("unexpected response: {again}");
+        };
+        assert_eq!(items[0].column, crate::day::DayColumn::Done);
+        assert_eq!(
+            crate::day::load(&root)
+                .items
+                .values()
+                .next()
+                .and_then(|item| item.done_at),
+            Some(settled_at)
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
