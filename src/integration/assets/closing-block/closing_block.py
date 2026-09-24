@@ -41,14 +41,16 @@ _DONE_RE = re.compile(
 )
 _WAITING_ON_YOU_RE = re.compile(
     r"^(?:(?:\*\*)?\d+[ \t]+agents?[ \t]+running:.*?[ \t]+·[ \t]+)?"
-    r"(?:Waiting(?:[ \t]+for|[ \t]*:)[ \t]+.*?[ \t]+·[ \t]+)?"
+    r"(?:Waiting(?:[ \t]+for|[ \t]*:)[ \t]+.*?"
+    r"(?:[ \t]+·[ \t]+|[.;][ \t]+))?"
     r"(?:\*\*)?Waiting on you[ \t]*[—–:-][ \t]*(?P<rest>.+?)(?:\*\*)?[ \t]*\r?$",
     re.MULTILINE | re.IGNORECASE,
 )
 _EXTERNAL_WAIT_RE = re.compile(
     r"^(?:(?:\*\*)?\d+[ \t]+agents?[ \t]+running:.*?[ \t]+·[ \t]+)?"
     r"(?:\*\*)?Waiting(?:[ \t]+for|[ \t]*:)[ \t]+(?P<rest>.+?)"
-    r"(?=(?:[ \t]+·[ \t]+Waiting on you\b)|(?:\*\*)?[ \t]*\r?$)",
+    r"(?=(?:(?:[ \t]+·[ \t]+|[.;][ \t]+)Waiting on you\b)|"
+    r"(?:\*\*)?[ \t]*\r?$)",
     re.MULTILINE | re.IGNORECASE,
 )
 _CONTRACT_RE = re.compile(
@@ -286,14 +288,14 @@ class ClosingBlock:
 
     @property
     def herdr_state(self) -> str:
-        if self.agents_running > 0 or self.external_wait:
-            return "working"
         if (
             self.blocking > 0
             or self.waiting_on_you
             or (self.parse_status == "malformed" and (self.declared_blocking or 0) > 0)
         ):
             return "blocked"
+        if self.agents_running > 0 or self.external_wait:
+            return "working"
         return "idle"
 
     def message(self) -> str | None:

@@ -534,6 +534,55 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(block.completion, "incomplete")
         self.assertEqual(block.parse_status, "ok")
 
+    def test_blocking_points_outrank_observed_external_wait_wording(self):
+        cases = [
+            (
+                "Waiting: GitHub CI on #358 at `4cc871a9`. The watcher is running "
+                "in the background and will notify me.\n"
+                "Waiting on you — 1 item (1), 1 blocking.",
+                "GitHub CI on #358 at `4cc871a9`. The watcher is running in the "
+                "background and will notify me",
+            ),
+            (
+                "Waiting: the Codex quota reset on Sep 19 10:23, before the end "
+                "review and blast-radius receipt can run. Nothing is scheduled to "
+                "wake me for it.\n"
+                "Waiting on you — 1 item (1), 1 blocking.",
+                "the Codex quota reset on Sep 19 10:23, before the end review and "
+                "blast-radius receipt can run. Nothing is scheduled to wake me for it",
+            ),
+            (
+                "Waiting: macOS CI on #358 and the 3 reviewers. Both are background "
+                "tasks that will notify me.\n"
+                "Waiting on you — 1 item (1), 1 blocking.",
+                "macOS CI on #358 and the 3 reviewers. Both are background tasks "
+                "that will notify me",
+            ),
+            (
+                "Waiting: launch waiter `bwxzgqm1j`; waiting on you — 1 item (1), "
+                "1 blocking",
+                "launch waiter `bwxzgqm1j`",
+            ),
+            (
+                "Waiting: CI on `e42b047d`. Waiting on you — 1 item (1), 1 blocking.",
+                "CI on `e42b047d`",
+            ),
+        ]
+        prefix = (
+            "**Critical action points (1 blocking)**\n\n"
+            "1. **Answer** — Choose the next lane.\n\n"
+        )
+
+        for footer, expected_wait in cases:
+            with self.subTest(footer=footer):
+                block = closing_block.parse(prefix + footer + "\n")
+
+                self.assertEqual(block.external_wait, expected_wait)
+                self.assertTrue(block.waiting_on_you)
+                self.assertEqual(block.blocking, 1)
+                self.assertEqual(block.herdr_state, "blocked")
+                self.assertEqual(block.parse_status, "ok")
+
     def test_short_reply_has_missing_task_evidence_instead_of_clearing_state(self):
         block = closing_block.parse("Progressing.\n")
 
@@ -1239,7 +1288,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(len(decisions), 1)
         self.assertIn("Nested detail remains part of the decision.", decisions[0]["text"])
 
-    def test_report_emits_v2_arrays_and_existing_blocked_channel(self):
+    def test_report_emits_v2_arrays_and_blocked_channel_with_agents(self):
         with mock.patch.object(herdr_status, "_rpc") as rpc, mock.patch.dict(
             herdr_status.os.environ,
             {"XDG_STATE_HOME": self._state_dir()},
@@ -1257,7 +1306,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
             )
 
         self.assertEqual(outcome["payload"]["v"], 2)
-        self.assertEqual(outcome["payload"]["state"], "working")
+        self.assertEqual(outcome["payload"]["state"], "blocked")
         self.assertIsInstance(outcome["payload"]["gates"][0], dict)
         self.assertEqual(len(outcome["payload"]["items"]), 2)
         self.assertTrue(outcome["payload"]["decisions"][0]["reversible"])
@@ -1321,7 +1370,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
 
         self.assertEqual(outcome["payload"]["seq"], 123456)
 
-    def test_non_gate_action_points_block_only_when_no_agent_is_running(self):
+    def test_non_gate_action_points_block_even_when_an_agent_is_running(self):
         cases = [
             ([{"label": "Answer", "text": "Choose the release lane"}], 0, "answer"),
             ([{"label": "Verify", "text": "Confirm the deployed build"}], 0, "verify"),
@@ -1333,7 +1382,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
                 0,
                 "2 action points",
             ),
-            ([{"label": "Answer", "text": "Choose the release lane"}], 2, "working"),
+            ([{"label": "Answer", "text": "Choose the release lane"}], 2, "answer"),
         ]
         for items, agents, expected_label in cases:
             with self.subTest(agents=agents, expected_label=expected_label), mock.patch.object(
@@ -1352,16 +1401,13 @@ class ClosingBlockV2Tests(unittest.TestCase):
                     sock_path="/tmp/herdr-test.sock",
                 )
 
-            expected_state = "working" if agents else "blocked"
+            expected_state = "blocked"
             self.assertEqual(outcome["payload"]["state"], expected_state)
             self.assertEqual(outcome["payload"]["items"][0]["text"], items[0]["text"])
             report_params = rpc.call_args_list[1].args[3]
             self.assertEqual(report_params["state"], expected_state)
             metadata_params = rpc.call_args_list[-1].args[3]
-            if agents:
-                self.assertEqual(metadata_params["state_labels"]["working"], expected_label)
-            else:
-                self.assertEqual(metadata_params["state_labels"]["blocked"], expected_label)
+            self.assertEqual(metadata_params["state_labels"]["blocked"], expected_label)
 
     def test_report_emits_contract_tokens_together_and_truncates_text(self):
         contract = "x" * 220
@@ -1453,7 +1499,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
         self.assertEqual(report_params["wait"], "CI run 4123")
         self.assertEqual(report_params["eta_s"], 720)
 
-    def test_report_emits_additive_lifecycle_fields_and_clearing_tokens(self):
+    def test_report_emits_lifecycle_fields_while_blocked_by_human_input(self):
         with mock.patch.object(herdr_status, "_rpc") as rpc, mock.patch.dict(
             herdr_status.os.environ,
             {"XDG_STATE_HOME": self._state_dir()},
@@ -1473,7 +1519,7 @@ class ClosingBlockV2Tests(unittest.TestCase):
             )
 
         payload = outcome["payload"]
-        self.assertEqual(payload["state"], "working")
+        self.assertEqual(payload["state"], "blocked")
         self.assertEqual(payload["completion"], "incomplete")
         self.assertEqual(payload["external_wait"], "CI run 4123 via watcher")
         self.assertEqual(payload["parse_status"], "ok")
