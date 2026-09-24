@@ -294,6 +294,43 @@ pub fn write_item(root: &Path, item: &DayItem) -> Result<(), String> {
     write_item_unlocked(root, item)
 }
 
+/// Creates `path` and every missing parent, keeping each new component owner
+/// only.
+///
+/// `create_dir_all` applies the umask to what it creates, so a permissive
+/// setting yields a directory the process cannot afterwards enter, and the next
+/// component underneath fails outright. Restrict each one as it appears.
+fn create_dir_all_owner_only(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            create_dir_all_owner_only(parent)?;
+        }
+    }
+    match fs::create_dir(path) {
+        Ok(()) => {
+            restrict_to_owner(path);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// See `restrict_to_owner`. Applied to the open handle so it cannot race a
+/// replacement of the path.
+fn restrict_file_to_owner(file: &fs::File) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+}
+
 /// The store holds what a person wrote down, so keep it to its owner. A failure
 /// here is not worth refusing the write over: the content is already saved, and
 /// the directory may be one the user deliberately shares.
@@ -310,13 +347,12 @@ fn restrict_to_owner(path: &Path) {
 fn write_item_unlocked(root: &Path, item: &DayItem) -> Result<(), String> {
     validate_item(item)?;
     let items_dir = root.join("items");
-    fs::create_dir_all(&items_dir).map_err(|error| {
+    create_dir_all_owner_only(&items_dir).map_err(|error| {
         format!(
             "cannot create day item directory {}: {error}",
             items_dir.display()
         )
     })?;
-    restrict_to_owner(&items_dir);
     let target = items_dir.join(format!("{}.md", item.id));
     let temporary = items_dir.join(format!(
         ".{}.tmp-{}-{}",
@@ -339,6 +375,11 @@ fn write_item_unlocked(root: &Path, item: &DayItem) -> Result<(), String> {
         let mut file = options
             .open(&temporary)
             .map_err(|error| format!("cannot create {}: {error}", temporary.display()))?;
+        // The requested mode is only an upper bound: the umask removes bits from
+        // it, and a permissive umask would leave the file unreadable to its own
+        // owner. Set it exactly. The create mode still bounds the window above,
+        // so nothing sees the file wider than this.
+        restrict_file_to_owner(&file);
         file.write_all(contents.as_bytes())
             .and_then(|()| file.sync_all())
             .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
@@ -352,17 +393,22 @@ fn write_item_unlocked(root: &Path, item: &DayItem) -> Result<(), String> {
 }
 
 fn lock_store(root: &Path) -> Result<fs::File, String> {
-    fs::create_dir_all(root)
+    create_dir_all_owner_only(root)
         .map_err(|error| format!("cannot create day item store {}: {error}", root.display()))?;
-    restrict_to_owner(root);
     let lock_path = root.join(".items.lock");
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock = options
         .open(&lock_path)
         .map_err(|error| format!("cannot open {}: {error}", lock_path.display()))?;
+    // The create mode is umask-filtered, so a permissive umask would leave a
+    // lock nothing can reopen, including this process on its next mutation.
+    restrict_file_to_owner(&lock);
     lock.lock()
         .map_err(|error| format!("cannot lock {}: {error}", lock_path.display()))?;
     Ok(lock)
@@ -741,6 +787,35 @@ mod tests {
         assert!(!at(crate::detect::AgentState::Working, 600).stale);
         assert!(at(crate::detect::AgentState::Working, 601).stale);
         assert!(!at(crate::detect::AgentState::Blocked, 601).stale);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_item_stays_owner_only_whatever_the_umask_is() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("permissions");
+        // A permissive umask subtracts from a requested create mode, which would
+        // leave the item unreadable to its own owner. A restrictive one is the
+        // case that hides a widening bug, so pin both.
+        for umask in [0o777, 0o000] {
+            let previous = unsafe { libc::umask(umask) };
+            let written = write_item(&root, &item("01K5PERM", "Keep me private"));
+            unsafe { libc::umask(previous) };
+            written.expect("write");
+
+            let file = fs::metadata(root.join("items/01K5PERM.md")).expect("item");
+            assert_eq!(file.permissions().mode() & 0o777, 0o600, "umask {umask:o}");
+            let dir = fs::metadata(root.join("items")).expect("items dir");
+            assert_eq!(dir.permissions().mode() & 0o777, 0o700, "umask {umask:o}");
+
+            assert!(
+                load(&root).items.contains_key("01K5PERM"),
+                "umask {umask:o}"
+            );
+        }
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
