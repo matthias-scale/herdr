@@ -2851,6 +2851,127 @@
           ],
           "type": "string"
         },
+        "DayAddParams": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "$ref": "#/schemas/request/$defs/DayItemKind",
+              "default": "task"
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "$ref": "#/schemas/request/$defs/DayItemSource",
+              "default": "manual"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "type": "object"
+        },
+        "DayBindParams": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "pane_id"
+          ],
+          "type": "object"
+        },
+        "DayItemKind": {
+          "enum": [
+            "task",
+            "noticed"
+          ],
+          "type": "string"
+        },
+        "DayItemSource": {
+          "enum": [
+            "manual",
+            "ticket",
+            "agent"
+          ],
+          "type": "string"
+        },
+        "DayItemTarget": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "DayLinkParams": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pr": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ticket": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "DayListParams": {
+          "additionalProperties": false,
+          "properties": {
+            "include_dismissed": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "DayNoteParams": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
         "EmptyParams": {
           "type": "object"
         },
@@ -7159,6 +7280,118 @@
         {
           "properties": {
             "method": {
+              "const": "day.add",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DayAddParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "day.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DayListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "day.bind",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DayBindParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "day.link",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DayLinkParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "day.note",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DayNoteParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "day.done",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DayItemTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "day.dismiss",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/DayItemTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.read",
               "type": "string"
             },
@@ -9178,6 +9411,160 @@
             "failed"
           ],
           "type": "string"
+        },
+        "DayBinding": {
+          "properties": {
+            "bound_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "description": "Known limit: a binding is scoped to the host, not to the server that\nissued the pane id. Pane ids restart at 1 in every server process, so two\nnamed servers on one host both own `w1:p1` and an item bound in one can\nreport the other's column. Naming the server needs an identity that\nsurvives restart with the panes it describes, which the sync work owns\nalong with binding identity across machines.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "bound_at"
+          ],
+          "type": "object"
+        },
+        "DayColumn": {
+          "enum": [
+            "todo",
+            "working",
+            "blocked",
+            "done"
+          ],
+          "type": "string"
+        },
+        "DayItemKind": {
+          "enum": [
+            "task",
+            "noticed"
+          ],
+          "type": "string"
+        },
+        "DayItemSource": {
+          "enum": [
+            "manual",
+            "ticket",
+            "agent"
+          ],
+          "type": "string"
+        },
+        "DayLinks": {
+          "properties": {
+            "prs": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "tickets": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "DayLoadError": {
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "message"
+          ],
+          "type": "object"
+        },
+        "DerivedDayItem": {
+          "properties": {
+            "added_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "bindings": {
+              "additionalProperties": {
+                "$ref": "#/schemas/success_response/$defs/DayBinding"
+              },
+              "default": {},
+              "type": "object"
+            },
+            "column": {
+              "$ref": "#/schemas/success_response/$defs/DayColumn"
+            },
+            "dismissed": {
+              "default": false,
+              "type": "boolean"
+            },
+            "done_at": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/success_response/$defs/DayItemKind",
+              "default": "task"
+            },
+            "links": {
+              "$ref": "#/schemas/success_response/$defs/DayLinks",
+              "default": {}
+            },
+            "note": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "notice": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "$ref": "#/schemas/success_response/$defs/DayItemSource",
+              "default": "manual"
+            },
+            "stale": {
+              "type": "boolean"
+            },
+            "stale_after_seconds": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "added_at",
+            "column",
+            "stale"
+          ],
+          "type": "object"
         },
         "ErrorBody": {
           "properties": {
@@ -13159,6 +13546,47 @@
               "required": [
                 "type",
                 "agents"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "item": {
+                  "$ref": "#/schemas/success_response/$defs/DerivedDayItem"
+                },
+                "type": {
+                  "const": "day_item",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "item"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "items": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/DerivedDayItem"
+                  },
+                  "type": "array"
+                },
+                "load_errors": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/DayLoadError"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "day_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "items"
               ],
               "type": "object"
             },

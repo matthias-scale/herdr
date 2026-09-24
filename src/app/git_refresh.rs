@@ -1063,7 +1063,9 @@ mod tests {
 
     #[test]
     fn headless_deadline_can_suppress_git_refresh_timer() {
-        let mut app = test_app(&crate::config::Config::default());
+        let mut config = crate::config::Config::default();
+        config.work_index.enabled = false;
+        let mut app = test_app(&config);
         app.state.workspaces.push(Workspace::test_new("test"));
         let now = Instant::now();
         app.last_git_remote_status_refresh = now - GIT_REMOTE_STATUS_REFRESH_INTERVAL;

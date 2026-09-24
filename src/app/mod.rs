@@ -196,6 +196,9 @@ pub struct App {
     pub(crate) fleet_poller_config: crate::fleet::FleetPollerHandle,
     /// Server-owned group authority. Persistence is separate from client presentation state.
     pub(crate) group_runtime: crate::groups::Runtime,
+    /// Local durable root for server-owned day items. Tests opt in with an
+    /// isolated path so AppState construction remains filesystem-free.
+    pub(crate) day_store_root: Option<std::path::PathBuf>,
     /// Advance-only authority history, independent from current fleet routes.
     pub(crate) authority_acceptance_ledger: crate::fleet::AuthorityAcceptanceLedger,
     pub(crate) authority_acceptance_ledger_path: Option<std::path::PathBuf>,
@@ -293,6 +296,10 @@ pub struct App {
     pub(crate) last_work_index_refresh_generation: u64,
     pub(crate) last_applied_work_index_refresh_generation: u64,
     pub(crate) next_work_index_refresh: Instant,
+    /// A refresh a person asked for, rather than one the interval came round to.
+    /// A detached server stops polling on its own after a while; it must not also
+    /// swallow the answer someone is waiting on.
+    pub(crate) work_index_refresh_requested: bool,
     pub(crate) work_index_context_fingerprint: crate::work_index::WorkIndexContextFingerprint,
     pub(crate) work_index_cache_bypass: crate::work_index::WorkIndexCacheBypass,
     pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
@@ -939,6 +946,12 @@ impl App {
             fleet_snapshot: crate::fleet::Snapshot::unpolled(&config.remote.fleet.hosts),
             local_group_snapshot: None,
             agent_host_name,
+            day_board: if cfg!(test) {
+                crate::day::DayBoard::default()
+            } else {
+                crate::day::load(&crate::day::default_root())
+            },
+            day_stale_after: Duration::from_secs(config.day_board.stale_after),
             local_agent_panel_identities,
             remote_agent_panel_entries: Vec::new(),
             aloop_projection: None,
@@ -1528,6 +1541,7 @@ impl App {
             )),
             fleet_poller_config,
             group_runtime,
+            day_store_root: (!cfg!(test)).then(crate::day::default_root),
             authority_acceptance_ledger,
             authority_acceptance_ledger_path,
             authority_acceptance_ledger_error,
@@ -1598,6 +1612,7 @@ impl App {
             last_work_index_refresh_generation: 0,
             last_applied_work_index_refresh_generation: 0,
             next_work_index_refresh: Instant::now(),
+            work_index_refresh_requested: false,
             work_index_context_fingerprint: Vec::new(),
             work_index_cache_bypass: crate::work_index::WorkIndexCacheBypass::default(),
             work_index_snapshot,
@@ -2967,6 +2982,10 @@ impl App {
             }
         }
 
+        if !invalid_section("day_board") {
+            self.state.day_stale_after = Duration::from_secs(config.day_board.stale_after);
+        }
+
         if !invalid_section("missive") {
             self.missive_config = config.missive.clone();
             self.state.settings_missive_team = config.missive.team.clone();
@@ -4080,13 +4099,9 @@ mod tests {
 
     fn test_app() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
-        App::new(
-            &Config::default(),
-            true,
-            None,
-            api_rx,
-            crate::api::EventHub::default(),
-        )
+        let mut config = Config::default();
+        config.work_index.enabled = false;
+        App::new(&config, true, None, api_rx, crate::api::EventHub::default())
     }
 
     #[test]
@@ -4273,6 +4288,7 @@ mod tests {
     #[test]
     fn disabled_work_index_does_not_start_a_refresh() {
         let mut app = test_app();
+        app.work_index_config.enabled = false;
         app.start_work_index_refresh_if_due(Instant::now());
         assert!(app.work_index_refresh_in_flight.is_none());
     }

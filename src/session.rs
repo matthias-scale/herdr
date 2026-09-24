@@ -85,6 +85,17 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
         index += 1;
     }
 
+    // Resolve the server this process was started under before any override
+    // moves it. A caller cannot otherwise tell whether its inherited pane facts
+    // describe the server a request is about to reach.
+    let inherited_server = match std::env::var(crate::api::SOCKET_PATH_ENV_VAR) {
+        Ok(path) => PathBuf::from(path),
+        Err(_) => api_socket_path_for(active_name().as_deref()),
+    };
+    *INHERITED_SERVER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(inherited_server);
+
     if let Some(session) = requested_session {
         apply_explicit_name(&session)?;
     } else if std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some() {
@@ -100,6 +111,10 @@ pub fn configure_from_args(args: &[String]) -> Result<Vec<String>, String> {
 
     Ok(cleaned)
 }
+
+/// The socket this process would reach without `--session`. Overwritten on each
+/// call so a test can re-enter argument parsing; production parses once.
+static INHERITED_SERVER: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
 pub fn active_name() -> Option<String> {
     std::env::var(SESSION_ENV_VAR)
@@ -155,6 +170,58 @@ pub fn active_restart_after_update_guidance() -> String {
 
 pub fn explicit_session_requested() -> bool {
     EXPLICIT_SESSION_REQUESTED.load(Ordering::Relaxed)
+}
+
+/// Whether a request addresses the server this process was started under.
+///
+/// `HERDR_PANE_ID` and other inherited facts describe that server's panes. They
+/// carry over unchanged when `--session` points the request somewhere else,
+/// where the same public id belongs to an unrelated pane, so a caller has to ask
+/// before trusting one. Compare where the request actually lands rather than the
+/// session name: naming the session it is already in stays home, while
+/// `--session default` from a pane reached over `HERDR_SOCKET_PATH` leaves, and
+/// a name alone cannot tell those apart.
+///
+/// Known limit: a socket path set inline on the command line is indistinguishable
+/// from an inherited one, because the pane records its server nowhere else. That
+/// takes deliberately repointing one variable while leaving `HERDR_PANE_ID` in
+/// place.
+pub fn addresses_own_server() -> bool {
+    if !explicit_session_requested() {
+        return true;
+    }
+    let inherited = INHERITED_SERVER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    match inherited {
+        Some(inherited) => {
+            resolved_socket_path(&inherited) == resolved_socket_path(&active_api_socket_path())
+        }
+        // Arguments were never parsed, so nothing was inherited to protect.
+        None => true,
+    }
+}
+
+/// Resolve the directory holding a socket so two spellings of one path compare
+/// equal.
+///
+/// The same live server is reachable through a symlinked parent under more than
+/// one name, and comparing the text alone would call one of them somewhere else.
+/// The socket itself is not resolved, because it may not exist yet and because a
+/// socket is not a symlink. A directory that does not resolve is left as written,
+/// which at worst declines to trust a pane rather than trusting the wrong one.
+fn resolved_socket_path(path: &Path) -> PathBuf {
+    // A relative override names the same socket as its absolute spelling, and
+    // `canonicalize` on an empty parent would not reconcile them.
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return path;
+    };
+    match std::fs::canonicalize(parent) {
+        Ok(parent) => parent.join(name),
+        Err(_) => path.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -925,6 +992,84 @@ mod tests {
         std::env::remove_var(SESSION_ENV_VAR);
         clear_explicit_session_for_test();
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+    }
+
+    #[test]
+    fn a_request_addresses_its_own_server_only_when_it_lands_there() {
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let config_home =
+            std::env::temp_dir().join(format!("herdr-session-own-{}", std::process::id()));
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+        let configure = |inherited_session: Option<&str>,
+                         inherited_socket: Option<&str>,
+                         requested: Option<&str>| {
+            match inherited_session {
+                Some(name) => std::env::set_var(SESSION_ENV_VAR, name),
+                None => std::env::remove_var(SESSION_ENV_VAR),
+            }
+            match inherited_socket {
+                Some(path) => std::env::set_var(crate::api::SOCKET_PATH_ENV_VAR, path),
+                None => std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR),
+            }
+            clear_explicit_session_for_test();
+            let mut args = vec!["herdr".to_string()];
+            if let Some(requested) = requested {
+                args.push("--session".to_string());
+                args.push(requested.to_string());
+            }
+            args.push("day".to_string());
+            configure_from_args(&args).expect("configure");
+            addresses_own_server()
+        };
+
+        // No override at all: the inherited pane belongs to the server reached.
+        assert!(configure(Some("work"), None, None));
+        // Naming the session it is already in is not going anywhere else.
+        assert!(configure(Some("work"), None, Some("work")));
+        // A different session is a different server.
+        assert!(!configure(Some("work"), None, Some("other")));
+        // `default` from a named session leaves it.
+        assert!(!configure(Some("work"), None, Some(DEFAULT_SESSION_NAME)));
+        // The session name alone cannot see this one: a pane reached over
+        // `HERDR_SOCKET_PATH` has no name, and neither does `default`, but
+        // naming `default` routes the request off that socket.
+        assert!(!configure(
+            None,
+            Some("/tmp/herdr-elsewhere.sock"),
+            Some(DEFAULT_SESSION_NAME)
+        ));
+        // The same request from a pane that really is on the default server.
+        assert!(configure(None, None, Some(DEFAULT_SESSION_NAME)));
+
+        // One server reached through a symlinked parent is spelled two ways.
+        // Comparing the text alone would send the caller's own pane away.
+        // Windows needs a privilege to create a symlink, so pin this where a
+        // plain user can.
+        #[cfg(unix)]
+        {
+            let real = config_home.join("real");
+            let linked = config_home.join("linked");
+            std::fs::create_dir_all(real.join(crate::config::app_dir_name())).expect("config home");
+            let _ = std::fs::remove_file(&linked);
+            std::os::unix::fs::symlink(&real, &linked).expect("symlink");
+            std::env::set_var("XDG_CONFIG_HOME", &real);
+            let through_link = linked
+                .join(crate::config::app_dir_name())
+                .join("herdr.sock");
+            assert!(configure(
+                None,
+                through_link.to_str(),
+                Some(DEFAULT_SESSION_NAME)
+            ));
+        }
+
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var(SESSION_ENV_VAR);
+        std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+        clear_explicit_session_for_test();
     }
 
     #[test]

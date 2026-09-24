@@ -1331,6 +1331,31 @@ pub fn repo_slug_from_pr_url(url: &str) -> Option<String> {
     Some(format!("{owner}/{repo}"))
 }
 
+/// Rebuilds the canonical `.../pull/<n>` form of a pull request url.
+///
+/// A stored link only completes a day item when the producer can turn it back
+/// into a `gh pr view` target, which reads the number as the last path segment.
+/// People paste a browser location instead, such as `.../pull/9/files#diff-1`,
+/// and that link would silently never match anything. Anything this cannot
+/// parse is not a pull request the producer could look up either, so the caller
+/// should reject it rather than store it.
+pub fn canonical_pull_request_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let without_query = trimmed.split(['#', '?']).next().unwrap_or(trimmed);
+    let path = without_query.strip_prefix("https://github.com/")?;
+    let mut parts = path.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+    if parts.next()? != "pull" || !valid_github_owner(owner) || !valid_github_repo(repo) {
+        return None;
+    }
+    let number: u64 = parts.next()?.parse().ok()?;
+    if number == 0 {
+        return None;
+    }
+    Some(format!("https://github.com/{owner}/{repo}/pull/{number}"))
+}
+
 fn valid_github_owner(value: &str) -> bool {
     !value.is_empty()
         && !value.starts_with('-')

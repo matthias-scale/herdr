@@ -12,6 +12,7 @@ const KNOWN_TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "actions",
     "advanced",
     "agent_detection",
+    "day_board",
     "experimental",
     "files",
     "goals_panel",
@@ -447,6 +448,14 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         &mut diagnostics,
         &mut invalid_sections,
         |section| config.work_index = section,
+    );
+    load_live_section(
+        table,
+        "day_board",
+        "day board config",
+        &mut diagnostics,
+        &mut invalid_sections,
+        |section| config.day_board = section,
     );
     load_live_section(
         table,
@@ -1118,6 +1127,16 @@ resume_agents_on_restore = true
         .unwrap();
 
         assert!(loaded.config.session.resume_agents_on_restore);
+        assert!(loaded.diagnostics.is_empty());
+        assert!(loaded.invalid_sections.is_empty());
+    }
+
+    #[test]
+    fn load_live_config_preserves_day_board_stale_threshold() {
+        let loaded = load_live_config_from_str("[day_board]\nstale_after = 90\n")
+            .expect("live day board config");
+
+        assert_eq!(loaded.config.day_board.stale_after, 90);
         assert!(loaded.diagnostics.is_empty());
         assert!(loaded.invalid_sections.is_empty());
     }

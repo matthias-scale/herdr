@@ -1342,14 +1342,39 @@ fn work_index_repos(config: &WorkIndexConfig, panes: &[WorkIndexPane]) -> Vec<St
     repos
 }
 
-fn pane_pr_urls(panes: &[WorkIndexPane]) -> Vec<String> {
+fn direct_pr_urls(
+    panes: &[WorkIndexPane],
+    day_links: Option<&crate::day::DayLinks>,
+) -> Vec<String> {
     let mut urls = panes
         .iter()
         .flat_map(|pane| pane.work_context.pr_urls.iter().cloned())
+        .chain(
+            day_links
+                .into_iter()
+                .flat_map(|links| links.prs.iter().cloned()),
+        )
         .collect::<Vec<_>>();
-    urls.sort();
-    urls.dedup();
+    // One pull request reaches here spelled more than one way: a pane's work
+    // context and a day link can disagree on owner and repo case, and GitHub
+    // rewrites that case itself. Each spelling that survives costs its own
+    // provider read on every refresh.
+    // Sort on a case-folded key so the spellings `dedup_by` must compare land
+    // next to each other; a plain sort can leave an unrelated url between them.
+    urls.sort_by(|left, right| {
+        left.to_ascii_lowercase()
+            .cmp(&right.to_ascii_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+    urls.dedup_by(|left, right| same_pull_request_url(left, right));
     urls
+}
+
+/// GitHub rewrites owner and repo case and may drop a trailing slash, so a
+/// stored url and the reported one can differ while naming the same PR.
+pub(crate) fn same_pull_request_url(left: &str, right: &str) -> bool {
+    left.trim_end_matches('/')
+        .eq_ignore_ascii_case(right.trim_end_matches('/'))
 }
 
 fn pane_pr_target(url: &str) -> Option<(String, u64)> {
@@ -1369,10 +1394,14 @@ fn upsert_github(pull_requests: &mut Vec<GithubPullRequest>, pull_request: Githu
     }
 }
 
-fn pane_ticket_ids(panes: &[WorkIndexPane]) -> Vec<String> {
+fn directly_observed_ticket_ids(
+    panes: &[WorkIndexPane],
+    day_links: Option<&crate::day::DayLinks>,
+) -> Vec<String> {
     let mut ids = panes
         .iter()
         .flat_map(|pane| pane.work_context.ticket_ids.iter())
+        .chain(day_links.into_iter().flat_map(|links| links.tickets.iter()))
         .filter_map(|id| normalize_ticket_id(id).ok())
         .collect::<Vec<_>>();
     ids.sort();
@@ -1501,6 +1530,7 @@ pub(crate) struct WorkIndexRefreshContext<'a> {
     pub(crate) previous: Option<&'a Snapshot>,
     pub(crate) linear_assignee: Option<&'a str>,
     pub(crate) selected_ticket: Option<&'a str>,
+    pub(crate) day_links: Option<&'a crate::day::DayLinks>,
     provider_cache: Option<&'a ProviderCache>,
     pub(crate) cache_bypass: WorkIndexCacheBypass,
 }
@@ -1523,6 +1553,7 @@ pub(crate) fn refresh_work_index_with_missive(
         previous,
         linear_assignee,
         selected_ticket,
+        day_links,
         provider_cache,
         cache_bypass,
     } = context;
@@ -1540,9 +1571,12 @@ pub(crate) fn refresh_work_index_with_missive(
     let mut degraded = WorkIndexUnavailable::default();
     let previous_github = previous_github(previous);
     let mut github = Vec::new();
-    for url in pane_pr_urls(panes) {
+    for url in direct_pr_urls(panes, day_links) {
         let Some((repo, number)) = pane_pr_target(&url) else {
-            degraded.record(WorkIndexSource::Github, "pane pull request URL is invalid");
+            degraded.record(
+                WorkIndexSource::Github,
+                "direct pull request URL is invalid",
+            );
             continue;
         };
         match fetch_github_pull_request(
@@ -1561,7 +1595,7 @@ pub(crate) fn refresh_work_index_with_missive(
                 );
                 if let Some(pull_request) = previous_github
                     .iter()
-                    .find(|pull_request| pull_request.url == url)
+                    .find(|pull_request| same_pull_request_url(&pull_request.url, &url))
                 {
                     upsert_github(&mut github, pull_request.clone());
                 }
@@ -1570,7 +1604,7 @@ pub(crate) fn refresh_work_index_with_missive(
                 degraded.record(WorkIndexSource::Github, message);
                 if let Some(pull_request) = previous_github
                     .iter()
-                    .find(|pull_request| pull_request.url == url)
+                    .find(|pull_request| same_pull_request_url(&pull_request.url, &url))
                 {
                     upsert_github(&mut github, pull_request.clone());
                 }
@@ -1716,7 +1750,7 @@ pub(crate) fn refresh_work_index_with_missive(
         },
         _ => Vec::new(),
     };
-    let mut directly_observed_tickets = pane_ticket_ids(panes);
+    let mut directly_observed_tickets = directly_observed_ticket_ids(panes, day_links);
     if let Some(selected) = selected_ticket.and_then(|ticket| normalize_ticket_id(ticket).ok()) {
         if !directly_observed_tickets
             .iter()
@@ -4084,6 +4118,7 @@ impl crate::app::App {
         if self.work_index_refresh_in_flight.is_some() || now < self.next_work_index_refresh {
             return;
         }
+        self.work_index_refresh_requested = false;
         self.next_work_index_refresh =
             now + Duration::from_secs(self.work_index_config.refresh_interval_seconds.max(1));
         self.last_work_index_refresh_generation =
@@ -4114,6 +4149,7 @@ impl crate::app::App {
         let session_missive_users =
             (!session.missive_users.is_empty()).then(|| session.missive_users.clone());
         let previous_snapshot = self.work_index_snapshot.clone();
+        let day_store_root = self.day_store_root.clone();
         let selected_ticket = self
             .state
             .work_view
@@ -4129,6 +4165,11 @@ impl crate::app::App {
         let _ = std::thread::Builder::new()
             .name("herdr-work-index".into())
             .spawn(move || {
+                let day_links = day_store_root
+                    .as_deref()
+                    .map(crate::day::load)
+                    .map(|board| board.links())
+                    .unwrap_or_default();
                 if !session.linear.resolved {
                     (session.linear, session.linear_query_identity) = fetch_linear_directory(
                         &linearis_program,
@@ -4148,6 +4189,7 @@ impl crate::app::App {
                         previous: previous_snapshot.as_ref(),
                         linear_assignee: session.linear_query_identity.as_deref(),
                         selected_ticket: selected_ticket.as_deref(),
+                        day_links: Some(&day_links),
                         provider_cache: Some(&provider_cache),
                         cache_bypass,
                     },
@@ -4447,6 +4489,26 @@ impl crate::app::App {
 
 #[cfg(all(test, unix))]
 mod tests {
+
+    #[test]
+    fn one_pull_request_spelled_two_ways_is_read_once() {
+        let links = crate::day::DayLinks {
+            tickets: Vec::new(),
+            // The case GitHub rewrote, the case a person typed, and a trailing
+            // slash a browser left behind. Every survivor costs a provider read.
+            prs: vec![
+                "https://github.com/acme/app/pull/9".into(),
+                "https://github.com/ACME/App/pull/9".into(),
+                "https://github.com/acme/app/pull/9/".into(),
+                "https://github.com/acme/app/pull/90".into(),
+            ],
+        };
+
+        let urls = super::direct_pr_urls(&[], Some(&links));
+
+        assert_eq!(urls.len(), 2, "{urls:?}");
+        assert!(urls.iter().any(|url| url.ends_with("/pull/90")), "{urls:?}");
+    }
 
     #[test]
     fn resolve_program_finds_a_tool_on_path_and_names_it_when_missing() {
@@ -5224,6 +5286,63 @@ esac
         assert!(linear_argv
             .lines()
             .any(|line| line.ends_with("issues read SCA-9999")));
+    }
+
+    #[test]
+    fn day_links_fetch_merged_pull_requests_and_done_tickets() {
+        let dir = fixture_dir("day-links");
+        let (gh, linearis) = fake_programs(
+            &dir,
+            &format!(
+                r#"#!/bin/sh
+case "$*" in
+  "pr view 9 --repo acme/app --json {GITHUB_PULL_REQUEST_SUMMARY_FIELDS}") printf '%s' '{{"number":9,"title":"Merged day PR","state":"MERGED","headRefName":"day/9","url":"https://github.com/acme/app/pull/9"}}' ;;
+  *"pr list"*) printf '%s' '[]' ;;
+  *) exit 42 ;;
+esac
+"#
+            ),
+            r#"#!/bin/sh
+case "$*" in
+  *"issues read SCA-42") printf '%s' '{"identifier":"SCA-42","title":"Done day ticket","state":{"name":"Done"}}' ;;
+  *"attachments list SCA-42"*) printf '%s' '[]' ;;
+  *) exit 43 ;;
+esac
+"#,
+        );
+        let links = crate::day::DayLinks {
+            tickets: vec!["SCA-42".into()],
+            prs: vec!["https://github.com/acme/app/pull/9".into()],
+        };
+        let mut config = config();
+        config.repos.clear();
+        config.linear_team = None;
+
+        let snapshot = refresh_work_index_with_missive(
+            &config,
+            &MissiveConfig::default(),
+            &[],
+            WorkIndexRefreshContext {
+                day_links: Some(&links),
+                ..WorkIndexRefreshContext::default()
+            },
+            Instant::now(),
+            Instant::now() + WORK_INDEX_BATCH_TIMEOUT,
+            WORK_INDEX_TARGET_TIMEOUT,
+            &gh,
+            &linearis,
+            Path::new("/usr/bin/false"),
+        );
+
+        assert!(snapshot.items.iter().any(|item| {
+            item.pr_url.as_deref() == Some("https://github.com/acme/app/pull/9")
+                && item.pr_state.as_deref() == Some("merged")
+        }));
+        assert!(snapshot.items.iter().any(|item| {
+            item.ticket_details.iter().any(|ticket| {
+                ticket.identifier == "SCA-42" && ticket.state.as_deref() == Some("Done")
+            })
+        }));
     }
 
     #[test]

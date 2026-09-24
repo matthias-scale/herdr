@@ -2333,6 +2333,12 @@ impl HeadlessServer {
             self.last_app_client_seen = now;
             return true;
         }
+        // Idleness only says nobody is watching the index go round on its own. A
+        // refresh someone asked for has a reader by definition: a CLI-only user
+        // who linked a merged pull request and is about to run `day list`.
+        if self.app.work_index_refresh_requested {
+            return true;
+        }
         let idle_limit = Duration::from_secs(
             self.app
                 .work_index_config
@@ -7711,7 +7717,8 @@ mod tests {
     }
 
     fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServer {
-        let config = crate::config::Config::default();
+        let mut config = crate::config::Config::default();
+        config.work_index.enabled = false;
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::app::App::new(&config, true, None, api_rx, event_hub);
         app.state.local_sound_playback = false;
@@ -8142,6 +8149,28 @@ mod tests {
             ]
         );
         assert_eq!(presentation.tab, Some(crate::app::DockSurface::Files));
+    }
+
+    #[test]
+    fn a_requested_refresh_runs_on_a_server_that_has_stopped_polling() {
+        let mut server = test_headless_server();
+        server.app.work_index_config.enabled = true;
+        server.app.work_index_config.refresh_interval_seconds = 10;
+        let now = Instant::now();
+        server.last_app_client_seen = now - Duration::from_secs(61);
+        assert!(!server.work_index_refresh_is_useful(now));
+
+        // `day link` is the only thing that can complete the item, and nobody is
+        // attached to carry the answer back. Swallowing it leaves a CLI-only user
+        // reading `todo` for a merged pull request forever.
+        server.app.work_index_refresh_requested = true;
+        assert!(server.work_index_refresh_is_useful(now));
+
+        // Running it clears the request, so the server goes back to sleep.
+        server.app.next_work_index_refresh = now;
+        server.app.start_work_index_refresh_if_due(now);
+        assert!(!server.app.work_index_refresh_requested);
+        assert!(!server.work_index_refresh_is_useful(now));
     }
 
     #[test]

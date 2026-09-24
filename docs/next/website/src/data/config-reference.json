@@ -1439,7 +1439,7 @@
           "key": "ui.open_dock_on_work_link",
           "type": "boolean",
           "default": "false",
-          "description": "Open the dock automatically when the focused pane carries a pull request, ticket, or conversation. Off by default: the status row names each link after the pane title, and clicking that name opens it in the dock. The dock tab strip's \u25e7 toggle writes this setting too."
+          "description": "Open the dock automatically when the focused pane carries a pull request, ticket, or conversation. Off by default: the status row names each link after the pane title, and clicking that name opens it in the dock. The dock tab strip's ◧ toggle writes this setting too."
         },
         {
           "key": "ui.show_pane_toggle_buttons",
@@ -2086,7 +2086,7 @@
           "key": "work_index.enabled",
           "type": "boolean",
           "default": "false",
-          "description": "Enable repo-wide GitHub, Linear, and agent-pane work indexing."
+          "description": "Enable repo-wide GitHub, Linear, agent-pane, and day-link work indexing. Day items complete themselves from linked merged PRs and done tickets only while this is on."
         },
         {
           "key": "work_index.refresh_interval_seconds",
@@ -2409,6 +2409,19 @@
           "type": "string",
           "default": "\"pomodoro-log.md\"",
           "description": "Note in the notepad directory confirmations are appended to. Empty disables the log."
+        }
+      ]
+    },
+    {
+      "id": "day_board",
+      "title": "Day board",
+      "description": "The day list, whose columns are derived from which pane is bound to an item and what that agent is doing.",
+      "keys": [
+        {
+          "key": "day_board.stale_after",
+          "type": "integer",
+          "default": "600",
+          "description": "Seconds a bound agent may stay quiet before its item reads as stale. The clock ignores an idle agent repainting its own chrome."
         }
       ]
     }

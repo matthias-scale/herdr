@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod agent_ref;
 pub mod agents;
 pub mod common;
+pub mod day;
 pub mod events;
 pub mod fleet;
 pub mod groups;
@@ -21,6 +22,7 @@ pub mod worktrees;
 pub use agent_ref::*;
 pub use agents::*;
 pub use common::*;
+pub use day::*;
 pub use events::*;
 pub use fleet::*;
 pub use groups::*;
@@ -153,6 +155,20 @@ pub enum Method {
     AgentState(AgentStateParams),
     #[serde(rename = "agent.report")]
     AgentReport(AgentReportParams),
+    #[serde(rename = "day.add")]
+    DayAdd(DayAddParams),
+    #[serde(rename = "day.list")]
+    DayList(DayListParams),
+    #[serde(rename = "day.bind")]
+    DayBind(DayBindParams),
+    #[serde(rename = "day.link")]
+    DayLink(DayLinkParams),
+    #[serde(rename = "day.note")]
+    DayNote(DayNoteParams),
+    #[serde(rename = "day.done")]
+    DayDone(DayItemTarget),
+    #[serde(rename = "day.dismiss")]
+    DayDismiss(DayItemTarget),
     #[serde(rename = "agent.read")]
     AgentRead(AgentReadParams),
     #[serde(rename = "agent.explain")]

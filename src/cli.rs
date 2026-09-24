@@ -25,6 +25,7 @@ macro_rules! println {
 mod agent;
 mod api;
 mod completion;
+mod day;
 mod fleet;
 mod integration;
 mod machine;
@@ -190,6 +191,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "config" => run_config_command(&args[2..])?,
         "fleet" => fleet::run_fleet_command(&args[2..])?,
         "work-index" => work_index::run_work_index_command(&args[2..])?,
+        "day" => day::run_day_command(&args[2..])?,
         "channel" => run_channel_command(&args[2..])?,
         "machine" => machine::run_machine_command(&args[2..])?,
         "workspace" => workspace::run_workspace_command(&args[2..])?,

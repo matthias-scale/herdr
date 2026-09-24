@@ -152,6 +152,14 @@ pub enum ResponseResult {
     AgentList {
         agents: Vec<AgentInfo>,
     },
+    DayItem {
+        item: super::day::DerivedDayItem,
+    },
+    DayList {
+        items: Vec<super::day::DerivedDayItem>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        load_errors: Vec<super::day::DayLoadError>,
+    },
     AgentFocusStarted {
         operation_id: String,
         agent_ref: super::AgentRef,

@@ -68,6 +68,7 @@ mod client;
 mod config;
 mod connectivity;
 mod contract_false_positive;
+mod day;
 mod detect;
 mod events;
 mod files;
@@ -198,7 +199,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # manifest_check = true
 
 [work_index]
-# Enable repo-wide GitHub, Linear, and agent-pane work indexing.
+# Enable repo-wide GitHub, Linear, agent-pane, and day-link work indexing.
+# Day items complete themselves from linked merged PRs and done tickets only
+# while this is on.
 # enabled = false
 # Refresh interval in seconds.
 # refresh_interval_seconds = 300
@@ -628,6 +631,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # target = "workbox"             # OpenSSH config alias or user@host
 # socket = "/path/to/herdr.sock" # optional
 # session = "agents"              # optional named Herdr session
+
+[day_board]
+# Mark a working item stale after this many quiet seconds. Default: 600 (10 minutes).
+# stale_after = 600
 
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.

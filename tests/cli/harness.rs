@@ -184,6 +184,7 @@ pub(super) fn spawn_named_server(
         // app directory rename make the written config inert.
         .env("HERDR_CONFIG_PATH", &config_path)
         .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env("XDG_STATE_HOME", runtime_dir.join("state"))
         .env_remove("HERDR_SOCKET_PATH")
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
         .env_remove("HERDR_ENV")
@@ -234,6 +235,7 @@ pub(super) fn run_named_cli_with_env_and_socket_override(
         .args(args)
         .env("XDG_CONFIG_HOME", config_home)
         .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env("XDG_STATE_HOME", runtime_dir.join("state"))
         .env_remove("HERDR_CONFIG_PATH")
         .env_remove("HERDR_CLIENT_SOCKET_PATH")
         .env_remove("HERDR_ENV");
@@ -315,6 +317,9 @@ pub(super) fn spawn_herdr_with_config(
     // directory rename make the written config inert.
     cmd.env("HERDR_CONFIG_PATH", &config_path);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
+    // Keep host-global state, including the day board store and its lock, out of
+    // the developer's real state dir; CLI tests run in parallel against it.
+    cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
     cmd.env("HERDR_SOCKET_PATH", socket_path);
     cmd.env_remove("HERDR_CLIENT_SOCKET_PATH");
     cmd.env("SHELL", "/bin/sh");

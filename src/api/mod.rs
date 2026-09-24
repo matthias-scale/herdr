@@ -178,4 +178,16 @@ mod tests {
             }));
         }
     }
+
+    #[test]
+    fn day_mutations_do_not_trigger_client_rendering() {
+        let request = Request {
+            id: "day-done".into(),
+            method: Method::DayDone(crate::api::schema::DayItemTarget {
+                id: "01K5DAYITEM".into(),
+            }),
+        };
+
+        assert!(!request_changes_ui(&request));
+    }
 }
