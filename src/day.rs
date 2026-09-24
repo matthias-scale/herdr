@@ -343,6 +343,19 @@ pub fn write_item(root: &Path, item: &DayItem) -> Result<(), String> {
     write_item_unlocked(root, item)
 }
 
+/// The store holds what a person wrote down, so keep it to its owner. A failure
+/// here is not worth refusing the write over: the content is already saved, and
+/// the directory may be one the user deliberately shares.
+fn restrict_to_owner(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 fn write_item_unlocked(root: &Path, item: &DayItem) -> Result<(), String> {
     validate_item(item)?;
     let items_dir = root.join("items");
@@ -352,6 +365,7 @@ fn write_item_unlocked(root: &Path, item: &DayItem) -> Result<(), String> {
             items_dir.display()
         )
     })?;
+    restrict_to_owner(&items_dir);
     let target = items_dir.join(format!("{}.md", item.id));
     let temporary = items_dir.join(format!(
         ".{}.tmp-{}-{}",
@@ -361,9 +375,17 @@ fn write_item_unlocked(root: &Path, item: &DayItem) -> Result<(), String> {
     ));
     let contents = format_item_file(item)?;
     let write_result = (|| -> Result<(), String> {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // An item carries the title, note, and linked work a person wrote down.
+        // The ambient umask is usually 022, which would publish all of it to any
+        // account that can reach the state directory.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
             .open(&temporary)
             .map_err(|error| format!("cannot create {}: {error}", temporary.display()))?;
         file.write_all(contents.as_bytes())
@@ -381,6 +403,7 @@ fn write_item_unlocked(root: &Path, item: &DayItem) -> Result<(), String> {
 fn lock_store(root: &Path) -> Result<fs::File, String> {
     fs::create_dir_all(root)
         .map_err(|error| format!("cannot create day item store {}: {error}", root.display()))?;
+    restrict_to_owner(root);
     let lock_path = root.join(".items.lock");
     let lock = fs::OpenOptions::new()
         .create(true)
