@@ -138,7 +138,7 @@ impl App {
                     return super::responses::encode_error(
                         id,
                         "invalid_params",
-                        &format!("invalid pull request url: {raw}"),
+                        format!("invalid pull request url: {raw}"),
                     );
                 }
             },
