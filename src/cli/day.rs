@@ -102,7 +102,15 @@ fn day_bind(args: &[String]) -> std::io::Result<i32> {
     };
     let pane_id = match pane_id {
         Some(pane_id) => pane_id,
-        None => current_pane_id()?,
+        // Report a missing pane the way every other argument problem is
+        // reported, rather than as a debug-formatted io error.
+        None => match current_pane_id() {
+            Ok(pane_id) => pane_id,
+            Err(message) => {
+                eprintln!("{message}");
+                return Ok(2);
+            }
+        },
     };
     send(
         "cli:day:bind",
@@ -110,17 +118,20 @@ fn day_bind(args: &[String]) -> std::io::Result<i32> {
     )
 }
 
-fn current_pane_id() -> std::io::Result<String> {
+fn current_pane_id() -> Result<String, String> {
     let response = super::send_request(&Request {
         id: "cli:day:bind:current".into(),
         method: Method::PaneCurrent(PaneCurrentParams {
             caller_pane_id: None,
         }),
-    })?;
+    })
+    .map_err(|error| format!("cannot reach the server: {error}"))?;
     response["result"]["pane"]["pane_id"]
         .as_str()
         .map(str::to_string)
-        .ok_or_else(|| std::io::Error::other(format!("cannot resolve current pane: {response}")))
+        .ok_or_else(|| {
+            "cannot resolve the current pane; name one as `herdr day bind <id> <pane>`".to_string()
+        })
 }
 
 fn day_link(args: &[String]) -> std::io::Result<i32> {
