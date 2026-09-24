@@ -4973,6 +4973,41 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_mouse_sgr_pixels_reports_cell_boundary_releases() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.resize(80, 24, 10, 20).unwrap();
+        terminal.write(b"\x1b[?1003h\x1b[?1006h\x1b[?1016h");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let press = pane.encode_mouse_button(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crate::input::mouse::Position::Cell { column: 4, row: 6 },
+            crossterm::event::KeyModifiers::empty(),
+        );
+        let right_boundary_release = pane.encode_mouse_button(
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            crate::input::mouse::Position::Cell { column: 80, row: 6 },
+            crossterm::event::KeyModifiers::empty(),
+        );
+        let bottom_boundary_release = pane.encode_mouse_button(
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            crate::input::mouse::Position::Cell { column: 4, row: 24 },
+            crossterm::event::KeyModifiers::empty(),
+        );
+
+        assert_eq!(press.as_deref(), Some(&b"\x1b[<0;41;121M"[..]));
+        assert_eq!(
+            right_boundary_release.as_deref(),
+            Some(&b"\x1b[<0;801;121m"[..])
+        );
+        assert_eq!(
+            bottom_boundary_release.as_deref(),
+            Some(&b"\x1b[<0;41;481m"[..])
+        );
+    }
+
+    #[test]
     fn ghostty_normalize_buffer_symbol_prefers_grapheme_width_when_metadata_disagrees() {
         const WIDE_GRAPHEME: &str = "🙂";
         const FLAG_GRAPHEME: &str = "🇧🇷";
