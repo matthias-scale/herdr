@@ -1994,7 +1994,7 @@ impl GhosttyPaneTerminal {
             return None;
         }
         let mut encoder = ghostty_mouse_encoder_for_terminal(&core.terminal, position)?;
-        let (x, y) = ghostty_mouse_position_for_terminal(position)?;
+        let (x, y) = ghostty_mouse_position_for_terminal(&core.terminal, position)?;
         event.set_position(x, y);
         encoder
             .encode(&event)
@@ -4938,26 +4938,38 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_mouse_sgr_pixels_preserves_exact_and_downgrades_cell_input() {
+    fn ghostty_mouse_sgr_pixels_preserves_exact_and_converts_cell_input() {
         let (tx, _rx) = mpsc::channel(4);
         let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
         terminal.resize(80, 24, 10, 20).unwrap();
         terminal.write(b"\x1b[?1003h\x1b[?1006h\x1b[?1016h");
         let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
 
-        let exact = pane.encode_mouse_motion(
-            crossterm::event::MouseEventKind::Moved,
+        let exact_press = pane.encode_mouse_button(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
             crate::input::mouse::Position::Pixels { x: 48, y: 139 },
             crossterm::event::KeyModifiers::empty(),
         );
-        let fallback = pane.encode_mouse_motion(
-            crossterm::event::MouseEventKind::Moved,
+        let exact_release = pane.encode_mouse_button(
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            crate::input::mouse::Position::Pixels { x: 48, y: 139 },
+            crossterm::event::KeyModifiers::empty(),
+        );
+        let fallback_press = pane.encode_mouse_button(
+            crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            crate::input::mouse::Position::Cell { column: 4, row: 6 },
+            crossterm::event::KeyModifiers::empty(),
+        );
+        let fallback_release = pane.encode_mouse_button(
+            crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
             crate::input::mouse::Position::Cell { column: 4, row: 6 },
             crossterm::event::KeyModifiers::empty(),
         );
 
-        assert_eq!(exact.as_deref(), Some(&b"\x1b[<35;48;139M"[..]));
-        assert_eq!(fallback.as_deref(), Some(&b"\x1b[<35;5;7M"[..]));
+        assert_eq!(exact_press.as_deref(), Some(&b"\x1b[<0;48;139M"[..]));
+        assert_eq!(exact_release.as_deref(), Some(&b"\x1b[<0;48;139m"[..]));
+        assert_eq!(fallback_press.as_deref(), Some(&b"\x1b[<0;41;121M"[..]));
+        assert_eq!(fallback_release.as_deref(), Some(&b"\x1b[<0;41;121m"[..]));
     }
 
     #[test]
