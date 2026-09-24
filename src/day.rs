@@ -197,17 +197,38 @@ pub struct DerivedDayItem {
     pub notice: Option<String>,
 }
 
-/// Names one server among those sharing the host-global store. A named session
-/// is already unique and readable. Unnamed servers differ only by socket path,
-/// so hash it: the raw path is a home directory that would otherwise be written
-/// into an item file and synced to other machines.
+/// Names one server among those sharing the host-global store.
+///
+/// The api socket path is the identity, because that is what actually routes a
+/// client to one server. A session name is not: `HERDR_SOCKET_PATH` overrides
+/// routing while an inherited `HERDR_SESSION` keeps naming the same session, so
+/// two servers a client reaches separately would otherwise claim each other's
+/// pane ids. The name only rides along so the value stays readable. The path is
+/// a home directory, so hash it rather than write it into an item file that
+/// syncs to other machines.
 pub fn server_id_for(session_name: Option<&str>, socket_path: &Path) -> String {
-    if let Some(name) = session_name {
-        return name.to_string();
-    }
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(socket_path.as_os_str().as_encoded_bytes());
-    format!("sock-{:x}", digest)[..17].to_string()
+    let digest = Sha256::digest(socket_identity_key(socket_path).as_encoded_bytes());
+    let digest = format!("{digest:x}");
+    let digest = &digest[..12];
+    match session_name {
+        Some(name) => format!("{name}-{digest}"),
+        None => format!("sock-{digest}"),
+    }
+}
+
+/// Two spellings of one socket path are one server, and a relative or
+/// symlinked spelling would otherwise orphan the bindings a previous start
+/// wrote. The socket file usually does not exist yet when identity is computed,
+/// so resolve the directory and keep the file name.
+fn socket_identity_key(socket_path: &Path) -> std::ffi::OsString {
+    match (socket_path.parent(), socket_path.file_name()) {
+        (Some(parent), Some(name)) => fs::canonicalize(parent)
+            .map(|dir| dir.join(name))
+            .unwrap_or_else(|_| socket_path.to_path_buf()),
+        _ => socket_path.to_path_buf(),
+    }
+    .into_os_string()
 }
 
 pub fn default_root() -> PathBuf {
@@ -849,5 +870,54 @@ mod tests {
         }));
         assert_eq!(state.day_board.items.get(&candidate.id), Some(&candidate));
         state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn server_id_separates_socket_overridden_servers_sharing_one_session_name() {
+        let root = temp_root("server-id-socket");
+        fs::create_dir_all(root.join("one")).expect("one");
+        fs::create_dir_all(root.join("two")).expect("two");
+
+        // `HERDR_SOCKET_PATH` decides which server a client reaches, so these are
+        // two servers even though both inherited the same `HERDR_SESSION`.
+        let left = server_id_for(Some("work"), &root.join("one/herdr.sock"));
+        let right = server_id_for(Some("work"), &root.join("two/herdr.sock"));
+
+        assert_ne!(left, right);
+        assert!(left.starts_with("work-"), "{left}");
+        assert!(right.starts_with("work-"), "{right}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn server_id_is_stable_across_spellings_of_one_socket_path() {
+        let root = temp_root("server-id-spelling");
+        let dir = root.join("nested");
+        fs::create_dir_all(&dir).expect("dir");
+
+        let plain = server_id_for(None, &dir.join("herdr.sock"));
+        let indirect = server_id_for(None, &root.join("nested/../nested/herdr.sock"));
+
+        assert_eq!(plain, indirect);
+        assert!(plain.starts_with("sock-"), "{plain}");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn server_id_never_carries_the_socket_path_itself() {
+        let root = temp_root("server-id-secret");
+        fs::create_dir_all(&root).expect("root");
+        let socket = root.join("herdr.sock");
+
+        let id = server_id_for(Some("work"), &socket);
+
+        // Item files sync to other machines, so the home directory must not ride
+        // along in one.
+        assert!(!id.contains(&root.to_string_lossy().to_string()), "{id}");
+        assert!(!id.contains("herdr.sock"), "{id}");
+
+        fs::remove_dir_all(&root).ok();
     }
 }
