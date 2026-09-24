@@ -1944,9 +1944,9 @@ impl Default for RemoteConfig {
 #[serde(default)]
 pub struct FleetConfig {
     /// Stable name for this server in cross-host agent references.
-    /// Defaults to the system hostname.
+    /// Defaults to the configured local fleet host, then the system hostname.
     pub self_name: Option<String>,
-    /// Fleet inventory refresh interval. Default: 15000 milliseconds.
+    /// Fleet inventory refresh interval. Default: 5000 milliseconds.
     pub refresh_interval_ms: u64,
     /// Per-host read deadline. Default: 5000 milliseconds.
     pub timeout_ms: u64,
@@ -1967,7 +1967,7 @@ impl Default for FleetConfig {
     fn default() -> Self {
         Self {
             self_name: None,
-            refresh_interval_ms: 15_000,
+            refresh_interval_ms: 5_000,
             timeout_ms: 5_000,
             heartbeat_stale_ms: 30 * 60 * 1_000,
             symphony_host: None,
@@ -1997,6 +1997,13 @@ impl FleetConfig {
         self.self_name
             .clone()
             .filter(|name| !name.trim().is_empty() && !name.contains("::"))
+            .or_else(|| {
+                self.hosts
+                    .iter()
+                    .find(|host| host.local)
+                    .map(|host| host.name.clone())
+                    .filter(|name| !name.trim().is_empty() && !name.contains("::"))
+            })
             .or(hostname)
             .filter(|name| !name.trim().is_empty() && !name.contains("::"))
             .unwrap_or_else(|| "localhost".to_string())
@@ -2600,7 +2607,7 @@ default_surfaces = ["home", "pull_request", "hosts", "keys", "note"]
         let defaults = Config::default().remote.fleet;
         assert!(defaults.self_name.is_none());
         assert!(!defaults.resolved_self_name().is_empty());
-        assert_eq!(defaults.refresh_interval_ms, 15_000);
+        assert_eq!(defaults.refresh_interval_ms, 5_000);
         assert!(defaults.hosts.is_empty());
         // MAT-159 SCH2: the aloop producer host defaults to ub2.
         assert_eq!(defaults.resolved_aloop_host(), "ub2");
@@ -2635,6 +2642,42 @@ session = "agents"
 
         let blank: FleetConfig = toml::from_str("aloop_host = \"  \"").expect("blank aloop host");
         assert_eq!(blank.resolved_aloop_host(), "ub2");
+    }
+
+    #[test]
+    fn fleet_self_name_prefers_the_local_host_before_the_os_hostname() {
+        let fleet = FleetConfig {
+            hosts: vec![
+                FleetHostConfig {
+                    name: "ub1".into(),
+                    target: "ub1".into(),
+                    ..FleetHostConfig::default()
+                },
+                FleetHostConfig {
+                    name: "mbpro".into(),
+                    local: true,
+                    ..FleetHostConfig::default()
+                },
+            ],
+            ..FleetConfig::default()
+        };
+        assert_eq!(
+            fleet.resolved_self_name_with_hostname(Some("Darwins-MacBook-Pro.local".into())),
+            "mbpro"
+        );
+
+        let without_local = FleetConfig {
+            hosts: vec![FleetHostConfig {
+                name: "ub1".into(),
+                target: "ub1".into(),
+                ..FleetHostConfig::default()
+            }],
+            ..FleetConfig::default()
+        };
+        assert_eq!(
+            without_local.resolved_self_name_with_hostname(Some("workstation".into())),
+            "workstation"
+        );
     }
 
     #[test]

@@ -16,13 +16,14 @@ const REMOTE_RUNS_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUNS_V1\x1e\n";
 const REMOTE_RUN_RECORD_MARKER: &[u8] = b"\x1eHERDR_FLEET_RUN_V1:";
 const REMOTE_HOST_MARKER: &[u8] = b"\x1eHERDR_FLEET_HOST_V1\x1e\n";
 const REMOTE_GROUPS_MARKER: &[u8] = b"\x1eHERDR_FLEET_GROUPS_V1\x1e\n";
+const REMOTE_PID_ALIVE_PROBE: &str = r#"[ -n "$pid" ] && [ "$pid" -gt 0 ] && (kill -0 "$pid" 2>/dev/null || ps -p "$pid" -o pid= >/dev/null 2>&1)"#;
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const MIN_TIMEOUT_MS: u64 = 100;
 const MAX_TIMEOUT_MS: u64 = 60_000;
 const MIN_REFRESH_INTERVAL_MS: u64 = 100;
-// ub2 currently carries about 1,000 retained runs. Inspect enough entries to
-// select its newest records while keeping malformed or unbounded stores capped.
-const MAX_RUN_DIRECTORY_ENTRIES: usize = 2_048;
+// ub2 currently carries more than 3,000 retained runs. Inspect enough entries
+// to select its newest records while keeping malformed stores capped.
+const MAX_RUN_DIRECTORY_ENTRIES: usize = 8_192;
 const MAX_REMOTE_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const AUTHORITY_ACCEPTANCE_LEDGER_VERSION: u32 = 2;
 #[cfg(not(test))]
@@ -1613,10 +1614,11 @@ impl Snapshot {
                 .filter(|row| row.source != EvidenceSource::Host && row.error.is_none())
                 .cloned()
                 .collect::<Vec<_>>();
-            if let Some(observed_at_unix_s) = observed_at_unix_s {
-                for row in &mut retained {
+            for row in &mut retained {
+                if let Some(observed_at_unix_s) = observed_at_unix_s {
                     row.age_s = row.age_seconds_at(observed_at_unix_s);
                 }
+                row.mark_unreachable();
             }
             retained.extend(std::mem::take(&mut host.entries));
             host.entries = retained;
@@ -2528,10 +2530,11 @@ fn remote_read_script(
     };
     let aloop = include_aloop.then(remote_aloop_script).unwrap_or_default();
     format!(
-        "set -u\n{socket}{session}herdr agent list || true\n{groups}printf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  ls -1t \"$HOME\"/.agents/runs/*/state.json 2>/dev/null | sed -n '1,{}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    pid=$(head -c {} \"$file\" | sed -n 's/.*\"pid\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)\n    alive=0\n    if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then alive=1; fi\n    printf '\\036HERDR_FLEET_RUN_V1:%s\\036\\n' \"$alive\"\n    head -c {} \"$file\"\n    printf '\\n'\n  done\nfi\n{aloop}printf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n",
+        "set -u\n{socket}{session}herdr agent list || true\n{groups}printf '\\036HERDR_FLEET_RUNS_V1\\036\\n'\nif [ -d \"$HOME/.agents/runs\" ]; then\n  ls -1t \"$HOME\"/.agents/runs/*/state.json 2>/dev/null | sed -n '1,{}p' | while IFS= read -r file; do\n    [ -f \"$file\" ] || continue\n    pid=$(head -c {} \"$file\" | sed -n 's/.*\"pid\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)\n    alive=0\n    if {pid_probe}; then alive=1; fi\n    printf '\\036HERDR_FLEET_RUN_V1:%s\\036\\n' \"$alive\"\n    head -c {} \"$file\"\n    printf '\\n'\n  done\nfi\n{aloop}printf '\\036HERDR_FLEET_HOST_V1\\036\\n'\nherdr status server --json || true\n",
         crate::agent_runs::MAX_RUNS_PER_HOST,
         crate::agent_runs::MAX_RUN_STATE_BYTES + 1,
         crate::agent_runs::MAX_RUN_STATE_BYTES + 1,
+        pid_probe = REMOTE_PID_ALIVE_PROBE,
     )
 }
 
@@ -3143,22 +3146,23 @@ impl FleetRow {
         let run = observation.state.clone();
         let heartbeat_at = parse_utc_timestamp(&run.last_heartbeat);
         let age_s = heartbeat_at.and_then(|heartbeat| now_s.checked_sub(heartbeat));
-        let fresh = age_s.is_some_and(|age| age <= heartbeat_stale_s);
         let blocked = run.state == crate::agent_runs::State::Blocked;
-        let liveness = match run.state {
-            crate::agent_runs::State::Active
-            | crate::agent_runs::State::Blocked
-            | crate::agent_runs::State::Waiting
-                if fresh =>
-            {
+        let summary = std::sync::Arc::new(crate::agent_runs::summarize(
+            host,
+            observation,
+            now_s,
+            heartbeat_stale_s,
+        ));
+        let liveness = match summary.state {
+            crate::agent_runs::DisplayState::Active | crate::agent_runs::DisplayState::Blocked => {
                 Liveness::Live
             }
-            crate::agent_runs::State::Done | crate::agent_runs::State::Failed => Liveness::Terminal,
-            crate::agent_runs::State::Active
-            | crate::agent_runs::State::Blocked
-            | crate::agent_runs::State::Waiting
-            | crate::agent_runs::State::Unknown
-            | crate::agent_runs::State::Empty => Liveness::Unknown,
+            crate::agent_runs::DisplayState::Done | crate::agent_runs::DisplayState::Failed => {
+                Liveness::Terminal
+            }
+            crate::agent_runs::DisplayState::Stale | crate::agent_runs::DisplayState::Empty => {
+                Liveness::Unknown
+            }
         };
         let raw_state = run.state.as_str().to_string();
         let state = effective_state(&raw_state, liveness, blocked);
@@ -3178,12 +3182,6 @@ impl FleetRow {
                     .as_ref()
                     .map(|session| format!("session:{}/{}", run.parent.host, session))
             });
-        let summary = std::sync::Arc::new(crate::agent_runs::summarize(
-            host,
-            observation,
-            now_s,
-            heartbeat_stale_s,
-        ));
         let agent_ref = crate::api::schema::AgentRef::new(host, summary.run_id.clone()).ok()?;
         let handle = agent_ref.to_string();
         Some(Self {
@@ -3238,6 +3236,24 @@ impl FleetRow {
             crate::api::schema::AgentRef::new(host, "RUN_STATE_ERROR").ok()?,
             error,
         ))
+    }
+
+    fn mark_unreachable(&mut self) {
+        if self.source != EvidenceSource::RunState || self.error.is_some() {
+            return;
+        }
+        self.state = "stale".into();
+        self.raw_state = "stale".into();
+        self.liveness = Liveness::Unknown;
+        self.blocked = false;
+        self.closure_liveness = Liveness::Unknown;
+        self.closure_blocked = false;
+        self.gate_summary = None;
+        if let Some(summary) = self.run_summary.as_mut() {
+            let summary = std::sync::Arc::make_mut(summary);
+            summary.state = crate::agent_runs::DisplayState::Stale;
+            summary.heartbeat_age_s = self.age_s;
+        }
     }
 
     fn unknown(
@@ -4804,6 +4820,20 @@ mod tests {
         let mut row = FleetRow::test_agent_row("remote", "worker");
         row.reported_at = Some("1970-01-01T00:01:40Z".into());
         row.age_s = Some(1);
+        let mut run = FleetRow::test_run_summary_row(crate::agent_runs::Summary {
+            host: "remote".into(),
+            run_id: "ra-active".into(),
+            label: "active run".into(),
+            task: "test retained state".into(),
+            phase: "verify".into(),
+            started_at: "1970-01-01T00:01:00Z".into(),
+            started_at_unix_s: 60,
+            heartbeat_age_s: Some(1),
+            state: crate::agent_runs::DisplayState::Active,
+        });
+        run.raw_state = "active".into();
+        run.liveness = Liveness::Live;
+        run.closure_liveness = Liveness::Live;
         let previous = Snapshot {
             hosts: vec![HostSnapshot {
                 name: "remote".into(),
@@ -4816,7 +4846,7 @@ mod tests {
                 protocol: None,
                 error: None,
                 remote_identity: None,
-                entries: vec![row],
+                entries: vec![row, run],
             }],
             ..Snapshot::default()
         };
@@ -4841,6 +4871,19 @@ mod tests {
         let mut first = unreachable(130_000);
         first.retain_unreachable_inventory_from(&previous);
         assert_eq!(first.hosts[0].entries[0].age_s, Some(30));
+        let retained_run = &first.hosts[0].entries[1];
+        assert_eq!(retained_run.state, "stale");
+        assert_eq!(retained_run.liveness, Liveness::Unknown);
+        assert_eq!(
+            retained_run.run_summary().expect("retained run").state,
+            crate::agent_runs::DisplayState::Stale
+        );
+        let projection = crate::agent_runs::project(&first);
+        assert_eq!(projection.active_count, 0);
+        assert_eq!(
+            projection.hosts[0].runs[0].state,
+            crate::agent_runs::DisplayState::Stale
+        );
 
         let mut second = unreachable(160_000);
         second.retain_unreachable_inventory_from(&first);
@@ -5396,7 +5439,7 @@ mod tests {
     }
 
     #[test]
-    fn local_run_scan_caps_entries_before_metadata_and_keeps_newest_results() {
+    fn local_run_scan_is_bounded_and_keeps_true_newest_results_past_2048_entries() {
         let inspected = std::sync::Arc::new(AtomicUsize::new(0));
         let observed = std::sync::Arc::clone(&inspected);
         let entries = (0..MAX_RUN_DIRECTORY_ENTRIES + 20).map(move |index| {
@@ -5407,17 +5450,39 @@ mod tests {
         assert_eq!(inspected.load(Ordering::Relaxed), MAX_RUN_DIRECTORY_ENTRIES);
 
         let root = run_fixture_dir("newest-runs");
-        let mut entries = Vec::new();
-        for index in 0..crate::agent_runs::MAX_RUNS_PER_HOST + 5 {
+        let entry_count = 3_280;
+        let mut entries = Vec::with_capacity(entry_count);
+        for index in 0..entry_count {
             let run = root.join(format!("run-{index:02}"));
             std::fs::create_dir(&run).expect("create run directory");
-            std::fs::write(run.join("state.json"), b"{}").expect("write run state");
+            let state = run.join("state.json");
+            std::fs::write(&state, b"{}").expect("write run state");
+            std::fs::File::open(&state)
+                .expect("open run state")
+                .set_modified(UNIX_EPOCH + Duration::from_secs(index as u64 + 1))
+                .expect("set run state mtime");
             entries.push(Ok(run));
-            std::thread::sleep(Duration::from_millis(2));
         }
         let newest = recent_run_state_paths(entries);
         assert_eq!(newest.len(), crate::agent_runs::MAX_RUNS_PER_HOST);
-        assert!(newest.contains(&root.join("run-44").join("state.json")));
+        assert!(newest.contains(
+            &root
+                .join(format!("run-{}", entry_count - 1))
+                .join("state.json")
+        ));
+        assert!(newest.iter().all(|path| {
+            let run_name = path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(OsStr::to_str)
+                .expect("run directory name");
+            let index = run_name
+                .strip_prefix("run-")
+                .expect("run prefix")
+                .parse::<usize>()
+                .expect("run index");
+            index >= entry_count - crate::agent_runs::MAX_RUNS_PER_HOST
+        }));
         assert!(!newest.contains(&root.join("run-00").join("state.json")));
         std::fs::remove_dir_all(root).expect("remove newest-runs fixture");
     }
@@ -5601,7 +5666,7 @@ mod tests {
     }
 
     #[test]
-    fn run_rows_preserve_stale_blocked_and_fresh_waiting_contract() {
+    fn run_rows_share_summary_liveness_for_stale_blocked_and_fresh_states() {
         let snapshot = run_snapshot(vec![
             legacy_run(
                 "ra-stale-blocked",
@@ -5613,6 +5678,13 @@ mod tests {
             legacy_run(
                 "ra-fresh-waiting",
                 "waiting",
+                "2025-09-17T08:59:30Z",
+                None,
+                None,
+            ),
+            legacy_run(
+                "ra-fresh-unknown",
+                "unknown",
                 "2025-09-17T08:59:30Z",
                 None,
                 None,
@@ -5639,6 +5711,19 @@ mod tests {
         assert_eq!(waiting["raw_state"], "waiting");
         assert_eq!(waiting["liveness"], "live");
         assert_eq!(waiting["blocked"], false);
+
+        let unknown = rows
+            .iter()
+            .find(|row| row["name"] == "ra-fresh-unknown")
+            .expect("unknown row");
+        assert_eq!(unknown["liveness"], "live");
+        let summary = snapshot.hosts[0]
+            .entries
+            .iter()
+            .find(|row| row.name.as_deref() == Some("ra-fresh-unknown"))
+            .and_then(FleetRow::run_summary)
+            .expect("unknown run summary");
+        assert_eq!(summary.state, crate::agent_runs::DisplayState::Active);
     }
 
     #[test]
@@ -6529,6 +6614,22 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
             crate::agent_runs::MAX_RUN_STATE_BYTES + 1
         )));
         assert!(script.contains("kill -0 \"$pid\""));
+        assert!(script.contains("ps -p \"$pid\" -o pid="));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_pid_probe_treats_kill_permission_denied_as_alive() {
+        let probe = format!(
+            "kill() {{ return 1; }}; ps() {{ return 0; }}; pid=42; if {}; then printf alive; else printf dead; fi",
+            REMOTE_PID_ALIVE_PROBE
+        );
+        let output = std::process::Command::new("sh")
+            .args(["-c", &probe])
+            .output()
+            .expect("run remote pid probe");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"alive");
     }
 
     #[test]
