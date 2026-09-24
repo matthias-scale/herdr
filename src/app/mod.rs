@@ -290,6 +290,10 @@ pub struct App {
     pub(crate) last_work_index_refresh_generation: u64,
     pub(crate) last_applied_work_index_refresh_generation: u64,
     pub(crate) next_work_index_refresh: Instant,
+    /// A refresh a person asked for, rather than one the interval came round to.
+    /// A detached server stops polling on its own after a while; it must not also
+    /// swallow the answer someone is waiting on.
+    pub(crate) work_index_refresh_requested: bool,
     pub(crate) work_index_context_fingerprint: crate::work_index::WorkIndexContextFingerprint,
     pub(crate) work_index_cache_bypass: crate::work_index::WorkIndexCacheBypass,
     pub(crate) work_index_snapshot: Option<crate::work_index::Snapshot>,
@@ -1592,6 +1596,7 @@ impl App {
             last_work_index_refresh_generation: 0,
             last_applied_work_index_refresh_generation: 0,
             next_work_index_refresh: Instant::now(),
+            work_index_refresh_requested: false,
             work_index_context_fingerprint: Vec::new(),
             work_index_cache_bypass: crate::work_index::WorkIndexCacheBypass::default(),
             work_index_snapshot,

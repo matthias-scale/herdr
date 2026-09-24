@@ -171,6 +171,11 @@ impl App {
         });
         if self.work_index_config.enabled {
             self.next_work_index_refresh = std::time::Instant::now();
+            // A link is the whole reason this item can complete on its own, and
+            // the person who typed it is waiting on the next `day list`. Say the
+            // refresh was asked for, so a detached server that has stopped
+            // polling still runs this one.
+            self.work_index_refresh_requested = true;
         }
         response
     }

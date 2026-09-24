@@ -4118,6 +4118,7 @@ impl crate::app::App {
         if self.work_index_refresh_in_flight.is_some() || now < self.next_work_index_refresh {
             return;
         }
+        self.work_index_refresh_requested = false;
         self.next_work_index_refresh =
             now + Duration::from_secs(self.work_index_config.refresh_interval_seconds.max(1));
         self.last_work_index_refresh_generation =
