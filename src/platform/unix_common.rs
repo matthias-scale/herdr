@@ -1,5 +1,9 @@
 use std::path::{Path, PathBuf};
 
+pub(super) fn process_exists_after_kill(result: libc::c_int, errno: Option<i32>) -> bool {
+    result == 0 || errno == Some(libc::EPERM)
+}
+
 pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::ChildExitReason {
     if status.signal().is_some() {
         super::ChildExitReason::Interrupted
@@ -55,6 +59,17 @@ fn copy_flush<R: std::io::Read, W: std::io::Write>(
         };
         writer.write_all(&buffer[..read])?;
         writer.flush()?;
+    }
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::process_exists_after_kill;
+
+    #[test]
+    fn permission_denied_pid_probe_still_means_the_process_exists() {
+        assert!(process_exists_after_kill(-1, Some(libc::EPERM)));
+        assert!(!process_exists_after_kill(-1, Some(libc::ESRCH)));
     }
 }
 

@@ -1318,11 +1318,10 @@ pub fn process_exists(pid: u32) -> bool {
         return false;
     }
     let result = unsafe { libc::kill(pid as i32, 0) };
-    if result == 0 {
-        true
-    } else {
-        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
+    let errno = (result != 0)
+        .then(|| std::io::Error::last_os_error().raw_os_error())
+        .flatten();
+    super::unix_common::process_exists_after_kill(result, errno)
 }
 
 pub fn write_clipboard(bytes: &[u8]) -> bool {

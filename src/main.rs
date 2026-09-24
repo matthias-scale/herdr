@@ -616,9 +616,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 
 # Read-only host inventory for `herdr fleet status`.
 # [remote.fleet]
-# Name used for this server in cross-host agent references. Defaults to the system hostname.
+# Name used for this server in cross-host agent references. Defaults to the local fleet host name, then the system hostname.
 # self_name = "laptop"
-# refresh_interval_ms = 15000
+# refresh_interval_ms = 5000
 # timeout_ms = 5000
 # heartbeat_stale_ms = 1800000
 # symphony_host = "server" # optional fleet host running Temporal; default is local
