@@ -244,7 +244,7 @@ fn short_streams_are_invariant_at_every_byte_boundary() {
         b"a\x1b[31;1mB\x1b[0m\x1b[2;3HZ\x1b[6n\x1b[?2004h",
         b"\x1b]8;;https://example.test/a\x1b\\link\x1b]8;;\x1b\\!",
         b"\x1b]52;c;aGk=\x07\x1b]2;migration\x1b\\\x07",
-        b"\x1bP+q5463\x1b\\\x1bP+q6E6F7065\x9c\x1b[6n",
+        b"\x1bP+q5463\x1b\\\x1bP+q6E6F7065\x1b\\\x1b[6n",
     ];
     for bytes in fixtures {
         let mut whole = Harness::new(16, 4);

@@ -4745,7 +4745,6 @@ mod tests {
     #[tokio::test]
     async fn c1_introducers_and_st_match_ghostty_rendered_text() {
         for (label, introducer, slug) in [
-            ("DCS", 0x90, "dcs"),
             ("SOS", 0x98, "sos"),
             ("PM", 0x9e, "pm"),
             ("APC", 0x9f, "apc"),
@@ -4761,12 +4760,27 @@ mod tests {
             assert_parser_classified_link_capture(label, &stream, &hidden, &visible, None);
         }
 
-        let hidden = "https://hidden-dcs-st.example.test/path";
-        let visible = "https://visible-after-st.example.test/path";
-        let mut stream = format!("\x1bP{hidden}").into_bytes();
-        stream.push(0x9c);
-        stream.extend_from_slice(format!("{visible}\n").as_bytes());
-        assert_parser_classified_link_capture("8-bit ST", &stream, hidden, visible, None);
+        for (label, prefix, terminator) in [
+            (
+                "DCS payload 0x9C",
+                b"\x1bPq".as_slice(),
+                b"\x1b\\".as_slice(),
+            ),
+            (
+                "OSC payload 0x9C",
+                b"\x1b]2;".as_slice(),
+                b"\x07".as_slice(),
+            ),
+        ] {
+            let hidden = "https://hidden-after-9c.example.test/path";
+            let visible = "https://visible-after-string.example.test/path";
+            let mut stream = prefix.to_vec();
+            stream.push(0x9c);
+            stream.extend_from_slice(hidden.as_bytes());
+            stream.extend_from_slice(terminator);
+            stream.extend_from_slice(format!("{visible}\n").as_bytes());
+            assert_parser_classified_link_capture(label, &stream, hidden, visible, None);
+        }
     }
 
     #[tokio::test]

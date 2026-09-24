@@ -605,75 +605,6 @@ index d8e84b63..755f2bf5 100644
  
      parser.command = .{
          .hyperlink_start = .{
-diff --git a/vendor/libghostty-vt/src/terminal/parse_table.zig b/vendor/libghostty-vt/src/terminal/parse_table.zig
-index fa074fa0..3133d3ab 100644
---- a/vendor/libghostty-vt/src/terminal/parse_table.zig
-+++ b/vendor/libghostty-vt/src/terminal/parse_table.zig
-@@ -213,6 +213,9 @@ fn genTable() Table {
-         // an ignored DCS could otherwise begin a live sequence mid-string
-         // (e.g. 0x9B => csi_entry).
-         range(&result, 0x80, 0xFF, source, source, .ignore);
-+
-+        // Herdr's parser-classified output contract also accepts raw 8-bit ST.
-+        single(&result, 0x9C, source, .ground, .none);
-     }
- 
-     // dcs_param
-@@ -263,6 +266,9 @@ fn genTable() Table {
-         // DCS strings terminate via 7-bit ST (ESC \) and abort via
-         // CAN/SUB, which are unaffected here.
-         range(&result, 0x80, 0xFF, source, source, .put);
-+
-+        // Herdr's parser-classified output contract also accepts raw 8-bit ST.
-+        single(&result, 0x9C, source, .ground, .none);
-     }
- 
-     // csi_param
-@@ -357,6 +363,9 @@ fn genTable() Table {
-         range(&result, 0x1C, 0x1F, source, source, .ignore);
-         range(&result, 0x20, 0xFF, source, source, .osc_put);
- 
-+        // Herdr's parser-classified output contract also accepts raw 8-bit ST.
-+        single(&result, 0x9C, source, .ground, .none);
-+
-         // XTerm accepts either BEL  or ST  for terminating OSC
-         // sequences, and when returning information, uses the same
-         // terminator used in a query.
-@@ -409,14 +418,17 @@ test {
-     _ = table;
- }
- 
--test "dcs_passthrough: high bytes are payload data" {
-+test "dcs_passthrough: high bytes except 8-bit ST are payload data" {
-     // Bytes 0x80-0xFF within a DCS string are payload data, not C1
--    // controls. This includes 0x9C (8-bit ST): a raw 0x9C is
--    // indistinguishable from a UTF-8 continuation byte (e.g. "Ü" is
--    // 0xC3 0x9C) and Ghostty doesn't support 8-bit C1 controls
--    // anywhere else.
-+    // controls. Herdr deliberately retains raw 8-bit ST as a terminator for
-+    // its parser-classified output contract.
-     for (0x80..0x100) |c| {
-         const entry = table[c][@intFromEnum(State.dcs_passthrough)];
-+        if (c == 0x9C) {
-+            try std.testing.expectEqual(State.ground, entry.state);
-+            try std.testing.expectEqual(Action.none, entry.action);
-+            continue;
-+        }
-         try std.testing.expectEqual(State.dcs_passthrough, entry.state);
-         try std.testing.expectEqual(Action.put, entry.action);
-     }
-@@ -428,6 +440,11 @@ test "dcs_ignore: high bytes are ignored payload data" {
-     // a CSI mid-string).
-     for (0x80..0x100) |c| {
-         const entry = table[c][@intFromEnum(State.dcs_ignore)];
-+        if (c == 0x9C) {
-+            try std.testing.expectEqual(State.ground, entry.state);
-+            try std.testing.expectEqual(Action.none, entry.action);
-+            continue;
-+        }
-         try std.testing.expectEqual(State.dcs_ignore, entry.state);
-         try std.testing.expectEqual(Action.ignore, entry.action);
-     }
 diff --git a/vendor/libghostty-vt/src/terminal/stream.zig b/vendor/libghostty-vt/src/terminal/stream.zig
 index 29bdde7d..26690beb 100644
 --- a/vendor/libghostty-vt/src/terminal/stream.zig
@@ -698,25 +629,6 @@ index 29bdde7d..26690beb 100644
                                  self.parser.state = .ground;
                                  offset += 1;
                                  continue;
-@@ -1090,7 +1096,8 @@ pub fn Stream(comptime H: type) type {
-                 const ByteVector = @Vector(vector_len, u8);
-                 while (end + vector_len <= input.len) {
-                     const bytes: ByteVector = input[end..][0..vector_len].*;
--                    const stop = bytes < @as(ByteVector, @splat(0x20));
-+                    const stop = (bytes < @as(ByteVector, @splat(0x20))) |
-+                        (bytes == @as(ByteVector, @splat(0x9C)));
-                     if (@reduce(.Or, stop)) break;
-                     end += vector_len;
-                 }
-@@ -1099,7 +1106,7 @@ pub fn Stream(comptime H: type) type {
-                 switch (input[end]) {
-                     // Not osc_put bytes: BEL/CAN/SUB/ESC terminate or
-                     // abort the state; other C0 bytes are ignored by it.
--                    0x00...0x1F => break,
-+                    0x00...0x1F, 0x9C => break,
-                     // Everything else is an osc_put byte.
-                     else => end += 1,
-                 }
 @@ -1203,6 +1210,12 @@ pub fn Stream(comptime H: type) type {
          fn nextNonUtf8(self: *Self, c: u8) void {
              assert(self.parser.state != .ground);
@@ -776,9 +688,9 @@ index 61172423..7b281693 100644
      /// silently ignored.
      terminfo_name: ?[]const u8 = null,
  
-+    /// OSC 8 target awaiting a parser-confirmed terminator. BEL and 8-bit ST
-+    /// consume the borrowed parser bytes immediately. ESC copies them until
-+    /// the following byte confirms or rejects 7-bit ST.
++    /// OSC 8 target awaiting a parser-confirmed terminator. BEL consumes the
++    /// borrowed parser bytes immediately. ESC copies them until the following
++    /// byte confirms or rejects 7-bit ST.
 +    parsed_hyperlink_pending: ?struct {
 +        uri: []const u8,
 +        owned: bool,
@@ -841,7 +753,7 @@ index 61172423..7b281693 100644
 +            callback(self, .boundary, "");
 +        }
 +        switch (terminator) {
-+            0x07, 0x9C => self.emitPendingHyperlink(),
++            0x07 => self.emitPendingHyperlink(),
 +            0x1B => {
 +                const pending = self.parsed_hyperlink_pending orelse return;
 +                if (pending.owned) return;
