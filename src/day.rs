@@ -315,12 +315,15 @@ fn create_dir_all_owner_only(path: &Path) -> std::io::Result<()> {
             create_dir_all_owner_only(parent)?;
         }
     }
-    let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    {
+    let builder = {
         use std::os::unix::fs::DirBuilderExt;
+        let mut builder = fs::DirBuilder::new();
         builder.mode(0o700);
-    }
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = fs::DirBuilder::new();
     match builder.create(path) {
         Ok(()) => restrict_to_owner(path),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
