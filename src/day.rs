@@ -29,6 +29,11 @@ pub enum DayItemSource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DayBinding {
+    /// Which server owns the bound pane. Pane ids restart at 1 in every server
+    /// process, so two named sessions on one host both own `w1:p1`. `None` is a
+    /// binding written before this field existed; it stays host-scoped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
     pub pane_id: String,
     pub bound_at: u64,
 }
@@ -207,6 +212,7 @@ impl crate::app::state::AppState {
         derive(
             item,
             &self.agent_host_name,
+            &self.day_server_id,
             stale_after,
             links_closed,
             |public_id| {
@@ -446,6 +452,7 @@ pub fn new_id(now_ms: u64) -> Result<String, String> {
 pub fn derive(
     item: &DayItem,
     local_host: &str,
+    local_server: &str,
     stale_after: Duration,
     links_closed: bool,
     pane: impl Fn(&str) -> Option<DayPaneEvidence>,
@@ -467,6 +474,20 @@ pub fn derive(
             notice: None,
         };
     };
+    if binding
+        .server_id
+        .as_deref()
+        .is_some_and(|server| server != local_server)
+    {
+        // Another server's pane id means nothing here, and resolving it against
+        // this server's panes would report a stranger's column.
+        return DerivedDayItem {
+            item: item.clone(),
+            column: DayColumn::Todo,
+            stale: false,
+            notice: None,
+        };
+    }
     let Some(evidence) = pane(&binding.pane_id) else {
         return DerivedDayItem {
             item: item.clone(),
@@ -518,6 +539,7 @@ mod tests {
             bindings: BTreeMap::from([(
                 "ub1".to_string(),
                 DayBinding {
+                    server_id: Some("default".to_string()),
                     pane_id: "w_main:p1".to_string(),
                     bound_at: 1_790_000_000,
                 },
@@ -633,6 +655,7 @@ mod tests {
             derive(
                 &candidate,
                 "ub1",
+                "default",
                 stale_after,
                 false,
                 evidence(crate::detect::AgentState::Working)
@@ -646,6 +669,7 @@ mod tests {
             derive(
                 &candidate,
                 "ub1",
+                "default",
                 stale_after,
                 true,
                 evidence(crate::detect::AgentState::Blocked)
@@ -657,6 +681,7 @@ mod tests {
             derive(
                 &candidate,
                 "ub1",
+                "default",
                 stale_after,
                 false,
                 evidence(crate::detect::AgentState::Working)
@@ -668,6 +693,7 @@ mod tests {
             derive(
                 &candidate,
                 "ub1",
+                "default",
                 stale_after,
                 false,
                 evidence(crate::detect::AgentState::Blocked)
@@ -681,6 +707,7 @@ mod tests {
             derive(
                 &candidate,
                 "ub1",
+                "default",
                 stale_after,
                 false,
                 evidence(crate::detect::AgentState::Working)
@@ -698,6 +725,7 @@ mod tests {
             derive(
                 &candidate,
                 "ub1",
+                "default",
                 Duration::from_secs(600),
                 false,
                 move |_| {
@@ -715,12 +743,80 @@ mod tests {
     }
 
     #[test]
+    fn binding_resolves_only_on_the_server_that_created_it() {
+        let mut bound_server = crate::app::state::AppState::test_with_adversarial_identity_state();
+        let mut other_server = crate::app::state::AppState::test_with_adversarial_identity_state();
+        other_server.workspaces[0].id = bound_server.workspaces[0].id.clone();
+        bound_server.day_server_id = "session-a".to_string();
+        other_server.day_server_id = "session-b".to_string();
+        bound_server.assert_invariants_for_test();
+        other_server.assert_invariants_for_test();
+
+        let pane_id = bound_server.workspaces[0].tabs[0].root_pane;
+        let public_pane_id = crate::workspace::public_pane_id_for_number(
+            &bound_server.workspaces[0].id,
+            bound_server.workspaces[0]
+                .public_pane_number(pane_id)
+                .expect("public pane number"),
+        );
+        let terminal_id = bound_server.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("terminal id")
+            .clone();
+        bound_server
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .set_raw_agent_state_for_test(crate::detect::AgentState::Working);
+        let other_pane_id = other_server.workspaces[0].tabs[0].root_pane;
+        let other_terminal_id = other_server.workspaces[0]
+            .terminal_id(other_pane_id)
+            .expect("terminal id")
+            .clone();
+        other_server
+            .terminals
+            .get_mut(&other_terminal_id)
+            .expect("terminal")
+            .set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
+
+        let mut candidate = item("01K5SERVER", "Stay on one server");
+        candidate.bindings = BTreeMap::from([(
+            bound_server.agent_host_name.clone(),
+            DayBinding {
+                server_id: Some(bound_server.day_server_id.clone()),
+                pane_id: public_pane_id,
+                bound_at: 1_790_000_000,
+            },
+        )]);
+
+        let bound = bound_server.derive_day_item(
+            &candidate,
+            Duration::from_secs(600),
+            false,
+            Instant::now(),
+        );
+        let mismatched = other_server.derive_day_item(
+            &candidate,
+            Duration::from_secs(600),
+            false,
+            Instant::now(),
+        );
+
+        assert_eq!(bound.column, DayColumn::Working);
+        assert_eq!(mismatched.column, DayColumn::Todo);
+        assert_eq!(mismatched.notice, None);
+        bound_server.assert_invariants_for_test();
+        other_server.assert_invariants_for_test();
+    }
+
+    #[test]
     fn adversarial_state_keeps_missing_pane_binding_as_todo_with_notice() {
         let mut state = crate::app::state::AppState::test_with_adversarial_identity_state();
         let mut candidate = item("01K5MISSING", "Keep me visible");
         candidate.bindings = BTreeMap::from([(
             state.agent_host_name.clone(),
             DayBinding {
+                server_id: Some(state.day_server_id.clone()),
                 pane_id: "w_missing:p9".to_string(),
                 bound_at: 1_790_000_000,
             },

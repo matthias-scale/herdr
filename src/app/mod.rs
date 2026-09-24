@@ -932,6 +932,8 @@ impl App {
             fleet_snapshot: crate::fleet::Snapshot::unpolled(&config.remote.fleet.hosts),
             local_group_snapshot: None,
             agent_host_name,
+            day_server_id: crate::session::active_name()
+                .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string()),
             day_board: if cfg!(test) {
                 crate::day::DayBoard::default()
             } else {

@@ -89,10 +89,12 @@ impl App {
             );
         };
         let host = self.state.agent_host_name.clone();
+        let server_id = self.state.day_server_id.clone();
         self.update_and_publish(id, &params.id, move |item| {
             item.bindings.insert(
                 host,
                 crate::day::DayBinding {
+                    server_id: Some(server_id),
                     pane_id: canonical_pane_id,
                     bound_at: crate::day::unix_seconds_now(),
                 },
@@ -459,6 +461,7 @@ mod tests {
             panic!("unexpected response: {enabled}");
         };
         assert_eq!(items[0].column, crate::day::DayColumn::Done);
+
         let _ = std::fs::remove_dir_all(root);
     }
 
