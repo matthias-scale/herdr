@@ -1682,6 +1682,7 @@ impl HeadlessServer {
 
     fn sync_foreground_client_state(&mut self) {
         self.app.direct_graphics_available = self.direct_graphics_available();
+        crate::kitty_graphics::set_direct_host_graphics(self.app.direct_graphics_available);
         self.app.pixel_mouse_available = self.foreground_client_id.is_some_and(|id| {
             self.clients
                 .get(&id)
@@ -6692,6 +6693,63 @@ impl HeadlessServer {
             let Some(client) = self.clients.get_mut(&client_id) else {
                 continue;
             };
+            #[cfg(unix)]
+            let reset_graphics_cache = client
+                .graphics_surface_reset_pending
+                .then(crate::kitty_graphics::HostGraphicsCache::default);
+            #[cfg(unix)]
+            let mut direct_transfer = if client.direct_graphics
+                && client.direct_terminal_graphics.is_none()
+                && is_app_client
+                && self.app.state.kitty_graphics_enabled
+            {
+                match crate::kitty_graphics::prepare_direct_terminal_transfer(
+                    &self.app.state,
+                    &self.app.pane_graphics,
+                    &self.app.terminal_runtimes,
+                    client_presentation_policy
+                        .as_ref()
+                        .expect("app render target has presentation policy")
+                        .clone(),
+                    cell_size,
+                    reset_graphics_cache
+                        .as_ref()
+                        .unwrap_or(&client.graphics_cache),
+                ) {
+                    Ok(transfer) => transfer,
+                    Err(err) => {
+                        warn!(client_id, %err, "failed to stage direct terminal graphics");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            #[cfg(unix)]
+            let direct_serialized = direct_transfer
+                .as_ref()
+                .map(crate::kitty_graphics::DirectTerminalTransfer::message)
+                .map(|message| {
+                    Self::frame_server_message_with_max(&message, MAX_GRAPHICS_FRAME_SIZE)
+                })
+                .transpose();
+            #[cfg(unix)]
+            let direct_serialized = match direct_serialized {
+                Ok(serialized) => serialized,
+                Err(err) => {
+                    warn!(client_id, %err, "failed to serialize direct terminal graphics");
+                    direct_transfer = None;
+                    None
+                }
+            };
+            #[cfg(unix)]
+            let direct_transfer_pending = client.direct_terminal_graphics.is_some();
+            #[cfg(unix)]
+            let direct_transfer_ready = direct_transfer.is_some();
+            #[cfg(not(unix))]
+            let direct_transfer_pending = false;
+            #[cfg(not(unix))]
+            let direct_transfer_ready = false;
             let mut next_graphics_cache = client.graphics_cache.clone();
             let mut reset_graphics = Vec::new();
             let mut encoded = if is_app_client
@@ -6706,15 +6764,23 @@ impl HeadlessServer {
                     }
                 }
                 let graphics_started = crate::render_prof::timer();
-                let encoded = crate::kitty_graphics::encode_local_pane_graphics_for_client(
-                    &self.app.state,
-                    &self.app.pane_graphics,
-                    &self.app.terminal_runtimes,
-                    client_presentation_policy.expect("app render target has presentation policy"),
-                    cell_size,
-                    Some(crate::kitty_graphics::HEADLESS_GRAPHICS_TRANSACTION_BUDGET),
-                    &mut next_graphics_cache,
-                );
+                let encoded = if direct_transfer_ready || direct_transfer_pending {
+                    crate::kitty_graphics::EncodedGraphics {
+                        bytes: Vec::new(),
+                        incomplete: false,
+                    }
+                } else {
+                    crate::kitty_graphics::encode_local_pane_graphics_for_client(
+                        &self.app.state,
+                        &self.app.pane_graphics,
+                        &self.app.terminal_runtimes,
+                        client_presentation_policy
+                            .expect("app render target has presentation policy"),
+                        cell_size,
+                        Some(crate::kitty_graphics::HEADLESS_GRAPHICS_TRANSACTION_BUDGET),
+                        &mut next_graphics_cache,
+                    )
+                };
                 crate::render_prof::duration_since("full_render.graphics_encode", graphics_started);
                 encoded
             } else if self.app.pane_graphics.slots.is_empty() {
@@ -6735,6 +6801,10 @@ impl HeadlessServer {
                 crate::render_prof::event("full_render.writer_missing");
                 continue;
             };
+            #[cfg(unix)]
+            if direct_transfer.is_some() {
+                client.request_repaint();
+            }
             let mut commit_graphics_cache = true;
             if frame.graphics.len() > MAX_GRAPHICS_FRAME_SIZE {
                 warn!(
@@ -6822,6 +6892,21 @@ impl HeadlessServer {
                         client.graphics_surface_reset_pending = false;
                     }
                     client.render_state.commit_sent_frame(prepared);
+                    #[cfg(unix)]
+                    if let (Some(transfer), Some(serialized)) =
+                        (direct_transfer.take(), direct_serialized)
+                    {
+                        match writer.render.send_ordered(serialized) {
+                            Ok(()) => client.direct_terminal_graphics = Some(transfer),
+                            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                                client.defer_full_render();
+                                deferred_frame = true;
+                            }
+                            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                                broken_clients.push(client_id);
+                            }
+                        }
+                    }
                     if let Some(presentation) = pomodoro_presentation {
                         client.queue_pomodoro_presentation(render_sequence, presentation);
                     }

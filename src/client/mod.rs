@@ -2217,12 +2217,19 @@ async fn run_client_loop(
                         }
                         let valid = state.kitty_graphics_enabled
                             && usize::try_from(expected_len).ok().is_some_and(|len| {
-                                crate::pane_graphics_files::validate_direct_source(
-                                    std::path::Path::new(&path),
-                                    len,
-                                )
-                                .is_ok()
-                                    && direct_graphics::valid_control(&control, image_id, len)
+                                direct_graphics::valid_control(&control, image_id, len)
+                                    && if direct_graphics::uses_shared_memory(&control) {
+                                        crate::pane_graphics_files::validate_direct_shared_memory_source(
+                                            &path, len,
+                                        )
+                                        .is_ok()
+                                    } else {
+                                        crate::pane_graphics_files::validate_direct_source(
+                                            std::path::Path::new(&path),
+                                            len,
+                                        )
+                                        .is_ok()
+                                    }
                             })
                             && state
                                 .direct_graphics_response

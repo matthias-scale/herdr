@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 #[cfg(unix)]
+use std::os::fd::FromRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
 #[cfg(unix)]
@@ -164,6 +166,32 @@ pub(crate) fn validate_direct_source(path: &Path, expected_len: usize) -> io::Re
     let metadata = file.metadata()?;
     validate_metadata(&metadata, expected_len)?;
     validate_path_identity(path, &metadata)
+}
+
+#[cfg(unix)]
+pub(crate) fn validate_direct_shared_memory_source(
+    name: &str,
+    expected_len: usize,
+) -> io::Result<()> {
+    let expected_prefix = format!("/herdr_graphics_{}_", effective_uid());
+    let suffix = name
+        .strip_prefix(&expected_prefix)
+        .ok_or_else(invalid_path)?;
+    if suffix.is_empty()
+        || suffix.contains('/')
+        || !suffix
+            .split('_')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(invalid_path());
+    }
+    let name = std::ffi::CString::new(name).map_err(|_| invalid_path())?;
+    let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let file = unsafe { File::from_raw_fd(fd) };
+    validate_metadata(&file.metadata()?, expected_len)
 }
 
 fn create_generation(base: &Path) -> io::Result<Generation> {
@@ -341,7 +369,7 @@ fn validate_path_identity(path: &Path, expected: &fs::Metadata) -> io::Result<()
 }
 
 #[cfg(unix)]
-fn effective_uid() -> u32 {
+pub(crate) fn effective_uid() -> u32 {
     // SAFETY: geteuid takes no arguments and has no preconditions.
     unsafe { libc::geteuid() }
 }

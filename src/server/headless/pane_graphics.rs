@@ -265,6 +265,16 @@ impl HeadlessServer {
         transfer_id: u64,
         image_id: u32,
     ) -> bool {
+        #[cfg(unix)]
+        if let Some(transfer) = self
+            .clients
+            .get_mut(&client_id)
+            .and_then(|client| client.direct_terminal_graphics.as_mut())
+            .filter(|transfer| transfer.matches(transfer_id, image_id))
+        {
+            transfer.start();
+            return false;
+        }
         if let Some(gate) = self.app.pane_graphics.slots.values_mut().find_map(|slot| {
             (slot.host_image_id == image_id && slot.stream_is_active())
                 .then_some(slot.direct_gate.as_mut())
@@ -288,6 +298,38 @@ impl HeadlessServer {
         if self.shutting_down {
             self.retire_all_direct_graphics();
             return false;
+        }
+        #[cfg(unix)]
+        {
+            let terminal_matches = self
+                .clients
+                .get(&client_id)
+                .and_then(|client| client.direct_terminal_graphics.as_ref())
+                .is_some_and(|transfer| {
+                    transfer.matches(transfer_id, image_id) && transfer.can_complete(success)
+                });
+            if terminal_matches {
+                let transfer = self
+                    .clients
+                    .get_mut(&client_id)
+                    .and_then(|client| client.direct_terminal_graphics.take())
+                    .expect("matched direct terminal transfer");
+                if success {
+                    let display = {
+                        let client = self.clients.get_mut(&client_id).expect("matched client");
+                        transfer.commit(&mut client.graphics_cache)
+                    };
+                    self.send_to_client(client_id, ServerMessage::Graphics { bytes: display });
+                } else {
+                    if let Some(client) = self.clients.get_mut(&client_id) {
+                        client.direct_graphics = false;
+                    }
+                    self.app.direct_graphics_available = false;
+                    crate::kitty_graphics::set_direct_host_graphics(false);
+                    self.retire_all_direct_graphics();
+                }
+                return true;
+            }
         }
         let key = self.app.pane_graphics.slots.iter().find_map(|(key, slot)| {
             slot.direct_gate
@@ -356,6 +398,7 @@ impl HeadlessServer {
             client.direct_graphics = false;
         }
         self.app.direct_graphics_available = false;
+        crate::kitty_graphics::set_direct_host_graphics(false);
         if !self.install_inline_fallback(&key) {
             self.retire_direct_gate(&key);
             self.retire_all_direct_graphics();
@@ -384,6 +427,32 @@ impl HeadlessServer {
     }
 
     pub(super) fn expire_direct_graphics(&mut self, now: std::time::Instant) -> bool {
+        #[cfg(unix)]
+        let expired_terminal = self
+            .clients
+            .iter()
+            .filter_map(|(client_id, client)| {
+                client
+                    .direct_terminal_graphics
+                    .as_ref()
+                    .filter(|transfer| transfer.expired(now))
+                    .map(|transfer| (*client_id, transfer.ids()))
+            })
+            .collect::<Vec<_>>();
+        #[cfg(unix)]
+        for (client_id, (transfer_id, image_id)) in &expired_terminal {
+            self.send_to_client(
+                *client_id,
+                ServerMessage::GraphicsTransmissionRetired {
+                    transfer_id: *transfer_id,
+                    image_id: *image_id,
+                },
+            );
+            if let Some(client) = self.clients.get_mut(client_id) {
+                client.direct_terminal_graphics = None;
+                client.direct_graphics = false;
+            }
+        }
         let expired = self
             .app
             .pane_graphics
@@ -413,14 +482,23 @@ impl HeadlessServer {
             }
             self.retire_direct_gate(key);
         }
-        if !expired.is_empty() {
+        #[cfg(unix)]
+        let any_expired = !expired.is_empty() || !expired_terminal.is_empty();
+        #[cfg(not(unix))]
+        let any_expired = !expired.is_empty();
+        if any_expired {
             self.app.direct_graphics_available = false;
+            crate::kitty_graphics::set_direct_host_graphics(false);
             self.retire_all_direct_graphics();
         }
-        !expired.is_empty()
+        any_expired
     }
 
     pub(super) fn retire_all_direct_graphics(&mut self) {
+        #[cfg(unix)]
+        for client in self.clients.values_mut() {
+            client.direct_terminal_graphics = None;
+        }
         let keys = self
             .app
             .pane_graphics
@@ -439,6 +517,10 @@ impl HeadlessServer {
     }
 
     pub(super) fn retire_direct_graphics_for_client(&mut self, client_id: u64) {
+        #[cfg(unix)]
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            client.direct_terminal_graphics = None;
+        }
         let keys = self
             .app
             .pane_graphics
@@ -515,27 +597,77 @@ impl HeadlessServer {
                 return RetainedGraphicsOutcome::Fallback;
             }
 
+            #[cfg(unix)]
+            let direct_transfer = if client.direct_graphics
+                && client.direct_terminal_graphics.is_none()
+            {
+                match crate::kitty_graphics::prepare_direct_terminal_transfer(
+                    &self.app.state,
+                    &self.app.pane_graphics,
+                    &self.app.terminal_runtimes,
+                    presentation_policy.clone(),
+                    cell_size,
+                    &client.graphics_cache,
+                ) {
+                    Ok(transfer) => transfer,
+                    Err(err) => {
+                        tracing::warn!(client_id, %err, "failed to stage direct terminal graphics");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            #[cfg(unix)]
+            let direct_transfer_pending = client.direct_terminal_graphics.is_some();
+            #[cfg(not(unix))]
+            let direct_transfer: Option<()> = None;
+            #[cfg(not(unix))]
+            let direct_transfer_pending = false;
             let mut next_graphics_cache = client.graphics_cache.clone();
             let encode_started = crate::render_prof::timer();
-            let encoded = crate::kitty_graphics::encode_local_pane_graphics_for_client(
-                &self.app.state,
-                &self.app.pane_graphics,
-                &self.app.terminal_runtimes,
-                presentation_policy,
-                cell_size,
-                Some(crate::kitty_graphics::HEADLESS_GRAPHICS_TRANSACTION_BUDGET),
-                &mut next_graphics_cache,
-            );
+            let encoded = if direct_transfer.is_some() || direct_transfer_pending {
+                crate::kitty_graphics::EncodedGraphics {
+                    bytes: Vec::new(),
+                    incomplete: false,
+                }
+            } else {
+                crate::kitty_graphics::encode_local_pane_graphics_for_client(
+                    &self.app.state,
+                    &self.app.pane_graphics,
+                    &self.app.terminal_runtimes,
+                    presentation_policy,
+                    cell_size,
+                    Some(crate::kitty_graphics::HEADLESS_GRAPHICS_TRANSACTION_BUDGET),
+                    &mut next_graphics_cache,
+                )
+            };
             crate::render_prof::duration_since("retained_graphics.graphics_encode", encode_started);
-            prepared.push((client_id, encoded, next_graphics_cache));
+            prepared.push((client_id, encoded, next_graphics_cache, direct_transfer));
         }
 
         let mut broken_clients = Vec::new();
-        for (client_id, encoded, next_graphics_cache) in prepared {
+        for (client_id, encoded, next_graphics_cache, direct_transfer) in prepared {
+            #[cfg(not(unix))]
+            let _ = &direct_transfer;
             let Some(client) = self.clients.get_mut(&client_id) else {
                 continue;
             };
-            let serialized = if encoded.bytes.is_empty() {
+            #[cfg(unix)]
+            let direct_message = direct_transfer
+                .as_ref()
+                .map(crate::kitty_graphics::DirectTerminalTransfer::message);
+            #[cfg(not(unix))]
+            let direct_message: Option<ServerMessage> = None;
+            let serialized = if let Some(message) = direct_message.as_ref() {
+                match Self::frame_server_message_with_max(message, MAX_GRAPHICS_FRAME_SIZE) {
+                    Ok(serialized) => Some(serialized),
+                    Err(_) => {
+                        crate::render_prof::event("retained_graphics_fallback.direct_serialize");
+                        return RetainedGraphicsOutcome::Fallback;
+                    }
+                }
+            } else if encoded.bytes.is_empty() {
                 None
             } else {
                 match Self::frame_server_message_with_max(
@@ -553,12 +685,24 @@ impl HeadlessServer {
             };
             let result = match (serialized, client.writer.as_ref()) {
                 (None, _) => Ok(()),
+                (Some(bytes), Some(writer)) if direct_message.is_some() => {
+                    writer.render.send_ordered(bytes)
+                }
                 (Some(bytes), Some(writer)) => writer.render.try_send(bytes).map(|_| ()),
                 (Some(bytes), None) => Err(std::sync::mpsc::TrySendError::Disconnected(bytes)),
             };
             match result {
                 Ok(()) => {
-                    client.graphics_cache = next_graphics_cache;
+                    #[cfg(unix)]
+                    if let Some(transfer) = direct_transfer {
+                        client.direct_terminal_graphics = Some(transfer);
+                    } else if client.direct_terminal_graphics.is_none() {
+                        client.graphics_cache = next_graphics_cache;
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        client.graphics_cache = next_graphics_cache;
+                    }
                     if encoded.incomplete {
                         client.defer_full_render();
                         deferred = true;

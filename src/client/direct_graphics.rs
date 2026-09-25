@@ -225,6 +225,7 @@ pub(super) fn valid_control(control: &str, image_id: u32, expected_len: usize) -
     let mut height = None;
     let mut placement = [false; 5];
     let mut has_placement_controls = false;
+    let mut shared_memory = false;
     for field in control.split(',') {
         let Some((key, value)) = field.split_once('=') else {
             return false;
@@ -247,6 +248,7 @@ pub(super) fn valid_control(control: &str, image_id: u32, expected_len: usize) -
             "h" => 1 << 14,
             "X" => 1 << 15,
             "Y" => 1 << 16,
+            "t" => 1 << 17,
             _ => return false,
         };
         if seen & key_bit != 0 {
@@ -259,7 +261,7 @@ pub(super) fn valid_control(control: &str, image_id: u32, expected_len: usize) -
             .bytes()
             .all(|byte| byte.is_ascii_digit())
             && !value.is_empty();
-        if key != "a" && !numeric {
+        if !matches!(key, "a" | "t") && !numeric {
             return false;
         }
         match key {
@@ -290,6 +292,8 @@ pub(super) fn valid_control(control: &str, image_id: u32, expected_len: usize) -
                 placement[4] = value == "1";
                 has_placement_controls = true;
             }
+            "t" if value == "s" => shared_memory = true,
+            "t" => return false,
             "x" | "y" | "w" | "h" | "X" | "Y" => has_placement_controls = true,
             _ => {}
         }
@@ -299,11 +303,15 @@ pub(super) fn valid_control(control: &str, image_id: u32, expected_len: usize) -
         .and_then(|(width, height)| width.checked_mul(height)?.checked_mul(4))
         == Some(expected_len);
     let profile_matches = match action {
-        Some("T") => placement.into_iter().all(|present| present),
+        Some("T") => placement.into_iter().all(|present| present) && !shared_memory,
         Some("t") => !has_placement_controls,
         _ => false,
     };
     format && image && quiet && dimensions_match && profile_matches
+}
+
+pub(super) fn uses_shared_memory(control: &str) -> bool {
+    control.split(',').any(|field| field == "t=s")
 }
 
 #[cfg(test)]
@@ -357,6 +365,8 @@ mod tests {
             800,
         ));
         assert!(valid_control("a=t,f=32,s=10,v=20,i=42,q=0", 42, 800,));
+        assert!(valid_control("a=t,t=s,f=32,s=10,v=20,i=42,q=0", 42, 800,));
+        assert!(uses_shared_memory("a=t,t=s,f=32,s=10,v=20,i=42,q=0"));
         for invalid in [
             "a=T,f=24,s=10,v=20,i=42,p=7,c=5,r=6,z=-1,C=1,q=0",
             "a=T,f=32,s=10,v=20,i=41,p=7,c=5,r=6,z=-1,C=1,q=0",
@@ -367,6 +377,7 @@ mod tests {
             "a=t,f=32,s=10,v=19,i=42,q=0",
             "a=t,f=32,s=10,i=42,q=0",
             "a=t,f=32,s=10,s=10,v=20,i=42,q=0",
+            "a=t,t=f,f=32,s=10,v=20,i=42,q=0",
         ] {
             assert!(!valid_control(invalid, 42, 800), "{invalid}");
         }
