@@ -191,21 +191,29 @@ impl SharedMemoryFrame {
     fn create(data: &[u8]) -> io::Result<Self> {
         let transfer_id = NEXT_DIRECT_TRANSFER_ID.fetch_add(1, Ordering::Relaxed);
         let name = CString::new(format!(
-            "/herdr_graphics_{}_{}_{}",
+            "/hg{:08x}{:08x}{:08x}",
             crate::pane_graphics_files::effective_uid(),
             std::process::id(),
-            transfer_id,
+            transfer_id as u32,
         ))
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid graphics shm name"))?;
         let fd = unsafe {
             libc::shm_open(
                 name.as_ptr(),
-                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR | libc::O_CLOEXEC,
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
                 (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
             )
         };
         if fd < 0 {
             return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+            let error = io::Error::last_os_error();
+            unsafe {
+                libc::close(fd);
+                libc::shm_unlink(name.as_ptr());
+            }
+            return Err(error);
         }
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
         let len = i64::try_from(data.len())

@@ -173,24 +173,22 @@ pub(crate) fn validate_direct_shared_memory_source(
     name: &str,
     expected_len: usize,
 ) -> io::Result<()> {
-    let expected_prefix = format!("/herdr_graphics_{}_", effective_uid());
+    let expected_prefix = format!("/hg{:08x}", effective_uid());
     let suffix = name
         .strip_prefix(&expected_prefix)
         .ok_or_else(invalid_path)?;
-    if suffix.is_empty()
-        || suffix.contains('/')
-        || !suffix
-            .split('_')
-            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-    {
+    if suffix.len() != 16 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(invalid_path());
     }
     let name = std::ffi::CString::new(name).map_err(|_| invalid_path())?;
-    let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC, 0) };
+    let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
     let file = unsafe { File::from_raw_fd(fd) };
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
     validate_metadata(&file.metadata()?, expected_len)
 }
 
