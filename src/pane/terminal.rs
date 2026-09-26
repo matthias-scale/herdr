@@ -149,6 +149,7 @@ impl InputState {
 pub(crate) struct ProcessBytesResult {
     pub request_render: bool,
     pub render_delay: Option<Duration>,
+    pub coalesce_graphics_render: bool,
     pub terminal_title_changed: bool,
     pub terminal_bells: u16,
     pub clipboard_writes: Vec<Vec<u8>>,
@@ -1266,6 +1267,7 @@ impl GhosttyPaneTerminal {
             return ProcessBytesResult {
                 request_render: false,
                 render_delay: None,
+                coalesce_graphics_render: false,
                 terminal_title_changed: false,
                 terminal_bells: 0,
                 clipboard_writes: Vec::new(),
@@ -1420,6 +1422,7 @@ impl GhosttyPaneTerminal {
         ProcessBytesResult {
             request_render,
             render_delay,
+            coalesce_graphics_render: request_render && has_kitty_graphics_sequence,
             terminal_title_changed,
             terminal_bells,
             clipboard_writes,
@@ -5575,6 +5578,7 @@ mod tests {
 
         assert!(result.request_render);
         assert_eq!(result.render_delay, Some(KITTY_GRAPHICS_REDRAW_SETTLE));
+        assert!(result.coalesce_graphics_render);
     }
 
     #[test]

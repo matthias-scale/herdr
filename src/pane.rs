@@ -1450,6 +1450,84 @@ pub(crate) struct RemoteProxyChannels {
 /// Keystroke bursts (including pastes) queue briefly; a stuck transport drops
 /// new input instead of growing memory without bound.
 const REMOTE_PROXY_OUTBOUND_CAPACITY: usize = 64;
+const KITTY_GRAPHICS_STREAM_MAX_RENDER_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(100);
+
+/// Keeps the leading render that prevents continuous streams from freezing,
+/// then collapses a burst to its newest frame. Long streams still refresh at
+/// a bounded cadence so applications remain visibly live without filling the
+/// host terminal's input queue with obsolete full-frame images.
+#[derive(Debug, Default)]
+pub(crate) struct KittyGraphicsRenderThrottle {
+    generation: AtomicU64,
+    armed: AtomicBool,
+}
+
+impl KittyGraphicsRenderThrottle {
+    pub(crate) fn request(
+        self: &Arc<Self>,
+        pane_id: PaneId,
+        delay: std::time::Duration,
+        render_notify: &Arc<Notify>,
+        render_dirty: &Arc<RenderSignal>,
+        runtime: &tokio::runtime::Handle,
+    ) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        if self
+            .armed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        request_pty_render(pane_id, render_notify, render_dirty);
+
+        let throttle = Arc::clone(self);
+        let render_notify = Arc::clone(render_notify);
+        let render_dirty = Arc::clone(render_dirty);
+        runtime.spawn(async move {
+            let mut observed_generation = throttle.generation.load(Ordering::Acquire);
+            let mut last_render = std::time::Instant::now();
+            loop {
+                tokio::time::sleep(delay).await;
+                let current_generation = throttle.generation.load(Ordering::Acquire);
+                let stream_is_quiet = current_generation == observed_generation;
+                if !stream_is_quiet
+                    && last_render.elapsed() < KITTY_GRAPHICS_STREAM_MAX_RENDER_INTERVAL
+                {
+                    observed_generation = current_generation;
+                    continue;
+                }
+
+                request_pty_render(pane_id, &render_notify, &render_dirty);
+                last_render = std::time::Instant::now();
+                observed_generation = current_generation;
+                if !stream_is_quiet {
+                    continue;
+                }
+
+                throttle.armed.store(false, Ordering::Release);
+                if throttle.generation.load(Ordering::Acquire) == current_generation {
+                    break;
+                }
+                if throttle
+                    .armed
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+}
+
+fn request_pty_render(pane_id: PaneId, render_notify: &Notify, render_dirty: &RenderSignal) {
+    if render_dirty.request_pty(pane_id) {
+        render_notify.notify_one();
+    }
+}
 
 enum PaneRuntimeIo {
     Actor(PtyIoActorHandle),
@@ -2793,6 +2871,7 @@ impl PaneRuntime {
             let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
             let delay_rt = rt.clone();
+            let graphics_render_throttle = Arc::new(KittyGraphicsRenderThrottle::default());
             let on_read = Box::new(move |bytes: &[u8]| {
                 let input_delivery_seq_at_read_start =
                     input_delivery_seq_for_read.load(Ordering::Acquire);
@@ -2811,18 +2890,32 @@ impl PaneRuntime {
                 publish_terminal_bells(pane_id, result.terminal_bells, &read_events);
                 observe_detection_content_change(bytes, &detection_content_seq);
                 observe_agent_output(bytes, &agent_output_seq);
-                if result.request_render && render_dirty.request_pty(pane_id) {
-                    render_notify.notify_one();
+                if result.coalesce_graphics_render {
+                    if let Some(delay) = result.render_delay {
+                        graphics_render_throttle.request(
+                            pane_id,
+                            delay,
+                            &render_notify,
+                            &render_dirty,
+                            &delay_rt,
+                        );
+                    }
+                } else {
+                    if result.request_render && render_dirty.request_pty(pane_id) {
+                        render_notify.notify_one();
+                    }
                 }
-                if let Some(delay) = result.render_delay {
-                    let render_notify = render_notify.clone();
-                    let render_dirty = render_dirty.clone();
-                    delay_rt.spawn(async move {
-                        tokio::time::sleep(delay).await;
-                        if render_dirty.request_pty(pane_id) {
-                            render_notify.notify_one();
-                        }
-                    });
+                if !result.coalesce_graphics_render {
+                    if let Some(delay) = result.render_delay {
+                        let render_notify = render_notify.clone();
+                        let render_dirty = render_dirty.clone();
+                        delay_rt.spawn(async move {
+                            tokio::time::sleep(delay).await;
+                            if render_dirty.request_pty(pane_id) {
+                                render_notify.notify_one();
+                            }
+                        });
+                    }
                 }
                 if let Some(cwd) = result.reported_cwd.clone() {
                     publish_reported_cwd(pane_id, cwd, &reported_cwd, &read_events);
@@ -3054,6 +3147,7 @@ impl PaneRuntime {
             let poison_events = events.clone();
             let reported_cwd = reported_cwd.clone();
             let rt = tokio::runtime::Handle::current();
+            let graphics_render_throttle = Arc::new(KittyGraphicsRenderThrottle::default());
             let on_read = Box::new(move |bytes: &[u8]| {
                 let input_delivery_seq_at_read_start =
                     input_delivery_seq_for_read.load(Ordering::Acquire);
@@ -3079,19 +3173,34 @@ impl PaneRuntime {
                 }
                 let title_requested =
                     result.terminal_title_changed && render_dirty.request_terminal_title(pane_id);
-                let render_requested = result.request_render && render_dirty.request_pty(pane_id);
+                let render_requested = if result.coalesce_graphics_render {
+                    if let Some(delay) = result.render_delay {
+                        graphics_render_throttle.request(
+                            pane_id,
+                            delay,
+                            &render_notify,
+                            &render_dirty,
+                            &rt,
+                        );
+                    }
+                    false
+                } else {
+                    result.request_render && render_dirty.request_pty(pane_id)
+                };
                 if title_requested || render_requested {
                     render_notify.notify_one();
                 }
-                if let Some(delay) = result.render_delay {
-                    let render_notify = render_notify.clone();
-                    let render_dirty = render_dirty.clone();
-                    rt.spawn(async move {
-                        tokio::time::sleep(delay).await;
-                        if render_dirty.request_pty(pane_id) {
-                            render_notify.notify_one();
-                        }
-                    });
+                if !result.coalesce_graphics_render {
+                    if let Some(delay) = result.render_delay {
+                        let render_notify = render_notify.clone();
+                        let render_dirty = render_dirty.clone();
+                        rt.spawn(async move {
+                            tokio::time::sleep(delay).await;
+                            if render_dirty.request_pty(pane_id) {
+                                render_notify.notify_one();
+                            }
+                        });
+                    }
                 }
                 if let Some(cwd) = result.reported_cwd.clone() {
                     publish_reported_cwd(pane_id, cwd, &reported_cwd, &events);
@@ -4548,6 +4657,45 @@ impl PaneRuntime {
 mod tests {
     use self::agent_detection::FULL_LIFECYCLE_HOOK_OUTPUT_RETIREMENT_GRACE;
     use super::*;
+
+    #[tokio::test]
+    async fn kitty_graphics_burst_schedules_only_leading_and_latest_renders() {
+        const FRAME_COUNT: usize = 64;
+        let pane_id = PaneId::from_raw(42);
+        let delay = Duration::from_millis(20);
+        let notify = Arc::new(Notify::new());
+        let dirty = Arc::new(RenderSignal::new());
+        let throttle = Arc::new(KittyGraphicsRenderThrottle::default());
+        let runtime = tokio::runtime::Handle::current();
+
+        for _ in 0..FRAME_COUNT {
+            throttle.request(pane_id, delay, &notify, &dirty, &runtime);
+        }
+
+        tokio::time::timeout(Duration::from_millis(250), notify.notified())
+            .await
+            .expect("leading frame render");
+        assert_eq!(
+            dirty.take().pty_sources,
+            std::collections::HashSet::from([pane_id])
+        );
+
+        tokio::time::timeout(Duration::from_millis(250), notify.notified())
+            .await
+            .expect("newest frame render");
+        assert_eq!(
+            dirty.take().pty_sources,
+            std::collections::HashSet::from([pane_id])
+        );
+
+        assert!(
+            tokio::time::timeout(delay.saturating_mul(2), notify.notified())
+                .await
+                .is_err(),
+            "stale frames must not queue more renders"
+        );
+        assert!(!dirty.is_pending());
+    }
 
     fn detected_urls(
         links: &[crate::agent_state::DetectedAgentLink],

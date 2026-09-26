@@ -468,14 +468,6 @@ fn encode_terminal_graphics_update_legacy(
             }
         }
 
-        release_superseded_terminal_image_legacy(
-            bytes,
-            cache,
-            &mut current_placements,
-            placement.source_key.clone(),
-            host_id,
-        );
-
         match cache.placements.get_mut(&placement_key) {
             Some(existing) if !view_changed && *existing == placement_signature => {}
             Some(existing) => {
@@ -499,6 +491,17 @@ fn encode_terminal_graphics_update_legacy(
                 cache.placements.insert(placement_key, placement_signature);
             }
         }
+
+        // Keep the previous frame visible until its replacement is on screen.
+        // Kitty applies commands in order, so deleting first exposes a blank
+        // pane between streamed frames.
+        release_superseded_terminal_image_legacy(
+            bytes,
+            cache,
+            &mut current_placements,
+            placement.source_key.clone(),
+            host_id,
+        );
     }
 
     let stale = cache
@@ -631,10 +634,46 @@ fn encode_graphics_update_incremental(
             || desired_sources.contains(source)
     });
 
+    // A changed image gets a new host id. Its old placements are therefore
+    // absent from `desired_placements`, but they must stay visible until the
+    // replacement transaction displays the new image.
+    let replaced_placements = placements
+        .iter()
+        .filter(|placement| clipped_placement(placement).is_some())
+        .filter_map(|placement| {
+            let next = placement
+                .host_image_id
+                .unwrap_or_else(|| host_image_id(placement.pane_id, &placement.placement));
+            let previous = cache
+                .sources
+                .get(&placement.source_key)
+                .copied()
+                .filter(|previous| *previous != next)?;
+            Some((
+                placement.source_key.clone(),
+                (
+                    previous,
+                    host_placement_id(&placement.source_key, &placement.placement),
+                ),
+            ))
+        })
+        .fold(
+            HashMap::<HostSourceKey, Vec<(u32, u32)>>::new(),
+            |mut replaced, (source, key)| {
+                replaced.entry(source).or_default().push(key);
+                replaced
+            },
+        );
+    let deferred_stale = replaced_placements
+        .values()
+        .flatten()
+        .copied()
+        .collect::<HashSet<_>>();
+
     let mut stale = cache
         .placements
         .keys()
-        .filter(|key| !desired_placements.contains(key))
+        .filter(|key| !desired_placements.contains(key) && !deferred_stale.contains(key))
         .copied()
         .collect::<Vec<_>>();
     stale.sort_unstable();
@@ -689,7 +728,12 @@ fn encode_graphics_update_incremental(
             continue;
         }
         let mut candidate = cache.clone();
-        let Some(transaction) = encode_placement_update(&mut candidate, placement) else {
+        let deferred_stale = replaced_placements
+            .get(&placement.source_key)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let Some(transaction) = encode_placement_update(&mut candidate, placement, deferred_stale)
+        else {
             continue;
         };
         if transaction.is_empty() {
@@ -755,6 +799,7 @@ fn source_order(source: &HostSourceKey) -> (u32, String) {
 fn encode_placement_update(
     cache: &mut HostGraphicsCache,
     placement: &HostPlacement,
+    deferred_stale: &[(u32, u32)],
 ) -> Option<Vec<u8>> {
     let (clipped, format_code) = clipped_placement(placement)?;
     let host_id = placement
@@ -805,7 +850,6 @@ fn encode_placement_update(
         cache.images.insert(host_id, image_signature);
     }
 
-    release_superseded_source_image(&mut bytes, cache, placement.source_key.clone(), host_id);
     if !displayed && !placement_current {
         encode_display_placement(
             &mut bytes,
@@ -818,6 +862,19 @@ fn encode_placement_update(
     cache.placements.insert(key, placement_signature);
     if cache.replay_placements {
         cache.replayed_placements.insert(key);
+    }
+    release_superseded_source_image(&mut bytes, cache, placement.source_key.clone(), host_id);
+    for &(old_host_id, old_placement_id) in deferred_stale {
+        if cache
+            .placements
+            .remove(&(old_host_id, old_placement_id))
+            .is_some()
+        {
+            encode_delete_placement(&mut bytes, old_host_id, old_placement_id);
+            cache
+                .replayed_placements
+                .remove(&(old_host_id, old_placement_id));
+        }
     }
     Some(bytes)
 }
@@ -1739,6 +1796,15 @@ fn encode_kitty_data(out: &mut Vec<u8>, control: &str, data: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::ffi::CString;
+    #[cfg(unix)]
+    use std::os::fd::FromRawFd;
+
+    #[cfg(unix)]
+    const AWRIT_FRAME_WIDTH: usize = 200;
+    #[cfg(unix)]
+    const AWRIT_FRAME_HEIGHT: usize = 100;
 
     #[test]
     fn fallback_cell_size_is_usable_only_for_nonempty_areas() {
@@ -1820,8 +1886,120 @@ mod tests {
         bytes
     }
 
+    #[cfg(unix)]
+    fn write_shared_memory_frame(name: &CString, frame: u8) {
+        unsafe {
+            libc::shm_unlink(name.as_ptr());
+        }
+        let fd = unsafe {
+            libc::shm_open(
+                name.as_ptr(),
+                libc::O_CREAT | libc::O_RDWR,
+                (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
+            )
+        };
+        assert!(fd >= 0, "create awrit-style shared memory frame");
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut rgba = vec![0; AWRIT_FRAME_WIDTH * AWRIT_FRAME_HEIGHT * 4];
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[frame, 0, 0, 255]);
+        }
+        file.set_len(rgba.len() as u64).unwrap();
+        let mapping = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                rgba.len(),
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+        assert_ne!(
+            mapping,
+            libc::MAP_FAILED,
+            "map awrit-style shared memory frame"
+        );
+        unsafe {
+            std::ptr::copy_nonoverlapping(rgba.as_ptr(), mapping.cast(), rgba.len());
+        }
+        assert_eq!(unsafe { libc::munmap(mapping, rgba.len()) }, 0);
+    }
+
+    #[cfg(unix)]
+    fn awrit_shared_memory_command(name: &CString) -> Vec<u8> {
+        let payload = base64::engine::general_purpose::STANDARD.encode(name.as_bytes());
+        format!(
+            "\x1b[H\x1b_Gf=32,t=s,s={AWRIT_FRAME_WIDTH},v={AWRIT_FRAME_HEIGHT},a=T,q=2,C=1,i=1,X=0,Y=0;{payload}\x1b\\"
+        )
+        .into_bytes()
+    }
+
+    #[cfg(unix)]
+    fn awrit_host_placement(terminal: &crate::ghostty::Terminal) -> HostPlacement {
+        let terminal_placement = terminal
+            .kitty_image_placements()
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("awrit frame placement");
+        assert_eq!(terminal_placement.image_id, 1, "awrit reuses one image id");
+        assert_eq!(
+            (
+                terminal_placement.image_width,
+                terminal_placement.image_height
+            ),
+            (AWRIT_FRAME_WIDTH as u32, AWRIT_FRAME_HEIGHT as u32)
+        );
+        HostPlacement {
+            pane_id: PaneId::from_raw(1),
+            host_image_id: None,
+            area: Rect::new(0, 0, 20, 10),
+            cell_size: HostCellSize {
+                width_px: 10,
+                height_px: 10,
+            },
+            source_key: HostSourceKey::Terminal {
+                pane_id: PaneId::from_raw(1),
+                image_id: terminal_placement.image_id,
+            },
+            placement: terminal_placement,
+            scrollback_offset: 0,
+        }
+    }
+
+    #[cfg(unix)]
+    fn observe_host_visibility(bytes: &[u8], visible: &mut HashSet<u32>) -> usize {
+        let mut blank_states = 0;
+        let mut rest = bytes;
+        while let Some(start) = rest.windows(3).position(|window| window == b"\x1b_G") {
+            rest = &rest[start + 3..];
+            let Some(end) = rest.windows(2).position(|window| window == b"\x1b\\") else {
+                break;
+            };
+            let command = std::str::from_utf8(&rest[..end]).unwrap();
+            let control = command
+                .split_once(';')
+                .map_or(command, |(control, _)| control);
+            let field = |key: &str| control.split(',').find_map(|part| part.strip_prefix(key));
+            let image_id = field("i=").and_then(|value| value.parse::<u32>().ok());
+            match (field("a="), field("d="), image_id) {
+                (Some("p" | "T"), _, Some(image_id)) => {
+                    visible.insert(image_id);
+                }
+                (Some("d"), Some("I"), Some(image_id)) => {
+                    visible.remove(&image_id);
+                }
+                _ => {}
+            }
+            blank_states += usize::from(visible.is_empty());
+            rest = &rest[end + 2..];
+        }
+        blank_states
+    }
+
     #[test]
-    fn terminal_graphics_without_pane_layers_preserves_legacy_transcript() {
+    fn terminal_graphics_without_pane_layers_has_stable_transcript() {
         fn record(transcript: &mut Vec<u8>, bytes: &[u8]) {
             transcript.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
             transcript.extend_from_slice(bytes);
@@ -1859,7 +2037,7 @@ mod tests {
         record(&mut transcript, &update(&mut cache, &[], false));
 
         assert_eq!(transcript.len(), 10_084);
-        assert_eq!(fnv1a(&transcript), 0xc5bd_83e4_b039_870e);
+        assert_eq!(fnv1a(&transcript), 0x6314_15ff_a63c_506e);
     }
 
     #[test]
@@ -2203,6 +2381,115 @@ mod tests {
         );
         assert_eq!(images.len(), 1);
         assert_eq!(placements.len(), 1);
+    }
+
+    #[test]
+    fn terminal_frame_replacement_displays_new_image_before_releasing_old() {
+        let mut cache = HostGraphicsCache::default();
+        let first = test_placement(0, 0);
+        let first_update = update(&mut cache, &[first], false);
+        assert!(String::from_utf8_lossy(&first_update).contains("a=p"));
+        let superseded_host_id = *cache.sources.values().next().expect("first host image");
+
+        let mut newest = test_placement(0, 0);
+        newest.placement.data_fingerprint += 1;
+        let newest_host_id = host_image_id(newest.pane_id, &newest.placement);
+        let replacement = String::from_utf8(update(&mut cache, &[newest], false)).unwrap();
+
+        let display = replacement
+            .find(&format!("a=p,i={newest_host_id}"))
+            .expect("new frame is displayed");
+        let release = replacement
+            .find(&format!("a=d,d=I,i={superseded_host_id}"))
+            .expect("old frame is released");
+        assert!(
+            display < release,
+            "host must display the new frame before deleting the visible old frame: {replacement:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn awrit_shared_memory_stream_drops_stale_frames_without_blanking() {
+        const FRAME_COUNT: usize = 32;
+        let settle = std::time::Duration::from_millis(20);
+
+        let name = CString::new(format!("/herdr_awrit_stream_{}", std::process::id())).unwrap();
+        let command = awrit_shared_memory_command(&name);
+        let mut terminal = crate::ghostty::Terminal::new(20, 10, 0).unwrap();
+        terminal.enable_kitty_graphics().unwrap();
+        terminal.resize(20, 10, 10, 10).unwrap();
+        let mut cache = HostGraphicsCache::default();
+        let mut visible = HashSet::new();
+        let mut blank_states = 0;
+        let mut host_updates = 0;
+        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+        let dirty = std::sync::Arc::new(crate::render_signal::RenderSignal::new());
+        let throttle = std::sync::Arc::new(crate::pane::KittyGraphicsRenderThrottle::default());
+        let runtime = tokio::runtime::Handle::current();
+        let pane_id = PaneId::from_raw(1);
+
+        write_shared_memory_frame(&name, 0);
+        terminal.write(&command);
+        throttle.request(pane_id, settle, &notify, &dirty, &runtime);
+        tokio::time::timeout(std::time::Duration::from_millis(250), notify.notified())
+            .await
+            .expect("leading frame reaches host");
+        let _ = dirty.take();
+        observe_host_visibility(
+            &update(&mut cache, &[awrit_host_placement(&terminal)], false),
+            &mut visible,
+        );
+        host_updates += 1;
+        assert!(!visible.is_empty(), "first frame is visible");
+
+        for frame in 1..FRAME_COUNT {
+            write_shared_memory_frame(&name, frame as u8);
+            terminal.write(&command);
+            throttle.request(pane_id, settle, &notify, &dirty, &runtime);
+        }
+
+        let stream_stopped = std::time::Instant::now();
+        tokio::time::timeout(std::time::Duration::from_millis(250), notify.notified())
+            .await
+            .expect("newest frame reaches host");
+        let elapsed = stream_stopped.elapsed();
+        let _ = dirty.take();
+        let newest = awrit_host_placement(&terminal);
+        let newest_host_id = host_image_id(newest.pane_id, &newest.placement);
+        let host_bytes = update(&mut cache, &[newest], false);
+        host_updates += 1;
+        blank_states += observe_host_visibility(&host_bytes, &mut visible);
+
+        unsafe {
+            libc::shm_unlink(name.as_ptr());
+        }
+        assert_eq!(
+            blank_states, 0,
+            "host output exposed a no-image state between streamed frames"
+        );
+        assert_eq!(host_updates, 2, "intermediate frames must be dropped");
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "newest frame took {elapsed:?} to reach the host"
+        );
+        assert_eq!(
+            host_bytes.windows(3).filter(|part| *part == b"a=t").count(),
+            1
+        );
+        assert_eq!(
+            cache.sources.values().copied().collect::<Vec<_>>(),
+            vec![newest_host_id]
+        );
+        assert!(
+            tokio::time::timeout(settle.saturating_mul(2), notify.notified())
+                .await
+                .is_err(),
+            "stale frames were replayed after the newest frame"
+        );
+        eprintln!(
+            "awrit stream: input_frames={FRAME_COUNT} host_updates={host_updates} blank_states={blank_states} newest_after={elapsed:?}"
+        );
     }
 
     #[test]
@@ -2799,7 +3086,7 @@ mod tests {
     }
 
     #[test]
-    fn budgeted_image_rows_delete_old_rows_together_before_replacement() {
+    fn budgeted_image_rows_display_replacement_before_releasing_old_image() {
         const IMAGE_ROWS: usize = 23;
         let old = image_covering_rows(IMAGE_ROWS);
         let mut cache = HostGraphicsCache::default();
@@ -2819,17 +3106,6 @@ mod tests {
         for placement in &mut replacement {
             placement.placement.data_fingerprint += 1;
         }
-        let cleanup = encode_terminal_graphics_update(
-            &mut cache,
-            &replacement,
-            false,
-            Some(HEADLESS_GRAPHICS_TRANSACTION_BUDGET),
-        );
-        assert!(cleanup.incomplete);
-        let cleanup = String::from_utf8(cleanup.bytes).unwrap();
-        assert_eq!(cleanup.matches("a=d,d=i").count(), IMAGE_ROWS);
-        assert!(!cleanup.contains("a=t"));
-
         let replaced = encode_terminal_graphics_update(
             &mut cache,
             &replacement,
@@ -2841,6 +3117,9 @@ mod tests {
         assert_eq!(replaced.matches("a=t").count(), 1);
         assert_eq!(replaced.matches("a=d,d=I").count(), 1);
         assert_eq!(replaced.matches("a=p").count(), IMAGE_ROWS);
+        let first_display = replaced.find("a=p").expect("replacement placement");
+        let old_release = replaced.find("a=d,d=I").expect("old image release");
+        assert!(first_display < old_release);
         assert_eq!(cache.images.len(), 1);
         assert_eq!(cache.placements.len(), IMAGE_ROWS);
     }
