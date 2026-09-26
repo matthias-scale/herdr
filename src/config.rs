@@ -35,8 +35,8 @@ pub use self::{
         MAX_TOAST_DELAY_SECONDS,
     },
     sidebar::{
-        AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SpaceSidebarToken,
-        SpacesSidebarConfig,
+        AgentSidebarToken, AgentsSidebarConfig, SidebarConfig, SidebarHeaderConfig,
+        SidebarLayoutConfig, SpaceSidebarToken, SpacesSidebarConfig,
     },
     sound::SoundConfig,
     tab_bar::TabBarRightEntryConfig,

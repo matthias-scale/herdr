@@ -1077,6 +1077,22 @@ impl AppState {
     /// round trip -- but it does change the row count, so the sidebar's own
     /// scroll clamp has to run afterwards.
     pub(crate) fn toggle_sidebar_group(&mut self, title: &str) {
+        if self.sidebar_sections_layout {
+            let key = format!("sections:{title}");
+            if title == crate::ui::sidebar::SETTLED_SECTION_TITLE {
+                if !self.collapsed_sidebar_groups.remove(&key) {
+                    self.collapsed_sidebar_groups.insert(key);
+                }
+            } else if !self.collapsed_sidebar_groups.remove(&key) {
+                self.collapsed_sidebar_groups.insert(key);
+            }
+            self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+                self,
+                self.view.sidebar_rect,
+                self.workspace_scroll,
+            );
+            return;
+        }
         let key = format!("{}:{title}", self.sidebar_group_mode.collapse_namespace());
         if title.starts_with(crate::ui::sidebar::aloops::ALOOP_CLEAN_KEY_PREFIX) {
             // Clean runs are folded by default, so membership represents the
@@ -2360,7 +2376,45 @@ impl super::super::App {
         target: crate::app::state::SidebarPaneLifecycleTarget,
     ) {
         match &target {
-            crate::app::state::SidebarPaneLifecycleTarget::Local(_) => {
+            crate::app::state::SidebarPaneLifecycleTarget::Local(pane_target) => {
+                if self.state.sidebar_sections_layout {
+                    let pane_targets = self
+                        .state
+                        .workspaces
+                        .iter()
+                        .position(|workspace| workspace.id == pane_target.workspace_id)
+                        .and_then(|ws_idx| {
+                            let workspace = self.state.workspaces.get(ws_idx)?;
+                            let tab = workspace
+                                .tabs
+                                .iter()
+                                .find(|tab| tab.panes.contains_key(&pane_target.pane_id))?;
+                            Some(
+                                tab.panes
+                                    .keys()
+                                    .copied()
+                                    .map(|pane_id| {
+                                        crate::app::state::SidebarPaneLifecycleTarget::Local(
+                                            crate::app::state::PaneFocusTarget {
+                                                workspace_id: pane_target.workspace_id.clone(),
+                                                pane_id,
+                                            },
+                                        )
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                        });
+                    if let Some(pane_targets) = pane_targets {
+                        for pane_target in pane_targets {
+                            if let Some(public_pane_id) =
+                                self.sidebar_pane_lifecycle_public_id(&pane_target)
+                            {
+                                self.runtime_pane_settle("tui.sidebar.settle", public_pane_id);
+                            }
+                        }
+                        return;
+                    }
+                }
                 // Keep the pre-remote-control keyboard behavior: local `s`
                 // always reaches pane.settle, whose API owns snoozed refusal.
                 if let Some(public_pane_id) = self.sidebar_pane_lifecycle_public_id(&target) {
@@ -2933,6 +2987,48 @@ mod tests {
         ));
 
         assert!(app.state.pane_is_settled(ws_idx, pane_id));
+    }
+
+    #[test]
+    fn sidebar_settle_tab_uses_pane_settle_for_every_tab_pane() {
+        let mut app = sidebar_order_app(false);
+        let workspace = &mut app.state.workspaces[0];
+        let root_pane = workspace.tabs[0].root_pane;
+        let sibling_pane = workspace.test_split(Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        app.state.sidebar_sections_layout = true;
+        let workspace_id = app.state.workspaces[0].id.clone();
+
+        app.settle_sidebar_pane(crate::app::state::SidebarPaneLifecycleTarget::Local(
+            crate::app::state::PaneFocusTarget {
+                workspace_id,
+                pane_id: root_pane,
+            },
+        ));
+
+        assert!(app.state.pane_is_settled(0, root_pane));
+        assert!(app.state.pane_is_settled(0, sibling_pane));
+    }
+
+    #[test]
+    fn sidebar_card_row_second_line_selects_the_tab() {
+        let mut app = sidebar_order_app(false);
+        app.state.sidebar_sections_layout = true;
+        let area = Rect::new(0, 0, 120, 40);
+        crate::ui::compute_view(&mut app.state, area);
+        let card = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
+            .into_iter()
+            .find(|card| card.ws_idx == 0 && card.tab_idx == 1)
+            .expect("second tab card");
+        assert_eq!(card.rect.height, 2);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            card.rect.x + 2,
+            card.rect.y + 1,
+        ));
+
+        assert_eq!(app.state.workspaces[0].active_tab, 1);
     }
 
     #[test]

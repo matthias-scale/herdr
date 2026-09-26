@@ -1316,6 +1316,10 @@ impl App {
             agent_view_override: None,
             sidebar_agents: config.ui.sidebar.agents.clone(),
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
+            sidebar_sections_layout: config.ui.sidebar.layout
+                == crate::config::SidebarLayoutConfig::Sections,
+            sidebar_header_plain: config.ui.sidebar.header
+                == crate::config::SidebarHeaderConfig::Plain,
             next_agent_state_change_seq: 0,
             mouse_capture: config.ui.mouse_capture,
             copy_on_select: config.ui.copy_on_select,
@@ -2829,6 +2833,9 @@ impl App {
                 }
                 if self.state.sidebar_agents != config.ui.sidebar.agents
                     || self.state.sidebar_spaces != config.ui.sidebar.spaces
+                    || self.state.sidebar_sections_layout
+                        != (config.ui.sidebar.layout
+                            == crate::config::SidebarLayoutConfig::Sections)
                 {
                     sidebar_projection_changed = true;
                 }
@@ -2839,6 +2846,10 @@ impl App {
                 self.state.working_row_opacity_percent = config.ui.working_row_opacity_percent;
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
+                self.state.sidebar_sections_layout =
+                    config.ui.sidebar.layout == crate::config::SidebarLayoutConfig::Sections;
+                self.state.sidebar_header_plain =
+                    config.ui.sidebar.header == crate::config::SidebarHeaderConfig::Plain;
                 if sidebar_projection_changed {
                     self.state.mark_sidebar_projection_changed();
                 }

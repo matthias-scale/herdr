@@ -1522,6 +1522,26 @@
           ]
         },
         {
+          "key": "ui.sidebar.layout",
+          "type": "enum",
+          "default": "current",
+          "description": "Sidebar row layout. `current` preserves the existing layout; `sections` shows pinned, active, snoozed, and settled thread shelves.",
+          "values": [
+            "current",
+            "sections"
+          ]
+        },
+        {
+          "key": "ui.sidebar.header",
+          "type": "enum",
+          "default": "sky",
+          "description": "Header decoration used by the sections layout. `plain` disables the night-sky background without changing header controls or their layout.",
+          "values": [
+            "sky",
+            "plain"
+          ]
+        },
+        {
           "key": "ui.sidebar.agents.row_gap",
           "type": "integer",
           "default": "0",

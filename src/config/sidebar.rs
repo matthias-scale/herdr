@@ -430,8 +430,34 @@ impl Default for SpacesSidebarConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SidebarConfig {
+    /// Sidebar row layout. `current` preserves the existing layout; `sections`
+    /// shows pinned, active, snoozed, and settled thread shelves.
+    pub layout: SidebarLayoutConfig,
+    /// Header decoration used by the sections layout. `plain` disables the
+    /// night-sky background without changing header controls or their layout.
+    pub header: SidebarHeaderConfig,
     pub agents: AgentsSidebarConfig,
     pub spaces: SpacesSidebarConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarLayoutConfig {
+    #[default]
+    /// Keep the configured legacy sidebar grouping.
+    Current,
+    /// Show the T3-style thread shelves.
+    Sections,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarHeaderConfig {
+    #[default]
+    /// Draw the theme-colored half-block night sky.
+    Sky,
+    /// Draw no header decoration.
+    Plain,
 }
 
 #[cfg(test)]
@@ -441,6 +467,8 @@ mod tests {
     #[test]
     fn defaults_show_only_thread_titles_and_space_names() {
         let config = SidebarConfig::default();
+        assert_eq!(config.layout, SidebarLayoutConfig::Current);
+        assert_eq!(config.header, SidebarHeaderConfig::Sky);
         assert_eq!(
             config.agents.rows,
             vec![vec![
@@ -460,6 +488,15 @@ mod tests {
         );
         // ac3: distinct Space groups get one compact blank row by default.
         assert_eq!(config.spaces.row_gap, 1);
+    }
+
+    #[test]
+    fn sections_layout_and_plain_header_parse_from_sidebar_config() {
+        let config: SidebarConfig =
+            toml::from_str("layout = \"sections\"\nheader = \"plain\"\n").unwrap();
+
+        assert_eq!(config.layout, SidebarLayoutConfig::Sections);
+        assert_eq!(config.header, SidebarHeaderConfig::Plain);
     }
 
     #[test]
