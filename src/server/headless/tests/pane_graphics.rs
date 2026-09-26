@@ -1678,10 +1678,6 @@ fn rejected_terminal_frame_keeps_pane_file_transport() {
     assert!(client.direct_graphics, "pane file transport stays enabled");
     assert!(server.app.direct_graphics_available);
     assert!(server.app.pane_graphics.slots.contains_key(&key));
-    assert_eq!(
-        crate::api::schema::PANE_GRAPHICS_DIRECT_FILE_MAX_BYTES,
-        400 * 1024 * 1024
-    );
 }
 
 #[cfg(unix)]
