@@ -13,8 +13,8 @@ pub(super) struct Response {
 
 #[derive(Debug, Default)]
 pub(super) struct ResponseMatcher {
-    expected: Option<(u64, u32, Option<std::time::Instant>)>,
-    retired: Option<(u32, std::time::Instant)>,
+    expected: std::collections::HashMap<u32, (u64, Option<std::time::Instant>)>,
+    retired: std::collections::HashMap<u32, std::time::Instant>,
     active: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -25,50 +25,63 @@ impl ResponseMatcher {
 
     fn refresh_active(&self) {
         self.active.store(
-            self.expected.is_some() || self.retired.is_some(),
+            !self.expected.is_empty() || !self.retired.is_empty(),
             std::sync::atomic::Ordering::Release,
         );
     }
+
     pub(super) fn interested(&mut self) -> bool {
         self.expire();
-        self.expected.is_some() || self.retired.is_some()
+        !self.expected.is_empty() || !self.retired.is_empty()
     }
+
     pub(super) fn arm(&mut self, transfer_id: u64, image_id: u32) -> bool {
         self.expire();
-        if self.expected.is_some() {
+        if self.expected.len() >= 64
+            || self.expected.contains_key(&image_id)
+            || self.retired.contains_key(&image_id)
+        {
             return false;
         }
-        self.expected = Some((transfer_id, image_id, None));
+        self.expected.insert(image_id, (transfer_id, None));
         self.refresh_active();
         true
     }
 
-    pub(super) fn start(&mut self, transfer_id: u64) {
-        self.start_at(transfer_id, std::time::Instant::now());
+    pub(super) fn start(&mut self, transfer_id: u64, image_id: u32) {
+        self.start_at(transfer_id, image_id, std::time::Instant::now());
     }
 
-    fn start_at(&mut self, transfer_id: u64, now: std::time::Instant) {
-        if let Some((id, _, deadline)) = &mut self.expected {
+    fn start_at(&mut self, transfer_id: u64, image_id: u32, now: std::time::Instant) {
+        if let Some((id, deadline)) = self.expected.get_mut(&image_id) {
             if *id == transfer_id {
                 *deadline = Some(now + RESPONSE_TIMEOUT);
             }
         }
     }
 
-    pub(super) fn cancel(&mut self, transfer_id: u64) {
-        if self.expected.is_some_and(|(id, _, _)| id == transfer_id) {
-            self.expected = None;
-            self.refresh_active();
+    pub(super) fn cancel(&mut self, transfer_id: u64, image_id: u32) {
+        if self
+            .expected
+            .get(&image_id)
+            .is_some_and(|(id, _)| *id == transfer_id)
+        {
+            self.expected.remove(&image_id);
         }
+        self.refresh_active();
     }
 
-    pub(super) fn retire(&mut self, transfer_id: u64) {
-        if self.expected.is_some_and(|(id, _, _)| id == transfer_id) {
-            if let Some((_, image_id, _)) = self.expected.take() {
-                self.retired = Some((image_id, std::time::Instant::now() + LATE_RESPONSE_DRAIN));
-                self.refresh_active();
-            }
+    pub(super) fn retire(&mut self, transfer_id: u64, image_id: u32) {
+        let now = std::time::Instant::now();
+        if self
+            .expected
+            .get(&image_id)
+            .is_some_and(|(id, _)| *id == transfer_id)
+        {
+            self.expected.remove(&image_id);
+            self.retired.insert(image_id, now + LATE_RESPONSE_DRAIN);
         }
+        self.refresh_active();
     }
 
     pub(super) fn expire(&mut self) {
@@ -76,17 +89,15 @@ impl ResponseMatcher {
     }
 
     fn expire_at(&mut self, now: std::time::Instant) {
-        if self
-            .expected
-            .is_some_and(|(_, _, deadline)| deadline.is_some_and(|deadline| deadline <= now))
-        {
-            if let Some((_, image_id, _)) = self.expected.take() {
-                self.retired = Some((image_id, now + LATE_RESPONSE_DRAIN));
+        self.expected.retain(|image_id, (_, deadline)| {
+            if deadline.is_some_and(|deadline| deadline <= now) {
+                self.retired.insert(*image_id, now + LATE_RESPONSE_DRAIN);
+                false
+            } else {
+                true
             }
-        }
-        if self.retired.is_some_and(|(_, deadline)| deadline <= now) {
-            self.retired = None;
-        }
+        });
+        self.retired.retain(|_, deadline| *deadline > now);
         self.refresh_active();
     }
 
@@ -100,18 +111,23 @@ impl ResponseMatcher {
         }
         let payload = &bytes[3..bytes.len() - 2];
         let separator = payload.iter().position(|byte| *byte == b';')?;
-        if let Some((retired_id, _)) = self.retired {
-            if matching_response_controls(&payload[..separator], retired_id) {
-                self.retired = None;
-                self.refresh_active();
-                return Some(None);
-            }
+        let controls = &payload[..separator];
+        if let Some(image_id) = self
+            .retired
+            .keys()
+            .copied()
+            .find(|id| matching_response_controls(controls, *id))
+        {
+            self.retired.remove(&image_id);
+            self.refresh_active();
+            return Some(None);
         }
-        let (transfer_id, image_id, _) = self.expected?;
-        if !matching_response_controls(&payload[..separator], image_id) {
-            return None;
-        }
-        self.expected = None;
+        let image_id = self
+            .expected
+            .keys()
+            .copied()
+            .find(|id| matching_response_controls(controls, *id))?;
+        let (transfer_id, _) = self.expected.remove(&image_id)?;
         self.refresh_active();
         Some(Some(Response {
             transfer_id,
@@ -225,7 +241,6 @@ pub(super) fn valid_control(control: &str, image_id: u32, expected_len: usize) -
     let mut height = None;
     let mut placement = [false; 5];
     let mut has_placement_controls = false;
-    let mut shared_memory = false;
     for field in control.split(',') {
         let Some((key, value)) = field.split_once('=') else {
             return false;
@@ -292,7 +307,6 @@ pub(super) fn valid_control(control: &str, image_id: u32, expected_len: usize) -
                 placement[4] = value == "1";
                 has_placement_controls = true;
             }
-            "t" if value == "s" => shared_memory = true,
             "t" => return false,
             "x" | "y" | "w" | "h" | "X" | "Y" => has_placement_controls = true,
             _ => {}
@@ -303,15 +317,11 @@ pub(super) fn valid_control(control: &str, image_id: u32, expected_len: usize) -
         .and_then(|(width, height)| width.checked_mul(height)?.checked_mul(4))
         == Some(expected_len);
     let profile_matches = match action {
-        Some("T") => placement.into_iter().all(|present| present) && !shared_memory,
+        Some("T") => placement.into_iter().all(|present| present),
         Some("t") => !has_placement_controls,
         _ => false,
     };
     format && image && quiet && dimensions_match && profile_matches
-}
-
-pub(super) fn uses_shared_memory(control: &str) -> bool {
-    control.split(',').any(|field| field == "t=s")
 }
 
 #[cfg(test)]
@@ -324,7 +334,7 @@ mod tests {
         let active = matcher.active_handle();
         assert!(matcher.arm(7, 42));
         assert!(active.load(std::sync::atomic::Ordering::Acquire));
-        assert!(!matcher.arm(8, 43));
+        assert!(!matcher.arm(8, 42));
         assert_eq!(matcher.consume(b"typed"), None);
         assert_eq!(matcher.consume(b"\x1b_Gi=41;OK\x1b\\"), None);
         assert_eq!(
@@ -352,7 +362,7 @@ mod tests {
         );
         matcher.arm(10, 45);
         assert_eq!(matcher.consume(b"\x1b_Gi=45;broken"), None);
-        matcher.cancel(10);
+        matcher.cancel(10, 45);
         matcher.arm(11, 46);
         assert_eq!(matcher.consume(b"\x1b_Gi=46oops;OK\x1b\\"), None);
     }
@@ -365,8 +375,6 @@ mod tests {
             800,
         ));
         assert!(valid_control("a=t,f=32,s=10,v=20,i=42,q=0", 42, 800,));
-        assert!(valid_control("a=t,t=s,f=32,s=10,v=20,i=42,q=0", 42, 800,));
-        assert!(uses_shared_memory("a=t,t=s,f=32,s=10,v=20,i=42,q=0"));
         for invalid in [
             "a=T,f=24,s=10,v=20,i=42,p=7,c=5,r=6,z=-1,C=1,q=0",
             "a=T,f=32,s=10,v=20,i=41,p=7,c=5,r=6,z=-1,C=1,q=0",
@@ -378,6 +386,7 @@ mod tests {
             "a=t,f=32,s=10,i=42,q=0",
             "a=t,f=32,s=10,s=10,v=20,i=42,q=0",
             "a=t,t=f,f=32,s=10,v=20,i=42,q=0",
+            "a=t,t=s,f=32,s=10,v=20,i=42,q=0",
         ] {
             assert!(!valid_control(invalid, 42, 800), "{invalid}");
         }
@@ -410,7 +419,7 @@ mod tests {
         let mut matcher = ResponseMatcher::default();
         let mut filter = InputFilter::default();
         matcher.arm(20, 50);
-        matcher.retire(20);
+        matcher.retire(20, 50);
         for foreign in [
             b"\x1b_Ga=p,i=50;OK\x1b\\".as_slice(),
             b"\x1b_Gi=50oops;OK\x1b\\",
@@ -430,10 +439,10 @@ mod tests {
         let mut matcher = ResponseMatcher::default();
         let started = std::time::Instant::now();
         assert!(matcher.arm(12, 47));
-        matcher.start_at(12, started);
-        assert!(!matcher.arm(13, 48));
-        matcher.expire_at(started + RESPONSE_TIMEOUT);
+        matcher.start_at(12, 47, started);
         assert!(matcher.arm(13, 48));
+        matcher.expire_at(started + RESPONSE_TIMEOUT);
+        assert!(!matcher.arm(13, 48));
         assert_eq!(matcher.consume(b"typed"), None);
         assert_eq!(matcher.consume(b"\x1b_Gi=47;OK\x1b\\"), Some(None));
         assert_eq!(
@@ -444,5 +453,33 @@ mod tests {
                 success: true,
             }))
         );
+    }
+
+    #[test]
+    fn terminal_and_pane_responses_match_in_both_orders() {
+        for terminal_first in [true, false] {
+            let mut matcher = ResponseMatcher::default();
+            assert!(matcher.arm(101, 10_042));
+            assert!(matcher.arm(102, 1 << 31 | 7));
+            matcher.start(101, 10_042);
+            matcher.start(102, 1 << 31 | 7);
+            let responses: [&[u8]; 2] = if terminal_first {
+                [b"\x1b_Gi=10042;OK\x1b\\", b"\x1b_Gi=2147483655;OK\x1b\\"]
+            } else {
+                [b"\x1b_Gi=2147483655;OK\x1b\\", b"\x1b_Gi=10042;OK\x1b\\"]
+            };
+            let first = matcher.consume(responses[0]).unwrap().unwrap();
+            assert!(matcher.interested(), "other image must remain armed");
+            let second = matcher.consume(responses[1]).unwrap().unwrap();
+            assert_eq!(
+                (first.transfer_id, second.transfer_id),
+                if terminal_first {
+                    (101, 102)
+                } else {
+                    (102, 101)
+                }
+            );
+            assert!(!matcher.interested());
+        }
     }
 }

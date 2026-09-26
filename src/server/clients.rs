@@ -99,6 +99,9 @@ pub(crate) struct ClientConnection {
     pub(crate) graphics_cache: crate::kitty_graphics::HostGraphicsCache,
     /// Passive eligibility for audited local Kitty regular-file graphics.
     pub(crate) direct_graphics: bool,
+    /// Host rejected terminal frame files; pane image files remain available.
+    #[cfg(unix)]
+    pub(crate) terminal_file_graphics: bool,
     /// The single terminal-image transfer awaiting the local host response.
     #[cfg(unix)]
     pub(crate) direct_terminal_graphics: Option<crate::kitty_graphics::DirectTerminalTransfer>,
@@ -188,6 +191,8 @@ impl ClientConnection {
             retained_pane_cursor: false,
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
             direct_graphics: false,
+            #[cfg(unix)]
+            terminal_file_graphics: true,
             #[cfg(unix)]
             direct_terminal_graphics: None,
             pixel_mouse: false,

@@ -8,17 +8,6 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-#[cfg(unix)]
-use std::ffi::CString;
-#[cfg(unix)]
-use std::os::fd::FromRawFd;
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
-#[cfg(all(unix, not(target_os = "linux")))]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-#[cfg(unix)]
-use std::path::{Path, PathBuf};
-
 use base64::Engine;
 use ratatui::layout::Rect;
 
@@ -185,366 +174,9 @@ pub(crate) fn direct_host_graphics_enabled() -> bool {
 
 #[cfg(unix)]
 #[derive(Debug)]
-struct SharedMemoryFrame {
-    name: CString,
-    file: std::fs::File,
-    len: usize,
-    transfer_id: u64,
-    registry_marker: Option<PathBuf>,
-}
-
-#[cfg(unix)]
-impl SharedMemoryFrame {
-    fn create(data: &[u8]) -> io::Result<Self> {
-        let transfer_id = NEXT_DIRECT_TRANSFER_ID.fetch_add(1, Ordering::Relaxed);
-        let name = CString::new(format!(
-            "/hg{:08x}{:08x}{:08x}",
-            crate::pane_graphics_files::effective_uid(),
-            std::process::id(),
-            transfer_id as u32,
-        ))
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid graphics shm name"))?;
-        #[cfg(target_os = "linux")]
-        let registry_marker = None;
-        #[cfg(all(unix, not(target_os = "linux")))]
-        let registry_marker = Some(register_shared_memory_frame(&name)?);
-        let fd = unsafe {
-            libc::shm_open(
-                name.as_ptr(),
-                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
-                (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
-            )
-        };
-        if fd < 0 {
-            let error = io::Error::last_os_error();
-            if let Some(marker) = registry_marker.as_deref() {
-                remove_shared_memory_registry_marker(marker);
-            }
-            return Err(error);
-        }
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
-            let error = io::Error::last_os_error();
-            unsafe {
-                libc::close(fd);
-            }
-            unlink_shared_memory_frame(&name, registry_marker.as_deref());
-            return Err(error);
-        }
-        let file = unsafe { std::fs::File::from_raw_fd(fd) };
-        let len = match i64::try_from(data.len()) {
-            Ok(len) => len,
-            Err(_) => {
-                unlink_shared_memory_frame(&name, registry_marker.as_deref());
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "graphics frame too large",
-                ));
-            }
-        };
-        if unsafe { libc::ftruncate(fd, len as libc::off_t) } != 0 {
-            let error = io::Error::last_os_error();
-            unlink_shared_memory_frame(&name, registry_marker.as_deref());
-            return Err(error);
-        }
-        let mapping = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                data.len(),
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            )
-        };
-        if mapping == libc::MAP_FAILED {
-            let error = io::Error::last_os_error();
-            unlink_shared_memory_frame(&name, registry_marker.as_deref());
-            return Err(error);
-        }
-        unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), mapping.cast(), data.len());
-        }
-        if unsafe { libc::munmap(mapping, data.len()) } != 0 {
-            let error = io::Error::last_os_error();
-            unlink_shared_memory_frame(&name, registry_marker.as_deref());
-            return Err(error);
-        }
-        Ok(Self {
-            name,
-            file,
-            len: data.len(),
-            transfer_id,
-            registry_marker,
-        })
-    }
-
-    fn name(&self) -> &str {
-        self.name.to_str().unwrap_or_default()
-    }
-}
-
-/// Remove Herdr graphics frames left behind by a server that exited without
-/// running `Drop`. The PID in the name keeps frames owned by live servers.
-#[cfg(unix)]
-pub(crate) fn cleanup_stale_shared_memory_frames() -> io::Result<usize> {
-    #[cfg(target_os = "linux")]
-    {
-        cleanup_stale_shared_memory_frames_linux()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        cleanup_stale_shared_memory_frames_from_registry()
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn cleanup_stale_shared_memory_frames_linux() -> io::Result<usize> {
-    let uid = unsafe { libc::geteuid() };
-    let directory = std::fs::read_dir("/dev/shm")?;
-    let mut removed = 0;
-
-    for entry in directory {
-        let entry = entry?;
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let Some((name_uid, pid)) = parse_shared_memory_frame_name(&name) else {
-            continue;
-        };
-        let metadata = match std::fs::symlink_metadata(entry.path()) {
-            Ok(metadata) => metadata,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(err),
-        };
-        if name_uid != uid
-            || !metadata.file_type().is_file()
-            || metadata.uid() != uid
-            || process_is_alive(pid)
-        {
-            continue;
-        }
-
-        let name = CString::new(format!("/{name}"))
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid graphics shm name"))?;
-        if unsafe { libc::shm_unlink(name.as_ptr()) } == 0 {
-            removed += 1;
-        } else {
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::NotFound {
-                return Err(error);
-            }
-        }
-    }
-
-    Ok(removed)
-}
-
-#[cfg(unix)]
-fn parse_shared_memory_frame_name(name: &str) -> Option<(libc::uid_t, libc::pid_t)> {
-    let bytes = name.as_bytes();
-    if bytes.len() != 26
-        || !bytes.starts_with(b"hg")
-        || !bytes[2..].iter().all(u8::is_ascii_hexdigit)
-    {
-        return None;
-    }
-    let uid = u32::from_str_radix(&name[2..10], 16).ok()?;
-    let pid = i32::from_str_radix(&name[10..18], 16).ok()?;
-    u32::from_str_radix(&name[18..26], 16).ok()?;
-    (pid > 0).then_some((uid, pid))
-}
-
-#[cfg(unix)]
-fn process_is_alive(pid: libc::pid_t) -> bool {
-    let result = unsafe { libc::kill(pid, 0) };
-    result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-const SHARED_MEMORY_REGISTRY_MARKER: &[u8] = b"herdr-graphics-shm-frame-v1\n";
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn shared_memory_registry_dir(uid: libc::uid_t) -> PathBuf {
-    std::env::temp_dir().join(format!("herdr-graphics-shm-{uid:08x}"))
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn verify_shared_memory_registry_dir(path: &Path, uid: libc::uid_t) -> io::Result<()> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_dir() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "graphics shared memory registry is not a private user-owned directory",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn ensure_shared_memory_registry_dir(uid: libc::uid_t) -> io::Result<PathBuf> {
-    let path = shared_memory_registry_dir(uid);
-    let mut builder = std::fs::DirBuilder::new();
-    builder.mode(0o700);
-    match builder.create(&path) {
-        Ok(()) => std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?,
-        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(err) => return Err(err),
-    }
-    verify_shared_memory_registry_dir(&path, uid)?;
-    Ok(path)
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn register_shared_memory_frame(name: &CString) -> io::Result<PathBuf> {
-    let uid = unsafe { libc::geteuid() };
-    let path = ensure_shared_memory_registry_dir(uid)?.join(
-        name.to_str()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid graphics shm name"))?
-            .trim_start_matches('/'),
-    );
-    let mut marker = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)?;
-    if let Err(err) = marker.write_all(SHARED_MEMORY_REGISTRY_MARKER) {
-        drop(marker);
-        let _ = std::fs::remove_file(&path);
-        return Err(err);
-    }
-    Ok(path)
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn cleanup_stale_shared_memory_frames_from_registry() -> io::Result<usize> {
-    let uid = unsafe { libc::geteuid() };
-    let directory = shared_memory_registry_dir(uid);
-    match verify_shared_memory_registry_dir(&directory, uid) {
-        Ok(()) => {}
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
-        Err(err) => return Err(err),
-    }
-
-    let mut removed = 0;
-    for entry in std::fs::read_dir(directory)? {
-        let entry = entry?;
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let Some((name_uid, pid)) = parse_shared_memory_frame_name(&name) else {
-            continue;
-        };
-        if name_uid != uid {
-            continue;
-        }
-        let marker_path = entry.path();
-        let metadata = match std::fs::symlink_metadata(&marker_path) {
-            Ok(metadata) => metadata,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(err),
-        };
-        if !metadata.file_type().is_file()
-            || metadata.uid() != uid
-            || metadata.len() != SHARED_MEMORY_REGISTRY_MARKER.len() as u64
-            || process_is_alive(pid)
-        {
-            continue;
-        }
-        let marker = std::fs::read(&marker_path)?;
-        if marker != SHARED_MEMORY_REGISTRY_MARKER {
-            continue;
-        }
-
-        let name = CString::new(format!("/{name}"))
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid graphics shm name"))?;
-        if unlink_registered_shared_memory_frame(&name, uid)? {
-            removed += 1;
-        }
-        match std::fs::remove_file(marker_path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
-        }
-    }
-
-    Ok(removed)
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn unlink_registered_shared_memory_frame(name: &CString, uid: libc::uid_t) -> io::Result<bool> {
-    let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
-    if fd < 0 {
-        let error = io::Error::last_os_error();
-        if matches!(
-            error.raw_os_error(),
-            Some(libc::ENOENT | libc::EACCES | libc::EPERM)
-        ) {
-            return Ok(false);
-        }
-        return Err(error);
-    }
-
-    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
-    let stat_result = unsafe { libc::fstat(fd, metadata.as_mut_ptr()) };
-    let stat_error = (stat_result != 0).then(io::Error::last_os_error);
-    unsafe {
-        libc::close(fd);
-    }
-    if let Some(error) = stat_error {
-        return Err(error);
-    }
-    if unsafe { metadata.assume_init() }.st_uid != uid {
-        return Ok(false);
-    }
-
-    if unsafe { libc::shm_unlink(name.as_ptr()) } == 0 {
-        return Ok(true);
-    }
-    let error = io::Error::last_os_error();
-    if error.kind() == io::ErrorKind::NotFound {
-        Ok(false)
-    } else {
-        Err(error)
-    }
-}
-
-#[cfg(unix)]
-fn unlink_shared_memory_frame(name: &CString, registry_marker: Option<&Path>) {
-    if unsafe { libc::shm_unlink(name.as_ptr()) } == 0
-        || io::Error::last_os_error().kind() == io::ErrorKind::NotFound
-    {
-        if let Some(marker) = registry_marker {
-            remove_shared_memory_registry_marker(marker);
-        }
-        return;
-    }
-    tracing::warn!(
-        name = name.to_str().unwrap_or_default(),
-        "failed to release graphics shared memory"
-    );
-}
-
-#[cfg(unix)]
-fn remove_shared_memory_registry_marker(marker: &Path) {
-    if let Err(err) = std::fs::remove_file(marker) {
-        if err.kind() != io::ErrorKind::NotFound {
-            tracing::warn!(%err, "failed to remove graphics shared memory registry marker");
-        }
-    }
-}
-
-#[cfg(unix)]
-impl Drop for SharedMemoryFrame {
-    fn drop(&mut self) {
-        let _keep_open = &self.file;
-        unlink_shared_memory_frame(&self.name, self.registry_marker.as_deref());
-    }
-}
-
-#[cfg(unix)]
-#[derive(Debug)]
 pub(crate) struct DirectTerminalTransfer {
-    shared_memory: SharedMemoryFrame,
+    frame: crate::pane_graphics_files::StagedFrame,
+    transfer_id: u64,
     image_id: u32,
     control: String,
     display: Vec<u8>,
@@ -555,23 +187,39 @@ pub(crate) struct DirectTerminalTransfer {
 
 #[cfg(unix)]
 impl DirectTerminalTransfer {
+    #[cfg(test)]
+    pub(crate) fn test_new(files: &crate::pane_graphics_files::FileStore, image_id: u32) -> Self {
+        Self {
+            frame: files
+                .stage_frame(&[0, 0, 0, 255])
+                .expect("stage test frame"),
+            transfer_id: NEXT_DIRECT_TRANSFER_ID.fetch_add(1, Ordering::Relaxed),
+            image_id,
+            control: format!("a=t,f=32,s=1,v=1,i={image_id},q=0"),
+            display: Vec::new(),
+            next_cache: HostGraphicsCache::default(),
+            deadline: std::time::Instant::now()
+                + crate::app::pane_graphics::DIRECT_DELIVERY_TIMEOUT,
+            written: false,
+        }
+    }
     pub(crate) fn message(&self) -> crate::protocol::ServerMessage {
         crate::protocol::ServerMessage::GraphicsFile {
-            path: self.shared_memory.name().to_owned(),
-            expected_len: self.shared_memory.len as u64,
+            path: self.frame.path().to_string_lossy().into_owned(),
+            expected_len: self.frame.len() as u64,
             image_id: self.image_id,
-            transfer_id: self.shared_memory.transfer_id,
+            transfer_id: self.transfer_id,
             leading: Vec::new(),
             control: self.control.clone(),
         }
     }
 
     pub(crate) fn matches(&self, transfer_id: u64, image_id: u32) -> bool {
-        self.shared_memory.transfer_id == transfer_id && self.image_id == image_id
+        self.transfer_id == transfer_id && self.image_id == image_id
     }
 
     pub(crate) fn ids(&self) -> (u64, u32) {
-        (self.shared_memory.transfer_id, self.image_id)
+        (self.transfer_id, self.image_id)
     }
 
     pub(crate) fn start(&mut self) {
@@ -594,10 +242,24 @@ impl DirectTerminalTransfer {
     }
 
     #[cfg(test)]
-    fn host_write_bytes(&self) -> usize {
+    fn host_write_measurement(&self) -> (usize, std::time::Duration) {
         let mut upload = Vec::new();
-        encode_kitty_regular_file(&mut upload, &[], &self.control, self.shared_memory.name());
-        upload.len() + self.display.len()
+        encode_kitty_regular_file(
+            &mut upload,
+            &[],
+            &self.control,
+            &self.frame.path().to_string_lossy(),
+        );
+        let started = std::time::Instant::now();
+        let mut client_output = Vec::with_capacity(upload.len() + self.display.len());
+        client_output
+            .write_all(&upload)
+            .expect("client upload write");
+        client_output
+            .write_all(&self.display)
+            .expect("client display write");
+        client_output.flush().expect("client output flush");
+        (client_output.len(), started.elapsed())
     }
 }
 
@@ -1869,6 +1531,7 @@ pub(crate) fn prepare_direct_file(
 
 #[cfg(unix)]
 pub(crate) fn prepare_direct_terminal_transfer(
+    files: &crate::pane_graphics_files::FileStore,
     app: &AppState,
     graphics: &crate::app::pane_graphics::Runtime,
     terminal_runtimes: &TerminalRuntimeRegistry,
@@ -1889,7 +1552,7 @@ pub(crate) fn prepare_direct_terminal_transfer(
         &cache.oversized,
     );
     for placement in placements {
-        if let Some(transfer) = prepare_direct_terminal_placement(cache, &placement)? {
+        if let Some(transfer) = prepare_direct_terminal_placement(files, cache, &placement)? {
             return Ok(Some(transfer));
         }
     }
@@ -1898,6 +1561,7 @@ pub(crate) fn prepare_direct_terminal_transfer(
 
 #[cfg(unix)]
 fn prepare_direct_terminal_placement(
+    files: &crate::pane_graphics_files::FileStore,
     cache: &HostGraphicsCache,
     placement: &HostPlacement,
 ) -> io::Result<Option<DirectTerminalTransfer>> {
@@ -1921,12 +1585,12 @@ fn prepare_direct_terminal_placement(
         return Ok(None);
     }
 
-    let shared_memory = SharedMemoryFrame::create(&placement.placement.data)?;
+    let frame = files.stage_frame(&placement.placement.data)?;
     let placement_id = host_placement_id(&placement.source_key, &placement.placement);
     let placement_signature =
         placement_signature(clipped, placement.placement.z, placement.scrollback_offset);
     let control = format!(
-        "a=t,t=s,f={format_code},s={},v={},i={host_id},q=0",
+        "a=t,f={format_code},s={},v={},i={host_id},q=0",
         placement.placement.image_width, placement.placement.image_height,
     );
 
@@ -1965,7 +1629,8 @@ fn prepare_direct_terminal_placement(
     next_cache.continuation = None;
 
     Ok(Some(DirectTerminalTransfer {
-        shared_memory,
+        frame,
+        transfer_id: NEXT_DIRECT_TRANSFER_ID.fetch_add(1, Ordering::Relaxed),
         image_id: host_id,
         control,
         display,
@@ -2024,11 +1689,7 @@ pub(crate) fn encode_kitty_regular_file(
     let payload = base64::engine::general_purpose::STANDARD.encode(path.as_bytes());
     out.extend_from_slice(b"\x1b7");
     out.extend_from_slice(leading);
-    if control.split(',').any(|field| field == "t=s") {
-        let _ = write!(out, "\x1b_G{control};{payload}\x1b\\");
-    } else {
-        let _ = write!(out, "\x1b_G{control},t=f;{payload}\x1b\\");
-    }
+    let _ = write!(out, "\x1b_G{control},t=f;{payload}\x1b\\");
     out.extend_from_slice(b"\x1b8");
 }
 
@@ -2443,82 +2104,6 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn stale_shared_memory_cleanup_removes_dead_frames_and_preserves_live_ones() {
-        const CHILD_MARKER: &str = "HERDR_TEST_CREATE_STALE_GRAPHICS_FRAME";
-        if std::env::var_os(CHILD_MARKER).is_some() {
-            let frame = SharedMemoryFrame::create(&[7]).expect("create child graphics frame");
-            println!("{}", frame.name());
-            std::io::stdout().flush().expect("flush child frame name");
-            loop {
-                std::thread::park();
-            }
-        }
-
-        let live_frame = SharedMemoryFrame::create(&[9]).expect("create live graphics frame");
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .arg("--exact")
-            .arg("kitty_graphics::tests::stale_shared_memory_cleanup_removes_dead_frames_and_preserves_live_ones")
-            .arg("--nocapture")
-            .env(CHILD_MARKER, "1")
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("start child test process");
-        let mut child_output = std::io::BufReader::new(child.stdout.take().unwrap());
-        let mut stale_name = String::new();
-        std::io::BufRead::read_line(&mut child_output, &mut stale_name)
-            .expect("read child frame name");
-        let stale_name = CString::new(stale_name.trim()).expect("child frame name");
-        let child_pid = child.id() as libc::pid_t;
-        assert_ne!(unsafe { libc::kill(child_pid, 0) }, -1);
-
-        child.kill().expect("kill child without frame cleanup");
-        child.wait().expect("reap killed child");
-
-        let foreign_uid_name = CString::new(format!(
-            "/hg{:08x}{:08x}{:08x}",
-            (unsafe { libc::geteuid() }).wrapping_add(1),
-            child_pid,
-            1,
-        ))
-        .expect("foreign uid frame name");
-        let foreign_uid_fd = unsafe {
-            libc::shm_open(
-                foreign_uid_name.as_ptr(),
-                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
-                (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
-            )
-        };
-        assert!(foreign_uid_fd >= 0, "create other-uid namespace frame");
-        unsafe {
-            libc::close(foreign_uid_fd);
-        }
-
-        let live_name = CString::new(live_frame.name()).expect("live frame name");
-        // A concurrent server startup may have removed the dead child's frame already.
-        cleanup_stale_shared_memory_frames().unwrap();
-        assert_eq!(
-            unsafe { libc::shm_open(stale_name.as_ptr(), libc::O_RDONLY, 0) },
-            -1
-        );
-        let live_fd = unsafe { libc::shm_open(live_name.as_ptr(), libc::O_RDONLY, 0) };
-        assert!(live_fd >= 0, "live Herdr frame must remain linked");
-        unsafe {
-            libc::close(live_fd);
-        }
-        let foreign_uid_fd =
-            unsafe { libc::shm_open(foreign_uid_name.as_ptr(), libc::O_RDONLY, 0) };
-        assert!(
-            foreign_uid_fd >= 0,
-            "other-uid namespace frame must remain linked"
-        );
-        unsafe {
-            libc::close(foreign_uid_fd);
-            libc::shm_unlink(foreign_uid_name.as_ptr());
-        }
-    }
-
-    #[cfg(unix)]
     fn write_shared_memory_frame(name: &CString, frame: u8) {
         unsafe {
             libc::shm_unlink(name.as_ptr());
@@ -2531,31 +2116,12 @@ mod tests {
             )
         };
         assert!(fd >= 0, "create awrit-style shared memory frame");
-        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
         let mut rgba = vec![0; AWRIT_FRAME_WIDTH * AWRIT_FRAME_HEIGHT * 4];
         for pixel in rgba.chunks_exact_mut(4) {
             pixel.copy_from_slice(&[frame, 0, 0, 255]);
         }
-        file.set_len(rgba.len() as u64).unwrap();
-        let mapping = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                rgba.len(),
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            )
-        };
-        assert_ne!(
-            mapping,
-            libc::MAP_FAILED,
-            "map awrit-style shared memory frame"
-        );
-        unsafe {
-            std::ptr::copy_nonoverlapping(rgba.as_ptr(), mapping.cast(), rgba.len());
-        }
-        assert_eq!(unsafe { libc::munmap(mapping, rgba.len()) }, 0);
+        file.write_all(&rgba).unwrap();
     }
 
     #[cfg(unix)]
@@ -3042,7 +2608,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
-    async fn awrit_shared_memory_stream_drops_stale_frames_without_blanking() {
+    async fn awrit_file_stream_drops_stale_frames_without_blanking() {
         const FRAME_COUNT: usize = 4;
         let settle = std::time::Duration::from_millis(20);
 
@@ -3073,18 +2639,29 @@ mod tests {
         let encode_started = std::time::Instant::now();
         let leading_bytes = update(&mut cache, &[awrit_host_placement(&terminal)], false);
         let leading_herdr_time = encode_started.elapsed();
-        let leading_paint_to_host = leading_ready_after + leading_herdr_time;
+        let inline_write_started = std::time::Instant::now();
+        let mut inline_output = Vec::with_capacity(leading_bytes.len());
+        inline_output.write_all(&leading_bytes).unwrap();
+        inline_output.flush().unwrap();
+        let leading_inline_write = inline_write_started.elapsed();
+        let leading_paint_to_host = leading_ready_after + leading_herdr_time + leading_inline_write;
         observe_host_visibility(&leading_bytes, &mut visible);
         let mut direct_cache = HostGraphicsCache::default();
+        let files = crate::pane_graphics_files::FileStore::default();
         let mut direct_visible = HashSet::new();
         let direct_started = std::time::Instant::now();
-        let leading_direct =
-            prepare_direct_terminal_placement(&direct_cache, &awrit_host_placement(&terminal))
-                .unwrap()
-                .expect("large RGBA frame uses direct host transport");
-        let leading_direct_host_bytes = leading_direct.host_write_bytes();
+        let leading_direct = prepare_direct_terminal_placement(
+            &files,
+            &direct_cache,
+            &awrit_host_placement(&terminal),
+        )
+        .unwrap()
+        .expect("large RGBA frame uses direct host transport");
         let leading_direct_herdr_time = direct_started.elapsed();
-        let leading_direct_paint_to_host = leading_ready_after + leading_direct_herdr_time;
+        let (leading_direct_host_bytes, leading_direct_write) =
+            leading_direct.host_write_measurement();
+        let leading_direct_paint_to_host =
+            leading_ready_after + leading_direct_herdr_time + leading_direct_write;
         let direct_display = leading_direct.commit(&mut direct_cache);
         let mut direct_blank_states = observe_host_visibility(&direct_display, &mut direct_visible);
         host_updates += 1;
@@ -3110,17 +2687,27 @@ mod tests {
         let newest_host_id = host_image_id(newest.pane_id, &newest.placement);
         let host_bytes = update(&mut cache, &[newest], false);
         let newest_herdr_time = encode_started.elapsed();
-        let newest_paint_to_host = newest_ready_after + newest_herdr_time;
+        let inline_write_started = std::time::Instant::now();
+        let mut inline_output = Vec::with_capacity(host_bytes.len());
+        inline_output.write_all(&host_bytes).unwrap();
+        inline_output.flush().unwrap();
+        let newest_inline_write = inline_write_started.elapsed();
+        let newest_paint_to_host = newest_ready_after + newest_herdr_time + newest_inline_write;
         host_updates += 1;
         blank_states += observe_host_visibility(&host_bytes, &mut visible);
         let direct_started = std::time::Instant::now();
-        let newest_direct =
-            prepare_direct_terminal_placement(&direct_cache, &awrit_host_placement(&terminal))
-                .unwrap()
-                .expect("newest large RGBA frame uses direct host transport");
-        let newest_direct_host_bytes = newest_direct.host_write_bytes();
+        let newest_direct = prepare_direct_terminal_placement(
+            &files,
+            &direct_cache,
+            &awrit_host_placement(&terminal),
+        )
+        .unwrap()
+        .expect("newest large RGBA frame uses direct host transport");
         let newest_direct_herdr_time = direct_started.elapsed();
-        let newest_direct_paint_to_host = newest_ready_after + newest_direct_herdr_time;
+        let (newest_direct_host_bytes, newest_direct_write) =
+            newest_direct.host_write_measurement();
+        let newest_direct_paint_to_host =
+            newest_ready_after + newest_direct_herdr_time + newest_direct_write;
         let direct_display = newest_direct.commit(&mut direct_cache);
         direct_blank_states += observe_host_visibility(&direct_display, &mut direct_visible);
 
@@ -3155,7 +2742,7 @@ mod tests {
             "stale frames were replayed after the newest frame"
         );
         eprintln!(
-            "awrit stream: dimensions={AWRIT_FRAME_WIDTH}x{AWRIT_FRAME_HEIGHT} rgba_bytes={} input_frames={FRAME_COUNT} host_updates={host_updates} blank_states={blank_states} inline_leading_host_bytes={} inline_leading_herdr_time={leading_herdr_time:?} inline_leading_paint_to_host={leading_paint_to_host:?} direct_leading_host_bytes={leading_direct_host_bytes} direct_leading_herdr_time={leading_direct_herdr_time:?} direct_leading_paint_to_host={leading_direct_paint_to_host:?} inline_newest_host_bytes={} inline_newest_herdr_time={newest_herdr_time:?} inline_newest_paint_to_host={newest_paint_to_host:?} direct_newest_host_bytes={newest_direct_host_bytes} direct_newest_herdr_time={newest_direct_herdr_time:?} direct_newest_paint_to_host={newest_direct_paint_to_host:?}",
+            "awrit stream: dimensions={AWRIT_FRAME_WIDTH}x{AWRIT_FRAME_HEIGHT} rgba_bytes={} input_frames={FRAME_COUNT} host_updates={host_updates} blank_states={blank_states} inline_leading_host_bytes={} inline_leading_herdr_time={leading_herdr_time:?} inline_leading_client_write={leading_inline_write:?} inline_leading_paint_to_host={leading_paint_to_host:?} direct_leading_host_bytes={leading_direct_host_bytes} direct_leading_herdr_time={leading_direct_herdr_time:?} direct_leading_client_write={leading_direct_write:?} direct_leading_paint_to_host={leading_direct_paint_to_host:?} inline_newest_host_bytes={} inline_newest_herdr_time={newest_herdr_time:?} inline_newest_client_write={newest_inline_write:?} inline_newest_paint_to_host={newest_paint_to_host:?} direct_newest_host_bytes={newest_direct_host_bytes} direct_newest_herdr_time={newest_direct_herdr_time:?} direct_newest_client_write={newest_direct_write:?} direct_newest_paint_to_host={newest_direct_paint_to_host:?}",
             AWRIT_FRAME_WIDTH * AWRIT_FRAME_HEIGHT * 4,
             leading_bytes.len(),
             host_bytes.len(),

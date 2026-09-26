@@ -184,9 +184,9 @@ struct ClientState {
     /// One bounded matcher, inactive unless a direct transmission is armed.
     #[cfg(unix)]
     direct_graphics_response: Arc<Mutex<direct_graphics::ResponseMatcher>>,
-    /// One server-retired direct transfer to suppress if it was still queued.
+    /// Server-retired transfers to suppress if they were still queued.
     #[cfg(unix)]
-    retired_direct_graphics: Option<(u64, u32)>,
+    retired_direct_graphics: std::collections::VecDeque<(u64, u32)>,
     /// Direct attach prefix escape state. None for full-app clients.
     attach_escape: Option<AttachEscapeState>,
     /// Rows scrolled for one direct-attach wheel notch.
@@ -1790,7 +1790,7 @@ async fn run_client_loop(
         #[cfg(unix)]
         direct_graphics_response: Arc::new(Mutex::new(direct_graphics::ResponseMatcher::default())),
         #[cfg(unix)]
-        retired_direct_graphics: None,
+        retired_direct_graphics: std::collections::VecDeque::new(),
         attach_escape,
         #[cfg(unix)]
         mouse_scroll_lines: config.mouse_scroll_lines,
@@ -2212,24 +2212,22 @@ async fn run_client_loop(
                 } => {
                     #[cfg(unix)]
                     {
-                        if state.retired_direct_graphics.take() == Some((transfer_id, image_id)) {
+                        if let Some(index) = state
+                            .retired_direct_graphics
+                            .iter()
+                            .position(|ids| *ids == (transfer_id, image_id))
+                        {
+                            state.retired_direct_graphics.remove(index);
                             continue;
                         }
                         let valid = state.kitty_graphics_enabled
                             && usize::try_from(expected_len).ok().is_some_and(|len| {
                                 direct_graphics::valid_control(&control, image_id, len)
-                                    && if direct_graphics::uses_shared_memory(&control) {
-                                        crate::pane_graphics_files::validate_direct_shared_memory_source(
-                                            &path, len,
-                                        )
-                                        .is_ok()
-                                    } else {
-                                        crate::pane_graphics_files::validate_direct_source(
-                                            std::path::Path::new(&path),
-                                            len,
-                                        )
-                                        .is_ok()
-                                    }
+                                    && crate::pane_graphics_files::validate_direct_source(
+                                        std::path::Path::new(&path),
+                                        len,
+                                    )
+                                    .is_ok()
                             })
                             && state
                                 .direct_graphics_response
@@ -2257,7 +2255,7 @@ async fn run_client_loop(
                         };
                         if sent {
                             if let Ok(mut matcher) = state.direct_graphics_response.lock() {
-                                matcher.start(transfer_id);
+                                matcher.start(transfer_id, image_id);
                             }
                             let started = ClientMessage::GraphicsTransmissionStarted {
                                 transfer_id,
@@ -2269,9 +2267,9 @@ async fn run_client_loop(
                         } else {
                             if let Ok(mut matcher) = state.direct_graphics_response.lock() {
                                 if valid {
-                                    matcher.retire(transfer_id);
+                                    matcher.retire(transfer_id, image_id);
                                 } else {
-                                    matcher.cancel(transfer_id);
+                                    matcher.cancel(transfer_id, image_id);
                                 }
                             }
                             let result = ClientMessage::GraphicsTransmissionResult {
@@ -2293,9 +2291,14 @@ async fn run_client_loop(
                 } => {
                     #[cfg(unix)]
                     {
-                        state.retired_direct_graphics = Some((transfer_id, image_id));
+                        if state.retired_direct_graphics.len() == 64 {
+                            state.retired_direct_graphics.pop_front();
+                        }
+                        state
+                            .retired_direct_graphics
+                            .push_back((transfer_id, image_id));
                         if let Ok(mut matcher) = state.direct_graphics_response.lock() {
-                            matcher.retire(transfer_id);
+                            matcher.retire(transfer_id, image_id);
                         }
                     }
                     #[cfg(not(unix))]

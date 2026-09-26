@@ -322,11 +322,10 @@ impl HeadlessServer {
                     self.send_to_client(client_id, ServerMessage::Graphics { bytes: display });
                 } else {
                     if let Some(client) = self.clients.get_mut(&client_id) {
-                        client.direct_graphics = false;
+                        client.terminal_file_graphics = false;
+                        client.request_repaint();
                     }
-                    self.app.direct_graphics_available = false;
                     crate::kitty_graphics::set_direct_host_graphics(false);
-                    self.retire_all_direct_graphics();
                 }
                 return true;
             }
@@ -450,8 +449,10 @@ impl HeadlessServer {
             );
             if let Some(client) = self.clients.get_mut(client_id) {
                 client.direct_terminal_graphics = None;
-                client.direct_graphics = false;
+                client.terminal_file_graphics = false;
+                client.request_repaint();
             }
+            crate::kitty_graphics::set_direct_host_graphics(false);
         }
         let expired = self
             .app
@@ -486,7 +487,7 @@ impl HeadlessServer {
         let any_expired = !expired.is_empty() || !expired_terminal.is_empty();
         #[cfg(not(unix))]
         let any_expired = !expired.is_empty();
-        if any_expired {
+        if !expired.is_empty() {
             self.app.direct_graphics_available = false;
             crate::kitty_graphics::set_direct_host_graphics(false);
             self.retire_all_direct_graphics();
@@ -599,9 +600,11 @@ impl HeadlessServer {
 
             #[cfg(unix)]
             let direct_transfer = if client.direct_graphics
+                && client.terminal_file_graphics
                 && client.direct_terminal_graphics.is_none()
             {
                 match crate::kitty_graphics::prepare_direct_terminal_transfer(
+                    &self.app.pane_graphics_files,
                     &self.app.state,
                     &self.app.pane_graphics,
                     &self.app.terminal_runtimes,
@@ -612,6 +615,8 @@ impl HeadlessServer {
                     Ok(transfer) => transfer,
                     Err(err) => {
                         tracing::warn!(client_id, %err, "failed to stage direct terminal graphics");
+                        client.terminal_file_graphics = false;
+                        crate::kitty_graphics::set_direct_host_graphics(false);
                         None
                     }
                 }

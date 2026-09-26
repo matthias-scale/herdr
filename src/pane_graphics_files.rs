@@ -2,12 +2,12 @@
 use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io;
+#[cfg(unix)]
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-#[cfg(unix)]
-use std::os::fd::FromRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
@@ -27,11 +27,42 @@ pub(crate) struct FileStore {
 struct Generation {
     root: PathBuf,
     source: PathBuf,
+    #[cfg(unix)]
+    _lock: File,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Lease {
     inner: Arc<LeaseInner>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct StagedFrame {
+    path: PathBuf,
+    len: usize,
+    _generation: Arc<Generation>,
+}
+
+#[cfg(unix)]
+impl StagedFrame {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StagedFrame {
+    fn drop(&mut self) {
+        if let Err(err) = fs::remove_file(&self.path) {
+            if err.kind() != io::ErrorKind::NotFound {
+                tracing::warn!(path = %self.path.display(), %err, "failed to remove staged graphics frame");
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -61,6 +92,27 @@ impl FileStore {
 
     pub(crate) fn source_directory(&self) -> io::Result<PathBuf> {
         Ok(self.generation()?.source.clone())
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn stage_frame(&self, data: &[u8]) -> io::Result<StagedFrame> {
+        let generation = self.generation()?;
+        let id = self.next_fingerprint.fetch_add(1, Ordering::Relaxed);
+        let path = generation.source.join(format!("terminal-{id}"));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(FILE_MODE)
+            .open(&path)?;
+        if let Err(err) = file.write_all(data) {
+            let _ = fs::remove_file(&path);
+            return Err(err);
+        }
+        Ok(StagedFrame {
+            path,
+            len: data.len(),
+            _generation: generation,
+        })
     }
 
     pub(crate) fn lease(&self, path: &Path, expected_len: usize) -> io::Result<Lease> {
@@ -168,30 +220,6 @@ pub(crate) fn validate_direct_source(path: &Path, expected_len: usize) -> io::Re
     validate_path_identity(path, &metadata)
 }
 
-#[cfg(unix)]
-pub(crate) fn validate_direct_shared_memory_source(
-    name: &str,
-    expected_len: usize,
-) -> io::Result<()> {
-    let expected_prefix = format!("/hg{:08x}", effective_uid());
-    let suffix = name
-        .strip_prefix(&expected_prefix)
-        .ok_or_else(invalid_path)?;
-    if suffix.len() != 16 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(invalid_path());
-    }
-    let name = std::ffi::CString::new(name).map_err(|_| invalid_path())?;
-    let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let file = unsafe { File::from_raw_fd(fd) };
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    validate_metadata(&file.metadata()?, expected_len)
-}
-
 fn create_generation(base: &Path) -> io::Result<Generation> {
     #[cfg(not(unix))]
     {
@@ -214,12 +242,30 @@ fn create_generation(base: &Path) -> io::Result<Generation> {
         let root = base.join(format!("server-{}-{nonce}", std::process::id()));
         fs::create_dir(&root)?;
         fs::set_permissions(&root, fs::Permissions::from_mode(DIRECTORY_MODE))?;
+        let lock = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(FILE_MODE)
+            .open(root.join(".lock"))?;
+        if unsafe {
+            libc::flock(
+                std::os::fd::AsRawFd::as_raw_fd(&lock),
+                libc::LOCK_EX | libc::LOCK_NB,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
         let source = root.join("source");
         fs::create_dir(&source)?;
         fs::set_permissions(&source, fs::Permissions::from_mode(DIRECTORY_MODE))?;
         validate_directory(&root)?;
         validate_directory(&source)?;
-        Ok(Generation { root, source })
+        Ok(Generation {
+            root,
+            source,
+            _lock: lock,
+        })
     }
 }
 
@@ -264,25 +310,25 @@ fn remove_stale_generations(base: &Path) {
         return;
     };
     for entry in entries.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.strip_prefix("server-"))
-            .and_then(|name| name.split('-').next())
-            .and_then(|pid| pid.parse::<i32>().ok())
-            .filter(|pid| *pid > 0)
-        else {
+        if !entry.file_name().to_string_lossy().starts_with("server-") {
             continue;
-        };
+        }
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
         if !file_type.is_dir() {
             continue;
         }
-        // SAFETY: kill with signal 0 probes process existence without sending a signal.
-        let alive = unsafe { libc::kill(pid, 0) } == 0;
-        if alive || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+        let Ok(lock) = open_no_follow(&entry.path().join(".lock")) else {
+            continue;
+        };
+        if unsafe {
+            libc::flock(
+                std::os::fd::AsRawFd::as_raw_fd(&lock),
+                libc::LOCK_EX | libc::LOCK_NB,
+            )
+        } != 0
+        {
             continue;
         }
         if let Err(err) = fs::remove_dir_all(entry.path()) {
@@ -442,6 +488,22 @@ mod tests {
     }
 
     #[test]
+    fn staged_terminal_frame_is_private_and_removed_after_transfer() {
+        let (store, base) = store();
+        let frame = store.stage_frame(&[1, 2, 3, 4]).unwrap();
+        let path = frame.path().to_owned();
+        assert_eq!(frame.len(), 4);
+        assert_eq!(
+            store.lease(&path, 4).unwrap().copy_rgba().unwrap(),
+            [1, 2, 3, 4]
+        );
+        drop(frame);
+        assert!(!path.exists());
+        drop(store);
+        let _ = fs::remove_dir(base);
+    }
+
+    #[test]
     fn validation_rejects_links_modes_lengths_and_outside_paths() {
         let cases = ["mode", "length", "hard-link", "symlink", "outside"];
         for case in cases {
@@ -474,6 +536,8 @@ mod tests {
     #[test]
     fn direct_source_validation_accepts_only_the_runtime_generation() {
         let runtime_store = FileStore::default();
+        let staged = runtime_store.stage_frame(&[1, 2, 3, 4]).unwrap();
+        validate_direct_source(staged.path(), staged.len()).unwrap();
         let runtime_path = frame(&runtime_store, "direct", &[1, 2, 3, 4]);
         validate_direct_source(&runtime_path, 4).unwrap();
         assert!(validate_direct_source(&runtime_path, 8).is_err());
@@ -525,15 +589,38 @@ mod tests {
     }
 
     #[test]
-    fn generation_creation_removes_dead_server_directories() {
+    fn generation_cleanup_uses_locks_across_pid_namespaces() {
         let (store, base) = store();
         fs::create_dir_all(&base).unwrap();
         fs::set_permissions(&base, fs::Permissions::from_mode(DIRECTORY_MODE)).unwrap();
         let stale = base.join("server-2147483647-stale");
         fs::create_dir(&stale).unwrap();
         fs::set_permissions(&stale, fs::Permissions::from_mode(DIRECTORY_MODE)).unwrap();
+        let lock_path = stale.join(".lock");
+        let live_lock = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(FILE_MODE)
+            .open(&lock_path)
+            .unwrap();
+        assert_eq!(
+            unsafe {
+                libc::flock(
+                    std::os::fd::AsRawFd::as_raw_fd(&live_lock),
+                    libc::LOCK_EX | libc::LOCK_NB,
+                )
+            },
+            0
+        );
 
         store.source_directory().unwrap();
+        assert!(
+            stale.exists(),
+            "locked generation survives even with invisible PID"
+        );
+        drop(live_lock);
+
+        remove_stale_generations(&base);
 
         assert!(!stale.exists());
         drop(store);

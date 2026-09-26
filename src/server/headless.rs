@@ -1682,7 +1682,17 @@ impl HeadlessServer {
 
     fn sync_foreground_client_state(&mut self) {
         self.app.direct_graphics_available = self.direct_graphics_available();
-        crate::kitty_graphics::set_direct_host_graphics(self.app.direct_graphics_available);
+        #[cfg(unix)]
+        crate::kitty_graphics::set_direct_host_graphics(
+            self.app.direct_graphics_available
+                && self.foreground_client_id.is_some_and(|id| {
+                    self.clients
+                        .get(&id)
+                        .is_some_and(|client| client.terminal_file_graphics)
+                }),
+        );
+        #[cfg(not(unix))]
+        crate::kitty_graphics::set_direct_host_graphics(false);
         self.app.pixel_mouse_available = self.foreground_client_id.is_some_and(|id| {
             self.clients
                 .get(&id)
@@ -6699,11 +6709,13 @@ impl HeadlessServer {
                 .then(crate::kitty_graphics::HostGraphicsCache::default);
             #[cfg(unix)]
             let mut direct_transfer = if client.direct_graphics
+                && client.terminal_file_graphics
                 && client.direct_terminal_graphics.is_none()
                 && is_app_client
                 && self.app.state.kitty_graphics_enabled
             {
                 match crate::kitty_graphics::prepare_direct_terminal_transfer(
+                    &self.app.pane_graphics_files,
                     &self.app.state,
                     &self.app.pane_graphics,
                     &self.app.terminal_runtimes,
@@ -6719,6 +6731,8 @@ impl HeadlessServer {
                     Ok(transfer) => transfer,
                     Err(err) => {
                         warn!(client_id, %err, "failed to stage direct terminal graphics");
+                        client.terminal_file_graphics = false;
+                        crate::kitty_graphics::set_direct_host_graphics(false);
                         None
                     }
                 }
@@ -7439,14 +7453,6 @@ fn is_keybinding_config_diagnostic(diagnostic: &str) -> bool {
 /// Run the headless server. This is the entry point called from main.rs.
 pub fn run_server() -> io::Result<()> {
     init_logging();
-    #[cfg(unix)]
-    match crate::kitty_graphics::cleanup_stale_shared_memory_frames() {
-        Ok(removed) if removed > 0 => {
-            info!(removed, "removed stale Kitty graphics shared memory frames");
-        }
-        Ok(_) => {}
-        Err(err) => warn!(%err, "could not remove stale Kitty graphics shared memory frames"),
-    }
     crate::platform::raise_server_nofile_limit();
 
     let args: Vec<String> = std::env::args().collect();
