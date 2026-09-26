@@ -2495,7 +2495,8 @@ mod tests {
         }
 
         let live_name = CString::new(live_frame.name()).expect("live frame name");
-        assert!(cleanup_stale_shared_memory_frames().unwrap() >= 1);
+        // A concurrent server startup may have removed the dead child's frame already.
+        cleanup_stale_shared_memory_frames().unwrap();
         assert_eq!(
             unsafe { libc::shm_open(stale_name.as_ptr(), libc::O_RDONLY, 0) },
             -1
