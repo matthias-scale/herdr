@@ -12,8 +12,12 @@ use std::sync::{Mutex, OnceLock};
 use std::ffi::CString;
 #[cfg(unix)]
 use std::os::fd::FromRawFd;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(all(unix, not(target_os = "linux")))]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use ratatui::layout::Rect;
@@ -186,6 +190,7 @@ struct SharedMemoryFrame {
     file: std::fs::File,
     len: usize,
     transfer_id: u64,
+    registry_marker: Option<PathBuf>,
 }
 
 #[cfg(unix)]
@@ -199,6 +204,10 @@ impl SharedMemoryFrame {
             transfer_id as u32,
         ))
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid graphics shm name"))?;
+        #[cfg(target_os = "linux")]
+        let registry_marker = None;
+        #[cfg(all(unix, not(target_os = "linux")))]
+        let registry_marker = Some(register_shared_memory_frame(&name)?);
         let fd = unsafe {
             libc::shm_open(
                 name.as_ptr(),
@@ -207,24 +216,34 @@ impl SharedMemoryFrame {
             )
         };
         if fd < 0 {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            if let Some(marker) = registry_marker.as_deref() {
+                remove_shared_memory_registry_marker(marker);
+            }
+            return Err(error);
         }
         if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
             let error = io::Error::last_os_error();
             unsafe {
                 libc::close(fd);
-                libc::shm_unlink(name.as_ptr());
             }
+            unlink_shared_memory_frame(&name, registry_marker.as_deref());
             return Err(error);
         }
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
-        let len = i64::try_from(data.len())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "graphics frame too large"))?;
+        let len = match i64::try_from(data.len()) {
+            Ok(len) => len,
+            Err(_) => {
+                unlink_shared_memory_frame(&name, registry_marker.as_deref());
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "graphics frame too large",
+                ));
+            }
+        };
         if unsafe { libc::ftruncate(fd, len as libc::off_t) } != 0 {
             let error = io::Error::last_os_error();
-            unsafe {
-                libc::shm_unlink(name.as_ptr());
-            }
+            unlink_shared_memory_frame(&name, registry_marker.as_deref());
             return Err(error);
         }
         let mapping = unsafe {
@@ -239,9 +258,7 @@ impl SharedMemoryFrame {
         };
         if mapping == libc::MAP_FAILED {
             let error = io::Error::last_os_error();
-            unsafe {
-                libc::shm_unlink(name.as_ptr());
-            }
+            unlink_shared_memory_frame(&name, registry_marker.as_deref());
             return Err(error);
         }
         unsafe {
@@ -249,9 +266,7 @@ impl SharedMemoryFrame {
         }
         if unsafe { libc::munmap(mapping, data.len()) } != 0 {
             let error = io::Error::last_os_error();
-            unsafe {
-                libc::shm_unlink(name.as_ptr());
-            }
+            unlink_shared_memory_frame(&name, registry_marker.as_deref());
             return Err(error);
         }
         Ok(Self {
@@ -259,6 +274,7 @@ impl SharedMemoryFrame {
             file,
             len: data.len(),
             transfer_id,
+            registry_marker,
         })
     }
 
@@ -269,8 +285,20 @@ impl SharedMemoryFrame {
 
 /// Remove Herdr graphics frames left behind by a server that exited without
 /// running `Drop`. The PID in the name keeps frames owned by live servers.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(crate) fn cleanup_stale_shared_memory_frames() -> io::Result<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        cleanup_stale_shared_memory_frames_linux()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        cleanup_stale_shared_memory_frames_from_registry()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_stale_shared_memory_frames_linux() -> io::Result<usize> {
     let uid = unsafe { libc::geteuid() };
     let directory = std::fs::read_dir("/dev/shm")?;
     let mut removed = 0;
@@ -311,7 +339,7 @@ pub(crate) fn cleanup_stale_shared_memory_frames() -> io::Result<usize> {
     Ok(removed)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn parse_shared_memory_frame_name(name: &str) -> Option<(libc::uid_t, libc::pid_t)> {
     let bytes = name.as_bytes();
     if bytes.len() != 26
@@ -326,28 +354,190 @@ fn parse_shared_memory_frame_name(name: &str) -> Option<(libc::uid_t, libc::pid_
     (pid > 0).then_some((uid, pid))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn process_is_alive(pid: libc::pid_t) -> bool {
     let result = unsafe { libc::kill(pid, 0) };
     result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn cleanup_stale_shared_memory_frames() -> io::Result<usize> {
-    Ok(0)
+#[cfg(all(unix, not(target_os = "linux")))]
+const SHARED_MEMORY_REGISTRY_MARKER: &[u8] = b"herdr-graphics-shm-frame-v1\n";
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn shared_memory_registry_dir(uid: libc::uid_t) -> PathBuf {
+    std::env::temp_dir().join(format!("herdr-graphics-shm-{uid:08x}"))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn verify_shared_memory_registry_dir(path: &Path, uid: libc::uid_t) -> io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "graphics shared memory registry is not a private user-owned directory",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn ensure_shared_memory_registry_dir(uid: libc::uid_t) -> io::Result<PathBuf> {
+    let path = shared_memory_registry_dir(uid);
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700);
+    match builder.create(&path) {
+        Ok(()) => std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?,
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(err),
+    }
+    verify_shared_memory_registry_dir(&path, uid)?;
+    Ok(path)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn register_shared_memory_frame(name: &CString) -> io::Result<PathBuf> {
+    let uid = unsafe { libc::geteuid() };
+    let path = ensure_shared_memory_registry_dir(uid)?.join(
+        name.to_str()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid graphics shm name"))?
+            .trim_start_matches('/'),
+    );
+    let mut marker = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    if let Err(err) = marker.write_all(SHARED_MEMORY_REGISTRY_MARKER) {
+        drop(marker);
+        let _ = std::fs::remove_file(&path);
+        return Err(err);
+    }
+    Ok(path)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn cleanup_stale_shared_memory_frames_from_registry() -> io::Result<usize> {
+    let uid = unsafe { libc::geteuid() };
+    let directory = shared_memory_registry_dir(uid);
+    match verify_shared_memory_registry_dir(&directory, uid) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err),
+    }
+
+    let mut removed = 0;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some((name_uid, pid)) = parse_shared_memory_frame_name(&name) else {
+            continue;
+        };
+        if name_uid != uid {
+            continue;
+        }
+        let marker_path = entry.path();
+        let metadata = match std::fs::symlink_metadata(&marker_path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        if !metadata.file_type().is_file()
+            || metadata.uid() != uid
+            || metadata.len() != SHARED_MEMORY_REGISTRY_MARKER.len() as u64
+            || process_is_alive(pid)
+        {
+            continue;
+        }
+        let marker = std::fs::read(&marker_path)?;
+        if marker != SHARED_MEMORY_REGISTRY_MARKER {
+            continue;
+        }
+
+        let name = CString::new(format!("/{name}"))
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid graphics shm name"))?;
+        if unlink_registered_shared_memory_frame(&name, uid)? {
+            removed += 1;
+        }
+        match std::fs::remove_file(marker_path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+
+    Ok(removed)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn unlink_registered_shared_memory_frame(name: &CString, uid: libc::uid_t) -> io::Result<bool> {
+    let fd = unsafe { libc::shm_open(name.as_ptr(), libc::O_RDONLY, 0) };
+    if fd < 0 {
+        let error = io::Error::last_os_error();
+        if matches!(
+            error.raw_os_error(),
+            Some(libc::ENOENT | libc::EACCES | libc::EPERM)
+        ) {
+            return Ok(false);
+        }
+        return Err(error);
+    }
+
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let stat_result = unsafe { libc::fstat(fd, metadata.as_mut_ptr()) };
+    let stat_error = (stat_result != 0).then(io::Error::last_os_error);
+    unsafe {
+        libc::close(fd);
+    }
+    if let Some(error) = stat_error {
+        return Err(error);
+    }
+    if unsafe { metadata.assume_init() }.st_uid != uid {
+        return Ok(false);
+    }
+
+    if unsafe { libc::shm_unlink(name.as_ptr()) } == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::NotFound {
+        Ok(false)
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(unix)]
+fn unlink_shared_memory_frame(name: &CString, registry_marker: Option<&Path>) {
+    if unsafe { libc::shm_unlink(name.as_ptr()) } == 0
+        || io::Error::last_os_error().kind() == io::ErrorKind::NotFound
+    {
+        if let Some(marker) = registry_marker {
+            remove_shared_memory_registry_marker(marker);
+        }
+        return;
+    }
+    tracing::warn!(
+        name = name.to_str().unwrap_or_default(),
+        "failed to release graphics shared memory"
+    );
+}
+
+#[cfg(unix)]
+fn remove_shared_memory_registry_marker(marker: &Path) {
+    if let Err(err) = std::fs::remove_file(marker) {
+        if err.kind() != io::ErrorKind::NotFound {
+            tracing::warn!(%err, "failed to remove graphics shared memory registry marker");
+        }
+    }
 }
 
 #[cfg(unix)]
 impl Drop for SharedMemoryFrame {
     fn drop(&mut self) {
         let _keep_open = &self.file;
-        let result = unsafe { libc::shm_unlink(self.name.as_ptr()) };
-        if result != 0 && io::Error::last_os_error().kind() != io::ErrorKind::NotFound {
-            tracing::warn!(
-                name = self.name().to_owned(),
-                "failed to release graphics shared memory"
-            );
-        }
+        unlink_shared_memory_frame(&self.name, self.registry_marker.as_deref());
     }
 }
 
@@ -2252,7 +2442,7 @@ mod tests {
         bytes
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn stale_shared_memory_cleanup_removes_dead_frames_and_preserves_live_ones() {
         const CHILD_MARKER: &str = "HERDR_TEST_CREATE_STALE_GRAPHICS_FRAME";

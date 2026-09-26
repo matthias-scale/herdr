@@ -6,13 +6,6 @@ pub fn run_server() -> io::Result<()> {
     let handoff_import = args.get(2).map(String::as_str) == Some("--handoff-import");
     let process_context = crate::platform::prepare_server_process(handoff_import);
     init_logging();
-    match crate::kitty_graphics::cleanup_stale_shared_memory_frames() {
-        Ok(removed) if removed > 0 => {
-            info!(removed, "removed stale Kitty graphics shared memory frames");
-        }
-        Ok(_) => {}
-        Err(err) => warn!(%err, "could not remove stale Kitty graphics shared memory frames"),
-    }
     match process_context {
         Ok(true) => info!("server using persistent user service context"),
         Ok(false) => {}

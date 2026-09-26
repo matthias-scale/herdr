@@ -7439,6 +7439,14 @@ fn is_keybinding_config_diagnostic(diagnostic: &str) -> bool {
 /// Run the headless server. This is the entry point called from main.rs.
 pub fn run_server() -> io::Result<()> {
     init_logging();
+    #[cfg(unix)]
+    match crate::kitty_graphics::cleanup_stale_shared_memory_frames() {
+        Ok(removed) if removed > 0 => {
+            info!(removed, "removed stale Kitty graphics shared memory frames");
+        }
+        Ok(_) => {}
+        Err(err) => warn!(%err, "could not remove stale Kitty graphics shared memory frames"),
+    }
     crate::platform::raise_server_nofile_limit();
 
     let args: Vec<String> = std::env::args().collect();
