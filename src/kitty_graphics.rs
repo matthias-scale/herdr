@@ -12,6 +12,8 @@ use std::sync::{Mutex, OnceLock};
 use std::ffi::CString;
 #[cfg(unix)]
 use std::os::fd::FromRawFd;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
 
 use base64::Engine;
 use ratatui::layout::Rect;
@@ -263,6 +265,76 @@ impl SharedMemoryFrame {
     fn name(&self) -> &str {
         self.name.to_str().unwrap_or_default()
     }
+}
+
+/// Remove Herdr graphics frames left behind by a server that exited without
+/// running `Drop`. The PID in the name keeps frames owned by live servers.
+#[cfg(target_os = "linux")]
+pub(crate) fn cleanup_stale_shared_memory_frames() -> io::Result<usize> {
+    let uid = unsafe { libc::geteuid() };
+    let directory = std::fs::read_dir("/dev/shm")?;
+    let mut removed = 0;
+
+    for entry in directory {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some((name_uid, pid)) = parse_shared_memory_frame_name(&name) else {
+            continue;
+        };
+        let metadata = match std::fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        if name_uid != uid
+            || !metadata.file_type().is_file()
+            || metadata.uid() != uid
+            || process_is_alive(pid)
+        {
+            continue;
+        }
+
+        let name = CString::new(format!("/{name}"))
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid graphics shm name"))?;
+        if unsafe { libc::shm_unlink(name.as_ptr()) } == 0 {
+            removed += 1;
+        } else {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::NotFound {
+                return Err(error);
+            }
+        }
+    }
+
+    Ok(removed)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_shared_memory_frame_name(name: &str) -> Option<(libc::uid_t, libc::pid_t)> {
+    let bytes = name.as_bytes();
+    if bytes.len() != 26
+        || !bytes.starts_with(b"hg")
+        || !bytes[2..].iter().all(u8::is_ascii_hexdigit)
+    {
+        return None;
+    }
+    let uid = u32::from_str_radix(&name[2..10], 16).ok()?;
+    let pid = i32::from_str_radix(&name[10..18], 16).ok()?;
+    u32::from_str_radix(&name[18..26], 16).ok()?;
+    (pid > 0).then_some((uid, pid))
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_alive(pid: libc::pid_t) -> bool {
+    let result = unsafe { libc::kill(pid, 0) };
+    result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn cleanup_stale_shared_memory_frames() -> io::Result<usize> {
+    Ok(0)
 }
 
 #[cfg(unix)]
@@ -2178,6 +2250,81 @@ mod tests {
             &mut cache.sources,
         );
         bytes
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_shared_memory_cleanup_removes_dead_frames_and_preserves_live_ones() {
+        const CHILD_MARKER: &str = "HERDR_TEST_CREATE_STALE_GRAPHICS_FRAME";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let frame = SharedMemoryFrame::create(&[7]).expect("create child graphics frame");
+            println!("{}", frame.name());
+            std::io::stdout().flush().expect("flush child frame name");
+            loop {
+                std::thread::park();
+            }
+        }
+
+        let live_frame = SharedMemoryFrame::create(&[9]).expect("create live graphics frame");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("kitty_graphics::tests::stale_shared_memory_cleanup_removes_dead_frames_and_preserves_live_ones")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("start child test process");
+        let mut child_output = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut stale_name = String::new();
+        std::io::BufRead::read_line(&mut child_output, &mut stale_name)
+            .expect("read child frame name");
+        let stale_name = CString::new(stale_name.trim()).expect("child frame name");
+        let child_pid = child.id() as libc::pid_t;
+        assert_ne!(unsafe { libc::kill(child_pid, 0) }, -1);
+
+        child.kill().expect("kill child without frame cleanup");
+        child.wait().expect("reap killed child");
+
+        let foreign_uid_name = CString::new(format!(
+            "/hg{:08x}{:08x}{:08x}",
+            (unsafe { libc::geteuid() }).wrapping_add(1),
+            child_pid,
+            1,
+        ))
+        .expect("foreign uid frame name");
+        let foreign_uid_fd = unsafe {
+            libc::shm_open(
+                foreign_uid_name.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+                (libc::S_IRUSR | libc::S_IWUSR) as libc::c_uint,
+            )
+        };
+        assert!(foreign_uid_fd >= 0, "create other-uid namespace frame");
+        unsafe {
+            libc::close(foreign_uid_fd);
+        }
+
+        let live_name = CString::new(live_frame.name()).expect("live frame name");
+        assert!(cleanup_stale_shared_memory_frames().unwrap() >= 1);
+        assert_eq!(
+            unsafe { libc::shm_open(stale_name.as_ptr(), libc::O_RDONLY, 0) },
+            -1
+        );
+        let live_fd = unsafe { libc::shm_open(live_name.as_ptr(), libc::O_RDONLY, 0) };
+        assert!(live_fd >= 0, "live Herdr frame must remain linked");
+        unsafe {
+            libc::close(live_fd);
+        }
+        let foreign_uid_fd =
+            unsafe { libc::shm_open(foreign_uid_name.as_ptr(), libc::O_RDONLY, 0) };
+        assert!(
+            foreign_uid_fd >= 0,
+            "other-uid namespace frame must remain linked"
+        );
+        unsafe {
+            libc::close(foreign_uid_fd);
+            libc::shm_unlink(foreign_uid_name.as_ptr());
+        }
     }
 
     #[cfg(unix)]
