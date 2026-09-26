@@ -2928,7 +2928,7 @@ fn project_badge(label: &str) -> ProjectBadge {
         // the second word, matching T3's last-word initial rule.
         Some('v')
     } else {
-        first_word_digit.or_else(|| {
+        first_word_digit.or({
             if word_count > 1 {
                 last_word_first
             } else {
@@ -3460,13 +3460,10 @@ fn compact_sidebar_rows_inner(
         }
         let mut rows = Vec::new();
         append_sections_block(app, &mut rows, PINNED_SECTION_TITLE, pinned_entries);
-        let mut active_entries = active_entries;
         active_entries.extend(remote_active);
         append_sections_block(app, &mut rows, ACTIVE_SECTION_TITLE, active_entries);
-        let mut snoozed_entries = snoozed_entries;
         snoozed_entries.extend(remote_snoozed);
         append_sections_block(app, &mut rows, SNOOZED_SECTION_TITLE, snoozed_entries);
-        let mut settled_entries = settled_entries;
         settled_entries.extend(remote_settled);
         append_sections_block(app, &mut rows, SETTLED_SECTION_TITLE, settled_entries);
         return rows;
