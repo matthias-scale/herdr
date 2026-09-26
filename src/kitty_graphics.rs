@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
+#[cfg(unix)]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -22,6 +24,8 @@ const MAX_OVERSIZED_SOURCES: usize = 256;
 pub(crate) const HEADLESS_GRAPHICS_TRANSACTION_BUDGET: usize =
     crate::protocol::MAX_GRAPHICS_FRAME_SIZE - crate::protocol::MAX_FRAME_SIZE;
 const HOST_IMAGE_ID_BASE: u32 = 10_000;
+#[cfg(unix)]
+const DIRECT_TERMINAL_IMAGE_MIN_BYTES: usize = 1024 * 1024;
 #[cfg(test)]
 const PANE_GRAPHICS_IMAGE_ID_BIT: u32 = 1 << 31;
 
@@ -147,6 +151,9 @@ pub(crate) struct HostGraphicsCache {
 }
 
 static KITTY_GRAPHICS_ENABLED: AtomicBool = AtomicBool::new(false);
+static DIRECT_HOST_GRAPHICS: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
+static NEXT_DIRECT_TRANSFER_ID: AtomicU64 = AtomicU64::new(1);
 static LOCAL_HOST_GRAPHICS: OnceLock<Mutex<HostGraphicsCache>> = OnceLock::new();
 
 pub(crate) fn set_enabled(enabled: bool) {
@@ -155,6 +162,105 @@ pub(crate) fn set_enabled(enabled: bool) {
 
 pub(crate) fn is_enabled() -> bool {
     KITTY_GRAPHICS_ENABLED.load(Ordering::Acquire)
+}
+
+pub(crate) fn set_direct_host_graphics(enabled: bool) {
+    DIRECT_HOST_GRAPHICS.store(enabled, Ordering::Release);
+}
+
+pub(crate) fn direct_host_graphics_enabled() -> bool {
+    DIRECT_HOST_GRAPHICS.load(Ordering::Acquire)
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct DirectTerminalTransfer {
+    frame: crate::pane_graphics_files::StagedFrame,
+    transfer_id: u64,
+    image_id: u32,
+    control: String,
+    display: Vec<u8>,
+    next_cache: HostGraphicsCache,
+    deadline: std::time::Instant,
+    written: bool,
+}
+
+#[cfg(unix)]
+impl DirectTerminalTransfer {
+    #[cfg(test)]
+    pub(crate) fn test_new(files: &crate::pane_graphics_files::FileStore, image_id: u32) -> Self {
+        Self {
+            frame: files
+                .stage_frame(&[0, 0, 0, 255])
+                .expect("stage test frame"),
+            transfer_id: NEXT_DIRECT_TRANSFER_ID.fetch_add(1, Ordering::Relaxed),
+            image_id,
+            control: format!("a=t,f=32,s=1,v=1,i={image_id},q=0"),
+            display: Vec::new(),
+            next_cache: HostGraphicsCache::default(),
+            deadline: std::time::Instant::now()
+                + crate::app::pane_graphics::DIRECT_DELIVERY_TIMEOUT,
+            written: false,
+        }
+    }
+    pub(crate) fn message(&self) -> crate::protocol::ServerMessage {
+        crate::protocol::ServerMessage::GraphicsFile {
+            path: self.frame.path().to_string_lossy().into_owned(),
+            expected_len: self.frame.len() as u64,
+            image_id: self.image_id,
+            transfer_id: self.transfer_id,
+            leading: Vec::new(),
+            control: self.control.clone(),
+        }
+    }
+
+    pub(crate) fn matches(&self, transfer_id: u64, image_id: u32) -> bool {
+        self.transfer_id == transfer_id && self.image_id == image_id
+    }
+
+    pub(crate) fn ids(&self) -> (u64, u32) {
+        (self.transfer_id, self.image_id)
+    }
+
+    pub(crate) fn start(&mut self) {
+        self.written = true;
+        self.deadline =
+            std::time::Instant::now() + crate::app::pane_graphics::DIRECT_RESPONSE_TIMEOUT;
+    }
+
+    pub(crate) fn can_complete(&self, success: bool) -> bool {
+        !success || self.written
+    }
+
+    pub(crate) fn expired(&self, now: std::time::Instant) -> bool {
+        self.deadline <= now
+    }
+
+    pub(crate) fn commit(self, cache: &mut HostGraphicsCache) -> Vec<u8> {
+        *cache = self.next_cache;
+        self.display
+    }
+
+    #[cfg(test)]
+    fn host_write_measurement(&self) -> (usize, std::time::Duration) {
+        let mut upload = Vec::new();
+        encode_kitty_regular_file(
+            &mut upload,
+            &[],
+            &self.control,
+            &self.frame.path().to_string_lossy(),
+        );
+        let started = std::time::Instant::now();
+        let mut client_output = Vec::with_capacity(upload.len() + self.display.len());
+        client_output
+            .write_all(&upload)
+            .expect("client upload write");
+        client_output
+            .write_all(&self.display)
+            .expect("client display write");
+        client_output.flush().expect("client output flush");
+        (client_output.len(), started.elapsed())
+    }
 }
 
 pub(crate) fn paint_local_pane_graphics(
@@ -1423,6 +1529,117 @@ pub(crate) fn prepare_direct_file(
     (!inline_fallback_available).then(|| direct_file_upload_command(layer, slot.host_image_id))
 }
 
+#[cfg(unix)]
+pub(crate) fn prepare_direct_terminal_transfer(
+    files: &crate::pane_graphics_files::FileStore,
+    app: &AppState,
+    graphics: &crate::app::pane_graphics::Runtime,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+    presentation_policy: crate::app::state::ClientPresentationPolicy<'_>,
+    cell_size: HostCellSize,
+    cache: &HostGraphicsCache,
+) -> io::Result<Option<DirectTerminalTransfer>> {
+    if !presentation_policy.pane_graphics_visible() || !cell_size.is_known() {
+        return Ok(None);
+    }
+    let placements = collect_visible_placements(
+        app,
+        graphics,
+        terminal_runtimes,
+        presentation_policy.tab_surface(),
+        cell_size,
+        &cache.images,
+        &cache.oversized,
+    );
+    for placement in placements {
+        if let Some(transfer) = prepare_direct_terminal_placement(files, cache, &placement)? {
+            return Ok(Some(transfer));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn prepare_direct_terminal_placement(
+    files: &crate::pane_graphics_files::FileStore,
+    cache: &HostGraphicsCache,
+    placement: &HostPlacement,
+) -> io::Result<Option<DirectTerminalTransfer>> {
+    if !matches!(placement.source_key, HostSourceKey::Terminal { .. })
+        || placement.placement.format != KittyImageFormat::Rgba
+        || placement.placement.data.len() < DIRECT_TERMINAL_IMAGE_MIN_BYTES
+    {
+        return Ok(None);
+    }
+    let Some((clipped, format_code)) = clipped_placement(placement) else {
+        return Ok(None);
+    };
+    let signature = image_signature(placement, format_code);
+    let host_id = host_image_id(placement.pane_id, &placement.placement);
+    if cache.images.get(&host_id) == Some(&signature)
+        || cache
+            .images
+            .get(&host_id)
+            .is_some_and(|existing| *existing != signature)
+    {
+        return Ok(None);
+    }
+
+    let frame = files.stage_frame(&placement.placement.data)?;
+    let placement_id = host_placement_id(&placement.source_key, &placement.placement);
+    let placement_signature =
+        placement_signature(clipped, placement.placement.z, placement.scrollback_offset);
+    let control = format!(
+        "a=t,f={format_code},s={},v={},i={host_id},q=0",
+        placement.placement.image_width, placement.placement.image_height,
+    );
+
+    let mut display = b"\x1b7".to_vec();
+    encode_display_placement(
+        &mut display,
+        clipped,
+        host_id,
+        placement_id,
+        placement.placement.z,
+    );
+    let mut next_cache = cache.clone();
+    next_cache.images.insert(host_id, signature);
+    next_cache
+        .placements
+        .insert((host_id, placement_id), placement_signature);
+    if next_cache.replay_placements {
+        next_cache
+            .replayed_placements
+            .insert((host_id, placement_id));
+    }
+    if let Some(previous) = next_cache
+        .sources
+        .insert(placement.source_key.clone(), host_id)
+        .filter(|previous| *previous != host_id)
+        .filter(|previous| !next_cache.sources.values().any(|id| id == previous))
+    {
+        encode_delete_image(&mut display, previous);
+        next_cache.images.remove(&previous);
+        next_cache.placements.retain(|(id, _), _| *id != previous);
+        next_cache
+            .replayed_placements
+            .retain(|(id, _)| *id != previous);
+    }
+    display.extend_from_slice(b"\x1b8");
+    next_cache.continuation = None;
+
+    Ok(Some(DirectTerminalTransfer {
+        frame,
+        transfer_id: NEXT_DIRECT_TRANSFER_ID.fetch_add(1, Ordering::Relaxed),
+        image_id: host_id,
+        control,
+        display,
+        next_cache,
+        deadline: std::time::Instant::now() + crate::app::pane_graphics::DIRECT_DELIVERY_TIMEOUT,
+        written: false,
+    }))
+}
+
 fn direct_file_upload_command(
     layer: &crate::app::pane_graphics::Layer,
     host_image_id: u32,
@@ -1802,9 +2019,9 @@ mod tests {
     use std::os::fd::FromRawFd;
 
     #[cfg(unix)]
-    const AWRIT_FRAME_WIDTH: usize = 200;
+    const AWRIT_FRAME_WIDTH: usize = 2_800;
     #[cfg(unix)]
-    const AWRIT_FRAME_HEIGHT: usize = 100;
+    const AWRIT_FRAME_HEIGHT: usize = 3_000;
 
     #[test]
     fn fallback_cell_size_is_usable_only_for_nonempty_areas() {
@@ -1899,31 +2116,35 @@ mod tests {
             )
         };
         assert!(fd >= 0, "create awrit-style shared memory frame");
+        #[cfg(target_os = "macos")]
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        #[cfg(not(target_os = "macos"))]
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
         let mut rgba = vec![0; AWRIT_FRAME_WIDTH * AWRIT_FRAME_HEIGHT * 4];
         for pixel in rgba.chunks_exact_mut(4) {
             pixel.copy_from_slice(&[frame, 0, 0, 255]);
         }
-        file.set_len(rgba.len() as u64).unwrap();
-        let mapping = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                rgba.len(),
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            )
-        };
-        assert_ne!(
-            mapping,
-            libc::MAP_FAILED,
-            "map awrit-style shared memory frame"
-        );
-        unsafe {
-            std::ptr::copy_nonoverlapping(rgba.as_ptr(), mapping.cast(), rgba.len());
+        #[cfg(not(target_os = "macos"))]
+        file.write_all(&rgba).unwrap();
+        #[cfg(target_os = "macos")]
+        {
+            file.set_len(rgba.len() as u64).unwrap();
+            let mapping = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    rgba.len(),
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED,
+                    fd,
+                    0,
+                )
+            };
+            assert_ne!(mapping, libc::MAP_FAILED);
+            unsafe {
+                std::ptr::copy_nonoverlapping(rgba.as_ptr(), mapping.cast(), rgba.len());
+            }
+            assert_eq!(unsafe { libc::munmap(mapping, rgba.len()) }, 0);
         }
-        assert_eq!(unsafe { libc::munmap(mapping, rgba.len()) }, 0);
     }
 
     #[cfg(unix)]
@@ -2410,8 +2631,8 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
-    async fn awrit_shared_memory_stream_drops_stale_frames_without_blanking() {
-        const FRAME_COUNT: usize = 32;
+    async fn awrit_file_stream_drops_stale_frames_without_blanking() {
+        const FRAME_COUNT: usize = 4;
         let settle = std::time::Duration::from_millis(20);
 
         let name = CString::new(format!("/herdr_awrit_stream_{}", std::process::id())).unwrap();
@@ -2429,6 +2650,7 @@ mod tests {
         let runtime = tokio::runtime::Handle::current();
         let pane_id = PaneId::from_raw(1);
 
+        let paint_started = std::time::Instant::now();
         write_shared_memory_frame(&name, 0);
         terminal.write(&command);
         throttle.request(pane_id, settle, &notify, &dirty, &runtime);
@@ -2436,14 +2658,41 @@ mod tests {
             .await
             .expect("leading frame reaches host");
         let _ = dirty.take();
-        observe_host_visibility(
-            &update(&mut cache, &[awrit_host_placement(&terminal)], false),
-            &mut visible,
-        );
+        let leading_ready_after = paint_started.elapsed();
+        let encode_started = std::time::Instant::now();
+        let leading_bytes = update(&mut cache, &[awrit_host_placement(&terminal)], false);
+        let leading_herdr_time = encode_started.elapsed();
+        let inline_write_started = std::time::Instant::now();
+        let mut inline_output = Vec::with_capacity(leading_bytes.len());
+        inline_output.write_all(&leading_bytes).unwrap();
+        inline_output.flush().unwrap();
+        let leading_inline_write = inline_write_started.elapsed();
+        let leading_paint_to_host = leading_ready_after + leading_herdr_time + leading_inline_write;
+        observe_host_visibility(&leading_bytes, &mut visible);
+        let mut direct_cache = HostGraphicsCache::default();
+        let files = crate::pane_graphics_files::FileStore::default();
+        let mut direct_visible = HashSet::new();
+        let direct_started = std::time::Instant::now();
+        let leading_direct = prepare_direct_terminal_placement(
+            &files,
+            &direct_cache,
+            &awrit_host_placement(&terminal),
+        )
+        .unwrap()
+        .expect("large RGBA frame uses direct host transport");
+        let leading_direct_herdr_time = direct_started.elapsed();
+        let (leading_direct_host_bytes, leading_direct_write) =
+            leading_direct.host_write_measurement();
+        let leading_direct_paint_to_host =
+            leading_ready_after + leading_direct_herdr_time + leading_direct_write;
+        let direct_display = leading_direct.commit(&mut direct_cache);
+        let mut direct_blank_states = observe_host_visibility(&direct_display, &mut direct_visible);
         host_updates += 1;
         assert!(!visible.is_empty(), "first frame is visible");
 
+        let mut newest_paint_started = std::time::Instant::now();
         for frame in 1..FRAME_COUNT {
+            newest_paint_started = std::time::Instant::now();
             write_shared_memory_frame(&name, frame as u8);
             terminal.write(&command);
             throttle.request(pane_id, settle, &notify, &dirty, &runtime);
@@ -2455,11 +2704,35 @@ mod tests {
             .expect("newest frame reaches host");
         let elapsed = stream_stopped.elapsed();
         let _ = dirty.take();
+        let newest_ready_after = newest_paint_started.elapsed();
+        let encode_started = std::time::Instant::now();
         let newest = awrit_host_placement(&terminal);
         let newest_host_id = host_image_id(newest.pane_id, &newest.placement);
         let host_bytes = update(&mut cache, &[newest], false);
+        let newest_herdr_time = encode_started.elapsed();
+        let inline_write_started = std::time::Instant::now();
+        let mut inline_output = Vec::with_capacity(host_bytes.len());
+        inline_output.write_all(&host_bytes).unwrap();
+        inline_output.flush().unwrap();
+        let newest_inline_write = inline_write_started.elapsed();
+        let newest_paint_to_host = newest_ready_after + newest_herdr_time + newest_inline_write;
         host_updates += 1;
         blank_states += observe_host_visibility(&host_bytes, &mut visible);
+        let direct_started = std::time::Instant::now();
+        let newest_direct = prepare_direct_terminal_placement(
+            &files,
+            &direct_cache,
+            &awrit_host_placement(&terminal),
+        )
+        .unwrap()
+        .expect("newest large RGBA frame uses direct host transport");
+        let newest_direct_herdr_time = direct_started.elapsed();
+        let (newest_direct_host_bytes, newest_direct_write) =
+            newest_direct.host_write_measurement();
+        let newest_direct_paint_to_host =
+            newest_ready_after + newest_direct_herdr_time + newest_direct_write;
+        let direct_display = newest_direct.commit(&mut direct_cache);
+        direct_blank_states += observe_host_visibility(&direct_display, &mut direct_visible);
 
         unsafe {
             libc::shm_unlink(name.as_ptr());
@@ -2467,6 +2740,10 @@ mod tests {
         assert_eq!(
             blank_states, 0,
             "host output exposed a no-image state between streamed frames"
+        );
+        assert_eq!(
+            direct_blank_states, 0,
+            "direct host output exposed a no-image state between streamed frames"
         );
         assert_eq!(host_updates, 2, "intermediate frames must be dropped");
         assert!(
@@ -2488,7 +2765,10 @@ mod tests {
             "stale frames were replayed after the newest frame"
         );
         eprintln!(
-            "awrit stream: input_frames={FRAME_COUNT} host_updates={host_updates} blank_states={blank_states} newest_after={elapsed:?}"
+            "awrit stream: dimensions={AWRIT_FRAME_WIDTH}x{AWRIT_FRAME_HEIGHT} rgba_bytes={} input_frames={FRAME_COUNT} host_updates={host_updates} blank_states={blank_states} inline_leading_host_bytes={} inline_leading_herdr_time={leading_herdr_time:?} inline_leading_client_write={leading_inline_write:?} inline_leading_paint_to_host={leading_paint_to_host:?} direct_leading_host_bytes={leading_direct_host_bytes} direct_leading_herdr_time={leading_direct_herdr_time:?} direct_leading_client_write={leading_direct_write:?} direct_leading_paint_to_host={leading_direct_paint_to_host:?} inline_newest_host_bytes={} inline_newest_herdr_time={newest_herdr_time:?} inline_newest_client_write={newest_inline_write:?} inline_newest_paint_to_host={newest_paint_to_host:?} direct_newest_host_bytes={newest_direct_host_bytes} direct_newest_herdr_time={newest_direct_herdr_time:?} direct_newest_client_write={newest_direct_write:?} direct_newest_paint_to_host={newest_direct_paint_to_host:?}",
+            AWRIT_FRAME_WIDTH * AWRIT_FRAME_HEIGHT * 4,
+            leading_bytes.len(),
+            host_bytes.len(),
         );
     }
 

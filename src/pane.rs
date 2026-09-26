@@ -1452,6 +1452,8 @@ pub(crate) struct RemoteProxyChannels {
 const REMOTE_PROXY_OUTBOUND_CAPACITY: usize = 64;
 const KITTY_GRAPHICS_STREAM_MAX_RENDER_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(100);
+const KITTY_GRAPHICS_DIRECT_STREAM_MAX_RENDER_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(20);
 
 /// Keeps the leading render that prevents continuous streams from freezing,
 /// then collapses a burst to its newest frame. Long streams still refresh at
@@ -1493,9 +1495,12 @@ impl KittyGraphicsRenderThrottle {
                 tokio::time::sleep(delay).await;
                 let current_generation = throttle.generation.load(Ordering::Acquire);
                 let stream_is_quiet = current_generation == observed_generation;
-                if !stream_is_quiet
-                    && last_render.elapsed() < KITTY_GRAPHICS_STREAM_MAX_RENDER_INTERVAL
-                {
+                let max_render_interval = if crate::kitty_graphics::direct_host_graphics_enabled() {
+                    KITTY_GRAPHICS_DIRECT_STREAM_MAX_RENDER_INTERVAL
+                } else {
+                    KITTY_GRAPHICS_STREAM_MAX_RENDER_INTERVAL
+                };
+                if !stream_is_quiet && last_render.elapsed() < max_render_interval {
                     observed_generation = current_generation;
                     continue;
                 }

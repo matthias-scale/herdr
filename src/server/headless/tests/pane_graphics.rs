@@ -1661,6 +1661,27 @@ fn add_direct_client(server: &mut HeadlessServer, client_id: u64) {
 
 #[cfg(unix)]
 #[test]
+fn rejected_terminal_frame_keeps_pane_file_transport() {
+    let (mut server, key, _response_rx) = direct_gate_server(&[1, 2, 3, 4]);
+    add_direct_client(&mut server, 7);
+    server.app.direct_graphics_available = true;
+    let transfer = crate::kitty_graphics::DirectTerminalTransfer::test_new(
+        &server.app.pane_graphics_files,
+        10_042,
+    );
+    let (transfer_id, image_id) = transfer.ids();
+    server.clients.get_mut(&7).unwrap().direct_terminal_graphics = Some(transfer);
+
+    assert!(server.complete_direct_graphics(7, transfer_id, image_id, false));
+    let client = &server.clients[&7];
+    assert!(!client.terminal_file_graphics);
+    assert!(client.direct_graphics, "pane file transport stays enabled");
+    assert!(server.app.direct_graphics_available);
+    assert!(server.app.pane_graphics.slots.contains_key(&key));
+}
+
+#[cfg(unix)]
+#[test]
 fn terminal_response_deadline_starts_only_after_client_flush() {
     let (mut server, key, _response_rx) = direct_gate_server(&[1, 2, 3, 4]);
     let slot = server.app.pane_graphics.slots.get_mut(&key).unwrap();
