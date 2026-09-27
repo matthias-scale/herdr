@@ -6228,7 +6228,12 @@ impl AppState {
         }
         // The notepad is a visible client editor. Once focused it owns input
         // and the host cursor ahead of shared modes and underlying surfaces.
-        if self.notepad.focused {
+        // Config reloads can hide Notes without clearing its focus flag, so
+        // resolve ownership from the same visibility settings as the panel.
+        if self.notepad.focused
+            && self.notepad.enabled
+            && (!self.sidebar_sections_layout || self.sidebar_areas.notes)
+        {
             return InputOwner::Notepad;
         }
         if self.add_project_active() {

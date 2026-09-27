@@ -9464,6 +9464,61 @@ last_pane = "prefix+tab"
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn config_reload_hiding_focused_notes_routes_keys_back_to_the_pane() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let path = temp_config_path("notes-focus-reload");
+        std::fs::write(
+            &path,
+            "[ui.sidebar]\nlayout = \"sections\"\n[ui.sidebar.areas]\nnotes = true\n[notepad]\nenabled = true\n",
+        )
+        .expect("write visible-notes config");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("test");
+        let focused = workspace.focused_pane_id().expect("focused pane");
+        let (runtime, mut pane_input) = TerminalRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.sidebar_sections_layout = true;
+        app.state.sidebar_areas.notes = true;
+        app.state.notepad.enabled = true;
+        app.state.notepad.focused = true;
+        assert_eq!(app.state.input_owner(), state::InputOwner::Notepad);
+
+        std::fs::write(
+            &path,
+            "[ui.sidebar]\nlayout = \"sections\"\n[ui.sidebar.areas]\nnotes = false\n[notepad]\nenabled = true\n",
+        )
+        .expect("write hidden-notes config");
+        app.reload_config();
+
+        assert!(
+            app.state.notepad.focused,
+            "reload leaves stale focus in place"
+        );
+        assert_eq!(app.state.input_owner(), state::InputOwner::Pane);
+        app.route_client_events_from(
+            42,
+            vec![raw_key(
+                KeyCode::Char('j'),
+                KeyModifiers::empty(),
+                KeyEventKind::Press,
+            )],
+            false,
+        );
+        assert!(pane_input.try_recv().is_ok(), "the pane receives the key");
+        assert!(app.state.notepad.body().is_empty());
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        std::fs::remove_dir_all(path.parent().expect("config parent")).ok();
+    }
+
     #[tokio::test]
     async fn headless_subgroup_picker_takes_keys_before_focused_notepad() {
         let mut app = test_app();
