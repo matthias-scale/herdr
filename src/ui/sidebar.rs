@@ -28356,13 +28356,16 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         };
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
-        app.sidebar_work_filter.machine_scope =
-            crate::app::state::SidebarMachineScope::AllMachines;
+        app.sidebar_work_filter.machine_scope = crate::app::state::SidebarMachineScope::AllMachines;
         app.remote_agent_panel_entries = remote_agent_panel_entries_at(&snapshot, 1_725_000_000);
         app.view_observed_at = std::time::Instant::now();
 
         assert_eq!(
-            compact_age(&app.remote_agent_panel_entries[0].entry, app.view_observed_at).0,
+            compact_age(
+                &app.remote_agent_panel_entries[0].entry,
+                app.view_observed_at
+            )
+            .0,
             "5m"
         );
         let card = sidebar_rows(&app)
