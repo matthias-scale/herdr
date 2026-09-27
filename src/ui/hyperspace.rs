@@ -48,7 +48,7 @@ fn button_glyph(app: &AppState) -> &'static str {
 /// How many rows of `content` the animation occupies. All or nothing: a box
 /// that cannot be its full size is not a square, so it is not drawn at all.
 /// Zero whenever it is off, the sidebar is collapsed or too narrow, or the list
-/// would be squeezed below [`MIN_LIST_ROWS_BESIDE_ANIMATION`].
+/// would fall below its layout's minimum row count.
 pub(crate) fn animation_height(app: &AppState, content: Rect) -> u16 {
     if !app.hyperspace.enabled || app.sidebar_collapsed || content.width < BOX_COLS {
         return 0;
