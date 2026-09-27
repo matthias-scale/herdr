@@ -4286,6 +4286,12 @@ mod tests {
     #[test]
     fn sections_resume_unsettles_every_pane_in_split_tab() {
         let mut app = app_for_mouse_test();
+        if app.state.workspaces.is_empty() {
+            app.state.workspaces.push(Workspace::test_new("sections"));
+            app.state.active = Some(0);
+            app.state.selected = 0;
+            app.state.ensure_test_terminals();
+        }
         let root_pane = app.state.workspaces[0].tabs[0].root_pane;
         let sibling_pane = app.state.workspaces[0].test_split(Direction::Horizontal);
         app.state.ensure_test_terminals();

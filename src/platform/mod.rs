@@ -7,9 +7,13 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HostOs {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Linux,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Mac,
+    #[cfg_attr(not(windows), allow(dead_code))]
     Windows,
+    #[cfg_attr(any(target_os = "linux", target_os = "macos", windows), allow(dead_code))]
     Other,
 }
 
