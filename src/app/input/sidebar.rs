@@ -1659,21 +1659,20 @@ impl App {
 }
 
 fn sidebar_areas_menu_accepts_input_owner(owner: InputOwner) -> bool {
-    matches!(
-        owner,
-        InputOwner::Sidebar
-            | InputOwner::Pane
-            | InputOwner::Notepad
-            | InputOwner::None
-            | InputOwner::Server(ServerInputOwner::Navigate)
-            | InputOwner::Surface(
-                crate::app::state::SurfaceInputOwner::Home
-                    | crate::app::state::SurfaceInputOwner::Inbox
-                    | crate::app::state::SurfaceInputOwner::Work
-                    | crate::app::state::SurfaceInputOwner::Usage
-            )
-            | InputOwner::Dock(_)
-    )
+    match owner {
+        InputOwner::Pomodoro
+        | InputOwner::Client(_)
+        | InputOwner::AddProject
+        | InputOwner::Popup => false,
+        InputOwner::Server(
+            ServerInputOwner::Navigate
+            | ServerInputOwner::Prefix
+            | ServerInputOwner::Copy
+            | ServerInputOwner::Resize,
+        ) => true,
+        InputOwner::Server(_) => false,
+        _ => true,
+    }
 }
 
 impl super::super::App {
@@ -2623,6 +2622,46 @@ mod tests {
         detect::{Agent, AgentState},
         workspace::Workspace,
     };
+
+    #[test]
+    fn sidebar_areas_menu_accepts_nonmodal_surfaces_and_excludes_modal_owners() {
+        use crate::app::state::{InputOwner, SurfaceInputOwner};
+
+        for surface in [
+            SurfaceInputOwner::Symphony,
+            SurfaceInputOwner::LoopRunHistory,
+            SurfaceInputOwner::AloopRunLog,
+            SurfaceInputOwner::EditorPreview,
+            SurfaceInputOwner::DockObjectPreview,
+        ] {
+            assert!(
+                super::sidebar_areas_menu_accepts_input_owner(InputOwner::Surface(surface)),
+                "nonmodal surface {surface:?} must allow the area checklist click"
+            );
+        }
+
+        for owner in [
+            InputOwner::Server(crate::app::state::ServerInputOwner::Navigate),
+            InputOwner::Server(crate::app::state::ServerInputOwner::Prefix),
+            InputOwner::Server(crate::app::state::ServerInputOwner::Copy),
+            InputOwner::Server(crate::app::state::ServerInputOwner::Resize),
+        ] {
+            assert!(super::sidebar_areas_menu_accepts_input_owner(owner));
+        }
+
+        for owner in [
+            InputOwner::Pomodoro,
+            InputOwner::Client(crate::app::state::ClientInputOwner::DockSurfaceMenu),
+            InputOwner::AddProject,
+            InputOwner::Server(crate::app::state::ServerInputOwner::Settings),
+            InputOwner::Popup,
+        ] {
+            assert!(
+                !super::sidebar_areas_menu_accepts_input_owner(owner),
+                "modal owner {owner:?} must keep the checklist click blocked"
+            );
+        }
+    }
 
     fn sidebar_order_app(settled: bool) -> crate::app::App {
         let mut app = app_for_mouse_test();
