@@ -341,7 +341,7 @@ mod tests {
         app.notepad.height = 5;
         let rects = split_sidebar_panels(&app, Rect::new(0, 1, 36, 12));
 
-        assert!(rects.workspaces.height >= super::sidebar::sidebar_workspace_floor(&app));
+        assert!(rects.workspaces.height >= crate::ui::sidebar::sidebar_workspace_floor(&app));
         assert!(rects.workspaces.bottom() <= rects.notepad.y);
         assert!(rects.notepad.bottom() <= rects.goals.y);
         assert_eq!(rects.goals.bottom(), 13);
