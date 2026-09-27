@@ -3439,13 +3439,13 @@ mod tests {
         assert_eq!(app.state.sidebar_areas_menu_selected, None);
     }
 
-    #[test]
-    fn area_menu_closes_when_sidebar_becomes_too_narrow() {
+    #[tokio::test]
+    async fn area_menu_closes_when_sidebar_becomes_too_narrow() {
         assert_hidden_areas_menu_releases_pane(false);
     }
 
-    #[test]
-    fn area_menu_closes_when_sections_layout_is_disabled() {
+    #[tokio::test]
+    async fn area_menu_closes_when_sections_layout_is_disabled() {
         assert_hidden_areas_menu_releases_pane(true);
     }
 
