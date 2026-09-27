@@ -514,11 +514,16 @@ mod tests {
                 shelf: crate::app::sidebar_folders::SidebarShelf::Pinned,
                 name: "Now".to_string(),
                 collapsed: true,
+                members: vec![crate::app::sidebar_folders::SidebarFolderTab {
+                    workspace_id: "w7".to_string(),
+                    tab_number: 3,
+                }],
             },
             crate::app::sidebar_folders::SidebarFolder {
                 shelf: crate::app::sidebar_folders::SidebarShelf::Active,
                 name: "Later".to_string(),
                 collapsed: false,
+                members: Vec::new(),
             },
         ];
         update_path(&path, |state| state.dock_width = Some(27)).expect("save dock width");

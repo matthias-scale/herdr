@@ -3048,6 +3048,7 @@ mod tests {
                 shelf: crate::app::sidebar_folders::SidebarShelf::Active,
                 name: "Plans".to_string(),
                 collapsed: false,
+                members: Vec::new(),
             });
         app.sidebar_selected_work_group =
             Some(crate::app::sidebar_folders::folder_selection_key("Plans"));

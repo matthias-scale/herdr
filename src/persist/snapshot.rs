@@ -1168,24 +1168,16 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_folder_membership_uses_the_existing_tab_subgroup_snapshot_field() {
-        let mut state = state_with_workspaces(&["folder membership"]);
-        state.workspaces[0].tabs[0].set_subgroup(Some("Plans".to_string()));
-
-        let snapshot = capture_from_state(&state);
-        assert_eq!(
-            snapshot.workspaces[0].tabs[0].subgroup.as_deref(),
-            Some("Plans")
-        );
-        let json = serde_json::to_string(&snapshot).expect("serialize folder membership");
-        assert!(!json.contains("sidebar_folders"), "{json}");
-
-        let restored: SessionSnapshot =
-            serde_json::from_str(&json).expect("restore folder membership snapshot");
-        assert_eq!(
-            restored.workspaces[0].tabs[0].subgroup.as_deref(),
-            Some("Plans")
-        );
+    fn folder_membership_does_not_change_the_session_snapshot() {
+        let state = state_with_workspaces(&["folder membership"]);
+        let before = serde_json::to_value(capture_from_state(&state)).expect("snapshot before");
+        let mut state = state;
+        state.sidebar_sections_layout = true;
+        let shelf = crate::ui::sidebar::sections_tab_shelf(&state, 0, 0).expect("test tab shelf");
+        state.create_sidebar_folder(shelf, "Plans").expect("folder");
+        assert!(state.set_tab_sidebar_folder(0, 0, Some("Plans")));
+        let after = serde_json::to_value(capture_from_state(&state)).expect("snapshot after");
+        assert_eq!(after, before);
     }
 
     #[test]

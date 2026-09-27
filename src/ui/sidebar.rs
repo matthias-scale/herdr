@@ -3018,7 +3018,10 @@ fn append_sections_block(
             .collect::<std::collections::HashMap<_, Vec<AgentPanelEntry>>>();
         let mut loose = Vec::new();
         for entry in entries.drain(..) {
-            if let Some(name) = sidebar_tab_subgroup(app, &entry) {
+            if let Some(name) = entry
+                .local_target()
+                .and_then(|target| app.tab_sidebar_folder(target.ws_idx, target.tab_idx, shelf))
+            {
                 if let Some(members) = members_by_folder.get_mut(name) {
                     members.push(entry);
                     continue;
@@ -29515,8 +29518,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 shelf: crate::app::sidebar_folders::SidebarShelf::Active,
                 name: "Build".to_string(),
                 collapsed: false,
+                members: Vec::new(),
             });
-        app.workspaces[0].tabs[0].set_subgroup(Some("Build".to_string()));
+        app.set_tab_sidebar_folder(0, 0, Some("Build"));
         let rows = sidebar_rows(&app);
         let folder = rows
             .iter()
@@ -29573,8 +29577,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 shelf: crate::app::sidebar_folders::SidebarShelf::Active,
                 name: "Build".to_string(),
                 collapsed: false,
+                members: Vec::new(),
             });
-        app.workspaces[0].tabs[0].set_subgroup(Some("Build".to_string()));
+        app.set_tab_sidebar_folder(0, 0, Some("Build"));
         let rows = sidebar_rows(&app);
         let folder_idx = rows
             .iter()
@@ -29619,8 +29624,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 shelf: crate::app::sidebar_folders::SidebarShelf::Active,
                 name: "Build".to_string(),
                 collapsed: true,
+                members: Vec::new(),
             });
-        app.workspaces[0].tabs[0].set_subgroup(Some("Build".to_string()));
+        app.set_tab_sidebar_folder(0, 0, Some("Build"));
 
         let rows = sidebar_rows(&app);
         let folder_idx = rows
@@ -29647,14 +29653,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let mut app = app_with_agents(&["local"]);
         app.sidebar_sections_layout = true;
         app.workspaces[0].tabs[0].pinned = true;
-        app.workspaces[0].tabs[0].set_subgroup(Some("Review".to_string()));
         app.sidebar_folders
             .push(crate::app::sidebar_folders::SidebarFolder {
                 shelf: crate::app::sidebar_folders::SidebarShelf::Pinned,
                 name: "Review".to_string(),
                 collapsed: false,
+                members: Vec::new(),
             });
 
+        app.set_tab_sidebar_folder(0, 0, Some("Review"));
         let pinned_rows = sidebar_rows(&app);
         assert!(pinned_rows.iter().any(|row| {
             matches!(row, SidebarRow::Tab { entry, depth: 1 }
@@ -29666,6 +29673,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
 
         app.workspaces[0].tabs[0].pinned = false;
+        app.remove_tab_sidebar_folder_if_shelf_changed(0, 0);
         let active_rows = sidebar_rows(&app);
         assert!(active_rows.iter().any(|row| {
             matches!(row, SidebarRow::Tab { entry, depth: 0 }
@@ -29708,41 +29716,43 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let mut app = app_with_agents(&["pinned", "active", "snoozed", "settled"]);
         app.sidebar_sections_layout = true;
         app.workspaces[0].tabs[0].pinned = true;
-        app.workspaces[2].tabs[0].set_subgroup(Some("Later".to_string()));
         let snoozed_pane = app.workspaces[2].tabs[0].root_pane;
         assert!(app.snooze_pane_at(2, snoozed_pane, app.view_observed_unix_s + 60));
-        app.workspaces[3].tabs[0].set_subgroup(Some("Archive".to_string()));
         let settled_pane = app.workspaces[3].tabs[0].root_pane;
         app.workspaces[3].tabs[0]
             .panes
             .get_mut(&settled_pane)
             .expect("settled test pane")
             .settled_at = Some(1_725_000_000);
-        for (ws_idx, name) in [(0, "Pinned"), (1, "Now")] {
-            app.workspaces[ws_idx].tabs[0].set_subgroup(Some(name.to_string()));
-        }
         app.sidebar_folders = vec![
             SidebarFolder {
                 shelf: SidebarShelf::Pinned,
                 name: "Pinned".to_string(),
                 collapsed: false,
+                members: Vec::new(),
             },
             SidebarFolder {
                 shelf: SidebarShelf::Active,
                 name: "Now".to_string(),
                 collapsed: false,
+                members: Vec::new(),
             },
             SidebarFolder {
                 shelf: SidebarShelf::Snoozed,
                 name: "Later".to_string(),
                 collapsed: false,
+                members: Vec::new(),
             },
             SidebarFolder {
                 shelf: SidebarShelf::Settled,
                 name: "Archive".to_string(),
                 collapsed: false,
+                members: Vec::new(),
             },
         ];
+        for (ws_idx, name) in [(0, "Pinned"), (1, "Now"), (2, "Later"), (3, "Archive")] {
+            assert!(app.set_tab_sidebar_folder(ws_idx, 0, Some(name)));
+        }
         set_sections_group_collapsed(&mut app, SNOOZED_SECTION_TITLE, false);
         set_sections_group_collapsed(&mut app, SETTLED_SECTION_TITLE, false);
 
@@ -29774,9 +29784,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 shelf: crate::app::sidebar_folders::SidebarShelf::Active,
                 name: "Shared".to_string(),
                 collapsed: false,
+                members: Vec::new(),
             });
         app.workspaces[0].tabs[0].set_subgroup(Some("Shared".to_string()));
         app.workspaces[1].tabs[0].set_subgroup(Some("Shared".to_string()));
+        app.set_tab_sidebar_folder(0, 0, Some("Shared"));
         let settled_pane = app.workspaces[1].tabs[0].root_pane;
         app.workspaces[1].tabs[0]
             .panes
@@ -29796,10 +29808,18 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             app.rename_sidebar_folder("Shared", "Current"),
             Ok("Current".to_string())
         );
-        assert_eq!(app.workspaces[0].tabs[0].subgroup(), Some("Current"));
+        assert_eq!(
+            app.tab_sidebar_folder(0, 0, crate::app::sidebar_folders::SidebarShelf::Active),
+            Some("Current")
+        );
+        assert_eq!(app.workspaces[0].tabs[0].subgroup(), Some("Shared"));
         assert_eq!(app.workspaces[1].tabs[0].subgroup(), Some("Shared"));
         assert!(app.delete_sidebar_folder("Current"));
-        assert_eq!(app.workspaces[0].tabs[0].subgroup(), None);
+        assert_eq!(
+            app.tab_sidebar_folder(0, 0, crate::app::sidebar_folders::SidebarShelf::Active),
+            None
+        );
+        assert_eq!(app.workspaces[0].tabs[0].subgroup(), Some("Shared"));
         assert_eq!(app.workspaces[1].tabs[0].subgroup(), Some("Shared"));
     }
 
@@ -29856,6 +29876,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 shelf: crate::app::sidebar_folders::SidebarShelf::Active,
                 name: "Ignored by tree".to_string(),
                 collapsed: false,
+                members: Vec::new(),
             });
         let after = signature(&app);
 

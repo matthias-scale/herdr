@@ -151,6 +151,7 @@ impl AppState {
         }
         pane.set_snoozed_until(Some(deadline));
         let workspace_id = workspace.id.clone();
+        self.remove_pane_sidebar_folder_if_shelf_changed(ws_idx, pane_id);
         self.pending_pane_snooze_changes.push(PaneSnoozeChange {
             workspace_id,
             pane_id,
@@ -192,6 +193,7 @@ impl AppState {
             deadline: None,
             reason: Some(reason),
         });
+        self.remove_pane_sidebar_folder_if_shelf_changed(ws_idx, pane_id);
         self.mark_session_dirty();
         self.mark_sidebar_projection_changed();
         true
@@ -329,6 +331,7 @@ impl AppState {
             terminal.clear_stale_for_settlement();
         }
         let workspace_id = self.workspaces[ws_idx].id.clone();
+        self.remove_pane_sidebar_folder_if_shelf_changed(ws_idx, pane_id);
         self.pending_pane_settlement_changes
             .push(PaneSettlementChange {
                 workspace_id,
@@ -348,6 +351,7 @@ impl AppState {
         let changed = pane.settled_at.take().is_some();
         self.mark_session_dirty();
         if changed {
+            self.remove_pane_sidebar_folder_if_shelf_changed(ws_idx, pane_id);
             let workspace_id = self.workspaces[ws_idx].id.clone();
             self.pending_pane_settlement_changes
                 .push(PaneSettlementChange {
@@ -380,6 +384,7 @@ impl AppState {
             self.mark_session_dirty();
         }
         if changed {
+            self.remove_pane_sidebar_folder_if_shelf_changed(ws_idx, pane_id);
             let workspace_id = self.workspaces[ws_idx].id.clone();
             self.pending_pane_settlement_changes
                 .push(PaneSettlementChange {

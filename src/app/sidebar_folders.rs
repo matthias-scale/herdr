@@ -1,14 +1,10 @@
 //! Named folders inside the shelves of the sections sidebar (MAT-240).
 //!
-//! A tab joins a folder through its persisted `subgroup` name, the same
-//! session field the default layout nests subgroups by, so membership restores
-//! with the tab exactly like its pin. The folder list itself (which shelf owns
-//! each folder, their order, and whether each is folded) is sidebar
-//! presentation and persists in the client presentation file.
+//! Folder membership uses stable public tab identities and persists alongside
+//! folder presentation in the client presentation file.
 //!
 //! A folder belongs to one shelf. A tab renders inside a folder only while it
-//! sits in that shelf: an unpinned or settled tab leaves the folder's shelf and
-//! so renders loose in its new one.
+//! sits in that shelf. A shelf transition removes its membership.
 
 use serde::{Deserialize, Serialize};
 
@@ -42,13 +38,15 @@ impl SidebarShelf {
 }
 
 /// One user-named folder. Names are unique across every shelf, compared
-/// without regard to case, so a tab's `subgroup` names one folder.
+/// without regard to case.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SidebarFolder {
     pub(crate) shelf: SidebarShelf,
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) collapsed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) members: Vec<SidebarFolderTab>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,10 +81,10 @@ pub(crate) enum SidebarFolderPrompt {
 
 /// A tab by stable identity, so a prompt that stays open across tab churn
 /// never files the wrong tab.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SidebarFolderTab {
     pub(crate) workspace_id: String,
-    pub(crate) tab_id: String,
+    pub(crate) tab_number: usize,
 }
 
 pub(crate) fn normalize_folder_name(name: &str) -> Option<String> {
@@ -134,12 +132,13 @@ impl AppState {
             shelf,
             name: name.clone(),
             collapsed: false,
+            members: Vec::new(),
         });
         self.sidebar_folders_persistence_request = true;
         Ok(name)
     }
 
-    /// Rename a folder and every tab filed under it, so membership follows.
+    /// Rename the registry entry; member identities do not depend on its name.
     pub(crate) fn rename_sidebar_folder(
         &mut self,
         old: &str,
@@ -159,23 +158,7 @@ impl AppState {
         if self.sidebar_folder_name_taken(&new, Some(old)) {
             return Err(SidebarFolderError::DuplicateName);
         }
-        let shelf = self.sidebar_folders[index].shelf;
-        let tab_shelves = crate::ui::sidebar::sections_tab_shelves(self);
         self.sidebar_folders[index].name = new.clone();
-        let mut moved = false;
-        for (ws_idx, workspace) in self.workspaces.iter_mut().enumerate() {
-            for (tab_idx, tab) in workspace.tabs.iter_mut().enumerate() {
-                if tab.subgroup() == Some(old)
-                    && tab_shelves.get(&(ws_idx, tab_idx)) == Some(&shelf)
-                {
-                    tab.set_subgroup(Some(new.clone()));
-                    moved = true;
-                }
-            }
-        }
-        if moved {
-            self.mark_session_dirty();
-        }
         self.sidebar_folders_persistence_request = true;
         Ok(new)
     }
@@ -183,28 +166,10 @@ impl AppState {
     /// Delete a folder. Its tabs stay where they are and render loose in the
     /// shelf again.
     pub(crate) fn delete_sidebar_folder(&mut self, name: &str) -> bool {
-        let Some(shelf) = self.sidebar_folder(name).map(|folder| folder.shelf) else {
-            return false;
-        };
-        let tab_shelves = crate::ui::sidebar::sections_tab_shelves(self);
         let before = self.sidebar_folders.len();
         self.sidebar_folders.retain(|folder| folder.name != name);
         if self.sidebar_folders.len() == before {
             return false;
-        }
-        let mut released = false;
-        for (ws_idx, workspace) in self.workspaces.iter_mut().enumerate() {
-            for (tab_idx, tab) in workspace.tabs.iter_mut().enumerate() {
-                if tab.subgroup() == Some(name)
-                    && tab_shelves.get(&(ws_idx, tab_idx)) == Some(&shelf)
-                {
-                    tab.set_subgroup(None);
-                    released = true;
-                }
-            }
-        }
-        if released {
-            self.mark_session_dirty();
         }
         self.sidebar_folders_persistence_request = true;
         self.workspace_scroll = crate::ui::normalized_workspace_scroll(
@@ -233,19 +198,109 @@ impl AppState {
                 return false;
             }
         }
-        let Some(tab) = self
-            .workspaces
-            .get_mut(ws_idx)
-            .and_then(|workspace| workspace.tabs.get_mut(tab_idx))
-        else {
+        let Some(tab) = self.sidebar_folder_tab(ws_idx, tab_idx) else {
             return false;
         };
-        if tab.subgroup() == folder {
+        let current = self
+            .sidebar_folders
+            .iter()
+            .find(|entry| entry.members.contains(&tab));
+        if current.map(|entry| entry.name.as_str()) == folder {
             return true;
         }
-        tab.set_subgroup(folder.map(str::to_string));
-        self.mark_session_dirty();
+        let mut changed = false;
+        for entry in &mut self.sidebar_folders {
+            let before = entry.members.len();
+            entry.members.retain(|member| member != &tab);
+            changed |= entry.members.len() != before;
+        }
+        if let Some(name) = folder {
+            if let Some(entry) = self
+                .sidebar_folders
+                .iter_mut()
+                .find(|entry| entry.name == name)
+            {
+                entry.members.push(tab);
+                changed = true;
+            }
+        }
+        self.sidebar_folders_persistence_request |= changed;
         true
+    }
+
+    /// Drop a tab's membership after a shelf transition or before closing it.
+    pub(crate) fn remove_tab_sidebar_folder(&mut self, ws_idx: usize, tab_idx: usize) {
+        let Some(tab) = self.sidebar_folder_tab(ws_idx, tab_idx) else {
+            return;
+        };
+        for entry in &mut self.sidebar_folders {
+            let before = entry.members.len();
+            entry.members.retain(|member| member != &tab);
+            self.sidebar_folders_persistence_request |= entry.members.len() != before;
+        }
+    }
+
+    pub(crate) fn remove_tab_sidebar_folder_if_shelf_changed(
+        &mut self,
+        ws_idx: usize,
+        tab_idx: usize,
+    ) {
+        let Some(tab) = self.sidebar_folder_tab(ws_idx, tab_idx) else {
+            return;
+        };
+        let Some(folder) = self
+            .sidebar_folders
+            .iter()
+            .find(|entry| entry.members.contains(&tab))
+        else {
+            return;
+        };
+        if crate::ui::sidebar::sections_tab_shelf(self, ws_idx, tab_idx) != Some(folder.shelf) {
+            self.remove_tab_sidebar_folder(ws_idx, tab_idx);
+        }
+    }
+
+    pub(crate) fn remove_pane_sidebar_folder_if_shelf_changed(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) {
+        let tab_idx = self.workspaces.get(ws_idx).and_then(|workspace| {
+            workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.panes.contains_key(&pane_id))
+        });
+        if let Some(tab_idx) = tab_idx {
+            self.remove_tab_sidebar_folder_if_shelf_changed(ws_idx, tab_idx);
+        }
+    }
+
+    pub(crate) fn prune_closed_sidebar_folder_tabs(&mut self) {
+        if self
+            .sidebar_folders
+            .iter()
+            .all(|folder| folder.members.is_empty())
+        {
+            return;
+        }
+        let live: std::collections::HashSet<(String, usize)> = self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| {
+                workspace
+                    .tabs
+                    .iter()
+                    .map(move |tab| (workspace.id.clone(), tab.number))
+            })
+            .collect();
+        for entry in &mut self.sidebar_folders {
+            let before = entry.members.len();
+            entry
+                .members
+                .retain(|member| live.contains(&(member.workspace_id.clone(), member.tab_number)));
+            self.sidebar_folders_persistence_request |= entry.members.len() != before;
+        }
     }
 
     pub(crate) fn toggle_sidebar_folder_collapsed(&mut self, name: &str) -> bool {
@@ -266,21 +321,23 @@ impl AppState {
         true
     }
 
-    /// The folder a tab renders in while it sits in `shelf`: its subgroup, when
-    /// that names a folder owned by the same shelf.
+    /// The folder a tab renders in while it sits in `shelf`.
     pub(crate) fn tab_sidebar_folder(
         &self,
         ws_idx: usize,
         tab_idx: usize,
         shelf: SidebarShelf,
     ) -> Option<&str> {
-        let name = self
-            .workspaces
-            .get(ws_idx)
-            .and_then(|workspace| workspace.tabs.get(tab_idx))
-            .and_then(crate::workspace::Tab::subgroup)?;
-        self.sidebar_folder(name)
-            .filter(|folder| folder.shelf == shelf)
+        let workspace = self.workspaces.get(ws_idx)?;
+        let tab_number = workspace.tabs.get(tab_idx)?.number;
+        self.sidebar_folders
+            .iter()
+            .find(|folder| {
+                folder.shelf == shelf
+                    && folder.members.iter().any(|member| {
+                        member.workspace_id == workspace.id && member.tab_number == tab_number
+                    })
+            })
             .map(|folder| folder.name.as_str())
     }
 
@@ -292,10 +349,10 @@ impl AppState {
             .workspaces
             .iter()
             .position(|workspace| workspace.id == tab.workspace_id)?;
-        let tab_idx = self.workspaces[ws_idx].tabs.iter().position(|candidate| {
-            crate::workspace::public_tab_id_for_number(&tab.workspace_id, candidate.number)
-                == tab.tab_id
-        })?;
+        let tab_idx = self.workspaces[ws_idx]
+            .tabs
+            .iter()
+            .position(|candidate| candidate.number == tab.tab_number)?;
         Some((ws_idx, tab_idx))
     }
 
@@ -308,7 +365,7 @@ impl AppState {
         let tab = workspace.tabs.get(tab_idx)?;
         Some(SidebarFolderTab {
             workspace_id: workspace.id.clone(),
-            tab_id: crate::workspace::public_tab_id_for_number(&workspace.id, tab.number),
+            tab_number: tab.number,
         })
     }
 
@@ -441,13 +498,18 @@ mod tests {
         let mut app = app_with_workspace();
         app.create_sidebar_folder(SidebarShelf::Active, "Drafts")
             .expect("create folder");
-        app.workspaces[0].tabs[0].set_subgroup(Some("Drafts".to_string()));
+        app.workspaces[0].tabs[0].set_subgroup(Some("Original".to_string()));
+        app.set_tab_sidebar_folder(0, 0, Some("Drafts"));
 
         assert_eq!(
             app.rename_sidebar_folder("Drafts", " Plans "),
             Ok("Plans".to_string())
         );
-        assert_eq!(app.workspaces[0].tabs[0].subgroup(), Some("Plans"));
+        assert_eq!(
+            app.tab_sidebar_folder(0, 0, SidebarShelf::Active),
+            Some("Plans")
+        );
+        assert_eq!(app.workspaces[0].tabs[0].subgroup(), Some("Original"));
         assert!(app.sidebar_folder("Plans").is_some());
     }
 
@@ -456,10 +518,10 @@ mod tests {
         let mut app = app_with_workspace();
         app.create_sidebar_folder(SidebarShelf::Active, "Drafts")
             .expect("create folder");
-        app.workspaces[0].tabs[0].set_subgroup(Some("Drafts".to_string()));
+        app.set_tab_sidebar_folder(0, 0, Some("Drafts"));
 
         assert!(app.delete_sidebar_folder("Drafts"));
-        assert_eq!(app.workspaces[0].tabs[0].subgroup(), None);
+        assert_eq!(app.tab_sidebar_folder(0, 0, SidebarShelf::Active), None);
         assert!(app.sidebar_folder("Drafts").is_none());
     }
 
@@ -478,7 +540,7 @@ mod tests {
             "Plans",
         );
 
-        assert_eq!(app.workspaces[0].tabs[0].subgroup(), Some("Plans"));
+        assert_eq!(app.tab_sidebar_folder(0, 0, shelf), Some("Plans"));
         assert_eq!(
             app.sidebar_folder("Plans").map(|folder| folder.shelf),
             Some(shelf)
@@ -511,7 +573,7 @@ mod tests {
             _ => panic!("folder create prompt expected"),
         };
         app.apply_sidebar_folder_prompt(prompt, "Plans");
-        assert_eq!(app.workspaces[0].tabs[0].subgroup(), Some("Plans"));
+        assert_eq!(app.tab_sidebar_folder(0, 0, shelf), Some("Plans"));
         assert_eq!(
             app.sidebar_folder("Plans").map(|folder| folder.shelf),
             Some(shelf)
@@ -534,7 +596,7 @@ mod tests {
             })
             .expect("folder choice");
         app.accept_sidebar_subgroup_picker(move_in);
-        assert_eq!(app.workspaces[0].tabs[0].subgroup(), Some("Plans"));
+        assert_eq!(app.tab_sidebar_folder(0, 0, shelf), Some("Plans"));
 
         assert!(app.open_sidebar_folder_picker(0, 0, (5, 6)));
         let move_out = crate::ui::sidebar::sidebar_subgroup_picker_choices(&app)
@@ -542,21 +604,146 @@ mod tests {
             .position(|choice| *choice == crate::ui::SidebarSubgroupChoice::NoFolder)
             .expect("no-folder choice");
         app.accept_sidebar_subgroup_picker(move_out);
-        assert_eq!(app.workspaces[0].tabs[0].subgroup(), None);
+        assert_eq!(app.tab_sidebar_folder(0, 0, shelf), None);
+    }
+
+    #[test]
+    fn folder_moves_and_delete_preserve_default_layout_subgroup() {
+        let mut app = app_with_workspace();
+        let shelf = crate::ui::sidebar::sections_tab_shelf(&app, 0, 0).expect("shelf");
+        app.workspaces[0].tabs[0].set_subgroup(Some("Original".to_string()));
+        app.create_sidebar_folder(shelf, "Plans").expect("folder");
+        assert!(app.set_tab_sidebar_folder(0, 0, Some("Plans")));
+        assert_eq!(app.workspaces[0].tabs[0].subgroup(), Some("Original"));
+        assert!(app.set_tab_sidebar_folder(0, 0, None));
+        assert_eq!(app.workspaces[0].tabs[0].subgroup(), Some("Original"));
+        assert!(app.set_tab_sidebar_folder(0, 0, Some("Plans")));
+        assert!(app.delete_sidebar_folder("Plans"));
+        assert_eq!(app.workspaces[0].tabs[0].subgroup(), Some("Original"));
+    }
+
+    #[test]
+    fn same_named_subgroup_does_not_join_folder() {
+        let mut app = app_with_workspace();
+        let shelf = crate::ui::sidebar::sections_tab_shelf(&app, 0, 0).expect("shelf");
+        app.workspaces[0].tabs[0].set_subgroup(Some("Plans".to_string()));
+        app.create_sidebar_folder(shelf, "Plans").expect("folder");
+        assert_eq!(app.tab_sidebar_folder(0, 0, shelf), None);
+        assert!(app
+            .sidebar_folder("Plans")
+            .expect("folder")
+            .members
+            .is_empty());
+        assert!(app.delete_sidebar_folder("Plans"));
+        assert_eq!(app.workspaces[0].tabs[0].subgroup(), Some("Plans"));
+    }
+
+    #[test]
+    fn leaving_shelf_removes_membership_before_return() {
+        let mut app = app_with_workspace();
+        app.workspaces[0].tabs[0].pinned = true;
+        app.create_sidebar_folder(SidebarShelf::Pinned, "Review")
+            .expect("folder");
+        assert!(app.set_tab_sidebar_folder(0, 0, Some("Review")));
+        app.workspaces[0].tabs[0].pinned = false;
+        app.remove_tab_sidebar_folder_if_shelf_changed(0, 0);
+        app.workspaces[0].tabs[0].pinned = true;
+        assert_eq!(app.tab_sidebar_folder(0, 0, SidebarShelf::Pinned), None);
+        assert!(app
+            .sidebar_folder("Review")
+            .expect("folder")
+            .members
+            .is_empty());
+    }
+
+    #[test]
+    fn snooze_and_wake_do_not_restore_old_folder() {
+        let mut app = app_with_workspace();
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        app.create_sidebar_folder(SidebarShelf::Active, "Now")
+            .expect("folder");
+        assert!(app.set_tab_sidebar_folder(0, 0, Some("Now")));
+        assert!(app.snooze_pane_at(0, pane, app.view_observed_unix_s + 900));
+        assert!(app
+            .sidebar_folder("Now")
+            .expect("folder")
+            .members
+            .is_empty());
+        assert!(app.unsnooze_pane_at(
+            0,
+            pane,
+            crate::api::schema::PaneUnsnoozeReason::Explicit,
+            std::time::Instant::now(),
+        ));
+        assert_eq!(app.tab_sidebar_folder(0, 0, SidebarShelf::Active), None);
+    }
+
+    #[test]
+    fn settle_and_activity_do_not_restore_old_folder() {
+        let mut app = app_with_workspace();
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        app.create_sidebar_folder(SidebarShelf::Active, "Now")
+            .expect("folder");
+        assert!(app.set_tab_sidebar_folder(0, 0, Some("Now")));
+        assert!(app.settle_pane_at(0, pane, 1_725_000_000));
+        assert!(app
+            .sidebar_folder("Now")
+            .expect("folder")
+            .members
+            .is_empty());
+        assert!(app.note_pane_activity_at(pane, std::time::Instant::now()));
+        assert_eq!(app.tab_sidebar_folder(0, 0, SidebarShelf::Active), None);
+    }
+
+    #[test]
+    fn closed_tab_is_pruned_from_persisted_membership() {
+        let mut app = app_with_workspace();
+        let shelf = crate::ui::sidebar::sections_tab_shelf(&app, 0, 0).expect("shelf");
+        app.create_sidebar_folder(shelf, "Plans").expect("folder");
+        assert!(app.set_tab_sidebar_folder(0, 0, Some("Plans")));
+        app.workspaces.clear();
+        app.prune_closed_sidebar_folder_tabs();
+        let saved = app
+            .take_sidebar_folders_persistence_request()
+            .expect("save");
+        assert!(saved[0].members.is_empty());
+    }
+
+    #[test]
+    fn membership_follows_public_tab_number_after_reorder() {
+        let mut app = app_with_workspace();
+        let second = app.workspaces[0].test_add_tab(Some("second"));
+        let identity = app.sidebar_folder_tab(0, second).expect("tab identity");
+        app.create_sidebar_folder(SidebarShelf::Active, "Plans")
+            .expect("folder");
+        app.sidebar_folders[0].members.push(identity.clone());
+        assert!(app.workspaces[0].move_tab(second, 0));
+        assert_eq!(app.sidebar_folder_tab_indices(&identity), Some((0, 0)));
+        assert_eq!(
+            app.tab_sidebar_folder(0, 0, SidebarShelf::Active),
+            Some("Plans")
+        );
+        assert_eq!(app.tab_sidebar_folder(0, 1, SidebarShelf::Active), None);
     }
 
     #[test]
     fn folder_registry_round_trips_as_json() {
+        let tab = SidebarFolderTab {
+            workspace_id: "w7".to_string(),
+            tab_number: 3,
+        };
         let folders = vec![
             SidebarFolder {
                 shelf: SidebarShelf::Pinned,
                 name: "Read later".to_string(),
                 collapsed: true,
+                members: vec![tab],
             },
             SidebarFolder {
                 shelf: SidebarShelf::Settled,
                 name: "Archive".to_string(),
                 collapsed: false,
+                members: Vec::new(),
             },
         ];
 

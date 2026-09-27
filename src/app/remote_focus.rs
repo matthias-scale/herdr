@@ -973,6 +973,7 @@ impl crate::app::App {
             .workspaces
             .get_mut(ws_idx)
             .is_some_and(|workspace| workspace.remove_pane(pane_id));
+        self.state.prune_closed_sidebar_folder_tabs();
         self.state.remove_plugin_pane_records([pane_id]);
         self.state.mark_session_dirty();
         if should_close_workspace {
