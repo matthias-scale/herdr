@@ -3032,10 +3032,7 @@ fn append_sections_block(
             .iter()
             .filter(|folder| folder.shelf == shelf)
         {
-            let mut members = match members_by_folder.remove(folder.name.as_str()) {
-                Some(members) => members,
-                None => Vec::new(),
-            };
+            let mut members = members_by_folder.remove(folder.name.as_str()).unwrap_or_default();
             let count = members.len();
             rows.push(SidebarRow::Folder {
                 shelf,
@@ -12400,17 +12397,6 @@ pub(crate) enum SidebarSubgroupChoice {
 }
 
 impl SidebarSubgroupChoice {
-    pub(crate) fn name(&self) -> &str {
-        match self {
-            Self::Create(name)
-            | Self::Existing(name)
-            | Self::CreateFolder(name)
-            | Self::ExistingFolder(name) => name,
-            Self::NewFolder => "New…",
-            Self::NoFolder => "No folder",
-        }
-    }
-
     fn label(&self) -> String {
         match self {
             Self::Create(name) | Self::CreateFolder(name) => format!("Create \"{name}\""),
