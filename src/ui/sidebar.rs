@@ -2818,6 +2818,16 @@ pub(crate) fn section_is_collapsed(app: &AppState, title: &str) -> bool {
 }
 
 #[cfg(test)]
+fn set_sections_group_collapsed(app: &mut AppState, title: &str, collapsed: bool) {
+    let key = format!("sections:{title}");
+    if collapsed != section_title_defaults_to_collapsed(title) {
+        app.collapsed_sidebar_groups.insert(key);
+    } else {
+        app.collapsed_sidebar_groups.remove(&key);
+    }
+}
+
+#[cfg(test)]
 thread_local! {
     static SIDEBAR_SECTION_CARD_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -27903,16 +27913,16 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_sections_layout = true;
         app.sidebar_group_mode = SidebarGroupMode::RepoPr;
         app.agent_host_name = "ub1".into();
-        for key in [
-            "sections:Pods",
-            "sections:Unassigned PRs",
-            "sections:Runs",
-            "sections:runs:host:ub1",
-            "sections:Aloops",
-            "sections:aloop:loop:nightly",
-            "sections:Symphony",
+        for title in [
+            PODS_SECTION_TITLE,
+            UNASSIGNED_PRS_SECTION_TITLE,
+            RUNS_SECTION_TITLE,
+            "runs:host:ub1",
+            ALOOPS_SECTION_TITLE,
+            "aloop:loop:nightly",
+            SYMPHONY_SECTION_TITLE,
         ] {
-            app.collapsed_sidebar_groups.remove(key);
+            set_sections_group_collapsed(&mut app, title, false);
         }
 
         let pane_id = app.workspaces[0].tabs[0].root_pane;
@@ -28068,12 +28078,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             SNOOZED_SECTION_TITLE,
             SETTLED_SECTION_TITLE,
         ] {
-            let key = format!("sections:{title}");
-            if title == SETTLED_SECTION_TITLE {
-                app.collapsed_sidebar_groups.remove(&key);
-            } else {
-                app.collapsed_sidebar_groups.insert(key);
-            }
+            set_sections_group_collapsed(&mut app, title, true);
         }
 
         take_sidebar_section_card_builds();
@@ -28093,7 +28098,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             )));
         }
 
-        app.collapsed_sidebar_groups.remove("sections:Active");
+        set_sections_group_collapsed(&mut app, ACTIVE_SECTION_TITLE, false);
         take_sidebar_section_card_builds();
         let expanded_rows = sidebar_rows(&app);
         assert_eq!(take_sidebar_section_card_builds(), 1);
