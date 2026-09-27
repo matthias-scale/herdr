@@ -278,7 +278,8 @@ fn render_subscription_usage(
     palette: &Palette,
     frame: &mut Frame,
 ) {
-    let providers = [
+    let agy = snapshot.primary_usage(crate::provider_usage::QuotaProvider::Agy);
+    let mut providers = vec![
         (
             "Claude Code",
             snapshot.primary_usage(crate::provider_usage::QuotaProvider::Claude),
@@ -295,7 +296,12 @@ fn render_subscription_usage(
             palette.mauve,
         ),
     ];
-    let rows = Layout::vertical([Constraint::Length(2); 3]).split(area);
+    // Antigravity only takes a row when it reports data, so the panel keeps its size otherwise.
+    if agy.five_hour.is_some() || agy.seven_day.is_some() {
+        providers.push(("Antigravity", agy, palette.teal));
+    }
+    providers.truncate(usize::from(area.height / 2).max(1));
+    let rows = Layout::vertical(vec![Constraint::Length(2); providers.len()]).split(area);
     for ((label, usage, color), provider_area) in providers.into_iter().zip(rows.iter().copied()) {
         let style = if usage.stale {
             Style::default()
@@ -1079,7 +1085,7 @@ mod tests {
     #[test]
     fn populated_provider_snapshot_renders_subscription_windows_resets_and_credits() {
         let now = 1_787_992_841;
-        let provider_usage = ProviderUsageSnapshot::with_primary_accounts(
+        let mut provider_usage = ProviderUsageSnapshot::with_primary_accounts(
             AccountUsage {
                 five_hour: Some(QuotaWindow {
                     used_percent: 31,
@@ -1115,6 +1121,12 @@ mod tests {
                 ..AccountUsage::default()
             },
         );
+        provider_usage
+            .primary_usage_mut(crate::provider_usage::QuotaProvider::Agy)
+            .five_hour = Some(QuotaWindow {
+            used_percent: 1,
+            resets_at: Some(now + 720),
+        });
 
         let text = render_snapshot_with_provider_usage_at(120, 40, fixture(), provider_usage);
         for expected in [
@@ -1128,6 +1140,8 @@ mod tests {
             "Kimi",
             "5h 0% · —",
             "week 24% · 2h45",
+            "Antigravity",
+            "5h 1% · 12m",
         ] {
             assert!(text.contains(expected), "missing {expected:?}\n{text}");
         }
