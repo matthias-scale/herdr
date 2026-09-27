@@ -433,8 +433,8 @@ pub struct SidebarConfig {
     /// Sidebar row layout. `current` preserves the existing layout; `sections`
     /// shows pinned, active, snoozed, and settled thread shelves.
     pub layout: SidebarLayoutConfig,
-    /// Header decoration used by the sections layout. `plain` disables the
-    /// night-sky background without changing header controls or their layout.
+    /// Header decoration used by the sections layout. `plain` removes the sky
+    /// band and places search and goto in the control row.
     pub header: SidebarHeaderConfig,
     /// Visibility of individual sections-layout areas. The current layout
     /// ignores these values so it keeps its existing row contract.
