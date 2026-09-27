@@ -10923,8 +10923,15 @@ fn render_sections_thread_card(
         }
         spans.push(Span::styled(text, Style::default().fg(color)));
     }
+    let details = Paragraph::new(Line::from(spans)).alignment(
+        if card.branch.is_none() && card.pull_request.is_none() {
+            Alignment::Right
+        } else {
+            Alignment::Left
+        },
+    );
     frame.render_widget(
-        Paragraph::new(Line::from(spans)),
+        details,
         Rect::new(rect.x, rect.y.saturating_add(1), rect.width, 1),
     );
 }
@@ -28644,6 +28651,32 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             !second.contains('#'),
             "PR field should be removed before branch: {second:?}"
         );
+    }
+
+    #[test]
+    fn sections_plain_thread_card_right_aligns_host_without_branch_or_pr() {
+        let mut app = AppState::test_new();
+        app.nerd_font = false;
+        let card = SidebarThreadCard {
+            badge: project_badge("shell"),
+            title: "shell".into(),
+            status: SidebarCardStatus::Idle("".into()),
+            branch: None,
+            pull_request: None,
+            host: "ub2".into(),
+            host_kind: SidebarCardHostKind::Linux,
+            agent: None,
+        };
+        let mut terminal =
+            Terminal::new(TestBackend::new(40, 2)).expect("plain shell card terminal");
+        terminal
+            .draw(|frame| {
+                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 40, 2), false)
+            })
+            .expect("render plain shell card");
+        let second = row_text(terminal.backend().buffer(), 1, 40);
+        assert!(second.ends_with("L ub2"), "{second:?}");
+        assert!(second.find("L ub2").unwrap_or(0) > 20, "{second:?}");
     }
 
     #[test]
