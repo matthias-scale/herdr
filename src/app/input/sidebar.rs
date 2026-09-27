@@ -2365,8 +2365,31 @@ impl super::super::App {
     }
 
     pub(crate) fn resume_settled_pane(&mut self, target: crate::app::state::PaneFocusTarget) {
-        self.state
-            .note_pane_activity_at(target.pane_id, std::time::Instant::now());
+        let now = std::time::Instant::now();
+        let tab_panes = self
+            .state
+            .sidebar_sections_layout
+            .then(|| {
+                self.state
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.id == target.workspace_id)
+                    .and_then(|workspace| {
+                        workspace
+                            .tabs
+                            .iter()
+                            .find(|tab| tab.panes.contains_key(&target.pane_id))
+                            .map(|tab| tab.panes.keys().copied().collect::<Vec<_>>())
+                    })
+            })
+            .flatten();
+        if let Some(pane_ids) = tab_panes {
+            for pane_id in pane_ids {
+                self.state.note_pane_activity_at(pane_id, now);
+            }
+        } else {
+            self.state.note_pane_activity_at(target.pane_id, now);
+        }
         self.focus_settled_pane(target);
         self.flush_pane_settlement_events();
     }
@@ -4258,6 +4281,32 @@ mod tests {
             Some(target.pane_id)
         );
         assert_eq!(app.state.server_mode(), Mode::Settings);
+    }
+
+    #[test]
+    fn sections_resume_unsettles_every_pane_in_split_tab() {
+        let mut app = app_for_mouse_test();
+        let root_pane = app.state.workspaces[0].tabs[0].root_pane;
+        let sibling_pane = app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        app.state.sidebar_sections_layout = true;
+        app.state.set_server_mode(Mode::Settings);
+        for pane_id in [root_pane, sibling_pane] {
+            assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
+        }
+        let target = crate::app::state::PaneFocusTarget {
+            workspace_id: app.state.workspaces[0].id.clone(),
+            pane_id: sibling_pane,
+        };
+
+        app.resume_settled_pane(target);
+
+        assert!(!app.state.pane_is_settled(0, root_pane));
+        assert!(!app.state.pane_is_settled(0, sibling_pane));
+        assert_eq!(
+            app.state.workspaces[0].focused_pane_id(),
+            Some(sibling_pane)
+        );
     }
 
     #[test]
