@@ -19550,7 +19550,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let area = Rect::new(0, 0, 20, 10);
         let ws_area = workspace_list_rect(area, app.sidebar_section_split);
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
-        let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
+        let body = workspace_list_body_rect(&app, ws_area, should_show_scrollbar(metrics));
         let mut terminal = Terminal::new(TestBackend::new(20, 10)).unwrap();
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
@@ -28760,7 +28760,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             assert!(row_text(buffer, 3, 42)
                 .contains(&sidebar_prefixed_key_label(&app, &app.keybinds.goto)));
             assert!(row_text(buffer, 4, 42).contains("View:"));
-            let sky = buffer[(20, 1)];
+            let sky = &buffer[(20, 1)];
             assert_ne!(sky.bg, app.palette.panel_bg, "sky band should stand out");
             assert!(matches!(sky.bg, Color::Rgb(_, _, _)));
         }

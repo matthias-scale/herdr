@@ -918,6 +918,7 @@ impl App {
             sidebar_search_active: false,
             sidebar_starred_only: false,
             sidebar_new_menu: None,
+            sidebar_areas_menu_selected: None,
             sidebar_new_thread: None,
             sidebar_project_menu: None,
             sidebar_refresh_requested: false,
