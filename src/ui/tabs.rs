@@ -438,6 +438,7 @@ impl TabActionVisibility {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn compute_tab_bar_view(
     ws: &crate::workspace::Workspace,
     terminals: &std::collections::HashMap<

@@ -50,10 +50,6 @@ pub(crate) fn sidebar_separator_col(area: Rect) -> Option<u16> {
     (area.width > 0).then(|| area.x + area.width.saturating_sub(1))
 }
 
-pub(crate) fn tab_agent_suffix(agent: Option<Agent>) -> Option<&'static str> {
-    crate::ui::icons::agent_text_tag(agent)
-}
-
 #[cfg(test)]
 pub(super) fn title_repeats_agent_identity(entry: &AgentPanelEntry, title: &str) -> bool {
     let title = title.trim().to_ascii_lowercase();
@@ -70,13 +66,13 @@ pub(super) fn title_repeats_agent_identity(entry: &AgentPanelEntry, title: &str)
         .into_iter()
         .chain(entry.agent_kind_label.as_deref())
         .chain(provider)
-        .chain(tab_agent_suffix(entry.agent))
+        .chain(crate::ui::icons::agent_text_tag(entry.agent))
         .any(|identity| identity.trim().eq_ignore_ascii_case(&title))
 }
 
 #[cfg(test)]
 pub(super) fn canonical_sidebar_agent_identity(entry: &AgentPanelEntry) -> Option<&str> {
-    tab_agent_suffix(entry.agent)
+    crate::ui::icons::agent_text_tag(entry.agent)
         .or(entry.agent_kind_label.as_deref())
         .or_else(|| {
             entry
@@ -13943,7 +13939,10 @@ pub(crate) mod tests {
     fn compact_provider_marks_plain_shells_and_kimi() {
         let plain = compact_test_entry("terminal", None);
         assert_eq!(compact_provider(&plain, false), ">_");
-        assert_eq!(tab_agent_suffix(Some(Agent::Kimi)), Some("ki"));
+        assert_eq!(
+            crate::ui::icons::agent_text_tag(Some(Agent::Kimi)),
+            Some("ki")
+        );
 
         let kimi = compact_test_entry("task", Some(Agent::Kimi));
         assert_eq!(compact_provider(&kimi, false), "ki");
@@ -23685,9 +23684,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
     #[test]
     fn pi_uses_pi_suffix_while_unsupported_and_agentless_tabs_omit_it() {
-        assert_eq!(tab_agent_suffix(Some(Agent::Pi)), Some("pi"));
-        assert_eq!(tab_agent_suffix(Some(Agent::Gemini)), None);
-        assert_eq!(tab_agent_suffix(None), None);
+        assert_eq!(
+            crate::ui::icons::agent_text_tag(Some(Agent::Pi)),
+            Some("pi")
+        );
+        assert_eq!(crate::ui::icons::agent_text_tag(Some(Agent::Gemini)), None);
+        assert_eq!(crate::ui::icons::agent_text_tag(None), None);
     }
 
     #[test]

@@ -192,8 +192,8 @@ pub(crate) use self::{
     panes::{apply_pane_chrome, pane_inner_rect, pane_is_scrolled_back},
     tab_surface::{tab_surface_cursor, tab_surface_hyperlinks, TabSurfaceView},
     tabs::{
-        compute_tab_bar_view, compute_tab_bar_view_with_icons, tab_action_fallback_hit_areas,
-        tab_bar_content_area, visible_user_actions, TabActionVisibility,
+        compute_tab_bar_view_with_icons, tab_action_fallback_hit_areas, tab_bar_content_area,
+        visible_user_actions, TabActionVisibility,
     },
     widgets::{centered_popup_rect, modal_stack_areas},
 };
