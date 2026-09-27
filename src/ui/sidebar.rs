@@ -2839,7 +2839,17 @@ fn sidebar_thread_card(app: &AppState, entry: &AgentPanelEntry) -> SidebarThread
                 .map(|name| name.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| entry.space_label.clone());
-    let age = compact_age(entry, app.view_observed_at).0;
+    let reported_age = compact_age(entry, app.view_observed_at).0;
+    let age = if entry.state == AgentState::Working {
+        entry_terminal(app, entry)
+            .and_then(crate::terminal::TerminalState::working_since)
+            .and_then(|started_at| {
+                status_report_age_compact_label(Some(started_at), app.view_observed_at)
+            })
+            .unwrap_or(reported_age)
+    } else {
+        reported_age
+    };
     let status = if entry_is_blocked(entry) {
         SidebarCardStatus::Blocked
     } else if entry.state == AgentState::Working {
