@@ -113,6 +113,25 @@ pub(crate) fn space_icon<'a>(
     label: &str,
     overrides: &'a BTreeMap<String, String>,
 ) -> &'a str {
+    resolved_space_icon(repo_binding, repo_root, label, overrides).0
+}
+
+pub(crate) fn space_badge_icon<'a>(
+    repo_binding: Option<&str>,
+    repo_root: Option<&Path>,
+    label: &str,
+    overrides: &'a BTreeMap<String, String>,
+) -> Option<&'a str> {
+    let (icon, is_specific) = resolved_space_icon(repo_binding, repo_root, label, overrides);
+    is_specific.then_some(icon)
+}
+
+fn resolved_space_icon<'a>(
+    repo_binding: Option<&str>,
+    repo_root: Option<&Path>,
+    label: &str,
+    overrides: &'a BTreeMap<String, String>,
+) -> (&'a str, bool) {
     let binding = repo_binding
         .map(str::trim)
         .filter(|value| !value.is_empty());
@@ -127,33 +146,33 @@ pub(crate) fn space_icon<'a>(
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(candidate))
         {
-            return icon;
+            return (icon, true);
         }
     }
 
     match repo_name {
-        Some(name) => builtin_repo_icon(name),
-        None => builtin_label_icon(label).unwrap_or(SHELL),
+        Some(name) => builtin_repo_icon(name).map_or((REPO, false), |icon| (icon, true)),
+        None => builtin_label_icon(label).map_or((SHELL, false), |icon| (icon, true)),
     }
 }
 
-fn builtin_repo_icon(name: &str) -> &'static str {
+fn builtin_repo_icon(name: &str) -> Option<&'static str> {
     if matches_any(name, &["inbox", "agent-inbox"]) {
-        INBOX
+        Some(INBOX)
     } else if name.eq_ignore_ascii_case("scalablev2") {
-        IMAGE_MULTIPLE
+        Some(IMAGE_MULTIPLE)
     } else if name.eq_ignore_ascii_case("herdr") {
-        TMUX
+        Some(TMUX)
     } else if matches_any(name, &["scalable-agent-fleet", "agent-fleet"]) {
-        ROBOT
+        Some(ROBOT)
     } else if name.eq_ignore_ascii_case("agent-harness") {
-        HAMMER_WRENCH
+        Some(HAMMER_WRENCH)
     } else if name.eq_ignore_ascii_case("dotfiles") {
-        CONFIG
+        Some(CONFIG)
     } else if name.eq_ignore_ascii_case("obsidian-vault") {
-        OBSIDIAN
+        Some(OBSIDIAN)
     } else {
-        REPO
+        None
     }
 }
 
@@ -256,6 +275,14 @@ mod tests {
         assert_eq!(
             space_icon(Some("owner/herdr"), None, "Herdr", &built_in_override),
             "♧"
+        );
+        assert_eq!(
+            space_badge_icon(Some("owner/herdr"), None, "Herdr", &built_in_override,),
+            Some("♧")
+        );
+        assert_eq!(
+            space_badge_icon(Some("owner/unknown"), None, "Unknown", &overrides),
+            None
         );
     }
 

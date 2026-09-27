@@ -1312,6 +1312,7 @@ pub(crate) enum AgentPanelIdentity {
 pub(crate) struct ProjectBadge {
     letters: String,
     color_index: usize,
+    icon: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1348,6 +1349,7 @@ pub(crate) struct SidebarThreadCard {
     host: String,
     host_kind: SidebarCardHostKind,
     agent: Option<SidebarCardAgent>,
+    agent_icon: Option<&'static str>,
 }
 
 #[derive(Clone)]
@@ -3023,6 +3025,34 @@ fn sidebar_thread_card(app: &AppState, entry: &AgentPanelEntry) -> SidebarThread
                 .map(|name| name.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| entry.space_label.clone());
+    let workspace = entry
+        .local_target()
+        .and_then(|target| app.workspaces.get(target.ws_idx));
+    let repo_binding = workspace
+        .and_then(|workspace| workspace.repo_binding.as_deref())
+        .or_else(|| context.and_then(|context| context.repo.as_deref()));
+    let repo_root = workspace
+        .and_then(|workspace| {
+            workspace
+                .cached_git_space
+                .as_ref()
+                .map(|space| space.repo_root.as_path())
+        })
+        .or_else(|| {
+            terminal
+                .and_then(|terminal| app.git_root_for_cwd.get(&terminal.cwd))
+                .and_then(Option::as_deref)
+        });
+    let mut badge = project_badge(&repo_label);
+    if app.nerd_font {
+        badge.icon = crate::ui::icons::space_badge_icon(
+            repo_binding,
+            repo_root,
+            &entry.space_label,
+            &app.space_icons,
+        )
+        .map(|icon| pad_right(icon, display_width(&badge.letters)));
+    }
     let reported_age = compact_age(entry, app.view_observed_at).0;
     let age = if entry.state == AgentState::Working {
         entry_earliest_working_since(app, entry)
@@ -3067,14 +3097,15 @@ fn sidebar_thread_card(app: &AppState, entry: &AgentPanelEntry) -> SidebarThread
             crate::platform::HostOs::Other => SidebarCardHostKind::Other,
         }
     };
-    let agent = match entry.agent.or(entry.agent_context) {
+    let detected_agent = entry.agent.or(entry.agent_context);
+    let agent = match detected_agent {
         Some(crate::detect::Agent::Claude) => Some(SidebarCardAgent::Claude),
         Some(crate::detect::Agent::Codex) => Some(SidebarCardAgent::Codex),
         Some(_) => Some(SidebarCardAgent::Other),
         None => None,
     };
     SidebarThreadCard {
-        badge: project_badge(&repo_label),
+        badge,
         title: compact_row_title(entry, true).to_string(),
         status,
         branch,
@@ -3082,6 +3113,11 @@ fn sidebar_thread_card(app: &AppState, entry: &AgentPanelEntry) -> SidebarThread
         host,
         host_kind,
         agent,
+        agent_icon: if app.nerd_font {
+            detected_agent.and_then(crate::ui::icons::agent_icon)
+        } else {
+            None
+        },
     }
 }
 
@@ -3141,6 +3177,7 @@ fn project_badge(label: &str) -> ProjectBadge {
     ProjectBadge {
         letters,
         color_index,
+        icon: None,
     }
 }
 
@@ -3686,7 +3723,7 @@ fn compact_sidebar_rows_inner(
             false,
         );
         let row_width = sidebar_row_render_width(app, &rows, expand_worktrees);
-        mark_ambiguous_remote_titles(&mut rows, row_width);
+        mark_ambiguous_remote_titles(&mut rows, row_width, app.nerd_font);
         return rows;
     }
 
@@ -10887,7 +10924,13 @@ fn render_sections_thread_card(
     let (status_glyph, status_label, status_color) =
         sidebar_card_status(&card.status, app.nerd_font, p);
     let (badge_fg, badge_bg) = project_badge_style(card.badge.color_index, app);
-    let badge_text = format!(" {} ", card.badge.letters);
+    let badge_icon = if app.nerd_font {
+        card.badge.icon.as_deref()
+    } else {
+        None
+    };
+    let badge_inner = badge_icon.unwrap_or(&card.badge.letters);
+    let badge_width = display_width(badge_inner) + 2;
     let status_text = if rect.width < 24 {
         match &card.status {
             SidebarCardStatus::Working(age) => format!("{status_glyph} {age}"),
@@ -10899,28 +10942,30 @@ fn render_sections_thread_card(
         format!("{status_glyph} {status_label}")
     };
     let first_line_width = usize::from(rect.width);
-    let fixed_width = display_width(&badge_text) + 1 + display_width(&status_text) + 1;
+    let fixed_width = badge_width + 1 + display_width(&status_text) + 1;
     let title_width = first_line_width.saturating_sub(fixed_width);
     let title = pad_right(&truncate_end(&card.title, title_width), title_width);
+    let badge_style = Style::default()
+        .fg(badge_fg)
+        .bg(badge_bg)
+        .add_modifier(Modifier::BOLD);
+    let mut first_line = Vec::with_capacity(7);
+    first_line.extend([
+        Span::styled(" ", badge_style),
+        Span::styled(badge_inner, badge_style),
+        Span::styled(" ", badge_style),
+        Span::raw(" "),
+        Span::styled(title, Style::default().fg(p.text)),
+        Span::raw(" "),
+        Span::styled(
+            status_text,
+            Style::default()
+                .fg(status_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                badge_text,
-                Style::default()
-                    .fg(badge_fg)
-                    .bg(badge_bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(title, Style::default().fg(p.text)),
-            Span::raw(" "),
-            Span::styled(
-                status_text,
-                Style::default()
-                    .fg(status_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])),
+        Paragraph::new(Line::from(first_line)),
         Rect::new(rect.x, rect.y, rect.width, 1),
     );
     if rect.height < 2 {
@@ -10929,14 +10974,15 @@ fn render_sections_thread_card(
 
     let branch_icon = if app.nerd_font { "" } else { "b" };
     let host_icon = sidebar_card_host_icon(card.host_kind, app.nerd_font);
-    let agent_icon = card.agent.map(|agent| match (agent, app.nerd_font) {
-        (SidebarCardAgent::Claude, true) => "✳",
-        (SidebarCardAgent::Codex, true) => "◉",
-        (SidebarCardAgent::Other, true) => "◆",
-        (SidebarCardAgent::Claude, false) => "*",
-        (SidebarCardAgent::Codex, false) => "o",
-        (SidebarCardAgent::Other, false) => "?",
-    });
+    let agent_icon = if app.nerd_font {
+        card.agent_icon
+    } else {
+        card.agent.map(|agent| match agent {
+            SidebarCardAgent::Claude => "*",
+            SidebarCardAgent::Codex => "o",
+            SidebarCardAgent::Other => "?",
+        })
+    };
     let mut left_fields = Vec::new();
     if let Some(branch) = card.branch.as_deref() {
         left_fields.push((format!("{branch_icon} {branch}"), p.mauve));
@@ -10946,14 +10992,17 @@ fn render_sections_thread_card(
     }
     // Keep the host before the agent so narrow cards drop the agent first;
     // render in reverse to keep the host at the far right.
-    let mut right_fields = vec![(format!("{host_icon} {}", card.host), p.overlay1)];
+    let mut right_fields = vec![(
+        std::borrow::Cow::Owned(format!("{host_icon} {}", card.host)),
+        p.overlay1,
+    )];
     if let Some(agent_icon) = agent_icon {
         let color = match card.agent {
             Some(SidebarCardAgent::Claude) => p.peach,
             Some(SidebarCardAgent::Codex) => p.green,
             _ => p.overlay0,
         };
-        right_fields.push((agent_icon.to_string(), color));
+        right_fields.push((std::borrow::Cow::Borrowed(agent_icon), color));
     }
     let has_branch = card.branch.is_some();
     let available = usize::from(rect.width).saturating_sub(2);
@@ -11013,7 +11062,7 @@ fn render_sections_thread_card(
         if index > 0 {
             right_spans.push(Span::raw(" "));
         }
-        right_spans.push(Span::styled(text.as_str(), Style::default().fg(*color)));
+        right_spans.push(Span::styled(text.as_ref(), Style::default().fg(*color)));
     }
     let left_width = left_fields
         .iter()
@@ -27387,7 +27436,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             )],
             ..crate::fleet::Snapshot::default()
         };
-        app.remote_agent_panel_entries = remote_agent_panel_entries_at(&snapshot, 1_725_000_000);
+        app.remote_agent_panel_entries =
+            remote_agent_panel_entries_at(&snapshot, 1_725_000_000, false);
         app.sidebar_selected_remote_agent = app
             .remote_agent_panel_entries
             .first()
@@ -28907,6 +28957,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             host: "ub1".into(),
             host_kind: SidebarCardHostKind::Linux,
             agent: Some(SidebarCardAgent::Codex),
+            agent_icon: None,
         };
         let mut terminal = Terminal::new(TestBackend::new(18, 2)).expect("card terminal");
         terminal
@@ -28940,6 +28991,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             host: "ub1".into(),
             host_kind: SidebarCardHostKind::Linux,
             agent: Some(SidebarCardAgent::Codex),
+            agent_icon: None,
         };
         let mut terminal = Terminal::new(TestBackend::new(36, 2)).expect("card terminal");
         terminal
@@ -28972,6 +29024,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             host: "ub2".into(),
             host_kind: SidebarCardHostKind::Linux,
             agent: None,
+            agent_icon: None,
         };
         let mut terminal =
             Terminal::new(TestBackend::new(40, 2)).expect("plain shell card terminal");
@@ -28998,6 +29051,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             host: "ub2".into(),
             host_kind: SidebarCardHostKind::Linux,
             agent: None,
+            agent_icon: None,
         };
         let mut terminal = Terminal::new(TestBackend::new(40, 2)).expect("thread card terminal");
         terminal
@@ -29319,6 +29373,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             host: "ub1".into(),
             host_kind: SidebarCardHostKind::Linux,
             agent: Some(SidebarCardAgent::Codex),
+            agent_icon: None,
         };
         let mut terminal = Terminal::new(TestBackend::new(60, 2)).expect("ASCII card terminal");
         terminal
@@ -29328,6 +29383,61 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("render ASCII card");
         assert!(row_text(terminal.backend().buffer(), 0, 60).is_ascii());
         assert!(row_text(terminal.backend().buffer(), 1, 60).is_ascii());
+    }
+
+    #[test]
+    fn sections_thread_card_uses_shared_claude_and_repo_icons() {
+        let mut app = app_with_agents(&["herdr"]);
+        app.nerd_font = true;
+        app.workspaces[0].repo_binding = Some("herdrdev/herdr".into());
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("agent terminal")
+            .detected_agent = Some(Agent::Claude);
+        app.refresh_local_agent_panel_identities();
+
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .next()
+            .expect("Claude sidebar entry");
+        let card = sidebar_thread_card(&app, &entry);
+        assert_eq!(card.agent_icon, Some("\u{EC82}"));
+        assert_eq!(card.badge.icon.as_deref(), Some("\u{EBC8} "));
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 2)).expect("icon card terminal");
+        terminal
+            .draw(|frame| {
+                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 60, 2), false)
+            })
+            .expect("render icon card");
+        assert!(row_text(terminal.backend().buffer(), 0, 60).contains("\u{EBC8}"));
+        assert!(row_text(terminal.backend().buffer(), 1, 60).contains("\u{EC82}"));
+    }
+
+    #[test]
+    fn sections_thread_card_keeps_letters_for_unknown_repositories() {
+        let mut app = app_with_agents(&["mystery project"]);
+        app.nerd_font = true;
+        app.workspaces[0].repo_binding = Some("owner/no-such-repo".into());
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .next()
+            .expect("sidebar entry");
+        let card = sidebar_thread_card(&app, &entry);
+
+        assert_eq!(card.badge.icon, None);
+        assert_eq!(card.badge.letters, "MP");
+        let mut terminal = Terminal::new(TestBackend::new(60, 2)).expect("unknown repo card");
+        terminal
+            .draw(|frame| {
+                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 60, 2), false)
+            })
+            .expect("render unknown repo card");
+        assert!(row_text(terminal.backend().buffer(), 0, 60).contains("MP"));
     }
 
     #[test]
@@ -29368,7 +29478,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ..crate::fleet::Snapshot::default()
         };
         remote_app.remote_agent_panel_entries =
-            remote_agent_panel_entries_at(&snapshot, 1_725_000_000);
+            remote_agent_panel_entries_at(&snapshot, 1_725_000_000, false);
         let remote_card = sidebar_rows(&remote_app)
             .into_iter()
             .find_map(|row| match row {
@@ -29534,7 +29644,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
         app.sidebar_work_filter.machine_scope = crate::app::state::SidebarMachineScope::AllMachines;
-        app.remote_agent_panel_entries = remote_agent_panel_entries_at(&snapshot, 1_725_000_000);
+        app.remote_agent_panel_entries =
+            remote_agent_panel_entries_at(&snapshot, 1_725_000_000, false);
         app.view_observed_at = std::time::Instant::now();
 
         assert_eq!(
