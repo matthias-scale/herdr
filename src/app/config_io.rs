@@ -99,6 +99,12 @@ impl App {
             key: area.config_key(),
             value,
         });
+        if area == crate::config::SidebarArea::Notes
+            && self.state.sidebar_sections_layout
+            && !self.state.sidebar_areas.is_visible(area)
+        {
+            self.state.set_notepad_focus(false);
+        }
     }
 
     /// Persist one captured keybinding and reload.
@@ -341,6 +347,7 @@ mod tests {
             crate::api::EventHub::default(),
         );
         app.state.hyperspace.enabled = false;
+        app.state.notepad.focused = true;
         let sidebar = ratatui::layout::Rect::new(0, 0, 36, 24);
         assert!(crate::ui::sidebar::sidebar_notepad_rect(&app.state, sidebar).height > 0);
 
@@ -350,6 +357,11 @@ mod tests {
             crate::ui::sidebar::sidebar_notepad_rect(&app.state, sidebar),
             ratatui::layout::Rect::default(),
             "a hidden notes area must reserve no panel rows"
+        );
+        assert!(!app.state.notepad.focused, "hiding Notes releases editor focus");
+        assert!(
+            app.state.notepad_request.is_some(),
+            "releasing focus queues the note save"
         );
         let saved = crate::config::Config::load().config;
         assert!(!saved.ui.sidebar.areas.notes);
