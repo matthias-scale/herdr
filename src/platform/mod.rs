@@ -5,6 +5,34 @@
 
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostOs {
+    Linux,
+    Mac,
+    Windows,
+    Other,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn local_host_os() -> HostOs {
+    linux::local_host_os()
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn local_host_os() -> HostOs {
+    macos::local_host_os()
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn local_host_os() -> HostOs {
+    windows::local_host_os()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+pub(crate) fn local_host_os() -> HostOs {
+    fallback::local_host_os()
+}
+
 #[cfg(all(test, unix))]
 pub(crate) mod ssh_agent;
 

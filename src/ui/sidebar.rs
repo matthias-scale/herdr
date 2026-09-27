@@ -1309,6 +1309,9 @@ enum SidebarCardStatus {
 enum SidebarCardHostKind {
     Linux,
     Mac,
+    Windows,
+    Other,
+    Remote,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2874,10 +2877,15 @@ fn sidebar_thread_card(app: &AppState, entry: &AgentPanelEntry) -> SidebarThread
         .or_else(|| entry.remote_host.clone())
         .unwrap_or_else(|| app.agent_host_name.clone());
     let remote_host = entry.remote_entry.is_some() || entry.remote_host.is_some();
-    let host_kind = if !remote_host && cfg!(target_os = "macos") {
-        SidebarCardHostKind::Mac
+    let host_kind = if remote_host {
+        SidebarCardHostKind::Remote
     } else {
-        SidebarCardHostKind::Linux
+        match crate::platform::local_host_os() {
+            crate::platform::HostOs::Linux => SidebarCardHostKind::Linux,
+            crate::platform::HostOs::Mac => SidebarCardHostKind::Mac,
+            crate::platform::HostOs::Windows => SidebarCardHostKind::Windows,
+            crate::platform::HostOs::Other => SidebarCardHostKind::Other,
+        }
     };
     let agent = match entry.agent.or(entry.agent_context) {
         Some(crate::detect::Agent::Claude) => Some(SidebarCardAgent::Claude),
@@ -10494,6 +10502,21 @@ fn sidebar_card_status(
     }
 }
 
+fn sidebar_card_host_icon(kind: SidebarCardHostKind, nerd_font: bool) -> &'static str {
+    match (kind, nerd_font) {
+        (SidebarCardHostKind::Linux, true) => "",
+        (SidebarCardHostKind::Linux, false) => "L",
+        (SidebarCardHostKind::Mac, true) => "",
+        (SidebarCardHostKind::Mac, false) => "A",
+        (SidebarCardHostKind::Windows, true) => "",
+        (SidebarCardHostKind::Windows, false) => "W",
+        (SidebarCardHostKind::Other, true) => "󰟀",
+        (SidebarCardHostKind::Other, false) => "?",
+        (SidebarCardHostKind::Remote, true) => "󰖟",
+        (SidebarCardHostKind::Remote, false) => "R",
+    }
+}
+
 fn render_sections_thread_card(
     app: &AppState,
     frame: &mut Frame,
@@ -10554,22 +10577,7 @@ fn render_sections_thread_card(
     }
 
     let branch_icon = if app.nerd_font { "" } else { "b" };
-    let host_icon = match card.host_kind {
-        SidebarCardHostKind::Linux => {
-            if app.nerd_font {
-                ""
-            } else {
-                "L"
-            }
-        }
-        SidebarCardHostKind::Mac => {
-            if app.nerd_font {
-                ""
-            } else {
-                "A"
-            }
-        }
-    };
+    let host_icon = sidebar_card_host_icon(card.host_kind, app.nerd_font);
     let agent_icon = card.agent.map(|agent| match (agent, app.nerd_font) {
         (SidebarCardAgent::Claude, true) => "✳",
         (SidebarCardAgent::Codex, true) => "◉",
@@ -27836,6 +27844,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .0
                 .is_ascii());
         }
+        assert_eq!(
+            sidebar_card_host_icon(SidebarCardHostKind::Remote, false),
+            "R"
+        );
+        assert!(sidebar_card_host_icon(SidebarCardHostKind::Remote, true)
+            .chars()
+            .any(|glyph| !glyph.is_ascii()));
         let card = SidebarThreadCard {
             badge: project_badge("herdr"),
             title: "sidebar".into(),
@@ -27854,5 +27869,58 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("render ASCII card");
         assert!(row_text(terminal.backend().buffer(), 0, 60).is_ascii());
         assert!(row_text(terminal.backend().buffer(), 1, 60).is_ascii());
+    }
+
+    #[test]
+    fn local_section_card_host_kind_comes_from_platform_and_remote_is_neutral() {
+        let app = app_with_agents(&["local"]);
+        let local_entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .next()
+            .expect("local sidebar entry");
+        let local_card = sidebar_thread_card(&app, &local_entry);
+        let expected_local_kind = match crate::platform::local_host_os() {
+            crate::platform::HostOs::Linux => SidebarCardHostKind::Linux,
+            crate::platform::HostOs::Mac => SidebarCardHostKind::Mac,
+            crate::platform::HostOs::Windows => SidebarCardHostKind::Windows,
+            crate::platform::HostOs::Other => SidebarCardHostKind::Other,
+        };
+        assert_eq!(local_card.host_kind, expected_local_kind);
+
+        let mut remote_app = app;
+        remote_app.sidebar_sections_layout = true;
+        remote_app.sidebar_work_filter.machine_scope =
+            crate::app::state::SidebarMachineScope::AllMachines;
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot(
+                "remote",
+                false,
+                vec![crate::fleet::FleetRow::test_agent_info_row(
+                    "remote",
+                    remote_agent_info(
+                        "remote-pane",
+                        "remote pane",
+                        crate::api::schema::AgentStatus::Working,
+                        false,
+                        false,
+                    ),
+                )],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+        remote_app.remote_agent_panel_entries =
+            remote_agent_panel_entries_at(&snapshot, 1_725_000_000);
+        let remote_card = sidebar_rows(&remote_app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::RemoteAgent {
+                    sections_card: Some(card),
+                    ..
+                } => Some(card),
+                _ => None,
+            })
+            .expect("remote section card");
+        assert_eq!(remote_card.host_kind, SidebarCardHostKind::Remote);
+        assert_eq!(sidebar_card_host_icon(remote_card.host_kind, false), "R");
     }
 }
