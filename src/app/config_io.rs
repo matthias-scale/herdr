@@ -358,7 +358,10 @@ mod tests {
             ratatui::layout::Rect::default(),
             "a hidden notes area must reserve no panel rows"
         );
-        assert!(!app.state.notepad.focused, "hiding Notes releases editor focus");
+        assert!(
+            !app.state.notepad.focused,
+            "hiding Notes releases editor focus"
+        );
         assert!(
             app.state.notepad_request.is_some(),
             "releasing focus queues the note save"

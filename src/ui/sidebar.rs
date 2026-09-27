@@ -28730,8 +28730,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             host_kind: SidebarCardHostKind::Linux,
             agent: None,
         };
-        let mut terminal =
-            Terminal::new(TestBackend::new(40, 2)).expect("thread card terminal");
+        let mut terminal = Terminal::new(TestBackend::new(40, 2)).expect("thread card terminal");
         terminal
             .draw(|frame| {
                 render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 40, 2), false)
