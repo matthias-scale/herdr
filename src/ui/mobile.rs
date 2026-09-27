@@ -144,27 +144,39 @@ fn mobile_switcher_target_for_row(
             false,
             col,
         ),
-        SidebarRow::Tab { entry, depth } => super::sidebar::selected_row_control_at(
-            app,
-            entry,
-            Rect::new(content.x, content.y, content.width, 1),
-            *depth,
-            true,
-            col,
-        ),
+        SidebarRow::Tab { entry, depth } => {
+            if entry.sections_card.is_some() {
+                None
+            } else {
+                super::sidebar::selected_row_control_at(
+                    app,
+                    entry,
+                    Rect::new(content.x, content.y, content.width, 1),
+                    *depth,
+                    true,
+                    col,
+                )
+            }
+        }
         SidebarRow::RemoteAgent {
             entry,
             depth,
             show_host_identity,
-            ..
-        } => super::sidebar::selected_remote_row_control_at(
-            app,
-            entry,
-            Rect::new(content.x, content.y, content.width, 1),
-            *depth,
-            *show_host_identity,
-            col,
-        ),
+            sections_card,
+        } => {
+            if sections_card.is_some() {
+                None
+            } else {
+                super::sidebar::selected_remote_row_control_at(
+                    app,
+                    entry,
+                    Rect::new(content.x, content.y, content.width, 1),
+                    *depth,
+                    *show_host_identity,
+                    col,
+                )
+            }
+        }
         _ => None,
     };
     if let Some(control) = control {

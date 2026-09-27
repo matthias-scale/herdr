@@ -7979,6 +7979,9 @@ pub(crate) fn compute_sidebar_hover_targets(
                     label: agent_dot_tooltip(entry),
                     action: None,
                 });
+                if entry.sections_card.is_some() {
+                    continue;
+                }
                 let fixed_width =
                     widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
                 let title_width = usize::from(body.width).saturating_sub(fixed_width);
@@ -8021,6 +8024,7 @@ pub(crate) fn compute_sidebar_hover_targets(
             }
             SidebarRow::RemoteAgent {
                 entry,
+                sections_card,
                 depth,
                 show_host_identity,
             } => {
@@ -8052,6 +8056,9 @@ pub(crate) fn compute_sidebar_hover_targets(
                         label: agent_dot_tooltip(entry),
                         action: None,
                     });
+                }
+                if sections_card.is_some() {
+                    continue;
                 }
                 let fixed_width =
                     widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
@@ -26603,6 +26610,68 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 assert_eq!(icon.fg, app.palette.overlay0, "width={width}");
                 assert_ne!(icon.fg, app.palette.green, "width={width}");
             }
+        }
+    }
+
+    #[test]
+    fn section_cards_have_no_local_or_remote_lifecycle_hover_targets() {
+        let mut app = app_with_agents(&["local"]);
+        app.sidebar_sections_layout = true;
+        app.sidebar_work_filter.machine_scope = crate::app::state::SidebarMachineScope::AllMachines;
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot(
+                "remote",
+                false,
+                vec![crate::fleet::FleetRow::test_agent_info_row(
+                    "remote",
+                    remote_agent_info(
+                        "remote-pane",
+                        "remote pane",
+                        crate::api::schema::AgentStatus::Working,
+                        false,
+                        false,
+                    ),
+                )],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+        app.remote_agent_panel_entries = remote_agent_panel_entries_at(&snapshot, 1_725_000_000);
+        app.sidebar_selected_remote_agent = app
+            .remote_agent_panel_entries
+            .first()
+            .map(|entry| entry.agent_ref.clone());
+
+        let area = Rect::new(0, 0, 80, 40);
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. } if entry.sections_card.is_some()
+        )));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::RemoteAgent {
+                sections_card: Some(_),
+                ..
+            }
+        )));
+        let local = compute_tab_card_areas(&app, area)
+            .into_iter()
+            .next()
+            .expect("local section card area");
+        let remote = compute_remote_agent_row_areas(&app, area)
+            .into_iter()
+            .next()
+            .expect("remote section card area");
+        let targets = compute_sidebar_hover_targets(&app, area);
+        for (kind, y) in [("local", local.rect.y), ("remote", remote.rect.y)] {
+            assert!(targets.iter().any(|target| target.rect.y == y));
+            assert!(
+                targets
+                    .iter()
+                    .filter(|target| target.rect.y == y)
+                    .all(|target| target.action.is_none()),
+                "{kind} section card exposed a lifecycle target: {targets:?}"
+            );
         }
     }
 
