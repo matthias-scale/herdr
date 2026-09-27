@@ -9469,6 +9469,8 @@ last_pane = "prefix+tab"
     fn config_reload_hiding_focused_notes_routes_keys_back_to_the_pane() {
         let mut env = crate::config::TestConfigEnvGuard::acquire();
         let path = temp_config_path("notes-focus-reload");
+        std::fs::create_dir_all(path.parent().expect("config parent"))
+            .expect("create config directory");
         std::fs::write(
             &path,
             "[ui.sidebar]\nlayout = \"sections\"\n[ui.sidebar.areas]\nnotes = true\n[notepad]\nenabled = true\n",
