@@ -5027,6 +5027,7 @@ fn entry_earliest_working_since(
         .get(target.tab_idx)?;
     tab.panes
         .values()
+        .filter(|pane| pane.snoozed_until().is_none())
         .filter_map(|pane| {
             let terminal = app.terminals.get(&pane.attached_terminal_id)?;
             (pane.agent_projection(terminal).state == AgentState::Working)
@@ -28428,6 +28429,68 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             entry.sections_card.expect("working card").status,
             SidebarCardStatus::Working("2m".into())
+        );
+    }
+
+    #[test]
+    fn working_card_duration_ignores_snoozed_pane() {
+        let mut workspace = Workspace::test_new("split snoozed working card");
+        let snoozed_working_pane = workspace.tabs[0].root_pane;
+        let working_pane = workspace.test_split(Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(working_pane);
+
+        let mut app = AppState::test_new();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.sidebar_sections_layout = true;
+
+        let observed_at = std::time::Instant::now();
+        let snoozed_working_since = observed_at - std::time::Duration::from_secs(185);
+        let working_since = observed_at - std::time::Duration::from_secs(65);
+        for (pane_id, working_since) in [
+            (snoozed_working_pane, snoozed_working_since),
+            (working_pane, working_since),
+        ] {
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals
+                .get_mut(&terminal_id)
+                .expect("working pane terminal")
+                .set_detected_state_with_screen_signals_at(
+                    Some(Agent::Codex),
+                    AgentState::Working,
+                    false,
+                    false,
+                    true,
+                    false,
+                    false,
+                    working_since,
+                );
+        }
+        assert!(app.snooze_pane_at(0, snoozed_working_pane, u64::MAX));
+        assert!(app.pane_is_snoozed(0, snoozed_working_pane));
+        app.view_observed_at = observed_at;
+        app.refresh_local_agent_panel_identities();
+        app.reconcile_sidebar_presentation();
+
+        let entry = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. }
+                    if entry
+                        .local_target()
+                        .is_some_and(|target| target.pane_id == working_pane) =>
+                {
+                    Some(entry)
+                }
+                _ => None,
+            })
+            .expect("unsnoozed split tab card");
+        assert_eq!(
+            entry.sections_card.expect("working card").status,
+            SidebarCardStatus::Working("1m".into())
         );
     }
 
