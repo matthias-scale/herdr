@@ -1231,9 +1231,10 @@ pub(super) fn tab_row_layout(
     prefix_width: usize,
     palette: &Palette,
     indicator_style: StatusIndicatorStyle,
+    nerd_font: bool,
 ) -> TabRowLayout {
     let _ = (palette, indicator_style);
-    compact_row_layout(entry, now, width, prefix_width, true, false)
+    compact_row_layout(entry, now, width, prefix_width, true, nerd_font)
 }
 
 pub(super) fn mobile_tab_row_layout(
@@ -1905,16 +1906,18 @@ fn collect_agent_panel_entries_with_runtimes(
 /// entries through `Arc` and never re-read or re-materialize fleet evidence.
 pub(crate) fn remote_agent_panel_entries(
     snapshot: &crate::fleet::Snapshot,
+    nerd_font: bool,
 ) -> Vec<std::sync::Arc<RemoteAgentPanelEntry>> {
     let now_unix_s = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
-    remote_agent_panel_entries_at(snapshot, now_unix_s)
+    remote_agent_panel_entries_at(snapshot, now_unix_s, nerd_font)
 }
 
 pub(crate) fn remote_agent_panel_entries_at(
     snapshot: &crate::fleet::Snapshot,
     now_unix_s: u64,
+    nerd_font: bool,
 ) -> Vec<std::sync::Arc<RemoteAgentPanelEntry>> {
     let narrow_host_tokens = narrow_remote_host_tokens(snapshot);
     let mut entries = snapshot
@@ -2048,7 +2051,7 @@ pub(crate) fn remote_agent_panel_entries_at(
                     lifecycle.settled,
                     lifecycle.snoozed_until,
                     host.state == crate::fleet::HostState::Reachable,
-                    app.nerd_font,
+                    nerd_font,
                 ),
             ))
         })
@@ -10178,6 +10181,7 @@ pub(crate) fn visible_tab_activity_instants_from(
                 narrow_prefix.unwrap_or_else(|| usize::from(depth) * 3 + 1),
                 &app.palette,
                 app.status_indicators,
+                app.nerd_font,
             );
             layout.activity_age.and(layout.activity_instant)
         })
@@ -11689,7 +11693,7 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
         let mut app = app_with_agents(&["local"]);
-        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
         expand_fleet(&mut app);
         app
     }
@@ -11756,7 +11760,8 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
         let mut app = AppState::test_new();
-        app.remote_agent_panel_entries = remote_agent_panel_entries_at(&snapshot, 1_725_000_899);
+        app.remote_agent_panel_entries =
+            remote_agent_panel_entries_at(&snapshot, 1_725_000_899, false);
         app.view_observed_unix_s = 1_725_000_899;
 
         let rows = sidebar_rows(&app);
@@ -11933,7 +11938,7 @@ pub(crate) mod tests {
             )],
             ..crate::fleet::Snapshot::default()
         };
-        let remote_entries = remote_agent_panel_entries(&snapshot);
+        let remote_entries = remote_agent_panel_entries(&snapshot, false);
 
         let mut empty = AppState::test_new();
         empty.remote_agent_panel_entries = remote_entries.clone();
@@ -11990,7 +11995,7 @@ pub(crate) mod tests {
             )],
             ..crate::fleet::Snapshot::default()
         };
-        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
         expand_fleet(&mut app);
 
         let (remote, show_host_identity) = sidebar_rows(&app)
@@ -12032,7 +12037,7 @@ pub(crate) mod tests {
             )],
             ..crate::fleet::Snapshot::default()
         };
-        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
         expand_fleet(&mut app);
 
         let rows = sidebar_rows(&app);
@@ -12086,7 +12091,8 @@ pub(crate) mod tests {
             )],
             ..crate::fleet::Snapshot::default()
         };
-        app.remote_agent_panel_entries = remote_agent_panel_entries_at(&snapshot, 1_725_000_899);
+        app.remote_agent_panel_entries =
+            remote_agent_panel_entries_at(&snapshot, 1_725_000_899, false);
         app.view_observed_unix_s = 1_725_000_899;
         expand_fleet(&mut app);
 
@@ -12271,7 +12277,7 @@ pub(crate) mod tests {
             )],
             ..crate::fleet::Snapshot::default()
         };
-        let entries = remote_agent_panel_entries(&snapshot);
+        let entries = remote_agent_panel_entries(&snapshot, false);
         let app = AppState::test_new();
         assert_eq!(
             snapshot.hosts[0].entries[0].title.as_deref(),
@@ -12396,7 +12402,7 @@ pub(crate) mod tests {
             ],
             ..crate::fleet::Snapshot::default()
         };
-        let entries = remote_agent_panel_entries(&snapshot);
+        let entries = remote_agent_panel_entries(&snapshot, false);
         let app = AppState::test_new();
         for entry in &entries {
             assert_eq!(display_width(&entry.narrow_host_suffix), 6);
@@ -12462,7 +12468,7 @@ pub(crate) mod tests {
         let mut app = AppState::test_new();
         app.sidebar_width = 18;
         app.view.sidebar_rect = Rect::new(0, 0, 18, 20);
-        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
         expand_fleet(&mut app);
 
         let remote_rows = sidebar_rows(&app)
@@ -12524,7 +12530,7 @@ pub(crate) mod tests {
         let mut app = AppState::test_new();
         app.sidebar_width = 26;
         app.view.sidebar_rect = Rect::new(0, 0, 26, 8);
-        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
         expand_fleet(&mut app);
 
         let rows = sidebar_rows(&app);
@@ -12581,7 +12587,7 @@ pub(crate) mod tests {
         app.view.layout = crate::app::state::ViewLayout::Mobile;
         app.view.mobile_header_rect = Rect::new(0, 0, 20, 2);
         app.view.terminal_area = Rect::new(0, 2, 20, 16);
-        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
         expand_fleet(&mut app);
 
         let collision_rows = mobile_sidebar_rows(&app)
@@ -12663,7 +12669,7 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
 
-        let entries = remote_agent_panel_entries(&snapshot);
+        let entries = remote_agent_panel_entries(&snapshot, false);
         let cloned_entry = entries[0].entry.clone();
         assert!(std::sync::Arc::ptr_eq(
             &entries[0].entry.data,
@@ -12766,7 +12772,7 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
         let mut app = AppState::test_new();
-        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
         expand_fleet(&mut app);
         take_remote_agent_panel_data_copies();
 
@@ -12799,14 +12805,14 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
 
-        let future = remote_agent_panel_entries_at(&snapshot, 199);
+        let future = remote_agent_panel_entries_at(&snapshot, 199, false);
         assert_eq!(future[0].state, AgentState::Unknown);
         assert_eq!(future[0].attention_tier, Some(AttentionTier::None));
         assert!(!future[0].open_blockers);
         assert!(!future[0].usage_limited);
         assert_eq!(future[0].snoozed_until, Some(200));
 
-        let expired = remote_agent_panel_entries_at(&snapshot, 200);
+        let expired = remote_agent_panel_entries_at(&snapshot, 200, false);
         assert_eq!(expired[0].snoozed_until, None);
         let mut app = AppState::test_new();
         app.remote_agent_panel_entries = expired;
@@ -12854,7 +12860,7 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
 
-        let entries = remote_agent_panel_entries(&snapshot);
+        let entries = remote_agent_panel_entries(&snapshot, false);
         let entry = &entries[0].entry;
         assert_eq!(entry.attention_tier, Some(AttentionTier::Blocked));
         assert!(entry_needs_human_attention(entry));
@@ -12873,7 +12879,7 @@ pub(crate) mod tests {
             )],
             ..crate::fleet::Snapshot::default()
         };
-        let settled_entries = remote_agent_panel_entries(&settled_snapshot);
+        let settled_entries = remote_agent_panel_entries(&settled_snapshot, false);
         let settled_entry = &settled_entries[0].entry;
         assert_eq!(settled_entry.attention_tier, Some(AttentionTier::None));
         assert!(!entry_needs_human_attention(settled_entry));
@@ -12901,11 +12907,11 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
 
-        let waiting = remote_agent_panel_entries(&snapshot_for(info.clone()));
+        let waiting = remote_agent_panel_entries(&snapshot_for(info.clone()), false);
         assert!(waiting[0].entry.waiting_on_agents);
 
         info.settled_at = Some(1_725_000_023);
-        let settled = remote_agent_panel_entries(&snapshot_for(info));
+        let settled = remote_agent_panel_entries(&snapshot_for(info), false);
         assert!(!settled[0].entry.waiting_on_agents);
     }
 
@@ -12920,7 +12926,7 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
 
-        let entries = remote_agent_panel_entries(&snapshot);
+        let entries = remote_agent_panel_entries(&snapshot, false);
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].agent_ref.host, "laptop");
@@ -12940,7 +12946,7 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
 
-        let entries = remote_agent_panel_entries(&snapshot);
+        let entries = remote_agent_panel_entries(&snapshot, false);
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].agent_ref.host, "localhost");
@@ -12957,7 +12963,7 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
         let mut app = app_with_agents(&["local"]);
-        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
         expand_fleet(&mut app);
         app.sidebar_work_filter.query = "WORKBOX reviewagent".into();
 
@@ -13874,6 +13880,7 @@ pub(crate) mod tests {
                 3,
                 &palette,
                 StatusIndicatorStyle::default(),
+                false,
             );
             cases.push((
                 layout.dot,
@@ -14597,7 +14604,7 @@ pub(crate) mod tests {
                 .collect(),
             ..crate::fleet::Snapshot::default()
         };
-        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
         expand_fleet(&mut app);
         let rows = sidebar_rows(&app);
         let remote = rows
@@ -14662,7 +14669,7 @@ pub(crate) mod tests {
                 .collect(),
             ..crate::fleet::Snapshot::default()
         };
-        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
         expand_fleet(&mut app);
         let area = Rect::new(0, 0, 30, 20);
         app.view.sidebar_rect = area;
@@ -14717,7 +14724,7 @@ pub(crate) mod tests {
                 .collect(),
             ..crate::fleet::Snapshot::default()
         };
-        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
         expand_fleet(&mut app);
         let area = Rect::new(0, 0, 30, 20);
         app.view.sidebar_rect = area;
@@ -14763,7 +14770,7 @@ pub(crate) mod tests {
                     .collect(),
                 ..crate::fleet::Snapshot::default()
             };
-            app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+            app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
             expand_fleet(&mut app);
             let width = 30;
             let area = Rect::new(0, 0, width, 20);
@@ -14799,7 +14806,7 @@ pub(crate) mod tests {
             )],
             ..crate::fleet::Snapshot::default()
         };
-        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
         expand_fleet(&mut app);
 
         take_remote_sidebar_row_visits();
@@ -15440,7 +15447,8 @@ pub(crate) mod tests {
                 60,
                 4,
                 &app.palette,
-                app.status_indicators
+                app.status_indicators,
+                false
             )
             .dot,
             "●"
@@ -16171,6 +16179,7 @@ pub(crate) mod tests {
             4,
             &app.palette,
             app.status_indicators,
+            false,
         );
 
         assert_eq!(display_width(&linked_layout.title), 9);
@@ -16300,6 +16309,7 @@ pub(crate) mod tests {
             4,
             &app.palette,
             app.status_indicators,
+            false,
         );
         assert_eq!(layout.dot, "●");
         assert_eq!(
@@ -16551,6 +16561,7 @@ pub(crate) mod tests {
             4,
             &app.palette,
             app.status_indicators,
+            false,
         );
         assert_eq!(layout.dot, "●");
         let mobile_layout = mobile_tab_row_layout(
@@ -16576,6 +16587,7 @@ pub(crate) mod tests {
             4,
             &app.palette,
             app.status_indicators,
+            false,
         );
         assert_eq!(layout.dot, "●");
 
@@ -16588,6 +16600,7 @@ pub(crate) mod tests {
             4,
             &app.palette,
             app.status_indicators,
+            false,
         );
         assert_eq!(layout.dot, "○");
         let mobile_layout = mobile_tab_row_layout(
@@ -16622,6 +16635,7 @@ pub(crate) mod tests {
             4,
             &app.palette,
             app.status_indicators,
+            false,
         );
         assert_eq!(layout.dot, "○");
         assert_eq!(
@@ -16638,6 +16652,7 @@ pub(crate) mod tests {
             4,
             &app.palette,
             app.status_indicators,
+            false,
         );
         assert_eq!(layout.dot, "○");
 
@@ -16651,6 +16666,7 @@ pub(crate) mod tests {
             4,
             &app.palette,
             app.status_indicators,
+            false,
         );
         assert_eq!(layout.dot, "●");
         assert_eq!(
@@ -17913,6 +17929,7 @@ row_gap = 1
             1,
             &app.palette,
             app.status_indicators,
+            false,
         );
 
         assert_eq!(layout.provider, "pi");
@@ -17947,6 +17964,7 @@ row_gap = 1
             1,
             &app.palette,
             app.status_indicators,
+            false,
         );
 
         assert_eq!(layout.provider, "pi");
@@ -18014,6 +18032,7 @@ row_gap = 1
             1,
             &app.palette,
             app.status_indicators,
+            false,
         );
         assert_eq!(layout.provider, "pi");
         assert_eq!(layout.dot, "●");
@@ -19819,7 +19838,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ..crate::fleet::Snapshot::default()
         };
         let mut app = app_with_agents(&["local"]);
-        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
 
         let rows = sidebar_rows(&app);
         assert!(
@@ -23496,7 +23515,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 80,
                 1,
                 &app.palette,
-                app.status_indicators
+                app.status_indicators,
+                false
             )
             .activity_age,
             tab_row_layout(
@@ -23505,7 +23525,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 80,
                 1,
                 &app.palette,
-                app.status_indicators
+                app.status_indicators,
+                false
             )
             .activity_age
         );
@@ -24271,6 +24292,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             2,
             &app.palette,
             app.status_indicators,
+            false,
         );
         assert_eq!(layout.title, "Codex");
         assert_eq!(layout.dot, "●");
@@ -24293,6 +24315,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             2,
             &app.palette,
             app.status_indicators,
+            false,
         );
         assert_eq!(layout.title, "manual pane");
         assert_eq!(layout.dot, "●");
@@ -25203,7 +25226,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ..crate::fleet::Snapshot::default()
         };
         let mut app = AppState::test_new();
-        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot);
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
         expand_fleet(&mut app);
         app.sidebar_work_filter.query = "label:not-on-remote".into();
 
@@ -26934,7 +26957,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             ..crate::fleet::Snapshot::default()
         };
         let mut app = AppState::test_new();
-        app.remote_agent_panel_entries = remote_agent_panel_entries_at(&snapshot, 2);
+        app.remote_agent_panel_entries = remote_agent_panel_entries_at(&snapshot, 2, false);
         app.fleet_snapshot = snapshot;
         let entry = app.remote_agent_panel_entries[0].clone();
         app.sidebar_selected_remote_agent = Some(entry.agent_ref.clone());

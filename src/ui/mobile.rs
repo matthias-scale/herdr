@@ -521,7 +521,12 @@ fn render_header_status(
         crate::terminal::state::AttentionTier::Attention => dot_style.fg(p.peach),
         crate::terminal::state::AttentionTier::None => dot_style,
     };
-    let tab_label = mobile_tab_status(ws, &app.terminals, area.width.saturating_sub(6) as usize);
+    let tab_label = mobile_tab_status(
+        ws,
+        &app.terminals,
+        area.width.saturating_sub(6) as usize,
+        app.nerd_font,
+    );
     let row1 = Rect::new(area.x, area.y, area.width, 1);
     let tab_w = display_width_u16(&tab_label)
         .saturating_add(1)
@@ -568,6 +573,7 @@ fn mobile_tab_status(
         crate::terminal::TerminalState,
     >,
     max_width: usize,
+    nerd_font: bool,
 ) -> String {
     let prefix = "tab ";
     let suffix = if ws.tabs.len() > 1 {
@@ -581,11 +587,7 @@ fn mobile_tab_status(
     let tab_label = ws
         .tab_display_projection(terminals, ws.active_tab)
         .map(|projection| {
-            super::tabs::fit_tab_display_projection_with_icons(
-                projection,
-                label_width,
-                app.nerd_font,
-            )
+            super::tabs::fit_tab_display_projection_with_icons(projection, label_width, nerd_font)
         })
         .unwrap_or_else(|| truncate_end(&(ws.active_tab + 1).to_string(), label_width));
     truncate_end(&format!("{prefix}{tab_label}{suffix}"), max_width)
@@ -2725,7 +2727,7 @@ mod tests {
         workspace.active_tab = 1;
 
         assert_eq!(
-            mobile_tab_status(&workspace, &Default::default(), 40),
+            mobile_tab_status(&workspace, &Default::default(), 40, false),
             "tab 2 · 2/2"
         );
     }
@@ -2748,11 +2750,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            mobile_tab_status(&app.workspaces[0], &app.terminals, 80),
+            mobile_tab_status(&app.workspaces[0], &app.terminals, 80, false),
             "tab SCA-42 · repair login regression"
         );
         assert_eq!(
-            mobile_tab_status(&app.workspaces[0], &app.terminals, 10),
+            mobile_tab_status(&app.workspaces[0], &app.terminals, 10, false),
             "tab SCA-42"
         );
     }

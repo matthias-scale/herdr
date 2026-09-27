@@ -2957,8 +2957,12 @@ impl App {
             self.state.files_icons = config.files.icons;
         }
         if !invalid_section("ui") {
+            let nerd_font_changed = self.state.nerd_font != config.ui.nerd_font;
             self.state.nerd_font = config.ui.nerd_font;
             self.state.space_icons = config.ui.icons.spaces.clone();
+            if nerd_font_changed {
+                self.refresh_remote_agent_panel_entries();
+            }
         }
 
         if !invalid_section("usage") {
