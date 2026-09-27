@@ -1221,13 +1221,14 @@ mod tests {
 
         assert!(app.tick_auto_nudges(now));
         assert!(drain(&mut rx).contains("Re-verify"));
+        assert!(app.tick_auto_nudges(now + STALL_NUDGE_SUBMIT_DELAY));
+        assert_eq!(drain(&mut rx), "\r");
         app.state
             .terminals
             .get_mut(&terminal_id)
             .expect("terminal")
             .supervisor_stale = false;
         app.tick_auto_nudges(now + STALL_NUDGE_SUBMIT_DELAY);
-        assert_eq!(drain(&mut rx), "\r");
 
         app.tick_auto_nudges(now + recovery + Duration::from_secs(1));
         assert!(!app.stall_nudge_episodes.contains_key(&terminal_id));
