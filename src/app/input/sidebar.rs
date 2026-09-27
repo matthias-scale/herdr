@@ -1645,13 +1645,25 @@ impl super::super::App {
         agent_ref: &crate::api::schema::AgentRef,
         message: String,
     ) {
+        self.show_pane_lifecycle_error(format!("{} pane action failed", agent_ref.host), message);
+    }
+
+    fn show_pane_lifecycle_error(&mut self, title: String, message: String) {
         self.state.toast = Some(crate::app::state::ToastNotification {
             kind: crate::app::state::ToastKind::NeedsAttention,
-            title: format!("{} pane action failed", agent_ref.host),
+            title,
             context: message,
             position: None,
             target: None,
         });
+    }
+
+    fn show_local_pane_lifecycle_error(&mut self, action: &str, response: &str) -> bool {
+        let Ok(error) = serde_json::from_str::<crate::api::schema::ErrorResponse>(response) else {
+            return false;
+        };
+        self.show_pane_lifecycle_error(format!("Pane {action} failed"), error.error.message);
+        true
     }
 
     pub(crate) fn remote_pane_lifecycle_refused(
@@ -2451,16 +2463,28 @@ impl super::super::App {
                 return;
             };
             for pane_id in pane_ids {
-                if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
-                    self.runtime_pane_settle(source, public_pane_id);
+                let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) else {
+                    continue;
+                };
+                if self.state.pane_is_snoozed(ws_idx, pane_id) {
+                    let response = self.runtime_pane_unsnooze(
+                        "tui.pane.unsnooze-before-settle",
+                        public_pane_id.clone(),
+                    );
+                    if self.show_local_pane_lifecycle_error("unsnooze", &response) {
+                        continue;
+                    }
                 }
+                let response = self.runtime_pane_settle(source, public_pane_id);
+                self.show_local_pane_lifecycle_error("settle", &response);
             }
             return;
         }
 
         let target = crate::app::state::SidebarPaneLifecycleTarget::Local(target);
         if let Some(public_pane_id) = self.sidebar_pane_lifecycle_public_id(&target) {
-            self.runtime_pane_settle(source, public_pane_id);
+            let response = self.runtime_pane_settle(source, public_pane_id);
+            self.show_local_pane_lifecycle_error("settle", &response);
         }
     }
 
@@ -3039,6 +3063,73 @@ mod tests {
     }
 
     #[test]
+    fn sections_settle_tab_unsnoozes_and_settles_snoozed_sibling() {
+        let mut sidebar = sidebar_order_app(false);
+        sidebar.state.active = Some(0);
+        let (root_pane, sibling_pane) = {
+            let workspace = &mut sidebar.state.workspaces[0];
+            let root_pane = workspace.tabs[0].root_pane;
+            let sibling_pane = workspace.test_split(Direction::Horizontal);
+            workspace.tabs[0].layout.focus_pane(root_pane);
+            (root_pane, sibling_pane)
+        };
+        sidebar.state.ensure_test_terminals();
+        sidebar.state.sidebar_sections_layout = true;
+        assert!(sidebar.state.snooze_pane_at(0, sibling_pane, u64::MAX));
+        sidebar.state.sidebar_focused = true;
+
+        assert!(sidebar.handle_sidebar_session_action_key(KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::empty(),
+        )));
+
+        for pane_id in [root_pane, sibling_pane] {
+            assert!(sidebar.state.pane_is_settled(0, pane_id));
+            assert!(!sidebar.state.pane_is_snoozed(0, pane_id));
+        }
+
+        let mut context_menu = sidebar_order_app(false);
+        let (workspace_id, tab_id, root_pane, sibling_pane) = {
+            let workspace = &mut context_menu.state.workspaces[0];
+            let root_pane = workspace.tabs[0].root_pane;
+            let sibling_pane = workspace.test_split(Direction::Horizontal);
+            workspace.tabs[0].layout.focus_pane(root_pane);
+            (
+                workspace.id.clone(),
+                workspace.tabs[0].id.clone(),
+                root_pane,
+                sibling_pane,
+            )
+        };
+        context_menu.state.ensure_test_terminals();
+        context_menu.state.sidebar_sections_layout = true;
+        assert!(context_menu.state.snooze_pane_at(0, sibling_pane, u64::MAX));
+        let menu = crate::app::state::ContextMenuState {
+            kind: crate::app::state::ContextMenuKind::Tab {
+                workspace_id,
+                tab_id,
+                ws_idx: 0,
+                tab_idx: 0,
+                starred: false,
+                has_subgroup: false,
+                settle_pane_id: Some(root_pane),
+                snooze_target: Some(root_pane),
+            },
+            x: 0,
+            y: 0,
+            selected: crate::app::state::ContextMenuAction::Settle,
+        };
+
+        context_menu
+            .apply_context_menu_action_via_api(menu, crate::app::state::ContextMenuAction::Settle);
+
+        for pane_id in [root_pane, sibling_pane] {
+            assert!(context_menu.state.pane_is_settled(0, pane_id));
+            assert!(!context_menu.state.pane_is_snoozed(0, pane_id));
+        }
+    }
+
+    #[test]
     fn sidebar_card_row_second_line_selects_the_tab() {
         let mut app = sidebar_order_app(false);
         app.state.sidebar_sections_layout = true;
@@ -3229,6 +3320,7 @@ mod tests {
     #[test]
     fn keyboard_s_keeps_the_local_pane_api_refusal_when_already_snoozed() {
         let mut app = sidebar_order_app(false);
+        assert!(!app.state.sidebar_sections_layout);
         let pane_id = app.state.workspaces[0]
             .focused_pane_id()
             .expect("focused pane");
