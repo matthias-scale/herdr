@@ -29743,6 +29743,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 collapsed: false,
             },
         ];
+        set_sections_group_collapsed(&mut app, SNOOZED_SECTION_TITLE, false);
         set_sections_group_collapsed(&mut app, SETTLED_SECTION_TITLE, false);
 
         let rows = sidebar_rows(&app);
