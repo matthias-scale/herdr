@@ -3452,9 +3452,10 @@ fn compact_sidebar_rows_inner(
     } else {
         active_entries
     };
-    let (recently_done, visible_entries): (Vec<_>, Vec<_>) = visible_entries
-        .into_iter()
-        .partition(|entry| entry_is_past_done_hide_threshold(app, entry));
+    let (recently_done, visible_entries): (Vec<_>, Vec<_>) =
+        visible_entries.into_iter().partition(|entry| {
+            (!sections_layout || !entry.pinned) && entry_is_past_done_hide_threshold(app, entry)
+        });
     settled_entries.extend(recently_done);
     settled_entries = ordered_tab_entries(app, &settled_entries);
 
@@ -20085,6 +20086,66 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(expanded
             .iter()
             .any(|row| matches!(row, SidebarRow::Tab { .. })));
+    }
+
+    #[test]
+    fn sections_pinned_done_tab_stays_pinned_after_done_hide_threshold() {
+        let done_since = std::time::Instant::now();
+        let mut app = priority_app_with_states(&[AgentState::Idle]);
+        app.sidebar_sections_layout = true;
+        app.workspaces[0].tabs[0].pinned = true;
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let pane = app.workspaces[0].tabs[0].panes.get_mut(&pane_id).unwrap();
+        pane.seen = false;
+        pane.done_since = Some(done_since);
+        app.hide_done_after = std::time::Duration::from_secs(30 * 60);
+        app.view_observed_at =
+            done_since + app.hide_done_after + std::time::Duration::from_nanos(1);
+        set_sections_group_collapsed(&mut app, PINNED_SECTION_TITLE, false);
+        set_sections_group_collapsed(&mut app, SETTLED_SECTION_TITLE, false);
+
+        let pinned_rows = sidebar_rows(&app);
+        let pinned_header = pinned_rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::SectionHeader { title, .. } if *title == PINNED_SECTION_TITLE))
+            .expect("Pinned shelf");
+        let active_header = pinned_rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::SectionHeader { title, .. } if *title == ACTIVE_SECTION_TITLE))
+            .expect("Active shelf");
+        let pinned_tab = pinned_rows
+            .iter()
+            .position(|row| {
+                matches!(row, SidebarRow::Tab { entry, .. }
+                if entry.local_target().is_some_and(|target| target.pane_id == pane_id))
+            })
+            .expect("pinned tab row");
+        assert!(pinned_header < pinned_tab && pinned_tab < active_header);
+        assert!(pinned_rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader { title, count: 0, .. }
+                if *title == SETTLED_SECTION_TITLE
+        )));
+
+        app.workspaces[0].tabs[0].pinned = false;
+        let unpinned_rows = sidebar_rows(&app);
+        let settled_header = unpinned_rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::SectionHeader { title, .. } if *title == SETTLED_SECTION_TITLE))
+            .expect("Settled shelf");
+        let settled_tab = unpinned_rows
+            .iter()
+            .position(|row| {
+                matches!(row, SidebarRow::Tab { entry, .. }
+                if entry.local_target().is_some_and(|target| target.pane_id == pane_id))
+            })
+            .expect("settled tab row");
+        assert!(settled_header < settled_tab);
+        assert!(unpinned_rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader { title, count: 1, .. }
+                if *title == SETTLED_SECTION_TITLE
+        )));
     }
 
     #[test]
