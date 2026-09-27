@@ -1789,30 +1789,63 @@ fn render_sidebar_hosts(app: &AppState, frame: &mut Frame, area: Rect) {
     let help_width = u16::try_from(display_width(&help))
         .unwrap_or(hosts.width)
         .min(hosts.width);
-    let help_rect = Rect::new(
-        hosts.right().saturating_sub(help_width),
-        hosts.y,
-        help_width,
-        1,
-    );
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            truncate_end(&help, usize::from(help_rect.width)),
-            Style::default().fg(app.palette.overlay0),
-        ))
-        .alignment(Alignment::Right),
-        help_rect,
-    );
+    let local_name_width = app
+        .machines
+        .iter()
+        .find(|machine| machine.is_local())
+        .map(|machine| display_width(&machine.name));
+    let show_help = local_name_width.is_none_or(|width| {
+        u16::try_from(width)
+            .unwrap_or(u16::MAX)
+            .saturating_add(help_width)
+            .saturating_add(1)
+            <= hosts.width
+    });
+    if show_help {
+        let help_rect = Rect::new(
+            hosts.right().saturating_sub(help_width),
+            hosts.y,
+            help_width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                truncate_end(&help, usize::from(help_rect.width)),
+                Style::default().fg(app.palette.overlay0),
+            ))
+            .alignment(Alignment::Right),
+            help_rect,
+        );
+    }
 
-    let host_width = hosts.width.saturating_sub(help_width.saturating_add(1));
+    let host_width = if show_help {
+        hosts.width.saturating_sub(help_width.saturating_add(1))
+    } else {
+        hosts.width
+    };
     let mut used = 0u16;
     let mut spans = Vec::new();
-    for (index, machine) in app.machines.iter().enumerate() {
+    let machines = app
+        .machines
+        .iter()
+        .filter(|machine| machine.is_local())
+        .chain(app.machines.iter().filter(|machine| !machine.is_local()));
+    for (index, machine) in machines.enumerate() {
         let separator = if index == 0 { "" } else { " " };
         let separator_width = u16::try_from(display_width(separator)).unwrap_or(0);
         let name_width = u16::try_from(display_width(&machine.name)).unwrap_or(u16::MAX);
         let remaining = host_width.saturating_sub(used);
-        if separator_width.saturating_add(name_width) > remaining {
+        let name_room = remaining.saturating_sub(separator_width);
+        if name_width > name_room {
+            if machine.is_local() && used == 0 {
+                let name = truncate_end(&machine.name, usize::from(name_room));
+                spans.push(Span::styled(
+                    name,
+                    Style::default()
+                        .fg(app.palette.accent)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
             break;
         }
         if !separator.is_empty() {
@@ -28832,6 +28865,33 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(buffer[(host_row.x, host_row.y)]
             .modifier
             .contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn narrow_sections_host_strip_keeps_the_truncated_local_name_before_help() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.sidebar_areas.hosts = true;
+        app.machines = vec![crate::app::machines::Machine {
+            name: "local-machine-name".into(),
+            target: None,
+            socket: None,
+        }];
+        let area = Rect::new(0, 0, 18, 12);
+        let hosts = sidebar_hosts_rect(&app, area);
+        assert!(hosts.width > 0);
+
+        let mut terminal = Terminal::new(TestBackend::new(18, 12)).expect("narrow host strip");
+        terminal
+            .draw(|frame| render_sidebar_hosts(&app, frame, area))
+            .expect("render narrow host strip");
+        let line = row_text(terminal.backend().buffer(), hosts.y, 18);
+        assert!(line.contains("local"), "{line:?}");
+        assert!(line.trim_end().ends_with('…'), "{line:?}");
+        assert!(
+            !line.contains(&sidebar_prefixed_key_label(&app, &app.keybinds.help)),
+            "the help hint yields to the local host: {line:?}"
+        );
     }
 
     #[test]
