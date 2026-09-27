@@ -496,6 +496,19 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # their positions but removes the theme-aware half-block night sky.
 # header = "sky"
 
+# Optional sections-layout areas. All are shown by default; the current layout
+# ignores these settings.
+# [ui.sidebar.areas]
+# sky_header = true
+# view_bar = true
+# unassigned = true
+# runs = true
+# aloops = true
+# symphony = true
+# notes = true
+# pomodoro = true
+# hosts = true
+
 # Expanded agent rows. Built-ins are state_icon, state_text, workspace, tab, pane, agent,
 # terminal_title, and terminal_title_stripped.
 # Custom values reported through pane metadata use a $name token.

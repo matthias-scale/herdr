@@ -356,7 +356,21 @@ Choose the sections layout with a separate layout key. The default `current` val
 [ui.sidebar]
 layout = "sections"
 header = "sky"
+
+[ui.sidebar.areas]
+sky_header = true
+view_bar = true
+unassigned = true
+runs = true
+aloops = true
+symphony = true
+notes = true
+pomodoro = true
+hosts = true
 ```
+
+Each `areas` key hides or shows that row group in the sections layout. Every
+area is shown by default. The current layout ignores this table.
 
 Pin or unpin a tab from the CLI with `herdr tab pin <tab_id>` and `herdr tab unpin <tab_id>`. The sections layout keeps settled tabs on a collapsed shelf until you expand it.
 
