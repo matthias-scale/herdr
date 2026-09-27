@@ -4626,12 +4626,10 @@ fn append_ordered_sidebar_blocks(
     remote_entries: &[AgentPanelEntry],
     expand_worktrees: bool,
     pods: &PodProjection,
-    include_tab_blocks: bool,
+    include_deferred: bool,
 ) {
     for block in SIDEBAR_BLOCK_ORDER {
-        if matches!(block, SidebarBlock::Unassigned | SidebarBlock::Deferred)
-            && !include_tab_blocks
-        {
+        if matches!(block, SidebarBlock::Deferred) && !include_deferred {
             continue;
         }
         let mut block_rows = Vec::new();
@@ -27815,21 +27813,22 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(
             titles,
             [
-                PINNED_SECTION_TITLE,
-                ACTIVE_SECTION_TITLE,
-                SNOOZED_SECTION_TITLE,
-                SETTLED_SECTION_TITLE,
-                SYMPHONY_SECTION_TITLE,
+                "Pinned",
+                "Active",
+                "Snoozed",
+                "Settled",
+                "No repo yet",
+                "Symphony",
             ]
         );
-        assert!(matches!(
-            rows.last(),
-            Some(SidebarRow::SectionHeader {
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
                 title: SETTLED_SECTION_TITLE,
                 collapsed: true,
                 ..
-            })
-        ));
+            }
+        )));
     }
 
     #[test]
