@@ -28725,7 +28725,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(row_text(terminal.backend().buffer(), 0, 18).contains("fix"));
         let second = row_text(terminal.backend().buffer(), 1, 18);
         assert!(second.contains("b"), "{second:?}");
-        assert!(second.ends_with("L ub1"), "host stays right-aligned: {second:?}");
+        assert!(
+            second.ends_with("L ub1"),
+            "host stays right-aligned: {second:?}"
+        );
         assert!(
             !second.contains('#'),
             "PR field should yield to the branch and host: {second:?}"
@@ -28754,8 +28757,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("render sections card");
 
         let second = row_text(terminal.backend().buffer(), 1, 36);
-        assert!(second.contains('…'), "long branch should be elided: {second:?}");
-        assert!(second.ends_with("L ub1"), "host stays right-aligned: {second:?}");
+        assert!(
+            second.contains('…'),
+            "long branch should be elided: {second:?}"
+        );
+        assert!(
+            second.ends_with("L ub1"),
+            "host stays right-aligned: {second:?}"
+        );
     }
 
     #[test]

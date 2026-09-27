@@ -9503,7 +9503,10 @@ last_pane = "prefix+tab"
         .expect("write hidden-notes config");
         app.reload_config();
 
-        assert!(!app.state.notepad.focused, "reload releases hidden-notes focus");
+        assert!(
+            !app.state.notepad.focused,
+            "reload releases hidden-notes focus"
+        );
         assert_eq!(app.state.input_owner(), state::InputOwner::Pane);
         app.route_client_events_from(
             42,
@@ -9535,7 +9538,10 @@ last_pane = "prefix+tab"
             )],
             false,
         );
-        assert!(pane_input.try_recv().is_ok(), "the pane keeps input ownership");
+        assert!(
+            pane_input.try_recv().is_ok(),
+            "the pane keeps input ownership"
+        );
         assert!(app.state.notepad.body().is_empty());
 
         env.remove(crate::config::CONFIG_PATH_ENV_VAR);
