@@ -2853,6 +2853,9 @@ impl App {
                 self.state.sidebar_areas = config.ui.sidebar.areas.clone();
                 self.state.sidebar_sections_layout =
                     config.ui.sidebar.layout == crate::config::SidebarLayoutConfig::Sections;
+                if self.state.sidebar_sections_layout && !self.state.sidebar_areas.notes {
+                    self.state.set_notepad_focus(false);
+                }
                 self.state.sidebar_header_plain =
                     config.ui.sidebar.header == crate::config::SidebarHeaderConfig::Plain;
                 if sidebar_projection_changed {
@@ -9500,10 +9503,7 @@ last_pane = "prefix+tab"
         .expect("write hidden-notes config");
         app.reload_config();
 
-        assert!(
-            app.state.notepad.focused,
-            "reload leaves stale focus in place"
-        );
+        assert!(!app.state.notepad.focused, "reload releases hidden-notes focus");
         assert_eq!(app.state.input_owner(), state::InputOwner::Pane);
         app.route_client_events_from(
             42,
@@ -9515,6 +9515,27 @@ last_pane = "prefix+tab"
             false,
         );
         assert!(pane_input.try_recv().is_ok(), "the pane receives the key");
+        assert!(app.state.notepad.body().is_empty());
+
+        std::fs::write(
+            &path,
+            "[ui.sidebar]\nlayout = \"sections\"\n[ui.sidebar.areas]\nnotes = true\n[notepad]\nenabled = true\n",
+        )
+        .expect("write visible-notes config again");
+        app.reload_config();
+
+        assert!(!app.state.notepad.focused);
+        assert_eq!(app.state.input_owner(), state::InputOwner::Pane);
+        app.route_client_events_from(
+            42,
+            vec![raw_key(
+                KeyCode::Char('k'),
+                KeyModifiers::empty(),
+                KeyEventKind::Press,
+            )],
+            false,
+        );
+        assert!(pane_input.try_recv().is_ok(), "the pane keeps input ownership");
         assert!(app.state.notepad.body().is_empty());
 
         env.remove(crate::config::CONFIG_PATH_ENV_VAR);
