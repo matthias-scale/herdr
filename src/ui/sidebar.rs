@@ -37,6 +37,16 @@ fn sidebar_header_rows(app: &AppState) -> u16 {
     sky_rows + 1 + u16::from(app.sidebar_areas.view_bar)
 }
 const MIN_WORKSPACE_LIST_ROWS: u16 = 3;
+
+pub(crate) fn sidebar_workspace_floor(app: &AppState) -> u16 {
+    let header_rows = if app.sidebar_sections_layout {
+        sidebar_header_rows(app)
+    } else {
+        0
+    };
+    header_rows.saturating_add(MIN_WORKSPACE_LIST_ROWS)
+}
+
 #[cfg(test)]
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
 pub(super) const DEFAULT_THREAD_TITLE: &str = "New Thread";
@@ -1767,7 +1777,7 @@ fn sidebar_footer_slot(area: Rect, index: u16) -> Rect {
 fn sidebar_hosts_rect(app: &AppState, area: Rect) -> Rect {
     if !app.sidebar_sections_layout
         || !sidebar_area_is_visible(app, crate::config::SidebarArea::Hosts)
-        || area.height < 2
+        || area.height < sidebar_workspace_floor(app).saturating_add(2)
         || area.width < 3
     {
         return Rect::default();
@@ -28847,13 +28857,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 socket: None,
             },
         ];
-        let area = Rect::new(0, 0, 40, 8);
+        let area = Rect::new(0, 0, 40, 12);
         let host_row = sidebar_hosts_rect(&app, area);
         let footer = sidebar_footer_settings_hit_area(area);
         assert_eq!(host_row.y.saturating_add(1), footer.y);
         assert!(expanded_sidebar_content_for_app(&app, area).bottom() <= host_row.y);
 
-        let mut terminal = Terminal::new(TestBackend::new(40, 8)).expect("host strip terminal");
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).expect("host strip terminal");
         terminal
             .draw(|frame| render_sidebar_hosts(&app, frame, area))
             .expect("render host strip");
@@ -28891,6 +28901,80 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(
             !line.contains(&sidebar_prefixed_key_label(&app, &app.keybinds.help)),
             "the help hint yields to the local host: {line:?}"
+        );
+    }
+
+    #[test]
+    fn sections_layout_at_80x24_keeps_header_and_three_tab_rows_clear() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.sidebar_width = 36;
+        app.sidebar_areas.sky_header = true;
+        app.sidebar_areas.view_bar = true;
+        app.sidebar_areas.notes = true;
+        app.sidebar_areas.pomodoro = true;
+        app.sidebar_areas.hosts = true;
+        app.notepad.enabled = true;
+        app.notepad.height = 18;
+        app.goals.enabled = true;
+        app.goals.load = crate::goals::GoalsLoad::Ready(
+            crate::goals::parse(
+                r#"{
+                    "version": 1,
+                    "next_goal_id": 2,
+                    "next_stream_id": 2,
+                    "goals": {"G1": {"text": "goal", "done_when": "done"}},
+                    "streams": {"S1": {"goal": "G1", "what": "work", "state": "running", "owner": "agent"}}
+                }"#,
+            )
+            .expect("goals fixture"),
+        );
+        app.pomodoro.enabled = true;
+        app.machines = vec![crate::app::machines::Machine {
+            name: "ub2".into(),
+            target: None,
+            socket: None,
+        }];
+        app.hyperspace.enabled = false;
+
+        crate::ui::compute_view(&mut app, Rect::new(0, 0, 80, 24));
+        let sidebar = app.view.sidebar_rect;
+        let list = workspace_list_rect_for_app(&app, sidebar);
+        let list_body = workspace_list_body_rect(&app, list, false);
+        let notes = sidebar_notepad_rect(&app, sidebar);
+        let goals = sidebar_goals_rect(&app, sidebar);
+        let hosts = sidebar_hosts_rect(&app, sidebar);
+        let timer = crate::ui::pomodoro::pomodoro_hit_area(&app, sidebar);
+
+        assert!(list_body.height >= MIN_WORKSPACE_LIST_ROWS);
+        assert!(notes.height > 0);
+        assert!(goals.height > 0);
+        assert!(
+            notes.height < app.notepad.height,
+            "notes should shrink first"
+        );
+        assert!(
+            notes.y >= list.y.saturating_add(sidebar_header_rows(&app)),
+            "notes must not draw over header rows"
+        );
+        assert!(notes.bottom() <= goals.y);
+        assert!(hosts.width > 0, "host strip remains at 80x24");
+        assert!(timer.width > 0, "Pomodoro remains at 80x24");
+
+        let timer_priority = Rect::new(sidebar.x, sidebar.y, sidebar.width, 10);
+        assert!(sidebar_hosts_rect(&app, timer_priority).width > 0);
+        assert_eq!(sidebar_notepad_rect(&app, timer_priority), Rect::default());
+        assert_eq!(
+            crate::ui::pomodoro::pomodoro_hit_area(&app, timer_priority),
+            Rect::default(),
+            "Pomodoro drops before the host strip"
+        );
+        let host_priority = Rect::new(sidebar.x, sidebar.y, sidebar.width, 9);
+        assert_eq!(sidebar_hosts_rect(&app, host_priority), Rect::default());
+        assert_eq!(sidebar_notepad_rect(&app, host_priority), Rect::default());
+        let short_list = workspace_list_rect_for_app(&app, host_priority);
+        assert!(
+            workspace_list_body_rect(&app, short_list, false).height >= MIN_WORKSPACE_LIST_ROWS
         );
     }
 

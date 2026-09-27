@@ -358,6 +358,8 @@ pub(crate) fn pomodoro_hit_area(app: &AppState, sidebar: Rect) -> Rect {
         || (app.sidebar_sections_layout && !app.sidebar_areas.pomodoro)
         || app.sidebar_collapsed
         || sidebar.height == 0
+        || (app.sidebar_sections_layout
+            && sidebar.height < super::sidebar::sidebar_workspace_floor(app).saturating_add(3))
     {
         return Rect::default();
     }
