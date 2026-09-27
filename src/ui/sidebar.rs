@@ -29601,9 +29601,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             text.starts_with("  "),
             "folder card was not indented: {text:?}"
         );
+        // The card badge includes its own leading space after the folder indent.
         assert!(
-            !text.starts_with("   "),
-            "indent should be exactly two columns: {text:?}"
+            text.starts_with("   LL"),
+            "folder indent and badge padding should take three columns: {text:?}"
         );
     }
 
@@ -29691,6 +29692,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             app.tab_sidebar_folder(0, 0, crate::app::sidebar_folders::SidebarShelf::Settled),
             None
         );
+        set_sections_group_collapsed(&mut app, SETTLED_SECTION_TITLE, false);
         assert!(sidebar_rows(&app).iter().any(|row| {
             matches!(row, SidebarRow::Tab { entry, depth: 0 }
                 if entry.local_target().is_some_and(|target| target.ws_idx == 0 && target.tab_idx == 0))
@@ -29739,6 +29741,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 collapsed: false,
             },
         ];
+        set_sections_group_collapsed(&mut app, SETTLED_SECTION_TITLE, false);
 
         let rows = sidebar_rows(&app);
         for (ws_idx, name, shelf) in [
