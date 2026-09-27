@@ -1535,7 +1535,7 @@
           "key": "ui.sidebar.header",
           "type": "enum",
           "default": "sky",
-          "description": "Header decoration used by the sections layout. `plain` disables the night-sky background without changing header controls or their layout.",
+          "description": "Header style for the sections layout. `plain` removes the sky band and wordmark while keeping search and sidebar action controls available in the compact header.",
           "values": [
             "sky",
             "plain"
