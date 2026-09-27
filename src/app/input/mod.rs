@@ -9915,6 +9915,7 @@ navigate_workspace_down = "ctrl+j"
             tab_idx: 0,
             anchor: (7, 4),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
+            folder_shelf: None,
         });
 
         assert!(
@@ -9956,6 +9957,7 @@ navigate_workspace_down = "ctrl+j"
             tab_idx: 0,
             anchor: (7, 4),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
+            folder_shelf: None,
         });
 
         let target = app

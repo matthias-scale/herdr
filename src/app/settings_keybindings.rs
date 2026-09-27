@@ -145,6 +145,9 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
                 &kb.toggle_tab_prio
             }),
             built_in("toggle_pin_tab", "pin tab", |kb| &kb.toggle_pin_tab),
+            built_in("move_tab_to_folder", "move tab to folder", |kb| {
+                &kb.move_tab_to_folder
+            }),
             built_in("previous_tab", "previous tab", |kb| &kb.previous_tab),
             built_in("next_tab", "next tab", |kb| &kb.next_tab),
             built_in("move_tab_previous", "move tab previous", |kb| {

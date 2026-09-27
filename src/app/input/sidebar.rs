@@ -441,16 +441,57 @@ impl AppState {
         let Some(picker) = self.sidebar_subgroup_picker.take() else {
             return;
         };
-        let Some(name) = choices.get(index).map(|choice| choice.name().to_string()) else {
+        let Some(choice) = choices.get(index).cloned() else {
             return;
         };
-        if let Some(tab) = self
-            .workspaces
-            .get_mut(picker.ws_idx)
-            .and_then(|workspace| workspace.tabs.get_mut(picker.tab_idx))
-        {
-            tab.set_subgroup(Some(name));
-            self.mark_session_dirty();
+        if let Some(shelf) = picker.folder_shelf {
+            if crate::ui::sidebar::sections_tab_shelf(self, picker.ws_idx, picker.tab_idx)
+                != Some(shelf)
+            {
+                return;
+            }
+        }
+        match (picker.folder_shelf, choice) {
+            (
+                None,
+                crate::ui::SidebarSubgroupChoice::Create(name)
+                | crate::ui::SidebarSubgroupChoice::Existing(name),
+            ) => {
+                if let Some(tab) = self
+                    .workspaces
+                    .get_mut(picker.ws_idx)
+                    .and_then(|workspace| workspace.tabs.get_mut(picker.tab_idx))
+                {
+                    tab.set_subgroup(Some(name));
+                    self.mark_session_dirty();
+                }
+            }
+            (Some(shelf), crate::ui::SidebarSubgroupChoice::NewFolder) => {
+                let tab = self.sidebar_folder_tab(picker.ws_idx, picker.tab_idx);
+                self.open_sidebar_folder_prompt(
+                    crate::app::sidebar_folders::SidebarFolderPrompt::Create { shelf, tab },
+                );
+            }
+            (Some(shelf), crate::ui::SidebarSubgroupChoice::CreateFolder(name)) => {
+                match self.create_sidebar_folder(shelf, &name) {
+                    Ok(name) => {
+                        self.set_tab_sidebar_folder(picker.ws_idx, picker.tab_idx, Some(&name));
+                    }
+                    Err(error) => self.show_sidebar_folder_error(error),
+                }
+            }
+            (Some(shelf), crate::ui::SidebarSubgroupChoice::ExistingFolder(name)) => {
+                if self
+                    .sidebar_folder(&name)
+                    .is_some_and(|folder| folder.shelf == shelf)
+                {
+                    self.set_tab_sidebar_folder(picker.ws_idx, picker.tab_idx, Some(&name));
+                }
+            }
+            (Some(_), crate::ui::SidebarSubgroupChoice::NoFolder) => {
+                self.set_tab_sidebar_folder(picker.ws_idx, picker.tab_idx, None);
+            }
+            _ => {}
         }
     }
 
@@ -714,6 +755,29 @@ impl AppState {
         let Some(selected) = self.sidebar_selected_work_group.clone() else {
             return SidebarWorkGroupKeyAction::Ignored;
         };
+        if let Some(name) = selected.strip_prefix("folder:") {
+            match key.code {
+                KeyCode::Enter if key.modifiers.is_empty() => {
+                    self.toggle_sidebar_folder_collapsed(name);
+                    return SidebarWorkGroupKeyAction::Consumed;
+                }
+                KeyCode::Char('r') if key.modifiers.is_empty() => {
+                    if let Some(folder) = self.sidebar_folder(name) {
+                        self.open_sidebar_folder_prompt(
+                            crate::app::sidebar_folders::SidebarFolderPrompt::Rename {
+                                name: folder.name.clone(),
+                            },
+                        );
+                    }
+                    return SidebarWorkGroupKeyAction::Consumed;
+                }
+                KeyCode::Char('d') if key.modifiers.is_empty() => {
+                    self.delete_sidebar_folder(name);
+                    return SidebarWorkGroupKeyAction::Consumed;
+                }
+                _ => {}
+            }
+        }
         if selected == crate::ui::sidebar::PODS_SECTION_TITLE {
             if key.code == KeyCode::Enter && key.modifiers.is_empty() {
                 self.toggle_sidebar_group(crate::ui::sidebar::PODS_SECTION_TITLE);
@@ -1196,6 +1260,7 @@ impl AppState {
                 crate::ui::SidebarRow::Agent { .. }
                 | crate::ui::SidebarRow::PodHeader { .. }
                 | crate::ui::SidebarRow::PodMember { .. }
+                | crate::ui::SidebarRow::Folder { .. }
                 | crate::ui::SidebarRow::RemoteAgent { .. }
                 | crate::ui::SidebarRow::Tab { .. }
                 | crate::ui::SidebarRow::SectionHeader { .. }
@@ -1238,6 +1303,7 @@ impl AppState {
                 crate::ui::SidebarRow::Workspace { .. }
                 | crate::ui::SidebarRow::PodHeader { .. }
                 | crate::ui::SidebarRow::PodMember { .. }
+                | crate::ui::SidebarRow::Folder { .. }
                 | crate::ui::SidebarRow::RemoteAgent { .. }
                 | crate::ui::SidebarRow::SectionHeader { .. }
                 | crate::ui::SidebarRow::NestedHeader { .. }
@@ -2973,6 +3039,51 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn folder_row_keyboard_actions_toggle_rename_and_delete() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.sidebar_folders
+            .push(crate::app::sidebar_folders::SidebarFolder {
+                shelf: crate::app::sidebar_folders::SidebarShelf::Active,
+                name: "Plans".to_string(),
+                collapsed: false,
+            });
+        app.sidebar_selected_work_group =
+            Some(crate::app::sidebar_folders::folder_selection_key("Plans"));
+
+        assert!(matches!(
+            app.handle_sidebar_work_group_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
+            super::SidebarWorkGroupKeyAction::Consumed
+        ));
+        assert!(app
+            .sidebar_folder("Plans")
+            .is_some_and(|folder| folder.collapsed));
+
+        assert!(matches!(
+            app.handle_sidebar_work_group_key(KeyEvent::new(
+                KeyCode::Char('r'),
+                KeyModifiers::empty(),
+            )),
+            super::SidebarWorkGroupKeyAction::Consumed
+        ));
+        assert!(matches!(
+            app.rename_target.as_ref(),
+            Some(crate::app::state::RenameTarget::Folder {
+                prompt: crate::app::sidebar_folders::SidebarFolderPrompt::Rename { name },
+            }) if name == "Plans"
+        ));
+
+        assert!(matches!(
+            app.handle_sidebar_work_group_key(KeyEvent::new(
+                KeyCode::Char('d'),
+                KeyModifiers::empty(),
+            )),
+            super::SidebarWorkGroupKeyAction::Consumed
+        ));
+        assert!(app.sidebar_folder("Plans").is_none());
+    }
+
     fn sidebar_order_signature(app: &crate::app::state::AppState) -> Vec<String> {
         crate::ui::sidebar_rows(app)
             .into_iter()
@@ -3260,6 +3371,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 has_subgroup: false,
+                folder_menu: false,
                 settle_pane_id: Some(root_pane),
                 snooze_target: Some(root_pane),
             },
@@ -4246,6 +4358,7 @@ mod tests {
             tab_idx: 0,
             anchor: (5, 5),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
+            folder_shelf: None,
         });
         for character in "api".chars() {
             assert!(app.state.handle_sidebar_subgroup_picker_key(KeyEvent::new(
@@ -4278,6 +4391,7 @@ mod tests {
             tab_idx: 1,
             anchor: (5, 5),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
+            folder_shelf: None,
         });
         let choices = crate::ui::sidebar::sidebar_subgroup_picker_choices(&app.state);
         assert_eq!(

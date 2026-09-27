@@ -41,6 +41,7 @@ pub(crate) struct MobileSwitcherAreas {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MobileSwitcherTarget {
     Section(&'static str),
+    Folder(String),
     NewWorkspace,
     Workspace(usize),
     WorkspaceDisclosure(usize),
@@ -177,6 +178,7 @@ fn mobile_switcher_target_for_row(
                 )
             }
         }
+        SidebarRow::Folder { name, .. } => Some(MobileSwitcherTarget::Folder(name.clone())),
         _ => None,
     };
     if let Some(control) = control {
@@ -230,6 +232,7 @@ fn mobile_switcher_target_for_row(
         SidebarRow::SectionHeader { .. }
         | SidebarRow::PodHeader { .. }
         | SidebarRow::PodMember { .. }
+        | SidebarRow::Folder { .. }
         | SidebarRow::Divider
         | SidebarRow::NeedsYou { .. }
         | SidebarRow::SymphonyJob { .. }
@@ -270,6 +273,7 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
         | SidebarRow::RemoteAgent { .. }
         | SidebarRow::PodHeader { .. }
         | SidebarRow::PodMember { .. }
+        | SidebarRow::Folder { .. }
         | SidebarRow::AloopLoop { .. }
         | SidebarRow::AloopRunLine { .. }
         | SidebarRow::AloopFinding { .. }
@@ -990,6 +994,23 @@ fn render_mobile_switcher_content(
                         age,
                         host,
                         *blocked,
+                    );
+                }
+            }
+            SidebarRow::Folder {
+                name,
+                count,
+                collapsed,
+                ..
+            } => {
+                if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
+                    super::sidebar::render_sidebar_folder_row(
+                        app,
+                        frame,
+                        Rect::new(content.x, y, content.width, 1),
+                        name,
+                        *count,
+                        *collapsed,
                     );
                 }
             }

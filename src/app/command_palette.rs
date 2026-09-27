@@ -56,6 +56,7 @@ pub(crate) fn action_for_field(field: &str) -> Option<NavigateAction> {
         "close_tab" => NavigateAction::CloseTab,
         "toggle_tab_prio" => NavigateAction::ToggleTabPrio,
         "toggle_pin_tab" => NavigateAction::TogglePinTab,
+        "move_tab_to_folder" => NavigateAction::MoveTabToFolder,
         "previous_tab" => NavigateAction::PreviousTab,
         "next_tab" => NavigateAction::NextTab,
         "move_tab_previous" => NavigateAction::MoveTabPrevious,

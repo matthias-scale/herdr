@@ -53,6 +53,7 @@ pub(crate) mod settings_general;
 pub(crate) mod settings_keybindings;
 pub(crate) mod settings_providers;
 pub(crate) mod settled;
+pub(crate) mod sidebar_folders;
 pub mod state;
 mod tab_bar_status;
 mod terminal_targets;
@@ -901,6 +902,10 @@ impl App {
         let sidebar_group_collapsed = crate::client::presentation::load_sidebar_group_collapsed();
         #[cfg(test)]
         let sidebar_group_collapsed = std::collections::HashMap::new();
+        #[cfg(not(test))]
+        let sidebar_folders = crate::client::presentation::load_sidebar_folders();
+        #[cfg(test)]
+        let sidebar_folders = Vec::new();
 
         let mut state = AppState {
             agent_picker: None,
@@ -1061,6 +1066,8 @@ impl App {
             sidebar_group_mode_persistence_request: None,
             sidebar_group_sort_persistence_request: None,
             sidebar_group_collapsed_persistence_request: None,
+            sidebar_folders,
+            sidebar_folders_persistence_request: false,
             sidebar_view_scan_request: false,
             sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
@@ -2234,6 +2241,9 @@ impl App {
                 .take_sidebar_group_collapsed_persistence_request()
             {
                 crate::client::presentation::save_sidebar_group_collapsed(&key, collapsed);
+            }
+            if let Some(folders) = self.state.take_sidebar_folders_persistence_request() {
+                crate::client::presentation::save_sidebar_folders(&folders);
             }
             if self.state.take_sidebar_view_scan_request() {
                 self.request_sidebar_view_scan(now);
@@ -9606,6 +9616,7 @@ last_pane = "prefix+tab"
             tab_idx: 0,
             anchor: (7, 4),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
+            folder_shelf: None,
         });
 
         app.route_client_events_from(
@@ -9653,6 +9664,7 @@ last_pane = "prefix+tab"
                 tab_idx: 0,
                 anchor: (7, 4),
                 filter: crate::ui::dropdown::DropdownFilterState::default(),
+                folder_shelf: None,
             });
             match overlay {
                 "Symphony" => app.state.toggle_symphony(),

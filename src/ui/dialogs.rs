@@ -91,6 +91,26 @@ pub(super) fn render_rename_overlay(app: &AppState, frame: &mut Frame, area: Rec
         Mode::RenamePane
             if matches!(
                 app.rename_target,
+                Some(crate::app::state::RenameTarget::Folder {
+                    prompt: crate::app::sidebar_folders::SidebarFolderPrompt::Create { .. }
+                })
+            ) =>
+        {
+            "new folder"
+        }
+        Mode::RenamePane
+            if matches!(
+                app.rename_target,
+                Some(crate::app::state::RenameTarget::Folder {
+                    prompt: crate::app::sidebar_folders::SidebarFolderPrompt::Rename { .. }
+                })
+            ) =>
+        {
+            "rename folder"
+        }
+        Mode::RenamePane
+            if matches!(
+                app.rename_target,
                 Some(crate::app::state::RenameTarget::Pod { .. })
             ) =>
         {

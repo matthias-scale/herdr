@@ -1168,6 +1168,27 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_folder_membership_uses_the_existing_tab_subgroup_snapshot_field() {
+        let mut state = state_with_workspaces(&["folder membership"]);
+        state.workspaces[0].tabs[0].set_subgroup(Some("Plans".to_string()));
+
+        let snapshot = capture_from_state(&state);
+        assert_eq!(
+            snapshot.workspaces[0].tabs[0].subgroup.as_deref(),
+            Some("Plans")
+        );
+        let json = serde_json::to_string(&snapshot).expect("serialize folder membership");
+        assert!(!json.contains("sidebar_folders"), "{json}");
+
+        let restored: SessionSnapshot =
+            serde_json::from_str(&json).expect("restore folder membership snapshot");
+        assert_eq!(
+            restored.workspaces[0].tabs[0].subgroup.as_deref(),
+            Some("Plans")
+        );
+    }
+
+    #[test]
     fn tab_snapshot_defaults_a_missing_subgroup_for_legacy_sessions() {
         let snapshot: TabSnapshot =
             serde_json::from_str(r#"{"layout":{"Pane":1},"panes":{},"zoomed":false}"#)

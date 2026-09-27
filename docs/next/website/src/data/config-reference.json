@@ -1147,6 +1147,12 @@
           "description": "Pin or unpin the active tab into the sidebar's Pinned group. Unset by default."
         },
         {
+          "key": "keys.move_tab_to_folder",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the active tab's folder picker. Unset by default."
+        },
+        {
           "key": "keys.symphony",
           "type": "keybinding",
           "default": "\"prefix+shift+s\"",

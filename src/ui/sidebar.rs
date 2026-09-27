@@ -2717,6 +2717,12 @@ pub(crate) enum SidebarRow {
         blocked: bool,
         target: PodTarget,
     },
+    Folder {
+        shelf: crate::app::sidebar_folders::SidebarShelf,
+        name: String,
+        count: usize,
+        collapsed: bool,
+    },
     /// A group label. Carries no pane, so it is deliberately absent from every
     /// card-area list: it cannot be focused or navigated onto. Clicking it
     /// collapses the group, which is why it carries the count -- a collapsed
@@ -2823,8 +2829,8 @@ pub(crate) enum SidebarRow {
 
 pub(crate) const SNOOZED_SECTION_TITLE: &str = "Snoozed";
 pub(crate) const SETTLED_SECTION_TITLE: &str = "Settled";
-const PINNED_SECTION_TITLE: &str = "Pinned";
-const ACTIVE_SECTION_TITLE: &str = "Active";
+pub(crate) const PINNED_SECTION_TITLE: &str = "Pinned";
+pub(crate) const ACTIVE_SECTION_TITLE: &str = "Active";
 pub(crate) const SPACES_SECTION_TITLE: &str = "Spaces";
 pub(crate) const FLEET_SECTION_TITLE: &str = "Fleet";
 pub(crate) const PODS_SECTION_TITLE: &str = "Pods";
@@ -2981,9 +2987,10 @@ fn append_sections_block(
     app: &AppState,
     rows: &mut Vec<SidebarRow>,
     title: &'static str,
-    entries: Vec<AgentPanelEntry>,
+    mut entries: Vec<AgentPanelEntry>,
+    probe_expanded: bool,
 ) {
-    let collapsed = section_is_collapsed(app, title);
+    let collapsed = !probe_expanded && section_is_collapsed(app, title);
     rows.push(SidebarRow::SectionHeader {
         title,
         count: entries.len(),
@@ -2991,6 +2998,69 @@ fn append_sections_block(
         collapsed,
     });
     if !collapsed {
+        let Some(shelf) = crate::app::sidebar_folders::SidebarShelf::from_title(title) else {
+            append_tab_rows(rows, entries, 0);
+            return;
+        };
+        let has_folders = app
+            .sidebar_folders
+            .iter()
+            .any(|folder| folder.shelf == shelf);
+        if !has_folders {
+            append_tab_rows(rows, entries, 0);
+            return;
+        }
+        let mut members_by_folder = app
+            .sidebar_folders
+            .iter()
+            .filter(|folder| folder.shelf == shelf)
+            .map(|folder| (folder.name.as_str(), Vec::new()))
+            .collect::<std::collections::HashMap<_, Vec<AgentPanelEntry>>>();
+        let mut loose = Vec::new();
+        for entry in entries.drain(..) {
+            if let Some(name) = sidebar_tab_subgroup(app, &entry) {
+                if let Some(members) = members_by_folder.get_mut(name) {
+                    members.push(entry);
+                    continue;
+                }
+            }
+            loose.push(entry);
+        }
+        entries = loose;
+        for folder in app
+            .sidebar_folders
+            .iter()
+            .filter(|folder| folder.shelf == shelf)
+        {
+            let members = match members_by_folder.remove(folder.name.as_str()) {
+                Some(members) => members,
+                None => Vec::new(),
+            };
+            let count = members.len();
+            rows.push(SidebarRow::Folder {
+                shelf,
+                name: folder.name.clone(),
+                count,
+                collapsed: folder.collapsed,
+            });
+            if !folder.collapsed || probe_expanded {
+                if !probe_expanded {
+                    for entry in &mut members {
+                        if entry.local_target().is_some() {
+                            entry.sections_card = Some(sidebar_thread_card(app, entry));
+                        }
+                    }
+                }
+                append_tab_rows(rows, members, 1);
+            }
+        }
+        if !probe_expanded {
+            for entry in &mut entries {
+                if entry.local_target().is_some() {
+                    entry.sections_card = Some(sidebar_thread_card(app, entry));
+                }
+            }
+        }
         append_tab_rows(rows, entries, 0);
     }
 }
@@ -3429,13 +3499,49 @@ fn sidebar_rows_inner(
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
     expand_worktrees: bool,
 ) -> Vec<SidebarRow> {
-    compact_sidebar_rows_inner(app, terminal_runtimes, expand_worktrees, true)
+    compact_sidebar_rows_inner(app, terminal_runtimes, expand_worktrees, true, false)
 }
 
 pub(crate) fn sidebar_navigation_agent_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     let mut entries = sidebar_filtered_agent_entries_from(app, None);
     crate::app::agent_view::apply_agent_view(app, &mut entries);
     entries
+}
+
+/// The shelf where a local tab appears in the sections layout, independent of
+/// shelf and folder collapse. Probe rows omit cards so picker opening stays a
+/// cheap read of the sidebar projection.
+pub(crate) fn sections_tab_shelf(
+    app: &AppState,
+    ws_idx: usize,
+    tab_idx: usize,
+) -> Option<crate::app::sidebar_folders::SidebarShelf> {
+    sections_tab_shelves(app).get(&(ws_idx, tab_idx)).copied()
+}
+
+pub(crate) fn sections_tab_shelves(
+    app: &AppState,
+) -> std::collections::HashMap<(usize, usize), crate::app::sidebar_folders::SidebarShelf> {
+    if !app.sidebar_sections_layout {
+        return std::collections::HashMap::new();
+    }
+    let rows = compact_sidebar_rows_inner(app, None, false, false, true);
+    let mut shelf = None;
+    let mut shelves = std::collections::HashMap::new();
+    for row in rows {
+        match row {
+            SidebarRow::SectionHeader { title, .. } => {
+                shelf = crate::app::sidebar_folders::SidebarShelf::from_title(title);
+            }
+            SidebarRow::Tab { entry, .. } => {
+                if let (Some(current_shelf), Some(target)) = (shelf, entry.local_target()) {
+                    shelves.insert((target.ws_idx, target.tab_idx), current_shelf);
+                }
+            }
+            _ => {}
+        }
+    }
+    shelves
 }
 
 fn sidebar_filtered_agent_entries_from(
@@ -3466,6 +3572,7 @@ fn compact_sidebar_rows_inner(
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
     expand_worktrees: bool,
     include_remote: bool,
+    probe_expanded: bool,
 ) -> Vec<SidebarRow> {
     let mut entries = match terminal_runtimes {
         Some(runtimes) => sidebar_thread_entries_from(app, runtimes),
@@ -3476,7 +3583,7 @@ fn compact_sidebar_rows_inner(
             .local_target()
             .is_some_and(|target| !app.remote_focus_proxy_panes.contains(&target.pane_id))
     });
-    if sidebar_rows_are_filtered(app) {
+    if sidebar_rows_are_filtered(app) && !probe_expanded {
         let scope = sidebar_project_scope(app);
         let visible_tabs = entries
             .iter()
@@ -3574,7 +3681,7 @@ fn compact_sidebar_rows_inner(
     let active_entries =
         ordered_tab_entries_preferring(app, &active_panes, Some(&active_pane_targets));
     let snoozed_entries = ordered_tab_entries(app, &snoozed_panes);
-    let snoozed_entries = if app.blocked_filter {
+    let snoozed_entries = if app.blocked_filter && !probe_expanded {
         snoozed_entries
             .into_iter()
             .filter(entry_has_red_dot)
@@ -3583,7 +3690,7 @@ fn compact_sidebar_rows_inner(
         snoozed_entries
     };
     let mut settled_entries = ordered_tab_entries(app, &settled_panes);
-    let visible_entries = if app.blocked_filter {
+    let visible_entries = if app.blocked_filter && !probe_expanded {
         active_entries
             .iter()
             .filter(|entry| entry_has_red_dot(entry))
@@ -3600,35 +3707,51 @@ fn compact_sidebar_rows_inner(
     settled_entries = ordered_tab_entries(app, &settled_entries);
 
     if sections_layout {
-        let pinned_expanded = !section_is_collapsed(app, PINNED_SECTION_TITLE);
-        let active_expanded = !section_is_collapsed(app, ACTIVE_SECTION_TITLE);
-        let snoozed_expanded = !section_is_collapsed(app, SNOOZED_SECTION_TITLE);
-        let settled_expanded = !section_is_collapsed(app, SETTLED_SECTION_TITLE);
+        let pinned_expanded = probe_expanded || !section_is_collapsed(app, PINNED_SECTION_TITLE);
+        let active_expanded = probe_expanded || !section_is_collapsed(app, ACTIVE_SECTION_TITLE);
+        let snoozed_expanded = probe_expanded || !section_is_collapsed(app, SNOOZED_SECTION_TITLE);
+        let settled_expanded = probe_expanded || !section_is_collapsed(app, SETTLED_SECTION_TITLE);
         let needs_you =
             needs_you_strip_rows(app, &visible_entries, &snoozed_entries, &remote_entries);
+        let has_pinned_folders = app
+            .sidebar_folders
+            .iter()
+            .any(|folder| folder.shelf == crate::app::sidebar_folders::SidebarShelf::Pinned);
+        let has_active_folders = app
+            .sidebar_folders
+            .iter()
+            .any(|folder| folder.shelf == crate::app::sidebar_folders::SidebarShelf::Active);
+        let has_snoozed_folders = app
+            .sidebar_folders
+            .iter()
+            .any(|folder| folder.shelf == crate::app::sidebar_folders::SidebarShelf::Snoozed);
+        let has_settled_folders = app
+            .sidebar_folders
+            .iter()
+            .any(|folder| folder.shelf == crate::app::sidebar_folders::SidebarShelf::Settled);
         let mut pinned_entries = Vec::new();
         let mut active_entries = Vec::new();
         for mut entry in visible_entries.iter().cloned() {
             if entry.pinned {
-                if pinned_expanded {
+                if pinned_expanded && !probe_expanded && !has_pinned_folders {
                     entry.sections_card = Some(sidebar_thread_card(app, &entry));
                 }
                 pinned_entries.push(entry);
             } else {
-                if active_expanded {
+                if active_expanded && !probe_expanded && !has_active_folders {
                     entry.sections_card = Some(sidebar_thread_card(app, &entry));
                 }
                 active_entries.push(entry);
             }
         }
         let mut snoozed_entries = snoozed_entries;
-        if snoozed_expanded {
+        if snoozed_expanded && !probe_expanded && !has_snoozed_folders {
             for entry in &mut snoozed_entries {
                 entry.sections_card = Some(sidebar_thread_card(app, entry));
             }
         }
         let mut settled_entries = settled_entries;
-        if settled_expanded {
+        if settled_expanded && !probe_expanded && !has_settled_folders {
             for entry in &mut settled_entries {
                 entry.sections_card = Some(sidebar_thread_card(app, entry));
             }
@@ -3639,19 +3762,19 @@ fn compact_sidebar_rows_inner(
         for mut entry in remote_entries.iter().cloned() {
             match sidebar_entry_lifecycle(app, &entry) {
                 SidebarEntryLifecycle::Active => {
-                    if active_expanded {
+                    if active_expanded && !probe_expanded {
                         entry.sections_card = Some(sidebar_thread_card(app, &entry));
                     }
                     remote_active.push(entry);
                 }
                 SidebarEntryLifecycle::Snoozed => {
-                    if snoozed_expanded {
+                    if snoozed_expanded && !probe_expanded {
                         entry.sections_card = Some(sidebar_thread_card(app, &entry));
                     }
                     remote_snoozed.push(entry);
                 }
                 SidebarEntryLifecycle::Settled => {
-                    if settled_expanded {
+                    if settled_expanded && !probe_expanded {
                         entry.sections_card = Some(sidebar_thread_card(app, &entry));
                     }
                     remote_settled.push(entry);
@@ -3663,13 +3786,37 @@ fn compact_sidebar_rows_inner(
             rows.extend(needs_you);
             rows.push(SidebarRow::Divider);
         }
-        append_sections_block(app, &mut rows, PINNED_SECTION_TITLE, pinned_entries);
+        append_sections_block(
+            app,
+            &mut rows,
+            PINNED_SECTION_TITLE,
+            pinned_entries,
+            probe_expanded,
+        );
         active_entries.extend(remote_active);
-        append_sections_block(app, &mut rows, ACTIVE_SECTION_TITLE, active_entries);
+        append_sections_block(
+            app,
+            &mut rows,
+            ACTIVE_SECTION_TITLE,
+            active_entries,
+            probe_expanded,
+        );
         snoozed_entries.extend(remote_snoozed);
-        append_sections_block(app, &mut rows, SNOOZED_SECTION_TITLE, snoozed_entries);
+        append_sections_block(
+            app,
+            &mut rows,
+            SNOOZED_SECTION_TITLE,
+            snoozed_entries,
+            probe_expanded,
+        );
         settled_entries.extend(remote_settled);
-        append_sections_block(app, &mut rows, SETTLED_SECTION_TITLE, settled_entries);
+        append_sections_block(
+            app,
+            &mut rows,
+            SETTLED_SECTION_TITLE,
+            settled_entries,
+            probe_expanded,
+        );
         append_ordered_sidebar_blocks(
             app,
             &mut rows,
@@ -7224,6 +7371,7 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
         }
         SidebarRow::PodHeader { .. }
         | SidebarRow::PodMember { .. }
+        | SidebarRow::Folder { .. }
         | SidebarRow::NeedsYou { .. }
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::Divider
@@ -7288,6 +7436,7 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
         (SidebarRow::RemoteAgent { .. }, _) | (_, SidebarRow::RemoteAgent { .. }) => 0,
         (SidebarRow::PodHeader { .. } | SidebarRow::PodMember { .. }, _)
         | (_, SidebarRow::PodHeader { .. } | SidebarRow::PodMember { .. }) => 0,
+        (SidebarRow::Folder { .. }, _) | (_, SidebarRow::Folder { .. }) => 0,
         (SidebarRow::Tab { .. }, SidebarRow::Tab { .. }) => 0,
         // A header hugs the group it names, and earns the agent gap above it so
         // the two groups read as separate lists rather than one long one.
@@ -7380,7 +7529,9 @@ pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) 
             .local_target()
             .is_some_and(|target| target.ws_idx == ws_idx),
         SidebarRow::RemoteAgent { .. } => false,
-        SidebarRow::PodHeader { .. } | SidebarRow::PodMember { .. } => false,
+        SidebarRow::PodHeader { .. } | SidebarRow::PodMember { .. } | SidebarRow::Folder { .. } => {
+            false
+        }
         // Headers belong to a state, not a workspace, so scrolling to a
         // workspace must never land on one.
         SidebarRow::SectionHeader { .. } => false,
@@ -7538,6 +7689,7 @@ pub(crate) fn compute_sidebar_row_areas(
             | SidebarRow::RemoteAgent { .. }
             | SidebarRow::PodHeader { .. }
             | SidebarRow::PodMember { .. }
+            | SidebarRow::Folder { .. }
             | SidebarRow::SectionHeader { .. }
             | SidebarRow::Divider
             | SidebarRow::NestedHeader { .. }
@@ -7904,6 +8056,135 @@ pub(super) fn render_pod_header_row(
         ])),
         rect,
     );
+}
+
+pub(super) fn render_sidebar_folder_row(
+    app: &AppState,
+    frame: &mut Frame,
+    rect: Rect,
+    name: &str,
+    count: usize,
+    collapsed: bool,
+) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let selected = app.sidebar_selected_work_group.as_deref()
+        == Some(crate::app::sidebar_folders::folder_selection_key(name).as_str());
+    let style = if selected {
+        Style::default()
+            .fg(active_sidebar_title_color(&app.palette))
+            .bg(app.palette.surface1)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(app.palette.subtext0)
+    };
+    if selected {
+        frame
+            .buffer_mut()
+            .set_style(rect, Style::default().bg(app.palette.surface1));
+    }
+    let disclosure = if collapsed { "▸" } else { "▾" };
+    let icon = if !app.nerd_font {
+        "F"
+    } else if collapsed {
+        "󰉋"
+    } else {
+        "󰝰"
+    };
+    let prefix = format!(" {disclosure} {icon} ");
+    let count_text = format!("  {count}");
+    let title = truncate_end(
+        name,
+        usize::from(rect.width)
+            .saturating_sub(display_width(&prefix))
+            .saturating_sub(display_width(&count_text)),
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(prefix, style),
+            Span::styled(title, style),
+            Span::styled(
+                count_text,
+                Style::default()
+                    .fg(app.palette.overlay0)
+                    .add_modifier(Modifier::DIM),
+            ),
+        ])),
+        rect,
+    );
+}
+
+pub(crate) fn sections_header_folder_button_rect(header_rect: Rect) -> Option<Rect> {
+    let width = if header_rect.width >= 17 {
+        8
+    } else if header_rect.width >= 10 {
+        1
+    } else {
+        return None;
+    };
+    Some(Rect::new(
+        header_rect.right().saturating_sub(width),
+        header_rect.y,
+        width,
+        1.min(header_rect.height),
+    ))
+}
+
+fn folder_row_areas_from_rows(
+    app: &AppState,
+    rows: &[SidebarRow],
+    body: Rect,
+    scroll_skip: usize,
+) -> Vec<(usize, Rect)> {
+    let mut y = body.y;
+    let mut out = Vec::new();
+    for (idx, row) in rows.iter().enumerate().skip(scroll_skip) {
+        let height = sidebar_row_height(app, row, body.height);
+        if y.saturating_add(height) > body.bottom() {
+            break;
+        }
+        if matches!(row, SidebarRow::Folder { .. }) {
+            out.push((idx, Rect::new(body.x, y, body.width, height)));
+        }
+        y = y
+            .saturating_add(height)
+            .saturating_add(sidebar_row_gap(app, rows, idx));
+    }
+    out
+}
+
+pub(crate) fn sidebar_folder_at(
+    app: &AppState,
+    row: u16,
+) -> Option<(crate::app::sidebar_folders::SidebarShelf, String)> {
+    let list = workspace_list_rect_for_app(app, app.view.sidebar_rect);
+    let metrics = workspace_list_scroll_metrics(app, list);
+    let body = workspace_list_body_rect(app, list, should_show_scrollbar(metrics));
+    let rows = sidebar_rows(app);
+    let scroll = workspace_list_scroll_skip(app, &metrics);
+    folder_row_areas_from_rows(app, &rows, body, scroll)
+        .into_iter()
+        .find(|(_, rect)| row >= rect.y && row < rect.bottom())
+        .and_then(|(idx, _)| match rows.get(idx) {
+            Some(SidebarRow::Folder { shelf, name, .. }) => Some((*shelf, name.clone())),
+            _ => None,
+        })
+}
+
+pub(crate) fn sections_header_folder_button_at(
+    app: &AppState,
+    col: u16,
+    row: u16,
+) -> Option<crate::app::sidebar_folders::SidebarShelf> {
+    compute_sidebar_section_header_areas(app, app.view.sidebar_rect)
+        .into_iter()
+        .find(|header| row >= header.rect.y && row < header.rect.bottom())
+        .and_then(|header| {
+            let shelf = crate::app::sidebar_folders::SidebarShelf::from_title(header.title)?;
+            let button = sections_header_folder_button_rect(header.rect)?;
+            (col >= button.x && col < button.right()).then_some(shelf)
+        })
 }
 
 pub(super) fn render_pod_member_row(
@@ -9364,6 +9645,21 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     Rect::new(ws_area.x, y, ws_area.width, 1),
                 );
             }
+            SidebarRow::Folder { collapsed, .. } => {
+                let icon = if app.nerd_font {
+                    if *collapsed {
+                        "󰉋"
+                    } else {
+                        "󰝰"
+                    }
+                } else {
+                    "F"
+                };
+                frame.render_widget(
+                    Paragraph::new(icon).style(Style::default().fg(p.overlay0)),
+                    Rect::new(ws_area.x, y, ws_area.width, 1),
+                );
+            }
             // Collapsed there is no room for a workflow name; the section rule
             // above already shows that a Symphony run is open.
             SidebarRow::SymphonyJob { .. }
@@ -10132,6 +10428,13 @@ fn render_section_header(
         .map(|count| format!(" {}:{}", count.host, count.count))
         .collect::<String>();
     let glyph = section_header_glyph_for_app(app, header.title);
+    let folder_button = (app.sidebar_sections_layout
+        && crate::app::sidebar_folders::SidebarShelf::from_title(header.title).is_some())
+    .then(|| sections_header_folder_button_rect(header.rect))
+    .flatten();
+    let folder_button_label =
+        folder_button.map(|rect| if rect.width == 1 { "+" } else { "+ Folder" });
+    let folder_button_width = folder_button_label.map(display_width).unwrap_or(0);
     let zero = header.title == SYMPHONY_SECTION_TITLE && count == 0;
     let title = truncate_end(
         header.title,
@@ -10139,7 +10442,9 @@ fn render_section_header(
             display_width(" ▾  ")
                 + display_width(glyph)
                 + display_width(&count_label)
-                + display_width(&host_count_label),
+                + display_width(&host_count_label)
+                + folder_button_width
+                + usize::from(folder_button_width > 0),
         ),
     );
     let header_style = |style| section_row_style(app, collapsed, zero, style);
@@ -10168,6 +10473,13 @@ fn render_section_header(
         ])),
         Rect::new(header.rect.x, header.rect.y, header.rect.width, 1),
     );
+    if let (Some(rect), Some(label)) = (folder_button, folder_button_label) {
+        frame.render_widget(
+            Paragraph::new(label)
+                .style(Style::default().fg(p.overlay0).add_modifier(Modifier::DIM)),
+            rect,
+        );
+    }
 }
 
 /// Where a nested header's cells land inside its row. Render and hover both
@@ -10611,6 +10923,21 @@ fn render_workspace_list(
             }
         }
     }
+    {
+        let body = workspace_list_body_rect(app, list_area, should_show_scrollbar(metrics));
+        let scroll = workspace_list_scroll_skip(app, &metrics);
+        for (row_idx, rect) in folder_row_areas_from_rows(app, &row_entries, body, scroll) {
+            if let Some(SidebarRow::Folder {
+                name,
+                count,
+                collapsed,
+                ..
+            }) = row_entries.get(row_idx)
+            {
+                render_sidebar_folder_row(app, frame, rect, name, *count, *collapsed);
+            }
+        }
+    }
     let tab_cards = compute_tab_card_areas(app, sidebar_area);
     let narrow_prefix = tab_cards
         .first()
@@ -10767,7 +11094,17 @@ fn render_tab_card(
                     .get(target.ws_idx)
                     .is_some_and(|workspace| workspace.active_tab == target.tab_idx)
         });
-        render_sections_thread_card(app, frame, thread_card, card.rect, selected);
+        let card_rect = if app.sidebar_sections_layout && depth > 0 {
+            Rect::new(
+                card.rect.x.saturating_add(2),
+                card.rect.y,
+                card.rect.width.saturating_sub(2),
+                card.rect.height,
+            )
+        } else {
+            card.rect
+        };
+        render_sections_thread_card(app, frame, thread_card, card_rect, selected);
         return;
     }
     render_compact_agent_row_with_prefix(
@@ -12056,19 +12393,30 @@ pub(super) fn render_sidebar_sort_menu(app: &AppState, frame: &mut Frame) {
 pub(crate) enum SidebarSubgroupChoice {
     Create(String),
     Existing(String),
+    NewFolder,
+    CreateFolder(String),
+    ExistingFolder(String),
+    NoFolder,
 }
 
 impl SidebarSubgroupChoice {
     pub(crate) fn name(&self) -> &str {
         match self {
-            Self::Create(name) | Self::Existing(name) => name,
+            Self::Create(name)
+            | Self::Existing(name)
+            | Self::CreateFolder(name)
+            | Self::ExistingFolder(name) => name,
+            Self::NewFolder => "New…",
+            Self::NoFolder => "No folder",
         }
     }
 
     fn label(&self) -> String {
         match self {
-            Self::Create(name) => format!("Create \"{name}\""),
-            Self::Existing(name) => name.clone(),
+            Self::Create(name) | Self::CreateFolder(name) => format!("Create \"{name}\""),
+            Self::Existing(name) | Self::ExistingFolder(name) => name.clone(),
+            Self::NewFolder => "New…".to_string(),
+            Self::NoFolder => "No folder".to_string(),
         }
     }
 }
@@ -12135,6 +12483,32 @@ pub(crate) fn sidebar_subgroup_picker_choices(app: &AppState) -> Vec<SidebarSubg
     let Some(picker) = app.sidebar_subgroup_picker.as_ref() else {
         return Vec::new();
     };
+    if let Some(shelf) = picker.folder_shelf {
+        let suggestions = app.sidebar_folder_names(shelf);
+        let matches = picker.filter.matches(&suggestions);
+        let query = picker.filter.query.trim();
+        let mut choices = Vec::new();
+        if query.is_empty() {
+            choices.push(SidebarSubgroupChoice::NewFolder);
+        } else if !suggestions
+            .iter()
+            .any(|name| name.to_lowercase() == query.to_lowercase())
+        {
+            choices.push(SidebarSubgroupChoice::CreateFolder(query.to_string()));
+        }
+        choices.extend(
+            matches
+                .into_iter()
+                .map(|(_, name)| SidebarSubgroupChoice::ExistingFolder(name.to_string())),
+        );
+        if app
+            .tab_sidebar_folder(picker.ws_idx, picker.tab_idx, shelf)
+            .is_some()
+        {
+            choices.push(SidebarSubgroupChoice::NoFolder);
+        }
+        return choices;
+    }
     let suggestions = sidebar_subgroup_suggestions(app, picker.ws_idx, picker.tab_idx);
     let matches = picker.filter.matches(&suggestions);
     let query = picker.filter.query.trim();
@@ -16801,6 +17175,7 @@ pub(crate) mod tests {
                 SidebarRow::SectionHeader { .. }
                 | SidebarRow::PodHeader { .. }
                 | SidebarRow::PodMember { .. }
+                | SidebarRow::Folder { .. }
                 | SidebarRow::Divider
                 | SidebarRow::NeedsYou { .. }
                 | SidebarRow::SymphonyJob { .. }
@@ -18231,6 +18606,7 @@ pub(crate) mod tests {
                 | SidebarRow::RemoteAgent { .. }
                 | SidebarRow::PodHeader { .. }
                 | SidebarRow::PodMember { .. }
+                | SidebarRow::Folder { .. }
                 | SidebarRow::SectionHeader { .. }
                 | SidebarRow::Divider
                 | SidebarRow::NestedHeader { .. }
@@ -18290,6 +18666,7 @@ pub(crate) mod tests {
                     SidebarRow::RemoteAgent { .. } => ("remote", 0, None, None),
                     SidebarRow::PodHeader { .. } => ("pod", 0, None, None),
                     SidebarRow::PodMember { .. } => ("pod-member", 0, None, None),
+                    SidebarRow::Folder { .. } => ("folder", 0, None, None),
                     SidebarRow::SectionHeader { .. } => ("section", 0, None, None),
                     SidebarRow::Divider => ("divider", 0, None, None),
                     SidebarRow::NestedHeader { .. } => ("section", 0, None, None),
@@ -20421,6 +20798,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 SidebarRow::SectionHeader { .. }
                 | SidebarRow::PodHeader { .. }
                 | SidebarRow::PodMember { .. }
+                | SidebarRow::Folder { .. }
                 | SidebarRow::Divider
                 | SidebarRow::NeedsYou { .. }
                 | SidebarRow::SymphonyJob { .. }
@@ -27511,6 +27889,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 SidebarRow::SectionHeader { .. }
                 | SidebarRow::PodHeader { .. }
                 | SidebarRow::PodMember { .. }
+                | SidebarRow::Folder { .. }
                 | SidebarRow::Divider
                 | SidebarRow::NeedsYou { .. }
                 | SidebarRow::SymphonyJob { .. }
@@ -29139,6 +29518,360 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("render ASCII card");
         assert!(row_text(terminal.backend().buffer(), 0, 60).is_ascii());
         assert!(row_text(terminal.backend().buffer(), 1, 60).is_ascii());
+
+        let mut app = app_with_agents(&["local"]);
+        app.sidebar_sections_layout = true;
+        app.nerd_font = false;
+        app.sidebar_folders
+            .push(crate::app::sidebar_folders::SidebarFolder {
+                shelf: crate::app::sidebar_folders::SidebarShelf::Active,
+                name: "Build".to_string(),
+                collapsed: false,
+            });
+        app.workspaces[0].tabs[0].set_subgroup(Some("Build".to_string()));
+        let rows = sidebar_rows(&app);
+        let folder = rows
+            .iter()
+            .find_map(|row| match row {
+                SidebarRow::Folder {
+                    name,
+                    count,
+                    collapsed,
+                    ..
+                } if name == "Build" => Some((count, collapsed)),
+                _ => None,
+            })
+            .expect("folder row");
+        let mut folder_terminal = Terminal::new(TestBackend::new(40, 1)).expect("folder terminal");
+        folder_terminal
+            .draw(|frame| {
+                render_sidebar_folder_row(
+                    &app,
+                    frame,
+                    Rect::new(0, 0, 40, 1),
+                    "Build",
+                    *folder.0,
+                    *folder.1,
+                )
+            })
+            .expect("render folder fallback");
+        let folder_text = row_text(folder_terminal.backend().buffer(), 0, 40);
+        assert!(folder_text.contains(" F Build  1"), "{folder_text:?}");
+        assert!(!folder_text.contains('('), "{folder_text:?}");
+
+        let header = SectionHeaderArea {
+            title: ACTIVE_SECTION_TITLE,
+            rect: Rect::new(0, 0, 24, 1),
+        };
+        let mut header_terminal = Terminal::new(TestBackend::new(24, 1)).expect("header terminal");
+        header_terminal
+            .draw(|frame| render_section_header(&app, frame, &header, 1, &[], false))
+            .expect("render folder button");
+        assert!(row_text(header_terminal.backend().buffer(), 0, 24).contains("+ Folder"));
+        assert_eq!(
+            sections_header_folder_button_rect(Rect::new(0, 0, 12, 1))
+                .unwrap()
+                .width,
+            1
+        );
+    }
+
+    #[test]
+    fn sections_folder_rows_count_members_and_cards_render_indented() {
+        let mut app = app_with_agents(&["local"]);
+        app.sidebar_sections_layout = true;
+        app.sidebar_folders
+            .push(crate::app::sidebar_folders::SidebarFolder {
+                shelf: crate::app::sidebar_folders::SidebarShelf::Active,
+                name: "Build".to_string(),
+                collapsed: false,
+            });
+        app.workspaces[0].tabs[0].set_subgroup(Some("Build".to_string()));
+        let rows = sidebar_rows(&app);
+        let folder_idx = rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::Folder { name, .. } if name == "Build"))
+            .expect("folder row");
+        let SidebarRow::Folder { count, .. } = &rows[folder_idx] else {
+            panic!("folder row expected")
+        };
+        assert_eq!(*count, 1);
+        assert_eq!(sidebar_row_height(&app, &rows[folder_idx], 10), 1);
+        let Some(SidebarRow::Tab { depth: 1, entry }) = rows.get(folder_idx + 1) else {
+            panic!("folder member tab should follow the folder")
+        };
+        assert!(entry.sections_card.is_some());
+
+        let card = compute_tab_card_areas(&app, Rect::new(0, 0, 60, 20))
+            .into_iter()
+            .find(|card| card.depth == 1)
+            .expect("indented folder card");
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).expect("folder card terminal");
+        terminal
+            .draw(|frame| render_tab_card(&app, frame, &card, None, &rows))
+            .expect("render folder card");
+        let text = row_text(terminal.backend().buffer(), card.rect.y, 60);
+        assert!(
+            text.starts_with("  "),
+            "folder card was not indented: {text:?}"
+        );
+        assert!(
+            !text.starts_with("   "),
+            "indent should be exactly two columns: {text:?}"
+        );
+    }
+
+    #[test]
+    fn collapsed_folder_occupies_one_row_and_keeps_its_count() {
+        let mut app = app_with_agents(&["local"]);
+        app.sidebar_sections_layout = true;
+        app.sidebar_folders
+            .push(crate::app::sidebar_folders::SidebarFolder {
+                shelf: crate::app::sidebar_folders::SidebarShelf::Active,
+                name: "Build".to_string(),
+                collapsed: true,
+            });
+        app.workspaces[0].tabs[0].set_subgroup(Some("Build".to_string()));
+
+        let rows = sidebar_rows(&app);
+        let folder_idx = rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::Folder { name, .. } if name == "Build"))
+            .expect("collapsed folder row");
+        assert!(matches!(
+            rows.get(folder_idx),
+            Some(SidebarRow::Folder {
+                count: 1,
+                collapsed: true,
+                ..
+            })
+        ));
+        assert!(!matches!(
+            rows.get(folder_idx + 1),
+            Some(SidebarRow::Tab { depth: 1, .. })
+        ));
+        assert_eq!(sidebar_row_height(&app, &rows[folder_idx], 10), 1);
+    }
+
+    #[test]
+    fn pinned_folder_works_and_tabs_leave_it_when_unpinned_or_settled() {
+        let mut app = app_with_agents(&["local"]);
+        app.sidebar_sections_layout = true;
+        app.workspaces[0].tabs[0].pinned = true;
+        app.workspaces[0].tabs[0].set_subgroup(Some("Review".to_string()));
+        app.sidebar_folders
+            .push(crate::app::sidebar_folders::SidebarFolder {
+                shelf: crate::app::sidebar_folders::SidebarShelf::Pinned,
+                name: "Review".to_string(),
+                collapsed: false,
+            });
+
+        let pinned_rows = sidebar_rows(&app);
+        assert!(pinned_rows.iter().any(|row| {
+            matches!(row, SidebarRow::Tab { entry, depth: 1 }
+                if entry.local_target().is_some_and(|target| target.ws_idx == 0 && target.tab_idx == 0))
+        }));
+        assert_eq!(
+            sections_tab_shelf(&app, 0, 0),
+            Some(crate::app::sidebar_folders::SidebarShelf::Pinned)
+        );
+
+        app.workspaces[0].tabs[0].pinned = false;
+        let active_rows = sidebar_rows(&app);
+        assert!(active_rows.iter().any(|row| {
+            matches!(row, SidebarRow::Tab { entry, depth: 0 }
+                if entry.local_target().is_some_and(|target| target.ws_idx == 0 && target.tab_idx == 0))
+        }));
+        assert_eq!(
+            sections_tab_shelf(&app, 0, 0),
+            Some(crate::app::sidebar_folders::SidebarShelf::Active)
+        );
+        assert_eq!(
+            app.tab_sidebar_folder(0, 0, crate::app::sidebar_folders::SidebarShelf::Active),
+            None
+        );
+
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane)
+            .unwrap()
+            .settled_at = Some(1_725_000_000);
+        assert_eq!(
+            sections_tab_shelf(&app, 0, 0),
+            Some(crate::app::sidebar_folders::SidebarShelf::Settled)
+        );
+        assert_eq!(
+            app.tab_sidebar_folder(0, 0, crate::app::sidebar_folders::SidebarShelf::Settled),
+            None
+        );
+        assert!(sidebar_rows(&app).iter().any(|row| {
+            matches!(row, SidebarRow::Tab { entry, depth: 0 }
+                if entry.local_target().is_some_and(|target| target.ws_idx == 0 && target.tab_idx == 0))
+        }));
+    }
+
+    #[test]
+    fn folders_render_in_pinned_active_snoozed_and_settled_shelves() {
+        use crate::app::sidebar_folders::{SidebarFolder, SidebarShelf};
+
+        let mut app = app_with_agents(&["pinned", "active", "snoozed", "settled"]);
+        app.sidebar_sections_layout = true;
+        app.workspaces[0].tabs[0].pinned = true;
+        app.workspaces[2].tabs[0].set_subgroup(Some("Later".to_string()));
+        let snoozed_pane = app.workspaces[2].tabs[0].root_pane;
+        assert!(app.snooze_pane_at(2, snoozed_pane, app.view_observed_unix_s + 60));
+        app.workspaces[3].tabs[0].set_subgroup(Some("Archive".to_string()));
+        let settled_pane = app.workspaces[3].tabs[0].root_pane;
+        app.workspaces[3].tabs[0]
+            .panes
+            .get_mut(&settled_pane)
+            .expect("settled test pane")
+            .settled_at = Some(1_725_000_000);
+        for (ws_idx, name) in [(0, "Pinned"), (1, "Now")] {
+            app.workspaces[ws_idx].tabs[0].set_subgroup(Some(name.to_string()));
+        }
+        app.sidebar_folders = vec![
+            SidebarFolder {
+                shelf: SidebarShelf::Pinned,
+                name: "Pinned".to_string(),
+                collapsed: false,
+            },
+            SidebarFolder {
+                shelf: SidebarShelf::Active,
+                name: "Now".to_string(),
+                collapsed: false,
+            },
+            SidebarFolder {
+                shelf: SidebarShelf::Snoozed,
+                name: "Later".to_string(),
+                collapsed: false,
+            },
+            SidebarFolder {
+                shelf: SidebarShelf::Settled,
+                name: "Archive".to_string(),
+                collapsed: false,
+            },
+        ];
+
+        let rows = sidebar_rows(&app);
+        for (ws_idx, name, shelf) in [
+            (0, "Pinned", SidebarShelf::Pinned),
+            (1, "Now", SidebarShelf::Active),
+            (2, "Later", SidebarShelf::Snoozed),
+            (3, "Archive", SidebarShelf::Settled),
+        ] {
+            let folder_idx = rows
+                .iter()
+                .position(|row| matches!(row, SidebarRow::Folder { name: found, shelf: found_shelf, count: 1, .. } if found == name && *found_shelf == shelf))
+                .expect("registered shelf folder with a member");
+            assert!(matches!(
+                rows.get(folder_idx + 1),
+                Some(SidebarRow::Tab { entry, depth: 1 })
+                    if entry.local_target().is_some_and(|target| target.ws_idx == ws_idx)
+            ));
+        }
+    }
+
+    #[test]
+    fn folder_rename_and_delete_only_change_members_in_their_current_shelf() {
+        let mut app = app_with_agents(&["active", "settled"]);
+        app.sidebar_sections_layout = true;
+        app.sidebar_folders
+            .push(crate::app::sidebar_folders::SidebarFolder {
+                shelf: crate::app::sidebar_folders::SidebarShelf::Active,
+                name: "Shared".to_string(),
+                collapsed: false,
+            });
+        app.workspaces[0].tabs[0].set_subgroup(Some("Shared".to_string()));
+        app.workspaces[1].tabs[0].set_subgroup(Some("Shared".to_string()));
+        let settled_pane = app.workspaces[1].tabs[0].root_pane;
+        app.workspaces[1].tabs[0]
+            .panes
+            .get_mut(&settled_pane)
+            .expect("settled test pane")
+            .settled_at = Some(1_725_000_000);
+        assert_eq!(
+            sections_tab_shelf(&app, 0, 0),
+            Some(crate::app::sidebar_folders::SidebarShelf::Active)
+        );
+        assert_eq!(
+            sections_tab_shelf(&app, 1, 0),
+            Some(crate::app::sidebar_folders::SidebarShelf::Settled)
+        );
+
+        assert_eq!(
+            app.rename_sidebar_folder("Shared", "Current"),
+            Ok("Current".to_string())
+        );
+        assert_eq!(app.workspaces[0].tabs[0].subgroup(), Some("Current"));
+        assert_eq!(app.workspaces[1].tabs[0].subgroup(), Some("Shared"));
+        assert!(app.delete_sidebar_folder("Current"));
+        assert_eq!(app.workspaces[0].tabs[0].subgroup(), None);
+        assert_eq!(app.workspaces[1].tabs[0].subgroup(), Some("Shared"));
+    }
+
+    #[test]
+    fn default_layout_rows_ignore_registered_sections_folders() {
+        fn signature(app: &AppState) -> (Vec<std::mem::Discriminant<SidebarRow>>, Vec<String>) {
+            let rows = sidebar_rows(app);
+            let kinds = rows.iter().map(std::mem::discriminant).collect();
+            let identities = rows
+                .iter()
+                .filter_map(|row| match row {
+                    SidebarRow::Workspace { ws_idx, title, .. } => {
+                        Some(format!("workspace:{ws_idx}:{title}"))
+                    }
+                    SidebarRow::Tab { entry, depth } | SidebarRow::Agent { entry, depth } => {
+                        let target = entry.local_target()?;
+                        Some(format!(
+                            "{}:{}:{}:{}",
+                            if matches!(row, SidebarRow::Tab { .. }) {
+                                "tab"
+                            } else {
+                                "agent"
+                            },
+                            target.ws_idx,
+                            target.tab_idx,
+                            depth,
+                        ))
+                    }
+                    SidebarRow::SectionHeader {
+                        title,
+                        count,
+                        collapsed,
+                        ..
+                    } => Some(format!("section:{title}:{count}:{collapsed}")),
+                    SidebarRow::NestedHeader {
+                        key,
+                        title,
+                        count,
+                        collapsed,
+                        ..
+                    } => Some(format!("group:{key}:{title}:{count}:{collapsed}")),
+                    SidebarRow::Folder { name, .. } => Some(format!("folder:{name}")),
+                    _ => None,
+                })
+                .collect();
+            (kinds, identities)
+        }
+
+        let mut app = app_with_agents(&["local"]);
+        app.workspaces[0].tabs[0].set_subgroup(Some("Existing subgroup".to_string()));
+        let before = signature(&app);
+        app.sidebar_folders
+            .push(crate::app::sidebar_folders::SidebarFolder {
+                shelf: crate::app::sidebar_folders::SidebarShelf::Active,
+                name: "Ignored by tree".to_string(),
+                collapsed: false,
+            });
+        let after = signature(&app);
+
+        assert_eq!(after, before);
+        assert!(!after
+            .1
+            .iter()
+            .any(|identity| identity.starts_with("folder:")));
     }
 
     #[test]

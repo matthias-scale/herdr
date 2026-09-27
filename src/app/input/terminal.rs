@@ -767,6 +767,7 @@ mod tests {
             tab_idx: 0,
             anchor: (7, 4),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
+            folder_shelf: None,
         });
 
         app.route_client_events(
@@ -822,6 +823,7 @@ mod tests {
             tab_idx: 0,
             anchor: (7, 4),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
+            folder_shelf: None,
         });
         app.route_client_events(
             vec![crate::raw_input::RawInputEvent::Key(TerminalKey::new(

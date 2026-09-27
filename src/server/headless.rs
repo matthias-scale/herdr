@@ -4663,6 +4663,9 @@ impl HeadlessServer {
         {
             crate::client::presentation::save_sidebar_group_collapsed(&key, collapsed);
         }
+        if let Some(folders) = self.app.state.take_sidebar_folders_persistence_request() {
+            crate::client::presentation::save_sidebar_folders(&folders);
+        }
         if self.app.state.take_sidebar_view_scan_request() {
             self.app.request_sidebar_view_scan(Instant::now());
         }
@@ -4793,6 +4796,8 @@ impl HeadlessServer {
                 if let Some(client) = self.clients.get_mut(&client_id) {
                     let group_mode = crate::client::presentation::load_sidebar_group_mode();
                     let collapsed = crate::client::presentation::load_sidebar_group_collapsed();
+                    self.app.state.sidebar_folders =
+                        crate::client::presentation::load_sidebar_folders();
                     client
                         .sidebar_presentation
                         .initialize_group_mode(group_mode, &collapsed);

@@ -1250,8 +1250,27 @@ impl AppState {
                     }
                     // Headers are tested before spaces: a header row owns its
                     // whole width, so anywhere on it folds the group.
+                    if let Some(shelf) = crate::ui::sidebar::sections_header_folder_button_at(
+                        self,
+                        mouse.column,
+                        mouse.row,
+                    ) {
+                        self.open_sidebar_folder_prompt(
+                            crate::app::sidebar_folders::SidebarFolderPrompt::Create {
+                                shelf,
+                                tab: None,
+                            },
+                        );
+                        return None;
+                    }
                     if let Some(title) = self.sidebar_section_header_at(mouse.row) {
                         self.toggle_sidebar_group(title);
+                        return None;
+                    }
+                    if let Some((_, name)) = crate::ui::sidebar_folder_at(self, mouse.row) {
+                        self.sidebar_selected_work_group =
+                            Some(crate::app::sidebar_folders::folder_selection_key(&name));
+                        self.toggle_sidebar_folder_collapsed(&name);
                         return None;
                     }
                     if let Some((group_id, _)) = crate::ui::sidebar_pod_header_at(self, mouse.row) {
@@ -2001,6 +2020,16 @@ impl AppState {
                 {
                     return None;
                 }
+                if let Some((shelf, name)) = crate::ui::sidebar_folder_at(self, mouse.row) {
+                    self.context_menu = Some(ContextMenuState {
+                        kind: ContextMenuKind::Folder { shelf, name },
+                        x: mouse.column,
+                        y: mouse.row,
+                        selected: ContextMenuAction::RenameFolder,
+                    });
+                    self.open_client_overlay(ClientOverlay::ContextMenu);
+                    return None;
+                }
                 // Session rows sit inside the same sidebar rect as workspace
                 // header rows but `workspace_at_row` never matches them, so
                 // without this branch a right-click on a session did nothing.
@@ -2030,11 +2059,18 @@ impl AppState {
                             settle_pane_id,
                             snooze_target,
                             starred: self.tab_starred(ws_idx, tab_idx),
-                            has_subgroup: self
-                                .workspaces
-                                .get(ws_idx)
-                                .and_then(|workspace| workspace.tabs.get(tab_idx))
-                                .is_some_and(|tab| tab.subgroup().is_some()),
+                            folder_menu: self.sidebar_sections_layout,
+                            has_subgroup: if self.sidebar_sections_layout {
+                                crate::ui::sidebar::sections_tab_shelf(self, ws_idx, tab_idx)
+                                    .is_some_and(|shelf| {
+                                        self.tab_sidebar_folder(ws_idx, tab_idx, shelf).is_some()
+                                    })
+                            } else {
+                                self.workspaces
+                                    .get(ws_idx)
+                                    .and_then(|workspace| workspace.tabs.get(tab_idx))
+                                    .is_some_and(|tab| tab.subgroup().is_some())
+                            },
                         },
                         x: mouse.column,
                         y: mouse.row,
@@ -2112,11 +2148,18 @@ impl AppState {
                             settle_pane_id: None,
                             snooze_target: None,
                             starred: self.tab_starred(ws_idx, tab_idx),
-                            has_subgroup: self
-                                .workspaces
-                                .get(ws_idx)
-                                .and_then(|workspace| workspace.tabs.get(tab_idx))
-                                .is_some_and(|tab| tab.subgroup().is_some()),
+                            folder_menu: self.sidebar_sections_layout,
+                            has_subgroup: if self.sidebar_sections_layout {
+                                crate::ui::sidebar::sections_tab_shelf(self, ws_idx, tab_idx)
+                                    .is_some_and(|shelf| {
+                                        self.tab_sidebar_folder(ws_idx, tab_idx, shelf).is_some()
+                                    })
+                            } else {
+                                self.workspaces
+                                    .get(ws_idx)
+                                    .and_then(|workspace| workspace.tabs.get(tab_idx))
+                                    .is_some_and(|tab| tab.subgroup().is_some())
+                            },
                         },
                         x: mouse.column,
                         y: mouse.row,
@@ -2762,6 +2805,11 @@ impl AppState {
             Some(crate::ui::MobileSwitcherTarget::Section(title)) => {
                 self.toggle_sidebar_group(title);
             }
+            Some(crate::ui::MobileSwitcherTarget::Folder(name)) => {
+                self.sidebar_selected_work_group =
+                    Some(crate::app::sidebar_folders::folder_selection_key(&name));
+                self.toggle_sidebar_folder_collapsed(&name);
+            }
             Some(crate::ui::MobileSwitcherTarget::NewWorkspace) => {
                 return MobileMouseResult::Action(MouseAction::NewWorkspace);
             }
@@ -2889,6 +2937,7 @@ impl AppState {
                 tab_id,
                 ..
             } => (workspace_id, Some(tab_id)),
+            ContextMenuKind::Folder { .. } => return None,
         };
         let ws_idx = self
             .workspaces
@@ -2906,6 +2955,11 @@ impl AppState {
     }
 
     pub(crate) fn rebase_context_menu_indices(&self, menu: &mut ContextMenuState) -> bool {
+        if let ContextMenuKind::Folder { shelf, name } = &menu.kind {
+            return self
+                .sidebar_folder(name)
+                .is_some_and(|folder| folder.shelf == *shelf);
+        }
         let Some((ws_idx, tab_idx)) = self.context_menu_target_indices(menu) else {
             return false;
         };
@@ -2928,11 +2982,24 @@ impl AppState {
                 *cached_ws = ws_idx;
                 *cached_tab = tab_idx;
             }
+            ContextMenuKind::Folder { .. } => return false,
         }
         true
     }
 
     pub(crate) fn context_menu_actions(&self, menu: &ContextMenuState) -> Vec<ContextMenuAction> {
+        if let ContextMenuKind::Folder { shelf, name } = &menu.kind {
+            return self
+                .sidebar_folder(name)
+                .filter(|folder| folder.shelf == *shelf)
+                .map(|_| {
+                    vec![
+                        ContextMenuAction::RenameFolder,
+                        ContextMenuAction::DeleteFolder,
+                    ]
+                })
+                .unwrap_or_default();
+        }
         let Some((ws_idx, tab_idx)) = self.context_menu_target_indices(menu) else {
             return Vec::new();
         };
@@ -2942,13 +3009,20 @@ impl AppState {
             ContextMenuKind::Tab {
                 starred,
                 has_subgroup,
+                folder_menu,
                 ..
             },
         ) = (tab_idx, &mut live_menu.kind)
         {
             if let Some(tab) = self.workspaces[ws_idx].tabs.get(tab_idx) {
                 *starred = tab.starred;
-                *has_subgroup = tab.subgroup().is_some();
+                *has_subgroup = if *folder_menu {
+                    crate::ui::sidebar::sections_tab_shelf(self, ws_idx, tab_idx).is_some_and(
+                        |shelf| self.tab_sidebar_folder(ws_idx, tab_idx, shelf).is_some(),
+                    )
+                } else {
+                    tab.subgroup().is_some()
+                };
             }
         }
         let target = match &menu.kind {
@@ -4305,6 +4379,41 @@ mod tests {
             !app.state.hyperspace.paused(),
             "a second click starts it again"
         );
+    }
+
+    #[test]
+    fn plus_folder_click_opens_create_prompt_for_its_shelf() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("folders")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.sidebar_sections_layout = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+
+        let header = crate::ui::compute_sidebar_section_header_areas(
+            &app.state,
+            app.state.view.sidebar_rect,
+        )
+        .into_iter()
+        .find(|header| header.title == crate::ui::sidebar::ACTIVE_SECTION_TITLE)
+        .expect("active shelf header");
+        let button = crate::ui::sidebar::sections_header_folder_button_rect(header.rect)
+            .expect("visible folder button");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x,
+            button.y,
+        ));
+
+        assert!(matches!(
+            app.state.rename_target,
+            Some(crate::app::state::RenameTarget::Folder {
+                prompt: crate::app::sidebar_folders::SidebarFolderPrompt::Create {
+                    shelf: crate::app::sidebar_folders::SidebarShelf::Active,
+                    tab: None,
+                }
+            })
+        ));
     }
 
     #[test]
@@ -6477,6 +6586,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 has_subgroup: false,
+                folder_menu: false,
                 settle_pane_id: Some(target.pane_id),
                 snooze_target: Some(target.pane_id),
             }
@@ -9955,6 +10065,7 @@ mod tests {
                 tab_idx: 1,
                 starred: false,
                 has_subgroup: false,
+                folder_menu: false,
                 settle_pane_id: None,
                 snooze_target: None,
             }

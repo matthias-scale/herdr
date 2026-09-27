@@ -170,6 +170,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.copy_mode), "copy mode"),
         help_entry(keybind_label(&kb.zoom), "zoom pane"),
         help_entry(keybind_label(&kb.toggle_pin_tab), "pin tab in sidebar"),
+        help_entry(keybind_label(&kb.move_tab_to_folder), "move tab to folder"),
         help_entry(keybind_label(&kb.resize_mode), "resize mode"),
         help_entry(keybind_label(&kb.resize_pane_left), "resize pane left"),
         help_entry(keybind_label(&kb.resize_pane_down), "resize pane down"),

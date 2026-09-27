@@ -22,6 +22,8 @@ struct ClientPresentationFile {
         Option<std::collections::HashMap<String, crate::app::state::SidebarSortMode>>,
     #[serde(default)]
     sidebar_group_collapsed: Option<std::collections::HashMap<String, bool>>,
+    #[serde(default)]
+    sidebar_folders: Option<Vec<crate::app::sidebar_folders::SidebarFolder>>,
 }
 
 fn presentation_path() -> PathBuf {
@@ -182,6 +184,37 @@ pub(crate) fn save_sidebar_group_collapsed(key: &str, collapsed: bool) {
     }) {
         warn!(path = %path.display(), err = %err, "failed to save client presentation state");
     }
+}
+
+pub(crate) fn load_sidebar_folders() -> Vec<crate::app::sidebar_folders::SidebarFolder> {
+    let path = presentation_path();
+    match load_sidebar_folders_from_path(&path) {
+        Ok(folders) => folders,
+        Err(err) => {
+            warn!(path = %path.display(), err = %err, "failed to load client presentation state");
+            Vec::new()
+        }
+    }
+}
+
+pub(crate) fn save_sidebar_folders(folders: &[crate::app::sidebar_folders::SidebarFolder]) {
+    let path = presentation_path();
+    if let Err(err) = save_sidebar_folders_to_path(&path, folders) {
+        warn!(path = %path.display(), err = %err, "failed to save client presentation state");
+    }
+}
+
+fn load_sidebar_folders_from_path(
+    path: &Path,
+) -> std::io::Result<Vec<crate::app::sidebar_folders::SidebarFolder>> {
+    Ok(load_from_path(path)?.sidebar_folders.unwrap_or_default())
+}
+
+fn save_sidebar_folders_to_path(
+    path: &Path,
+    folders: &[crate::app::sidebar_folders::SidebarFolder],
+) -> std::io::Result<()> {
+    update_path(path, |state| state.sidebar_folders = Some(folders.to_vec()))
 }
 
 fn load_from_path(path: &Path) -> std::io::Result<ClientPresentationFile> {
@@ -471,5 +504,40 @@ mod tests {
         let state: ClientPresentationFile =
             serde_json::from_str(r#"{"dock_width":31}"#).expect("legacy presentation state");
         assert!(state.sidebar_group_collapsed.is_none());
+    }
+
+    #[test]
+    fn sidebar_folder_registry_round_trips_without_erasing_other_fields() {
+        let path = temp_path();
+        let folders = vec![
+            crate::app::sidebar_folders::SidebarFolder {
+                shelf: crate::app::sidebar_folders::SidebarShelf::Pinned,
+                name: "Now".to_string(),
+                collapsed: true,
+            },
+            crate::app::sidebar_folders::SidebarFolder {
+                shelf: crate::app::sidebar_folders::SidebarShelf::Active,
+                name: "Later".to_string(),
+                collapsed: false,
+            },
+        ];
+        update_path(&path, |state| state.dock_width = Some(27)).expect("save dock width");
+
+        save_sidebar_folders_to_path(&path, &folders).expect("save folder registry");
+        let state = load_from_path(&path).expect("load presentation state");
+        assert_eq!(state.dock_width, Some(27));
+        assert_eq!(state.sidebar_folders, Some(folders.clone()));
+        assert_eq!(
+            load_sidebar_folders_from_path(&path).expect("load folders"),
+            folders
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_presentation_files_have_no_sidebar_folders() {
+        let state: ClientPresentationFile =
+            serde_json::from_str(r#"{"dock_width":31}"#).expect("legacy presentation state");
+        assert!(state.sidebar_folders.is_none());
     }
 }

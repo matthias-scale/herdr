@@ -1046,6 +1046,8 @@ pub struct KeysConfig {
     /// Pin or unpin the active tab into the sidebar's Pinned group.
     /// Unset by default; pinning is available from the sidebar and API.
     pub toggle_pin_tab: BindingConfig,
+    /// Open the active tab's folder picker. Unset by default.
+    pub move_tab_to_folder: BindingConfig,
     /// Enter resize mode. Default: "prefix+r"
     pub resize_mode: BindingConfig,
     /// Resize the focused pane toward the left. Unset by default.
@@ -1289,6 +1291,8 @@ pub(crate) struct KeysConfigOverlay {
     zoom: Option<BindingConfig>,
     toggle_pin_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    move_tab_to_folder: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     resize_mode: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     resize_pane_left: Option<BindingConfig>,
@@ -1462,6 +1466,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(close_pane);
         apply_field!(zoom);
         apply_field!(toggle_pin_tab);
+        apply_field!(move_tab_to_folder);
         apply_field!(resize_mode);
         apply_field!(resize_pane_left);
         apply_field!(resize_pane_down);
@@ -1623,6 +1628,7 @@ impl KeysConfig {
         copy_effective_action_field!(close_pane, keybinds.close_pane);
         copy_effective_action_field!(zoom, keybinds.zoom);
         copy_effective_action_field!(toggle_pin_tab, keybinds.toggle_pin_tab);
+        copy_effective_action_field!(move_tab_to_folder, keybinds.move_tab_to_folder);
         copy_effective_action_field!(resize_mode, keybinds.resize_mode);
         copy_effective_action_field!(resize_pane_left, keybinds.resize_pane_left);
         copy_effective_action_field!(resize_pane_down, keybinds.resize_pane_down);
@@ -2187,6 +2193,7 @@ impl Default for KeysConfig {
             close_pane: BindingConfig::one("prefix+x"),
             zoom: BindingConfig::one("prefix+z"),
             toggle_pin_tab: BindingConfig::empty(),
+            move_tab_to_folder: BindingConfig::empty(),
             resize_mode: BindingConfig::one("prefix+r"),
             resize_pane_left: BindingConfig::empty(),
             resize_pane_down: BindingConfig::empty(),

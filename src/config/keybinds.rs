@@ -398,6 +398,7 @@ pub struct Keybinds {
     pub close_pane: ActionKeybinds,
     pub zoom: ActionKeybinds,
     pub toggle_pin_tab: ActionKeybinds,
+    pub move_tab_to_folder: ActionKeybinds,
     pub resize_mode: ActionKeybinds,
     pub resize_pane_left: ActionKeybinds,
     pub resize_pane_down: ActionKeybinds,
@@ -624,6 +625,7 @@ impl Config {
             close_pane: empty_action!(),
             zoom: empty_action!(),
             toggle_pin_tab: empty_action!(),
+            move_tab_to_folder: empty_action!(),
             resize_mode: empty_action!(),
             resize_pane_left: empty_action!(),
             resize_pane_down: empty_action!(),
@@ -829,6 +831,7 @@ impl Config {
             apply_action!(keybinds.close_pane, close_pane, source);
             apply_action!(keybinds.zoom, zoom, source);
             apply_action!(keybinds.toggle_pin_tab, toggle_pin_tab, source);
+            apply_action!(keybinds.move_tab_to_folder, move_tab_to_folder, source);
             apply_action!(keybinds.resize_mode, resize_mode, source);
             apply_action!(keybinds.resize_pane_left, resize_pane_left, source);
             apply_action!(keybinds.resize_pane_down, resize_pane_down, source);

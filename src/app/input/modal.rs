@@ -682,6 +682,11 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                     }
                 }
                 Mode::RenamePane => {
+                    if let Some(crate::app::state::RenameTarget::Folder { prompt }) =
+                        state.rename_target.clone()
+                    {
+                        state.apply_sidebar_folder_prompt(prompt, &new_name);
+                    }
                     let target = state.rename_target.clone().and_then(|target| match target {
                         crate::app::state::RenameTarget::Pane {
                             workspace_id,
@@ -1044,16 +1049,11 @@ pub(super) fn apply_context_menu_action(
             ContextMenuKind::Tab {
                 ws_idx, tab_idx, ..
             },
-            Some(crate::app::state::MOVE_TO_SUBGROUP_ITEM),
+            Some(crate::app::state::MOVE_TO_SUBGROUP_ITEM | crate::app::state::MOVE_TO_FOLDER_ITEM),
         ) => {
             // The picker hangs off the menu cell the operator just chose, the
             // way every other downward menu hangs off its anchor.
-            state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
-                ws_idx,
-                tab_idx,
-                anchor: (menu_x, menu_y),
-                filter: crate::ui::dropdown::DropdownFilterState::default(),
-            });
+            state.open_sidebar_folder_picker(ws_idx, tab_idx, (menu_x, menu_y));
             state.set_server_mode(if state.active.is_some() {
                 Mode::Terminal
             } else {
@@ -1064,7 +1064,10 @@ pub(super) fn apply_context_menu_action(
             ContextMenuKind::Tab {
                 ws_idx, tab_idx, ..
             },
-            Some(crate::app::state::REMOVE_FROM_SUBGROUP_ITEM),
+            Some(
+                crate::app::state::REMOVE_FROM_SUBGROUP_ITEM
+                | crate::app::state::REMOVE_FROM_FOLDER_ITEM,
+            ),
         ) => {
             state.clear_tab_subgroup(ws_idx, tab_idx);
             state.set_server_mode(if state.active.is_some() {
@@ -1072,6 +1075,15 @@ pub(super) fn apply_context_menu_action(
             } else {
                 Mode::Navigate
             });
+        }
+        (ContextMenuKind::Folder { name, .. }, Some("Rename")) => {
+            state.open_sidebar_folder_prompt(
+                crate::app::sidebar_folders::SidebarFolderPrompt::Rename { name },
+            );
+        }
+        (ContextMenuKind::Folder { name, .. }, Some("Delete folder")) => {
+            state.delete_sidebar_folder(&name);
+            leave_modal(state);
         }
         (
             ContextMenuKind::Tab {
@@ -1472,7 +1484,11 @@ impl App {
                 }
             }
             Mode::RenamePane => {
-                if let Some(crate::app::state::RenameTarget::Pod { record }) =
+                if let Some(crate::app::state::RenameTarget::Folder { prompt }) =
+                    self.state.rename_target.clone()
+                {
+                    self.state.apply_sidebar_folder_prompt(prompt, &new_name);
+                } else if let Some(crate::app::state::RenameTarget::Pod { record }) =
                     self.state.rename_target.clone()
                 {
                     if !new_name.is_empty() {
@@ -1790,6 +1806,15 @@ impl App {
                 | ContextMenuKind::GitWorkspace { ws_idx, .. },
                 Some("Rename"),
             ) => open_rename_workspace(&mut self.state, &self.terminal_runtimes, ws_idx),
+            (ContextMenuKind::Folder { name, .. }, Some("Rename")) => {
+                self.state.open_sidebar_folder_prompt(
+                    crate::app::sidebar_folders::SidebarFolderPrompt::Rename { name },
+                );
+            }
+            (ContextMenuKind::Folder { name, .. }, Some("Delete folder")) => {
+                self.state.delete_sidebar_folder(&name);
+                self.state.close_client_overlay();
+            }
             (
                 ContextMenuKind::Workspace { ws_idx, .. }
                 | ContextMenuKind::GitWorkspace { ws_idx, .. },
@@ -1836,24 +1861,25 @@ impl App {
                 ContextMenuKind::Tab {
                     ws_idx, tab_idx, ..
                 },
-                Some(crate::app::state::MOVE_TO_SUBGROUP_ITEM),
+                Some(
+                    crate::app::state::MOVE_TO_SUBGROUP_ITEM
+                    | crate::app::state::MOVE_TO_FOLDER_ITEM,
+                ),
             ) => {
                 // The picker hangs off the menu cell the operator just chose,
                 // the way every other downward menu hangs off its anchor.
-                self.state.sidebar_subgroup_picker =
-                    Some(crate::app::state::SidebarSubgroupPickerState {
-                        ws_idx,
-                        tab_idx,
-                        anchor: (menu_x, menu_y),
-                        filter: crate::ui::dropdown::DropdownFilterState::default(),
-                    });
+                self.state
+                    .open_sidebar_folder_picker(ws_idx, tab_idx, (menu_x, menu_y));
                 self.state.close_client_overlay();
             }
             (
                 ContextMenuKind::Tab {
                     ws_idx, tab_idx, ..
                 },
-                Some(crate::app::state::REMOVE_FROM_SUBGROUP_ITEM),
+                Some(
+                    crate::app::state::REMOVE_FROM_SUBGROUP_ITEM
+                    | crate::app::state::REMOVE_FROM_FOLDER_ITEM,
+                ),
             ) => {
                 self.state.clear_tab_subgroup(ws_idx, tab_idx);
                 self.state.close_client_overlay();
@@ -2274,6 +2300,37 @@ mod tests {
             Mode::Navigate
         });
         app
+    }
+
+    #[test]
+    fn folder_context_menu_dispatches_rename_and_delete() {
+        let mut app = app_with_test_workspaces(&["folders"]);
+        app.state.sidebar_sections_layout = true;
+        app.state
+            .create_sidebar_folder(crate::app::sidebar_folders::SidebarShelf::Active, "Plans")
+            .expect("create folder");
+        app.state.workspaces[0].tabs[0].set_subgroup(Some("Plans".to_string()));
+        let menu = || ContextMenuState {
+            kind: ContextMenuKind::Folder {
+                shelf: crate::app::sidebar_folders::SidebarShelf::Active,
+                name: "Plans".to_string(),
+            },
+            x: 0,
+            y: 0,
+            selected: ContextMenuAction::RenameFolder,
+        };
+
+        app.apply_context_menu_action_via_api(menu(), ContextMenuAction::RenameFolder);
+        assert!(matches!(
+            app.state.rename_target.as_ref(),
+            Some(crate::app::state::RenameTarget::Folder {
+                prompt: crate::app::sidebar_folders::SidebarFolderPrompt::Rename { name },
+            }) if name == "Plans"
+        ));
+
+        app.apply_context_menu_action_via_api(menu(), ContextMenuAction::DeleteFolder);
+        assert!(app.state.sidebar_folder("Plans").is_none());
+        assert_eq!(app.state.workspaces[0].tabs[0].subgroup(), None);
     }
 
     fn context_tab_ids(state: &AppState, ws_idx: usize, tab_idx: usize) -> (String, String) {
@@ -3379,6 +3436,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 has_subgroup: false,
+                folder_menu: false,
                 settle_pane_id: None,
                 snooze_target: None,
             },
@@ -3405,6 +3463,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 has_subgroup: false,
+                folder_menu: false,
                 settle_pane_id: None,
                 snooze_target: None,
             },
@@ -3431,6 +3490,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 has_subgroup: true,
+                folder_menu: false,
                 settle_pane_id: None,
                 snooze_target: None,
             },
@@ -3467,6 +3527,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 has_subgroup: false,
+                folder_menu: false,
                 settle_pane_id: Some(pane_id),
                 snooze_target: None,
             },
@@ -3497,6 +3558,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 has_subgroup: false,
+                folder_menu: false,
                 settle_pane_id: Some(pane_id),
                 snooze_target: None,
             },
@@ -3523,6 +3585,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 has_subgroup: false,
+                folder_menu: false,
                 settle_pane_id: None,
                 snooze_target: None,
             },
@@ -3554,6 +3617,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 has_subgroup: true,
+                folder_menu: false,
                 settle_pane_id: None,
                 snooze_target: None,
             },
@@ -3638,6 +3702,7 @@ mod tests {
                     snooze_target: Some(pane_id),
                     starred: false,
                     has_subgroup: false,
+                    folder_menu: false,
                 },
                 x: 0,
                 y: 0,
@@ -3700,6 +3765,7 @@ mod tests {
                 snooze_target: Some(pane_id),
                 starred: false,
                 has_subgroup: false,
+                folder_menu: false,
             },
             x: 3,
             y: 2,
@@ -3773,6 +3839,7 @@ mod tests {
                 snooze_target: Some(pane_id),
                 starred: false,
                 has_subgroup: false,
+                folder_menu: false,
             },
             x: 3,
             y: 2,

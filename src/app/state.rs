@@ -1994,6 +1994,8 @@ pub(crate) struct SidebarSubgroupPickerState {
     /// Cell the dropdown hangs from: the context menu item the operator chose.
     pub(crate) anchor: (u16, u16),
     pub(crate) filter: crate::ui::dropdown::DropdownFilterState,
+    /// When set, choices are folders restricted to this sections-layout shelf.
+    pub(crate) folder_shelf: Option<crate::app::sidebar_folders::SidebarShelf>,
 }
 
 /// Attach-local picker that assigns one pane to a pod.
@@ -3492,6 +3494,12 @@ pub enum ContextMenuKind {
         /// Snapshot of the tab's subgroup membership at open time, so the menu
         /// offers "Remove from subgroup" exactly when there is one to remove.
         has_subgroup: bool,
+        /// Sections layout replaces subgroup wording with folder actions.
+        folder_menu: bool,
+    },
+    Folder {
+        shelf: crate::app::sidebar_folders::SidebarShelf,
+        name: String,
     },
     Pane {
         workspace_id: String,
@@ -3538,6 +3546,9 @@ pub(crate) enum RenameTarget {
     },
     Pod {
         record: crate::groups::GroupRecord,
+    },
+    Folder {
+        prompt: crate::app::sidebar_folders::SidebarFolderPrompt,
     },
 }
 
@@ -3624,6 +3635,8 @@ pub const UNSTAR_ITEM: &str = "Unstar";
 /// Labels of the sidebar-subgroup entries in the tab context menu.
 pub const MOVE_TO_SUBGROUP_ITEM: &str = "Move to subgroup…";
 pub const REMOVE_FROM_SUBGROUP_ITEM: &str = "Remove from subgroup";
+pub const MOVE_TO_FOLDER_ITEM: &str = "Move to folder…";
+pub const REMOVE_FROM_FOLDER_ITEM: &str = "Remove from folder";
 pub const SETTLE_ITEM: &str = "Settle";
 pub const SNOOZE_ITEM: &str = "Snooze ▸";
 pub const SET_TIME_ITEM: &str = "Set time…";
@@ -3822,6 +3835,10 @@ pub enum ContextMenuAction {
     UnstarTab,
     MoveToSubgroup,
     RemoveFromSubgroup,
+    MoveToFolder,
+    RemoveFromFolder,
+    RenameFolder,
+    DeleteFolder,
     Snooze,
     Unsnooze,
     SetTime,
@@ -3849,7 +3866,7 @@ pub enum ContextMenuAction {
 impl ContextMenuAction {
     pub fn label(self) -> &'static str {
         match self {
-            Self::RenameWorkspace | Self::RenameTab => "Rename",
+            Self::RenameWorkspace | Self::RenameTab | Self::RenameFolder => "Rename",
             Self::CloseWorkspace | Self::CloseTab => "Close",
             Self::NewWorktree => "New worktree",
             Self::OpenWorktree => "Open worktree...",
@@ -3861,6 +3878,9 @@ impl ContextMenuAction {
             Self::UnstarTab => UNSTAR_ITEM,
             Self::MoveToSubgroup => MOVE_TO_SUBGROUP_ITEM,
             Self::RemoveFromSubgroup => REMOVE_FROM_SUBGROUP_ITEM,
+            Self::MoveToFolder => MOVE_TO_FOLDER_ITEM,
+            Self::RemoveFromFolder => REMOVE_FROM_FOLDER_ITEM,
+            Self::DeleteFolder => "Delete folder",
             Self::Snooze => SNOOZE_ITEM,
             Self::Unsnooze => UNSNOOZE_ITEM,
             Self::SetTime => SET_TIME_ITEM,
@@ -3961,6 +3981,7 @@ impl ContextMenuState {
             ContextMenuKind::Tab {
                 starred,
                 has_subgroup,
+                folder_menu,
                 settle_pane_id,
                 snooze_target,
                 ..
@@ -3973,10 +3994,18 @@ impl ContextMenuState {
                     } else {
                         ContextMenuAction::StarTab
                     },
-                    ContextMenuAction::MoveToSubgroup,
+                    if *folder_menu {
+                        ContextMenuAction::MoveToFolder
+                    } else {
+                        ContextMenuAction::MoveToSubgroup
+                    },
                 ];
                 if *has_subgroup {
-                    items.push(ContextMenuAction::RemoveFromSubgroup);
+                    items.push(if *folder_menu {
+                        ContextMenuAction::RemoveFromFolder
+                    } else {
+                        ContextMenuAction::RemoveFromSubgroup
+                    });
                 }
                 if snooze_target.is_some() && (pane_snoozed || pane_snoozeable) {
                     if pane_snoozed {
@@ -3991,6 +4020,10 @@ impl ContextMenuState {
                 items.push(ContextMenuAction::CloseTab);
                 items
             }
+            ContextMenuKind::Folder { .. } => vec![
+                ContextMenuAction::RenameFolder,
+                ContextMenuAction::DeleteFolder,
+            ],
             ContextMenuKind::Pane {
                 source_pane_id,
                 has_manual_label,
@@ -4405,6 +4438,8 @@ pub struct AppState {
     pub(crate) sidebar_group_mode_persistence_request: Option<SidebarGroupMode>,
     pub(crate) sidebar_group_sort_persistence_request: Option<(String, SidebarSortMode)>,
     pub(crate) sidebar_group_collapsed_persistence_request: Option<(String, bool)>,
+    pub(crate) sidebar_folders: Vec<crate::app::sidebar_folders::SidebarFolder>,
+    pub(crate) sidebar_folders_persistence_request: bool,
     pub(crate) sidebar_view_scan_request: bool,
     pub(crate) sidebar_work_filter_persistence_request: Option<SidebarWorkFilter>,
     /// Set when UI interaction requested a clipboard write that must be
@@ -6362,6 +6397,12 @@ impl AppState {
                 .any(|candidate| {
                     candidate.id == record.id && candidate.revision == record.revision
                 }),
+            Some(RenameTarget::Folder { prompt }) => match prompt {
+                crate::app::sidebar_folders::SidebarFolderPrompt::Create { .. } => true,
+                crate::app::sidebar_folders::SidebarFolderPrompt::Rename { name } => {
+                    self.sidebar_folder(name).is_some()
+                }
+            },
             None => self.pending_workspace_create_cwd.is_some() || self.creating_new_tab,
         };
         if matches!(
@@ -7541,6 +7582,8 @@ impl AppState {
             sidebar_group_mode_persistence_request: None,
             sidebar_group_sort_persistence_request: None,
             sidebar_group_collapsed_persistence_request: None,
+            sidebar_folders: Vec::new(),
+            sidebar_folders_persistence_request: false,
             sidebar_view_scan_request: false,
             sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
@@ -8270,6 +8313,13 @@ impl AppState {
                         assert_live_pane(source_pane_id, "context menu source pane");
                     }
                 }
+                ContextMenuKind::Folder { shelf, ref name } => {
+                    assert!(
+                        self.sidebar_folder(name)
+                            .is_some_and(|folder| folder.shelf == shelf),
+                        "context menu folder must remain registered"
+                    );
+                }
             }
         }
     }
@@ -8735,6 +8785,7 @@ mod tests {
             tab_idx: 0,
             anchor: (7, 4),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
+            folder_shelf: None,
         });
 
         app.swap_sidebar_presentation(&mut first_client);
@@ -8912,6 +8963,7 @@ mod tests {
                 snooze_target: Some(pane_id),
                 starred: false,
                 has_subgroup: false,
+                folder_menu: false,
             },
             x: 7,
             y: 3,
@@ -8941,6 +8993,7 @@ mod tests {
                 snooze_target: Some(pane_id),
                 starred: false,
                 has_subgroup: false,
+                folder_menu: false,
             }
         );
         assert_eq!(menu.selected, ContextMenuAction::Snooze);
@@ -8984,6 +9037,7 @@ mod tests {
                 snooze_target: None,
                 starred: false,
                 has_subgroup: false,
+                folder_menu: false,
             },
             x: 2,
             y: 2,
@@ -10118,5 +10172,63 @@ mod tests {
         );
         assert_eq!(client.object_views[&pr].tab, PrDetailTab::Files);
         assert_eq!(client.object_views[&ticket].scroll, 7);
+    }
+
+    #[test]
+    fn tab_context_menu_uses_folder_actions_only_in_sections_layout() {
+        let tab_kind = |folder_menu, has_subgroup| ContextMenuKind::Tab {
+            workspace_id: "workspace".to_string(),
+            tab_id: "tab".to_string(),
+            ws_idx: 0,
+            tab_idx: 0,
+            settle_pane_id: None,
+            snooze_target: None,
+            starred: false,
+            has_subgroup,
+            folder_menu,
+        };
+        let sections = ContextMenuState {
+            kind: tab_kind(true, true),
+            x: 0,
+            y: 0,
+            selected: ContextMenuAction::MoveToFolder,
+        };
+        let sections_actions = sections.actions_for_pane_state(false, true, true);
+        assert!(sections_actions.contains(&ContextMenuAction::MoveToFolder));
+        assert!(sections_actions.contains(&ContextMenuAction::RemoveFromFolder));
+        assert!(!sections_actions.contains(&ContextMenuAction::MoveToSubgroup));
+        assert!(!sections_actions.contains(&ContextMenuAction::RemoveFromSubgroup));
+
+        let default = ContextMenuState {
+            kind: tab_kind(false, true),
+            x: 0,
+            y: 0,
+            selected: ContextMenuAction::MoveToSubgroup,
+        };
+        let default_actions = default.actions_for_pane_state(false, true, true);
+        assert!(default_actions.contains(&ContextMenuAction::MoveToSubgroup));
+        assert!(default_actions.contains(&ContextMenuAction::RemoveFromSubgroup));
+        assert!(!default_actions.contains(&ContextMenuAction::MoveToFolder));
+        assert!(!default_actions.contains(&ContextMenuAction::RemoveFromFolder));
+    }
+
+    #[test]
+    fn folder_context_menu_offers_rename_and_delete() {
+        let menu = ContextMenuState {
+            kind: ContextMenuKind::Folder {
+                shelf: crate::app::sidebar_folders::SidebarShelf::Active,
+                name: "Plans".to_string(),
+            },
+            x: 0,
+            y: 0,
+            selected: ContextMenuAction::RenameFolder,
+        };
+        assert_eq!(
+            menu.actions_for_pane_state(false, true, true),
+            vec![
+                ContextMenuAction::RenameFolder,
+                ContextMenuAction::DeleteFolder
+            ]
+        );
     }
 }

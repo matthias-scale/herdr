@@ -471,6 +471,25 @@ impl App {
                 self.toggle_pin_active_tab_via_api();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::MoveTabToFolder => {
+                if let Some(ws_idx) = self.state.active {
+                    if let Some(tab_idx) = self
+                        .state
+                        .workspaces
+                        .get(ws_idx)
+                        .map(crate::workspace::Workspace::active_tab_index)
+                    {
+                        let anchor = (
+                            self.state.view.sidebar_rect.x,
+                            self.state.view.sidebar_rect.y,
+                        );
+                        self.state
+                            .open_sidebar_folder_picker(ws_idx, tab_idx, anchor);
+                        self.state.focus_client_on_sidebar();
+                    }
+                }
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::EnterResizeMode => self.state.set_server_mode(Mode::Resize),
             NavigateAction::ResizePaneLeft => {
                 self.resize_pane_direction_via_api(NavDirection::Left);
@@ -2406,6 +2425,7 @@ pub(crate) enum NavigateAction {
     CopyMode,
     Zoom,
     TogglePinTab,
+    MoveTabToFolder,
     EnterResizeMode,
     ResizePaneLeft,
     ResizePaneDown,
@@ -2692,6 +2712,7 @@ macro_rules! non_indexed_action_bindings {
             (&kb.close_pane, NavigateAction::ClosePane),
             (&kb.zoom, NavigateAction::Zoom),
             (&kb.toggle_pin_tab, NavigateAction::TogglePinTab),
+            (&kb.move_tab_to_folder, NavigateAction::MoveTabToFolder),
             (&kb.resize_mode, NavigateAction::EnterResizeMode),
             (&kb.resize_pane_left, NavigateAction::ResizePaneLeft),
             (&kb.resize_pane_down, NavigateAction::ResizePaneDown),
@@ -3097,6 +3118,20 @@ pub(super) fn execute_navigate_action_in_context(
         // would otherwise have asked the server to flip.
         NavigateAction::TogglePinTab => {
             state.toggle_pin_active_tab();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::MoveTabToFolder => {
+            if let Some(ws_idx) = state.active {
+                if let Some(tab_idx) = state
+                    .workspaces
+                    .get(ws_idx)
+                    .map(crate::workspace::Workspace::active_tab_index)
+                {
+                    let anchor = (state.view.sidebar_rect.x, state.view.sidebar_rect.y);
+                    state.open_sidebar_folder_picker(ws_idx, tab_idx, anchor);
+                    state.focus_client_on_sidebar();
+                }
+            }
             leave_navigate_mode(state);
         }
         NavigateAction::EnterResizeMode => state.set_server_mode(Mode::Resize),
@@ -6510,6 +6545,29 @@ resize_pane_left = "prefix+shift+left"
         );
 
         assert_eq!(action, Some(NavigateAction::MoveTabNext));
+    }
+
+    #[test]
+    fn move_tab_to_folder_keybinding_opens_picker_and_focuses_sidebar() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.ensure_test_terminals();
+        state.sidebar_sections_layout = true;
+        state.keybinds.move_tab_to_folder = crate::config::ActionKeybinds::direct("alt+f");
+
+        let action = terminal_direct_navigation_action(
+            &state,
+            TerminalKey::new(KeyCode::Char('f'), KeyModifiers::ALT),
+        );
+        assert_eq!(action, Some(NavigateAction::MoveTabToFolder));
+        execute_navigate_action(&mut state, NavigateAction::MoveTabToFolder);
+
+        let picker = state
+            .sidebar_subgroup_picker
+            .as_ref()
+            .expect("folder picker opened");
+        assert_eq!((picker.ws_idx, picker.tab_idx), (0, 0));
+        assert!(picker.folder_shelf.is_some());
+        assert!(state.sidebar_focused);
     }
 
     fn tab_labels(state: &AppState) -> Vec<String> {
