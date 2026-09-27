@@ -2876,7 +2876,7 @@ fn sidebar_thread_card(app: &AppState, entry: &AgentPanelEntry) -> SidebarThread
             .and_then(|started_at| {
                 status_report_age_compact_label(Some(started_at), app.view_observed_at)
             })
-            .unwrap_or(reported_age)
+            .unwrap_or_default()
     } else {
         reported_age
     };
@@ -28335,5 +28335,46 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("remote section card");
         assert_eq!(remote_card.host_kind, SidebarCardHostKind::Remote);
         assert_eq!(sidebar_card_host_icon(remote_card.host_kind, false), "R");
+    }
+
+    #[test]
+    fn remote_working_card_shows_no_duration() {
+        let mut remote_row = crate::fleet::FleetRow::test_agent_info_row(
+            "remote",
+            remote_agent_info(
+                "remote-pane",
+                "remote pane",
+                crate::api::schema::AgentStatus::Working,
+                false,
+                false,
+            ),
+        );
+        remote_row.age_s = Some(5 * 60);
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot("remote", false, vec![remote_row])],
+            ..crate::fleet::Snapshot::default()
+        };
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.sidebar_work_filter.machine_scope =
+            crate::app::state::SidebarMachineScope::AllMachines;
+        app.remote_agent_panel_entries = remote_agent_panel_entries_at(&snapshot, 1_725_000_000);
+        app.view_observed_at = std::time::Instant::now();
+
+        assert_eq!(
+            compact_age(&app.remote_agent_panel_entries[0].entry, app.view_observed_at).0,
+            "5m"
+        );
+        let card = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::RemoteAgent {
+                    sections_card: Some(card),
+                    ..
+                } => Some(card),
+                _ => None,
+            })
+            .expect("remote section card");
+        assert_eq!(card.status, SidebarCardStatus::Working(String::new()));
     }
 }
