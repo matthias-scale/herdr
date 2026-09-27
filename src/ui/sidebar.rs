@@ -10918,7 +10918,7 @@ fn render_sections_thread_card(
     if let Some(pull_request) = card.pull_request.as_deref() {
         left_fields.push((format!("# {pull_request}"), p.blue));
     }
-    // Store the host before the agent so narrow cards discard the agent first;
+    // Keep the host before the agent so narrow cards drop the agent first;
     // render in reverse to keep the host at the far right.
     let mut right_fields = vec![(format!("{host_icon} {}", card.host), p.overlay1)];
     if let Some(agent_icon) = agent_icon {
@@ -10947,7 +10947,7 @@ fn render_sections_thread_card(
         if width <= available {
             break;
         }
-        if !right_fields.is_empty() {
+        if right_fields.len() > 1 {
             right_fields.pop();
         } else if left_fields.len() > 1 || (!has_branch && !left_fields.is_empty()) {
             left_fields.pop();
@@ -28703,7 +28703,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn sidebar_card_row_uses_two_lines_and_drops_trailing_fields_when_narrow() {
+    fn sidebar_card_row_keeps_host_and_drops_optional_fields_when_narrow() {
         let mut app = AppState::test_new();
         app.nerd_font = false;
         let card = SidebarThreadCard {
@@ -28725,14 +28725,37 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(row_text(terminal.backend().buffer(), 0, 18).contains("fix"));
         let second = row_text(terminal.backend().buffer(), 1, 18);
         assert!(second.contains("b"), "{second:?}");
-        assert!(
-            !second.contains("ub1"),
-            "host field should be removed before branch: {second:?}"
-        );
+        assert!(second.ends_with("L ub1"), "host stays right-aligned: {second:?}");
         assert!(
             !second.contains('#'),
-            "PR field should be removed before branch: {second:?}"
+            "PR field should yield to the branch and host: {second:?}"
         );
+    }
+
+    #[test]
+    fn sections_card_elides_a_long_branch_before_dropping_the_host() {
+        let mut app = AppState::test_new();
+        app.nerd_font = false;
+        let card = SidebarThreadCard {
+            badge: project_badge("herdr"),
+            title: "fix sidebar cards".into(),
+            status: SidebarCardStatus::Working("4m".into()),
+            branch: Some("feature/a-branch-name-that-is-much-longer-than-the-card".into()),
+            pull_request: Some("207".into()),
+            host: "ub1".into(),
+            host_kind: SidebarCardHostKind::Linux,
+            agent: Some(SidebarCardAgent::Codex),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(36, 2)).expect("card terminal");
+        terminal
+            .draw(|frame| {
+                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 36, 2), false)
+            })
+            .expect("render sections card");
+
+        let second = row_text(terminal.backend().buffer(), 1, 36);
+        assert!(second.contains('…'), "long branch should be elided: {second:?}");
+        assert!(second.ends_with("L ub1"), "host stays right-aligned: {second:?}");
     }
 
     #[test]
