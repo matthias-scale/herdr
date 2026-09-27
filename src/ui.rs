@@ -181,6 +181,8 @@ pub(crate) use self::{
 #[cfg(test)]
 pub(crate) use self::sidebar::compute_remote_agent_row_areas;
 #[cfg(test)]
+pub(crate) use self::sidebar::{sidebar_group_mode_anchor_rect, sidebar_header_search_rect};
+#[cfg(test)]
 pub(crate) use self::tabs::REPO_EDITOR_BUTTON_WIDTH;
 pub(crate) use self::{
     keybind_help::keybind_help_lines,
