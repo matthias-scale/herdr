@@ -2400,49 +2400,9 @@ impl super::super::App {
     ) {
         match &target {
             crate::app::state::SidebarPaneLifecycleTarget::Local(pane_target) => {
-                if self.state.sidebar_sections_layout {
-                    let pane_targets = self
-                        .state
-                        .workspaces
-                        .iter()
-                        .position(|workspace| workspace.id == pane_target.workspace_id)
-                        .and_then(|ws_idx| {
-                            let workspace = self.state.workspaces.get(ws_idx)?;
-                            let tab = workspace
-                                .tabs
-                                .iter()
-                                .find(|tab| tab.panes.contains_key(&pane_target.pane_id))?;
-                            Some(
-                                tab.panes
-                                    .keys()
-                                    .copied()
-                                    .map(|pane_id| {
-                                        crate::app::state::SidebarPaneLifecycleTarget::Local(
-                                            crate::app::state::PaneFocusTarget {
-                                                workspace_id: pane_target.workspace_id.clone(),
-                                                pane_id,
-                                            },
-                                        )
-                                    })
-                                    .collect::<Vec<_>>(),
-                            )
-                        });
-                    if let Some(pane_targets) = pane_targets {
-                        for pane_target in pane_targets {
-                            if let Some(public_pane_id) =
-                                self.sidebar_pane_lifecycle_public_id(&pane_target)
-                            {
-                                self.runtime_pane_settle("tui.sidebar.settle", public_pane_id);
-                            }
-                        }
-                        return;
-                    }
-                }
                 // Keep the pre-remote-control keyboard behavior: local `s`
                 // always reaches pane.settle, whose API owns snoozed refusal.
-                if let Some(public_pane_id) = self.sidebar_pane_lifecycle_public_id(&target) {
-                    self.runtime_pane_settle("tui.sidebar.settle", public_pane_id);
-                }
+                self.settle_local_pane_or_tab(pane_target.clone(), "tui.sidebar.settle");
             }
             crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref) => {
                 let Some((snoozed, _)) = self.sidebar_pane_lifecycle_state(&target) else {
@@ -2456,6 +2416,51 @@ impl super::super::App {
                     self.show_remote_pane_lifecycle_error(agent_ref, error);
                 }
             }
+        }
+    }
+
+    pub(crate) fn settle_local_pane_or_tab(
+        &mut self,
+        target: crate::app::state::PaneFocusTarget,
+        source: &'static str,
+    ) {
+        let pane_ids = self
+            .state
+            .sidebar_sections_layout
+            .then(|| {
+                self.state
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.id == target.workspace_id)
+                    .and_then(|workspace| {
+                        workspace
+                            .tabs
+                            .iter()
+                            .find(|tab| tab.panes.contains_key(&target.pane_id))
+                            .map(|tab| tab.panes.keys().copied().collect::<Vec<_>>())
+                    })
+            })
+            .flatten();
+        if let Some(pane_ids) = pane_ids {
+            let Some(ws_idx) = self
+                .state
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == target.workspace_id)
+            else {
+                return;
+            };
+            for pane_id in pane_ids {
+                if let Some(public_pane_id) = self.public_pane_id(ws_idx, pane_id) {
+                    self.runtime_pane_settle(source, public_pane_id);
+                }
+            }
+            return;
+        }
+
+        let target = crate::app::state::SidebarPaneLifecycleTarget::Local(target);
+        if let Some(public_pane_id) = self.sidebar_pane_lifecycle_public_id(&target) {
+            self.runtime_pane_settle(source, public_pane_id);
         }
     }
 
