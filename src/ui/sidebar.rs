@@ -27885,9 +27885,24 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .set_raw_agent_state_for_test(AgentState::Blocked);
         app.reconcile_sidebar_presentation();
 
-        let work_index = sidebar_work_item_fixture();
+        let mut work_index = sidebar_work_item_fixture();
+        let unassigned_pr = work_index
+            .work_index_snapshot
+            .as_mut()
+            .and_then(|snapshot| {
+                snapshot
+                    .items
+                    .iter_mut()
+                    .find(|item| item.pr_number == Some(159))
+            })
+            .expect("fixture pull request");
+        unassigned_pr.source.github = true;
+        unassigned_pr.author = Some("matthias-scale".into());
+        work_index.work_index_session.github.viewer = Some("matthias-scale".into());
         app.work_index_enabled = work_index.work_index_enabled;
         app.work_index_snapshot = work_index.work_index_snapshot;
+        app.sidebar_work_filter = work_index.sidebar_work_filter;
+        app.work_index_session = work_index.work_index_session;
         app.fleet_snapshot = crate::fleet::Snapshot {
             polled: true,
             hosts: vec![fleet_host_snapshot(
