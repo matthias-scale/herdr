@@ -1254,9 +1254,8 @@ mod tests {
             2
         );
 
-        assert!(app.tick_auto_nudges(
-            now + recovery + Duration::from_secs(2) + STALL_NUDGE_SUBMIT_DELAY
-        ));
+        assert!(app
+            .tick_auto_nudges(now + recovery + Duration::from_secs(2) + STALL_NUDGE_SUBMIT_DELAY));
         assert_eq!(drain(&mut rx), "\r");
         assert_eq!(
             auto_nudge_decision(&AutoNudgeFacts {
@@ -1711,9 +1710,9 @@ mod tests {
             .expect("pane nudge count");
         assert!(!persisted.episode_active);
         assert_eq!(persisted.nudges_without_human, 4);
-        let persisted = serde_json::from_slice::<
-            crate::handoff_runtime::StallNudgeHandoffState,
-        >(&serde_json::to_vec(&persisted).expect("serialize nudge state"))
+        let persisted = serde_json::from_slice::<crate::handoff_runtime::StallNudgeHandoffState>(
+            &serde_json::to_vec(&persisted).expect("serialize nudge state"),
+        )
         .expect("restore serialized nudge state");
 
         app.find_pane_mut(pane_id)

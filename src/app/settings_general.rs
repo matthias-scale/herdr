@@ -295,9 +295,7 @@ pub(crate) fn cycle_general_row(state: &AppState, row: GeneralRow) -> Option<Con
         GeneralRow::MaxNudgesWithoutHuman => Some(ConfigEdit::Integer {
             section,
             key,
-            value: u64::from(next_nudges_without_human(
-                state.max_nudges_without_human,
-            )),
+            value: u64::from(next_nudges_without_human(state.max_nudges_without_human)),
         }),
         GeneralRow::HideWhitespace => toggle(state.dock_diff_ignore_whitespace),
         GeneralRow::DeleteConfirmation => toggle(state.confirm_close),

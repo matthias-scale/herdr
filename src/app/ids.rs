@@ -21,9 +21,9 @@ impl App {
             .iter_mut()
             .enumerate()
             .find_map(|(ws_idx, ws)| {
-                ws.tabs.iter_mut().find_map(|tab| {
-                    tab.panes.get_mut(&pane_id).map(|pane| (ws_idx, pane))
-                })
+                ws.tabs
+                    .iter_mut()
+                    .find_map(|tab| tab.panes.get_mut(&pane_id).map(|pane| (ws_idx, pane)))
             })
     }
 
