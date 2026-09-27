@@ -156,6 +156,7 @@ fn mobile_switcher_target_for_row(
             entry,
             depth,
             show_host_identity,
+            ..
         } => super::sidebar::selected_remote_row_control_at(
             app,
             entry,
@@ -887,6 +888,7 @@ fn render_mobile_switcher_content(
                 entry,
                 depth,
                 show_host_identity,
+                ..
             } => {
                 let selected = app
                     .sidebar_selected_remote_agent
@@ -3188,6 +3190,7 @@ mod tests {
         let content = Rect::new(0, 0, 60, 1);
         let row = SidebarRow::RemoteAgent {
             entry: entry.clone(),
+            sections_card: None,
             depth: 0,
             show_host_identity: true,
         };
