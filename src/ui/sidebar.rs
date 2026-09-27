@@ -51,13 +51,7 @@ pub(crate) fn sidebar_separator_col(area: Rect) -> Option<u16> {
 }
 
 pub(crate) fn tab_agent_suffix(agent: Option<Agent>) -> Option<&'static str> {
-    match agent {
-        Some(Agent::Codex) => Some("cx"),
-        Some(Agent::Claude) => Some("cc"),
-        Some(Agent::Pi) => Some("pi"),
-        Some(Agent::Kimi) => Some("ki"),
-        _ => None,
-    }
+    crate::ui::icons::agent_text_tag(agent)
 }
 
 #[cfg(test)]
@@ -287,8 +281,8 @@ pub(crate) fn compact_dot_for_state(
     }
 }
 
-fn compact_provider(entry: &AgentPanelEntry) -> String {
-    let provider = compact_provider_token(entry);
+fn compact_provider(entry: &AgentPanelEntry, nerd_font: bool) -> String {
+    let provider = compact_provider_token(entry, nerd_font);
     match entry.remote_host.as_deref() {
         Some(host) if provider.is_empty() => host.to_string(),
         Some(host) => format!("{host} · {provider}"),
@@ -296,16 +290,16 @@ fn compact_provider(entry: &AgentPanelEntry) -> String {
     }
 }
 
-fn compact_provider_token(entry: &AgentPanelEntry) -> String {
+fn compact_provider_token(entry: &AgentPanelEntry, nerd_font: bool) -> String {
     if !entry.has_agent {
-        return ">_".to_string();
+        return crate::ui::icons::shell_label(nerd_font).to_string();
     }
     let Some(agent) = entry.agent.or(entry.agent_context) else {
-        return ">_".to_string();
+        return crate::ui::icons::shell_label(nerd_font).to_string();
     };
-    let Some(suffix) = tab_agent_suffix(Some(agent)) else {
+    let Some(suffix) = crate::ui::icons::agent_label(agent, nerd_font) else {
         return if entry.holds_shell {
-            ">_".to_string()
+            crate::ui::icons::shell_label(nerd_font).to_string()
         } else {
             String::new()
         };
@@ -317,7 +311,8 @@ fn compact_provider_token(entry: &AgentPanelEntry) -> String {
         }
     }
     if entry.holds_shell {
-        provider.push_str(" >_");
+        provider.push(' ');
+        provider.push_str(crate::ui::icons::shell_label(nerd_font));
     }
     provider
 }
@@ -424,9 +419,10 @@ fn compact_row_layout(
     width: usize,
     prefix_width: usize,
     tab: bool,
+    nerd_font: bool,
 ) -> TabRowLayout {
     let (age, activity_instant) = compact_age(entry, now);
-    let provider = compact_provider(entry);
+    let provider = compact_provider(entry, nerd_font);
     let title = compact_row_title_for_width(
         compact_row_title(entry, tab),
         &provider,
@@ -455,12 +451,16 @@ pub(crate) struct AgentRowCells {
     pub provider_color: Color,
 }
 
-pub(crate) fn agent_row_cells(entry: &AgentPanelEntry, p: &Palette) -> AgentRowCells {
+pub(crate) fn agent_row_cells(
+    entry: &AgentPanelEntry,
+    p: &Palette,
+    nerd_font: bool,
+) -> AgentRowCells {
     AgentRowCells {
         dot: compact_row_dot_text(entry),
         dot_color: compact_row_color(entry, p),
         title: compact_row_title(entry, true).to_string(),
-        provider: compact_provider(entry),
+        provider: compact_provider(entry, nerd_font),
         provider_color: provider_color(entry, p),
     }
 }
@@ -925,7 +925,7 @@ fn render_compact_agent_row_with_prefix(
     };
     let p = &app.palette;
     let requested_prefix_width = prefix_override.unwrap_or_else(|| usize::from(depth) * 3 + 1);
-    let provider = compact_provider(entry);
+    let provider = compact_provider(entry, app.nerd_font);
     let row_title = compact_row_title_for_width(
         compact_row_title(entry, tab),
         &provider,
@@ -945,6 +945,7 @@ fn render_compact_agent_row_with_prefix(
         usize::from(rect.width),
         widths.prefix,
         tab,
+        app.nerd_font,
     );
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
@@ -1135,7 +1136,7 @@ pub(crate) fn selected_row_control_at(
     column: u16,
 ) -> Option<crate::app::state::SidebarHoverAction> {
     let requested_prefix = usize::from(depth) * 3 + 1;
-    let provider = compact_provider(entry);
+    let provider = compact_provider(entry, app.nerd_font);
     let title = compact_row_title_for_width(
         compact_row_title(entry, tab),
         &provider,
@@ -1232,7 +1233,7 @@ pub(super) fn tab_row_layout(
     indicator_style: StatusIndicatorStyle,
 ) -> TabRowLayout {
     let _ = (palette, indicator_style);
-    compact_row_layout(entry, now, width, prefix_width, true)
+    compact_row_layout(entry, now, width, prefix_width, true, false)
 }
 
 pub(super) fn mobile_tab_row_layout(
@@ -1242,9 +1243,10 @@ pub(super) fn mobile_tab_row_layout(
     prefix_width: usize,
     palette: &Palette,
     indicator_style: StatusIndicatorStyle,
+    nerd_font: bool,
 ) -> TabRowLayout {
     let _ = (palette, indicator_style);
-    compact_row_layout(entry, now, width, prefix_width, true)
+    compact_row_layout(entry, now, width, prefix_width, true, nerd_font)
 }
 
 /// Foreground for the selected Space and the current tab title in the sidebar.
@@ -1462,6 +1464,7 @@ impl RemoteAgentPanelEntry {
             false,
             None,
             true,
+            false,
         )
     }
 
@@ -1474,10 +1477,11 @@ impl RemoteAgentPanelEntry {
         settled: bool,
         snoozed_until: Option<u64>,
         host_fresh: bool,
+        nerd_font: bool,
     ) -> Self {
         let render_dot = compact_row_dot(&entry);
         let render_title = compact_row_title(&entry, false).to_string();
-        let render_provider = compact_provider(&entry);
+        let render_provider = compact_provider(&entry, nerd_font);
         let host_suffix = format!(" · {narrow_host}");
         let narrow_host_suffix = host_suffix.clone();
         let search_key_lowercase = format!(
@@ -2044,6 +2048,7 @@ pub(crate) fn remote_agent_panel_entries_at(
                     lifecycle.settled,
                     lifecycle.snoozed_until,
                     host.state == crate::fleet::HostState::Reachable,
+                    app.nerd_font,
                 ),
             ))
         })
@@ -3208,7 +3213,7 @@ fn compact_sidebar_rows_inner(
         }
     }
     let row_width = sidebar_row_render_width(app, &rows, expand_worktrees);
-    mark_ambiguous_remote_titles(&mut rows, row_width);
+    mark_ambiguous_remote_titles(&mut rows, row_width, app.nerd_font);
     rows
 }
 
@@ -3243,17 +3248,17 @@ fn sidebar_row_render_width(app: &AppState, rows: &[SidebarRow], mobile: bool) -
     usize::from(list.width.saturating_sub(u16::from(has_scrollbar)))
 }
 
-fn mark_ambiguous_remote_titles(rows: &mut [SidebarRow], width: usize) {
+fn mark_ambiguous_remote_titles(rows: &mut [SidebarRow], width: usize, nerd_font: bool) {
     let rendered_title = |row: &SidebarRow| -> Option<String> {
         let (title, provider, depth) = match row {
             SidebarRow::Agent { entry, depth } => (
                 compact_row_title(entry, false),
-                compact_provider(entry),
+                compact_provider(entry, nerd_font),
                 *depth,
             ),
             SidebarRow::Tab { entry, depth } => (
                 compact_row_title(entry, true),
-                compact_provider(entry),
+                compact_provider(entry, nerd_font),
                 *depth,
             ),
             SidebarRow::RemoteAgent { entry, depth, .. } => (
@@ -7540,7 +7545,7 @@ pub(crate) fn compute_sidebar_hover_targets(
     let narrow_prefix = visible
         .iter()
         .any(|(row, _)| matches!(row, SidebarRow::Tab { .. }))
-        .then(|| narrow_view_tab_prefix_from_rows(&rows, usize::from(body.width)))
+        .then(|| narrow_view_tab_prefix_from_rows(&rows, usize::from(body.width), app.nerd_font))
         .flatten();
 
     let mut targets = Vec::new();
@@ -7552,7 +7557,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                 };
                 let tab = matches!(row, SidebarRow::Tab { .. });
                 let requested_prefix = narrow_prefix.unwrap_or_else(|| usize::from(*depth) * 3 + 1);
-                let provider = compact_provider(entry);
+                let provider = compact_provider(entry, app.nerd_font);
                 let title = compact_row_title_for_width(
                     compact_row_title(entry, tab),
                     &provider,
@@ -9683,6 +9688,17 @@ fn render_workspace_list(
         } else {
             Style::default().fg(p.subtext0)
         };
+        let space_icon = app.nerd_font.then(|| {
+            crate::ui::icons::space_icon(
+                ws.repo_binding.as_deref(),
+                ws.cached_git_space
+                    .as_ref()
+                    .map(|space| space.repo_root.as_path()),
+                &display_label,
+                &app.space_icons,
+            )
+        });
+        let space_icon_width = space_icon.map_or(0, |icon| display_width(icon) + 1);
 
         let window_count = member_indices
             .iter()
@@ -9725,8 +9741,11 @@ fn render_workspace_list(
             .and_then(|(.., sort_key, _)| sort_key.map(|_| 2))
             .unwrap_or(0);
         let prefix = if repo_header { "▾ " } else { " ▾ " };
-        let fixed_width =
-            display_width(prefix) + display_width(&count_label) + state_count_width + sort_width;
+        let fixed_width = display_width(prefix)
+            + space_icon_width
+            + display_width(&count_label)
+            + state_count_width
+            + sort_width;
         let title = truncate_end(
             &display_label,
             usize::from(card.rect.width).saturating_sub(fixed_width),
@@ -9740,6 +9759,10 @@ fn render_workspace_list(
             Style::default().fg(p.accent),
         ));
         spans.push(Span::raw(" "));
+        if let Some(icon) = space_icon {
+            spans.push(Span::styled(icon, name_style));
+            spans.push(Span::raw(" "));
+        }
         spans.push(Span::styled(title, name_style));
         spans.push(Span::styled(
             count_label,
@@ -9974,10 +9997,14 @@ fn narrow_view_tab_prefix(app: &AppState, width: usize) -> Option<usize> {
         return None;
     }
     let rows = sidebar_rows(app);
-    narrow_view_tab_prefix_from_rows(&rows, width)
+    narrow_view_tab_prefix_from_rows(&rows, width, app.nerd_font)
 }
 
-fn narrow_view_tab_prefix_from_rows(rows: &[SidebarRow], width: usize) -> Option<usize> {
+fn narrow_view_tab_prefix_from_rows(
+    rows: &[SidebarRow],
+    width: usize,
+    nerd_font: bool,
+) -> Option<usize> {
     let prefixes = rows
         .iter()
         .filter_map(|row| match row {
@@ -9987,7 +10014,7 @@ fn narrow_view_tab_prefix_from_rows(rows: &[SidebarRow], width: usize) -> Option
         })
         .map(|(entry, depth, tab)| {
             let requested_prefix = usize::from(*depth) * 3 + 1;
-            let provider = compact_provider(entry);
+            let provider = compact_provider(entry, nerd_font);
             let title = compact_row_title_for_width(
                 compact_row_title(entry, tab),
                 &provider,
@@ -12170,7 +12197,7 @@ pub(crate) mod tests {
             .next()
             .expect("attached entry");
         assert_eq!(entry.remote_host.as_deref(), Some("ub1"));
-        let provider = compact_provider(&entry);
+        let provider = compact_provider(&entry, false);
         assert!(provider.starts_with("ub1 · "), "{provider:?}");
 
         let width = 40;
@@ -13365,6 +13392,79 @@ pub(crate) mod tests {
     use ratatui::{backend::TestBackend, layout::Direction, style::Color, Terminal};
 
     #[test]
+    fn compact_sidebar_row_uses_the_claude_glyph_and_keeps_the_text_fallback() {
+        let mut app = app_with_agents(&["claude row"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals.get_mut(&terminal_id).unwrap().detected_agent = Some(Agent::Claude);
+        app.refresh_local_agent_panel_identities();
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .next()
+            .expect("Claude sidebar entry");
+
+        let render = |app: &AppState| {
+            let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_compact_agent_row(
+                        app,
+                        frame,
+                        &entry,
+                        Rect::new(0, 0, 40, 1),
+                        0,
+                        true,
+                        None,
+                    )
+                })
+                .unwrap();
+            row_text(terminal.backend().buffer(), 0, 40)
+        };
+
+        app.nerd_font = true;
+        let icon_row = render(&app);
+        assert!(icon_row.contains("\u{EC82}"), "{icon_row:?}");
+        assert!(!icon_row.contains("cc"), "{icon_row:?}");
+
+        app.nerd_font = false;
+        let text_row = render(&app);
+        assert!(text_row.contains("cc"), "{text_row:?}");
+        assert!(!text_row.contains("\u{EC82}"), "{text_row:?}");
+    }
+
+    #[test]
+    fn space_header_renders_the_inbox_glyph_before_its_title() {
+        let mut app = app_with_agents(&["agent-inbox"]);
+        app.sidebar_group_mode = SidebarGroupMode::Spaces;
+        app.workspaces[0].cached_git_space = None;
+        app.workspaces[0].repo_binding = None;
+        app.workspaces[0].custom_name = Some("agent-inbox".into());
+        app.nerd_font = true;
+        let area = Rect::new(0, 0, 60, 20);
+        crate::ui::compute_view_with_runtime_registry(
+            &mut app,
+            &TerminalRuntimeRegistry::new(),
+            area,
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let rendered = (0..area.height)
+            .map(|row| row_text(terminal.backend().buffer(), row, area.width))
+            .collect::<Vec<_>>();
+        assert!(
+            rendered
+                .iter()
+                .any(|row| row.contains("\u{F0687} agent-inbox")),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
     fn collapsed_and_expanded_sidebars_render_separator_on_shared_column() {
         let app = AppState::test_new();
         let area = Rect::new(3, 1, 26, 8);
@@ -13731,13 +13831,13 @@ pub(crate) mod tests {
 
         let mut two = compact_test_entry("two", Some(Agent::Claude));
         two.active_subagents = Some(2);
-        assert_eq!(compact_provider(&two), "cc+2");
+        assert_eq!(compact_provider(&two, false), "cc+2");
         two.holds_shell = true;
-        assert_eq!(compact_provider(&two), "cc+2 >_");
+        assert_eq!(compact_provider(&two, false), "cc+2 >_");
 
         let mut stale = two;
         stale.stale = true;
-        assert_eq!(compact_provider(&stale), "cc >_");
+        assert_eq!(compact_provider(&stale, false), "cc >_");
     }
 
     #[test]
@@ -13835,11 +13935,11 @@ pub(crate) mod tests {
     #[test]
     fn compact_provider_marks_plain_shells_and_kimi() {
         let plain = compact_test_entry("terminal", None);
-        assert_eq!(compact_provider(&plain), ">_");
+        assert_eq!(compact_provider(&plain, false), ">_");
         assert_eq!(tab_agent_suffix(Some(Agent::Kimi)), Some("ki"));
 
         let kimi = compact_test_entry("task", Some(Agent::Kimi));
-        assert_eq!(compact_provider(&kimi), "ki");
+        assert_eq!(compact_provider(&kimi, false), "ki");
     }
 
     #[test]
@@ -15972,6 +16072,7 @@ pub(crate) mod tests {
             4,
             &app.palette,
             app.status_indicators,
+            false,
         );
 
         let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
@@ -16061,6 +16162,7 @@ pub(crate) mod tests {
             4,
             &app.palette,
             app.status_indicators,
+            false,
         );
         let unlinked_layout = tab_row_layout(
             unlinked,
@@ -16458,6 +16560,7 @@ pub(crate) mod tests {
             4,
             &app.palette,
             app.status_indicators,
+            false,
         );
         assert_eq!(mobile_layout.dot, "●");
 
@@ -16494,6 +16597,7 @@ pub(crate) mod tests {
             4,
             &app.palette,
             app.status_indicators,
+            false,
         );
         assert_eq!(mobile_layout.dot, "○");
     }
@@ -18982,7 +19086,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             });
         }
 
-        let prefix = narrow_view_tab_prefix_from_rows(&rows, 25);
+        let prefix = narrow_view_tab_prefix_from_rows(&rows, 25, false);
         assert_eq!(prefix, Some(1));
         let mut marker_columns = Vec::new();
         for (row, expected_title) in rows.iter().zip([
@@ -19028,7 +19132,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(compact_row_widths(short_github, "cc", 24, 7).prefix, 7);
 
         assert_eq!(
-            narrow_view_tab_prefix_from_rows(&rows, 43),
+            narrow_view_tab_prefix_from_rows(&rows, 43, false),
             None,
             "nested rows keep their extra level when every title fits"
         );

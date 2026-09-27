@@ -1260,6 +1260,7 @@ impl App {
             dock_files_roots_by_cwd: std::collections::HashMap::new(),
             files_icons: config.files.icons,
             nerd_font: config.ui.nerd_font,
+            space_icons: config.ui.icons.spaces.clone(),
             dock_home_selection: None,
             dock_home_ticket_selection: None,
             dock_home_poll_selection: None,
@@ -2957,6 +2958,7 @@ impl App {
         }
         if !invalid_section("ui") {
             self.state.nerd_font = config.ui.nerd_font;
+            self.state.space_icons = config.ui.icons.spaces.clone();
         }
 
         if !invalid_section("usage") {

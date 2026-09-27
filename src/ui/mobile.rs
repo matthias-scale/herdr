@@ -329,6 +329,7 @@ pub(crate) fn visible_tab_activity_instants_from(
                 display_width(&indent),
                 &app.palette,
                 app.status_indicators,
+                app.nerd_font,
             );
             layout.activity_age.and(layout.activity_instant)
         })
@@ -579,7 +580,13 @@ fn mobile_tab_status(
         .saturating_sub(display_width(&suffix));
     let tab_label = ws
         .tab_display_projection(terminals, ws.active_tab)
-        .map(|projection| super::tabs::fit_tab_display_projection(projection, label_width))
+        .map(|projection| {
+            super::tabs::fit_tab_display_projection_with_icons(
+                projection,
+                label_width,
+                app.nerd_font,
+            )
+        })
         .unwrap_or_else(|| truncate_end(&(ws.active_tab + 1).to_string(), label_width));
     truncate_end(&format!("{prefix}{tab_label}{suffix}"), max_width)
 }
@@ -1238,7 +1245,13 @@ fn render_mobile_switcher_content(
                 as usize;
             let display_name = ws
                 .tab_display_projection(&app.terminals, idx)
-                .map(|projection| super::tabs::fit_tab_display_projection(projection, label_width))
+                .map(|projection| {
+                    super::tabs::fit_tab_display_projection_with_icons(
+                        projection,
+                        label_width,
+                        app.nerd_font,
+                    )
+                })
                 .unwrap_or_else(|| truncate_end(&(idx + 1).to_string(), label_width));
             let label = format!("{label_prefix}{display_name}");
             let title = Line::from(vec![

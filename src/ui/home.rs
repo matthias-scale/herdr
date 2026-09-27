@@ -1592,7 +1592,9 @@ pub(super) fn render_home(
                             .local_target()
                             .is_some_and(|target| target.pane_id == agent.pane_id)
                     })
-                    .map(|entry| crate::ui::sidebar::agent_row_cells(entry, &app.palette));
+                    .map(|entry| {
+                        crate::ui::sidebar::agent_row_cells(entry, &app.palette, app.nerd_font)
+                    });
                 agent_line(app, agent, cells.as_ref(), idx == selected, body.width)
             })
             .collect()
