@@ -10911,66 +10911,115 @@ fn render_sections_thread_card(
         (SidebarCardAgent::Codex, false) => "o",
         (SidebarCardAgent::Other, false) => "?",
     });
-    let mut fields = Vec::new();
+    let mut left_fields = Vec::new();
     if let Some(branch) = card.branch.as_deref() {
-        fields.push((format!("{branch_icon} {branch}"), p.mauve));
+        left_fields.push((format!("{branch_icon} {branch}"), p.mauve));
     }
     if let Some(pull_request) = card.pull_request.as_deref() {
-        fields.push((format!("# {pull_request}"), p.blue));
+        left_fields.push((format!("# {pull_request}"), p.blue));
     }
-    fields.push((format!("{host_icon} {}", card.host), p.overlay1));
+    // Store the host before the agent so narrow cards discard the agent first;
+    // render in reverse to keep the host at the far right.
+    let mut right_fields = vec![(format!("{host_icon} {}", card.host), p.overlay1)];
     if let Some(agent_icon) = agent_icon {
         let color = match card.agent {
             Some(SidebarCardAgent::Claude) => p.peach,
             Some(SidebarCardAgent::Codex) => p.green,
             _ => p.overlay0,
         };
-        fields.push((agent_icon.to_string(), color));
+        right_fields.push((agent_icon.to_string(), color));
     }
     let has_branch = card.branch.is_some();
     let available = usize::from(rect.width).saturating_sub(2);
     loop {
-        let width = fields
+        let left_width = left_fields
             .iter()
             .map(|(text, _)| display_width(text))
             .sum::<usize>()
-            + fields.len().saturating_sub(1);
+            + left_fields.len().saturating_sub(1);
+        let right_width = right_fields
+            .iter()
+            .map(|(text, _)| display_width(text))
+            .sum::<usize>()
+            + right_fields.len().saturating_sub(1);
+        let gap = usize::from(!left_fields.is_empty() && !right_fields.is_empty());
+        let width = left_width + right_width + gap;
         if width <= available {
             break;
         }
-        if fields.len() > 1 {
-            fields.pop();
-        } else if has_branch {
-            break;
+        if right_fields.len() > 1 {
+            right_fields.pop();
+        } else if !right_fields.is_empty() {
+            right_fields.pop();
+        } else if left_fields.len() > 1 {
+            left_fields.pop();
+        } else if !has_branch && !left_fields.is_empty() {
+            left_fields.pop();
         } else {
-            fields.pop();
+            break;
         }
     }
-    if has_branch && !fields.is_empty() {
-        let other_width = fields
+    if has_branch && !left_fields.is_empty() {
+        let left_tail_width = left_fields
             .iter()
             .skip(1)
             .map(|(text, _)| display_width(text))
             .sum::<usize>()
-            + fields.len().saturating_sub(1);
-        let branch_width = available.saturating_sub(other_width);
-        let branch = &mut fields[0].0;
+            + left_fields.len().saturating_sub(1);
+        let right_width = right_fields
+            .iter()
+            .map(|(text, _)| display_width(text))
+            .sum::<usize>()
+            + right_fields.len().saturating_sub(1);
+        let gap = usize::from(!right_fields.is_empty());
+        let branch_width = available.saturating_sub(left_tail_width + right_width + gap);
+        let branch = &mut left_fields[0].0;
         if display_width(branch) > branch_width {
             *branch = middle_elide(branch, branch_width);
         }
     }
-    let mut spans = vec![Span::raw("  ")];
-    for (index, (text, color)) in fields.into_iter().enumerate() {
+
+    let mut left_spans = Vec::new();
+    for (index, (text, color)) in left_fields.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::raw(" "));
+            left_spans.push(Span::raw(" "));
         }
-        spans.push(Span::styled(text, Style::default().fg(color)));
+        left_spans.push(Span::styled(text.as_str(), Style::default().fg(*color)));
     }
-    let details = Paragraph::new(Line::from(spans)).alignment(Alignment::Right);
-    frame.render_widget(
-        details,
-        Rect::new(rect.x, rect.y.saturating_add(1), rect.width, 1),
-    );
+    let mut right_spans = Vec::new();
+    for (index, (text, color)) in right_fields.iter().rev().enumerate() {
+        if index > 0 {
+            right_spans.push(Span::raw(" "));
+        }
+        right_spans.push(Span::styled(text.as_str(), Style::default().fg(*color)));
+    }
+    let left_width = left_fields
+        .iter()
+        .map(|(text, _)| display_width(text))
+        .sum::<usize>()
+        + left_fields.len().saturating_sub(1);
+    let left_width = u16::try_from(left_width)
+        .unwrap_or(rect.width)
+        .min(rect.width.saturating_sub(2));
+    let gap = u16::from(!left_spans.is_empty() && !right_spans.is_empty());
+    let details_y = rect.y.saturating_add(1);
+    if !left_spans.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(left_spans)),
+            Rect::new(rect.x.saturating_add(2), details_y, left_width, 1),
+        );
+    }
+    if !right_spans.is_empty() {
+        let right_x = rect
+            .x
+            .saturating_add(2)
+            .saturating_add(left_width)
+            .saturating_add(gap);
+        frame.render_widget(
+            Paragraph::new(Line::from(right_spans)).alignment(Alignment::Right),
+            Rect::new(right_x, details_y, rect.right().saturating_sub(right_x), 1),
+        );
+    }
 }
 
 fn tab_card_entry<'a>(
@@ -28717,7 +28766,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn sections_thread_card_right_aligns_host_with_a_short_branch_and_pr() {
+    fn sections_thread_card_left_aligns_branch_and_pr_and_right_aligns_host() {
         let mut app = AppState::test_new();
         app.nerd_font = false;
         let card = SidebarThreadCard {
@@ -28737,9 +28786,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             })
             .expect("render thread card");
         let second = row_text(terminal.backend().buffer(), 1, 40);
-        assert!(second.contains("feat/x"), "{second:?}");
-        assert!(second.contains("207"), "{second:?}");
+        assert!(second.starts_with("  b feat/x # 207"), "{second:?}");
         assert!(second.ends_with("L ub2"), "{second:?}");
+        let pr_end = second.find("# 207").expect("left PR field") + "# 207".len();
+        let host_start = second.find("L ub2").expect("right host field");
+        assert!(
+            host_start > pr_end + 1,
+            "fields need a visible gap: {second:?}"
+        );
     }
 
     #[test]
