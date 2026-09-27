@@ -9465,8 +9465,8 @@ last_pane = "prefix+tab"
     }
 
     #[cfg(unix)]
-    #[test]
-    fn config_reload_hiding_focused_notes_routes_keys_back_to_the_pane() {
+    #[tokio::test]
+    async fn config_reload_hiding_focused_notes_routes_keys_back_to_the_pane() {
         let mut env = crate::config::TestConfigEnvGuard::acquire();
         let path = temp_config_path("notes-focus-reload");
         std::fs::create_dir_all(path.parent().expect("config parent"))
