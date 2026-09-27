@@ -10077,6 +10077,10 @@ fn render_section_header(
         && matches!(header.title, PINNED_SECTION_TITLE | ACTIVE_SECTION_TITLE)
     {
         String::new()
+    } else if app.sidebar_sections_layout
+        && matches!(header.title, SNOOZED_SECTION_TITLE | SETTLED_SECTION_TITLE)
+    {
+        format!(" {count}")
     } else {
         format!(" ({count})")
     };
@@ -28640,6 +28644,28 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             !second.contains('#'),
             "PR field should be removed before branch: {second:?}"
         );
+    }
+
+    #[test]
+    fn sections_shelf_counts_render_without_parentheses() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        for (title, count, expected) in [
+            (SNOOZED_SECTION_TITLE, 2, "Snoozed 2"),
+            (SETTLED_SECTION_TITLE, 14, "Settled 14"),
+        ] {
+            let header = SectionHeaderArea {
+                title,
+                rect: Rect::new(0, 0, 32, 1),
+            };
+            let mut terminal = Terminal::new(TestBackend::new(32, 1)).expect("shelf terminal");
+            terminal
+                .draw(|frame| render_section_header(&app, frame, &header, count, &[], false))
+                .expect("render shelf header");
+            let line = row_text(terminal.backend().buffer(), 0, 32);
+            assert!(line.contains(expected), "{line:?}");
+            assert!(!line.contains(&format!("({count})")), "{line:?}");
+        }
     }
 
     #[test]
