@@ -1530,7 +1530,7 @@ fn fresh_hook_working_overrides_stale_native_claude_permission() {
 fn bundled_manifest_versions_cover_deployed_and_upstream_floors() {
     let claude: toml::Value = toml::from_str(include_str!("../manifests/claude.toml")).unwrap();
     let kimi: toml::Value = toml::from_str(include_str!("../manifests/kimi.toml")).unwrap();
-    assert_eq!(claude["version"].as_str(), Some("2026.09.23.1"));
+    assert_eq!(claude["version"].as_str(), Some("2026.09.27.1"));
     assert!(kimi["version"]
         .as_str()
         .is_some_and(|version| version > "2026.06.10.1"));
@@ -2052,4 +2052,29 @@ fn ordinary_claude_permission_prompt_keeps_its_existing_rule() {
     );
     assert!(result.visible_blocker);
     assert!(!result.usage_limited);
+}
+
+fn assert_claude_visible_blocker(result: &DetectionExplain, rule: &str, label: &str) {
+    assert_eq!(result.state, AgentState::Blocked, "{label}");
+    assert_eq!(
+        result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some(rule),
+        "{label}"
+    );
+    assert!(result.visible_blocker, "{label}");
+    assert!(!result.usage_limited, "{label}");
+}
+
+#[test]
+fn claude_plan_approval_dialog_is_a_visible_blocker() {
+    let screen = include_str!(
+        "../../../tests/fixtures/agent-detection/claude-plan-approval-ub1-20260927.txt"
+    );
+
+    let result = bundled_explain(Agent::Claude, screen);
+    assert_claude_visible_blocker(&result, "plan_approval_prompt", "no OSC");
+
+    // Claude keeps the idle title glyph while the dialog waits for an answer.
+    let result = osc_explain(Agent::Claude, screen, "✳ Create probe file", "");
+    assert_claude_visible_blocker(&result, "plan_approval_prompt", "idle OSC title");
 }
