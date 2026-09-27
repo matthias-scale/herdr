@@ -2881,8 +2881,7 @@ fn sidebar_thread_card(app: &AppState, entry: &AgentPanelEntry) -> SidebarThread
         .unwrap_or_else(|| entry.space_label.clone());
     let reported_age = compact_age(entry, app.view_observed_at).0;
     let age = if entry.state == AgentState::Working {
-        entry_terminal(app, entry)
-            .and_then(crate::terminal::TerminalState::working_since)
+        entry_earliest_working_since(app, entry)
             .and_then(|started_at| {
                 status_report_age_compact_label(Some(started_at), app.view_observed_at)
             })
@@ -5014,6 +5013,27 @@ fn entry_terminal<'a>(
     let tab = workspace.tabs.get(target.tab_idx)?;
     let pane = tab.panes.get(&target.pane_id)?;
     app.terminals.get(&pane.attached_terminal_id)
+}
+
+fn entry_earliest_working_since(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+) -> Option<std::time::Instant> {
+    let target = entry.local_target()?;
+    let tab = app
+        .workspaces
+        .get(target.ws_idx)?
+        .tabs
+        .get(target.tab_idx)?;
+    tab.panes
+        .values()
+        .filter_map(|pane| {
+            let terminal = app.terminals.get(&pane.attached_terminal_id)?;
+            (pane.agent_projection(terminal).state == AgentState::Working)
+                .then(|| terminal.working_since())
+                .flatten()
+        })
+        .min()
 }
 
 fn preferred_pr_urls(app: &AppState, entry: &AgentPanelEntry) -> Vec<String> {
@@ -28340,6 +28360,75 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("remote section card");
         assert_eq!(remote_card.host_kind, SidebarCardHostKind::Remote);
         assert_eq!(sidebar_card_host_icon(remote_card.host_kind, false), "R");
+    }
+
+    #[test]
+    fn working_card_duration_uses_earliest_working_pane() {
+        let mut workspace = Workspace::test_new("split working card");
+        let focused_idle_pane = workspace.tabs[0].root_pane;
+        let other_working_pane = workspace.test_split(Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(focused_idle_pane);
+
+        let mut app = AppState::test_new();
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.sidebar_sections_layout = true;
+
+        let observed_at = std::time::Instant::now();
+        let working_since = observed_at - std::time::Duration::from_secs(125);
+        let idle_terminal_id = app.workspaces[0].tabs[0].panes[&focused_idle_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&idle_terminal_id)
+            .expect("focused idle terminal")
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Codex),
+                AgentState::Idle,
+                false,
+                true,
+                false,
+                false,
+                false,
+                observed_at,
+            );
+        let working_terminal_id = app.workspaces[0].tabs[0].panes[&other_working_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&working_terminal_id)
+            .expect("other working terminal")
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Codex),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                false,
+                working_since,
+            );
+        app.view_observed_at = observed_at;
+        app.refresh_local_agent_panel_identities();
+        app.reconcile_sidebar_presentation();
+
+        let entry = sidebar_rows(&app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::Tab { entry, .. } => Some(entry),
+                _ => None,
+            })
+            .expect("split tab card");
+        assert_eq!(
+            entry.local_target().expect("local tab").pane_id,
+            focused_idle_pane
+        );
+        assert_eq!(entry.state, AgentState::Working);
+        assert_eq!(
+            entry.sections_card.expect("working card").status,
+            SidebarCardStatus::Working("2m".into())
+        );
     }
 
     #[test]
