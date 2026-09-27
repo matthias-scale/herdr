@@ -4626,10 +4626,12 @@ fn append_ordered_sidebar_blocks(
     remote_entries: &[AgentPanelEntry],
     expand_worktrees: bool,
     pods: &PodProjection,
-    include_deferred: bool,
+    include_tab_blocks: bool,
 ) {
     for block in SIDEBAR_BLOCK_ORDER {
-        if matches!(block, SidebarBlock::Deferred) && !include_deferred {
+        if matches!(block, SidebarBlock::Unassigned | SidebarBlock::Deferred)
+            && !include_tab_blocks
+        {
             continue;
         }
         let mut block_rows = Vec::new();
@@ -27817,6 +27819,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ACTIVE_SECTION_TITLE,
                 SNOOZED_SECTION_TITLE,
                 SETTLED_SECTION_TITLE,
+                SYMPHONY_SECTION_TITLE,
             ]
         );
         assert!(matches!(
@@ -27827,6 +27830,32 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn sections_layout_lists_each_tab_once() {
+        let mut app = app_with_unlinked_tab_directories(&[None, None]);
+        app.sidebar_sections_layout = true;
+        app.workspaces[0].tabs[1].pinned = true;
+
+        let rows = sidebar_rows(&app);
+        let local_pane_ids = app
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.panes.keys().copied())
+            .collect::<Vec<_>>();
+
+        for pane_id in local_pane_ids {
+            let tab_row_count = rows
+                .iter()
+                .filter(|row| {
+                    matches!(row, SidebarRow::Tab { entry, .. }
+                        if entry.local_target().is_some_and(|target| target.pane_id == pane_id))
+                })
+                .count();
+            assert_eq!(tab_row_count, 1, "pane {pane_id:?} should have one tab row");
+        }
     }
 
     #[test]
