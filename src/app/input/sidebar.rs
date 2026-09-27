@@ -1425,14 +1425,7 @@ impl App {
         owner: InputOwner,
     ) -> bool {
         if self.state.sidebar_areas_menu_selected.is_none()
-            || !matches!(
-                owner,
-                InputOwner::Sidebar
-                    | InputOwner::Pane
-                    | InputOwner::Notepad
-                    | InputOwner::None
-                    | InputOwner::Server(ServerInputOwner::Navigate)
-            )
+            || !sidebar_areas_menu_accepts_input_owner(owner)
         {
             return false;
         }
@@ -1472,14 +1465,7 @@ impl App {
         mouse: MouseEvent,
         owner: InputOwner,
     ) -> bool {
-        if !matches!(
-            owner,
-            InputOwner::Sidebar
-                | InputOwner::Pane
-                | InputOwner::Notepad
-                | InputOwner::None
-                | InputOwner::Server(ServerInputOwner::Navigate)
-        ) {
+        if !sidebar_areas_menu_accepts_input_owner(owner) {
             return false;
         }
         if self.state.sidebar_areas_menu_selected.is_some() {
@@ -1670,6 +1656,24 @@ impl App {
             expected_pane_incarnation: Some(pane.attached_terminal_id.to_string()),
         });
     }
+}
+
+fn sidebar_areas_menu_accepts_input_owner(owner: InputOwner) -> bool {
+    matches!(
+        owner,
+        InputOwner::Sidebar
+            | InputOwner::Pane
+            | InputOwner::Notepad
+            | InputOwner::None
+            | InputOwner::Server(ServerInputOwner::Navigate)
+            | InputOwner::Surface(
+                crate::app::state::SurfaceInputOwner::Home
+                    | crate::app::state::SurfaceInputOwner::Inbox
+                    | crate::app::state::SurfaceInputOwner::Work
+                    | crate::app::state::SurfaceInputOwner::Usage
+            )
+            | InputOwner::Dock(_)
+    )
 }
 
 impl super::super::App {
@@ -3247,6 +3251,99 @@ mod tests {
         ));
 
         assert_eq!(app.state.workspaces[0].active_tab, 1);
+    }
+
+    #[test]
+    fn sidebar_areas_menu_opens_and_toggles_from_surface_and_dock_owners() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let config_path = unique_temp_path("sidebar-areas-owners");
+        let config = "[ui.sidebar]\nlayout = \"sections\"\nheader = \"sky\"\n[ui.sidebar.areas]\nsky_header = true\nview_bar = true\n";
+        fs::write(&config_path, config).expect("seed sidebar config");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &config_path);
+
+        let owners = [
+            crate::app::state::InputOwner::Surface(crate::app::state::SurfaceInputOwner::Home),
+            crate::app::state::InputOwner::Surface(crate::app::state::SurfaceInputOwner::Inbox),
+            crate::app::state::InputOwner::Surface(crate::app::state::SurfaceInputOwner::Work),
+            crate::app::state::InputOwner::Surface(crate::app::state::SurfaceInputOwner::Usage),
+            crate::app::state::InputOwner::Dock(crate::app::state::DockInputOwner::Home),
+        ];
+
+        for owner in owners {
+            fs::write(&config_path, config).expect("reset sidebar config");
+            let mut app = app_for_mouse_test();
+            app.state.sidebar_sections_layout = true;
+            app.state.sidebar_width = 40;
+            app.state.sidebar_areas.sky_header = true;
+            app.state.sidebar_areas.view_bar = true;
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+            let anchor = app.state.view.sidebar_areas_hit_area;
+            assert!(anchor.width > 0, "checklist control must be visible");
+
+            app.handle_mouse_for_input_owner(
+                1,
+                mouse(MouseEventKind::Down(MouseButton::Left), anchor.x, anchor.y),
+                crate::ui::pomodoro::InputPresentation::default(),
+                owner,
+            );
+            assert_eq!(app.state.sidebar_areas_menu_selected, Some(0));
+            assert!(app.handle_sidebar_areas_menu_key(
+                KeyEvent::new(KeyCode::Down, KeyModifiers::empty()),
+                owner,
+            ));
+            assert_eq!(app.state.sidebar_areas_menu_selected, Some(1));
+            assert!(app.handle_sidebar_areas_menu_key(
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+                owner,
+            ));
+            assert!(!app.state.sidebar_areas.view_bar);
+
+            fs::write(&config_path, config).expect("reset sidebar config for mouse toggle");
+            let mut app = app_for_mouse_test();
+            app.state.sidebar_sections_layout = true;
+            app.state.sidebar_width = 40;
+            app.state.sidebar_areas.sky_header = true;
+            app.state.sidebar_areas.view_bar = true;
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+            let anchor = app.state.view.sidebar_areas_hit_area;
+            app.handle_mouse_for_input_owner(
+                1,
+                mouse(MouseEventKind::Down(MouseButton::Left), anchor.x, anchor.y),
+                crate::ui::pomodoro::InputPresentation::default(),
+                owner,
+            );
+            let menu =
+                crate::ui::sidebar::sidebar_areas_menu_layout(&app.state, Rect::new(0, 0, 120, 40))
+                    .expect("checklist menu layout");
+            app.handle_mouse_for_input_owner(
+                1,
+                mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    menu.rect.x.saturating_add(1),
+                    menu.rect.y,
+                ),
+                crate::ui::pomodoro::InputPresentation::default(),
+                owner,
+            );
+            assert!(!app.state.sidebar_areas.sky_header);
+        }
+
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_sections_layout = true;
+        app.state.view.sidebar_areas_hit_area = Rect::new(10, 19, 1, 1);
+        let modal = crate::app::state::InputOwner::Pomodoro;
+        assert!(!app.handle_sidebar_areas_menu_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 10, 19),
+            modal,
+        ));
+        assert!(!app.handle_sidebar_areas_menu_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+            modal,
+        ));
+        assert_eq!(app.state.sidebar_areas_menu_selected, None);
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = fs::remove_file(config_path);
     }
 
     #[test]
