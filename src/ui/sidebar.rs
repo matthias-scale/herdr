@@ -1292,13 +1292,13 @@ pub(crate) enum AgentPanelIdentity {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ProjectBadge {
+pub(crate) struct ProjectBadge {
     letters: String,
     color_index: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum SidebarCardStatus {
+pub(crate) enum SidebarCardStatus {
     Working(String),
     Done,
     Blocked,
@@ -1306,7 +1306,7 @@ enum SidebarCardStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SidebarCardHostKind {
+pub(crate) enum SidebarCardHostKind {
     Linux,
     Mac,
     Windows,
@@ -1315,14 +1315,14 @@ enum SidebarCardHostKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SidebarCardAgent {
+pub(crate) enum SidebarCardAgent {
     Claude,
     Codex,
     Other,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct SidebarThreadCard {
+pub(crate) struct SidebarThreadCard {
     badge: ProjectBadge,
     title: String,
     status: SidebarCardStatus,
@@ -28180,9 +28180,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             sidebar_card_host_icon(SidebarCardHostKind::Remote, false),
             "R"
         );
-        assert!(sidebar_card_host_icon(SidebarCardHostKind::Remote, true)
-            .chars()
-            .any(|glyph| !glyph.is_ascii()));
+        assert!(!sidebar_card_host_icon(SidebarCardHostKind::Remote, true).is_ascii());
         let card = SidebarThreadCard {
             badge: project_badge("herdr"),
             title: "sidebar".into(),
