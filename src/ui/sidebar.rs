@@ -28,6 +28,14 @@ use crate::ui::work_list_detail::{PrAction, PrActionKind, PrActionPlacement, PrI
 use crate::ui::work_status::WorkGroupStatus;
 
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
+
+fn sidebar_header_rows(app: &AppState) -> u16 {
+    if !app.sidebar_sections_layout {
+        return WORKSPACE_SECTION_HEADER_ROWS;
+    }
+    let sky_rows = if sidebar_has_sky_band(app) { 3 } else { 0 };
+    sky_rows + 1 + u16::from(app.sidebar_areas.view_bar)
+}
 const MIN_WORKSPACE_LIST_ROWS: u16 = 3;
 #[cfg(test)]
 const TAB_ACTIVITY_AGE_MIN_TITLE_WIDTH: usize = 3;
@@ -1731,6 +1739,17 @@ fn expanded_sidebar_content(area: Rect) -> Rect {
     )
 }
 
+fn expanded_sidebar_content_for_app(app: &AppState, area: Rect) -> Rect {
+    let content = expanded_sidebar_content(area);
+    let host_row = u16::from(sidebar_hosts_rect(app, area).width > 0);
+    Rect::new(
+        content.x,
+        content.y,
+        content.width,
+        content.height.saturating_sub(host_row),
+    )
+}
+
 fn sidebar_footer_slot(area: Rect, index: u16) -> Rect {
     let content_width = area.width.saturating_sub(1);
     let x_offset = 1 + index.saturating_mul(2);
@@ -1743,6 +1762,80 @@ fn sidebar_footer_slot(area: Rect, index: u16) -> Rect {
         2,
         1,
     )
+}
+
+fn sidebar_hosts_rect(app: &AppState, area: Rect) -> Rect {
+    if !app.sidebar_sections_layout
+        || !sidebar_area_is_visible(app, crate::config::SidebarArea::Hosts)
+        || area.height < 2
+        || area.width < 3
+    {
+        return Rect::default();
+    }
+    Rect::new(
+        area.x.saturating_add(1),
+        area.bottom().saturating_sub(2),
+        area.width.saturating_sub(2),
+        1,
+    )
+}
+
+fn render_sidebar_hosts(app: &AppState, frame: &mut Frame, area: Rect) {
+    let hosts = sidebar_hosts_rect(app, area);
+    if hosts.width == 0 {
+        return;
+    }
+    let help = sidebar_prefixed_key_label(app, &app.keybinds.help);
+    let help_width = u16::try_from(display_width(&help))
+        .unwrap_or(hosts.width)
+        .min(hosts.width);
+    let help_rect = Rect::new(
+        hosts.right().saturating_sub(help_width),
+        hosts.y,
+        help_width,
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            truncate_end(&help, usize::from(help_rect.width)),
+            Style::default().fg(app.palette.overlay0),
+        ))
+        .alignment(Alignment::Right),
+        help_rect,
+    );
+
+    let host_width = hosts.width.saturating_sub(help_width.saturating_add(1));
+    let mut used = 0u16;
+    let mut spans = Vec::new();
+    for (index, machine) in app.machines.iter().enumerate() {
+        let separator = if index == 0 { "" } else { " " };
+        let separator_width = u16::try_from(display_width(separator)).unwrap_or(0);
+        let name_width = u16::try_from(display_width(&machine.name)).unwrap_or(u16::MAX);
+        let remaining = host_width.saturating_sub(used);
+        if separator_width.saturating_add(name_width) > remaining {
+            break;
+        }
+        if !separator.is_empty() {
+            spans.push(Span::raw(separator));
+        }
+        spans.push(Span::styled(
+            machine.name.clone(),
+            if machine.is_local() {
+                Style::default()
+                    .fg(app.palette.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.palette.subtext0)
+            },
+        ));
+        used = used
+            .saturating_add(separator_width)
+            .saturating_add(name_width);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect::new(hosts.x, hosts.y, host_width, 1),
+    );
 }
 
 pub(crate) fn sidebar_footer_settings_hit_area(area: Rect) -> Rect {
@@ -2715,6 +2808,10 @@ pub(crate) fn unassigned_section_title(mode: SidebarGroupMode) -> Option<&'stati
     }
 }
 
+pub(crate) fn sidebar_area_is_visible(app: &AppState, area: crate::config::SidebarArea) -> bool {
+    !app.sidebar_sections_layout || app.sidebar_areas.is_visible(area)
+}
+
 const INITIAL_COLLAPSED_SHARED_GROUP_TITLES: [&str; 6] = [
     SNOOZED_SECTION_TITLE,
     SETTLED_SECTION_TITLE,
@@ -3643,7 +3740,7 @@ fn sidebar_row_render_width(app: &AppState, rows: &[SidebarRow], mobile: bool) -
     }
 
     let list = workspace_list_rect_for_app(app, area);
-    let body_height = list.height.saturating_sub(WORKSPACE_SECTION_HEADER_ROWS);
+    let body_height = list.height.saturating_sub(sidebar_header_rows(app));
     let content_height = rows.iter().enumerate().fold(0u16, |height, (index, row)| {
         height
             .saturating_add(sidebar_row_height(app, row, body_height))
@@ -4676,9 +4773,15 @@ fn append_ordered_sidebar_blocks(
             }
             SidebarBlock::Fleet => append_fleet_rows(app, &mut block_rows, remote_entries),
             SidebarBlock::Ambient => {
-                runs::append_rows(app, &mut block_rows);
-                aloops::append_rows(app, &mut block_rows);
-                append_symphony_rows(app, &mut block_rows);
+                if sidebar_area_is_visible(app, crate::config::SidebarArea::Runs) {
+                    runs::append_rows(app, &mut block_rows);
+                }
+                if sidebar_area_is_visible(app, crate::config::SidebarArea::Aloops) {
+                    aloops::append_rows(app, &mut block_rows);
+                }
+                if sidebar_area_is_visible(app, crate::config::SidebarArea::Symphony) {
+                    append_symphony_rows(app, &mut block_rows);
+                }
             }
         }
         if block_rows.is_empty() {
@@ -6380,6 +6483,9 @@ pub(crate) fn sidebar_show_more_key(mode: SidebarGroupMode) -> String {
 }
 
 fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[AgentPanelEntry]) {
+    if !sidebar_area_is_visible(app, crate::config::SidebarArea::Unassigned) {
+        return;
+    }
     let Some(title) = unassigned_section_title(app.sidebar_group_mode) else {
         return;
     };
@@ -6776,7 +6882,7 @@ pub(super) fn sidebar_space_member_indices(app: &AppState, root_idx: usize) -> V
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
     let ws_area = workspace_list_rect_for_app(app, area);
-    let body = workspace_list_body_rect(ws_area, false);
+    let body = workspace_list_body_rect(app, ws_area, false);
     if body.height == 0 {
         return requested;
     }
@@ -6984,7 +7090,7 @@ pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
 /// Everything above the animation - the workspace list and the notepad - is
 /// laid out inside this, so both shrink with it.
 fn expanded_sidebar_body(app: &AppState, area: Rect) -> Rect {
-    let content = expanded_sidebar_content(area);
+    let content = expanded_sidebar_content_for_app(app, area);
     let animation = crate::ui::hyperspace::animation_height(app, content);
     Rect::new(
         content.x,
@@ -7014,15 +7120,16 @@ fn sidebar_goals_rect(app: &AppState, area: Rect) -> Rect {
 /// The idle animation's box, in the bottom-left corner of the sidebar's content
 /// area and below the notepad.
 pub(crate) fn sidebar_animation_rect(app: &AppState, area: Rect) -> Rect {
-    crate::ui::hyperspace::animation_box_rect(app, expanded_sidebar_content(area))
+    crate::ui::hyperspace::animation_box_rect(app, expanded_sidebar_content_for_app(app, area))
 }
 
-pub(crate) fn workspace_list_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
-    if area.width == 0 || area.height <= WORKSPACE_SECTION_HEADER_ROWS {
+pub(crate) fn workspace_list_body_rect(app: &AppState, area: Rect, has_scrollbar: bool) -> Rect {
+    let header_rows = sidebar_header_rows(app);
+    if area.width == 0 || area.height <= header_rows {
         return Rect::default();
     }
 
-    let body_y = area.y.saturating_add(WORKSPACE_SECTION_HEADER_ROWS);
+    let body_y = area.y.saturating_add(header_rows);
     let body_height = area.y.saturating_add(area.height).saturating_sub(body_y);
     let body_width = area.width.saturating_sub(u16::from(has_scrollbar));
     Rect::new(area.x, body_y, body_width, body_height)
@@ -7176,7 +7283,7 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
 }
 
 fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> usize {
-    let body = workspace_list_body_rect(area, false);
+    let body = workspace_list_body_rect(app, area, false);
     if body.width == 0 || body.height == 0 {
         return 0;
     }
@@ -7198,7 +7305,7 @@ fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> us
 }
 
 fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
-    let body = workspace_list_body_rect(area, false);
+    let body = workspace_list_body_rect(app, area, false);
     let entries = sidebar_rows(app);
     let mut used_rows = 0u16;
     let mut start = entries.len();
@@ -7302,7 +7409,7 @@ fn workspace_list_scroll_skip(app: &AppState, metrics: &crate::pane::ScrollMetri
 
 pub(crate) fn workspace_list_scrollbar_rect(app: &AppState, area: Rect) -> Option<Rect> {
     let metrics = workspace_list_scroll_metrics(app, area);
-    let body = workspace_list_body_rect(area, true);
+    let body = workspace_list_body_rect(app, area, true);
     (should_show_scrollbar(metrics) && body.width > 0 && body.height > 0).then_some(Rect::new(
         area.x + area.width.saturating_sub(1),
         body.y,
@@ -7331,7 +7438,7 @@ pub(crate) fn compute_sidebar_row_areas(
     }
 
     let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
     if body.width == 0 || body.height == 0 {
         return (Vec::new(), Vec::new());
     }
@@ -7431,7 +7538,7 @@ pub(crate) fn compute_tab_card_areas(
 ) -> Vec<crate::app::state::TabCardArea> {
     let ws_area = workspace_list_rect_for_app(app, area);
     let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
     let mut y = body.y;
     let mut out = Vec::new();
     let rows = sidebar_rows(app);
@@ -7490,7 +7597,7 @@ struct NestedHeaderArea {
 fn compute_sidebar_nested_header_areas(app: &AppState, area: Rect) -> Vec<NestedHeaderArea> {
     let ws_area = workspace_list_rect_for_app(app, area);
     let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
     let rows = sidebar_rows(app);
     let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
     nested_header_areas_from_rows(app, &rows, body, scroll_skip)
@@ -7567,7 +7674,7 @@ pub(crate) fn compute_remote_agent_row_areas(
     }
     let ws_area = workspace_list_rect_for_app(app, area);
     let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
     let rows = sidebar_rows(app);
     let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
     remote_agent_row_areas_from_rows(app, &rows, body, scroll_skip)
@@ -7648,7 +7755,7 @@ fn needs_you_row_areas_from_rows(
 pub(crate) fn needs_you_row_at(app: &AppState, row: u16) -> Option<NeedsYouTarget> {
     let ws_area = workspace_list_rect_for_app(app, app.view.sidebar_rect);
     let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
     let rows = sidebar_rows(app);
     let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
     needs_you_row_areas_from_rows(app, &rows, body, scroll_skip)
@@ -7848,7 +7955,7 @@ pub(crate) fn sidebar_pod_header_at(
 ) -> Option<(crate::groups::GroupId, bool)> {
     let list = workspace_list_rect_for_app(app, app.view.sidebar_rect);
     let metrics = workspace_list_scroll_metrics(app, list);
-    let body = workspace_list_body_rect(list, should_show_scrollbar(metrics));
+    let body = workspace_list_body_rect(app, list, should_show_scrollbar(metrics));
     let rows = sidebar_rows(app);
     let scroll = workspace_list_scroll_skip(app, &metrics);
     pod_row_areas_from_rows(app, &rows, body, scroll)
@@ -7865,7 +7972,7 @@ pub(crate) fn sidebar_pod_header_at(
 pub(crate) fn sidebar_pod_member_at(app: &AppState, row: u16) -> Option<PodTarget> {
     let list = workspace_list_rect_for_app(app, app.view.sidebar_rect);
     let metrics = workspace_list_scroll_metrics(app, list);
-    let body = workspace_list_body_rect(list, should_show_scrollbar(metrics));
+    let body = workspace_list_body_rect(app, list, should_show_scrollbar(metrics));
     let rows = sidebar_rows(app);
     let scroll = workspace_list_scroll_skip(app, &metrics);
     pod_row_areas_from_rows(app, &rows, body, scroll)
@@ -7971,7 +8078,7 @@ pub(crate) fn compute_sidebar_hover_targets(
         return Vec::new();
     }
     let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
     if body.width == 0 || body.height == 0 {
         return Vec::new();
     }
@@ -8330,7 +8437,7 @@ fn compute_symphony_job_areas(app: &AppState, area: Rect) -> Vec<SymphonyJobArea
 fn compute_symphony_areas(app: &AppState, area: Rect) -> (Vec<SymphonyJobArea>, Option<Rect>) {
     let ws_area = workspace_list_rect_for_app(app, area);
     let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
     let mut y = body.y;
     let mut out = Vec::new();
     let mut empty = None;
@@ -8724,7 +8831,7 @@ pub(crate) fn compute_sidebar_section_header_areas(
 ) -> Vec<SectionHeaderArea> {
     let ws_area = workspace_list_rect_for_app(app, area);
     let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
     let mut y = body.y;
     let mut out = Vec::new();
     let rows = sidebar_rows(app);
@@ -8756,7 +8863,7 @@ fn compute_sidebar_divider_areas(
     rows: &[SidebarRow],
     metrics: crate::pane::ScrollMetrics,
 ) -> Vec<Rect> {
-    let body = workspace_list_body_rect(body, should_show_scrollbar(metrics));
+    let body = workspace_list_body_rect(app, body, should_show_scrollbar(metrics));
     let mut y = body.y;
     let mut out = Vec::new();
     for (idx, row) in rows
@@ -9377,6 +9484,7 @@ pub(super) fn render_sidebar(
     crate::ui::goals::render_goals(app, frame, sidebar_goals_rect(app, area));
     crate::ui::hyperspace::render_animation(app, frame, sidebar_animation_rect(app, area));
     render_sidebar_header(app, frame, area, p);
+    render_sidebar_hosts(app, frame, area);
     let settings = sidebar_footer_settings_hit_area(area);
     if settings.width > 0 {
         let style = sidebar_footer_style(
@@ -9444,6 +9552,11 @@ pub(super) fn render_sidebar(
         frame,
         crate::ui::pomodoro::notification_hit_area(app, area),
     );
+    crate::ui::pomodoro::render_sidebar_areas_toggle(
+        app,
+        frame,
+        crate::ui::pomodoro::sidebar_areas_hit_area(app, area),
+    );
     let refresh = sidebar_footer_refresh_hit_area(area);
     if refresh.width > 0 {
         let style = sidebar_footer_style(
@@ -9454,6 +9567,7 @@ pub(super) fn render_sidebar(
         );
         frame.render_widget(Paragraph::new(Span::styled("⟳ ", style)), refresh);
     }
+    render_sidebar_areas_menu(app, frame);
 }
 
 fn sidebar_footer_style(
@@ -9494,37 +9608,51 @@ fn blend_rgb(left: Color, right: Color, amount: u16) -> Color {
     )
 }
 
+fn sidebar_light_theme(app: &AppState) -> bool {
+    crate::app::state::color_rgb(app.palette.panel_bg).is_some_and(|rgb| {
+        u32::from(rgb.r) * 299 + u32::from(rgb.g) * 587 + u32::from(rgb.b) * 114 > 140_000
+    })
+}
+
 fn render_sidebar_sky(app: &AppState, frame: &mut Frame, area: Rect) {
-    if !app.sidebar_sections_layout || app.sidebar_header_plain {
+    if !sidebar_has_sky_band(app) {
         return;
     }
     let content_width = sidebar_separator_col(area)
         .map(|separator| separator.saturating_sub(area.x))
         .unwrap_or(area.width);
-    let light_theme = crate::app::state::color_rgb(app.palette.panel_bg).is_some_and(|rgb| {
-        u32::from(rgb.r) * 299 + u32::from(rgb.g) * 587 + u32::from(rgb.b) * 114 > 140_000
-    });
+    let light_theme = sidebar_light_theme(app);
     let star_color = if light_theme {
-        Color::Rgb(84, 104, 165)
+        Color::Rgb(74, 91, 151)
     } else {
         Color::Rgb(220, 226, 255)
     };
-    let height = area.height.min(WORKSPACE_SECTION_HEADER_ROWS);
+    let height = area.height.min(3);
     for row in 0..height {
         for column in 0..content_width {
             let phase = u32::from(column) * 100 / u32::from(content_width.max(1));
-            let gradient = blend_rgb(
-                app.palette.panel_bg,
-                app.palette.accent,
-                10 + (phase / 8) as u16,
-            );
-            let star = (row == 0 && column % 19 == 5) || (row == 1 && column % 29 == 13);
+            let gradient = if light_theme {
+                blend_rgb(
+                    Color::Rgb(174, 193, 238),
+                    Color::Rgb(112, 137, 208),
+                    (phase / 2) as u16,
+                )
+            } else {
+                blend_rgb(
+                    Color::Rgb(35, 49, 95),
+                    Color::Rgb(77, 89, 157),
+                    (phase / 2) as u16,
+                )
+            };
+            let star = (row == 0 && column % 19 == 5)
+                || (row == 1 && column % 29 == 13)
+                || (row == 2 && column % 23 == 9);
             let sky = if star { star_color } else { gradient };
-            let horizon = blend_rgb(
-                app.palette.panel_bg,
-                app.palette.blue,
-                8 + (phase / 10) as u16,
-            );
+            let horizon = if light_theme {
+                Color::Rgb(129, 153, 218)
+            } else {
+                Color::Rgb(54, 66, 128)
+            };
             let cell = &mut frame.buffer_mut()[(area.x + column, area.y + row)];
             cell.set_symbol("▀");
             cell.set_style(Style::default().fg(sky).bg(horizon));
@@ -9538,15 +9666,33 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
     }
     render_sidebar_sky(app, frame, area);
     let toggle = expanded_sidebar_toggle_rect(area);
-    let search = sidebar_header_search_rect(area);
+    let has_sky_band = sidebar_has_sky_band(app);
+    let sky_ink = if sidebar_light_theme(app) {
+        Color::Rgb(45, 57, 94)
+    } else {
+        Color::White
+    };
+    let search = sidebar_header_search_rect_for_app(app, area);
     let new_thread = sidebar_header_new_thread_rect(area);
     let new_menu = sidebar_header_new_menu_rect(area);
     let star_filter = sidebar_header_star_filter_rect(area);
     let overflow = sidebar_header_overflow_rect(area);
     frame.render_widget(
-        Paragraph::new(Span::styled("«", Style::default().fg(p.overlay0))),
+        Paragraph::new(Span::styled(
+            "«",
+            Style::default().fg(if has_sky_band { sky_ink } else { p.overlay0 }),
+        )),
         toggle,
     );
+    if has_sky_band && area.width > 12 {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "herdr",
+                Style::default().fg(sky_ink).add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(area.x.saturating_add(2), area.y, 6, 1),
+        );
+    }
     if search.width > 0 {
         let query = app.sidebar_work_filter.query.as_str();
         let text = if query.is_empty() && app.sidebar_search_active {
@@ -9562,13 +9708,21 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
         frame.render_widget(
             Paragraph::new(Span::styled(
                 truncate_end(&text, usize::from(search.width)),
-                Style::default().fg(if app.sidebar_search_active {
+                Style::default().fg(if has_sky_band || app.sidebar_search_active {
                     p.text
                 } else {
                     p.overlay0
                 }),
             )),
             search,
+        );
+    }
+    let goto = sidebar_header_goto_rect(app, area);
+    if goto.width > 0 {
+        let label = sidebar_prefixed_key_label(app, &app.keybinds.goto);
+        frame.render_widget(
+            Paragraph::new(Span::styled(label, Style::default().fg(p.overlay0))),
+            goto,
         );
     }
     if star_filter.width > 0 {
@@ -9585,16 +9739,22 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
         frame.render_widget(Paragraph::new(Span::styled(glyph, style)), star_filter);
     }
     frame.render_widget(
-        Paragraph::new(Span::styled("✎", Style::default().fg(p.accent))),
+        Paragraph::new(Span::styled(
+            "✎",
+            Style::default().fg(if has_sky_band { sky_ink } else { p.accent }),
+        )),
         new_thread,
     );
     frame.render_widget(
-        Paragraph::new(Span::styled("+", Style::default().fg(p.accent))),
+        Paragraph::new(Span::styled(
+            "+",
+            Style::default().fg(if has_sky_band { sky_ink } else { p.accent }),
+        )),
         new_menu,
     );
-    let mode_anchor = sidebar_group_mode_anchor_rect(area);
+    let mode_anchor = sidebar_group_mode_anchor_rect_for_app(app, area);
     let project_chip_rect = sidebar_project_anchor_rect(app, area);
-    if mode_anchor.width > 0 {
+    if mode_anchor.width > 0 && sidebar_area_is_visible(app, crate::config::SidebarArea::ViewBar) {
         let label = sidebar_header_mode_label(app);
         let chip = sidebar_project_chip(app);
         // The chip owns fixed columns at the end of the line, so the view label
@@ -9633,6 +9793,11 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
         Style::default().fg(p.accent).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(p.overlay0)
+    };
+    let overflow_style = if has_sky_band {
+        overflow_style.fg(sky_ink)
+    } else {
+        overflow_style
     };
     frame.render_widget(Paragraph::new(Span::styled("…", overflow_style)), overflow);
 }
@@ -10314,7 +10479,7 @@ fn render_workspace_list(
     if (!has_matching_rows && !app.sidebar_work_filter.query.is_empty())
         || (row_entries.is_empty() && !app.sidebar_shows_spaces_tree())
     {
-        let body = workspace_list_body_rect(list_area, should_show_scrollbar(metrics));
+        let body = workspace_list_body_rect(app, list_area, should_show_scrollbar(metrics));
         let empty_y = section_headers
             .iter()
             .map(|header| header.rect.bottom())
@@ -10361,7 +10526,7 @@ fn render_workspace_list(
         render_nested_header(app, frame, &header);
     }
     {
-        let body = workspace_list_body_rect(list_area, should_show_scrollbar(metrics));
+        let body = workspace_list_body_rect(app, list_area, should_show_scrollbar(metrics));
         let scroll = workspace_list_scroll_skip(app, &metrics);
         for (row_idx, rect) in pod_row_areas_from_rows(app, &row_entries, body, scroll) {
             match row_entries.get(row_idx) {
@@ -10432,7 +10597,7 @@ fn render_workspace_list(
         render_agent_card(app, frame, entry, card.rect, depth, narrow_prefix);
     }
     if !app.remote_agent_panel_entries.is_empty() {
-        let body = workspace_list_body_rect(list_area, should_show_scrollbar(metrics));
+        let body = workspace_list_body_rect(app, list_area, should_show_scrollbar(metrics));
         let scroll = workspace_list_scroll_skip(app, &metrics);
         for row_area in remote_agent_row_areas_from_rows(app, &row_entries, body, scroll) {
             let Some(SidebarRow::RemoteAgent {
@@ -10470,7 +10635,7 @@ fn render_workspace_list(
     // The Needs-you strip leads the same row list, so its geometry comes from
     // the same walk as the remote rows above it.
     {
-        let body = workspace_list_body_rect(list_area, should_show_scrollbar(metrics));
+        let body = workspace_list_body_rect(app, list_area, should_show_scrollbar(metrics));
         let scroll = workspace_list_scroll_skip(app, &metrics);
         for (row_idx, rect) in needs_you_row_areas_from_rows(app, &row_entries, body, scroll) {
             let Some(SidebarRow::NeedsYou {
@@ -10938,6 +11103,84 @@ pub(crate) fn sidebar_header_search_rect(area: Rect) -> Rect {
     )
 }
 
+fn sidebar_has_sky_band(app: &AppState) -> bool {
+    app.sidebar_sections_layout && app.sidebar_areas.sky_header && !app.sidebar_header_plain
+}
+
+fn sidebar_search_y(app: &AppState, area: Rect) -> u16 {
+    area.y
+        .saturating_add(if sidebar_has_sky_band(app) { 3 } else { 0 })
+}
+
+fn sidebar_prefixed_key_label(app: &AppState, bindings: &crate::config::ActionKeybinds) -> String {
+    if let Some(rhs) = bindings.prefix_rhs_label() {
+        format!(
+            "{} {rhs}",
+            crate::config::format_key_combo((app.prefix_code, app.prefix_mods))
+        )
+    } else {
+        bindings.label().unwrap_or_else(|| "unset".to_string())
+    }
+}
+
+pub(crate) fn sidebar_header_search_rect_for_app(app: &AppState, area: Rect) -> Rect {
+    if !app.sidebar_sections_layout {
+        return sidebar_header_search_rect(area);
+    }
+    let goto = sidebar_prefixed_key_label(app, &app.keybinds.goto);
+    let content_right = if sidebar_has_sky_band(app) {
+        sidebar_separator_col(area).unwrap_or(area.right())
+    } else {
+        let first_control = sidebar_header_star_filter_rect(area);
+        let first_control = if first_control.width > 0 {
+            first_control
+        } else {
+            sidebar_header_new_thread_rect(area)
+        };
+        first_control.x.saturating_sub(1)
+    };
+    let start = area.x.saturating_add(1);
+    let reserved = u16::try_from(display_width(&goto).saturating_add(1)).unwrap_or(u16::MAX);
+    let width = content_right.saturating_sub(start).saturating_sub(reserved);
+    Rect::new(start, sidebar_search_y(app, area), width, 1)
+}
+
+pub(crate) fn sidebar_header_goto_rect(app: &AppState, area: Rect) -> Rect {
+    if !app.sidebar_sections_layout {
+        return Rect::default();
+    }
+    let goto = app
+        .keybinds
+        .goto
+        .prefix_rhs_label()
+        .map(|rhs| {
+            format!(
+                "{} {rhs}",
+                crate::config::format_key_combo((app.prefix_code, app.prefix_mods))
+            )
+        })
+        .or_else(|| app.keybinds.goto.label())
+        .unwrap_or_else(|| "unset".to_string());
+    let width = u16::try_from(display_width(&goto)).unwrap_or(u16::MAX);
+    let right = if sidebar_has_sky_band(app) {
+        sidebar_separator_col(area).unwrap_or(area.right())
+    } else {
+        let first_control = sidebar_header_star_filter_rect(area);
+        let first_control = if first_control.width > 0 {
+            first_control
+        } else {
+            sidebar_header_new_thread_rect(area)
+        };
+        first_control.x.saturating_sub(1)
+    };
+    Rect::new(
+        right.saturating_sub(width),
+        sidebar_search_y(app, area),
+        width,
+        1,
+    )
+}
+
 pub(crate) fn sidebar_header_mode_label(app: &AppState) -> String {
     let view = format!("View: {} ▾", app.sidebar_group_mode.view_label());
     let machine = match app.sidebar_work_filter.machine_scope {
@@ -10978,11 +11221,14 @@ pub(crate) const ALL_PROJECTS_LABEL: &str = "All projects";
 
 /// The project chip's hit area: the tail of the header line.
 pub(crate) fn sidebar_project_anchor_rect(app: &AppState, area: Rect) -> Rect {
+    if !sidebar_area_is_visible(app, crate::config::SidebarArea::ViewBar) {
+        return Rect::default();
+    }
     let chip = sidebar_project_chip(app);
     if chip.is_empty() {
         return Rect::default();
     }
-    let mode_anchor = sidebar_group_mode_anchor_rect(area);
+    let mode_anchor = sidebar_group_mode_anchor_rect_for_app(app, area);
     let width = u16::try_from(display_width(&chip)).unwrap_or(u16::MAX);
     // The chip closes the header line and keeps its own columns, so a default
     // 26-column sidebar still offers the scope instead of hiding it behind a
@@ -11006,7 +11252,10 @@ const MODE_LABEL_MIN_WIDTH: u16 = 10;
 /// The `· <filter> ▾` half of the header line, which opens the filter dropdown.
 /// Empty outside the work-item modes, where there is nothing to filter.
 pub(crate) fn sidebar_filter_anchor_rect(app: &AppState, area: Rect) -> Rect {
-    let mode_anchor = sidebar_group_mode_anchor_rect(area);
+    if !sidebar_area_is_visible(app, crate::config::SidebarArea::ViewBar) {
+        return Rect::default();
+    }
+    let mode_anchor = sidebar_group_mode_anchor_rect_for_app(app, area);
     if mode_anchor.width == 0 {
         return Rect::default();
     }
@@ -11038,6 +11287,117 @@ pub(crate) fn sidebar_group_mode_anchor_rect(area: Rect) -> Rect {
     let x = area.x.saturating_add(if area.width < 20 { 1 } else { 2 });
     let right = area.right().saturating_sub(2);
     Rect::new(x, area.y.saturating_add(1), right.saturating_sub(x), 1)
+}
+
+pub(crate) fn sidebar_group_mode_anchor_rect_for_app(app: &AppState, area: Rect) -> Rect {
+    if !sidebar_area_is_visible(app, crate::config::SidebarArea::ViewBar) {
+        return Rect::default();
+    }
+    if !app.sidebar_sections_layout {
+        return sidebar_group_mode_anchor_rect(area);
+    }
+    if area.width < 8 || area.height == 0 {
+        return Rect::default();
+    }
+    let x = area.x.saturating_add(if area.width < 20 { 1 } else { 2 });
+    let right = sidebar_separator_col(area)
+        .unwrap_or_else(|| area.right())
+        .saturating_sub(2);
+    let y = sidebar_search_y(app, area).saturating_add(1);
+    Rect::new(x, y, right.saturating_sub(x), 1)
+}
+
+const SIDEBAR_AREAS: [crate::config::SidebarArea; 9] = [
+    crate::config::SidebarArea::SkyHeader,
+    crate::config::SidebarArea::ViewBar,
+    crate::config::SidebarArea::Unassigned,
+    crate::config::SidebarArea::Runs,
+    crate::config::SidebarArea::Aloops,
+    crate::config::SidebarArea::Symphony,
+    crate::config::SidebarArea::Notes,
+    crate::config::SidebarArea::Pomodoro,
+    crate::config::SidebarArea::Hosts,
+];
+
+pub(crate) fn sidebar_area_at_menu_index(index: usize) -> Option<crate::config::SidebarArea> {
+    SIDEBAR_AREAS.get(index).copied()
+}
+
+pub(crate) fn sidebar_areas_menu_layout(
+    app: &AppState,
+    area: Rect,
+) -> Option<super::dropdown::DropdownLayout> {
+    let selected = app.sidebar_areas_menu_selected?;
+    let anchor = app.view.sidebar_areas_hit_area;
+    if anchor.width == 0 || area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let visible_rows = SIDEBAR_AREAS
+        .len()
+        .min(usize::from(anchor.y.saturating_sub(area.y)));
+    if visible_rows == 0 {
+        return None;
+    }
+    let width = SIDEBAR_AREAS
+        .iter()
+        .map(|area| display_width(&format!("[x] {}", area.label())))
+        .max()
+        .unwrap_or(1)
+        .saturating_add(2)
+        .min(usize::from(area.width));
+    let width = u16::try_from(width).ok()?.max(1);
+    let x = anchor.x.max(area.x).min(area.right().saturating_sub(width));
+    let height = u16::try_from(visible_rows).ok()?;
+    let rect = Rect::new(x, anchor.y.saturating_sub(height), width, height);
+    let max_first = SIDEBAR_AREAS.len().saturating_sub(visible_rows);
+    let first_visible = selected
+        .saturating_sub(visible_rows.saturating_sub(1))
+        .min(max_first);
+    Some(super::dropdown::DropdownLayout {
+        rect,
+        first_visible,
+        visible_rows,
+        filter_rect: None,
+        list_rect: rect,
+    })
+}
+
+pub(crate) fn sidebar_areas_menu_index_at(
+    app: &AppState,
+    area: Rect,
+    x: u16,
+    y: u16,
+) -> Option<usize> {
+    super::dropdown::hit_test(&sidebar_areas_menu_layout(app, area)?, x, y)
+        .filter(|index| *index < SIDEBAR_AREAS.len())
+}
+
+pub(super) fn render_sidebar_areas_menu(app: &AppState, frame: &mut Frame) {
+    let Some(layout) = sidebar_areas_menu_layout(app, frame.area()) else {
+        return;
+    };
+    let rows = SIDEBAR_AREAS
+        .iter()
+        .map(|area| super::dropdown::DropdownMenuRow::Item {
+            label: format!(
+                "[{}] {}",
+                if app.sidebar_areas.is_visible(*area) {
+                    "x"
+                } else {
+                    " "
+                },
+                area.label()
+            ),
+            enabled: true,
+        })
+        .collect::<Vec<_>>();
+    super::dropdown::render_menu(
+        &app.palette,
+        frame,
+        &layout,
+        &rows,
+        app.sidebar_areas_menu_selected.unwrap_or(0),
+    );
 }
 
 pub(crate) fn sidebar_new_menu_layout(
@@ -11296,7 +11656,7 @@ pub(crate) fn sidebar_group_menu_layout(
     app: &AppState,
     area: Rect,
 ) -> Option<super::dropdown::DropdownLayout> {
-    let anchor = sidebar_group_mode_anchor_rect(app.view.sidebar_rect);
+    let anchor = sidebar_group_mode_anchor_rect_for_app(app, app.view.sidebar_rect);
     super::dropdown::layout_dropdown(
         &super::dropdown::DropdownSpec {
             anchor,
@@ -19179,7 +19539,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let area = Rect::new(0, 0, 20, 10);
         let ws_area = workspace_list_rect(area, app.sidebar_section_split);
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
-        let body = workspace_list_body_rect(ws_area, should_show_scrollbar(metrics));
+        let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
         let mut terminal = Terminal::new(TestBackend::new(20, 10)).unwrap();
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
@@ -28321,6 +28681,77 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .draw(|frame| render_sidebar_sky(&app, frame, area))
             .expect("plain header");
         assert_ne!(plain_terminal.backend().buffer()[(20, 0)].symbol(), "▀");
+    }
+
+    #[test]
+    fn sections_design_d_header_has_sky_search_goto_and_view_in_both_themes() {
+        for palette in [Palette::one_dark(), Palette::one_light()] {
+            let mut app = AppState::test_new();
+            app.sidebar_sections_layout = true;
+            app.palette = palette;
+            app.keybinds.goto = crate::config::ActionKeybinds::prefix("g");
+            let area = Rect::new(0, 0, 42, 6);
+            let mut terminal = Terminal::new(TestBackend::new(42, 6)).expect("header terminal");
+            terminal
+                .draw(|frame| render_sidebar_header(&app, frame, area, &app.palette))
+                .expect("render design D header");
+            let buffer = terminal.backend().buffer();
+            assert!(row_text(buffer, 0, 42).contains("herdr"));
+            assert!(row_text(buffer, 3, 42).contains("Search"));
+            assert!(row_text(buffer, 3, 42)
+                .contains(&sidebar_prefixed_key_label(&app, &app.keybinds.goto)));
+            assert!(row_text(buffer, 4, 42).contains("View:"));
+            let sky = buffer[(20, 1)];
+            assert_ne!(sky.bg, app.palette.panel_bg, "sky band should stand out");
+            assert!(matches!(sky.bg, Color::Rgb(_, _, _)));
+        }
+    }
+
+    #[test]
+    fn sections_host_strip_lists_local_first_and_keeps_help_clear_of_footer() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.keybinds.help = crate::config::ActionKeybinds::prefix("?");
+        app.machines = vec![
+            crate::app::machines::Machine {
+                name: "ub2".into(),
+                target: None,
+                socket: None,
+            },
+            crate::app::machines::Machine {
+                name: "ub1".into(),
+                target: Some("ub1".into()),
+                socket: None,
+            },
+            crate::app::machines::Machine {
+                name: "mbpro".into(),
+                target: Some("mbpro".into()),
+                socket: None,
+            },
+            crate::app::machines::Machine {
+                name: "mbair".into(),
+                target: Some("mbair".into()),
+                socket: None,
+            },
+        ];
+        let area = Rect::new(0, 0, 40, 8);
+        let host_row = sidebar_hosts_rect(&app, area);
+        let footer = sidebar_footer_settings_hit_area(area);
+        assert_eq!(host_row.y.saturating_add(1), footer.y);
+        assert!(expanded_sidebar_content_for_app(&app, area).bottom() <= host_row.y);
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).expect("host strip terminal");
+        terminal
+            .draw(|frame| render_sidebar_hosts(&app, frame, area))
+            .expect("render host strip");
+        let buffer = terminal.backend().buffer();
+        let line = row_text(buffer, host_row.y, 40);
+        assert!(line.contains("ub2 ub1 mbpro mbair"), "{line:?}");
+        assert!(line.ends_with(&sidebar_prefixed_key_label(&app, &app.keybinds.help)));
+        assert_eq!(buffer[(host_row.x, host_row.y)].fg, app.palette.accent);
+        assert!(buffer[(host_row.x, host_row.y)]
+            .modifier
+            .contains(Modifier::BOLD));
     }
 
     #[test]

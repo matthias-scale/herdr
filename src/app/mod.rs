@@ -1118,6 +1118,7 @@ impl App {
                 notepad_usage_max_scroll: 0,
                 pomodoro_hit_area: Rect::default(),
                 notification_hit_area: Rect::default(),
+                sidebar_areas_hit_area: Rect::default(),
                 hyperspace_rect: Rect::default(),
                 hyperspace_pause_hit_area: Rect::default(),
                 sidebar_footer_refresh_hit_area: Rect::default(),
@@ -1316,6 +1317,7 @@ impl App {
             agent_view_override: None,
             sidebar_agents: config.ui.sidebar.agents.clone(),
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
+            sidebar_areas: config.ui.sidebar.areas.clone(),
             sidebar_sections_layout: config.ui.sidebar.layout
                 == crate::config::SidebarLayoutConfig::Sections,
             sidebar_header_plain: config.ui.sidebar.header
@@ -2833,6 +2835,7 @@ impl App {
                 }
                 if self.state.sidebar_agents != config.ui.sidebar.agents
                     || self.state.sidebar_spaces != config.ui.sidebar.spaces
+                    || self.state.sidebar_areas != config.ui.sidebar.areas
                     || self.state.sidebar_sections_layout
                         != (config.ui.sidebar.layout
                             == crate::config::SidebarLayoutConfig::Sections)
@@ -2846,6 +2849,7 @@ impl App {
                 self.state.working_row_opacity_percent = config.ui.working_row_opacity_percent;
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
+                self.state.sidebar_areas = config.ui.sidebar.areas.clone();
                 self.state.sidebar_sections_layout =
                     config.ui.sidebar.layout == crate::config::SidebarLayoutConfig::Sections;
                 self.state.sidebar_header_plain =
@@ -3612,6 +3616,9 @@ impl App {
         key: crate::input::TerminalKey,
     ) {
         let key_event = key.as_key_event();
+        if self.handle_sidebar_areas_menu_key(key_event, owner) {
+            return;
+        }
         match owner {
             state::InputOwner::Pomodoro | state::InputOwner::Popup | state::InputOwner::Pane => {}
             state::InputOwner::Client(owner) => match owner {

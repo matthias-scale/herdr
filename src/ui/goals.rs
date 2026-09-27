@@ -43,7 +43,11 @@ pub(crate) fn split_sidebar_panels(app: &AppState, content: Rect) -> SidebarPane
         content.width,
         content.height.saturating_sub(goals_height),
     );
-    let notepad = super::notepad::notepad_panel_rect(app, upper);
+    let notepad = if app.sidebar_sections_layout && !app.sidebar_areas.notes {
+        Rect::default()
+    } else {
+        super::notepad::notepad_panel_rect(app, upper)
+    };
     let workspaces = Rect::new(
         upper.x,
         upper.y,

@@ -1,8 +1,8 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
 use crate::app::{
-    state::{AppState, ViewLayout},
+    state::{AppState, InputOwner, ServerInputOwner, ViewLayout},
     App,
 };
 
@@ -590,7 +590,7 @@ impl AppState {
     }
 
     pub(crate) fn sidebar_group_mode_anchor_rect(&self) -> Rect {
-        crate::ui::sidebar_group_mode_anchor_rect(self.view.sidebar_rect)
+        crate::ui::sidebar_group_mode_anchor_rect_for_app(self, self.view.sidebar_rect)
     }
 
     pub(crate) fn sidebar_group_menu_item_at(&self, col: u16, row: u16) -> Option<usize> {
@@ -1419,6 +1419,105 @@ impl AppState {
 }
 
 impl App {
+    pub(crate) fn handle_sidebar_areas_menu_key(
+        &mut self,
+        key: KeyEvent,
+        owner: InputOwner,
+    ) -> bool {
+        if self.state.sidebar_areas_menu_selected.is_none()
+            || !matches!(
+                owner,
+                InputOwner::Sidebar
+                    | InputOwner::Pane
+                    | InputOwner::Notepad
+                    | InputOwner::None
+                    | InputOwner::Server(ServerInputOwner::Navigate)
+            )
+        {
+            return false;
+        }
+        const LAST_AREA_INDEX: usize = 8;
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(selected) = &mut self.state.sidebar_areas_menu_selected {
+                    *selected = selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(selected) = &mut self.state.sidebar_areas_menu_selected {
+                    *selected = selected.saturating_add(1).min(LAST_AREA_INDEX);
+                }
+            }
+            KeyCode::Home => self.state.sidebar_areas_menu_selected = Some(0),
+            KeyCode::End => self.state.sidebar_areas_menu_selected = Some(LAST_AREA_INDEX),
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Some(area) = self
+                    .state
+                    .sidebar_areas_menu_selected
+                    .and_then(crate::ui::sidebar::sidebar_area_at_menu_index)
+                {
+                    self.toggle_sidebar_area(area);
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.state.sidebar_areas_menu_selected = None;
+            }
+            _ => {}
+        }
+        true
+    }
+
+    pub(super) fn handle_sidebar_areas_menu_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        owner: InputOwner,
+    ) -> bool {
+        if !matches!(
+            owner,
+            InputOwner::Sidebar
+                | InputOwner::Pane
+                | InputOwner::Notepad
+                | InputOwner::None
+                | InputOwner::Server(ServerInputOwner::Navigate)
+        ) {
+            return false;
+        }
+        if self.state.sidebar_areas_menu_selected.is_some() {
+            if let Some(index) = crate::ui::sidebar::sidebar_areas_menu_index_at(
+                &self.state,
+                self.state.screen_rect(),
+                mouse.column,
+                mouse.row,
+            ) {
+                if matches!(mouse.kind, MouseEventKind::Moved) {
+                    self.state.sidebar_areas_menu_selected = Some(index);
+                    return true;
+                }
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    self.state.sidebar_areas_menu_selected = Some(index);
+                    if let Some(area) = crate::ui::sidebar::sidebar_area_at_menu_index(index) {
+                        self.toggle_sidebar_area(area);
+                    }
+                    return true;
+                }
+            }
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.state.sidebar_areas_menu_selected = None;
+            }
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.state.point_in_rect(
+                self.state.view.sidebar_areas_hit_area,
+                mouse.column,
+                mouse.row,
+            )
+        {
+            self.state.sidebar_areas_menu_selected = Some(0);
+            return true;
+        }
+        false
+    }
+
     /// Open the pod picker for the focused local pane. The action is safe to
     /// expose in the palette even when no pod exists because a typed name can
     /// create the first local pod.
