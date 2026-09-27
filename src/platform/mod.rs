@@ -13,7 +13,10 @@ pub(crate) enum HostOs {
     Mac,
     #[cfg_attr(not(windows), allow(dead_code))]
     Windows,
-    #[cfg_attr(any(target_os = "linux", target_os = "macos", windows), allow(dead_code))]
+    #[cfg_attr(
+        any(target_os = "linux", target_os = "macos", windows),
+        allow(dead_code)
+    )]
     Other,
 }
 
