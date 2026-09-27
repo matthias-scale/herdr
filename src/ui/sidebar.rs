@@ -2893,6 +2893,7 @@ fn project_badge(label: &str) -> ProjectBadge {
     let mut first_word_digit = None;
     let mut first_word_last = None;
     let mut last_word_first = None;
+    let mut first_word_position = 0usize;
     let mut word_count = 0usize;
     let mut inside_word = false;
     for character in label.chars() {
@@ -2905,37 +2906,23 @@ fn project_badge(label: &str) -> ProjectBadge {
                 }
             }
             if word_count == 1 {
-                if first_word.is_some_and(|first| first != character)
-                    && first_word_digit.is_none()
-                    && character.is_numeric()
-                {
+                if first_word_position > 0 && first_word_digit.is_none() && character.is_numeric() {
                     first_word_digit = Some(character);
                 }
                 first_word_last = Some(character);
+                first_word_position += 1;
             }
             inside_word = true;
         } else {
             inside_word = false;
         }
     }
-    let version_v2 = {
-        let mut suffix = label.chars().rev();
-        matches!((suffix.next(), suffix.next()), (Some('2'), Some('v' | 'V')))
-    };
     let first = first_word.unwrap_or('P');
-    let second = if version_v2 {
-        // The ticket's `scalablev2 → SV` example treats its version marker as
-        // the second word, matching T3's last-word initial rule.
-        Some('v')
+    let second = first_word_digit.or(if word_count > 1 {
+        last_word_first
     } else {
-        first_word_digit.or({
-            if word_count > 1 {
-                last_word_first
-            } else {
-                first_word_last
-            }
-        })
-    };
+        first_word_last
+    });
     let mut letters = if word_count == 0 {
         "PR".to_string()
     } else {
@@ -27728,9 +27715,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
     #[test]
     fn project_badge_follows_t3_examples_and_uses_the_eighteen_color_hash() {
-        assert_eq!(project_badge("scalablev2").letters, "SV");
+        assert_eq!(project_badge("scalablev2").letters, "S2");
         assert_eq!(project_badge("herdr").letters, "HR");
         assert_eq!(project_badge("my project").letters, "MP");
+        assert_eq!(project_badge("agent-fleet").letters, "AF");
+        assert_eq!(project_badge("scalable-agent-fleet").letters, "SF");
+        assert_eq!(project_badge("11x").letters, "11");
+        assert_eq!(project_badge("").letters, "PR");
         assert_eq!(project_badge("scalablev2").color_index, {
             "scalablev2".chars().fold(0usize, |hash, ch| {
                 hash.wrapping_mul(31).wrapping_add(ch as usize) % 18
