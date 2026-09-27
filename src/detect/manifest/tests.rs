@@ -2078,3 +2078,54 @@ fn claude_plan_approval_dialog_is_a_visible_blocker() {
     let result = osc_explain(Agent::Claude, screen, "✳ Create probe file", "");
     assert_claude_visible_blocker(&result, "plan_approval_prompt", "idle OSC title");
 }
+
+#[test]
+fn claude_file_write_permission_prompt_is_a_visible_blocker() {
+    let screen = include_str!(
+        "../../../tests/fixtures/agent-detection/claude-write-permission-ub1-20260927.txt"
+    );
+
+    let result = bundled_explain(Agent::Claude, screen);
+    assert_claude_visible_blocker(&result, "file_permission_prompt", "no OSC");
+
+    let result = osc_explain(Agent::Claude, screen, "✳ Create probe file", "");
+    assert_claude_visible_blocker(&result, "file_permission_prompt", "idle OSC title");
+}
+
+#[test]
+fn claude_wrapped_file_edit_permission_prompt_is_a_visible_blocker() {
+    let rule = "─".repeat(80);
+    let screen = format!(
+        "{rule}\n Edit file\n probe.txt\n{rule}\n Do you want to make this\n edit to probe.txt?\n ❯ 1. Yes\n   2. Yes, and switch to accept edits (auto-approve file edits and common\n      file commands) for this session (shift+tab)\n   3. No\n\n Esc to cancel · Tab to amend\n"
+    );
+
+    let result = bundled_explain(Agent::Claude, &screen);
+    assert_claude_visible_blocker(&result, "file_permission_prompt", "wrapped edit");
+}
+
+#[test]
+fn current_claude_bash_permission_panel_keeps_its_existing_rule() {
+    let screen = include_str!(
+        "../../../tests/fixtures/agent-detection/claude-native-bash-permission-ub1-20260927.txt"
+    );
+
+    let result = bundled_explain(Agent::Claude, screen);
+    assert_claude_visible_blocker(&result, "bash_permission_prompt", "no OSC");
+
+    let result = osc_explain(Agent::Claude, screen, "✳ Create probe file", "");
+    assert_claude_visible_blocker(&result, "bash_permission_prompt", "idle OSC title");
+}
+
+#[test]
+fn quoted_plan_and_file_prompts_above_a_live_prompt_stay_idle() {
+    let rule = "─".repeat(80);
+    let screen = format!(
+        "❯ Quote the two Claude dialogs back to me.\n\n⏺ The plan dialog says \"Claude has written up a plan and is ready to execute. Would you like\n  to proceed?\" with 1. Yes, and use auto mode, 2. Yes, manually approve edits and\n  3. Tell Claude what to change. The write dialog asks \"Do you want to create probe.txt?\"\n  with 1. Yes, 2. Yes, and switch to accept edits, 3. No and Esc to cancel.\n\n{rule}\n❯\n{rule}\n  -- INSERT -- ⏸ manual mode on · ← 13 agents /rc\n"
+    );
+
+    for (label, osc_title) in [("no OSC", ""), ("idle OSC title", "✳ Create probe file")] {
+        let result = osc_explain(Agent::Claude, &screen, osc_title, "");
+        assert_eq!(result.state, AgentState::Idle, "{label}");
+        assert!(!result.visible_blocker, "{label}");
+    }
+}

@@ -291,6 +291,24 @@ all = [
 ]
 
 [[rules]]
+id = "file_permission_prompt"
+state = "blocked"
+priority = 850
+region = "after_last_horizontal_rule"
+visible_blocker = true
+# Write and Edit approvals ask "Do you want to create <file>?" or "Do you want
+# to make this edit to <file>?" instead of "Do you want to proceed?", so only
+# the non-visible legacy fallback caught them. Gate on that question
+# (wrap-tolerant), the cancel footer, and at least one numbered option.
+regex = ['(?i)do(?:[ \t]+|[ \t]*\n[ \t]*)you(?:[ \t]+|[ \t]*\n[ \t]*)want(?:[ \t]+|[ \t]*\n[ \t]*)to(?:[ \t]+|[ \t]*\n[ \t]*)(?:create|make(?:[ \t]+|[ \t]*\n[ \t]*)this(?:[ \t]+|[ \t]*\n[ \t]*)edit(?:[ \t]+|[ \t]*\n[ \t]*)to)']
+contains = ["esc to cancel"]
+any = [
+  { line_regex = ['^\s*❯?\s*1\.\s*Yes\b'] },
+  { line_regex = ['^\s*❯?\s*2\.\s*Yes\b'] },
+  { line_regex = ['^\s*❯?\s*3\.\s*No\b'] },
+]
+
+[[rules]]
 id = "generic_permission_prompt"
 state = "blocked"
 priority = 840
