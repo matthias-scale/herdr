@@ -2715,6 +2715,15 @@ pub(crate) fn unassigned_section_title(mode: SidebarGroupMode) -> Option<&'stati
     }
 }
 
+const INITIAL_COLLAPSED_SHARED_GROUP_TITLES: [&str; 6] = [
+    SNOOZED_SECTION_TITLE,
+    SETTLED_SECTION_TITLE,
+    FLEET_SECTION_TITLE,
+    RUNS_SECTION_TITLE,
+    ALOOPS_SECTION_TITLE,
+    SYMPHONY_SECTION_TITLE,
+];
+
 pub(crate) fn initial_collapsed_sidebar_groups(
     overrides: &std::collections::HashMap<String, bool>,
 ) -> std::collections::HashSet<String> {
@@ -2724,14 +2733,7 @@ pub(crate) fn initial_collapsed_sidebar_groups(
         if let Some(title) = unassigned_section_title(mode) {
             groups.insert(format!("{namespace}:{title}"));
         }
-        for title in [
-            SNOOZED_SECTION_TITLE,
-            SETTLED_SECTION_TITLE,
-            FLEET_SECTION_TITLE,
-            RUNS_SECTION_TITLE,
-            ALOOPS_SECTION_TITLE,
-            SYMPHONY_SECTION_TITLE,
-        ] {
+        for title in INITIAL_COLLAPSED_SHARED_GROUP_TITLES {
             groups.insert(format!("{namespace}:{title}"));
         }
     }
@@ -2743,6 +2745,15 @@ pub(crate) fn initial_collapsed_sidebar_groups(
         }
     }
     groups
+}
+
+fn section_title_defaults_to_collapsed(title: &str) -> bool {
+    title == SETTLED_SECTION_TITLE
+        || title.starts_with(aloops::ALOOP_CLEAN_KEY_PREFIX)
+        || INITIAL_COLLAPSED_SHARED_GROUP_TITLES.contains(&title)
+        || SidebarGroupMode::ALL
+            .into_iter()
+            .any(|mode| unassigned_section_title(mode) == Some(title))
 }
 
 /// Shown under a reachable runner with nothing to list. It states the fact so
@@ -2792,10 +2803,11 @@ fn section_header_glyph_for_app(app: &AppState, title: &str) -> &'static str {
 pub(crate) fn section_is_collapsed(app: &AppState, title: &str) -> bool {
     if app.sidebar_sections_layout {
         let key = format!("sections:{title}");
-        if title == SETTLED_SECTION_TITLE {
-            return !app.collapsed_sidebar_groups.contains(&key);
-        }
-        return app.collapsed_sidebar_groups.contains(&key);
+        return if section_title_defaults_to_collapsed(title) {
+            !app.collapsed_sidebar_groups.contains(&key)
+        } else {
+            app.collapsed_sidebar_groups.contains(&key)
+        };
     }
     let key = format!("{}:{title}", app.sidebar_group_mode.collapse_namespace());
     if title.starts_with(aloops::ALOOP_CLEAN_KEY_PREFIX) {
@@ -27829,6 +27841,34 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn sections_layout_keeps_default_collapsed_groups() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.collapsed_sidebar_groups.clear();
+
+        let initial_groups = initial_collapsed_sidebar_groups(&std::collections::HashMap::new());
+        let default_titles = initial_groups
+            .iter()
+            .filter_map(|key| key.rsplit_once(':').map(|(_, title)| title))
+            .collect::<std::collections::HashSet<_>>();
+        for title in default_titles {
+            assert!(
+                section_is_collapsed(&app, title),
+                "{title} should start collapsed"
+            );
+        }
+
+        let clean_group = format!("{}weekly", aloops::ALOOP_CLEAN_KEY_PREFIX);
+        assert!(section_is_collapsed(&app, &clean_group));
+        assert!(section_is_collapsed(&app, SETTLED_SECTION_TITLE));
+
+        app.toggle_sidebar_group(RUNS_SECTION_TITLE);
+        assert!(!section_is_collapsed(&app, RUNS_SECTION_TITLE));
+        app.toggle_sidebar_group(RUNS_SECTION_TITLE);
+        assert!(section_is_collapsed(&app, RUNS_SECTION_TITLE));
     }
 
     #[test]
