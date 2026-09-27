@@ -1439,6 +1439,10 @@ impl AgentPanelEntry {
             AgentPanelIdentity::Remote(_) => None,
         }
     }
+
+    pub(crate) fn has_sections_card(&self) -> bool {
+        self.sections_card.is_some()
+    }
 }
 
 impl std::ops::Deref for AgentPanelEntry {

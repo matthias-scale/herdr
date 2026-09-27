@@ -145,7 +145,7 @@ fn mobile_switcher_target_for_row(
             col,
         ),
         SidebarRow::Tab { entry, depth } => {
-            if entry.sections_card.is_some() {
+            if entry.has_sections_card() {
                 None
             } else {
                 super::sidebar::selected_row_control_at(
