@@ -796,7 +796,9 @@ def parse(text: str) -> ClosingBlock:
         block.workers_unknown = block.declared_agents > 0
         if waits:
             block.external_wait = "; ".join(waits)
-        block.present = True
+        # A liveness line alone is a progress reply, not a closing block: it
+        # must not report an ok parse with empty blocker arrays, which the
+        # server would take as authority to clear a pending human decision.
     else:
         if agents:
             block.declared_agents = int(agents.group("n"))

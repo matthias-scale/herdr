@@ -2048,6 +2048,21 @@ class NeedsYouBlockTests(unittest.TestCase):
         self.assertEqual(block.external_wait, "CI finishes; release bot")
         self.assertEqual(block.herdr_state, "working")
 
+    def test_now_only_progress_reply_is_not_a_closing_block(self):
+        block = closing_block.parse("Progress.\n\n**Now:** reviewer — inspecting diff\n")
+
+        self.assertFalse(block.present)
+        self.assertEqual(block.parse_status, "missing")
+        self.assertEqual(block.herdr_state, "idle")
+
+    def test_now_after_needs_you_nothing_stays_present(self):
+        block = closing_block.parse("**Needs you: nothing.**\n**Now:** wait — CI on PR 12\n")
+
+        self.assertTrue(block.present)
+        self.assertEqual(block.parse_status, "ok")
+        self.assertEqual(block.external_wait, "CI on PR 12")
+        self.assertEqual(block.herdr_state, "working")
+
     def test_now_with_only_stopped_entries_is_idle(self):
         block = closing_block.parse(
             "Needs you: nothing.\nNow: stopped — reviewer finished\n"
