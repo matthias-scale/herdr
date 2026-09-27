@@ -3367,6 +3367,7 @@ mod tests {
     #[test]
     fn expanded_sidebar_workspace_rows_omit_redundant_branch_line() {
         let mut app = crate::app::state::AppState::test_new();
+        app.nerd_font = false;
         let mut ws = Workspace::test_new("one");
         let repo = temp_git_repo("main");
         ws.identity_cwd = repo.clone();

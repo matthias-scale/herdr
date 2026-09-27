@@ -2437,6 +2437,7 @@ mod tests {
     fn mobile_subagent_count_is_dimmed_and_aligned_at_supported_widths() {
         for width in [18, 40] {
             let mut app = crate::app::state::AppState::test_new();
+            app.nerd_font = false;
             app.workspaces = vec![crate::workspace::Workspace::test_new("mobile-count")];
             app.workspaces[0].tabs[0].custom_name = Some("mobile worker".into());
             app.ensure_test_terminals();
@@ -2804,6 +2805,7 @@ mod tests {
     #[test]
     fn ac1_ac2_ac3_mobile_tabs_are_status_first_single_line_rows() {
         let mut app = crate::app::state::AppState::test_new();
+        app.nerd_font = false;
         let mut workspace = crate::workspace::Workspace::test_new("mobile-tabs");
         workspace.tabs[0].custom_name = Some("First task".into());
         workspace.test_add_tab(Some("Second task"));
@@ -2880,6 +2882,7 @@ mod tests {
     fn mobile_tab_rows_follow_field_priority_at_minimum_and_normal_widths() {
         let started = std::time::Instant::now();
         let mut app = crate::app::state::AppState::test_new();
+        app.nerd_font = false;
         let mut workspace = crate::workspace::Workspace::test_new("mobile-tabs");
         workspace.tabs[0].custom_name = Some("Investigate release regression".into());
         let pane = workspace.tabs[0].root_pane;

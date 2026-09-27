@@ -12176,6 +12176,7 @@ pub(crate) mod tests {
     #[test]
     fn a_pane_attached_to_a_fleet_host_names_the_machine_before_the_provider() {
         let mut app = app_with_agents(&["attached"]);
+        app.nerd_font = false;
         app.fleet_snapshot = crate::fleet::Snapshot {
             polled: true,
             configured_hosts: vec!["ub1".into()],
@@ -13582,6 +13583,7 @@ pub(crate) mod tests {
     #[test]
     fn working_row_opacity_matches_each_level_for_local_and_remote_at_18_and_60_columns() {
         let mut app = AppState::test_new();
+        app.nerd_font = false;
         let mut working = compact_test_entry("working task", Some(Agent::Claude));
         working.state = AgentState::Working;
         let agent_ref =
@@ -15304,6 +15306,7 @@ pub(crate) mod tests {
     #[test]
     fn active_subagent_count_is_dimmed_and_right_aligned() {
         let mut app = app_with_agents(&["one"]);
+        app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("render sidebar count".into());
         set_active_subagents(&mut app, 0, Some(3));
         let area = Rect::new(0, 0, 40, 20);
@@ -15340,6 +15343,7 @@ pub(crate) mod tests {
     #[test]
     fn narrow_subagent_count_preserves_title_and_column_alignment() {
         let mut app = app_with_agents(&["one"]);
+        app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("narrow sidebar title".into());
         set_active_subagents(&mut app, 0, Some(3));
         let area = Rect::new(0, 0, 18, 20);
@@ -15359,6 +15363,7 @@ pub(crate) mod tests {
     #[test]
     fn blue_working_dot_and_active_subagent_count_share_the_row() {
         let mut app = app_with_agents(&["one"]);
+        app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("blocked review".into());
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].terminal_id(pane_id).unwrap().clone();
@@ -16192,6 +16197,7 @@ pub(crate) mod tests {
     #[test]
     fn narrow_flagged_tab_budget_truncates_title() {
         let mut app = app_with_agents(&["one"]);
+        app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("a deliberately long tab title".into());
         app.workspaces[0].tabs[0].set_prio(true);
         let area = Rect::new(0, 0, 18, 12);
@@ -16677,6 +16683,7 @@ pub(crate) mod tests {
     #[test]
     fn usage_limited_worklist_rows_render_a_non_color_cue_at_supported_widths() {
         let mut app = app_with_agents(&["Wait for plan reset"]);
+        app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("Wait for plan reset".into());
         let pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
@@ -17463,6 +17470,7 @@ row_gap = 1
     #[test]
     fn sidebar_visual_evidence_renders_release_layout() {
         let mut app = AppState::test_new();
+        app.nerd_font = false;
         app.palette = crate::app::state::Palette::one_light();
 
         let mut active = Workspace::test_new("Herdr");
@@ -17607,6 +17615,7 @@ row_gap = 1
     #[test]
     fn default_tab_row_shows_status_and_title_once_without_pane_identity_row() {
         let mut app = crate::app::state::AppState::test_new();
+        app.nerd_font = false;
         app.palette = crate::app::state::Palette::one_light();
         let mut workspace = Workspace::test_new("repo-folder");
         workspace.tabs[0].custom_name = Some("Fix Billing Retry".into());
@@ -17850,6 +17859,7 @@ row_gap = 1
     #[test]
     fn narrow_tab_rows_keep_status_before_truncated_title() {
         let mut app = app_with_agents(&["one"]);
+        app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("one".into());
         let area = Rect::new(0, 0, 23, 12);
         let mut terminal = Terminal::new(TestBackend::new(23, 12)).unwrap();
@@ -18276,6 +18286,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
     #[test]
     fn sidebar_and_tab_bar_render_the_same_agent_title() {
         let mut app = app_with_agents(&["one"]);
+        app.nerd_font = false;
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
@@ -18396,6 +18407,7 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
     #[test]
     fn prio_row_appends_the_provider_once_after_the_workspace() {
         let mut app = AppState::test_new();
+        app.nerd_font = false;
         let mut workspace = Workspace::test_new("one");
         let focused_pane = workspace.tabs[0].root_pane;
         workspace.tabs[0].set_prio(true);
@@ -18426,6 +18438,11 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
         assert!(rendered.contains("Fix billing"), "{rendered:?}");
         assert!(rendered.contains("pi"), "{rendered:?}");
         assert!(!rendered.contains("Reviewer"), "{rendered:?}");
+
+        app.nerd_font = true;
+        let icon_rendered = render_first_tab_row(&app, 60);
+        assert!(icon_rendered.contains("Fix billing"), "{icon_rendered:?}");
+        assert!(icon_rendered.contains("\u{f03ff}"), "{icon_rendered:?}");
     }
 
     #[test]
@@ -18602,6 +18619,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn narrow_agent_rows_preserve_later_tab_tokens() {
         let mut app = crate::app::state::AppState::test_new();
+        app.nerd_font = false;
         let mut workspace = Workspace::test_new("very-long-workspace-name");
         let tab_idx = workspace.test_add_tab(Some("logs"));
         let pane_id = workspace.tabs[tab_idx].root_pane;
@@ -18837,6 +18855,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn agent_rows_end_at_age_and_return_suffix_width_to_title() {
         let mut app = app_with_agents(&["one", "two"]);
+        app.nerd_font = false;
         app.workspaces[0].custom_name = Some("t3-sample".into());
         app.workspaces[1].custom_name = Some("other-space".into());
         app.workspaces[0].tabs[0].custom_name = Some("sample-pr".into());
@@ -23534,6 +23553,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn tab_shell_marker_renders_in_the_provider_column() {
         let mut app = app_with_agents(&["one"]);
+        app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("Use Repository Instructions".into());
         let pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
@@ -23556,11 +23576,25 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
         assert!(rendered.contains("pi >_"), "{rendered:?}");
         assert!(!rendered.contains("  2 >_"), "{rendered:?}");
+
+        app.nerd_font = true;
+        let mut icon_terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        icon_terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let icon_row = compute_tab_card_areas(&app, area)[0].rect.y;
+        let icon_rendered = row_text(icon_terminal.backend().buffer(), icon_row, area.width - 1);
+        assert!(
+            icon_rendered.contains("Use Repository Instructions"),
+            "{icon_rendered:?}"
+        );
+        assert!(icon_rendered.contains("\u{ea85}"), "{icon_rendered:?}");
     }
 
     #[test]
     fn tab_provider_suffixes_distinguish_codex_and_claude_after_title() {
         let mut app = app_with_agents(&["one"]);
+        app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("Codex task".into());
         let codex_pane = app.workspaces[0].tabs[0].root_pane;
         let codex_terminal = app.workspaces[0].tabs[0].panes[&codex_pane]
@@ -23603,6 +23637,27 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .any(|row| row.contains("Claude task") && row.contains("cc")),
             "{rendered:?}"
         );
+
+        app.nerd_font = true;
+        let mut icon_terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        icon_terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let icon_rows = (0..area.height)
+            .map(|row| row_text(icon_terminal.backend().buffer(), row, area.width - 1))
+            .collect::<Vec<_>>();
+        assert!(
+            icon_rows
+                .iter()
+                .any(|row| row.contains("Codex task") && row.contains("\u{ec81}")),
+            "{icon_rows:?}"
+        );
+        assert!(
+            icon_rows
+                .iter()
+                .any(|row| row.contains("Claude task") && row.contains("\u{ec82}")),
+            "{icon_rows:?}"
+        );
     }
 
     #[test]
@@ -23638,6 +23693,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn tab_rows_follow_field_priority_at_minimum_and_normal_widths() {
         let started = std::time::Instant::now();
         let mut app = app_with_agents(&["one"]);
+        app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("Investigate release regression".into());
         let pane = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane]
@@ -24683,6 +24739,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn sidebar_agent_rows_suppress_redundant_identity() {
         let activity_at = std::time::Instant::now();
         let mut app = app_for_real_sidebar_fixtures(&["claude", "gemini"]);
+        app.nerd_font = false;
         app.agent_panel_sort = AgentPanelSort::Priority;
         configure_real_sidebar_agent(
             &mut app,
@@ -24762,6 +24819,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn sidebar_real_fixture_rows_are_compact() {
         let activity_at = std::time::Instant::now();
         let mut app = app_for_real_sidebar_fixtures(&["claude-code", "codex"]);
+        app.nerd_font = false;
         configure_real_sidebar_agent(
             &mut app,
             0,
@@ -26028,7 +26086,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn selected_local_rows_prioritize_title_then_render_snooze_and_settle_controls() {
         for width in [18, 60] {
-            let app = app_with_agents(&["alpha"]);
+            let mut app = app_with_agents(&["alpha"]);
+            app.nerd_font = false;
             let area = Rect::new(0, 0, width, 20);
             let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
             terminal
@@ -26969,6 +27028,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn c1_remote_controls_use_local_glyphs_widths_and_hit_rectangles() {
         let mut app = app_with_agents(&["alpha"]);
+        app.nerd_font = false;
         let (entry, depth, tab) = sidebar_rows(&app)
             .into_iter()
             .find_map(|row| match row {

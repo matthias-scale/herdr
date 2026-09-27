@@ -1930,6 +1930,7 @@ mod tests {
     #[test]
     fn home_rows_use_the_sidebar_dot_session_title_and_provider() {
         let mut app = AppState::test_new();
+        app.nerd_font = false;
         let mut workspace = Workspace::test_new("herdr");
         workspace.tabs[0].custom_name = Some("Critical action links".into());
         app.workspaces = vec![workspace];
