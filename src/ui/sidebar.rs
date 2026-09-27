@@ -10947,9 +10947,7 @@ fn render_sections_thread_card(
         if width <= available {
             break;
         }
-        if right_fields.len() > 1 {
-            right_fields.pop();
-        } else if !right_fields.is_empty() {
+        if !right_fields.is_empty() {
             right_fields.pop();
         } else if left_fields.len() > 1 {
             left_fields.pop();
