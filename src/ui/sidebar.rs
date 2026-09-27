@@ -10923,13 +10923,7 @@ fn render_sections_thread_card(
         }
         spans.push(Span::styled(text, Style::default().fg(color)));
     }
-    let details = Paragraph::new(Line::from(spans)).alignment(
-        if card.branch.is_none() && card.pull_request.is_none() {
-            Alignment::Right
-        } else {
-            Alignment::Left
-        },
-    );
+    let details = Paragraph::new(Line::from(spans)).alignment(Alignment::Right);
     frame.render_widget(
         details,
         Rect::new(rect.x, rect.y.saturating_add(1), rect.width, 1),
@@ -28677,6 +28671,33 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let second = row_text(terminal.backend().buffer(), 1, 40);
         assert!(second.ends_with("L ub2"), "{second:?}");
         assert!(second.find("L ub2").unwrap_or(0) > 20, "{second:?}");
+    }
+
+    #[test]
+    fn sections_thread_card_right_aligns_host_with_a_short_branch_and_pr() {
+        let mut app = AppState::test_new();
+        app.nerd_font = false;
+        let card = SidebarThreadCard {
+            badge: project_badge("shell"),
+            title: "shell".into(),
+            status: SidebarCardStatus::Idle("".into()),
+            branch: Some("feat/x".into()),
+            pull_request: Some("207".into()),
+            host: "ub2".into(),
+            host_kind: SidebarCardHostKind::Linux,
+            agent: None,
+        };
+        let mut terminal =
+            Terminal::new(TestBackend::new(40, 2)).expect("thread card terminal");
+        terminal
+            .draw(|frame| {
+                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 40, 2), false)
+            })
+            .expect("render thread card");
+        let second = row_text(terminal.backend().buffer(), 1, 40);
+        assert!(second.contains("feat/x"), "{second:?}");
+        assert!(second.contains("207"), "{second:?}");
+        assert!(second.ends_with("L ub2"), "{second:?}");
     }
 
     #[test]
