@@ -1429,6 +1429,12 @@ impl App {
         {
             return false;
         }
+        if crate::ui::sidebar::sidebar_areas_menu_layout(&self.state, self.state.screen_rect())
+            .is_none()
+        {
+            self.state.sidebar_areas_menu_selected = None;
+            return false;
+        }
         const LAST_AREA_INDEX: usize = 8;
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
@@ -3383,6 +3389,64 @@ mod tests {
 
         env.remove(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = fs::remove_file(config_path);
+    }
+
+    fn assert_hidden_areas_menu_releases_pane(layout_off: bool) {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("areas-menu-pane");
+        let pane_id = workspace.tabs[0].root_pane;
+        let (runtime, mut pane_input) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 0, b"", 4,
+            );
+        workspace.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.sidebar_sections_layout = true;
+        app.state.sidebar_width = 40;
+        app.state.sidebar_areas.sky_header = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let anchor = app.state.view.sidebar_areas_hit_area;
+        assert!(anchor.width > 0);
+        assert!(app.handle_sidebar_areas_menu_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), anchor.x, anchor.y),
+            crate::app::state::InputOwner::Pane,
+        ));
+        assert_eq!(app.state.sidebar_areas_menu_selected, Some(0));
+
+        let area = if layout_off {
+            app.state.sidebar_sections_layout = false;
+            Rect::new(0, 0, 120, 40)
+        } else {
+            Rect::new(0, 0, 40, 40)
+        };
+        crate::ui::compute_view(&mut app.state, area);
+        assert_eq!(app.state.view.sidebar_areas_hit_area.width, 0);
+        assert_eq!(app.state.sidebar_areas_menu_selected, None);
+
+        // A stale selection can arrive before the next view pass. Input must
+        // still go to the pane and must not toggle the hidden area.
+        app.state.sidebar_areas_menu_selected = Some(0);
+        assert_eq!(app.state.input_owner(), crate::app::state::InputOwner::Pane);
+        let target = app.handle_terminal_key_headless(crate::input::TerminalKey::new(
+            KeyCode::Char(' '),
+            KeyModifiers::empty(),
+        ));
+        assert!(target.is_some(), "space must reach the focused pane");
+        assert_eq!(pane_input.try_recv().expect("pane input").as_ref(), b" ");
+        assert!(app.state.sidebar_areas.sky_header);
+        assert_eq!(app.state.sidebar_areas_menu_selected, None);
+    }
+
+    #[test]
+    fn area_menu_closes_when_sidebar_becomes_too_narrow() {
+        assert_hidden_areas_menu_releases_pane(false);
+    }
+
+    #[test]
+    fn area_menu_closes_when_sections_layout_is_disabled() {
+        assert_hidden_areas_menu_releases_pane(true);
     }
 
     #[test]

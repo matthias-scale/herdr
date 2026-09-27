@@ -11421,6 +11421,9 @@ pub(crate) fn sidebar_areas_menu_layout(
     area: Rect,
 ) -> Option<super::dropdown::DropdownLayout> {
     let selected = app.sidebar_areas_menu_selected?;
+    if !app.sidebar_sections_layout || app.sidebar_collapsed {
+        return None;
+    }
     let anchor = app.view.sidebar_areas_hit_area;
     if anchor.width == 0 || area.width == 0 || area.height == 0 {
         return None;

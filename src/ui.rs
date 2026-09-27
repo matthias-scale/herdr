@@ -384,6 +384,9 @@ fn compute_view_internal_at(
     }
     if uses_mobile_layout(app, area) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
+        if sidebar::sidebar_areas_menu_layout(app, area).is_none() {
+            app.sidebar_areas_menu_selected = None;
+        }
         return;
     }
 
@@ -938,6 +941,9 @@ fn compute_view_internal_at(
         dock_host_row_hit_areas,
         dock_body_rect,
     };
+    if sidebar::sidebar_areas_menu_layout(app, area).is_none() {
+        app.sidebar_areas_menu_selected = None;
+    }
     // The menu anchors on the `+`, so its geometry needs the strip already
     // stored on the view.
     app.view.dock_surface_menu_layout = dock::chooser_menu_layout(app, dock_area);
