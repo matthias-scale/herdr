@@ -29032,6 +29032,37 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn sections_animation_preserves_three_workspace_rows_at_heights_14_and_15() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.sidebar_areas.sky_header = true;
+        app.sidebar_areas.view_bar = true;
+        app.sidebar_areas.notes = false;
+        app.sidebar_areas.hosts = false;
+        app.notepad.enabled = false;
+        app.goals.enabled = false;
+        app.hyperspace.enabled = true;
+
+        for height in [14, 15] {
+            let sidebar = Rect::new(0, 0, 36, height);
+            let animation = sidebar_animation_rect(&app, sidebar);
+            let list = workspace_list_rect_for_app(&app, sidebar);
+            let body = workspace_list_body_rect(&app, list, false);
+
+            assert!(
+                body.height >= MIN_WORKSPACE_LIST_ROWS,
+                "height {height} leaves only {} workspace rows",
+                body.height
+            );
+            if height == 14 {
+                assert_eq!(animation.height, 0, "animation yields its space at 14 rows");
+            } else {
+                assert_eq!(animation.height, 6, "animation fits above the list floor");
+            }
+        }
+    }
+
+    #[test]
     fn sidebar_sections_ascii_fallback_contains_no_nerd_font_glyphs() {
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
