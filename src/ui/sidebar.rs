@@ -10949,9 +10949,7 @@ fn render_sections_thread_card(
         }
         if !right_fields.is_empty() {
             right_fields.pop();
-        } else if left_fields.len() > 1 {
-            left_fields.pop();
-        } else if !has_branch && !left_fields.is_empty() {
+        } else if left_fields.len() > 1 || (!has_branch && !left_fields.is_empty()) {
             left_fields.pop();
         } else {
             break;
