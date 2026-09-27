@@ -9467,6 +9467,43 @@ last_pane = "prefix+tab"
         );
     }
 
+    #[tokio::test]
+    async fn toggling_hidden_notes_does_not_steal_input_when_notes_are_shown() {
+        let mut app = test_app();
+        let mut workspace = Workspace::test_new("hidden-notes-toggle");
+        let focused = workspace.focused_pane_id().expect("focused pane");
+        let (runtime, mut pane_input) = TerminalRuntime::test_with_channel(80, 24);
+        workspace.tabs[0].runtimes.insert(focused, runtime);
+        app.state.workspaces = vec![workspace];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.sidebar_sections_layout = true;
+        app.state.sidebar_areas.notes = false;
+        app.state.notepad.enabled = true;
+
+        assert!(!app.state.notepad.focused);
+        assert!(!app.state.toggle_notepad_focus());
+        assert!(!app.state.notepad.focused);
+        app.state.set_notepad_focus(true);
+        assert!(!app.state.notepad.focused);
+
+        app.state.sidebar_areas.notes = true;
+        assert_eq!(app.state.input_owner(), state::InputOwner::Pane);
+        app.route_client_events_from(
+            42,
+            vec![raw_key(
+                KeyCode::Char('j'),
+                KeyModifiers::empty(),
+                KeyEventKind::Press,
+            )],
+            false,
+        );
+
+        assert!(pane_input.try_recv().is_ok(), "the pane receives the key");
+        assert!(app.state.notepad.body().is_empty());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn config_reload_hiding_focused_notes_routes_keys_back_to_the_pane() {

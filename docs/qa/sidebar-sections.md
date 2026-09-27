@@ -7,3 +7,4 @@
 5. Confirm AC10: `header = "sky"` shows the sky band and `herdr` wordmark, with Search and the goto-key hint below and the View bar beneath them. With `header = "plain"`, the sky band and wordmark disappear and the remaining header controls reflow to the plain layout.
 6. Check the host strip above the footer: the local host comes first and the help hint sits at the right. At 18 columns, the local host remains visible (truncated if needed) and the help hint yields first. Check the sidebar still keeps three tab-list rows at 80x24 with Notes, Pomodoro, and Hosts enabled.
 7. Set `ui.nerd_font = false` and check the card and shelf icons.
+8. Hide Notes, invoke the Toggle Notes action, then show Notes again. Confirm the focused pane still receives typing and the Notes editor does not.
