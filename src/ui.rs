@@ -157,6 +157,7 @@ pub(crate) use self::{
         remote_agent_panel_entries_at, remote_agent_row_at, repo_group_focus_plan,
         sidebar_agent_run_at, sidebar_aloop_target_at, sidebar_dim_header_at,
         sidebar_filter_anchor_rect, sidebar_filter_menu_layout, sidebar_filter_options,
+        sidebar_folder_at,
         sidebar_group_menu_layout, sidebar_group_mode_anchor_rect_for_app,
         sidebar_header_new_menu_rect, sidebar_header_new_thread_rect, sidebar_header_overflow_rect,
         sidebar_header_search_rect_for_app, sidebar_header_star_filter_rect,
@@ -174,7 +175,7 @@ pub(crate) use self::{
         workspace_list_rect_for_app, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
         workspace_parent_group_state, AgentPanelEntry, AgentPanelLocalIdentity, NeedsYouTarget,
         PodTarget, RemoteAgentPanelEntry, SidebarFilterOption, SidebarObjectMenuItem, SidebarRow,
-        WorkspaceListEntry, SETTLED_MENU_LABELS,
+        SidebarSubgroupChoice, WorkspaceListEntry, SETTLED_MENU_LABELS,
     },
 };
 

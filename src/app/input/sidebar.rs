@@ -3115,6 +3115,9 @@ mod tests {
                 crate::ui::SidebarRow::PodMember { title, .. } => {
                     format!("pod-member:{title}")
                 }
+                crate::ui::SidebarRow::Folder { shelf, name, .. } => {
+                    format!("folder:{shelf:?}:{name}")
+                }
                 crate::ui::SidebarRow::SectionHeader { title, .. } => {
                     format!("section:{title}")
                 }

@@ -3032,7 +3032,7 @@ fn append_sections_block(
             .iter()
             .filter(|folder| folder.shelf == shelf)
         {
-            let members = match members_by_folder.remove(folder.name.as_str()) {
+            let mut members = match members_by_folder.remove(folder.name.as_str()) {
                 Some(members) => members,
                 None => Vec::new(),
             };

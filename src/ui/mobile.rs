@@ -178,7 +178,6 @@ fn mobile_switcher_target_for_row(
                 )
             }
         }
-        SidebarRow::Folder { name, .. } => Some(MobileSwitcherTarget::Folder(name.clone())),
         _ => None,
     };
     if let Some(control) = control {
@@ -222,6 +221,7 @@ fn mobile_switcher_target_for_row(
             MobileSwitcherTarget::RemoteAgent(entry.agent_ref.clone())
         }
         SidebarRow::NestedHeader { key, .. } => MobileSwitcherTarget::NestedHeader(key.clone()),
+        SidebarRow::Folder { name, .. } => MobileSwitcherTarget::Folder(name.clone()),
         SidebarRow::AgentRun {
             host,
             summary: Some(summary),
@@ -232,7 +232,6 @@ fn mobile_switcher_target_for_row(
         SidebarRow::SectionHeader { .. }
         | SidebarRow::PodHeader { .. }
         | SidebarRow::PodMember { .. }
-        | SidebarRow::Folder { .. }
         | SidebarRow::Divider
         | SidebarRow::NeedsYou { .. }
         | SidebarRow::SymphonyJob { .. }
