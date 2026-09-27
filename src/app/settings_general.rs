@@ -370,7 +370,7 @@ mod tests {
         let total = keys.len();
         keys.sort_unstable();
         keys.dedup();
-        assert_eq!(total, 20);
+        assert_eq!(total, 21);
         assert_eq!(keys.len(), total);
     }
 
