@@ -3096,10 +3096,7 @@ mod tests {
             workspace.tabs[0].layout.focus_pane(root_pane);
             (
                 workspace.id.clone(),
-                crate::workspace::public_tab_id_for_number(
-                    &workspace.id,
-                    workspace.tabs[0].number,
-                ),
+                crate::workspace::public_tab_id_for_number(&workspace.id, workspace.tabs[0].number),
                 root_pane,
                 sibling_pane,
             )
