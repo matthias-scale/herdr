@@ -36,6 +36,7 @@ pub(super) fn command() -> Command {
         .subcommand(fleet_command())
         .subcommand(work_index_command())
         .subcommand(day_command())
+        .subcommand(watchdog_command())
         .subcommand(channel_command())
         .subcommand(machine::command())
         .subcommand(server_command())
@@ -210,6 +211,55 @@ fn day_command() -> Command {
         )
         .subcommand(id_command("done", "id", "Complete an item"))
         .subcommand(id_command("dismiss", "id", "Dismiss an item"))
+}
+
+pub(super) fn watchdog_command() -> Command {
+    Command::new("watchdog")
+        .about("Detect and report blocked coding agents")
+        .arg(flag("once").help("Scan once, then exit"))
+        .arg(flag("dry-run").help("Print decisions without reporting blocked agents"))
+        .arg(
+            option("interval-secs", "N")
+                .default_value("300")
+                .value_parser(clap::value_parser!(u64))
+                .help("Seconds between scans"),
+        )
+        .arg(
+            option("stall-secs", "N")
+                .default_value("600")
+                .value_parser(clap::value_parser!(u64))
+                .help("Seconds without tail changes before a working pane is stalled"),
+        )
+        .arg(
+            option("lines", "N")
+                .default_value("40")
+                .value_parser(clap::value_parser!(u32))
+                .help("Recent pane lines to read"),
+        )
+        .arg(flag("no-model").help("Skip ambiguous-pane model classification"))
+        .arg(
+            option("max-model-calls", "N")
+                .default_value("5")
+                .value_parser(clap::value_parser!(usize))
+                .help("Maximum model classifications per scan"),
+        )
+        .arg(
+            option("codex-bin", "PATH")
+                .default_value("codex")
+                .value_hint(ValueHint::FilePath)
+                .help("Codex executable used for ambiguous panes"),
+        )
+        .arg(
+            path_option("state-file", "PATH")
+                .default_value(
+                    crate::config::state_dir()
+                        .join("watchdog.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+                .help("Path to persistent pane-tail hash JSON"),
+        )
+        .arg(json_flag().help("Print decisions and summary as JSON"))
 }
 
 fn channel_command() -> Command {
