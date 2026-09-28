@@ -4047,7 +4047,6 @@ mod tests {
                 local: false,
                 session: Some("agents".into()),
                 socket: Some("/tmp/herdr.sock".into()),
-                icon: None,
             }],
             ..FleetConfig::default()
         }

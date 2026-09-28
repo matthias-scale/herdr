@@ -151,7 +151,19 @@ fn mobile_switcher_target_for_row(
         ),
         SidebarRow::Tab { entry, depth } => {
             if entry.has_sections_card() {
-                if content.width >= 24 && col == content.right().saturating_sub(1) {
+                if content.width >= 24
+                    && entry.sections_card.as_ref().is_some_and(|card| {
+                        col == super::sidebar::sections_control_start(
+                            app,
+                            card,
+                            super::sidebar::sections_thread_rect(
+                                Rect::new(content.x, content.y, content.width, 1),
+                                *depth,
+                            ),
+                            1,
+                        )
+                    })
+                {
                     let target = entry.local_target()?;
                     return Some(MobileSwitcherTarget::Pin {
                         ws_idx: target.ws_idx,
@@ -940,7 +952,10 @@ fn render_mobile_switcher_content(
                             app,
                             frame,
                             card,
-                            Rect::new(content.x, y, content.width, 1),
+                            super::sidebar::sections_thread_rect(
+                                Rect::new(content.x, y, content.width, 1),
+                                *depth,
+                            ),
                             selected,
                         );
                     } else {
@@ -1250,13 +1265,15 @@ fn render_mobile_switcher_content(
                 if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
                     let rect = Rect::new(content.x, y, content.width, 1);
                     if let Some(card) = entry.sections_card.as_ref() {
-                        let content_width = rect.width.saturating_sub(u16::from(rect.width >= 24));
-                        render_sections_thread_card(
+                        let row_rect = super::sidebar::sections_thread_rect(rect, *depth);
+                        let controls_width = u16::from(rect.width >= 24);
+                        super::sidebar::render_sections_thread_card_with_controls(
                             app,
                             frame,
                             card,
-                            Rect::new(rect.x, rect.y, content_width, 1),
+                            row_rect,
                             active,
+                            controls_width,
                         );
                         if rect.width >= 24 {
                             let pin = if app.nerd_font {
@@ -1272,7 +1289,17 @@ fn render_mobile_switcher_content(
                             };
                             frame.render_widget(
                                 Paragraph::new(pin).style(Style::default().fg(p.overlay0)),
-                                Rect::new(rect.right() - 1, rect.y, 1, 1),
+                                Rect::new(
+                                    super::sidebar::sections_control_start(
+                                        app,
+                                        card,
+                                        row_rect,
+                                        controls_width,
+                                    ),
+                                    rect.y,
+                                    1,
+                                    1,
+                                ),
                             );
                         }
                     } else {
@@ -1895,8 +1922,21 @@ mod tests {
         let doc_row = mobile_sidebar_rows_start(&app, &rows) + tab_pos;
         let viewport = mobile_switcher_areas(&app).viewport;
         let content = inset_for_left_scrollbar(viewport);
+        let SidebarRow::Tab { entry, depth } = tab else {
+            panic!("tab row")
+        };
+        let card = entry.sections_card.as_ref().expect("sections card");
+        let pin_col = super::sidebar::sections_control_start(
+            &app,
+            card,
+            super::sidebar::sections_thread_rect(
+                Rect::new(content.x, content.y, content.width, 1),
+                *depth,
+            ),
+            1,
+        );
         assert_eq!(
-            mobile_switcher_target_at(&app, content.right() - 1, viewport.y + doc_row as u16),
+            mobile_switcher_target_at(&app, pin_col, viewport.y + doc_row as u16),
             Some(MobileSwitcherTarget::Pin {
                 ws_idx: 0,
                 tab_idx: 0

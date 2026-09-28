@@ -947,17 +947,6 @@ impl App {
             fleet_snapshot: crate::fleet::Snapshot::unpolled(&config.remote.fleet.hosts),
             local_group_snapshot: None,
             agent_host_name,
-            sidebar_machine_icons: config
-                .remote
-                .fleet
-                .hosts
-                .iter()
-                .filter_map(|host| {
-                    host.icon
-                        .as_ref()
-                        .map(|icon| (host.name.clone(), icon.clone()))
-                })
-                .collect(),
             day_board: if cfg!(test) {
                 crate::day::DayBoard::default()
             } else {
@@ -2744,21 +2733,6 @@ impl App {
                 );
             }
             let agent_host_name = config.remote.fleet.resolved_self_name();
-            let machine_icons: std::collections::HashMap<String, String> = config
-                .remote
-                .fleet
-                .hosts
-                .iter()
-                .filter_map(|host| {
-                    host.icon
-                        .as_ref()
-                        .map(|icon| (host.name.clone(), icon.clone()))
-                })
-                .collect();
-            if self.state.sidebar_machine_icons != machine_icons {
-                self.state.sidebar_machine_icons = machine_icons;
-                self.state.mark_sidebar_projection_changed();
-            }
             if self.state.agent_host_name != agent_host_name {
                 self.state.agent_host_name = agent_host_name;
                 self.refresh_remote_agent_panel_entries();

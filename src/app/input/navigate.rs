@@ -1180,13 +1180,29 @@ impl App {
         let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
             return;
         };
-        self.runtime_tab_pin(
+        let (title, was_pinned) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| {
+                Some((
+                    workspace.tab_display_name_from(&self.state.terminals, tab_idx)?,
+                    workspace.tabs.get(tab_idx)?.pinned,
+                ))
+            })
+            .unwrap_or_else(|| (String::new(), false));
+        let response = self.runtime_tab_pin(
             "tui.tab.pin",
             crate::api::schema::TabPinParams {
                 tab_id,
                 mode: crate::api::schema::TabPinMode::Toggle,
             },
         );
+        if !title.is_empty()
+            && serde_json::from_str::<crate::api::schema::ErrorResponse>(&response).is_err()
+        {
+            self.show_sidebar_action_toast(if was_pinned { "Unpinned" } else { "Pinned" }, title);
+        }
     }
 
     /// Toggle the session star through the runtime so the flag is a server fact

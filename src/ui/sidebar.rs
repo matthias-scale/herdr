@@ -7703,11 +7703,8 @@ fn render_needs_you_row(
     } else {
         "!"
     };
-    let (machine, machine_color) = if app.sidebar_sections_layout {
-        sections_machine_mark(app, host)
-    } else {
-        (host.to_string(), p.overlay0)
-    };
+    let machine = host.to_string();
+    let machine_color = p.overlay0;
     let host_width = display_width(&machine);
     // The marker and gap plus the right-aligned host come off the title.
     let title_width = usize::from(rect.width).saturating_sub(3 + host_width + 1);
@@ -8057,7 +8054,17 @@ pub(crate) fn compute_sidebar_hover_targets(
                         Rect::new(body.x, row_y, body.width, 1),
                     );
                     if controls.width > 0 {
-                        let start = usize::from(body.width - controls.width);
+                        let row_rect =
+                            sections_thread_rect(Rect::new(body.x, row_y, body.width, 1), *depth);
+                        let start = usize::from(
+                            sections_control_start(
+                                app,
+                                entry.sections_card.as_ref().expect("sections card"),
+                                row_rect,
+                                controls.width,
+                            )
+                            .saturating_sub(body.x),
+                        );
                         if let Some(rect) = clamp_row_cells(body, row_y, start, 1) {
                             targets.push(crate::app::state::SidebarHoverTarget {
                                 rect,
@@ -10153,11 +10160,13 @@ fn nested_header_spans(header: &NestedHeaderArea) -> NestedHeaderSpans {
     // The status glyph sits before the id, so it costs the title its width.
     let glyph = header.status.map(WorkGroupStatus::glyph);
     let glyph_width = glyph.map(|glyph| display_width(glyph) + 1).unwrap_or(0);
+    let project_width = usize::from(header.key.starts_with("sections-project:")) * 2;
     let title = truncate_end(
         &header.title,
         usize::from(header.rect.width)
             .saturating_sub(prefix_width)
             .saturating_sub(glyph_width)
+            .saturating_sub(project_width)
             .saturating_sub(count_width)
             .saturating_sub(sort_width)
             .saturating_sub(action_width)
@@ -10206,6 +10215,12 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
     } else {
         "  ▾ "
     })];
+    if header.key.starts_with("sections-project:") {
+        spans.push(Span::styled(
+            if app.nerd_font { "󰉋 " } else { "# " },
+            Style::default().fg(p.subtext0),
+        ));
+    }
     if let Some(glyph) = glyph {
         let status_color = header
             .status
@@ -10636,7 +10651,13 @@ fn render_workspace_list(
                 .as_ref()
                 .is_some_and(|selected| selected == &entry.agent_ref);
             if let Some(card) = sections_card.as_ref() {
-                render_sections_thread_card(app, frame, card, row_area.rect, selected);
+                render_sections_thread_card(
+                    app,
+                    frame,
+                    card,
+                    sections_thread_rect(row_area.rect, *depth),
+                    selected,
+                );
             } else {
                 render_remote_compact_agent_row_with_prefix(
                     app,
@@ -10745,15 +10766,17 @@ fn render_tab_card(
                     .is_some_and(|workspace| workspace.active_tab == target.tab_idx)
         });
         let controls = sections_local_controls(app, entry, card.rect);
-        let card_rect = Rect::new(
-            card.rect.x,
-            card.rect.y,
-            card.rect.width.saturating_sub(controls.width),
-            1,
+        let row_rect = sections_thread_rect(card.rect, depth);
+        render_sections_thread_card_with_controls(
+            app,
+            frame,
+            thread_card,
+            row_rect,
+            selected,
+            controls.width,
         );
-        render_sections_thread_card(app, frame, thread_card, card_rect, selected);
         if controls.width > 0 {
-            let x = card.rect.right().saturating_sub(controls.width);
+            let x = sections_control_start(app, thread_card, row_rect, controls.width);
             let pin = if app.nerd_font {
                 if entry.pinned {
                     "󰐃"
@@ -10846,34 +10869,15 @@ fn sections_local_controls(
     SectionsLocalControls { width, lifecycle }
 }
 
-fn sections_machine_mark(app: &AppState, host: &str) -> (String, Color) {
-    let default = match host.to_ascii_lowercase().as_str() {
-        "ub1" => ("\u{f03a4}", "U", app.palette.blue),
-        "ub2" => ("\u{f03a7}", "U", app.palette.green),
-        "mbpro" => ("\u{f0b17}", "M", app.palette.mauve),
-        "mbair" => ("\u{f0b08}", "M", app.palette.peach),
-        _ => ("", "", app.palette.overlay0),
-    };
-    let fallback = if default.1.is_empty() {
-        host.chars()
-            .next()
-            .unwrap_or('?')
-            .to_uppercase()
-            .collect::<String>()
-    } else {
-        default.1.to_string()
-    };
-    let icon = app
-        .sidebar_machine_icons
-        .get(host)
-        .map(String::as_str)
-        .unwrap_or(default.0);
-    let mark = if app.nerd_font && display_width(icon) == 1 {
-        icon.to_string()
-    } else {
-        fallback
-    };
-    (mark, default.2)
+pub(super) fn sections_thread_rect(rect: Rect, depth: u16) -> Rect {
+    // A shelf owns the first inset; a project header owns the second.
+    let indent = if depth == 0 { 3 } else { 6 }.min(rect.width);
+    Rect::new(
+        rect.x.saturating_add(indent),
+        rect.y,
+        rect.width.saturating_sub(indent),
+        1,
+    )
 }
 
 pub(super) fn render_sections_thread_card(
@@ -10882,6 +10886,48 @@ pub(super) fn render_sections_thread_card(
     card: &SidebarThreadCard,
     rect: Rect,
     selected: bool,
+) {
+    render_sections_thread_card_with_controls(app, frame, card, rect, selected, 0);
+}
+
+fn sections_tail_width(app: &AppState, card: &SidebarThreadCard, width: usize) -> (usize, usize) {
+    let suffix = match &card.status {
+        SidebarCardStatus::Done => "✓ Done",
+        SidebarCardStatus::Idle(age) => age.as_str(),
+        _ => "",
+    };
+    let suffix_width = if width >= 28 && !suffix.is_empty() {
+        display_width(suffix) + 1
+    } else {
+        0
+    };
+    let host_width = if card.host != app.agent_host_name && width >= 32 {
+        display_width(&card.host) + 1
+    } else {
+        0
+    };
+    (suffix_width, host_width)
+}
+
+pub(super) fn sections_control_start(
+    app: &AppState,
+    card: &SidebarThreadCard,
+    rect: Rect,
+    controls_width: u16,
+) -> u16 {
+    let (suffix_width, host_width) = sections_tail_width(app, card, usize::from(rect.width));
+    rect.right()
+        .saturating_sub(controls_width)
+        .saturating_sub((suffix_width + host_width) as u16)
+}
+
+pub(super) fn render_sections_thread_card_with_controls(
+    app: &AppState,
+    frame: &mut Frame,
+    card: &SidebarThreadCard,
+    rect: Rect,
+    selected: bool,
+    controls_width: u16,
 ) {
     if rect.width == 0 || rect.height == 0 {
         return;
@@ -10898,21 +10944,11 @@ pub(super) fn render_sections_thread_card(
         SidebarCardStatus::Blocked => (p.red, "".to_string()),
         SidebarCardStatus::Idle(age) => (p.overlay0, age.clone()),
     };
-    let (machine, machine_color) = sections_machine_mark(app, &card.host);
-    // At the supported 18-column minimum, the title wins over age and machine.
+    // At the supported 18-column minimum, the title wins over age and host.
     let width = usize::from(rect.width);
-    let machine_width = if width >= 18 {
-        display_width(&machine) + 1
-    } else {
-        0
-    };
-    let suffix_width = if width >= 28 && !suffix.is_empty() {
-        display_width(&suffix) + 1
-    } else {
-        0
-    };
+    let (suffix_width, host_width) = sections_tail_width(app, card, width);
     let title_width = width
-        .saturating_sub(2 + machine_width + suffix_width)
+        .saturating_sub(2 + usize::from(controls_width) + host_width + suffix_width)
         .max(1);
     let title = truncate_end(&card.title, title_width);
     let padding = title_width.saturating_sub(display_width(&title));
@@ -10929,13 +10965,14 @@ pub(super) fn render_sections_thread_card(
         ),
         Span::raw(" ".repeat(padding)),
     ];
+    spans.push(Span::raw(" ".repeat(usize::from(controls_width))));
     if suffix_width > 0 {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(suffix, Style::default().fg(p.overlay0)));
     }
-    if machine_width > 0 {
+    if host_width > 0 {
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(machine, Style::default().fg(machine_color)));
+        spans.push(Span::styled(&card.host, Style::default().fg(p.overlay0)));
     }
     frame.render_widget(
         Paragraph::new(Line::from(spans)),
@@ -28834,6 +28871,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             SidebarRow::NestedHeader { title, count: 1, .. } if title == "Work")));
         assert!(rows.iter().any(|row| matches!(row,
             SidebarRow::Tab { entry, depth: 0 } if entry.primary_label == "loose")));
+        assert!(rows.iter().any(|row| matches!(row,
+            SidebarRow::Tab { entry, depth: 1 } if entry.primary_label == "herdr")));
+        assert!(rows.iter().any(|row| matches!(row,
+            SidebarRow::Tab { entry, depth: 1 } if entry.primary_label == "scalablev2")));
         assert_eq!(
             rows.iter()
                 .filter(|row| matches!(row, SidebarRow::Tab { .. }))
@@ -28880,9 +28921,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn sections_row_is_one_line_and_keeps_title_before_machine() {
+    fn sections_row_is_indented_and_keeps_title_before_host() {
         let mut app = AppState::test_new();
         app.nerd_font = false;
+        app.agent_host_name = "ub1".into();
         let card = SidebarThreadCard {
             title: "fix sidebar".into(),
             status: SidebarCardStatus::Idle("8m".into()),
@@ -28896,15 +28938,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                         &app,
                         frame,
                         &card,
-                        Rect::new(0, 0, width, 2),
+                        sections_thread_rect(Rect::new(0, 0, width, 2), 1),
                         false,
                     )
                 })
                 .expect("draw");
             let first = row_text(terminal.backend().buffer(), 0, width);
             let second = row_text(terminal.backend().buffer(), 1, width);
-            assert!(first.starts_with("● fix"), "{first:?}");
-            assert!(first.trim_end().ends_with('U'), "{first:?}");
+            assert!(first.starts_with("      ● fix"), "{first:?}");
+            assert!(!first.contains("◆") && !first.contains("ub1"), "{first:?}");
             assert!(
                 !first.contains("HR") && !first.contains("feat/") && !first.contains("207"),
                 "{first:?}"
@@ -28914,6 +28956,44 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 assert!(first.contains("8m"), "{first:?}");
             }
         }
+    }
+
+    #[test]
+    fn sections_project_header_and_child_leave_controls_before_age() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.nerd_font = false;
+        let header = NestedHeaderArea {
+            key: "sections-project:Active:tools".into(),
+            action_key: None,
+            sort_key: None,
+            sort_mode: SidebarSortMode::Default,
+            title: "Tools".into(),
+            count: 2,
+            collapsed: false,
+            dim: false,
+            status: None,
+            spawn: false,
+            rect: Rect::new(0, 0, 40, 1),
+        };
+        let card = SidebarThreadCard {
+            title: "fix sidebar".into(),
+            status: SidebarCardStatus::Idle("8m".into()),
+            host: app.agent_host_name.clone(),
+        };
+        let row = sections_thread_rect(Rect::new(0, 1, 40, 1), 1);
+        let mut terminal = Terminal::new(TestBackend::new(40, 2)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render_nested_header(&app, frame, &header);
+                render_sections_thread_card_with_controls(&app, frame, &card, row, false, 6);
+            })
+            .expect("draw");
+        assert!(row_text(terminal.backend().buffer(), 0, 40).starts_with("  ▾ # Tools (2)"));
+        let child = row_text(terminal.backend().buffer(), 1, 40);
+        assert!(child.starts_with("      ● fix sidebar"), "{child:?}");
+        assert!(child.trim_end().ends_with("8m"), "{child:?}");
+        assert_eq!(sections_control_start(&app, &card, row, 6), 31);
     }
 
     #[test]
@@ -28966,10 +29046,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let text = row_text(terminal.backend().buffer(), 0, 40);
         assert!(text.starts_with(" ● Agent waiting"), "{text:?}");
         assert!(!text.contains('!'));
-        assert!(
-            text.trim_end().ends_with('U') && !text.contains("ub1"),
-            "{text:?}"
-        );
+        assert!(text.trim_end().ends_with("ub1"), "{text:?}");
         assert_eq!(terminal.backend().buffer()[(1, 0)].fg, app.palette.red);
 
         app.sidebar_sections_layout = false;
@@ -29239,30 +29316,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 assert_eq!(animation.height, 6, "animation fits above the list floor");
             }
         }
-    }
-
-    #[test]
-    fn sections_machine_marks_use_distinct_defaults_and_configured_icon() {
-        let mut app = AppState::test_new();
-        app.nerd_font = true;
-        let mut colors = Vec::new();
-        for (host, icon) in [
-            ("ub1", "\u{f03a4}"),
-            ("ub2", "\u{f03a7}"),
-            ("mbpro", "\u{f0b17}"),
-            ("mbair", "\u{f0b08}"),
-        ] {
-            let (mark, color) = sections_machine_mark(&app, host);
-            assert_eq!(mark, icon);
-            assert!(!colors.contains(&color));
-            colors.push(color);
-        }
-        app.sidebar_machine_icons.insert("ub1".into(), "◆".into());
-        assert_eq!(sections_machine_mark(&app, "ub1").0, "◆");
-        app.nerd_font = false;
-        assert_eq!(sections_machine_mark(&app, "ub1").0, "U");
-        assert_eq!(sections_machine_mark(&app, "mbpro").0, "M");
-        assert_eq!(sections_machine_mark(&app, "other").0, "O");
     }
 
     #[test]
