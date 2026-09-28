@@ -504,6 +504,16 @@ fn load_plugin_registry(no_session: bool) -> crate::app::state::InstalledPluginR
         .collect()
 }
 
+fn load_sidebar_folders_for_mode(
+    no_session: bool,
+) -> Vec<crate::app::sidebar_folders::SidebarFolder> {
+    if no_session {
+        Vec::new()
+    } else {
+        crate::client::presentation::load_sidebar_folders()
+    }
+}
+
 fn agent_panel_sort_from_config(
     sort: crate::config::AgentPanelSortConfig,
 ) -> state::AgentPanelSort {
@@ -903,7 +913,7 @@ impl App {
         #[cfg(test)]
         let sidebar_group_collapsed = std::collections::HashMap::new();
         #[cfg(not(test))]
-        let sidebar_folders = crate::client::presentation::load_sidebar_folders();
+        let sidebar_folders = load_sidebar_folders_for_mode(no_session);
         #[cfg(test)]
         let sidebar_folders = Vec::new();
 
@@ -2039,6 +2049,15 @@ impl App {
         self.prefix_input_source = source;
     }
 
+    fn persist_sidebar_folders_if_enabled(&mut self) {
+        if self.no_session {
+            return;
+        }
+        if let Some(folders) = self.state.take_sidebar_folders_persistence_request() {
+            crate::client::presentation::save_sidebar_folders(&folders);
+        }
+    }
+
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         if self.input_rx.is_none() {
             self.input_rx = Some(crate::raw_input::spawn_input_reader());
@@ -2244,9 +2263,7 @@ impl App {
             {
                 crate::client::presentation::save_sidebar_group_collapsed(&key, collapsed);
             }
-            if let Some(folders) = self.state.take_sidebar_folders_persistence_request() {
-                crate::client::presentation::save_sidebar_folders(&folders);
-            }
+            self.persist_sidebar_folders_if_enabled();
             if self.state.take_sidebar_view_scan_request() {
                 self.request_sidebar_view_scan(now);
             }
@@ -4138,6 +4155,37 @@ mod tests {
         let mut config = Config::default();
         config.work_index.enabled = false;
         App::new(&config, true, None, api_rx, crate::api::EventHub::default())
+    }
+
+    #[test]
+    fn no_session_sidebar_folders_do_not_touch_persistent_registry() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let config_home = unique_temp_path("no-session-sidebar-folders");
+        env.set("XDG_CONFIG_HOME", &config_home);
+        env.remove(crate::session::SESSION_ENV_VAR);
+
+        let saved = vec![crate::app::sidebar_folders::SidebarFolder {
+            shelf: crate::app::sidebar_folders::SidebarShelf::Active,
+            name: "Plans".into(),
+            collapsed: true,
+            members: vec![crate::app::sidebar_folders::SidebarFolderTab {
+                workspace_id: "normal-session".into(),
+                tab_number: 7,
+            }],
+        }];
+        crate::client::presentation::save_sidebar_folders(&saved);
+        assert!(load_sidebar_folders_for_mode(true).is_empty());
+
+        let mut app = test_app();
+        assert!(app.no_session);
+        assert!(app.state.sidebar_folders.is_empty());
+        app.state.sidebar_folders = saved.clone();
+        assert!(app.state.reconcile_sidebar_folder_memberships());
+        app.persist_sidebar_folders_if_enabled();
+
+        assert_eq!(load_sidebar_folders_for_mode(false), saved);
+        env.remove("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(config_home);
     }
 
     #[test]

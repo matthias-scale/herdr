@@ -1047,13 +1047,21 @@ pub(super) fn apply_context_menu_action(
         }
         (
             ContextMenuKind::Tab {
-                ws_idx, tab_idx, ..
+                ws_idx,
+                tab_idx,
+                folder_shelf,
+                ..
             },
             Some(crate::app::state::MOVE_TO_SUBGROUP_ITEM | crate::app::state::MOVE_TO_FOLDER_ITEM),
         ) => {
             // The picker hangs off the menu cell the operator just chose, the
             // way every other downward menu hangs off its anchor.
-            state.open_sidebar_folder_picker(ws_idx, tab_idx, (menu_x, menu_y));
+            state.open_sidebar_folder_picker_for_shelf(
+                ws_idx,
+                tab_idx,
+                (menu_x, menu_y),
+                folder_shelf,
+            );
             state.set_server_mode(if state.active.is_some() {
                 Mode::Terminal
             } else {
@@ -1869,7 +1877,10 @@ impl App {
             }
             (
                 ContextMenuKind::Tab {
-                    ws_idx, tab_idx, ..
+                    ws_idx,
+                    tab_idx,
+                    folder_shelf,
+                    ..
                 },
                 Some(
                     crate::app::state::MOVE_TO_SUBGROUP_ITEM
@@ -1878,8 +1889,12 @@ impl App {
             ) => {
                 // The picker hangs off the menu cell the operator just chose,
                 // the way every other downward menu hangs off its anchor.
-                self.state
-                    .open_sidebar_folder_picker(ws_idx, tab_idx, (menu_x, menu_y));
+                self.state.open_sidebar_folder_picker_for_shelf(
+                    ws_idx,
+                    tab_idx,
+                    (menu_x, menu_y),
+                    folder_shelf,
+                );
                 self.state.close_client_overlay();
             }
             (
@@ -3459,6 +3474,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 folder_menu: false,
+                folder_shelf: None,
                 settle_pane_id: None,
                 snooze_target: None,
             },
@@ -3486,6 +3502,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 folder_menu: false,
+                folder_shelf: None,
                 settle_pane_id: None,
                 snooze_target: None,
             },
@@ -3513,6 +3530,7 @@ mod tests {
                 starred: false,
                 has_subgroup: true,
                 folder_menu: false,
+                folder_shelf: None,
                 settle_pane_id: None,
                 snooze_target: None,
             },
@@ -3550,6 +3568,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 folder_menu: false,
+                folder_shelf: None,
                 settle_pane_id: Some(pane_id),
                 snooze_target: None,
             },
@@ -3581,6 +3600,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 folder_menu: false,
+                folder_shelf: None,
                 settle_pane_id: Some(pane_id),
                 snooze_target: None,
             },
@@ -3608,6 +3628,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 folder_menu: false,
+                folder_shelf: None,
                 settle_pane_id: None,
                 snooze_target: None,
             },
@@ -3643,6 +3664,7 @@ mod tests {
                 starred: false,
                 has_subgroup: true,
                 folder_menu: false,
+                folder_shelf: None,
                 settle_pane_id: None,
                 snooze_target: None,
             },
@@ -3675,6 +3697,7 @@ mod tests {
                     starred: false,
                     has_subgroup: true,
                     folder_menu: true,
+                    folder_shelf: Some(crate::app::sidebar_folders::SidebarShelf::Active),
                     settle_pane_id: None,
                     snooze_target: None,
                 },
@@ -3776,6 +3799,7 @@ mod tests {
                     starred: false,
                     has_subgroup: false,
                     folder_menu: false,
+                    folder_shelf: None,
                 },
                 x: 0,
                 y: 0,
@@ -3839,6 +3863,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 folder_menu: false,
+                folder_shelf: None,
             },
             x: 3,
             y: 2,
@@ -3913,6 +3938,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 folder_menu: false,
+                folder_shelf: None,
             },
             x: 3,
             y: 2,

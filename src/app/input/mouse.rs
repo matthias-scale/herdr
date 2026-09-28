@@ -2037,6 +2037,11 @@ impl AppState {
                     self.agent_detail_target_at(mouse.row)
                         .map(|(w, t, _)| (w, t))
                 }) {
+                    let folder_shelf = self.sidebar_local_pane_at(mouse.row).and_then(
+                        |(row_ws, row_tab, pane_id)| {
+                            crate::ui::sidebar::sections_pane_shelf(self, row_ws, row_tab, pane_id)
+                        },
+                    );
                     let settle_pane_id = self
                         .sidebar_local_pane_at(mouse.row)
                         .map(|(_, _, pane_id)| pane_id)
@@ -2060,11 +2065,11 @@ impl AppState {
                             snooze_target,
                             starred: self.tab_starred(ws_idx, tab_idx),
                             folder_menu: self.sidebar_sections_layout,
+                            folder_shelf,
                             has_subgroup: if self.sidebar_sections_layout {
-                                crate::ui::sidebar::sections_tab_shelf(self, ws_idx, tab_idx)
-                                    .is_some_and(|shelf| {
-                                        self.tab_sidebar_folder(ws_idx, tab_idx, shelf).is_some()
-                                    })
+                                folder_shelf.is_some_and(|shelf| {
+                                    self.tab_sidebar_folder(ws_idx, tab_idx, shelf).is_some()
+                                })
                             } else {
                                 self.workspaces
                                     .get(ws_idx)
@@ -2134,6 +2139,14 @@ impl AppState {
                 if let (Some(ws_idx), Some(tab_idx)) =
                     (self.active, self.tab_at(mouse.column, mouse.row))
                 {
+                    let folder_shelf =
+                        self.workspaces[ws_idx]
+                            .focused_pane_id()
+                            .and_then(|pane_id| {
+                                crate::ui::sidebar::sections_pane_shelf(
+                                    self, ws_idx, tab_idx, pane_id,
+                                )
+                            });
                     let workspace_id = self.workspaces[ws_idx].id.clone();
                     let tab_id = crate::workspace::public_tab_id_for_number(
                         &workspace_id,
@@ -2149,11 +2162,11 @@ impl AppState {
                             snooze_target: None,
                             starred: self.tab_starred(ws_idx, tab_idx),
                             folder_menu: self.sidebar_sections_layout,
+                            folder_shelf,
                             has_subgroup: if self.sidebar_sections_layout {
-                                crate::ui::sidebar::sections_tab_shelf(self, ws_idx, tab_idx)
-                                    .is_some_and(|shelf| {
-                                        self.tab_sidebar_folder(ws_idx, tab_idx, shelf).is_some()
-                                    })
+                                folder_shelf.is_some_and(|shelf| {
+                                    self.tab_sidebar_folder(ws_idx, tab_idx, shelf).is_some()
+                                })
                             } else {
                                 self.workspaces
                                     .get(ws_idx)
@@ -3010,6 +3023,7 @@ impl AppState {
                 starred,
                 has_subgroup,
                 folder_menu,
+                folder_shelf,
                 ..
             },
         ) = (tab_idx, &mut live_menu.kind)
@@ -3017,9 +3031,9 @@ impl AppState {
             if let Some(tab) = self.workspaces[ws_idx].tabs.get(tab_idx) {
                 *starred = tab.starred;
                 *has_subgroup = if *folder_menu {
-                    crate::ui::sidebar::sections_tab_shelf(self, ws_idx, tab_idx).is_some_and(
-                        |shelf| self.tab_sidebar_folder(ws_idx, tab_idx, shelf).is_some(),
-                    )
+                    (*folder_shelf).is_some_and(|shelf| {
+                        self.tab_sidebar_folder(ws_idx, tab_idx, shelf).is_some()
+                    })
                 } else {
                     tab.subgroup().is_some()
                 };
@@ -6587,6 +6601,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 folder_menu: false,
+                folder_shelf: None,
                 settle_pane_id: Some(target.pane_id),
                 snooze_target: Some(target.pane_id),
             }
@@ -6683,6 +6698,112 @@ mod tests {
                 pane_id == active_pane,
                 "snoozed rows must not offer Settle"
             );
+        }
+    }
+
+    #[test]
+    fn split_tab_folder_actions_use_the_clicked_and_focused_shelves() {
+        use crate::app::sidebar_folders::SidebarShelf;
+
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_sections_layout = true;
+        let mut workspace = Workspace::test_new("split folders");
+        let active_pane = workspace.tabs[0].root_pane;
+        let snoozed_pane = workspace.test_split(Direction::Horizontal);
+        workspace.tabs[0].layout.focus_pane(active_pane);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        let snoozed_terminal = app.state.workspaces[0].tabs[0].panes[&snoozed_pane]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&snoozed_terminal)
+            .expect("snoozed terminal")
+            .set_detected_state_with_screen_signals_at(
+                Some(crate::detect::Agent::Pi),
+                crate::detect::AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                false,
+                std::time::Instant::now(),
+            );
+        app.state.reconcile_sidebar_presentation();
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.state.snooze_pane_at(0, snoozed_pane, deadline));
+        app.state
+            .collapsed_sidebar_groups
+            .insert("sections:Snoozed".to_string());
+        app.state
+            .create_sidebar_folder(SidebarShelf::Active, "Now")
+            .expect("active folder");
+        app.state
+            .create_sidebar_folder(SidebarShelf::Snoozed, "Later")
+            .expect("snoozed folder");
+        let sidebar = Rect::new(0, 0, 40, 40);
+        app.state.view.sidebar_rect = sidebar;
+
+        for (pane_id, shelf, name) in [
+            (active_pane, SidebarShelf::Active, "Now"),
+            (snoozed_pane, SidebarShelf::Snoozed, "Later"),
+        ] {
+            app.state.close_client_overlay();
+            app.state.context_menu = None;
+            let card = crate::ui::compute_tab_card_areas(&app.state, sidebar)
+                .into_iter()
+                .find(|card| card.pane_id == pane_id)
+                .expect("pane row");
+            app.state.handle_mouse(
+                &mut app.terminal_runtimes,
+                crate::app::LOCAL_INPUT_SOURCE,
+                mouse(
+                    MouseEventKind::Down(MouseButton::Right),
+                    card.rect.x + 2,
+                    card.rect.y,
+                ),
+            );
+            let menu = app.state.context_menu.take().expect("row menu");
+            assert!(matches!(
+                &menu.kind,
+                ContextMenuKind::Tab { folder_shelf: Some(row_shelf), .. } if *row_shelf == shelf
+            ));
+            super::super::modal::apply_context_menu_action(
+                &mut app.state,
+                &mut app.terminal_runtimes,
+                menu,
+                ContextMenuAction::MoveToFolder,
+            );
+            assert_eq!(
+                app.state
+                    .sidebar_subgroup_picker
+                    .as_ref()
+                    .map(|picker| picker.folder_shelf),
+                Some(Some(shelf))
+            );
+            let index = crate::ui::sidebar::sidebar_subgroup_picker_choices(&app.state)
+                .iter()
+                .position(|choice| {
+                    *choice == crate::ui::SidebarSubgroupChoice::ExistingFolder(name.to_string())
+                })
+                .expect("folder choice in clicked shelf");
+            app.state.accept_sidebar_subgroup_picker(index);
+            assert_eq!(app.state.tab_sidebar_folder(0, 0, shelf), Some(name));
+
+            app.state.workspaces[0].tabs[0].layout.focus_pane(pane_id);
+            assert!(app.state.open_sidebar_folder_picker(0, 0, (5, 6)));
+            assert_eq!(
+                app.state
+                    .sidebar_subgroup_picker
+                    .as_ref()
+                    .map(|picker| picker.folder_shelf),
+                Some(Some(shelf))
+            );
+            app.state.sidebar_subgroup_picker = None;
         }
     }
 
@@ -10066,6 +10187,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 folder_menu: false,
+                folder_shelf: None,
                 settle_pane_id: None,
                 snooze_target: None,
             }

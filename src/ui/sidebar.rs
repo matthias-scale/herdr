@@ -3519,9 +3519,8 @@ pub(crate) fn sidebar_navigation_agent_entries(app: &AppState) -> Vec<AgentPanel
     entries
 }
 
-/// The shelf where a local tab appears in the sections layout, independent of
-/// shelf and folder collapse. Probe rows omit cards so picker opening stays a
-/// cheap read of the sidebar projection.
+/// The last shelf where a local tab appears, for single-shelf fixtures.
+#[cfg(test)]
 pub(crate) fn sections_tab_shelf(
     app: &AppState,
     ws_idx: usize,
@@ -3561,6 +3560,39 @@ pub(crate) fn sections_tab_in_shelf(
     false
 }
 
+/// Resolve the shelf of the exact pane represented by a sidebar row. A split
+/// tab can have different panes on different shelves.
+pub(crate) fn sections_pane_shelf(
+    app: &AppState,
+    ws_idx: usize,
+    tab_idx: usize,
+    pane_id: crate::layout::PaneId,
+) -> Option<crate::app::sidebar_folders::SidebarShelf> {
+    if !app.sidebar_sections_layout {
+        return None;
+    }
+    let mut shelf = None;
+    for row in compact_sidebar_rows_inner(app, None, false, false, true) {
+        match row {
+            SidebarRow::SectionHeader { title, .. } => {
+                shelf = crate::app::sidebar_folders::SidebarShelf::from_title(title);
+            }
+            SidebarRow::Tab { entry, .. }
+                if entry.local_target().is_some_and(|target| {
+                    target.ws_idx == ws_idx
+                        && target.tab_idx == tab_idx
+                        && target.pane_id == pane_id
+                }) =>
+            {
+                return shelf;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(test)]
 pub(crate) fn sections_tab_shelves(
     app: &AppState,
 ) -> std::collections::HashMap<(usize, usize), crate::app::sidebar_folders::SidebarShelf> {

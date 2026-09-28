@@ -394,9 +394,7 @@ impl AppState {
                         .as_ref()
                         .and_then(|tab| self.sidebar_folder_tab_indices(tab))
                     {
-                        if crate::ui::sidebar::sections_tab_shelf(self, ws_idx, tab_idx)
-                            == Some(shelf)
-                        {
+                        if crate::ui::sidebar::sections_tab_in_shelf(self, ws_idx, tab_idx, shelf) {
                             self.set_tab_sidebar_folder(ws_idx, tab_idx, Some(&name));
                         }
                     }
@@ -430,11 +428,30 @@ impl AppState {
         tab_idx: usize,
         anchor: (u16, u16),
     ) -> bool {
+        let shelf = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.focused_pane_id())
+            .and_then(|pane_id| {
+                crate::ui::sidebar::sections_pane_shelf(self, ws_idx, tab_idx, pane_id)
+            });
+        self.open_sidebar_folder_picker_for_shelf(ws_idx, tab_idx, anchor, shelf)
+    }
+
+    pub(crate) fn open_sidebar_folder_picker_for_shelf(
+        &mut self,
+        ws_idx: usize,
+        tab_idx: usize,
+        anchor: (u16, u16),
+        shelf: Option<SidebarShelf>,
+    ) -> bool {
         let Some(tab) = self.sidebar_folder_tab(ws_idx, tab_idx) else {
             return false;
         };
         let folder_shelf = if self.sidebar_sections_layout {
-            let Some(shelf) = crate::ui::sidebar::sections_tab_shelf(self, ws_idx, tab_idx) else {
+            let Some(shelf) = shelf.filter(|shelf| {
+                crate::ui::sidebar::sections_tab_in_shelf(self, ws_idx, tab_idx, *shelf)
+            }) else {
                 return false;
             };
             Some(shelf)

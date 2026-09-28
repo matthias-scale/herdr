@@ -448,7 +448,7 @@ impl AppState {
             return;
         };
         if let Some(shelf) = picker.folder_shelf {
-            if crate::ui::sidebar::sections_tab_shelf(self, ws_idx, tab_idx) != Some(shelf) {
+            if !crate::ui::sidebar::sections_tab_in_shelf(self, ws_idx, tab_idx, shelf) {
                 return;
             }
         }
@@ -3379,6 +3379,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 folder_menu: false,
+                folder_shelf: None,
                 settle_pane_id: Some(root_pane),
                 snooze_target: Some(root_pane),
             },

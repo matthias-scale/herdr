@@ -3495,6 +3495,8 @@ pub enum ContextMenuKind {
         has_subgroup: bool,
         /// Sections layout replaces subgroup wording with folder actions.
         folder_menu: bool,
+        /// Shelf of the row that opened the menu, if it was a sidebar row.
+        folder_shelf: Option<crate::app::sidebar_folders::SidebarShelf>,
     },
     Folder {
         shelf: crate::app::sidebar_folders::SidebarShelf,
@@ -8967,6 +8969,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 folder_menu: false,
+                folder_shelf: None,
             },
             x: 7,
             y: 3,
@@ -8997,6 +9000,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 folder_menu: false,
+                folder_shelf: None,
             }
         );
         assert_eq!(menu.selected, ContextMenuAction::Snooze);
@@ -9041,6 +9045,7 @@ mod tests {
                 starred: false,
                 has_subgroup: false,
                 folder_menu: false,
+                folder_shelf: None,
             },
             x: 2,
             y: 2,
@@ -10189,6 +10194,7 @@ mod tests {
             starred: false,
             has_subgroup,
             folder_menu,
+            folder_shelf: None,
         };
         let sections = ContextMenuState {
             kind: tab_kind(true, true),
