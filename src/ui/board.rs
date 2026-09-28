@@ -48,11 +48,7 @@ pub(crate) fn render(app: &AppState, area: Rect, frame: &mut Frame) {
             Rect::new(area.right() - 13, area.y, 3, 1),
         );
     }
-    let goals_height = if view.board.goals.is_empty() {
-        2
-    } else {
-        6.min(area.height / 3)
-    };
+    let goals_height = goals_height(view, area.height);
     let goals_area = Rect::new(area.x, area.y + 1, area.width, goals_height);
     render_goals(app, view, goals_area, frame);
     let board_area = Rect::new(
@@ -76,6 +72,15 @@ pub(crate) fn render(app: &AppState, area: Rect, frame: &mut Frame) {
         Paragraph::new(hint).style(Style::default().fg(palette.subtext0)),
         footer,
     );
+    if let Some(detail) = &view.detail {
+        render_detail(app, view, detail, area, frame);
+    }
+    if let Some(dialog) = &view.dialog {
+        render_dialog(app, dialog, area, frame);
+    }
+    if let Some(editor) = &view.editor {
+        render_editor(app, editor, area, frame);
+    }
     if let Some(error) = &view.error {
         let rect = Rect::new(
             area.x + 2,
@@ -87,15 +92,6 @@ pub(crate) fn render(app: &AppState, area: Rect, frame: &mut Frame) {
             Paragraph::new(error.as_str()).style(Style::default().fg(palette.red)),
             rect,
         );
-    }
-    if let Some(detail) = &view.detail {
-        render_detail(app, view, detail, area, frame);
-    }
-    if let Some(dialog) = &view.dialog {
-        render_dialog(app, dialog, area, frame);
-    }
-    if let Some(editor) = &view.editor {
-        render_editor(app, editor, area, frame);
     }
 }
 
@@ -173,6 +169,13 @@ pub(crate) fn goal_page_size(width: u16) -> usize {
     usize::from((width / 22).clamp(1, 4))
 }
 
+fn goals_height(view: &BoardView, screen_height: u16) -> u16 {
+    if view.board.goals.is_empty() {
+        return 2;
+    }
+    8.min((screen_height / 3).max(4))
+}
+
 pub(crate) fn column_rects(area: Rect, selected: Column) -> Vec<(Column, Rect)> {
     if area.width == 0 {
         return Vec::new();
@@ -199,11 +202,7 @@ pub(crate) fn column_rects(area: Rect, selected: Column) -> Vec<(Column, Rect)> 
 }
 
 pub(crate) fn board_rect(area: Rect, view: &BoardView) -> Rect {
-    let goals_height = if view.board.goals.is_empty() {
-        2
-    } else {
-        6.min(area.height / 3)
-    };
+    let goals_height = goals_height(view, area.height);
     Rect::new(
         area.x,
         area.y.saturating_add(1 + goals_height),

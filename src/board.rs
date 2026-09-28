@@ -695,6 +695,10 @@ fn parse(text: &str) -> Result<Board, String> {
                 updates: meta.updates,
                 agents: meta.agents,
             });
+        } else if !line.trim().is_empty() && !line.starts_with("# Herdr board · ") {
+            return Err(format!(
+                "line {line_number}: unsupported weekly note content"
+            ));
         }
     }
     Ok(board)
@@ -823,6 +827,14 @@ mod tests {
         }
         .goal_done("g1"));
         fs::remove_dir_all(root).expect("remove own fixture");
+    }
+
+    #[test]
+    fn unknown_obsidian_content_is_rejected_instead_of_overwritten() {
+        let date = Date::from_calendar_date(2026, time::Month::September, 28).expect("date");
+        let note = WeekNote::for_date(Path::new("/vault"), date).expect("note");
+        let text = format!("{}My private note\n", format_note(&Board::default(), &note));
+        assert!(parse(&text).is_err());
     }
 
     #[test]

@@ -182,10 +182,10 @@ impl App {
                                     let current = goal.as_ref().and_then(|id| {
                                         goal_ids.iter().position(|candidate| candidate == id)
                                     });
-                                    *goal = current
-                                        .and_then(|i| goal_ids.get(i + 1))
-                                        .or_else(|| goal_ids.first())
-                                        .cloned();
+                                    *goal = match current {
+                                        None => goal_ids.first().cloned(),
+                                        Some(i) => goal_ids.get(i + 1).cloned(),
+                                    };
                                 }
                             }
                             Dialog::Goal { scope, field, .. } => {
@@ -816,6 +816,11 @@ impl App {
                     .flat_map(|project| &project.repos)
                     .find(|repo| repo.name == repo_name)
                     .map(|repo| repo.path.clone())
+                    .or_else(|| {
+                        std::env::var_os("HOME").map(|home| {
+                            std::path::PathBuf::from(home).join("Repos").join(repo_name)
+                        })
+                    })
             }
         };
         let Some(directory) = directory.filter(|path| path.is_dir()) else {
@@ -856,6 +861,7 @@ impl App {
             if let Some(view) = self.state.board_view.as_mut() {
                 view.error = Some("agent started, but its pane could not be linked".into());
             }
+            self.state.board_return = self.state.board_view.take();
             return;
         };
         if let Some(view) = self.state.board_view.as_mut() {
@@ -866,9 +872,8 @@ impl App {
                 });
                 card.column = Column::InProgress;
             }
-            if view.persist() {
-                self.state.board_return = self.state.board_view.take();
-            }
+            view.persist();
+            self.state.board_return = self.state.board_view.take();
         }
     }
 }
