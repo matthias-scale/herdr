@@ -1904,13 +1904,26 @@ pub(crate) fn relative_agent_navigation_entry(
             .and_then(crate::workspace::Workspace::focused_pane_id)
             .map(|pane_id| (ws_idx, pane_id))
     });
-    let current_idx = entries.iter().position(|entry| {
-        focused.is_some_and(|(ws_idx, pane_id)| {
-            entry
-                .local_target()
-                .is_some_and(|target| target.ws_idx == ws_idx && target.pane_id == pane_id)
+    let current_idx = app
+        .sidebar_selected_remote_agent
+        .as_ref()
+        .and_then(|selected| {
+            entries.iter().position(|entry| {
+                matches!(
+                    &entry.identity,
+                    AgentPanelIdentity::Remote(agent_ref) if agent_ref == selected
+                )
+            })
         })
-    });
+        .or_else(|| {
+            entries.iter().position(|entry| {
+                focused.is_some_and(|(ws_idx, pane_id)| {
+                    entry
+                        .local_target()
+                        .is_some_and(|target| target.ws_idx == ws_idx && target.pane_id == pane_id)
+                })
+            })
+        });
     let next_idx = match (current_idx, forward) {
         (Some(idx), true) => (idx + 1) % entries.len(),
         (Some(0), false) => entries.len() - 1,
