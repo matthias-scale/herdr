@@ -2167,11 +2167,11 @@ fn cycle_space_order(state: &AppState) -> Vec<usize> {
         })
         // Grouped members follow their root, as the space tree shows them.
         .flat_map(|ws_idx| {
-            std::iter::once(ws_idx).chain(
-                grouped
-                    .then(|| crate::ui::sidebar::sidebar_space_member_indices(state, ws_idx))
-                    .unwrap_or_default(),
-            )
+            std::iter::once(ws_idx).chain(if grouped {
+                crate::ui::sidebar::sidebar_space_member_indices(state, ws_idx)
+            } else {
+                Vec::new()
+            })
         })
         .chain(0..state.workspaces.len())
         .filter(|ws_idx| !state.workspaces[*ws_idx].is_fleet && seen.insert(*ws_idx))
