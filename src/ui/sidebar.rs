@@ -30555,6 +30555,7 @@ mod model_letter {
         let terminal = app.terminals.get_mut(&terminal_id).expect("agent terminal");
         terminal.detected_agent = Some(agent);
         terminal.agent_model = model.map(str::to_string);
+        terminal.set_raw_agent_state_for_test(AgentState::Blocked);
         app.refresh_local_agent_panel_identities();
         app
     }
