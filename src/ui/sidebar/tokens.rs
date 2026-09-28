@@ -257,6 +257,8 @@ mod tests {
                 seen: true,
                 done_since: None,
                 stale: false,
+                inferred_state: None,
+                settled: false,
                 reported_at: None,
                 last_agent_state_change_seq: None,
                 activity_at: None,
