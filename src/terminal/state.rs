@@ -749,6 +749,9 @@ pub struct TerminalState {
     claude_subagent_activity_observed_at: Option<Instant>,
     /// Last background observation of the pane's distinct foreground process.
     pub(crate) foreground_process_name: Option<String>,
+    /// Runtime-only model the pane's agent process was launched with
+    /// (`--model`/`-m` argv). `None` when unknown.
+    pub(crate) agent_model: Option<String>,
     foreground_process_active: bool,
     pub last_agent_state_change_seq: Option<u64>,
     /// Runtime-only start of the current Working lifecycle, independent of
@@ -835,6 +838,7 @@ impl TerminalState {
             claude_subagent_transcript_activity: SubagentTranscriptActivity::Unknown,
             claude_subagent_activity_observed_at: None,
             foreground_process_name: None,
+            agent_model: None,
             foreground_process_active: false,
             last_agent_state_change_seq: None,
             working_since: None,

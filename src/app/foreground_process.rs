@@ -25,6 +25,7 @@ pub(crate) struct ForegroundProcessObservation {
     pub(crate) shell_pid: Option<u32>,
     pub(crate) process_name: Option<String>,
     pub(crate) process_active: bool,
+    pub(crate) agent_model: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +84,27 @@ fn single_process_job(process: &ForegroundProcess) -> ForegroundJob {
     ForegroundJob {
         process_group_id: process.pid,
         processes: vec![process.clone()],
+    }
+}
+
+/// The model the pane's agent process was launched with, from its argv.
+pub(crate) fn agent_model_for_job(job: &ForegroundJob) -> Option<String> {
+    let agent_pid = agent_process_pid(job)?;
+    let process = job
+        .processes
+        .iter()
+        .find(|process| process.pid == agent_pid)?;
+    match process.argv.as_deref() {
+        Some(argv) => crate::detect::agent_model_from_argv(argv),
+        None => {
+            let argv: Vec<String> = process
+                .cmdline
+                .as_deref()?
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            crate::detect::agent_model_from_argv(&argv)
+        }
     }
 }
 
@@ -265,8 +287,8 @@ where
 {
     let mut observations = Vec::with_capacity(targets.len());
     for target in targets {
-        let (process_name, process_active) = match target.shell_pid {
-            None => (None, false),
+        let (process_name, process_active, agent_model) = match target.shell_pid {
+            None => (None, false, None),
             Some(_) if Instant::now() >= deadline => continue,
             Some(shell_pid) => lookup(shell_pid)
                 .map(|job| {
@@ -274,15 +296,20 @@ where
                         || agent_process_pid(&job).is_some_and(|agent_pid| {
                             agent_subprocess_active(&job, &descendants(agent_pid))
                         });
-                    (process_name_for_job(shell_pid, &job), active)
+                    (
+                        process_name_for_job(shell_pid, &job),
+                        active,
+                        agent_model_for_job(&job),
+                    )
                 })
-                .unwrap_or((None, false)),
+                .unwrap_or((None, false, None)),
         };
         observations.push(ForegroundProcessObservation {
             pane_id: target.pane_id,
             shell_pid: target.shell_pid,
             process_name,
             process_active,
+            agent_model,
         });
     }
     observations
@@ -472,6 +499,17 @@ impl crate::app::App {
             {
                 continue;
             }
+            let model_changed = self
+                .state
+                .terminals
+                .get(&terminal_id)
+                .is_some_and(|terminal| terminal.agent_model != observation.agent_model);
+            if model_changed {
+                if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+                    terminal.agent_model = observation.agent_model.clone();
+                }
+                changed = true;
+            }
             let process_changed = self
                 .state
                 .terminals
@@ -535,6 +573,23 @@ mod tests {
             process_group_id,
             processes,
         }
+    }
+
+    #[test]
+    fn agent_model_is_read_from_the_agent_process_argv() {
+        let job = job(
+            40,
+            vec![
+                process_with_argv(40, "claude", &["claude", "--model", "claude-fable-5-1"]),
+                process_with_argv(41, "node", &["node", "--model", "decoy"]),
+            ],
+        );
+        assert_eq!(
+            agent_model_for_job(&job).as_deref(),
+            Some("claude-fable-5-1")
+        );
+        let plain = super::tests::job(50, vec![process_with_argv(50, "codex", &["codex"])]);
+        assert_eq!(agent_model_for_job(&plain), None);
     }
 
     #[test]
@@ -977,6 +1032,7 @@ mod tests {
                 shell_pid: None,
                 process_name: Some("cargo".into()),
                 process_active: true,
+                agent_model: None,
             }],
         );
 
@@ -1003,6 +1059,7 @@ mod tests {
                 shell_pid: None,
                 process_name: Some("cargo".into()),
                 process_active: true,
+                agent_model: None,
             }],
         ));
 
@@ -1029,6 +1086,7 @@ mod tests {
                 shell_pid: None,
                 process_name: Some("codex".into()),
                 process_active: true,
+                agent_model: None,
             }],
         ));
         assert_eq!(
@@ -1044,6 +1102,7 @@ mod tests {
                 shell_pid: None,
                 process_name: None,
                 process_active: false,
+                agent_model: None,
             }],
         ));
         assert_eq!(
@@ -1071,6 +1130,7 @@ mod tests {
                 shell_pid: None,
                 process_name: Some("claude".into()),
                 process_active: false,
+                agent_model: None,
             }],
         );
         let _ = app.render_dirty.take();
@@ -1084,6 +1144,7 @@ mod tests {
                 shell_pid: None,
                 process_name: Some("claude".into()),
                 process_active: true,
+                agent_model: None,
             }],
         ));
 
@@ -1128,6 +1189,7 @@ mod tests {
                 shell_pid: None,
                 process_name: Some("cargo".into()),
                 process_active: true,
+                agent_model: None,
             }],
         ));
         assert_eq!(
@@ -1144,6 +1206,7 @@ mod tests {
                 shell_pid: None,
                 process_name: Some("stale-process".into()),
                 process_active: true,
+                agent_model: None,
             }],
         ));
         assert_eq!(
@@ -1182,6 +1245,7 @@ mod tests {
                 shell_pid: None,
                 process_name: Some("stale-process".into()),
                 process_active: true,
+                agent_model: None,
             }],
         ));
         assert_eq!(
@@ -1219,6 +1283,7 @@ mod tests {
                 shell_pid: None,
                 process_name: Some("stale-process".into()),
                 process_active: true,
+                agent_model: None,
             }],
         );
 

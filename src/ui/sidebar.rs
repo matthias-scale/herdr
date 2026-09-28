@@ -1363,6 +1363,22 @@ pub(crate) struct SidebarThreadCard {
     host_kind: SidebarCardHostKind,
     agent: Option<SidebarCardAgent>,
     agent_icon: Option<&'static str>,
+    /// Small-capital model letter drawn right after the agent icon.
+    model_letter: Option<&'static str>,
+}
+
+/// The model letter for a card. Shown only for (Claude, Fable) and
+/// (Codex, Astra); every other pair, and an unknown model, shows nothing.
+fn model_letter_for(
+    agent: Option<crate::detect::Agent>,
+    model: Option<&str>,
+) -> Option<&'static str> {
+    let model = model?.to_ascii_lowercase();
+    match agent? {
+        crate::detect::Agent::Claude if model.contains("fable") => Some("\u{A730}"),
+        crate::detect::Agent::Codex if model.contains("astra") => Some("\u{1D00}"),
+        _ => None,
+    }
 }
 
 #[derive(Clone)]
@@ -3129,6 +3145,14 @@ fn sidebar_thread_card(app: &AppState, entry: &AgentPanelEntry) -> SidebarThread
         agent,
         agent_icon: if app.nerd_font {
             detected_agent.map(|agent| crate::ui::icons::agent_icon(agent).unwrap_or("◆"))
+        } else {
+            None
+        },
+        model_letter: if app.nerd_font {
+            model_letter_for(
+                detected_agent,
+                terminal.and_then(|terminal| terminal.agent_model.as_deref()),
+            )
         } else {
             None
         },
@@ -11068,9 +11092,12 @@ fn render_sections_thread_card(
     }
     // Keep the host before the agent so narrow cards drop the agent first;
     // render in reverse to keep the host at the far right.
-    let mut right_fields = vec![(
+    // The optional suffix is the model letter, drawn bold right after the
+    // agent icon and counted in that field's width.
+    let mut right_fields: Vec<(std::borrow::Cow<str>, Color, Option<&'static str>)> = vec![(
         std::borrow::Cow::Owned(format!("{host_icon} {}", card.host)),
         p.overlay1,
+        None,
     )];
     if let Some(agent_icon) = agent_icon {
         let color = match card.agent {
@@ -11078,7 +11105,12 @@ fn render_sections_thread_card(
             Some(SidebarCardAgent::Codex) => crate::ui::icons::codex_color(p),
             _ => p.overlay0,
         };
-        right_fields.push((std::borrow::Cow::Borrowed(agent_icon), color));
+        let model_letter = if app.nerd_font {
+            card.model_letter
+        } else {
+            None
+        };
+        right_fields.push((std::borrow::Cow::Borrowed(agent_icon), color, model_letter));
     }
     let has_branch = card.branch.is_some();
     let available = usize::from(rect.width).saturating_sub(2);
@@ -11090,7 +11122,7 @@ fn render_sections_thread_card(
             + left_fields.len().saturating_sub(1);
         let right_width = right_fields
             .iter()
-            .map(|(text, _)| display_width(text))
+            .map(|(text, _, suffix)| display_width(text) + suffix.map_or(0, display_width))
             .sum::<usize>()
             + right_fields.len().saturating_sub(1);
         let gap = usize::from(!left_fields.is_empty() && !right_fields.is_empty());
@@ -11115,7 +11147,7 @@ fn render_sections_thread_card(
             + left_fields.len().saturating_sub(1);
         let right_width = right_fields
             .iter()
-            .map(|(text, _)| display_width(text))
+            .map(|(text, _, suffix)| display_width(text) + suffix.map_or(0, display_width))
             .sum::<usize>()
             + right_fields.len().saturating_sub(1);
         let gap = usize::from(!right_fields.is_empty());
@@ -11134,11 +11166,17 @@ fn render_sections_thread_card(
         left_spans.push(Span::styled(text.as_str(), Style::default().fg(*color)));
     }
     let mut right_spans = Vec::new();
-    for (index, (text, color)) in right_fields.iter().rev().enumerate() {
+    for (index, (text, color, suffix)) in right_fields.iter().rev().enumerate() {
         if index > 0 {
             right_spans.push(Span::raw(" "));
         }
         right_spans.push(Span::styled(text.as_ref(), Style::default().fg(*color)));
+        if let Some(suffix) = suffix {
+            right_spans.push(Span::styled(
+                *suffix,
+                Style::default().fg(*color).add_modifier(Modifier::BOLD),
+            ));
+        }
     }
     let left_width = left_fields
         .iter()
@@ -16124,7 +16162,7 @@ pub(crate) mod tests {
         assert_eq!(take_remote_sidebar_row_visits(), 0);
     }
 
-    fn app_with_agents(names: &[&str]) -> AppState {
+    pub(super) fn app_with_agents(names: &[&str]) -> AppState {
         let mut app = AppState::test_new();
         app.workspaces = names.iter().map(|name| Workspace::test_new(name)).collect();
         app.ensure_test_terminals();
@@ -18732,7 +18770,7 @@ row_gap = 1
         );
     }
 
-    fn row_text(buffer: &ratatui::buffer::Buffer, row: u16, width: u16) -> String {
+    pub(super) fn row_text(buffer: &ratatui::buffer::Buffer, row: u16, width: u16) -> String {
         (0..width)
             .map(|x| buffer[(x, row)].symbol())
             .collect::<String>()
@@ -29195,6 +29233,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             host_kind: SidebarCardHostKind::Linux,
             agent: Some(SidebarCardAgent::Codex),
             agent_icon: None,
+            model_letter: None,
         };
         let mut terminal = Terminal::new(TestBackend::new(18, 2)).expect("card terminal");
         terminal
@@ -29229,6 +29268,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             host_kind: SidebarCardHostKind::Linux,
             agent: Some(SidebarCardAgent::Codex),
             agent_icon: None,
+            model_letter: None,
         };
         let mut terminal = Terminal::new(TestBackend::new(36, 2)).expect("card terminal");
         terminal
@@ -29262,6 +29302,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             host_kind: SidebarCardHostKind::Linux,
             agent: None,
             agent_icon: None,
+            model_letter: None,
         };
         let mut terminal =
             Terminal::new(TestBackend::new(40, 2)).expect("plain shell card terminal");
@@ -29289,6 +29330,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             host_kind: SidebarCardHostKind::Linux,
             agent: None,
             agent_icon: None,
+            model_letter: None,
         };
         let mut terminal = Terminal::new(TestBackend::new(40, 2)).expect("thread card terminal");
         terminal
@@ -29611,6 +29653,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             host_kind: SidebarCardHostKind::Linux,
             agent: Some(SidebarCardAgent::Codex),
             agent_icon: None,
+            model_letter: None,
         };
         let mut terminal = Terminal::new(TestBackend::new(60, 2)).expect("ASCII card terminal");
         terminal
@@ -29944,5 +29987,116 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             })
             .expect("remote section card");
         assert_eq!(card.status, SidebarCardStatus::Working(String::new()));
+    }
+}
+
+#[cfg(test)]
+mod model_letter {
+    use super::tests::{app_with_agents, row_text};
+    use super::*;
+    use crate::detect::Agent;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    const FABLE: &str = "\u{A730}";
+    const ASTRA: &str = "\u{1D00}";
+
+    fn render_card(
+        agent: Agent,
+        model: Option<&str>,
+    ) -> (SidebarThreadCard, ratatui::buffer::Buffer, AppState) {
+        let mut app = app_with_agents(&["herdr"]);
+        app.nerd_font = true;
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).expect("agent terminal");
+        terminal.detected_agent = Some(agent);
+        terminal.agent_model = model.map(str::to_string);
+        app.refresh_local_agent_panel_identities();
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .next()
+            .expect("sidebar entry");
+        let card = sidebar_thread_card(&app, &entry);
+        let mut backend = Terminal::new(TestBackend::new(60, 2)).expect("card terminal");
+        backend
+            .draw(|frame| {
+                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 60, 2), false)
+            })
+            .expect("render card");
+        let buffer = backend.backend().buffer().clone();
+        (card, buffer, app)
+    }
+
+    fn letter_cell(
+        buffer: &ratatui::buffer::Buffer,
+        letter: &str,
+    ) -> Option<(u16, ratatui::buffer::Cell)> {
+        (0..60).find_map(|x| {
+            let cell = &buffer[(x, 1)];
+            (cell.symbol() == letter).then(|| (x, cell.clone()))
+        })
+    }
+
+    #[test]
+    fn fable() {
+        let (card, buffer, app) = render_card(Agent::Claude, Some("claude-fable-5-1"));
+        assert_eq!(card.model_letter, Some(FABLE));
+        let (x, cell) = letter_cell(&buffer, FABLE).expect("fable letter rendered");
+        assert_eq!(buffer[(x - 1, 1)].symbol(), card.agent_icon.expect("icon"));
+        assert!(cell.modifier.contains(Modifier::BOLD));
+        assert_eq!(cell.fg, crate::ui::icons::claude_color(&app.palette));
+        assert!(row_text(&buffer, 1, 60).contains(FABLE));
+    }
+
+    #[test]
+    fn astra() {
+        let (card, buffer, app) = render_card(Agent::Codex, Some("gpt-6-astra"));
+        assert_eq!(card.model_letter, Some(ASTRA));
+        let (x, cell) = letter_cell(&buffer, ASTRA).expect("astra letter rendered");
+        assert_eq!(buffer[(x - 1, 1)].symbol(), card.agent_icon.expect("icon"));
+        assert!(cell.modifier.contains(Modifier::BOLD));
+        assert_eq!(cell.fg, crate::ui::icons::codex_color(&app.palette));
+    }
+
+    #[test]
+    fn other() {
+        for (agent, model) in [
+            (Agent::Claude, "claude-opus-5-5"),
+            (Agent::Codex, "gpt-6-luna"),
+            // AS1: the letter belongs to the (agent, model) pair, not the model.
+            (Agent::Claude, "gpt-6-astra"),
+            (Agent::Codex, "claude-fable-5-1"),
+            (Agent::Cursor, "fable"),
+        ] {
+            let (card, buffer, _) = render_card(agent, Some(model));
+            assert_eq!(card.model_letter, None, "{agent:?} {model}");
+            assert!(letter_cell(&buffer, FABLE).is_none());
+            assert!(letter_cell(&buffer, ASTRA).is_none());
+        }
+    }
+
+    #[test]
+    fn unknown() {
+        for agent in [Agent::Claude, Agent::Codex] {
+            let (card, buffer, _) = render_card(agent, None);
+            assert_eq!(card.model_letter, None);
+            assert!(letter_cell(&buffer, FABLE).is_none());
+            assert!(letter_cell(&buffer, ASTRA).is_none());
+        }
+    }
+
+    #[test]
+    fn matching_is_case_insensitive() {
+        assert_eq!(
+            model_letter_for(Some(Agent::Claude), Some("Claude-FABLE")),
+            Some(FABLE)
+        );
+        assert_eq!(
+            model_letter_for(Some(Agent::Codex), Some("GPT-6-Astra")),
+            Some(ASTRA)
+        );
+        assert_eq!(model_letter_for(None, Some("fable")), None);
     }
 }
