@@ -8,7 +8,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
@@ -180,7 +180,7 @@ impl StatusLog {
             .flatten()
             .flatten()
             .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+            .filter(|path| is_day_file(path))
             .collect();
         files.sort();
         files
@@ -237,6 +237,19 @@ impl StatusLog {
         }
         out
     }
+}
+
+fn is_day_file(path: &Path) -> bool {
+    if path.extension().is_none_or(|ext| ext != "jsonl") {
+        return false;
+    }
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    let Ok(format) = time::format_description::parse_borrowed::<3>("[year]-[month]-[day]") else {
+        return false;
+    };
+    time::Date::parse(stem, &format).is_ok()
 }
 
 #[derive(Debug, Default, Clone)]
@@ -408,6 +421,38 @@ mod tests {
         }
         assert_eq!(log.day_files().len(), RETAINED_DAY_FILES);
         assert!(!dir.join("2026-07-01.jsonl").exists());
+    }
+
+    #[test]
+    fn status_log_retention_ignores_non_day_jsonl_files() {
+        let dir = test_tempdir();
+        let log = StatusLog::new(dir.clone());
+        for name in ["notes.jsonl", "2026-99-99.jsonl"] {
+            fs::write(dir.join(name), "keep this file").unwrap();
+        }
+        for index in 0..RETAINED_DAY_FILES {
+            fs::write(
+                dir.join(format!("unrelated-{index}.jsonl")),
+                "keep this file",
+            )
+            .unwrap();
+        }
+
+        log.append(&record("p", "2026-09-28T10:00:00Z", "t"))
+            .unwrap();
+
+        for name in ["notes.jsonl", "2026-99-99.jsonl"] {
+            assert_eq!(
+                fs::read_to_string(dir.join(name)).unwrap(),
+                "keep this file"
+            );
+        }
+        for index in 0..RETAINED_DAY_FILES {
+            assert_eq!(
+                fs::read_to_string(dir.join(format!("unrelated-{index}.jsonl"))).unwrap(),
+                "keep this file"
+            );
+        }
     }
 
     #[test]
