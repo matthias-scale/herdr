@@ -2987,20 +2987,42 @@ fn append_sections_block(
         let mut grouped = vec![Vec::new(); app.projects.len()];
         let mut ungrouped = Vec::new();
         for entry in entries {
-            let project_index = app.projects.iter().position(|project| {
-                let cwd = entry
-                    .local_target()
-                    .and_then(|target| app.workspaces.get(target.ws_idx))
-                    .map(|workspace| workspace.identity_cwd.as_path());
-                cwd.is_some_and(|cwd| project.repos.iter().any(|repo| cwd.starts_with(&repo.path)))
-                    || entry_repo_label(app, &entry).is_some_and(|label| {
-                        let name = label.rsplit('/').next().unwrap_or(label.as_str());
-                        project
-                            .repos
-                            .iter()
-                            .any(|repo| repo.name.eq_ignore_ascii_case(name))
+            let path_project = |cwd: &std::path::Path| {
+                app.projects
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, project)| {
+                        project.repos.iter().map(move |repo| (index, repo))
                     })
-            });
+                    .filter(|(_, repo)| cwd.starts_with(&repo.path))
+                    .max_by_key(|(_, repo)| repo.path.components().count())
+                    .map(|(index, _)| index)
+            };
+            let project_index = entry_terminal(app, &entry)
+                .and_then(|terminal| path_project(&terminal.cwd))
+                .or_else(|| {
+                    entry
+                        .local_target()
+                        .and_then(|target| app.workspaces.get(target.ws_idx))
+                        .and_then(|workspace| path_project(&workspace.identity_cwd))
+                })
+                .or_else(|| {
+                    let label = entry_repo_label(app, &entry)?;
+                    let name = label.rsplit('/').next().unwrap_or(label.as_str());
+                    let mut matches =
+                        app.projects
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, project)| {
+                                project
+                                    .repos
+                                    .iter()
+                                    .any(|repo| repo.name.eq_ignore_ascii_case(name))
+                                    .then_some(index)
+                            });
+                    let index = matches.next()?;
+                    matches.next().is_none().then_some(index)
+                });
             if let Some(index) = project_index {
                 grouped[index].push(entry);
             } else {
@@ -8062,7 +8084,12 @@ pub(crate) fn compute_sidebar_hover_targets(
                     continue;
                 };
                 if let Some(sections_card) = entry.sections_card.as_ref() {
-                    if let Some(rect) = clamp_row_cells(body, row_y, 0, 1) {
+                    let dot_offset = usize::from(
+                        sections_thread_rect(Rect::new(body.x, row_y, body.width, 1), *depth)
+                            .x
+                            .saturating_sub(body.x),
+                    );
+                    if let Some(rect) = clamp_row_cells(body, row_y, dot_offset, 1) {
                         targets.push(crate::app::state::SidebarHoverTarget {
                             rect,
                             label: agent_dot_tooltip(entry),
@@ -10921,7 +10948,12 @@ fn sidebar_card_host_icon(kind: SidebarCardHostKind, nerd_font: bool) -> &'stati
     }
 }
 
-fn sections_tail_width(app: &AppState, card: &SidebarThreadCard, width: usize) -> (usize, usize) {
+fn sections_tail_width(
+    app: &AppState,
+    card: &SidebarThreadCard,
+    width: usize,
+    controls_width: u16,
+) -> (usize, usize) {
     let suffix = match &card.status {
         SidebarCardStatus::Done => "✓ Done",
         SidebarCardStatus::Idle(age) => age.as_str(),
@@ -10932,10 +10964,18 @@ fn sections_tail_width(app: &AppState, card: &SidebarThreadCard, width: usize) -
     } else {
         0
     };
+    // The host is optional. Keep a useful title fragment and all controls and
+    // status text before reserving any space for it.
+    let max_host_width = width.saturating_sub(2 + usize::from(controls_width) + suffix_width + 8);
     let host_width = if width >= 32 {
-        display_width(&card.host)
+        let needed = display_width(&card.host)
             + display_width(sidebar_card_host_icon(card.host_kind, app.nerd_font))
-            + 2
+            + 2;
+        if needed <= max_host_width {
+            needed
+        } else {
+            0
+        }
     } else {
         0
     };
@@ -10948,7 +10988,8 @@ pub(super) fn sections_control_start(
     rect: Rect,
     controls_width: u16,
 ) -> u16 {
-    let (suffix_width, host_width) = sections_tail_width(app, card, usize::from(rect.width));
+    let (suffix_width, host_width) =
+        sections_tail_width(app, card, usize::from(rect.width), controls_width);
     rect.right()
         .saturating_sub(controls_width)
         .saturating_sub((suffix_width + host_width) as u16)
@@ -10979,7 +11020,7 @@ pub(super) fn render_sections_thread_card_with_controls(
     };
     // At the supported 18-column minimum, the title wins over age and host.
     let width = usize::from(rect.width);
-    let (suffix_width, host_width) = sections_tail_width(app, card, width);
+    let (suffix_width, host_width) = sections_tail_width(app, card, width, controls_width);
     let title_width = width
         .saturating_sub(2 + usize::from(controls_width) + host_width + suffix_width)
         .max(1);
@@ -28934,6 +28975,90 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn sections_projects_choose_pane_path_before_duplicate_repo_names() {
+        let mut app = app_with_agents(&["first", "second"]);
+        app.sidebar_sections_layout = true;
+        app.sidebar_named_projects = true;
+        app.workspaces[0].identity_cwd = "/tmp/one/shared".into();
+        // The workspace identity can lag the pane's current checkout.
+        app.workspaces[1].identity_cwd = "/tmp/one/shared".into();
+        let pane = &app.workspaces[1].tabs[0].panes[&app.workspaces[1].tabs[0].root_pane];
+        app.terminals
+            .get_mut(&pane.attached_terminal_id)
+            .expect("second terminal")
+            .cwd = "/tmp/two/shared/subdir".into();
+        app.projects = [("one", "/tmp/one/shared"), ("two", "/tmp/two/shared")]
+            .into_iter()
+            .map(|(id, path)| crate::app::projects::Project {
+                id: id.into(),
+                label: id.into(),
+                repos: vec![crate::app::projects::ProjectRepo {
+                    name: "shared".into(),
+                    path: path.into(),
+                }],
+            })
+            .collect();
+
+        let mut rows = Vec::new();
+        append_sections_block(
+            &app,
+            &mut rows,
+            ACTIVE_SECTION_TITLE,
+            sidebar_thread_entries(&app),
+        );
+        let groups = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::NestedHeader { title, .. } => Some(title.as_str()),
+                SidebarRow::Tab { entry, .. } => Some(entry.primary_label.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(groups, ["one", "first", "two", "second"]);
+
+        // A shared repo name without a matching checkout path is ambiguous.
+        for (index, cwd) in ["/tmp/other/a", "/tmp/other/b"].into_iter().enumerate() {
+            app.workspaces[index].identity_cwd = cwd.into();
+            let pane =
+                &app.workspaces[index].tabs[0].panes[&app.workspaces[index].tabs[0].root_pane];
+            app.terminals
+                .get_mut(&pane.attached_terminal_id)
+                .expect("terminal")
+                .cwd = cwd.into();
+            app.git_root_for_cwd
+                .insert(cwd.into(), Some("/tmp/git/shared".into()));
+        }
+        let mut rows = Vec::new();
+        append_sections_block(
+            &app,
+            &mut rows,
+            ACTIVE_SECTION_TITLE,
+            sidebar_thread_entries(&app),
+        );
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::NestedHeader { .. })));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Tab { depth: 0, .. }))
+                .count(),
+            2
+        );
+
+        app.projects.pop();
+        let mut rows = Vec::new();
+        append_sections_block(
+            &app,
+            &mut rows,
+            ACTIVE_SECTION_TITLE,
+            sidebar_thread_entries(&app),
+        );
+        assert!(rows.iter().any(
+            |row| matches!(row, SidebarRow::NestedHeader { title, count: 2, .. } if title == "one")
+        ));
+    }
+
+    #[test]
     fn sections_pin_control_targets_its_tab_without_hiding_snooze_and_settle() {
         let mut app = app_with_agents(&["agent"]);
         app.sidebar_sections_layout = true;
@@ -29037,6 +29162,95 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(child.starts_with("      ● fix sidebar"), "{child:?}");
         assert!(child.contains("8m L localhost"), "{child:?}");
         assert_eq!(sections_control_start(&app, &card, row, 6), 19);
+    }
+
+    #[test]
+    fn long_section_host_keeps_title_controls_and_age_at_40_columns() {
+        let mut app = AppState::test_new();
+        app.nerd_font = false;
+        let card = SidebarThreadCard {
+            title: "fix sidebar".into(),
+            status: SidebarCardStatus::Idle("8m".into()),
+            host: "a-very-long-machine-name-that-exceeds-the-row".into(),
+            host_kind: SidebarCardHostKind::Remote,
+        };
+        for depth in [0, 1] {
+            let row = sections_thread_rect(Rect::new(0, 0, 40, 1), depth);
+            let pin_x = sections_control_start(&app, &card, row, 6);
+            let mut terminal = Terminal::new(TestBackend::new(40, 1)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    render_sections_thread_card_with_controls(&app, frame, &card, row, false, 6);
+                    frame.render_widget(Paragraph::new("p"), Rect::new(pin_x, 0, 1, 1));
+                })
+                .expect("draw");
+            let rendered = row_text(terminal.backend().buffer(), 0, 40);
+            assert!(rendered.contains("fix side"), "{rendered:?}");
+            assert!(rendered.contains("8m"), "{rendered:?}");
+            assert!(!rendered.contains("machine"), "{rendered:?}");
+            assert_eq!(rendered.chars().nth(usize::from(pin_x)), Some('p'));
+            assert!(pin_x > row.x + 2, "pin left the indented row: {rendered:?}");
+        }
+    }
+
+    #[test]
+    fn section_dot_and_pin_hover_targets_match_indented_rendered_cells() {
+        for grouped in [false, true] {
+            let mut app = app_with_agents(&["agent"]);
+            app.sidebar_sections_layout = true;
+            app.sidebar_named_projects = grouped;
+            app.sidebar_width = 40;
+            app.nerd_font = false;
+            app.agent_host_name = "a-very-long-machine-name-that-exceeds-the-row".into();
+            if grouped {
+                app.workspaces[0].identity_cwd = "/tmp/project/agent".into();
+                app.projects = vec![crate::app::projects::Project {
+                    id: "project".into(),
+                    label: "Project".into(),
+                    repos: vec![crate::app::projects::ProjectRepo {
+                        name: "agent".into(),
+                        path: "/tmp/project/agent".into(),
+                    }],
+                }];
+            }
+            let area = Rect::new(0, 0, 40, 24);
+            crate::ui::compute_view(&mut app, area);
+            let mut terminal = Terminal::new(TestBackend::new(40, 24)).expect("terminal");
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .expect("draw");
+            let card = compute_tab_card_areas(&app, area)[0].clone();
+            let targets = compute_sidebar_hover_targets(&app, area);
+            let dot = targets
+                .iter()
+                .find(|target| target.rect.y == card.rect.y && target.label == "Working")
+                .expect("status dot target");
+            let pin = targets
+                .iter()
+                .find(|target| {
+                    matches!(
+                        target.action,
+                        Some(crate::app::state::SidebarHoverAction::Pin {
+                            ws_idx: 0,
+                            tab_idx: 0
+                        })
+                    )
+                })
+                .expect("pin target");
+            let rendered = row_text(terminal.backend().buffer(), card.rect.y, 40);
+            assert_eq!(dot.rect.x, card.rect.x + if grouped { 6 } else { 3 });
+            assert_eq!(
+                rendered.chars().nth(usize::from(dot.rect.x)),
+                Some('●'),
+                "{rendered:?}"
+            );
+            assert_eq!(
+                rendered.chars().nth(usize::from(pin.rect.x)),
+                Some('p'),
+                "{rendered:?}"
+            );
+            assert!(pin.rect.x > dot.rect.x + 2, "{rendered:?}");
+        }
     }
 
     #[test]
