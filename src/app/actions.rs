@@ -3923,7 +3923,8 @@ impl AppState {
                 || agent_name_changed
                 || mutation.hook_work_context_changed
                 || mutation.sidebar_projection_changed
-                || report_changed)
+                || report_changed
+                || suppress_acquisition_completion)
                 .then(|| terminal.unchanged_effective_state_change_at(now));
             (
                 mutation,

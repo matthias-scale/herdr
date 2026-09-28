@@ -2331,6 +2331,11 @@ fn blocked_pane_cycle_in_order(
         Vec::new()
     };
     let mut panes = Vec::with_capacity(local.len() + remote.len());
+    let rows = if include_needs_you {
+        crate::ui::sidebar::sidebar_navigation_rows(state)
+    } else {
+        rows
+    };
     for row in rows {
         match row {
             crate::ui::SidebarRow::NeedsYou { target, .. } if include_needs_you => match target {
@@ -4231,17 +4236,49 @@ mod tests {
         app.state.skip_collapsed_cycle = true;
         assert!(!window_navigation_order(&app.state).is_empty());
 
-        for title in ["Pinned", "Active", "Snoozed", "Settled", "No repo yet"] {
-            app.state
-                .collapsed_sidebar_groups
-                .insert(format!("sections:{title}"));
-            if !crate::ui::sidebar::section_is_collapsed(&app.state, title) {
-                app.state
-                    .collapsed_sidebar_groups
-                    .remove(&format!("sections:{title}"));
+        // Collapse every section header the sidebar shows.
+        for _ in 0..3 {
+            let titles = crate::ui::sidebar_rows(&app.state)
+                .into_iter()
+                .filter_map(|row| match row {
+                    crate::ui::SidebarRow::SectionHeader {
+                        title,
+                        collapsed: false,
+                        ..
+                    } => Some(title.to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for title in titles {
+                let key = format!("sections:{title}");
+                if !app.state.collapsed_sidebar_groups.remove(&key) {
+                    app.state.collapsed_sidebar_groups.insert(key);
+                }
             }
         }
-        assert!(window_navigation_order(&app.state).is_empty());
+        // The sections layout shows tabs only through their own rows.
+        let shown = crate::ui::sidebar_rows(&app.state)
+            .into_iter()
+            .filter_map(|row| match row {
+                crate::ui::SidebarRow::Tab { entry, .. } => entry.local_target(),
+                _ => None,
+            })
+            .map(|target| (target.ws_idx, target.tab_idx))
+            .collect::<std::collections::HashSet<_>>();
+        let cycled = window_cycle_order(&app.state)
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(cycled, shown);
+        app.state.collapsed_sidebar_groups.insert(format!(
+            "sections:{}",
+            crate::ui::sidebar::SPACES_SECTION_TITLE
+        ));
+        if crate::ui::sidebar::section_is_collapsed(
+            &app.state,
+            crate::ui::sidebar::SPACES_SECTION_TITLE,
+        ) {
+            assert!(window_navigation_order(&app.state).is_empty());
+        }
 
         app.state.skip_collapsed_cycle = false;
         assert!(!window_navigation_order(&app.state).is_empty());
@@ -5078,9 +5115,8 @@ mod tests {
         assert!(rows.iter().any(|row| matches!(
             row,
             crate::ui::SidebarRow::NeedsYou {
-                target: crate::ui::NeedsYouTarget::Remote(target),
-                ..
-            } if target == &agent_ref
+                target: crate::ui::sidebar::NeedsYouTarget::Remote(target), ..
+            } if *target == agent_ref
         )));
         assert!(!rows.iter().any(|row| matches!(
             row,
