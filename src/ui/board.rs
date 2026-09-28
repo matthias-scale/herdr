@@ -228,17 +228,19 @@ fn render_columns(app: &AppState, view: &BoardView, area: Rect, frame: &mut Fram
             .iter()
             .filter(|card| card.column == column)
             .count();
-        let title = if column == Column::Draft {
-            format!(" {} · {count}  + ", column.label())
-        } else {
-            format!(" {} · {count} ", column.label())
-        };
+        let title = format!(" {} · {count} ", column.label());
         let block = Block::default()
             .borders(Borders::ALL)
             .title(title)
             .border_style(style);
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
+        if column == Column::Draft && rect.width >= 8 {
+            frame.render_widget(
+                Paragraph::new("+"),
+                Rect::new(rect.right() - 3, rect.y, 1, 1),
+            );
+        }
         let mut cards: Vec<_> = view
             .board
             .cards
@@ -384,7 +386,11 @@ pub(crate) fn hit_at(app: &AppState, area: Rect, x: u16, y: u16) -> Option<Board
             return None;
         }
         if y == rect.bottom().saturating_sub(2) {
-            return Some(BoardHit::EditorSave);
+            return Some(if x < rect.x + 12 {
+                BoardHit::EditorSave
+            } else {
+                BoardHit::EditorCancel
+            });
         }
         if y == rect.y {
             return Some(BoardHit::EditorCancel);
@@ -426,7 +432,7 @@ pub(crate) fn hit_at(app: &AppState, area: Rect, x: u16, y: u16) -> Option<Board
             Dialog::Goal { .. } => {
                 if y <= rect.y + 3 {
                     Some(0)
-                } else if y == rect.y + 6 {
+                } else if y == rect.y + 5 {
                     Some(1)
                 } else if y >= rect.y + 8 {
                     Some(2)
@@ -454,14 +460,12 @@ pub(crate) fn hit_at(app: &AppState, area: Rect, x: u16, y: u16) -> Option<Board
             return Some(BoardHit::DetailTab(x >= rect.x + rect.width / 2));
         }
         if let Some(card) = view.board.card(&detail.card_id) {
-            let contents = if detail.agent_tab {
-                3 + card.updates.len()
-            } else {
-                2 + card.description.lines().count().max(1)
-            };
-            let start = rect.y + 1 + contents as u16 + 2;
-            if y >= start && ((y - start) as usize) < card.agents.len() {
-                return Some(BoardHit::DetailAgent((y - start) as usize));
+            if let Some((first, list)) =
+                detail_agent_rows(rect, detail.agent_row, card.agents.len())
+            {
+                if y >= list.y && y < list.bottom() {
+                    return Some(BoardHit::DetailAgent(first + usize::from(y - list.y)));
+                }
             }
         }
         return None;
@@ -581,12 +585,10 @@ fn render_detail(
             ),
         rect,
     );
-    let inner = Rect::new(
-        rect.x + 1,
-        rect.y + 1,
-        rect.width.saturating_sub(2),
-        rect.height.saturating_sub(2),
-    );
+    let agent_rows = detail_agent_rows(rect, detail.agent_row, card.agents.len());
+    let body_bottom = agent_rows
+        .map(|(_, list)| list.y.saturating_sub(1))
+        .unwrap_or(rect.bottom().saturating_sub(2));
     let mut lines = vec![
         format!(
             " {} Human   {} Agent",
@@ -603,12 +605,30 @@ fn render_detail(
     } else {
         lines.push(card.description.clone());
     }
-    if !card.agents.is_empty() {
-        lines.push(String::new());
-        lines.push("Terminals · Enter to jump".into());
-        for (i, agent) in card.agents.iter().enumerate() {
+    frame.render_widget(
+        Paragraph::new(lines.join("\n")).wrap(Wrap { trim: false }),
+        Rect::new(
+            rect.x + 1,
+            rect.y + 1,
+            rect.width.saturating_sub(2),
+            body_bottom.saturating_sub(rect.y + 1),
+        ),
+    );
+    if let Some((first, list)) = agent_rows {
+        frame.render_widget(
+            Paragraph::new("Terminals · Enter to jump"),
+            Rect::new(list.x, list.y.saturating_sub(1), list.width, 1),
+        );
+        let mut agent_lines = Vec::new();
+        for (i, agent) in card
+            .agents
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(usize::from(list.height))
+        {
             let info = app.board_agent(agent);
-            lines.push(format!(
+            agent_lines.push(format!(
                 "{} {} · {} · {}",
                 if i == detail.agent_row { "▸" } else { " " },
                 info.host,
@@ -616,11 +636,8 @@ fn render_detail(
                 info.last_line
             ));
         }
+        frame.render_widget(Paragraph::new(agent_lines.join("\n")), list);
     }
-    frame.render_widget(
-        Paragraph::new(lines.join("\n")).wrap(Wrap { trim: false }),
-        inner,
-    );
     let actions = if detail.agent_tab {
         "[ Summary ]  [ Add update ]"
     } else {
@@ -635,6 +652,27 @@ fn render_detail(
             1,
         ),
     );
+}
+
+fn detail_agent_rows(rect: Rect, selected: usize, count: usize) -> Option<(usize, Rect)> {
+    let shown = count.min(usize::from(rect.height.saturating_sub(7)));
+    if shown == 0 {
+        return None;
+    }
+    let first = selected
+        .saturating_add(1)
+        .saturating_sub(shown)
+        .min(count - shown);
+    let height = shown as u16;
+    Some((
+        first,
+        Rect::new(
+            rect.x + 2,
+            rect.bottom().saturating_sub(2 + height),
+            rect.width.saturating_sub(4),
+            height,
+        ),
+    ))
 }
 
 fn render_dialog(app: &AppState, dialog: &Dialog, area: Rect, frame: &mut Frame) {

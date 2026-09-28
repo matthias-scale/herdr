@@ -80,7 +80,12 @@ impl App {
                             view.column,
                         )
                         .into_iter()
-                        .find(|(_, rect)| mouse.column >= rect.x && mouse.column < rect.right())
+                        .find(|(_, rect)| {
+                            mouse.column >= rect.x
+                                && mouse.column < rect.right()
+                                && mouse.row >= rect.y
+                                && mouse.row < rect.bottom()
+                        })
                         .map(|(column, _)| column)
                     });
                     if let Some(column) = target {
@@ -865,14 +870,22 @@ impl App {
             return;
         };
         if let Some(view) = self.state.board_view.as_mut() {
+            let link = crate::board::AgentLink {
+                host: self.state.agent_host_name.clone(),
+                pane_id,
+            };
             if let Some(card) = view.board.card_mut(id) {
-                card.agents.push(crate::board::AgentLink {
-                    host: self.state.agent_host_name.clone(),
-                    pane_id,
-                });
+                card.agents.push(link.clone());
                 card.column = Column::InProgress;
             }
-            view.persist();
+            if !view.persist()
+                && view
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("changed in Obsidian"))
+            {
+                view.persist_spawn_link(id, link);
+            }
             self.state.board_return = self.state.board_view.take();
         }
     }

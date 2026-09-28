@@ -268,6 +268,44 @@ impl BoardView {
             }
         }
     }
+
+    /// A spawned pane already exists. Rebase just its link onto a concurrent
+    /// Obsidian edit so the pane remains attached to its card.
+    pub(crate) fn persist_spawn_link(&mut self, id: &str, link: AgentLink) -> bool {
+        let mut latest = match Self::from_note(self.note.clone()) {
+            Ok(view) => view,
+            Err(error) => {
+                self.error = Some(error);
+                return false;
+            }
+        };
+        let Some(card) = latest.board.card_mut(id) else {
+            self.error = Some(format!(
+                "spawned pane {} has no card in the weekly note",
+                link.pane_id
+            ));
+            return false;
+        };
+        if !card.agents.is_empty() && !card.agents.contains(&link) {
+            self.error = Some(format!(
+                "card already has an agent; spawned pane {} needs linking",
+                link.pane_id
+            ));
+            return false;
+        }
+        if !card.agents.contains(&link) {
+            card.agents.push(link);
+        }
+        card.column = Column::InProgress;
+        if !latest.persist() {
+            self.error = latest.error;
+            return false;
+        }
+        self.board = latest.board;
+        self.baseline = latest.baseline;
+        self.error = None;
+        true
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -359,11 +397,11 @@ pub(crate) fn worst_lane(lanes: impl IntoIterator<Item = Lane>) -> Lane {
     }
 }
 
-pub(crate) struct AgentDisplay {
-    pub(crate) pane_id: String,
-    pub(crate) host: String,
+pub(crate) struct AgentDisplay<'a> {
+    pub(crate) pane_id: &'a str,
+    pub(crate) host: &'a str,
     pub(crate) lane: Lane,
-    pub(crate) last_line: String,
+    pub(crate) last_line: &'a str,
 }
 
 impl crate::app::state::AppState {
@@ -470,17 +508,17 @@ impl crate::app::state::AppState {
         }
     }
 
-    pub(crate) fn board_agent(&self, link: &AgentLink) -> AgentDisplay {
+    pub(crate) fn board_agent<'a>(&'a self, link: &'a AgentLink) -> AgentDisplay<'a> {
         AgentDisplay {
-            pane_id: link.pane_id.clone(),
-            host: link.host.clone(),
+            pane_id: &link.pane_id,
+            host: &link.host,
             lane: self.board_agent_lane(link),
             last_line: self
                 .board_view
                 .as_ref()
                 .and_then(|view| view.agent_lines.get(link))
-                .map(|(_, text)| text.clone())
-                .unwrap_or_else(|| "terminal quiet".into()),
+                .map(|(_, text)| text.as_str())
+                .unwrap_or("terminal quiet"),
         }
     }
 
@@ -826,6 +864,41 @@ mod tests {
             cards: Vec::new()
         }
         .goal_done("g1"));
+        fs::remove_dir_all(root).expect("remove own fixture");
+    }
+
+    #[test]
+    fn spawned_agent_link_rebases_over_external_note_edit() {
+        let date = Date::from_calendar_date(2026, time::Month::September, 28).expect("date");
+        let root = std::env::temp_dir().join(new_id("herdr-board-spawn-test").expect("id"));
+        let note = WeekNote::for_date(&root, date).expect("note");
+        let mut view = BoardView::from_note(note.clone()).expect("empty note");
+        view.board.cards.push(Card {
+            id: "c1".into(),
+            title: "Verify".into(),
+            description: String::new(),
+            area: Area::Harness,
+            column: Column::Todo,
+            goal_id: None,
+            agent_summary: String::new(),
+            updates: Vec::new(),
+            agents: Vec::new(),
+        });
+        assert!(view.persist());
+        let edited = fs::read_to_string(&note.path)
+            .expect("written note")
+            .replace("- [ ] Verify", "- [ ] Verify edited");
+        fs::write(&note.path, edited).expect("Obsidian edit");
+        let link = AgentLink {
+            host: "ub2".into(),
+            pane_id: "pane-1".into(),
+        };
+        assert!(view.persist_spawn_link("c1", link.clone()));
+        let reloaded = BoardView::from_note(note).expect("reload");
+        let card = reloaded.board.card("c1").expect("card");
+        assert_eq!(card.agents, vec![link]);
+        assert_eq!(card.title, "Verify edited");
+        assert_eq!(card.column, Column::InProgress);
         fs::remove_dir_all(root).expect("remove own fixture");
     }
 
