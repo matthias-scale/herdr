@@ -659,7 +659,8 @@ def _decision_fields(body: str) -> tuple[str, str | None]:
 _NOW_HUMAN_WAIT_RE = re.compile(
     r"^(?:(?:still[ \t]+)?(?:waiting|awaiting|blocked)\b.*?\b(?:on|for)[ \t]+"
     r"(?:you|your|the[ \t]+human|human|matthias|user|operator)\b)"
-    r"|\byour[ \t]+(?:choice|reply|answer|approval|decision|input|sign-?off|call|review|go-?ahead|pick)\b",
+    r"|^(?:(?:still[ \t]+)?(?:waiting|awaiting|blocked)(?:[ \t]+(?:on|for))?[ \t]+)?"
+    r"your[ \t]+(?:choice|reply|answer|approval|decision|input|sign-?off|call|review|go-?ahead|pick)\b",
     re.IGNORECASE,
 )
 _NOW_IDLE_RE = re.compile(

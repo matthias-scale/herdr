@@ -2115,6 +2115,7 @@ class NeedsYouBlockTests(unittest.TestCase):
             "codex reviewer — waiting on your choice",
             "codex reviewer — inspecting PR while CI checks running",
             "luna: awaiting deploy",
+            "worker executing your approval check",
         ):
             with self.subTest(line=line):
                 block = closing_block.parse(f"Needs you: nothing.\n**Now:** {line}\n")
