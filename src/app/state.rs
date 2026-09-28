@@ -2644,6 +2644,8 @@ pub struct ViewState {
     pub sidebar_rect: Rect,
     /// Sidebar-footer entry for the settings screen.
     pub(crate) sidebar_footer_settings_hit_area: Rect,
+    /// Sidebar-footer toggle for pending ask subtitles.
+    pub(crate) sidebar_footer_ask_subtitles_hit_area: Rect,
     /// Sidebar-footer entry for the full-screen pull-request view.
     pub(crate) sidebar_footer_work_hit_area: Rect,
     /// Sidebar-footer entry for the client-local historical usage view.
@@ -5343,6 +5345,7 @@ impl From<crate::config::LinearLayoutConfig> for LinearViewLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarFooterItem {
     Settings,
+    AskSubtitles,
     PullRequests,
     Usage,
     Linear,
@@ -7745,6 +7748,7 @@ impl AppState {
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
                 sidebar_footer_settings_hit_area: Rect::default(),
+                sidebar_footer_ask_subtitles_hit_area: Rect::default(),
                 sidebar_footer_work_hit_area: Rect::default(),
                 sidebar_footer_usage_hit_area: Rect::default(),
                 usage_hit_areas: Vec::new(),

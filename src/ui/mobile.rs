@@ -261,7 +261,6 @@ fn mobile_sidebar_row_height(app: &AppState, row: &SidebarRow) -> usize {
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::Divider
         | SidebarRow::ShelfDivider
-        | SidebarRow::NeedsYou { .. }
         | SidebarRow::NeedsYouMore { .. }
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
@@ -277,6 +276,7 @@ fn mobile_sidebar_row_height(app: &AppState, row: &SidebarRow) -> usize {
         | SidebarRow::AloopUnreachable { .. }
         | SidebarRow::AloopEmpty
         | SidebarRow::AgentRun { .. } => 1,
+        SidebarRow::NeedsYou { subtitle, .. } => 1 + usize::from(subtitle.is_some()),
     }
 }
 
@@ -1335,6 +1335,7 @@ fn render_mobile_switcher_content(
                 space_icon,
                 host,
                 blocked,
+                subtitle,
                 ..
             } => {
                 if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
@@ -1345,7 +1346,13 @@ fn render_mobile_switcher_content(
                         space_icon,
                         host,
                         *blocked,
-                        Rect::new(content.x, y, content.width, 1),
+                        subtitle.as_deref(),
+                        Rect::new(
+                            content.x,
+                            y,
+                            content.width,
+                            1 + u16::from(subtitle.is_some()),
+                        ),
                     );
                 }
             }
@@ -2525,6 +2532,82 @@ mod tests {
                 pane_id,
             })
         );
+    }
+
+    #[test]
+    fn mobile_needs_you_rows_show_the_shared_ask_subtitle() {
+        for width in [18, 60] {
+            let mut app = AppState::test_new();
+            app.workspaces = vec![crate::workspace::Workspace::test_new("herdr")];
+            app.active = Some(0);
+            app.sidebar_sections_layout = true;
+            app.view.layout = crate::app::state::ViewLayout::Mobile;
+            app.ensure_test_terminals();
+            let pane = app.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
+            let terminal_state = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal_state.detected_agent = Some(crate::detect::Agent::Claude);
+            terminal_state.set_raw_agent_state_for_test(AgentState::Blocked);
+            terminal_state.closing_items = vec![crate::api::schema::ClosingBlockItem {
+                blocking: true,
+                n: 1,
+                label: "Answer".into(),
+                text: "Choose one".into(),
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }];
+            app.reconcile_sidebar_presentation();
+
+            let rows = mobile_sidebar_rows(&app);
+            let ask_index = rows
+                .iter()
+                .position(|row| matches!(row, SidebarRow::NeedsYou { .. }))
+                .expect("mobile top ask row");
+            let SidebarRow::NeedsYou {
+                subtitle: Some(ask),
+                ..
+            } = &rows[ask_index]
+            else {
+                panic!("mobile top ask has its subtitle");
+            };
+            assert_eq!(ask, "Choose one");
+            assert_eq!(mobile_sidebar_row_height(&app, &rows[ask_index]), 2);
+
+            let area = Rect::new(0, 0, width, 20);
+            let mut rendered =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 20))
+                    .expect("mobile ask terminal");
+            rendered
+                .draw(|frame| {
+                    render_mobile_switcher_content(
+                        &app,
+                        &TerminalRuntimeRegistry::new(),
+                        frame,
+                        area,
+                    )
+                })
+                .expect("render mobile ask list");
+            let ask_y = (mobile_sidebar_rows_start(&app, &rows)
+                + rows
+                    .iter()
+                    .take(ask_index)
+                    .map(|row| mobile_sidebar_row_height(&app, row))
+                    .sum::<usize>()) as u16;
+            let first_line = (1..width)
+                .map(|x| rendered.backend().buffer()[(x, ask_y)].symbol())
+                .collect::<String>();
+            let second_line = (1..width)
+                .map(|x| rendered.backend().buffer()[(x, ask_y + 1)].symbol())
+                .collect::<String>();
+            assert!(first_line.contains('●'), "width={width}: {first_line:?}");
+            assert!(second_line.contains("↳ "), "width={width}: {second_line:?}");
+            if width > 18 {
+                assert!(second_line.contains("Choose one"), "{second_line:?}");
+            }
+        }
     }
 
     #[test]

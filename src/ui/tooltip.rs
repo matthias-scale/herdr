@@ -98,6 +98,10 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
             view.sidebar_footer_settings_hit_area,
         ),
         (
+            ControlId::SidebarFooter(SidebarFooterItem::AskSubtitles),
+            view.sidebar_footer_ask_subtitles_hit_area,
+        ),
+        (
             ControlId::SidebarFooter(SidebarFooterItem::PullRequests),
             view.sidebar_footer_work_hit_area,
         ),
@@ -190,6 +194,14 @@ fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> 
         ControlId::SidebarFooter(item) => {
             let (rect, label) = match item {
                 SidebarFooterItem::Settings => (view.sidebar_footer_settings_hit_area, "Settings"),
+                SidebarFooterItem::AskSubtitles => (
+                    view.sidebar_footer_ask_subtitles_hit_area,
+                    if app.sidebar_show_ask_subtitles {
+                        "Hide ask subtitles"
+                    } else {
+                        "Show ask subtitles"
+                    },
+                ),
                 SidebarFooterItem::PullRequests => {
                     (view.sidebar_footer_work_hit_area, "Pull requests")
                 }
@@ -424,6 +436,7 @@ mod tests {
         let mut app = AppState::test_new();
         app.view.sidebar_rect = Rect::new(0, 0, 26, 24);
         app.view.sidebar_footer_settings_hit_area = Rect::new(1, 23, 2, 1);
+        app.view.sidebar_footer_ask_subtitles_hit_area = Rect::new(0, 23, 1, 1);
         app.view.notification_hit_area = Rect::new(14, 23, 2, 1);
         app.view.dock_tab_close_rect = Rect::new(90, 1, 1, 1);
         app.view.add_action_button_hit_area = Rect::new(70, 0, 10, 1);
@@ -431,6 +444,27 @@ mod tests {
         assert_eq!(
             hovered_control_at(&app, 1, 23),
             Some(ControlId::SidebarFooter(SidebarFooterItem::Settings))
+        );
+        assert_eq!(
+            hovered_control_at(&app, 0, 23),
+            Some(ControlId::SidebarFooter(SidebarFooterItem::AskSubtitles))
+        );
+        assert_eq!(
+            tooltip_target(
+                &app,
+                ControlId::SidebarFooter(SidebarFooterItem::AskSubtitles)
+            )
+            .map(|(_, label)| label),
+            Some("Hide ask subtitles".to_string())
+        );
+        app.sidebar_show_ask_subtitles = false;
+        assert_eq!(
+            tooltip_target(
+                &app,
+                ControlId::SidebarFooter(SidebarFooterItem::AskSubtitles)
+            )
+            .map(|(_, label)| label),
+            Some("Show ask subtitles".to_string())
         );
         assert_eq!(
             hovered_control_at(&app, 14, 23),

@@ -1127,6 +1127,7 @@ impl App {
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
                 sidebar_footer_settings_hit_area: Rect::default(),
+                sidebar_footer_ask_subtitles_hit_area: Rect::default(),
                 sidebar_footer_work_hit_area: Rect::default(),
                 sidebar_footer_usage_hit_area: Rect::default(),
                 usage_hit_areas: Vec::new(),

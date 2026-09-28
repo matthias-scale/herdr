@@ -2007,6 +2007,13 @@ pub(crate) fn sidebar_footer_settings_hit_area(area: Rect) -> Rect {
     sidebar_footer_slot(area, 0)
 }
 
+pub(crate) fn sidebar_footer_ask_subtitles_hit_area(app: &AppState, area: Rect) -> Rect {
+    if app.sidebar_collapsed || area.width < 18 || area.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(area.x, area.bottom().saturating_sub(1), 1, 1)
+}
+
 pub(crate) fn sidebar_footer_work_hit_area(area: Rect) -> Rect {
     sidebar_footer_slot(area, 1)
 }
@@ -2847,6 +2854,8 @@ pub(crate) enum SidebarRow {
         host: String,
         /// Retained for urgency ordering; all Needs-you markers render red.
         blocked: bool,
+        /// Human ask shown beneath the row when the shared subtitle setting is on.
+        subtitle: Option<String>,
         target: NeedsYouTarget,
     },
     NeedsYouMore {
@@ -5070,6 +5079,7 @@ fn needs_you_strip_rows(
             space_icon,
             host: sidebar_machine_host(app, entry).to_string(),
             blocked: entry_is_blocked(entry),
+            subtitle: visible_pending_ask(app, entry).map(str::to_owned),
             target: NeedsYouTarget::Local(target),
         });
     }
@@ -5095,6 +5105,7 @@ fn needs_you_strip_rows(
             space_name,
             host: remote.agent_ref.host.clone(),
             blocked: entry_is_blocked(entry),
+            subtitle: visible_pending_ask(app, entry).map(str::to_owned),
             target: NeedsYouTarget::Remote(remote.agent_ref.clone()),
         });
     }
@@ -7459,9 +7470,11 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
                 1
             }
         }
+        SidebarRow::NeedsYou { subtitle, .. } => {
+            body_height.min(if subtitle.is_some() { 2 } else { 1 })
+        }
         SidebarRow::PodHeader { .. }
         | SidebarRow::PodMember { .. }
-        | SidebarRow::NeedsYou { .. }
         | SidebarRow::NeedsYouMore { .. }
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::Divider
@@ -8079,6 +8092,7 @@ pub(super) fn render_needs_you_row(
     space_icon: &str,
     host: &str,
     _blocked: bool,
+    subtitle: Option<&str>,
     rect: Rect,
 ) {
     if rect.width == 0 || rect.height == 0 {
@@ -8115,6 +8129,19 @@ pub(super) fn render_needs_you_row(
         ])),
         Rect::new(rect.x, rect.y, rect.width, 1),
     );
+    if rect.height > 1 {
+        if let Some(subtitle) = subtitle {
+            let indent = 3 + display_width(space_icon);
+            let line = format!("{}↳ {subtitle}", " ".repeat(indent));
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    truncate_end(&line, usize::from(rect.width)),
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                )),
+                Rect::new(rect.x, rect.y.saturating_add(1), rect.width, 1),
+            );
+        }
+    }
 }
 
 pub(super) fn render_pod_header_row(
@@ -9998,6 +10025,17 @@ pub(super) fn render_sidebar(
         );
         frame.render_widget(Paragraph::new(Span::styled("⚙ ", style)), settings);
     }
+    let ask_subtitles = sidebar_footer_ask_subtitles_hit_area(app, area);
+    if ask_subtitles.width > 0 {
+        let glyph = if app.nerd_font { "\u{f0f3}" } else { "S" };
+        let style = sidebar_footer_style(
+            app,
+            crate::app::state::SidebarFooterItem::AskSubtitles,
+            app.sidebar_show_ask_subtitles,
+            p,
+        );
+        frame.render_widget(Paragraph::new(Span::styled(glyph, style)), ask_subtitles);
+    }
     let work = sidebar_footer_work_hit_area(area);
     if work.width > 0 {
         let style = sidebar_footer_style(
@@ -11276,9 +11314,19 @@ fn render_workspace_list(
                     space_icon,
                     host,
                     blocked,
+                    subtitle,
                     ..
                 }) => {
-                    render_needs_you_row(app, frame, title, space_icon, host, *blocked, rect);
+                    render_needs_you_row(
+                        app,
+                        frame,
+                        title,
+                        space_icon,
+                        host,
+                        *blocked,
+                        subtitle.as_deref(),
+                        rect,
+                    );
                 }
                 Some(SidebarRow::NeedsYouMore {
                     remaining,
@@ -29328,6 +29376,25 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ]);
         app.sidebar_sections_layout = true;
         app.sidebar_group_mode = SidebarGroupMode::Spaces;
+        let review_pane = app.workspaces[0].tabs[0].root_pane;
+        let review_terminal = app.workspaces[0].tabs[0].panes[&review_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&review_terminal)
+            .expect("blocked review terminal")
+            .closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose a layout".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        app.reconcile_sidebar_presentation();
         let done_pane = app.workspaces[0].tabs[1].root_pane;
         app.workspaces[0].tabs[1]
             .panes
@@ -29430,6 +29497,49 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         };
         assert_eq!(entry.pending_ask.as_deref(), Some("Choose a layout"));
         assert_eq!(sidebar_row_height(&app, &row, 20), 2);
+        let needs_you_row = sidebar_rows(&app)
+            .into_iter()
+            .find(|row| matches!(row, SidebarRow::NeedsYou { .. }))
+            .expect("top ask row");
+        let SidebarRow::NeedsYou {
+            title,
+            space_icon,
+            host,
+            blocked,
+            subtitle,
+            ..
+        } = &needs_you_row
+        else {
+            unreachable!()
+        };
+        assert_eq!(subtitle.as_deref(), Some("Choose a layout"));
+        assert_eq!(sidebar_row_height(&app, &needs_you_row, 20), 2);
+        let mut top_ask = Terminal::new(TestBackend::new(42, 2)).expect("top ask terminal");
+        top_ask
+            .draw(|frame| {
+                render_needs_you_row(
+                    &app,
+                    frame,
+                    title,
+                    space_icon,
+                    host,
+                    *blocked,
+                    subtitle.as_deref(),
+                    Rect::new(0, 0, 42, 2),
+                )
+            })
+            .expect("render top ask row");
+        let marker = &top_ask.backend().buffer()[(0, 0)];
+        assert_eq!(marker.symbol(), "●");
+        assert_eq!(marker.style().fg, Some(app.palette.red));
+        let ask_snapshot = row_text(top_ask.backend().buffer(), 1, 42);
+        assert!(ask_snapshot.contains("↳ Choose a layout"), "{ask_snapshot}");
+        let arrow_x = (0..42)
+            .find(|x| top_ask.backend().buffer()[(*x, 1)].symbol() == "↳")
+            .expect("ask arrow cell");
+        assert!(top_ask.backend().buffer()[(arrow_x, 1)]
+            .modifier
+            .contains(ratatui::style::Modifier::DIM));
         let area = Rect::new(0, 0, 42, 32);
         let render = |app: &AppState| {
             let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
@@ -29445,7 +29555,53 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(render(&app).contains("↳ Choose a layout"));
         app.sidebar_show_ask_subtitles = false;
         assert_eq!(sidebar_row_height(&app, &row, 20), 1);
+        let hidden_ask = sidebar_rows(&app)
+            .into_iter()
+            .find(|row| matches!(row, SidebarRow::NeedsYou { .. }))
+            .expect("top ask row with subtitles disabled");
+        assert!(matches!(
+            hidden_ask,
+            SidebarRow::NeedsYou { subtitle: None, .. }
+        ));
         assert!(!render(&app).contains("↳ Choose a layout"));
+    }
+
+    #[test]
+    fn ask_subtitle_footer_uses_a_bell_at_supported_sidebar_widths() {
+        let mut app = app_with_agents(&["herdr"]);
+        app.sidebar_sections_layout = true;
+        app.nerd_font = true;
+        for width in [18, 42] {
+            let area = Rect::new(0, 0, width, 20);
+            let slot = sidebar_footer_ask_subtitles_hit_area(&app, area);
+            assert_eq!(slot, Rect::new(0, 19, 1, 1));
+            let mut terminal =
+                Terminal::new(TestBackend::new(width, 20)).expect("ask subtitle footer terminal");
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .expect("render active ask subtitle bell");
+            let active = &terminal.backend().buffer()[(slot.x, slot.y)];
+            assert_eq!(active.symbol(), "\u{f0f3}");
+            assert_eq!(active.fg, app.palette.accent);
+
+            app.sidebar_show_ask_subtitles = false;
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .expect("render muted ask subtitle bell");
+            let muted = &terminal.backend().buffer()[(slot.x, slot.y)];
+            assert_eq!(muted.symbol(), "\u{f0f3}");
+            assert_eq!(muted.fg, app.palette.overlay0);
+            app.sidebar_show_ask_subtitles = true;
+        }
+
+        app.nerd_font = false;
+        let area = Rect::new(0, 0, 42, 20);
+        let slot = sidebar_footer_ask_subtitles_hit_area(&app, area);
+        let mut terminal = Terminal::new(TestBackend::new(42, 20)).expect("fallback terminal");
+        terminal
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .expect("render text fallback");
+        assert_eq!(terminal.backend().buffer()[(slot.x, slot.y)].symbol(), "S");
     }
 
     #[test]
@@ -30013,6 +30169,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                             space_icon,
                             host,
                             *blocked,
+                            None,
                             Rect::new(0, 0, 36, 1),
                         );
                     }
@@ -30068,6 +30225,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                             "▯",
                             "ub1",
                             true,
+                            None,
                             Rect::new(0, 1, width, 1),
                         );
                     })
