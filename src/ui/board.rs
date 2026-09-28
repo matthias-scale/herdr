@@ -457,7 +457,7 @@ pub(crate) fn hit_at(app: &AppState, area: Rect, x: u16, y: u16) -> Option<Board
             });
         }
         if y == rect.y + 1 {
-            return Some(BoardHit::DetailTab(x >= rect.x + rect.width / 2));
+            return Some(BoardHit::DetailTab(x >= rect.x + 12));
         }
         if let Some(card) = view.board.card(&detail.card_id) {
             if let Some((first, list)) =
@@ -923,6 +923,10 @@ mod tests {
         assert_eq!(
             hit_at(&app, area, side.x + 15, side.bottom() - 2),
             Some(BoardHit::DetailAppend)
+        );
+        assert_eq!(
+            hit_at(&app, area, side.x + 15, side.y + 1),
+            Some(BoardHit::DetailTab(true))
         );
         app.board_view.as_mut().expect("view").board.cards[0].description =
             "long description ".repeat(30);
