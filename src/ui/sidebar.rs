@@ -321,14 +321,10 @@ fn compact_provider_token(entry: &AgentPanelEntry, nerd_font: bool) -> String {
 }
 
 fn sidebar_machine_host<'a>(app: &'a AppState, entry: &'a AgentPanelEntry) -> &'a str {
-    entry.remote_host.as_deref().unwrap_or_else(|| {
-        app.machines
-            .iter()
-            .find(|machine| machine.is_local() && machine.name != "this machine")
-            .map_or(app.agent_host_name.as_str(), |machine| {
-                machine.name.as_str()
-            })
-    })
+    entry
+        .remote_host
+        .as_deref()
+        .unwrap_or(app.agent_host_name.as_str())
 }
 
 fn sidebar_machine_icon<'a>(app: &'a AppState, host: &str) -> &'a str {
@@ -29194,6 +29190,28 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
         assert_eq!(machine.rect.width, 1);
         assert!(machine.action.is_none());
+    }
+
+    #[test]
+    fn local_machine_identity_uses_resolved_self_name() {
+        let mut app = app_with_agents(&["working"]);
+        app.agent_host_name = "ub2".into();
+        app.machines = vec![crate::app::machines::Machine {
+            name: "ub1".into(),
+            icon: None,
+            target: None,
+            socket: None,
+        }];
+        app.nerd_font = false;
+        let entry = sidebar_thread_entries(&app).remove(0);
+        assert_eq!(sidebar_machine_host(&app, &entry), "ub2");
+        let area = Rect::new(0, 0, 40, 1);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_compact_agent_row(&app, frame, &entry, area, 0, true, None))
+            .unwrap();
+        let rendered = row_text(terminal.backend().buffer(), 0, area.width);
+        assert!(rendered.contains('2'), "{rendered:?}");
     }
 
     #[test]
