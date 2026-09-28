@@ -11239,8 +11239,12 @@ next_tab = ""
             .remote_focus_operations
             .proxy_location(&operation_id)
             .expect("proxy pane bound");
-        let should_close = client.state.workspaces[0].remove_pane(proxy_pane_id);
-        assert!(!should_close);
+        let (proxy_ws_idx, _) = client.find_pane(proxy_pane_id).expect("proxy pane placed");
+        assert!(client.state.workspaces[proxy_ws_idx].is_fleet);
+        // The proxy is the fleet space's only pane, so closing it closes the space.
+        if client.state.workspaces[proxy_ws_idx].remove_pane(proxy_pane_id) {
+            client.state.workspaces.remove(proxy_ws_idx);
+        }
         client
             .state
             .remove_unattached_terminal_ids([proxy_terminal_id.clone()]);
