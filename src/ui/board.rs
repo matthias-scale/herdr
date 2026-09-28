@@ -800,10 +800,20 @@ mod tests {
                     goal_id: Some("g1".into()),
                     agent_summary: String::new(),
                     updates: Vec::new(),
-                    agents: Vec::new(),
+                    agents: vec![crate::board::AgentLink {
+                        host: "ub1".into(),
+                        pane_id: "w:p1".into(),
+                    }],
                 }],
             },
         ));
+        app.board_view.as_mut().expect("board").agent_lines.insert(
+            crate::board::AgentLink {
+                host: "ub1".into(),
+                pane_id: "w:p1".into(),
+            },
+            (1, "last words".into()),
+        );
         let width = 120;
         let backend = TestBackend::new(width, 30);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -827,6 +837,7 @@ mod tests {
             "Done",
             "working",
             "goals sync",
+            "ub1 last words",
         ] {
             assert!(text.contains(required), "missing {required}: {text}");
         }
@@ -912,6 +923,32 @@ mod tests {
         assert_eq!(
             hit_at(&app, area, side.x + 15, side.bottom() - 2),
             Some(BoardHit::DetailAppend)
+        );
+        app.board_view.as_mut().expect("view").board.cards[0].description =
+            "long description ".repeat(30);
+        assert_eq!(
+            hit_at(&app, area, side.x + 3, side.bottom() - 3),
+            Some(BoardHit::DetailAgent(0))
+        );
+        app.board_view.as_mut().expect("view").detail = None;
+        app.board_view.as_mut().expect("view").dialog = Some(Dialog::Goal {
+            title: String::new(),
+            scope: GoalScope::Week,
+            todos: String::new(),
+            field: 0,
+        });
+        assert_eq!(
+            hit_at(&app, area, side.x + 3, side.y + 5),
+            Some(BoardHit::DialogField(1))
+        );
+        app.board_view.as_mut().expect("view").dialog = None;
+        app.board_view.as_mut().expect("view").editor = Some(crate::board::Editor {
+            field: EditField::HumanReplace,
+            text: String::new(),
+        });
+        assert_eq!(
+            hit_at(&app, area, side.x + 15, side.bottom() - 2),
+            Some(BoardHit::EditorCancel)
         );
     }
 }

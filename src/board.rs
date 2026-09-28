@@ -162,6 +162,8 @@ pub(crate) struct BoardView {
     pub(crate) agent_lines: std::collections::HashMap<AgentLink, (u64, String)>,
     pub(crate) agent_lanes: std::collections::HashMap<AgentLink, Lane>,
     pub(crate) last_agent_refresh_unix_s: u64,
+    pub(crate) remote_line_fetch_in_flight: bool,
+    pub(crate) last_remote_line_fetch_unix_s: u64,
 }
 
 impl BoardView {
@@ -198,6 +200,8 @@ impl BoardView {
             agent_lines: std::collections::HashMap::new(),
             agent_lanes: std::collections::HashMap::new(),
             last_agent_refresh_unix_s: 0,
+            remote_line_fetch_in_flight: false,
+            last_remote_line_fetch_unix_s: 0,
         })
     }
 
@@ -220,6 +224,8 @@ impl BoardView {
             agent_lines: std::collections::HashMap::new(),
             agent_lanes: std::collections::HashMap::new(),
             last_agent_refresh_unix_s: 0,
+            remote_line_fetch_in_flight: false,
+            last_remote_line_fetch_unix_s: 0,
         }
     }
 
@@ -442,7 +448,9 @@ impl crate::app::state::AppState {
                     .map(|entry| lane_from_state(entry.entry.state))
                     .unwrap_or(Lane::Working);
                 lane_changes.push((link.clone(), lane));
-                line_changes.push((link, (u64::MAX, "remote terminal".into())));
+                if !view.agent_lines.contains_key(&link) {
+                    line_changes.push((link, (u64::MAX, "remote terminal".into())));
+                }
                 continue;
             }
             let evidence = link

@@ -7,6 +7,94 @@ use crate::board::{
 use super::super::App;
 
 impl App {
+    pub(crate) fn refresh_board_remote_lines(&mut self) {
+        let Some(view) = self.state.board_view.as_ref() else {
+            return;
+        };
+        let now = crate::day::unix_seconds_now();
+        if view.remote_line_fetch_in_flight
+            || now.saturating_sub(view.last_remote_line_fetch_unix_s) < 10
+        {
+            return;
+        }
+        let mut seen = std::collections::HashSet::new();
+        let requests: Vec<_> = view
+            .board
+            .cards
+            .iter()
+            .flat_map(|card| &card.agents)
+            .filter(|link| link.host != self.state.agent_host_name && seen.insert((*link).clone()))
+            .filter_map(|link| {
+                self.state
+                    .fleet_snapshot
+                    .hosts
+                    .iter()
+                    .find(|host| {
+                        host.name == link.host && host.state == crate::fleet::HostState::Reachable
+                    })
+                    .map(|host| (link.clone(), crate::fleet::HostApiRoute::from_host(host)))
+            })
+            .collect();
+        if requests.is_empty() {
+            return;
+        }
+        let note_path = view.note.path.clone();
+        let fleet_generation = self.state.fleet_snapshot.config_generation;
+        if let Some(view) = self.state.board_view.as_mut() {
+            view.remote_line_fetch_in_flight = true;
+            view.last_remote_line_fetch_unix_s = now;
+        }
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let lines = requests
+                .into_iter()
+                .map(|(link, route)| {
+                    let line = crate::fleet::read_board_remote_line(&route, &link.pane_id)
+                        .unwrap_or_else(|_| "remote terminal unavailable".into());
+                    (link, line)
+                })
+                .collect();
+            let _ = event_tx.blocking_send(crate::events::AppEvent::BoardRemoteLinesFetched {
+                note_path,
+                fleet_generation,
+                lines,
+            });
+        });
+    }
+
+    pub(crate) fn apply_board_remote_lines(
+        &mut self,
+        note_path: &std::path::Path,
+        fleet_generation: u64,
+        lines: Vec<(crate::board::AgentLink, String)>,
+    ) -> bool {
+        let visible = self.state.board_view.is_some();
+        let current_generation = self.state.fleet_snapshot.config_generation;
+        let view = self
+            .state
+            .board_view
+            .as_mut()
+            .or(self.state.board_return.as_mut());
+        let Some(view) = view.filter(|view| view.note.path == note_path) else {
+            return false;
+        };
+        view.remote_line_fetch_in_flight = false;
+        if fleet_generation != current_generation {
+            return false;
+        }
+        for (link, line) in lines {
+            if view
+                .board
+                .cards
+                .iter()
+                .any(|card| card.agents.contains(&link))
+            {
+                view.agent_lines.insert(link, (u64::MAX, line));
+            }
+        }
+        visible
+    }
+
     pub(crate) fn board_insert_text(&mut self, text: &str) -> bool {
         let Some(view) = self.state.board_view.as_mut() else {
             return false;
@@ -316,6 +404,7 @@ impl App {
                     .set_server_mode(crate::app::state::Mode::Terminal);
                 self.state.board_view = Some(view);
                 self.state.release_sidebar_focus_to_surface();
+                self.refresh_board_remote_lines();
             }
             Err(error) => self.state.config_diagnostic = Some(format!("board: {error}")),
         }
