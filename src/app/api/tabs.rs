@@ -802,6 +802,48 @@ mod tests {
     }
 
     #[test]
+    fn batched_api_unpin_and_repin_keep_folder_membership() {
+        use crate::app::sidebar_folders::SidebarShelf;
+
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&Config::default(), true, None, api_rx, event_hub);
+        app.state.workspaces = vec![Workspace::test_new("tabs")];
+        app.state.ensure_test_terminals();
+        app.state.sidebar_sections_layout = true;
+        app.state.workspaces[0].tabs[0].pinned = true;
+        app.state
+            .create_sidebar_folder(SidebarShelf::Pinned, "Review")
+            .expect("folder");
+        assert!(app.state.set_tab_sidebar_folder(0, 0, Some("Review")));
+        let tab_id = app.public_tab_id(0, 0).expect("tab id");
+
+        app.handle_tab_pin(
+            "unpin".into(),
+            TabPinParams {
+                tab_id: tab_id.clone(),
+                mode: TabPinMode::Unpin,
+            },
+        );
+        assert_eq!(
+            app.state.tab_sidebar_folder(0, 0, SidebarShelf::Active),
+            None
+        );
+        app.handle_tab_pin(
+            "repin".into(),
+            TabPinParams {
+                tab_id,
+                mode: TabPinMode::Pin,
+            },
+        );
+        assert!(!app.state.reconcile_sidebar_folder_memberships());
+        assert_eq!(
+            app.state.tab_sidebar_folder(0, 0, SidebarShelf::Pinned),
+            Some("Review")
+        );
+    }
+
+    #[test]
     fn api_tab_star_toggles_sets_and_clears_the_focus_star() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();

@@ -3530,6 +3530,37 @@ pub(crate) fn sections_tab_shelf(
     sections_tab_shelves(app).get(&(ws_idx, tab_idx)).copied()
 }
 
+/// A split tab may contribute rows to more than one shelf. Test the requested
+/// shelf against its rows instead of reducing the tab to one shelf.
+pub(crate) fn sections_tab_in_shelf(
+    app: &AppState,
+    ws_idx: usize,
+    tab_idx: usize,
+    wanted: crate::app::sidebar_folders::SidebarShelf,
+) -> bool {
+    if !app.sidebar_sections_layout {
+        return false;
+    }
+    let mut shelf = None;
+    for row in compact_sidebar_rows_inner(app, None, false, false, true) {
+        match row {
+            SidebarRow::SectionHeader { title, .. } => {
+                shelf = crate::app::sidebar_folders::SidebarShelf::from_title(title);
+            }
+            SidebarRow::Tab { entry, .. } if shelf == Some(wanted) => {
+                if entry
+                    .local_target()
+                    .is_some_and(|target| target.ws_idx == ws_idx && target.tab_idx == tab_idx)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 pub(crate) fn sections_tab_shelves(
     app: &AppState,
 ) -> std::collections::HashMap<(usize, usize), crate::app::sidebar_folders::SidebarShelf> {
@@ -29736,6 +29767,60 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             matches!(row, SidebarRow::Tab { entry, depth: 0 }
                 if entry.local_target().is_some_and(|target| target.ws_idx == 0 && target.tab_idx == 0))
         }));
+    }
+
+    #[test]
+    fn split_tab_keeps_folder_row_in_its_shelf() {
+        use crate::app::sidebar_folders::SidebarShelf;
+
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        expand_section_for_all_views(&mut app, SNOOZED_SECTION_TITLE);
+        let mut workspace = Workspace::test_new("split folder");
+        let snoozed_pane = workspace.test_split(Direction::Horizontal);
+        app.workspaces = vec![workspace];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.set_sidebar_group_mode(SidebarGroupMode::Spaces);
+        app.create_sidebar_folder(SidebarShelf::Active, "Now")
+            .expect("folder");
+        assert!(app.set_tab_sidebar_folder(0, 0, Some("Now")));
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.snooze_pane_at(0, snoozed_pane, deadline));
+        assert!(!app.reconcile_sidebar_folder_memberships());
+        let rows = sidebar_rows(&app);
+        let folder_idx = rows
+            .iter()
+            .position(|row| {
+                matches!(row,
+                    SidebarRow::Folder { name, count: 1, .. } if name == "Now"
+                )
+            })
+            .expect("active folder contains the split tab");
+        assert!(matches!(
+            rows.get(folder_idx + 1),
+            Some(SidebarRow::Tab { depth: 1, .. })
+        ));
+        let snoozed_idx = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SNOOZED_SECTION_TITLE,
+                        ..
+                    }
+                )
+            })
+            .expect("snoozed shelf");
+        assert!(rows[snoozed_idx + 1..].iter().any(|row| matches!(row,
+            SidebarRow::Tab { depth: 0, entry } if entry.local_target().is_some_and(|target|
+                target.ws_idx == 0 && target.tab_idx == 0)
+        )));
+        assert_eq!(
+            app.tab_sidebar_folder(0, 0, SidebarShelf::Active),
+            Some("Now")
+        );
     }
 
     #[test]

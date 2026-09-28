@@ -4439,6 +4439,7 @@ pub struct AppState {
     pub(crate) sidebar_group_collapsed_persistence_request: Option<(String, bool)>,
     pub(crate) sidebar_folders: Vec<crate::app::sidebar_folders::SidebarFolder>,
     pub(crate) sidebar_folders_persistence_request: bool,
+    pub(crate) sidebar_folders_reconciled_revision: Option<u64>,
     pub(crate) sidebar_view_scan_request: bool,
     pub(crate) sidebar_work_filter_persistence_request: Option<SidebarWorkFilter>,
     /// Set when UI interaction requested a clipboard write that must be
@@ -7583,6 +7584,7 @@ impl AppState {
             sidebar_group_collapsed_persistence_request: None,
             sidebar_folders: Vec::new(),
             sidebar_folders_persistence_request: false,
+            sidebar_folders_reconciled_revision: None,
             sidebar_view_scan_request: false,
             sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,

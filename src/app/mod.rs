@@ -1068,6 +1068,7 @@ impl App {
             sidebar_group_collapsed_persistence_request: None,
             sidebar_folders,
             sidebar_folders_persistence_request: false,
+            sidebar_folders_reconciled_revision: None,
             sidebar_view_scan_request: false,
             sidebar_work_filter_persistence_request: None,
             request_clipboard_write: None,
@@ -2218,9 +2219,7 @@ impl App {
             if self.pane_graphics.retain_live_panes(&self.state) {
                 needs_render = true;
             }
-            if needs_render {
-                self.state.reconcile_sidebar_folder_memberships();
-            }
+            self.state.reconcile_sidebar_folder_memberships_if_needed();
 
             let now = Instant::now();
             self.render_dirty

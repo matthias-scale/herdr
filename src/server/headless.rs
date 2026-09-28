@@ -950,8 +950,11 @@ impl HeadlessServer {
                 needs_render = true;
                 needs_graphics_render = true;
             }
-            if needs_full_render {
-                self.app.state.reconcile_sidebar_folder_memberships();
+            self.app
+                .state
+                .reconcile_sidebar_folder_memberships_if_needed();
+            if let Some(folders) = self.app.state.take_sidebar_folders_persistence_request() {
+                crate::client::presentation::save_sidebar_folders(&folders);
             }
 
             self.drain_client_config_reload_request();
@@ -4666,7 +4669,9 @@ impl HeadlessServer {
         {
             crate::client::presentation::save_sidebar_group_collapsed(&key, collapsed);
         }
-        self.app.state.reconcile_sidebar_folder_memberships();
+        self.app
+            .state
+            .reconcile_sidebar_folder_memberships_if_needed();
         if let Some(folders) = self.app.state.take_sidebar_folders_persistence_request() {
             crate::client::presentation::save_sidebar_folders(&folders);
         }
@@ -4802,6 +4807,7 @@ impl HeadlessServer {
                     let collapsed = crate::client::presentation::load_sidebar_group_collapsed();
                     self.app.state.sidebar_folders =
                         crate::client::presentation::load_sidebar_folders();
+                    self.app.state.sidebar_folders_reconciled_revision = None;
                     client
                         .sidebar_presentation
                         .initialize_group_mode(group_mode, &collapsed);
@@ -5776,6 +5782,12 @@ impl HeadlessServer {
                     return changed;
                 }
             }
+        }
+        self.app
+            .state
+            .reconcile_sidebar_folder_memberships_if_needed();
+        if let Some(folders) = self.app.state.take_sidebar_folders_persistence_request() {
+            crate::client::presentation::save_sidebar_folders(&folders);
         }
         let _ = msg.respond_to.send(response);
 
@@ -7889,6 +7901,57 @@ mod tests {
             server_event_rx,
             server_event_tx,
         }
+    }
+
+    #[test]
+    fn headless_tab_close_persists_folder_member_removal() {
+        use crate::app::sidebar_folders::SidebarShelf;
+
+        let state_home = std::env::temp_dir().join(format!(
+            "hh-folder-close-{}",
+            crate::config::test_unique_suffix()
+        ));
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        env.set("XDG_STATE_HOME", &state_home);
+        let mut server = test_headless_server();
+        server.app.no_session = false;
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("folders")];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.sidebar_sections_layout = true;
+        server
+            .app
+            .state
+            .create_sidebar_folder(SidebarShelf::Active, "Now")
+            .expect("folder");
+        assert!(server.app.state.set_tab_sidebar_folder(0, 0, Some("Now")));
+        crate::client::presentation::save_sidebar_folders(&server.app.state.sidebar_folders);
+        let _ = server.app.state.take_sidebar_folders_persistence_request();
+        let tab_id = server.app.public_tab_id(0, 0).expect("tab id");
+
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            request: api::schema::Request {
+                id: "close-folder-tab".into(),
+                method: api::schema::Method::TabClose(api::schema::TabTarget { tab_id }),
+            },
+            respond_to,
+            response_write_complete: None,
+            stream_active: None,
+        });
+        let response = response_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("close response");
+        let success: api::schema::SuccessResponse =
+            serde_json::from_str(&response).expect("success");
+        assert_eq!(success.result, api::schema::ResponseResult::Ok {});
+        let saved = crate::client::presentation::load_sidebar_folders();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].members.is_empty());
+
+        shutdown_test_runtimes(&mut server);
+        env.restore();
+        let _ = std::fs::remove_dir_all(state_home);
     }
 
     #[tokio::test(flavor = "current_thread")]
