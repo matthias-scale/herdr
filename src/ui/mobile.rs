@@ -10,9 +10,10 @@ use ratatui::{
 use super::sidebar::agent_panel_entries;
 use super::sidebar::{
     dim_inactive_pane_row, mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout,
-    render_compact_agent_row, render_remote_compact_agent_row_with_identity, section_header_glyph,
-    section_row_style, sidebar_row_belongs_to_workspace, sidebar_space_member_indices,
-    sidebar_thread_entries_from, sidebar_workspace_labels, SidebarRow, SYMPHONY_SECTION_TITLE,
+    render_compact_agent_row, render_remote_compact_agent_row_with_identity,
+    section_header_glyph_for_app, section_row_style, sidebar_row_belongs_to_workspace,
+    sidebar_space_member_indices, sidebar_thread_entries_from, sidebar_workspace_labels,
+    SidebarRow, SYMPHONY_SECTION_TITLE,
 };
 #[cfg(test)]
 use super::sidebar::{AgentPanelEntry, AgentPanelEntryData};
@@ -144,39 +145,26 @@ fn mobile_switcher_target_for_row(
             false,
             col,
         ),
-        SidebarRow::Tab { entry, depth } => {
-            if entry.has_sections_card() {
-                None
-            } else {
-                super::sidebar::selected_row_control_at(
-                    app,
-                    entry,
-                    Rect::new(content.x, content.y, content.width, 1),
-                    *depth,
-                    true,
-                    col,
-                )
-            }
-        }
+        SidebarRow::Tab { entry, depth } => super::sidebar::selected_row_control_at(
+            app,
+            entry,
+            Rect::new(content.x, content.y, content.width, 1),
+            *depth,
+            true,
+            col,
+        ),
         SidebarRow::RemoteAgent {
             entry,
             depth,
             show_host_identity,
-            sections_card,
-        } => {
-            if sections_card.is_some() {
-                None
-            } else {
-                super::sidebar::selected_remote_row_control_at(
-                    app,
-                    entry,
-                    Rect::new(content.x, content.y, content.width, 1),
-                    *depth,
-                    *show_host_identity,
-                    col,
-                )
-            }
-        }
+        } => super::sidebar::selected_remote_row_control_at(
+            app,
+            entry,
+            Rect::new(content.x, content.y, content.width, 1),
+            *depth,
+            *show_host_identity,
+            col,
+        ),
         _ => None,
     };
     if let Some(control) = control {
@@ -774,6 +762,7 @@ fn render_mobile_switcher_content(
                 ws_idx,
                 title,
                 count,
+                shelf_counts,
                 state_counts,
                 ..
             } => {
@@ -811,24 +800,30 @@ fn render_mobile_switcher_content(
                 } else {
                     (title.clone(), false)
                 };
-                let window_count = member_indices
-                    .iter()
-                    .filter_map(|member| app.workspaces.get(*member))
-                    .map(|workspace| workspace.tabs.len())
-                    .sum::<usize>();
-                let agent_count = sidebar_thread_entries_from(app, terminal_runtimes)
-                    .into_iter()
-                    .filter(|entry| {
-                        entry.local_target().is_some_and(|target| {
-                            member_indices.contains(&target.ws_idx) && entry.has_agent
+                let (agent_count, window_count) = if let Some(counts) = shelf_counts {
+                    *counts
+                } else {
+                    let windows = member_indices
+                        .iter()
+                        .filter_map(|member| app.workspaces.get(*member))
+                        .map(|workspace| workspace.tabs.len())
+                        .sum();
+                    let agents = sidebar_thread_entries_from(app, terminal_runtimes)
+                        .into_iter()
+                        .filter(|entry| {
+                            entry.local_target().is_some_and(|target| {
+                                member_indices.contains(&target.ws_idx) && entry.has_agent
+                            })
                         })
-                    })
-                    .count();
+                        .count();
+                    (agents, windows)
+                };
                 let count_label = if state_counts.is_empty() {
-                    count.map_or_else(
-                        || format!(" ({agent_count}/{window_count})"),
-                        |count| format!(" ({count})"),
-                    )
+                    match (shelf_counts, count) {
+                        (Some((agents, windows)), _) => format!(" ({agents}/{windows})"),
+                        (_, Some(count)) => format!(" ({count})"),
+                        _ => format!(" ({agent_count}/{window_count})"),
+                    }
                 } else {
                     String::new()
                 };
@@ -941,7 +936,7 @@ fn render_mobile_switcher_content(
                 let label = format!(
                     "  {} {} {title} ({count}){host_counts}",
                     if *collapsed { "▸" } else { "▾" },
-                    section_header_glyph(title)
+                    section_header_glyph_for_app(app, title)
                 );
                 let zero = *title == SYMPHONY_SECTION_TITLE && *count == 0;
                 render_one_line_item(
@@ -957,7 +952,13 @@ fn render_mobile_switcher_content(
                             app,
                             *collapsed,
                             zero,
-                            Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(if *title == super::sidebar::NEEDS_YOU_SECTION_TITLE {
+                                    p.red
+                                } else {
+                                    p.overlay0
+                                })
+                                .add_modifier(Modifier::BOLD),
                         ),
                     )),
                 );
@@ -2758,6 +2759,32 @@ mod tests {
     }
 
     #[test]
+    fn mobile_sections_switcher_uses_the_same_three_shelves() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        let rows = mobile_sidebar_rows(&app);
+        let shelves = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::SectionHeader { title, .. }
+                    if matches!(*title, "Active" | "Snoozed" | "Settled") =>
+                {
+                    Some(*title)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(shelves, ["Active", "Snoozed", "Settled"]);
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: "Pinned",
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn mobile_agent_detail_keeps_tab_title_owned_by_the_tab_row() {
         let entry = agent_entry(Some("mobile-state"), Some("pi"));
 
@@ -3283,7 +3310,6 @@ mod tests {
         let content = Rect::new(0, 0, 60, 1);
         let row = SidebarRow::RemoteAgent {
             entry: entry.clone(),
-            sections_card: None,
             depth: 0,
             show_host_identity: true,
         };
