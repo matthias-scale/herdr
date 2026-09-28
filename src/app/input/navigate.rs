@@ -2280,14 +2280,15 @@ fn blocked_pane_cycle_in_order(
     include_needs_you: bool,
 ) -> Vec<(BlockedPaneTarget, bool)> {
     let rows = crate::ui::sidebar_rows(state);
-    let visible_local = rows
+    // A shown row stands for its whole tab: split panes share one row.
+    let visible_tabs = rows
         .iter()
         .filter_map(|row| match row {
             crate::ui::SidebarRow::Tab { entry, .. }
             | crate::ui::SidebarRow::Agent { entry, .. } => entry.local_target(),
             _ => None,
         })
-        .map(|target| (target.ws_idx, target.pane_id))
+        .map(|target| (target.ws_idx, target.tab_idx))
         .collect::<std::collections::HashSet<_>>();
     let visible_remote = rows
         .iter()
@@ -2346,7 +2347,7 @@ fn blocked_pane_cycle_in_order(
             crate::ui::SidebarRow::NeedsYou { target, .. } if include_needs_you => match target {
                 crate::ui::NeedsYouTarget::Local(entry_target) => {
                     if state.skip_collapsed_cycle
-                        && !visible_local.contains(&(entry_target.ws_idx, entry_target.pane_id))
+                        && !visible_tabs.contains(&(entry_target.ws_idx, entry_target.tab_idx))
                     {
                         continue;
                     }
@@ -2388,10 +2389,9 @@ fn blocked_pane_cycle_in_order(
                 while index < local.len() {
                     let same_tab = matches!(
                         local[index].0,
-                        BlockedPaneTarget::Local { ws_idx, tab_idx, pane_id }
+                        BlockedPaneTarget::Local { ws_idx, tab_idx, .. }
                             if (ws_idx, tab_idx)
                                 == (entry_target.ws_idx, entry_target.tab_idx)
-                                && visible_local.contains(&(ws_idx, pane_id))
                     );
                     if same_tab {
                         panes.push(local.remove(index));
@@ -2431,9 +2431,15 @@ fn blocked_pane_cycle_in_order(
     }
     // Collapsed or filtered local rows remain keyboard-reachable when the
     // operator has not enabled skip-collapsed cycling.
-    if !state.skip_collapsed_cycle {
-        panes.extend(local);
-    }
+    // Skip-collapsed still keeps panes whose tab a shown row stands for.
+    panes.extend(local.into_iter().filter(|(target, _)| {
+        !state.skip_collapsed_cycle
+            || matches!(
+                target,
+                BlockedPaneTarget::Local { ws_idx, tab_idx, .. }
+                    if visible_tabs.contains(&(*ws_idx, *tab_idx))
+            )
+    }));
     panes
 }
 
@@ -4662,6 +4668,39 @@ mod tests {
             assert!(
                 shown,
                 "sections={sections}: fixture should show the snoozed tab"
+            );
+        }
+    }
+
+    #[test]
+    fn fleet_workspace_ac9_skip_collapsed_keeps_both_blockers_in_a_split_tab() {
+        for sections in [false, true] {
+            let mut app = app_with_test_workspaces(&["split"]);
+            app.state.active = Some(0);
+            let first = app.state.workspaces[0].tabs[0].root_pane;
+            let second = app.state.workspaces[0].test_split(Direction::Horizontal);
+            app.state.ensure_test_terminals();
+            for pane in [first, second] {
+                set_pane_agent_state(
+                    &mut app.state,
+                    0,
+                    0,
+                    pane,
+                    crate::detect::AgentState::Blocked,
+                );
+            }
+            app.state.sidebar_sections_layout = sections;
+            app.state.skip_collapsed_cycle = true;
+            let blocked = blocked_pane_cycle(&app.state)
+                .into_iter()
+                .filter_map(|(target, _)| match target {
+                    BlockedPaneTarget::Local { pane_id, .. } => Some(pane_id),
+                    BlockedPaneTarget::Remote(_) => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                blocked.contains(&first) && blocked.contains(&second),
+                "sections={sections}: {blocked:?}"
             );
         }
     }
