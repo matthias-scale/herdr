@@ -6051,12 +6051,20 @@ mod tests {
         let blocked_at = Instant::now();
         let mut source = test_terminal();
         source.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("pi-handoff-hold").unwrap();
+        anchor_full_lifecycle_session(
+            &mut source,
+            Agent::Pi,
+            "herdr:pi",
+            "pi",
+            session_ref.clone(),
+        );
         source.set_hook_authority_at(
             "herdr:pi".into(),
             "pi".into(),
             AgentState::Blocked,
             None,
-            None,
+            Some(session_ref.clone()),
             Some(1),
             blocked_at,
         );
@@ -6092,7 +6100,7 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            None,
+            Some(session_ref.clone()),
             Some(2),
             captured_at + Duration::from_secs(3),
         );
@@ -9704,12 +9712,20 @@ mod tests {
         let observed = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("pi-explicit-input").unwrap();
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Pi,
+            "herdr:pi",
+            "pi",
+            session_ref.clone(),
+        );
         terminal.set_hook_authority_at(
             "herdr:pi".into(),
             "pi".into(),
             AgentState::Blocked,
             None,
-            None,
+            Some(session_ref.clone()),
             Some(1),
             observed,
         );
@@ -9727,12 +9743,20 @@ mod tests {
         let observed = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("pi-working-report").unwrap();
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Pi,
+            "herdr:pi",
+            "pi",
+            session_ref.clone(),
+        );
         terminal.set_hook_authority_at(
             "herdr:pi".into(),
             "pi".into(),
             AgentState::Blocked,
             None,
-            None,
+            Some(session_ref.clone()),
             Some(1),
             observed,
         );
@@ -9743,7 +9767,7 @@ mod tests {
             "pi".into(),
             AgentState::Working,
             None,
-            None,
+            Some(session_ref.clone()),
             Some(2),
             observed + Duration::from_secs(1),
         );
@@ -9804,12 +9828,20 @@ mod tests {
         let observed = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("pi-process-exit").unwrap();
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Pi,
+            "herdr:pi",
+            "pi",
+            session_ref.clone(),
+        );
         terminal.set_hook_authority_at(
             "herdr:pi".into(),
             "pi".into(),
             AgentState::Blocked,
             None,
-            None,
+            Some(session_ref.clone()),
             Some(1),
             observed,
         );
