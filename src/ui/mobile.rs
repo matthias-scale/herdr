@@ -11,9 +11,9 @@ use super::sidebar::agent_panel_entries;
 use super::sidebar::{
     dim_inactive_pane_row, mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout,
     render_compact_agent_row, render_remote_compact_agent_row_with_identity,
-    render_sections_thread_card, section_header_glyph_for_app, section_row_style,
-    sidebar_row_belongs_to_workspace, sidebar_space_member_indices, sidebar_thread_entries_from,
-    sidebar_workspace_labels, SidebarRow, SYMPHONY_SECTION_TITLE,
+    section_header_glyph_for_app, section_row_style, sidebar_row_belongs_to_workspace,
+    sidebar_space_member_indices, sidebar_thread_entries_from, sidebar_workspace_labels,
+    SidebarRow, SYMPHONY_SECTION_TITLE,
 };
 #[cfg(test)]
 use super::sidebar::{AgentPanelEntry, AgentPanelEntryData};
@@ -151,26 +151,46 @@ fn mobile_switcher_target_for_row(
         ),
         SidebarRow::Tab { entry, depth } => {
             if entry.has_sections_card() {
-                if content.width >= 24
-                    && entry.sections_card.as_ref().is_some_and(|card| {
-                        col == super::sidebar::sections_control_start(
-                            app,
-                            card,
-                            super::sidebar::sections_thread_rect(
-                                Rect::new(content.x, content.y, content.width, 1),
-                                *depth,
-                            ),
-                            1,
-                        )
+                let card = entry.sections_card.as_ref()?;
+                let controls = super::sidebar::sections_local_controls(
+                    app,
+                    entry,
+                    Rect::new(content.x, content.y, content.width, 1),
+                );
+                if controls.width > 0 {
+                    let start = super::sidebar::sections_control_start(
+                        app,
+                        card,
+                        super::sidebar::sections_thread_rect(
+                            Rect::new(content.x, content.y, content.width, 1),
+                            *depth,
+                        ),
+                        controls.width,
+                    );
+                    if col == start {
+                        if let Some(target) = entry.local_target() {
+                            return Some(MobileSwitcherTarget::Pin {
+                                ws_idx: target.ws_idx,
+                                tab_idx: target.tab_idx,
+                            });
+                        }
+                    }
+                    controls.lifecycle.and_then(|lifecycle| {
+                        if (start + 1..start + 4).contains(&col) {
+                            Some(crate::app::state::SidebarHoverAction::Snooze {
+                                target: lifecycle.target,
+                            })
+                        } else if lifecycle.show_settle && (start + 4..start + 6).contains(&col) {
+                            Some(crate::app::state::SidebarHoverAction::Settle {
+                                target: lifecycle.target,
+                            })
+                        } else {
+                            None
+                        }
                     })
-                {
-                    let target = entry.local_target()?;
-                    return Some(MobileSwitcherTarget::Pin {
-                        ws_idx: target.ws_idx,
-                        tab_idx: target.tab_idx,
-                    });
+                } else {
+                    None
                 }
-                None
             } else {
                 super::sidebar::selected_row_control_at(
                     app,
@@ -188,8 +208,33 @@ fn mobile_switcher_target_for_row(
             show_host_identity,
             sections_card,
         } => {
-            if sections_card.is_some() {
-                None
+            if let Some(card) = sections_card {
+                (content.width >= 38)
+                    .then(|| super::sidebar::remote_row_control(entry))
+                    .flatten()
+                    .and_then(|lifecycle| {
+                        let controls_width = 3 + u16::from(lifecycle.show_settle) * 2;
+                        let start = super::sidebar::sections_control_start(
+                            app,
+                            card,
+                            super::sidebar::sections_thread_rect(
+                                Rect::new(content.x, content.y, content.width, 1),
+                                *depth,
+                            ),
+                            controls_width,
+                        );
+                        if (start..start + 3).contains(&col) {
+                            Some(crate::app::state::SidebarHoverAction::Snooze {
+                                target: lifecycle.target,
+                            })
+                        } else if lifecycle.show_settle && (start + 3..start + 5).contains(&col) {
+                            Some(crate::app::state::SidebarHoverAction::Settle {
+                                target: lifecycle.target,
+                            })
+                        } else {
+                            None
+                        }
+                    })
             } else {
                 super::sidebar::selected_remote_row_control_at(
                     app,
@@ -948,16 +993,42 @@ fn render_mobile_switcher_content(
                 let bg = mobile_item_bg(selected, false, p);
                 if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
                     if let Some(card) = sections_card {
-                        render_sections_thread_card(
+                        let row_rect = super::sidebar::sections_thread_rect(
+                            Rect::new(content.x, y, content.width, 1),
+                            *depth,
+                        );
+                        let lifecycle = (content.width >= 38)
+                            .then(|| super::sidebar::remote_row_control(entry))
+                            .flatten();
+                        let controls_width = lifecycle
+                            .as_ref()
+                            .map_or(0, |control| 3 + u16::from(control.show_settle) * 2);
+                        super::sidebar::render_sections_thread_card_with_controls(
                             app,
                             frame,
                             card,
-                            super::sidebar::sections_thread_rect(
-                                Rect::new(content.x, y, content.width, 1),
-                                *depth,
-                            ),
+                            row_rect,
                             selected,
+                            controls_width,
                         );
+                        if let Some(control) = lifecycle {
+                            let x = super::sidebar::sections_control_start(
+                                app,
+                                card,
+                                row_rect,
+                                controls_width,
+                            );
+                            frame.render_widget(
+                                Paragraph::new(" ◷ ").style(Style::default().fg(p.mauve)),
+                                Rect::new(x, y, 3, 1),
+                            );
+                            if control.show_settle {
+                                frame.render_widget(
+                                    Paragraph::new(" ✓").style(Style::default().fg(p.overlay0)),
+                                    Rect::new(x + 3, y, 2, 1),
+                                );
+                            }
+                        }
                     } else {
                         render_remote_compact_agent_row_with_identity(
                             app,
@@ -1266,7 +1337,8 @@ fn render_mobile_switcher_content(
                     let rect = Rect::new(content.x, y, content.width, 1);
                     if let Some(card) = entry.sections_card.as_ref() {
                         let row_rect = super::sidebar::sections_thread_rect(rect, *depth);
-                        let controls_width = u16::from(rect.width >= 24);
+                        let controls = super::sidebar::sections_local_controls(app, entry, rect);
+                        let controls_width = controls.width;
                         super::sidebar::render_sections_thread_card_with_controls(
                             app,
                             frame,
@@ -1275,7 +1347,7 @@ fn render_mobile_switcher_content(
                             active,
                             controls_width,
                         );
-                        if rect.width >= 24 {
+                        if controls_width > 0 {
                             let pin = if app.nerd_font {
                                 if entry.pinned {
                                     "󰐃"
@@ -1301,6 +1373,24 @@ fn render_mobile_switcher_content(
                                     1,
                                 ),
                             );
+                            if let Some(control) = controls.lifecycle {
+                                let x = super::sidebar::sections_control_start(
+                                    app,
+                                    card,
+                                    row_rect,
+                                    controls_width,
+                                );
+                                frame.render_widget(
+                                    Paragraph::new(" ◷ ").style(Style::default().fg(p.mauve)),
+                                    Rect::new(x + 1, rect.y, 3, 1),
+                                );
+                                if control.show_settle {
+                                    frame.render_widget(
+                                        Paragraph::new(" ✓").style(Style::default().fg(p.overlay0)),
+                                        Rect::new(x + 4, rect.y, 2, 1),
+                                    );
+                                }
+                            }
                         }
                     } else {
                         render_compact_agent_row(app, frame, entry, rect, *depth, true, Some(bg));
@@ -1902,9 +1992,14 @@ mod tests {
         app.sidebar_sections_layout = true;
         app.workspaces = vec![crate::workspace::Workspace::test_new("agent")];
         app.ensure_test_terminals();
+        for terminal in app.terminals.values_mut() {
+            terminal.agent_name = Some("codex".to_string());
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
+        }
         app.active = Some(0);
         app.selected = 0;
         app.reconcile_sidebar_presentation();
+        app.view.layout = crate::app::state::ViewLayout::Mobile;
         app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
         app.view.terminal_area = Rect::new(0, 2, 40, 18);
         let rows = mobile_sidebar_rows(&app);
@@ -1933,7 +2028,7 @@ mod tests {
                 Rect::new(content.x, content.y, content.width, 1),
                 *depth,
             ),
-            1,
+            6,
         );
         assert_eq!(
             mobile_switcher_target_at(&app, pin_col, viewport.y + doc_row as u16),
@@ -1942,6 +2037,129 @@ mod tests {
                 tab_idx: 0
             })
         );
+        let row = viewport.y + doc_row as u16;
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        assert!(matches!(
+            mobile_switcher_target_at(&app, pin_col + 1, row),
+            Some(MobileSwitcherTarget::Snooze(
+                crate::app::state::SidebarPaneLifecycleTarget::Local(target)
+            )) if target.pane_id == pane_id
+        ));
+        assert!(matches!(
+            mobile_switcher_target_at(&app, pin_col + 4, row),
+            Some(MobileSwitcherTarget::Settle(
+                crate::app::state::SidebarPaneLifecycleTarget::Local(target)
+            )) if target.pane_id == pane_id
+        ));
+        assert!(matches!(
+            mobile_switcher_target_at(&app, content.x, row),
+            Some(MobileSwitcherTarget::SidebarTab { pane_id: target, .. }) if target == pane_id
+        ));
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 20))
+            .expect("mobile terminal");
+        terminal
+            .draw(|frame| {
+                render_mobile_panel(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 40, 20),
+                )
+            })
+            .expect("render switcher");
+        assert_eq!(
+            terminal.backend().buffer()[(pin_col + 2, row)].symbol(),
+            "◷"
+        );
+        assert_eq!(
+            terminal.backend().buffer()[(pin_col + 5, row)].symbol(),
+            "✓"
+        );
+    }
+
+    #[test]
+    fn sections_mobile_remote_row_exposes_lifecycle_targets() {
+        let (mut app, entry) = crate::ui::sidebar::tests::remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Working,
+            false,
+            false,
+            false,
+        );
+        app.sidebar_sections_layout = true;
+        app.sidebar_work_filter.machine_scope = crate::app::state::SidebarMachineScope::AllMachines;
+        app.view.layout = crate::app::state::ViewLayout::Mobile;
+        app.view.mobile_header_rect = Rect::new(0, 0, 60, 2);
+        app.view.terminal_area = Rect::new(0, 2, 60, 16);
+        let rows = mobile_sidebar_rows(&app);
+        let (index, row) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| {
+                matches!(
+                    row,
+                    SidebarRow::RemoteAgent {
+                        sections_card: Some(_),
+                        ..
+                    }
+                )
+            })
+            .expect("remote sections row");
+        let doc_row = mobile_sidebar_rows_start(&app, &rows)
+            + rows[..index]
+                .iter()
+                .map(mobile_sidebar_row_height)
+                .sum::<usize>();
+        let viewport = mobile_switcher_areas(&app).viewport;
+        let content = inset_for_left_scrollbar(viewport);
+        let SidebarRow::RemoteAgent {
+            sections_card: Some(card),
+            depth,
+            ..
+        } = row
+        else {
+            unreachable!();
+        };
+        let start = super::super::sidebar::sections_control_start(
+            &app,
+            card,
+            super::super::sidebar::sections_thread_rect(
+                Rect::new(content.x, content.y, content.width, 1),
+                *depth,
+            ),
+            5,
+        );
+        let y = viewport.y + doc_row as u16;
+        assert!(matches!(
+            mobile_switcher_target_at(&app, start + 1, y),
+            Some(MobileSwitcherTarget::Snooze(
+                crate::app::state::SidebarPaneLifecycleTarget::Remote(target)
+            )) if target == entry.agent_ref
+        ));
+        assert!(matches!(
+            mobile_switcher_target_at(&app, start + 3, y),
+            Some(MobileSwitcherTarget::Settle(
+                crate::app::state::SidebarPaneLifecycleTarget::Remote(target)
+            )) if target == entry.agent_ref
+        ));
+        assert_eq!(
+            mobile_switcher_target_at(&app, content.x, y),
+            Some(MobileSwitcherTarget::RemoteAgent(entry.agent_ref.clone()))
+        );
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 18))
+            .expect("mobile terminal");
+        terminal
+            .draw(|frame| {
+                render_mobile_panel(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 60, 18),
+                )
+            })
+            .expect("render switcher");
+        assert_eq!(terminal.backend().buffer()[(start + 1, y)].symbol(), "◷");
+        assert_eq!(terminal.backend().buffer()[(start + 4, y)].symbol(), "✓");
     }
 
     #[test]
@@ -2639,6 +2857,69 @@ mod tests {
                 assert!(rendered.contains('✓'), "{rendered:?}");
             }
         }
+    }
+
+    #[test]
+    fn mobile_nonfocused_rows_keep_lifecycle_controls_visible_and_clickable() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![
+            crate::workspace::Workspace::test_new("mobile-active"),
+            crate::workspace::Workspace::test_new("mobile-other"),
+        ];
+        app.ensure_test_terminals();
+        for terminal in app.terminals.values_mut() {
+            terminal.agent_name = Some("codex".to_string());
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
+        }
+        app.active = Some(0);
+        app.selected = 0;
+        app.set_server_mode(crate::app::Mode::Navigate);
+        app.view.layout = crate::app::state::ViewLayout::Mobile;
+        app.view.mobile_header_rect = Rect::new(0, 0, 60, 2);
+        app.view.terminal_area = Rect::new(0, 2, 60, 16);
+        app.reconcile_sidebar_presentation();
+
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 18)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_mobile_panel(
+                    &app,
+                    &TerminalRuntimeRegistry::new(),
+                    frame,
+                    Rect::new(0, 0, 60, 18),
+                )
+            })
+            .unwrap();
+
+        let viewport = mobile_switcher_areas(&app).viewport;
+        let content = inset_for_left_scrollbar(viewport);
+        let range = mobile_switcher_workspace_doc_range(&app, 1).expect("inactive workspace row");
+        let row = viewport.y + range.start as u16 + 1;
+        let rendered = (content.x..content.right())
+            .map(|column| terminal.backend().buffer()[(column, row)].symbol())
+            .collect::<String>();
+        assert!(rendered.contains('◷'), "{rendered:?}");
+        assert!(rendered.contains('✓'), "{rendered:?}");
+
+        let pane_id = app.workspaces[1]
+            .focused_pane_id()
+            .expect("inactive workspace pane");
+        let targets = (content.x..content.right())
+            .filter_map(|column| mobile_switcher_target_at(&app, column, row))
+            .collect::<Vec<_>>();
+        assert!(targets.iter().any(|target| matches!(
+            target,
+            MobileSwitcherTarget::Snooze(
+                crate::app::state::SidebarPaneLifecycleTarget::Local(pane)
+            ) if pane.pane_id == pane_id
+        )));
+        assert!(targets.iter().any(|target| matches!(
+            target,
+            MobileSwitcherTarget::Settle(
+                crate::app::state::SidebarPaneLifecycleTarget::Local(pane)
+            ) if pane.pane_id == pane_id
+        )));
     }
 
     #[test]

@@ -1883,11 +1883,14 @@ impl super::super::App {
     ) {
         let title = self.sidebar_lifecycle_title(&target);
         match target {
-            crate::app::state::SidebarPaneLifecycleTarget::Local(_) => {
+            crate::app::state::SidebarPaneLifecycleTarget::Local(pane_target) => {
                 let response = self.runtime_pane_snooze("tui.sidebar.snooze", params);
                 if !self.show_local_pane_lifecycle_error("snooze", &response) {
                     if let Some(title) = title {
-                        self.show_sidebar_action_toast("Snoozed", title);
+                        self.show_sidebar_action_toast(
+                            self.sidebar_local_destination(&pane_target),
+                            title,
+                        );
                     }
                 }
             }
@@ -1901,15 +1904,23 @@ impl super::super::App {
         }
     }
 
-    fn dispatch_sidebar_pane_unsnooze(
+    pub(crate) fn dispatch_sidebar_pane_unsnooze(
         &mut self,
         target: crate::app::state::SidebarPaneLifecycleTarget,
+    ) {
+        self.dispatch_sidebar_pane_unsnooze_from(target, "tui.sidebar.unsnooze");
+    }
+
+    pub(crate) fn dispatch_sidebar_pane_unsnooze_from(
+        &mut self,
+        target: crate::app::state::SidebarPaneLifecycleTarget,
+        source: &'static str,
     ) {
         let title = self.sidebar_lifecycle_title(&target);
         match &target {
             crate::app::state::SidebarPaneLifecycleTarget::Local(pane_target) => {
                 if let Some(pane_id) = self.sidebar_pane_lifecycle_public_id(&target) {
-                    let response = self.runtime_pane_unsnooze("tui.sidebar.unsnooze", pane_id);
+                    let response = self.runtime_pane_unsnooze(source, pane_id);
                     if !self.show_local_pane_lifecycle_error("unsnooze", &response) {
                         if let Some(title) = title {
                             self.show_sidebar_action_toast(
@@ -2700,7 +2711,7 @@ impl super::super::App {
             }
             if changed {
                 if let Some(title) = title {
-                    self.show_sidebar_action_toast("Settled", title);
+                    self.show_sidebar_action_toast(self.sidebar_local_destination(&target), title);
                 }
             }
             return;
@@ -2711,7 +2722,14 @@ impl super::super::App {
             let response = self.runtime_pane_settle(source, public_pane_id);
             if !self.show_local_pane_lifecycle_error("settle", &response) {
                 if let Some(title) = title {
-                    self.show_sidebar_action_toast("Settled", title);
+                    if let crate::app::state::SidebarPaneLifecycleTarget::Local(pane_target) =
+                        &target
+                    {
+                        self.show_sidebar_action_toast(
+                            self.sidebar_local_destination(pane_target),
+                            title,
+                        );
+                    }
                 }
             }
         }
@@ -3330,6 +3348,99 @@ mod tests {
     }
 
     #[test]
+    fn sections_split_tab_snooze_toast_names_the_remaining_shelf() {
+        for (pinned, destination) in [(false, "Active"), (true, "Pinned")] {
+            let mut app = sidebar_order_app(false);
+            let root = app.state.workspaces[0].tabs[0].root_pane;
+            let sibling = app.state.workspaces[0].test_split(Direction::Horizontal);
+            app.state.ensure_test_terminals();
+            app.state.sidebar_sections_layout = true;
+            app.state.workspaces[0].tabs[0].pinned = pinned;
+            let title = app.state.workspaces[0]
+                .tab_display_name_from(&app.state.terminals, 0)
+                .expect("title");
+            let target = crate::app::state::SidebarPaneLifecycleTarget::Local(
+                crate::app::state::PaneFocusTarget {
+                    workspace_id: app.state.workspaces[0].id.clone(),
+                    pane_id: sibling,
+                },
+            );
+            let pane_id = app
+                .sidebar_pane_lifecycle_public_id(&target)
+                .expect("pane id");
+            app.dispatch_sidebar_pane_snooze(
+                target,
+                crate::api::schema::PaneSnoozeParams {
+                    pane_id,
+                    duration_s: Some(900),
+                    snoozed_until: None,
+                },
+            );
+            assert!(app.state.pane_is_snoozed(0, sibling));
+            assert!(!app.state.pane_is_snoozed(0, root));
+            assert_eq!(
+                app.state.toast.as_ref().map(|toast| toast.title.as_str()),
+                Some(format!("{destination} · {title}").as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn sections_partial_settlement_keeps_active_destination() {
+        let mut app = sidebar_order_app(false);
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let sibling = app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        app.state.sidebar_sections_layout = true;
+        assert!(app.state.settle_pane_at(0, sibling, 1));
+        assert!(!app.state.pane_is_settled(0, root));
+        assert_eq!(
+            crate::ui::sidebar::sidebar_local_tab_destination(&app.state, 0, 0),
+            "Active"
+        );
+    }
+
+    #[test]
+    fn sections_tab_context_unsnooze_toasts_destination() {
+        let mut app = sidebar_order_app(false);
+        app.state.sidebar_sections_layout = true;
+        let workspace = &app.state.workspaces[0];
+        let pane_id = workspace.tabs[0].root_pane;
+        let workspace_id = workspace.id.clone();
+        let tab_id =
+            crate::workspace::public_tab_id_for_number(&workspace.id, workspace.tabs[0].number);
+        let title = workspace
+            .tab_display_name_from(&app.state.terminals, 0)
+            .expect("title");
+        assert!(app.state.snooze_pane_at(0, pane_id, u64::MAX));
+        let menu = crate::app::state::ContextMenuState {
+            kind: crate::app::state::ContextMenuKind::Tab {
+                workspace_id,
+                tab_id,
+                ws_idx: 0,
+                tab_idx: 0,
+                starred: false,
+                has_subgroup: false,
+                settle_pane_id: None,
+                snooze_target: Some(pane_id),
+            },
+            x: 0,
+            y: 0,
+            selected: crate::app::state::ContextMenuAction::Unsnooze,
+        };
+        assert!(app
+            .state
+            .context_menu_items(&menu)
+            .contains(&crate::app::state::UNSNOOZE_ITEM));
+        app.apply_context_menu_action_via_api(menu, crate::app::state::ContextMenuAction::Unsnooze);
+        assert!(!app.state.pane_is_snoozed(0, pane_id));
+        assert_eq!(
+            app.state.toast.as_ref().map(|toast| toast.title.as_str()),
+            Some(format!("Active · {title}").as_str())
+        );
+    }
+
+    #[test]
     fn sections_unpinning_old_done_tab_toasts_settled() {
         let mut app = sidebar_order_app(false);
         app.state.sidebar_sections_layout = true;
@@ -3401,18 +3512,37 @@ mod tests {
     #[test]
     fn clicking_sidebar_settle_icon_settles_the_exact_pane() {
         let mut app = sidebar_order_app(false);
-        // Nested rows need room for both selected-row controls. The 26-column
-        // default intentionally preserves the title instead of drawing them.
+        // Nested rows need room for both lifecycle controls. This tab belongs
+        // to the inactive workspace, so its controls must appear on hover.
         app.state.sidebar_width = 40;
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let area = Rect::new(0, 0, 120, 40);
+        crate::ui::compute_view(&mut app.state, area);
+        let row = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
+            .into_iter()
+            .find(|row| row.ws_idx == 1 && row.tab_idx == 1)
+            .expect("inactive workspace tab");
+        app.handle_mouse(mouse(
+            MouseEventKind::Moved,
+            row.rect.right() - 1,
+            row.rect.y,
+        ));
+        crate::ui::compute_view(&mut app.state, area);
         let target = app
             .state
             .view
             .sidebar_hover_targets
             .iter()
-            .find(|target| target.label == "Settle")
+            .find(|target| {
+                target.rect.y == row.rect.y
+                    && matches!(
+                        target.action.as_ref(),
+                        Some(crate::app::state::SidebarHoverAction::Settle {
+                            target: crate::app::state::SidebarPaneLifecycleTarget::Local(pane),
+                        }) if pane.pane_id == row.pane_id
+                    )
+            })
             .cloned()
-            .expect("settle icon target");
+            .expect("settle icon target for the inactive tab");
         let crate::app::state::SidebarHoverAction::Settle {
             target: lifecycle_target,
         } = target.action.expect("settle action")
@@ -3437,6 +3567,11 @@ mod tests {
             target.rect.y,
         ));
 
+        assert_eq!(
+            app.state.active,
+            Some(0),
+            "the other workspace stays active"
+        );
         assert!(app.state.pane_is_settled(ws_idx, pane_id));
     }
 
@@ -3704,15 +3839,34 @@ mod tests {
     fn clicking_sidebar_snooze_opens_durations_and_dispatches_the_api() {
         let mut app = sidebar_order_app(false);
         app.state.sidebar_width = 40;
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let area = Rect::new(0, 0, 120, 40);
+        crate::ui::compute_view(&mut app.state, area);
+        let row = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
+            .into_iter()
+            .find(|row| row.ws_idx == 1 && row.tab_idx == 2)
+            .expect("second inactive workspace tab");
+        app.handle_mouse(mouse(
+            MouseEventKind::Moved,
+            row.rect.right() - 1,
+            row.rect.y,
+        ));
+        crate::ui::compute_view(&mut app.state, area);
         let target = app
             .state
             .view
             .sidebar_hover_targets
             .iter()
-            .find(|target| target.label == "Set time")
+            .find(|target| {
+                target.rect.y == row.rect.y
+                    && matches!(
+                        target.action.as_ref(),
+                        Some(crate::app::state::SidebarHoverAction::Snooze {
+                            target: crate::app::state::SidebarPaneLifecycleTarget::Local(pane),
+                        }) if pane.pane_id == row.pane_id
+                    )
+            })
             .cloned()
-            .expect("snooze control target");
+            .expect("snooze control target for the inactive tab");
         let crate::app::state::SidebarHoverAction::Snooze {
             target: lifecycle_target,
         } = target.action.expect("snooze action")

@@ -1892,8 +1892,8 @@ impl App {
                 },
                 Some(crate::app::state::UNSNOOZE_ITEM),
             ) => {
-                if let Some(pane_id) = self.public_pane_id(ws_idx, target) {
-                    self.runtime_pane_unsnooze("tui.context-menu.unsnooze", pane_id);
+                if let Some(target) = self.local_sidebar_pane_lifecycle_target(ws_idx, target) {
+                    self.dispatch_sidebar_pane_unsnooze_from(target, "tui.context-menu.unsnooze");
                 }
                 self.state.close_client_overlay();
             }
@@ -1964,8 +1964,8 @@ impl App {
                 },
                 Some(crate::app::state::UNSNOOZE_ITEM),
             ) => {
-                if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
-                    self.runtime_pane_unsnooze("tui.context-menu.unsnooze", pane_id);
+                if let Some(target) = self.local_sidebar_pane_lifecycle_target(ws_idx, pane_id) {
+                    self.dispatch_sidebar_pane_unsnooze_from(target, "tui.context-menu.unsnooze");
                 }
                 self.state.close_client_overlay();
             }
@@ -3874,7 +3874,11 @@ mod tests {
     #[test]
     fn set_time_and_unsnooze_context_actions_dispatch_through_the_runtime_api() {
         let mut app = app_with_test_workspaces(&["main"]);
+        app.state.sidebar_sections_layout = true;
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let title = app.state.workspaces[0]
+            .tab_display_name_from(&app.state.terminals, 0)
+            .expect("tab title");
         let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 300;
         let input = crate::app::state::SidebarSnoozeUiState {
             target: crate::app::state::SidebarPaneLifecycleTarget::Local(
@@ -3904,6 +3908,10 @@ mod tests {
             .contains(&crate::app::state::UNSNOOZE_ITEM));
         app.apply_context_menu_action_via_api(menu, ContextMenuAction::Unsnooze);
         assert!(!app.state.pane_is_snoozed(0, pane_id));
+        assert_eq!(
+            app.state.toast.as_ref().map(|toast| toast.title.as_str()),
+            Some(format!("Active · {title}").as_str())
+        );
     }
 
     #[test]
