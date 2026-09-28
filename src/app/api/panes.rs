@@ -146,6 +146,7 @@ impl App {
             None => return encode_error(id, "pane_not_found", "pane not found"),
         };
         if let Some(pane) = self.state.workspaces[ws_idx].pane_state_mut(new_pane.pane_id) {
+            pane.is_companion = params.companion;
             pane.right_click_passthrough = matches!(
                 params.right_click,
                 crate::api::schema::PaneRightClickTarget::Pane
@@ -2477,15 +2478,22 @@ impl App {
         };
         let workspace_id = self.public_workspace_id(ws_idx);
         let layout_update_target = self.layout_update_target_after_pane_removal(ws_idx, pane_id);
-        if !exact_workspace
-            && self.state.close_pane_would_close_workspace(ws_idx, pane_id)
-            && self.state.confirm_implicit_worktree_group_close(ws_idx)
-        {
-            return Err(encode_error(
-                id,
-                "confirmation_required",
-                "closing this pane would close a worktree group",
-            ));
+        if !exact_workspace {
+            let close_tab_idx = self.state.workspaces.get(ws_idx).and_then(|workspace| {
+                let tab_idx = workspace.find_tab_index_for_pane(pane_id)?;
+                let tab = workspace.tabs.get(tab_idx)?;
+                let leaves_only_companions = tab
+                    .panes
+                    .iter()
+                    .filter(|(candidate, _)| **candidate != pane_id)
+                    .all(|(_, pane)| pane.is_companion);
+                (tab.layout.pane_count() <= 1 || leaves_only_companions).then_some(tab_idx)
+            });
+            if let Some(tab_idx) = close_tab_idx {
+                return self
+                    .close_tab_preserving_workspace(ws_idx, tab_idx, true)
+                    .map_err(|message| encode_error(id, "pane_close_failed", message));
+            }
         }
         let workspace_snapshot = self.workspace_info(ws_idx);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
@@ -4696,8 +4704,10 @@ mod tests {
     }
 
     #[test]
-    fn api_pane_close_closes_linked_worktree_workspace_only() {
+    fn api_pane_close_last_pane_keeps_linked_worktree_workspace() {
         let mut app = app_with_linked_worktree();
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let workspace_cwd = app.state.workspaces[0].identity_cwd.clone();
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
 
@@ -4711,7 +4721,46 @@ mod tests {
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(success.id, "req");
         assert_eq!(app.state.request_remove_linked_worktree, None);
-        assert!(app.state.workspaces.is_empty());
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.workspaces[0].id, workspace_id);
+        assert_eq!(app.state.workspaces[0].identity_cwd, workspace_cwd);
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert!(app.state.workspaces[0].worktree_space.is_some());
+        assert!(app.state.workspaces[0].pane_state(pane_id).is_none());
+        for (_terminal_id, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
+    }
+
+    #[test]
+    fn api_pane_close_removes_orphaned_companions_with_their_tab() {
+        let (mut app, _) = app_with_test_workspace();
+        let primary = app.state.workspaces[0].tabs[0].root_pane;
+        let companion = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(primary);
+        app.state.workspaces[0]
+            .pane_state_mut(companion)
+            .unwrap()
+            .is_companion = true;
+        let remaining_tab = app.state.workspaces[0].test_add_tab(Some("next"));
+        let remaining_root = app.state.workspaces[0].tabs[remaining_tab].root_pane;
+        app.state.ensure_test_terminals();
+        let primary_terminal = app.state.terminal_id_for_pane(0, primary).unwrap();
+        let companion_terminal = app.state.terminal_id_for_pane(0, companion).unwrap();
+        let public_primary = app.public_pane_id(0, primary).unwrap();
+
+        let response = app.handle_pane_close(
+            "close".into(),
+            PaneTarget {
+                pane_id: public_primary,
+            },
+        );
+
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs[0].root_pane, remaining_root);
+        assert!(!app.state.terminals.contains_key(&primary_terminal));
+        assert!(!app.state.terminals.contains_key(&companion_terminal));
     }
 
     #[test]

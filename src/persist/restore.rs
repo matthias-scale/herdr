@@ -65,6 +65,7 @@ fn restore_pane_activity(pane: &mut PaneState, saved: Option<&super::snapshot::P
     let Some(saved) = saved else {
         return;
     };
+    pane.is_companion = saved.is_companion;
     let now = std::time::Instant::now();
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -547,7 +548,9 @@ fn restore_tab(
                 "Saved directory is unavailable. Restore the directory and restart this session."
                     .into(),
             );
-            panes.insert(*id, PaneState::new(terminal.id.clone()));
+            let mut pane = PaneState::new(terminal.id.clone());
+            restore_pane_activity(&mut pane, saved_pane);
+            panes.insert(*id, pane);
             terminals.push(terminal);
             continue;
         }
@@ -841,7 +844,9 @@ fn restore_tab(
                         saved_pane, cwd,
                         format!("Could not start the saved shell: {e}. Fix the shell configuration and restart this session."),
                     );
-                    panes.insert(*id, PaneState::new(terminal.id.clone()));
+                    let mut pane = PaneState::new(terminal.id.clone());
+                    restore_pane_activity(&mut pane, saved_pane);
+                    panes.insert(*id, pane);
                     terminals.push(terminal);
                 }
             }
@@ -1189,6 +1194,7 @@ mod tests {
             .as_secs();
         let saved = super::super::snapshot::PaneSnapshot {
             cwd: "/tmp".into(),
+            is_companion: true,
             last_activity_at: Some(now_unix.saturating_sub(60)),
             detection_output_at: Some(now_unix.saturating_sub(120)),
             quiet_since_at: Some(now_unix.saturating_sub(60)),
@@ -1209,6 +1215,7 @@ mod tests {
 
         restore_pane_activity(&mut pane, Some(&saved));
 
+        assert!(pane.is_companion);
         let quiet_for = pane.activity.quiet_for(Instant::now()).unwrap();
         assert!(quiet_for >= Duration::from_secs(60));
         assert!(quiet_for < Duration::from_secs(65));
@@ -1814,6 +1821,7 @@ mod tests {
                         0,
                         super::super::snapshot::PaneSnapshot {
                             cwd,
+                            is_companion: false,
                             last_activity_at: None,
                             detection_output_at: None,
                             quiet_since_at: None,
@@ -1962,6 +1970,7 @@ mod tests {
                             10,
                             super::super::snapshot::PaneSnapshot {
                                 cwd: cwd.clone(),
+                                is_companion: false,
                                 last_activity_at: None,
                                 detection_output_at: None,
                                 quiet_since_at: None,
@@ -1983,6 +1992,7 @@ mod tests {
                             20,
                             super::super::snapshot::PaneSnapshot {
                                 cwd: cwd.clone(),
+                                is_companion: false,
                                 last_activity_at: None,
                                 detection_output_at: None,
                                 quiet_since_at: None,
@@ -2051,6 +2061,7 @@ mod tests {
                 id.parse::<u32>().unwrap(),
                 super::super::snapshot::PaneSnapshot {
                     cwd: cwd.clone(),
+                    is_companion: false,
                     last_activity_at: None,
                     detection_output_at: None,
                     quiet_since_at: None,
@@ -2071,6 +2082,7 @@ mod tests {
         };
         let final_pane = super::super::snapshot::PaneSnapshot {
             cwd: cwd.clone(),
+            is_companion: false,
             last_activity_at: None,
             detection_output_at: None,
             quiet_since_at: None,
@@ -2271,6 +2283,7 @@ mod tests {
                         0,
                         super::super::snapshot::PaneSnapshot {
                             cwd,
+                            is_companion: false,
                             last_activity_at: None,
                             detection_output_at: None,
                             quiet_since_at: None,
@@ -2637,6 +2650,7 @@ mod tests {
             0,
             super::super::snapshot::PaneSnapshot {
                 cwd: cwd.clone(),
+                is_companion: false,
                 last_activity_at: None,
                 detection_output_at: None,
                 quiet_since_at: None,

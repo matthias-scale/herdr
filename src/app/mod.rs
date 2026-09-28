@@ -7893,6 +7893,7 @@ mod tests {
                 ratio: None,
                 cwd: None,
                 focus: false,
+                companion: false,
                 right_click: Default::default(),
                 env: Default::default(),
                 work_context: None,
@@ -7975,6 +7976,7 @@ mod tests {
                 ratio: None,
                 cwd: None,
                 focus: true,
+                companion: true,
                 right_click: Default::default(),
                 env: Default::default(),
                 work_context: None,
@@ -7985,6 +7987,16 @@ mod tests {
         assert_eq!(response["result"]["type"], "pane_info");
         assert_eq!(response["result"]["pane"]["tab_id"], target_tab_id);
         assert_eq!(response["result"]["pane"]["focused"], true);
+        let created_pane_id = app
+            .parse_pane_id(response["result"]["pane"]["pane_id"].as_str().unwrap())
+            .unwrap()
+            .1;
+        assert!(
+            app.state.workspaces[0]
+                .pane_state(created_pane_id)
+                .unwrap()
+                .is_companion
+        );
         assert_eq!(app.state.active, Some(0));
         assert_eq!(app.state.workspaces[0].active_tab, background_tab);
 
@@ -8023,6 +8035,7 @@ mod tests {
                 ratio: Some(0.333),
                 cwd: None,
                 focus: false,
+                companion: false,
                 right_click: crate::api::schema::PaneRightClickTarget::Pane,
                 env: Default::default(),
                 work_context: None,
@@ -8079,6 +8092,7 @@ mod tests {
                 ratio: None,
                 cwd: None,
                 focus: false,
+                companion: false,
                 right_click: Default::default(),
                 env: Default::default(),
                 work_context: None,

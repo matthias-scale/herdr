@@ -221,6 +221,7 @@ impl App {
                 ratio: None,
                 cwd: Some(cwd.to_string_lossy().into_owned()),
                 focus: true,
+                companion: false,
                 right_click: Default::default(),
                 env: Default::default(),
                 work_context: None,
