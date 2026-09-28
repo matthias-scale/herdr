@@ -616,8 +616,8 @@ mod tests {
         assert_eq!(error.error.message, "tab w_missing:t1 not found");
     }
 
-    #[test]
-    fn api_tab_close_last_tab_replaces_tab_without_closing_workspace() {
+    #[tokio::test]
+    async fn api_tab_close_last_tab_replaces_tab_without_closing_workspace() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(&Config::default(), true, None, api_rx, event_hub.clone());

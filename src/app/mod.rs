@@ -8253,8 +8253,8 @@ mod tests {
         assert_eq!(app.state.workspaces[0].display_name(), "api-pane-close");
     }
 
-    #[test]
-    fn pane_close_request_replaces_last_tab_without_closing_workspace() {
+    #[tokio::test]
+    async fn pane_close_request_replaces_last_tab_without_closing_workspace() {
         let mut app = test_app();
         let workspace = Workspace::test_new("api-pane-close-last");
         app.state.workspaces = vec![workspace];

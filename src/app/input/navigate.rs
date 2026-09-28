@@ -7332,8 +7332,8 @@ navigate_pane_down = "ctrl+j"
         assert_eq!(state.workspaces.len(), 2);
     }
 
-    #[test]
-    fn tui_close_tab_last_tab_replaces_tab_without_closing_workspace() {
+    #[tokio::test]
+    async fn tui_close_tab_last_tab_replaces_tab_without_closing_workspace() {
         let mut app = app_with_test_workspaces(&["main"]);
         let workspace_id = app.state.workspaces[0].id.clone();
         let workspace_cwd = app.state.workspaces[0].identity_cwd.clone();
@@ -7366,8 +7366,8 @@ navigate_pane_down = "ctrl+j"
         }));
     }
 
-    #[test]
-    fn tui_close_last_pane_replaces_tab_without_closing_workspace() {
+    #[tokio::test]
+    async fn tui_close_last_pane_replaces_tab_without_closing_workspace() {
         let mut app = app_with_test_workspaces(&["main"]);
         let workspace_id = app.state.workspaces[0].id.clone();
         let workspace_cwd = app.state.workspaces[0].identity_cwd.clone();

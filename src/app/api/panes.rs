@@ -4720,8 +4720,8 @@ mod tests {
             .is_empty());
     }
 
-    #[test]
-    fn api_pane_close_last_pane_keeps_linked_worktree_workspace() {
+    #[tokio::test]
+    async fn api_pane_close_last_pane_keeps_linked_worktree_workspace() {
         let mut app = app_with_linked_worktree();
         let workspace_id = app.state.workspaces[0].id.clone();
         let workspace_cwd = app.state.workspaces[0].identity_cwd.clone();
@@ -4749,8 +4749,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn api_pane_close_removes_orphaned_companions_with_their_tab() {
+    #[tokio::test]
+    async fn api_pane_close_removes_orphaned_companions_with_their_tab() {
         let (mut app, _) = app_with_test_workspace();
         let primary = app.state.workspaces[0].tabs[0].root_pane;
         let companion = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
