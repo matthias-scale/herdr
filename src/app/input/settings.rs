@@ -978,7 +978,8 @@ mod tests {
     #[test]
     fn clicking_the_providers_nav_row_starts_the_tool_probes() {
         let mut app = app_for_mouse_test();
-        open_settings_at(&mut app.state, SettingsSection::General);
+        // Keep Providers visible in the scrolled nav without entering a probed section.
+        open_settings_at(&mut app.state, SettingsSection::Keybindings);
         // Opening on an unprobed section leaves nothing requested.
         assert!(!app.state.request_tool_probes);
 
@@ -1013,7 +1014,7 @@ mod tests {
         assert!(state.request_tool_probes, "open_settings_at requests");
 
         state.request_tool_probes = false;
-        open_settings_at(&mut state, SettingsSection::General);
+        open_settings_at(&mut state, SettingsSection::Keybindings);
         assert!(!state.request_tool_probes, "an unprobed section does not");
 
         // Keyboard: tab through to Integrations.
