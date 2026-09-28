@@ -3114,7 +3114,7 @@ fn sidebar_thread_card(app: &AppState, entry: &AgentPanelEntry) -> SidebarThread
         host_kind,
         agent,
         agent_icon: if app.nerd_font {
-            detected_agent.and_then(crate::ui::icons::agent_icon)
+            detected_agent.map(|agent| crate::ui::icons::agent_icon(agent).unwrap_or("◆"))
         } else {
             None
         },
@@ -29416,6 +29416,46 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("render icon card");
         assert!(row_text(terminal.backend().buffer(), 0, 60).contains("\u{EBC8}"));
         assert!(row_text(terminal.backend().buffer(), 1, 60).contains("\u{EC82}"));
+    }
+
+    #[test]
+    fn sections_thread_card_uses_generic_icon_for_unmapped_agent() {
+        let mut app = app_with_agents(&["herdr"]);
+        app.nerd_font = true;
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("agent terminal")
+            .detected_agent = Some(Agent::Cursor);
+        app.refresh_local_agent_panel_identities();
+
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .next()
+            .expect("Cursor sidebar entry");
+        let card = sidebar_thread_card(&app, &entry);
+        assert_eq!(card.agent_icon, Some("◆"));
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 2)).expect("generic icon card");
+        terminal
+            .draw(|frame| {
+                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 60, 2), false)
+            })
+            .expect("render generic icon card");
+        let buffer = terminal.backend().buffer();
+        let second = row_text(buffer, 1, 60);
+        assert!(
+            second.contains("◆"),
+            "generic agent mark missing: {second:?}"
+        );
+        let icon = (0..60)
+            .map(|x| &buffer[(x, 1)])
+            .find(|cell| cell.symbol() == "◆")
+            .expect("generic agent mark cell");
+        assert_eq!(icon.fg, app.palette.overlay0);
     }
 
     #[test]
