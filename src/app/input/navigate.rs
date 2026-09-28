@@ -2070,26 +2070,28 @@ fn cycle_visible_workspaces(state: &AppState) -> std::collections::HashSet<usize
     if crate::ui::sidebar::section_is_collapsed(state, crate::ui::sidebar::SPACES_SECTION_TITLE) {
         return std::collections::HashSet::new();
     }
-    // Work-item modes list groups, not spaces, so row visibility alone decides.
-    if matches!(
-        state.sidebar_group_mode,
-        crate::app::state::SidebarGroupMode::LinearTeam
-            | crate::app::state::SidebarGroupMode::Missive
-    ) {
-        return (0..state.workspaces.len())
-            .filter(|ws_idx| !state.workspaces[*ws_idx].is_fleet)
-            .collect();
-    }
-    crate::ui::sidebar::workspace_list_entries_for_mode(state, false, state.sidebar_group_mode)
+    // A space is hidden only when a collapsed group drops it from the list;
+    // spaces a mode never lists (worktree members, work-item modes) stay.
+    let listed = |force_expanded| {
+        crate::ui::sidebar::workspace_list_entries_for_mode(
+            state,
+            force_expanded,
+            state.sidebar_group_mode,
+        )
         .into_iter()
         .filter_map(|entry| match entry {
-            crate::ui::sidebar::WorkspaceListEntry::Workspace { ws_idx, .. }
-                if !state.workspaces[ws_idx].is_fleet =>
-            {
-                Some(ws_idx)
-            }
+            crate::ui::sidebar::WorkspaceListEntry::Workspace { ws_idx, .. } => Some(ws_idx),
             _ => None,
         })
+        .collect::<std::collections::HashSet<_>>()
+    };
+    let shown = listed(false);
+    let collapsed = listed(true)
+        .into_iter()
+        .filter(|ws_idx| !shown.contains(ws_idx))
+        .collect::<std::collections::HashSet<_>>();
+    (0..state.workspaces.len())
+        .filter(|ws_idx| !state.workspaces[*ws_idx].is_fleet && !collapsed.contains(ws_idx))
         .collect()
 }
 
@@ -2155,12 +2157,21 @@ fn cycle_shown_local_tabs(
 /// Local spaces in sidebar order; spaces the list does not name follow in
 /// index order.
 fn cycle_space_order(state: &AppState) -> Vec<usize> {
+    let grouped = state.sidebar_group_mode != crate::app::state::SidebarGroupMode::Spaces;
     let mut seen = std::collections::HashSet::new();
     crate::ui::sidebar::workspace_list_entries_for_mode(state, true, state.sidebar_group_mode)
         .into_iter()
         .filter_map(|entry| match entry {
             crate::ui::sidebar::WorkspaceListEntry::Workspace { ws_idx, .. } => Some(ws_idx),
             _ => None,
+        })
+        // Grouped members follow their root, as the space tree shows them.
+        .flat_map(|ws_idx| {
+            std::iter::once(ws_idx).chain(
+                grouped
+                    .then(|| crate::ui::sidebar::sidebar_space_member_indices(state, ws_idx))
+                    .unwrap_or_default(),
+            )
         })
         .chain(0..state.workspaces.len())
         .filter(|ws_idx| !state.workspaces[*ws_idx].is_fleet && seen.insert(*ws_idx))
@@ -4510,6 +4521,80 @@ mod tests {
                     &[(ws_idx, 0), (ws_idx, 1)],
                     "{mode:?}: tabs out of order in {order:?}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn next_window_keeps_worktree_groups_together_and_visible() {
+        use crate::app::state::SidebarGroupMode;
+        for sections in [false, true] {
+            for mode in [
+                SidebarGroupMode::Repo,
+                SidebarGroupMode::RepoWorktree,
+                SidebarGroupMode::RepoPr,
+            ] {
+                // Root `a`, unrelated `b`, then `a`'s worktree.
+                let mut app = app_with_test_workspaces(&["a", "b", "a-wt"]);
+                mark_worktree_space_member(&mut app.state, 0, "repo-a");
+                mark_worktree_space_member(&mut app.state, 2, "repo-a");
+                for terminal in app.state.terminals.values_mut() {
+                    terminal.set_detected_state(
+                        Some(crate::detect::Agent::Claude),
+                        crate::detect::AgentState::Blocked,
+                    );
+                }
+                app.state.sidebar_sections_layout = sections;
+                app.state.set_sidebar_group_mode(mode);
+
+                let spaces = window_cycle_order(&app.state)
+                    .into_iter()
+                    .map(|(ws_idx, _)| ws_idx)
+                    .collect::<Vec<_>>();
+                let root = spaces.iter().position(|ws_idx| *ws_idx == 0);
+                let member = spaces.iter().position(|ws_idx| *ws_idx == 2);
+                assert_eq!(
+                    member.zip(root).map(|(member, root)| member.abs_diff(root)),
+                    Some(1),
+                    "{mode:?} sections={sections}: worktree split from its root in {spaces:?}"
+                );
+
+                // Nothing is collapsed, so skip-collapsed keeps every shown tab.
+                app.state.skip_collapsed_cycle = true;
+                let cycled = window_cycle_order(&app.state);
+                let shown_rows = crate::ui::sidebar_rows(&app.state)
+                    .into_iter()
+                    .filter_map(|row| match row {
+                        crate::ui::SidebarRow::Tab { entry, .. } => entry.local_target(),
+                        _ => None,
+                    })
+                    .map(|target| (target.ws_idx, target.tab_idx))
+                    .collect::<Vec<_>>();
+                for tab in shown_rows {
+                    assert!(
+                        cycled.contains(&tab),
+                        "{mode:?} sections={sections}: shown tab {tab:?} left out of {cycled:?}"
+                    );
+                }
+                let blocked = blocked_pane_cycle(&app.state);
+                for row in crate::ui::sidebar_rows(&app.state) {
+                    let (crate::ui::SidebarRow::Tab { entry, .. }
+                    | crate::ui::SidebarRow::Agent { entry, .. }) = row
+                    else {
+                        continue;
+                    };
+                    let Some(target) = entry.local_target() else {
+                        continue;
+                    };
+                    assert!(
+                        blocked.iter().any(|(pane, _)| matches!(
+                            pane,
+                            BlockedPaneTarget::Local { ws_idx, pane_id, .. }
+                                if (*ws_idx, *pane_id) == (target.ws_idx, target.pane_id)
+                        )),
+                        "{mode:?} sections={sections}: shown blocked pane {target:?} skipped"
+                    );
+                }
             }
         }
     }
