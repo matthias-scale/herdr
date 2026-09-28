@@ -399,7 +399,6 @@ impl App {
         self.state.remove_unattached_terminal_ids(terminal_ids);
         self.shutdown_detached_terminal_runtimes();
         self.schedule_session_save();
-        crate::logging::tab_closed(&workspace_id, &tab_id);
         if let Some(public_pane_ids) = public_pane_ids {
             for pane_id in public_pane_ids {
                 self.emit_event(EventEnvelope {

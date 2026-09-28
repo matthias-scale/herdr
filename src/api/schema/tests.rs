@@ -769,7 +769,10 @@ fn pane_split_companion_uses_a_new_method_without_changing_pane_split_shape() {
     fn legacy_accepts(encoded: &str) -> Result<(), serde_json::Error> {
         let request = serde_json::from_str::<LegacyRequest>(encoded)?;
         match request.method {
-            LegacyMethod::PaneSplit(_) => Ok(()),
+            LegacyMethod::PaneSplit(params) => {
+                assert_eq!(params.target_pane_id.as_deref(), Some("pane-1"));
+                Ok(())
+            }
         }
     }
 

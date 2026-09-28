@@ -2258,10 +2258,6 @@ impl AppState {
             .unwrap_or_else(|| vec![ws_idx])
     }
 
-    pub(crate) fn workspace_close_would_close_worktree_group(&self, ws_idx: usize) -> bool {
-        self.workspace_close_indices(ws_idx).len() >= 2
-    }
-
     pub(crate) fn begin_workspace_close_confirmation(&mut self, ws_idx: usize) -> bool {
         let Some(workspace_id) = self
             .workspaces
