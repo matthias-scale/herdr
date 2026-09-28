@@ -10135,6 +10135,10 @@ fn render_section_header(
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
+                    format!(" {}", header.title),
+                    Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
                     format!(" {count}"),
                     Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
                 ),
@@ -29035,8 +29039,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .draw(|frame| render_section_header(&app, frame, &header, count, &[], false))
                 .expect("render shelf header");
             let line = row_text(terminal.backend().buffer(), 0, 32);
-            assert!(line.contains(expected), "{line:?}");
-            assert!(!line.contains(title), "{line:?}");
+            assert!(line.contains(&format!("{title}{expected}")), "{line:?}");
             assert!(!line.contains(&format!("({count})")), "{line:?}");
         }
     }
