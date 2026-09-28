@@ -9343,7 +9343,7 @@ mod tests {
             AgentState::Working
         );
         let owner = app.pane_info(1, owner_internal_id).unwrap();
-        assert_eq!(owner.agent_status, crate::api::schema::AgentStatus::Done);
+        assert_eq!(owner.agent_status, crate::api::schema::AgentStatus::Idle);
         assert_eq!(
             owner.tokens.get("closing_completion").map(String::as_str),
             Some("complete")
