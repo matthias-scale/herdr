@@ -1054,11 +1054,6 @@ impl TerminalState {
             .is_some_and(|hold| observed_at >= hold.since)
         {
             self.blocked_state_hold = None;
-            self.fallback_visible_blocker = false;
-            if self.fallback_state == AgentState::Blocked {
-                self.fallback_state = AgentState::Idle;
-            }
-            self.fallback_observed_at = Some(observed_at);
             true
         } else {
             false
@@ -1102,6 +1097,38 @@ impl TerminalState {
         self.blocked_state_hold.as_ref().is_some_and(|hold| {
             owner.matches_blocked_hold(&hold.owner) && observed_at >= hold.since
         }) && self.release_blocked_hold_at(observed_at)
+    }
+
+    fn release_full_lifecycle_blocked_hold_for_visible_working(
+        &mut self,
+        agent: Option<Agent>,
+        observed_at: Instant,
+    ) -> bool {
+        let Some(agent) = agent else {
+            return false;
+        };
+        let owner = self.blocked_hold_owner_for_agent(agent);
+        let should_release = self.blocked_state_hold.as_ref().is_some_and(|hold| {
+            owner.matches_blocked_hold(&hold.owner) && observed_at >= hold.since
+        }) && self.hook_authority.as_ref().is_some_and(|authority| {
+            authority.state == AgentState::Blocked
+                && authority.retired_at.is_none()
+                && authority.reported_at < observed_at
+                && self.hook_authority_is_effective(authority)
+                && crate::detect::full_lifecycle_hook_authority(
+                    &authority.source,
+                    &authority.agent_label,
+                )
+                && crate::detect::parse_agent_label(&authority.agent_label) == Some(agent)
+        });
+        if !should_release {
+            return false;
+        }
+
+        if let Some(authority) = self.hook_authority.as_mut() {
+            authority.retired_at = Some(observed_at);
+        }
+        self.release_blocked_state_hold_for(&owner, observed_at)
     }
 
     fn blocked_hold_matches_current_activity(&self, hold: &BlockedStateHold) -> bool {
@@ -2065,6 +2092,9 @@ impl TerminalState {
         let agent_released = process_exited
             && !newer_custom_authority
             && (previous_agent_label.is_some() || self.agent_name.is_some());
+        if visible_working_signal {
+            self.release_full_lifecycle_blocked_hold_for_visible_working(agent, now);
+        }
         if self.should_ignore_detected_state_under_full_lifecycle_hook(agent, process_exited) {
             if self
                 .hook_authority
@@ -4735,6 +4765,10 @@ impl TerminalState {
         if detected_state == AgentState::Idle
             && self.effective_agent_label().is_some()
             && self.foreground_process_active
+            && !self
+                .blocked_state_hold
+                .as_ref()
+                .is_some_and(|hold| self.blocked_hold_matches_current_activity(hold))
             && !(self.detected_agent == Some(Agent::Codex)
                 && self.fallback_state == AgentState::Idle)
             && !self.finished_closing_report()
@@ -9739,6 +9773,51 @@ mod tests {
     }
 
     #[test]
+    fn explicit_input_releases_hook_hold_but_preserves_visible_screen_blocker() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("pi-visible-blocker").unwrap();
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Pi,
+            "herdr:pi",
+            "pi",
+            session_ref.clone(),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Blocked,
+            None,
+            Some(session_ref),
+            Some(1),
+            observed,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Blocked,
+            true,
+            false,
+            false,
+            false,
+            false,
+            observed + Duration::from_millis(1),
+        );
+        assert!(terminal.blocked_state_hold.is_some());
+
+        terminal
+            .retire_blocked_full_lifecycle_hook_authority_at(observed + Duration::from_secs(1))
+            .expect("input releases the full-lifecycle blocked hold");
+
+        assert!(terminal.blocked_state_hold.is_none());
+        assert_eq!(terminal.fallback_state, AgentState::Blocked);
+        assert!(terminal.fallback_visible_blocker);
+        assert_eq!(terminal.state, AgentState::Blocked);
+        assert_eq!(terminal.effective_state_arbitration(), "screen");
+    }
+
+    #[test]
     fn working_report_releases_full_lifecycle_blocked_hold() {
         let observed = Instant::now();
         let mut terminal = test_terminal();
@@ -9773,6 +9852,50 @@ mod tests {
         );
 
         assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn visible_working_releases_same_owner_full_lifecycle_blocked_hold() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("pi-visible-working").unwrap();
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Pi,
+            "herdr:pi",
+            "pi",
+            session_ref.clone(),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Blocked,
+            None,
+            Some(session_ref),
+            Some(1),
+            observed,
+        );
+        assert!(terminal.blocked_state_hold.is_some());
+
+        let working_at = observed + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH;
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            working_at,
+        );
+
+        assert!(terminal.blocked_state_hold.is_none());
+        assert_eq!(terminal.state, AgentState::Working);
+        assert_eq!(
+            terminal.hook_authority.as_ref().unwrap().retired_at,
+            Some(working_at)
+        );
     }
 
     #[test]
@@ -13044,6 +13167,45 @@ mod tests {
 
         assert!(mutation.is_some());
         assert!(!terminal.full_lifecycle_hook_authority_active());
+        assert_eq!(terminal.state, AgentState::Blocked);
+        assert_eq!(terminal.effective_state_arbitration(), "blocked_hold");
+    }
+
+    #[test]
+    fn blocked_hold_outranks_foreground_process_after_full_lifecycle_horizon() {
+        let reported_at = Instant::now();
+        let timeout = Duration::from_secs(10 * 60);
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Kimi), AgentState::Idle);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("kimi-held-foreground").unwrap();
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Kimi,
+            "herdr:kimi",
+            "kimi",
+            session_ref.clone(),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:kimi".into(),
+            "kimi".into(),
+            AgentState::Blocked,
+            None,
+            Some(session_ref),
+            Some(1),
+            reported_at,
+        );
+        terminal.set_foreground_process(
+            Some("cargo".into()),
+            true,
+            reported_at + Duration::from_secs(1),
+        );
+
+        let after_timeout = reported_at + timeout + Duration::from_secs(1);
+        let mutation = terminal.expire_full_lifecycle_hook_authority_at(after_timeout, timeout);
+
+        assert!(mutation.is_some());
+        assert!(!terminal.full_lifecycle_hook_authority_active());
+        assert!(terminal.foreground_process_active());
         assert_eq!(terminal.state, AgentState::Blocked);
         assert_eq!(terminal.effective_state_arbitration(), "blocked_hold");
     }
