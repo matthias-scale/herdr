@@ -2760,8 +2760,8 @@ mod tests {
         )));
     }
 
-    #[test]
-    fn agent_status_transition_is_queued_and_flushed_to_log() {
+    #[tokio::test]
+    async fn agent_status_transition_is_queued_and_flushed_to_log() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -2781,6 +2781,14 @@ mod tests {
             .expect("root terminal")
             .set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Working);
         app.state = state;
+        app.terminal_runtimes.insert(
+            terminal_id,
+            crate::terminal::TerminalRuntime::test_with_screen_bytes(
+                80,
+                24,
+                b"recent session tail\n",
+            ),
+        );
         let log = crate::status_log::StatusLog::new(crate::status_log::test_tempdir());
         app.status_log = Some(log.clone());
 
@@ -2800,8 +2808,28 @@ mod tests {
         assert!(app.state.pending_status_transitions.is_empty());
         let records = log.read(&crate::status_log::ReadFilter::default());
         assert_eq!(records.len(), 1);
+        assert_eq!(records[0].pane, app.public_pane_id(0, pane_id).unwrap());
+        assert!(time::OffsetDateTime::parse(
+            &records[0].ts,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .is_ok());
+        assert!(records[0].host.is_some());
+        assert!(records[0].session.is_some());
+        assert_eq!(records[0].agent.as_deref(), Some("codex"));
         assert_eq!(records[0].from_state, "working");
         assert_eq!(records[0].to_state, "blocked");
         assert_eq!(records[0].source, crate::status_log::Source::Detector);
+        assert!(records[0].tail.contains("recent session tail"));
+        assert!(records[0].tail.len() <= crate::status_log::TAIL_MAX_BYTES);
+        assert!(records[0].tail.lines().count() <= crate::status_log::TAIL_MAX_LINES);
+
+        transition_agent_state(&mut app.state, pane_id, AgentState::Idle, Instant::now());
+        assert_eq!(app.state.pending_status_transitions.len(), 1);
+        app.status_log = None;
+        app.flush_status_transitions();
+
+        assert!(app.state.pending_status_transitions.is_empty());
+        assert_eq!(log.read(&crate::status_log::ReadFilter::default()).len(), 1);
     }
 }
