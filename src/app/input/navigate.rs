@@ -3986,7 +3986,7 @@ mod tests {
             }],
             ..crate::fleet::Snapshot::default()
         };
-        crate::ui::remote_agent_panel_entries_at(&snapshot, 100)
+        crate::ui::remote_agent_panel_entries_at(&snapshot, 100, false)
             .into_iter()
             .next()
             .expect("remote blocker entry")
@@ -4404,7 +4404,8 @@ mod tests {
             ..crate::fleet::Snapshot::default()
         };
         let mut state = AppState::test_new();
-        state.remote_agent_panel_entries = crate::ui::remote_agent_panel_entries_at(&snapshot, 100);
+        state.remote_agent_panel_entries =
+            crate::ui::remote_agent_panel_entries_at(&snapshot, 100, false);
         state.view_observed_unix_s = 100;
         state.collapsed_sidebar_groups.remove("repo:Fleet");
 
