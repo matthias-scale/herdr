@@ -2097,6 +2097,11 @@ fn codex_v0158_question_and_confirmation_snapshots_are_blocked() {
             "browser_sign_in",
         ),
         (
+            "narrow browser sign in",
+            include_str!("../../../tests/fixtures/agent-detection/codex-browser-sign-in-narrow-20260928.txt"),
+            "browser_sign_in",
+        ),
+        (
             "remapped request_user_input submit",
             include_str!("../../../tests/fixtures/agent-detection/codex-request-user-input-remapped-submit-20260928.txt"),
             "request_user_input",
@@ -2235,6 +2240,14 @@ fn codex_question_prompts_above_idle_composer_are_not_blocked() {
 
         assert_ne!(result.state, AgentState::Blocked, "{name}");
     }
+
+    let narrow_browser_prompt = include_str!(
+        "../../../tests/fixtures/agent-detection/codex-browser-sign-in-narrow-20260928.txt"
+    );
+    let screen = format!("{narrow_browser_prompt}\n› \n\n  GPT-6-Luna default · /repo");
+    let result = bundled_explain(Agent::Codex, &screen);
+
+    assert_ne!(result.state, AgentState::Blocked, "narrow browser sign in");
 }
 
 #[test]
