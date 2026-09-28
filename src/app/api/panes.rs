@@ -1915,14 +1915,19 @@ impl App {
             return AgentReportPaneResolution::Pane((ws_idx, pane_id));
         }
 
-        match self.unique_agent_session_pane(agent_label, session_id) {
-            UniqueAgentSessionPane::One(target) => AgentReportPaneResolution::Pane(target),
-            // A report without a current owner can establish a new session on
-            // its resolved pane. Ambiguous ownership must never mutate either
-            // the addressed pane or one of the possible owners.
-            UniqueAgentSessionPane::None => AgentReportPaneResolution::Pane((ws_idx, pane_id)),
-            UniqueAgentSessionPane::Several => AgentReportPaneResolution::Ignore,
+        if self.pane_has_live_conflicting_agent_session(ws_idx, pane_id, agent_label, session_id) {
+            return match self.unique_live_agent_session_pane(agent_label, session_id) {
+                UniqueAgentSessionPane::One(target) => AgentReportPaneResolution::Pane(target),
+                UniqueAgentSessionPane::None | UniqueAgentSessionPane::Several => {
+                    AgentReportPaneResolution::Ignore
+                }
+            };
         }
+
+        // A resolved pane with no live conflicting session can be a shell, a
+        // newly started agent, or a resumed session whose first hook is still
+        // reporting. Persisted identity on another pane must not steal it.
+        AgentReportPaneResolution::Pane((ws_idx, pane_id))
     }
 
     fn pane_owns_agent_session(
@@ -1957,6 +1962,55 @@ impl App {
                         .get(&pane.attached_terminal_id)
                         .is_some_and(|terminal| {
                             terminal.agent_session_id_matches_current_agent(agent_label, session_id)
+                        });
+                    if matches {
+                        if owner.is_some() {
+                            return UniqueAgentSessionPane::Several;
+                        }
+                        owner = Some((ws_idx, pane_id));
+                    }
+                }
+            }
+        }
+        owner.map_or(UniqueAgentSessionPane::None, UniqueAgentSessionPane::One)
+    }
+
+    fn pane_has_live_conflicting_agent_session(
+        &self,
+        ws_idx: usize,
+        pane_id: PaneId,
+        agent_label: &str,
+        session_id: &str,
+    ) -> bool {
+        self.state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.pane_state(pane_id))
+            .and_then(|pane| self.state.terminals.get(&pane.attached_terminal_id))
+            .and_then(crate::terminal::TerminalState::effective_non_retired_hook_session)
+            .is_some_and(|(current_agent, current_session)| {
+                current_agent != agent_label || current_session != session_id
+            })
+    }
+
+    fn unique_live_agent_session_pane(
+        &self,
+        agent_label: &str,
+        session_id: &str,
+    ) -> UniqueAgentSessionPane {
+        let mut owner = None;
+        for (ws_idx, workspace) in self.state.workspaces.iter().enumerate() {
+            for tab in &workspace.tabs {
+                for (&pane_id, pane) in &tab.panes {
+                    let matches = self
+                        .state
+                        .terminals
+                        .get(&pane.attached_terminal_id)
+                        .and_then(
+                            crate::terminal::TerminalState::effective_non_retired_hook_session,
+                        )
+                        .is_some_and(|(current_agent, current_session)| {
+                            current_agent == agent_label && current_session == session_id
                         });
                     if matches {
                         if owner.is_some() {
@@ -4290,6 +4344,31 @@ mod tests {
                 agent: agent.into(),
                 session_ref: crate::agent_resume::AgentSessionRef::id(session_id).unwrap(),
             });
+        terminal_id
+    }
+
+    fn bind_test_live_agent_session(
+        app: &mut App,
+        pane_id: &str,
+        source: &str,
+        agent_label: &str,
+        session_id: &str,
+    ) -> crate::terminal::TerminalId {
+        let terminal_id = bind_test_agent_session(app, pane_id, source, agent_label, session_id);
+        let agent = crate::detect::parse_agent_label(agent_label).expect("known test agent");
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(agent), AgentState::Working);
+        terminal.set_hook_authority_with_session_ref(
+            source.into(),
+            agent_label.into(),
+            AgentState::Working,
+            None,
+            Some(
+                crate::agent_resume::AgentSessionRef::id(session_id)
+                    .expect("valid test session id"),
+            ),
+            Some(1),
+        );
         terminal_id
     }
 
@@ -9302,23 +9381,213 @@ mod tests {
     }
 
     #[test]
-    fn a_reused_pane_id_cannot_take_another_sessions_report() {
+    fn resumed_report_agent_session_stays_on_addressed_pane_with_persisted_duplicate() {
+        let (mut app, old_pane_id) = app_with_test_workspace();
+        let (old_ws_idx, old_internal_pane_id) = app.parse_pane_id(&old_pane_id).unwrap();
+        let old_terminal_id = app.state.workspaces[old_ws_idx]
+            .pane_state(old_internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        bind_test_agent_session(
+            &mut app,
+            &old_pane_id,
+            "herdr:claude",
+            "claude",
+            "resumed-session",
+        );
+        let old_state = app.state.terminals[&old_terminal_id].raw_agent_state();
+
+        let resumed_pane_id = add_test_workspace(&mut app, "resumed-session");
+        let (resumed_ws_idx, resumed_internal_pane_id) =
+            app.parse_pane_id(&resumed_pane_id).unwrap();
+        let resumed_terminal_id = app.state.workspaces[resumed_ws_idx]
+            .pane_state(resumed_internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&resumed_terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+
+        let session_response = app.handle_pane_report_agent_session(
+            "resumed-session-report".into(),
+            PaneReportAgentSessionParams {
+                pane_id: resumed_pane_id.clone(),
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                seq: Some(1),
+                agent_session_id: Some("resumed-session".into()),
+                agent_session_path: None,
+                session_start_source: Some("resume".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&session_response).unwrap();
+        assert_eq!(
+            app.state.terminals[&resumed_terminal_id].current_agent_session_id(),
+            Some("resumed-session")
+        );
+        assert_eq!(
+            app.state.terminals[&old_terminal_id]
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("resumed-session")
+        );
+        assert!(app.state.terminals[&old_terminal_id]
+            .hook_authority
+            .is_none());
+
+        let mut report = closing_block_report(&resumed_pane_id, 2, Vec::new());
+        report.source = "herdr:claude-closing-block".into();
+        report.agent = "claude".into();
+        report.agent_session_id = Some("resumed-session".into());
+        let response = app.handle_pane_report_agent("resumed-final-report".into(), report);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(
+            app.state.terminals[&old_terminal_id].raw_agent_state(),
+            old_state,
+            "the pane carrying only persisted identity stays untouched"
+        );
+        assert_eq!(
+            app.pane_info(resumed_ws_idx, resumed_internal_pane_id)
+                .unwrap()
+                .tokens
+                .get("closing_completion")
+                .map(String::as_str),
+            Some("complete")
+        );
+    }
+
+    #[test]
+    fn report_agent_session_uses_addressed_shell_over_persisted_session_owner() {
+        let (mut app, old_pane_id) = app_with_test_workspace();
+        let (old_ws_idx, old_internal_pane_id) = app.parse_pane_id(&old_pane_id).unwrap();
+        let old_terminal_id = app.state.workspaces[old_ws_idx]
+            .pane_state(old_internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        bind_test_agent_session(
+            &mut app,
+            &old_pane_id,
+            "herdr:claude",
+            "claude",
+            "persisted-session",
+        );
+        let old_state = app.state.terminals[&old_terminal_id].raw_agent_state();
+
+        let addressed_pane_id = add_test_workspace(&mut app, "addressed-shell");
+        let (addressed_ws_idx, addressed_internal_pane_id) =
+            app.parse_pane_id(&addressed_pane_id).unwrap();
+        let addressed_terminal_id = app.state.workspaces[addressed_ws_idx]
+            .pane_state(addressed_internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+
+        let response = app.handle_pane_report_agent_session(
+            "shell-session-report".into(),
+            PaneReportAgentSessionParams {
+                pane_id: addressed_pane_id,
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                seq: Some(1),
+                agent_session_id: Some("persisted-session".into()),
+                agent_session_path: None,
+                session_start_source: Some("startup".into()),
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(
+            app.state.terminals[&addressed_terminal_id].current_agent_session_id(),
+            Some("persisted-session")
+        );
+        assert_eq!(
+            app.state.terminals[&old_terminal_id].raw_agent_state(),
+            old_state
+        );
+        assert!(app.state.terminals[&old_terminal_id]
+            .hook_authority
+            .is_none());
+    }
+
+    #[test]
+    fn report_agent_does_not_reroute_live_conflict_to_persisted_session_owner() {
+        let (mut app, persisted_pane_id) = app_with_test_workspace();
+        let (persisted_ws_idx, persisted_internal_pane_id) =
+            app.parse_pane_id(&persisted_pane_id).unwrap();
+        let persisted_terminal_id = app.state.workspaces[persisted_ws_idx]
+            .pane_state(persisted_internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        bind_test_agent_session(
+            &mut app,
+            &persisted_pane_id,
+            "herdr:claude",
+            "claude",
+            "persisted-session",
+        );
+        let persisted_state = app.state.terminals[&persisted_terminal_id].raw_agent_state();
+
+        let live_pane_id = add_test_workspace(&mut app, "live-other-session");
+        let (live_ws_idx, live_internal_pane_id) = app.parse_pane_id(&live_pane_id).unwrap();
+        let live_terminal_id = bind_test_live_agent_session(
+            &mut app,
+            &live_pane_id,
+            "herdr:claude",
+            "claude",
+            "live-session",
+        );
+        let live_state = app.state.terminals[&live_terminal_id].raw_agent_state();
+
+        let mut report = closing_block_report(&live_pane_id, 1, vec![test_gate()]);
+        report.source = "herdr:claude-closing-block".into();
+        report.agent = "claude".into();
+        report.agent_session_id = Some("persisted-session".into());
+        let response = app.handle_pane_report_agent("persisted-conflict".into(), report);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(
+            app.state.terminals[&persisted_terminal_id].raw_agent_state(),
+            persisted_state
+        );
+        assert!(app.state.terminals[&persisted_terminal_id]
+            .hook_authority
+            .is_none());
+        assert_eq!(
+            app.state.terminals[&live_terminal_id].current_agent_session_id(),
+            Some("live-session")
+        );
+        assert_eq!(
+            app.state.terminals[&live_terminal_id].raw_agent_state(),
+            live_state
+        );
+        assert!(app
+            .pane_info(live_ws_idx, live_internal_pane_id)
+            .unwrap()
+            .gates
+            .is_empty());
+    }
+
+    #[test]
+    fn report_agent_on_reused_pane_id_cannot_take_another_sessions_report() {
         let (mut app, reused_pane_id) = app_with_test_workspace();
-        let reused_terminal_id = bind_test_agent_session(
+        let reused_terminal_id = bind_test_live_agent_session(
             &mut app,
             &reused_pane_id,
             "herdr:claude",
             "claude",
             "other-session",
         );
-        app.state
-            .terminals
-            .get_mut(&reused_terminal_id)
-            .unwrap()
-            .set_detected_state(Some(Agent::Claude), AgentState::Working);
 
         let owner_pane_id = add_test_workspace(&mut app, "actual-session-owner");
-        let owner_terminal_id = bind_test_agent_session(
+        let owner_terminal_id = bind_test_live_agent_session(
             &mut app,
             &owner_pane_id,
             "herdr:claude",
