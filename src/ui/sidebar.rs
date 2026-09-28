@@ -791,6 +791,7 @@ pub(super) fn render_remote_compact_agent_row(
     );
 }
 
+#[cfg(test)]
 pub(super) fn render_remote_compact_agent_row_with_identity(
     app: &AppState,
     frame: &mut Frame,
@@ -799,6 +800,28 @@ pub(super) fn render_remote_compact_agent_row_with_identity(
     depth: u16,
     bg: Option<Color>,
     show_host_identity: bool,
+) {
+    render_remote_compact_agent_row_with_shelf(
+        app,
+        frame,
+        remote,
+        rect,
+        depth,
+        bg,
+        show_host_identity,
+        false,
+    );
+}
+
+pub(super) fn render_remote_compact_agent_row_with_shelf(
+    app: &AppState,
+    frame: &mut Frame,
+    remote: &RemoteAgentPanelEntry,
+    rect: Rect,
+    depth: u16,
+    bg: Option<Color>,
+    show_host_identity: bool,
+    working_shelf: bool,
 ) {
     render_remote_compact_agent_row_with_prefix(
         app,
@@ -809,7 +832,7 @@ pub(super) fn render_remote_compact_agent_row_with_identity(
         bg,
         None,
         show_host_identity,
-        false,
+        working_shelf,
     );
 }
 
@@ -959,6 +982,18 @@ fn render_remote_compact_agent_row_with_prefix(
                 .alignment(Alignment::Right),
             Rect::new(x, rect.y, age_width as u16, rect.height),
         );
+    }
+    if rect.height > 1 {
+        if let Some(ask) = visible_pending_ask(app, &remote.entry) {
+            let subtitle = format!("{}↳ {ask}", " ".repeat(requested_prefix));
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    truncate_end(&subtitle, usize::from(rect.width)),
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                )),
+                Rect::new(rect.x, rect.y.saturating_add(1), rect.width, 1),
+            );
+        }
     }
 }
 
@@ -1480,11 +1515,13 @@ impl AgentPanelEntry {
     }
 }
 
-fn pending_human_ask(terminal: &crate::terminal::TerminalState) -> Option<String> {
-    let text = terminal
-        .closing_gates()
+fn pending_ask_from_items(
+    gates: &[crate::api::schema::ClosingBlockItem],
+    items: &[crate::api::schema::ClosingBlockItem],
+) -> Option<String> {
+    let text = gates
         .iter()
-        .chain(terminal.closing_items())
+        .chain(items)
         .find(|item| item.requires_human_input())
         .and_then(|item| item.text.lines().next())
         .map(|line| {
@@ -1495,6 +1532,19 @@ fn pending_human_ask(terminal: &crate::terminal::TerminalState) -> Option<String
         })?;
     let text = text.trim();
     (!text.is_empty()).then(|| text.to_string())
+}
+
+fn pending_human_ask(terminal: &crate::terminal::TerminalState) -> Option<String> {
+    pending_ask_from_items(terminal.closing_gates(), terminal.closing_items())
+}
+
+pub(super) fn visible_pending_ask<'a>(
+    app: &AppState,
+    entry: &'a AgentPanelEntry,
+) -> Option<&'a str> {
+    (app.sidebar_sections_layout && app.sidebar_show_ask_subtitles && entry_is_blocked(entry))
+        .then_some(entry.pending_ask.as_deref())
+        .flatten()
 }
 
 impl std::ops::Deref for AgentPanelEntry {
@@ -2205,50 +2255,54 @@ pub(crate) fn remote_agent_panel_entries_at(
                 .unwrap_or_else(|| {
                     middle_elide(row.agent_ref.host.as_str(), SIDEBAR_HOST_TOKEN_NARROW_WIDTH)
                 });
+            let mut panel_entry = AgentPanelEntry::new(
+                AgentPanelIdentity::Remote(row.agent_ref.clone()),
+                AgentPanelEntryData {
+                    primary_label: row.agent_ref.host.clone(),
+                    space_label: workspace_id.clone(),
+                    primary_tab_label: Some(title),
+                    tab_has_custom_name,
+                    tab_label_leads_with_agent: false,
+                    pane_label,
+                    pane_label_is_agent_identity: true,
+                    terminal_title,
+                    terminal_title_stripped,
+                    agent_label,
+                    agent_kind_label: row.agent.clone(),
+                    agent,
+                    foreground_process_name: None,
+                    agent_context: agent,
+                    has_agent: true,
+                    prio: false,
+                    starred: false,
+                    state: lifecycle.state,
+                    attention_tier: lifecycle.attention_tier,
+                    open_blockers: lifecycle.open_blockers,
+                    completion_tier: None,
+                    usage_limited: lifecycle.usage_limited,
+                    active_subagents: None,
+                    waiting_on_agents: lifecycle.waiting_on_agents,
+                    holds_shell: false,
+                    gate_count,
+                    seen: lifecycle.seen,
+                    done_since: None,
+                    stale: lifecycle.stale,
+                    reported_at,
+                    last_agent_state_change_seq: state_change_seq,
+                    activity_at: reported_at,
+                    state_labels,
+                    tokens,
+                    tab_first_pane: false,
+                    remote_host: None,
+                },
+            );
+            panel_entry.pending_ask = row
+                .agent_info()
+                .and_then(|info| pending_ask_from_items(&info.gates, &info.items));
             Some(std::sync::Arc::new(
                 RemoteAgentPanelEntry::new_with_narrow_host(
                     row.agent_ref.clone(),
-                    AgentPanelEntry::new(
-                        AgentPanelIdentity::Remote(row.agent_ref.clone()),
-                        AgentPanelEntryData {
-                            primary_label: row.agent_ref.host.clone(),
-                            space_label: workspace_id.clone(),
-                            primary_tab_label: Some(title),
-                            tab_has_custom_name,
-                            tab_label_leads_with_agent: false,
-                            pane_label,
-                            pane_label_is_agent_identity: true,
-                            terminal_title,
-                            terminal_title_stripped,
-                            agent_label,
-                            agent_kind_label: row.agent.clone(),
-                            agent,
-                            foreground_process_name: None,
-                            agent_context: agent,
-                            has_agent: true,
-                            prio: false,
-                            starred: false,
-                            state: lifecycle.state,
-                            attention_tier: lifecycle.attention_tier,
-                            open_blockers: lifecycle.open_blockers,
-                            completion_tier: None,
-                            usage_limited: lifecycle.usage_limited,
-                            active_subagents: None,
-                            waiting_on_agents: lifecycle.waiting_on_agents,
-                            holds_shell: false,
-                            gate_count,
-                            seen: lifecycle.seen,
-                            done_since: None,
-                            stale: lifecycle.stale,
-                            reported_at,
-                            last_agent_state_change_seq: state_change_seq,
-                            activity_at: reported_at,
-                            state_labels,
-                            tokens,
-                            tab_first_pane: false,
-                            remote_host: None,
-                        },
-                    ),
+                    panel_entry,
                     narrow_host,
                     work_context,
                     workspace_id,
@@ -3504,7 +3558,7 @@ fn compact_sidebar_rows_inner(
             space_entries,
             false,
             terminal_runtimes,
-            SidebarGroupMode::Spaces,
+            SidebarGroupMode::Repo,
             false,
             true,
             workspace_activity.as_ref(),
@@ -3761,13 +3815,9 @@ fn sidebar_remote_activity(
         {
             continue;
         }
-        let workspace_id = if remote.workspace_id.is_empty() {
-            "Remote".to_string()
-        } else {
-            remote.workspace_id.clone()
-        };
+        let (group_key, _) = remote_focus_group(remote);
         let count = activity
-            .entry((remote.agent_ref.host.clone(), workspace_id))
+            .entry((remote.agent_ref.host.clone(), group_key))
             .or_insert(SidebarActivityCount::default());
         count.total = count.total.saturating_add(1);
         if entry.state == AgentState::Working && !entry.usage_limited {
@@ -3775,6 +3825,28 @@ fn sidebar_remote_activity(
         }
     }
     activity
+}
+
+fn remote_focus_group(remote: &RemoteAgentPanelEntry) -> (String, String) {
+    if let Some(repo) = remote
+        .work_context
+        .repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty())
+    {
+        let title = repo.trim_end_matches('/');
+        return (
+            format!("repo:{repo}"),
+            title.rsplit('/').next().unwrap_or(title).to_string(),
+        );
+    }
+    let workspace = if remote.workspace_id.is_empty() {
+        "Remote"
+    } else {
+        remote.workspace_id.as_str()
+    };
+    (workspace.to_string(), workspace.to_string())
 }
 
 fn sidebar_workspace_activity(
@@ -3907,22 +3979,18 @@ fn append_space_tree_rows(
     let workspace_labels = sidebar_workspace_labels(app, terminal_runtimes);
     let workspaces = workspace_list_entries_for_mode(app, expand_worktrees, mode);
     let mut entries_by_workspace = std::collections::HashMap::<usize, Vec<AgentPanelEntry>>::new();
-    let mut remote_spaces = Vec::<(String, String, Vec<AgentPanelEntry>)>::new();
+    let mut remote_spaces = Vec::<(String, String, String, Vec<AgentPanelEntry>)>::new();
     for entry in entries {
         if let Some(remote) = entry.remote_entry.as_ref() {
             let host = remote.agent_ref.host.clone();
-            let workspace_id = if remote.workspace_id.is_empty() {
-                "Remote".to_string()
-            } else {
-                remote.workspace_id.clone()
-            };
+            let (group_key, title) = remote_focus_group(remote);
             match remote_spaces
                 .iter_mut()
-                .find(|(group_host, group_workspace, _)| {
-                    group_host == &host && group_workspace == &workspace_id
+                .find(|(group_host, group_key_seen, _, _)| {
+                    group_host == &host && group_key_seen == &group_key
                 }) {
-                Some((_, _, group_entries)) => group_entries.push(entry),
-                None => remote_spaces.push((host, workspace_id, vec![entry])),
+                Some((_, _, _, group_entries)) => group_entries.push(entry),
+                None => remote_spaces.push((host, group_key, title, vec![entry])),
             }
         } else {
             if let Some(target) = entry.local_target() {
@@ -4073,23 +4141,23 @@ fn append_space_tree_rows(
         }
     }
     let mut remote_title_counts = std::collections::HashMap::<String, usize>::new();
-    for (_, workspace_id, _) in &remote_spaces {
-        *remote_title_counts.entry(workspace_id.clone()).or_default() += 1;
+    for (_, _, title, _) in &remote_spaces {
+        *remote_title_counts.entry(title.clone()).or_default() += 1;
     }
-    for (host, workspace_id, entries) in remote_spaces {
-        let key = format!("remote-space:{host}:{workspace_id}");
+    for (host, group_key, title, entries) in remote_spaces {
+        let key = format!("remote-space:{host}:{group_key}");
         let collapsed = section_is_collapsed(app, &key);
         let sort = effective_sidebar_group_sort(app, &key, SidebarSortMode::Default);
         let activity_count = remote_activity
-            .and_then(|activity| activity.get(&(host.clone(), workspace_id.clone())))
+            .and_then(|activity| activity.get(&(host.clone(), group_key.clone())))
             .map(|count| (count.working, count.total));
         let title = if remote_title_counts
-            .get(workspace_id.as_str())
+            .get(title.as_str())
             .is_some_and(|count| *count > 1)
         {
-            format!("{workspace_id} · {host}")
+            format!("{title} · {host}")
         } else {
-            workspace_id
+            title
         };
         rows.push(SidebarRow::NestedHeader {
             key: key.clone(),
@@ -7306,15 +7374,13 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
         SidebarRow::Agent { entry, depth } => {
             agent_entry_height_in_body_at(app, entry, body_height, *depth)
         }
-        SidebarRow::RemoteAgent { entry, depth, .. } => {
-            agent_entry_height_in_body_at(app, &entry.entry, body_height, *depth)
-        }
+        SidebarRow::RemoteAgent { entry, depth, .. } => visible_pending_ask(app, &entry.entry)
+            .map_or_else(
+                || agent_entry_height_in_body_at(app, &entry.entry, body_height, *depth),
+                |_| body_height.min(2),
+            ),
         SidebarRow::Tab { entry, .. } => {
-            if app.sidebar_sections_layout
-                && app.sidebar_show_ask_subtitles
-                && entry_is_blocked(entry)
-                && entry.pending_ask.is_some()
-            {
+            if visible_pending_ask(app, entry).is_some() {
                 body_height.min(2)
             } else {
                 1
@@ -29266,6 +29332,43 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn focus_sidebar_groups_spaces_with_one_repo_and_counts_hidden_work() {
+        let mut app = app_with_agents(&["main", "worktree"]);
+        app.sidebar_sections_layout = true;
+        for workspace in &mut app.workspaces {
+            workspace.repo_binding = Some("owner/herdr".into());
+        }
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("blocked terminal")
+            .set_raw_agent_state_for_test(AgentState::Blocked);
+
+        let rows = sidebar_rows(&app);
+        let groups = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Workspace {
+                    ws_idx,
+                    activity_count,
+                    ..
+                } => Some((*ws_idx, *activity_count)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(groups, [(0, Some((1, 2)))]);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Tab { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn focus_sidebar_remote_space_counts_working_agents_hidden_in_the_shelf() {
         let snapshot = crate::fleet::Snapshot {
             hosts: vec![fleet_host_snapshot(
@@ -29322,6 +29425,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect::<Vec<_>>()
             .join("\n");
         assert!(snapshot.contains("1 of 2"), "{snapshot}");
+        assert!(snapshot.contains("↳ Approve remote work"), "{snapshot}");
+        let blocked = rows
+            .iter()
+            .find(|row| matches!(row, SidebarRow::RemoteAgent { entry, .. } if entry.entry.state == AgentState::Blocked))
+            .expect("blocked remote row");
+        assert_eq!(sidebar_row_height(&app, blocked, 20), 2);
+        app.sidebar_show_ask_subtitles = false;
+        assert_eq!(sidebar_row_height(&app, blocked, 20), 1);
     }
 
     #[test]

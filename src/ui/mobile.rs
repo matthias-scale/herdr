@@ -8,15 +8,17 @@ use ratatui::{
 
 #[cfg(test)]
 use super::sidebar::agent_panel_entries;
+#[cfg(test)]
+use super::sidebar::render_remote_compact_agent_row_with_identity;
+#[cfg(test)]
+use super::sidebar::AgentPanelEntryData;
 use super::sidebar::{
     dim_inactive_pane_row, mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout,
-    render_compact_agent_row, render_remote_compact_agent_row_with_identity,
+    render_compact_agent_row, render_remote_compact_agent_row_with_shelf,
     section_header_glyph_for_app, section_row_style, sidebar_row_belongs_to_workspace,
     sidebar_space_member_indices, sidebar_thread_entries_from, sidebar_workspace_labels,
-    SidebarRow, SYMPHONY_SECTION_TITLE,
+    visible_pending_ask, AgentPanelEntry, SidebarRow, SYMPHONY_SECTION_TITLE,
 };
-#[cfg(test)]
-use super::sidebar::{AgentPanelEntry, AgentPanelEntryData};
 use super::status::{state_icon, state_icon_symbol};
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::{Palette, ToastKind, ToastNotification};
@@ -249,10 +251,13 @@ fn mobile_sidebar_rows_start(app: &AppState, rows: &[SidebarRow]) -> usize {
     start
 }
 
-fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
+fn mobile_sidebar_row_height(app: &AppState, row: &SidebarRow) -> usize {
     match row {
+        SidebarRow::Tab { entry, .. } => 1 + usize::from(visible_pending_ask(app, entry).is_some()),
+        SidebarRow::RemoteAgent { entry, .. } => {
+            1 + usize::from(visible_pending_ask(app, &entry.entry).is_some())
+        }
         SidebarRow::Workspace { .. }
-        | SidebarRow::Tab { .. }
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::Divider
         | SidebarRow::ShelfDivider
@@ -262,7 +267,6 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
         | SidebarRow::Agent { .. }
-        | SidebarRow::RemoteAgent { .. }
         | SidebarRow::PodHeader { .. }
         | SidebarRow::PodMember { .. }
         | SidebarRow::AloopLoop { .. }
@@ -276,10 +280,43 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
     }
 }
 
+fn render_mobile_ask_subtitle(
+    app: &AppState,
+    frame: &mut Frame,
+    viewport: Rect,
+    content: Rect,
+    doc_y: usize,
+    depth: u16,
+    bg: Color,
+    entry: &AgentPanelEntry,
+) {
+    let Some(ask) = visible_pending_ask(app, entry) else {
+        return;
+    };
+    let subtitle = format!("{}↳ {ask}", " ".repeat(usize::from(depth) * 3 + 1));
+    render_one_line_item(
+        frame,
+        viewport,
+        content,
+        doc_y + 1,
+        app.mobile_switcher_scroll,
+        bg,
+        Line::from(Span::styled(
+            truncate_end(&subtitle, usize::from(content.width)),
+            Style::default()
+                .fg(app.palette.overlay0)
+                .add_modifier(Modifier::DIM),
+        )),
+    );
+}
+
 fn mobile_sidebar_block_height(app: &AppState) -> usize {
     let rows = mobile_sidebar_rows(app);
     mobile_sidebar_rows_start(app, &rows)
-        + rows.iter().map(mobile_sidebar_row_height).sum::<usize>()
+        + rows
+            .iter()
+            .map(|row| mobile_sidebar_row_height(app, row))
+            .sum::<usize>()
 }
 
 pub(crate) fn mobile_switcher_workspace_doc_range(
@@ -296,9 +333,9 @@ pub(crate) fn mobile_switcher_workspace_doc_range(
     let start = mobile_sidebar_rows_start(app, &rows)
         + rows[..pos]
             .iter()
-            .map(mobile_sidebar_row_height)
+            .map(|row| mobile_sidebar_row_height(app, row))
             .sum::<usize>();
-    Some(start..start + mobile_sidebar_row_height(&rows[pos]))
+    Some(start..start + mobile_sidebar_row_height(app, &rows[pos]))
 }
 
 pub(crate) fn mobile_switcher_max_scroll(app: &AppState) -> usize {
@@ -322,7 +359,7 @@ pub(crate) fn visible_tab_activity_instants_from(
     rows.iter()
         .filter_map(|row| {
             let row_start = doc_y;
-            doc_y = doc_y.saturating_add(mobile_sidebar_row_height(row));
+            doc_y = doc_y.saturating_add(mobile_sidebar_row_height(app, row));
             if row_start >= visible_end || doc_y <= visible_start {
                 return None;
             }
@@ -369,7 +406,7 @@ pub(crate) fn mobile_switcher_target_at(
     }
     let mut cursor = mobile_sidebar_rows_start(app, &rows);
     for entry in &rows {
-        let row_height = mobile_sidebar_row_height(entry);
+        let row_height = mobile_sidebar_row_height(app, entry);
         if doc_row >= cursor && doc_row < cursor + row_height {
             if let SidebarRow::SectionHeader { title, .. } = entry {
                 return Some(MobileSwitcherTarget::Section(title));
@@ -769,6 +806,7 @@ fn render_mobile_switcher_content(
                 ws_idx,
                 title,
                 count,
+                activity_count,
                 shelf_counts,
                 state_counts,
                 ..
@@ -825,7 +863,9 @@ fn render_mobile_switcher_content(
                         .count();
                     (agents, windows)
                 };
-                let count_label = if state_counts.is_empty() {
+                let count_label = if let Some((working, total)) = activity_count {
+                    format!(" ({working} of {total})")
+                } else if state_counts.is_empty() {
                     match (shelf_counts, count) {
                         (Some((agents, windows)), _) => format!(" ({agents}/{windows})"),
                         (_, Some(count)) => format!(" ({count})"),
@@ -911,7 +951,7 @@ fn render_mobile_switcher_content(
                 entry,
                 depth,
                 show_host_identity,
-                ..
+                working_shelf,
             } => {
                 let selected = app
                     .sidebar_selected_remote_agent
@@ -919,7 +959,7 @@ fn render_mobile_switcher_content(
                     .is_some_and(|agent_ref| agent_ref == &entry.agent_ref);
                 let bg = mobile_item_bg(selected, false, p);
                 if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
-                    render_remote_compact_agent_row_with_identity(
+                    render_remote_compact_agent_row_with_shelf(
                         app,
                         frame,
                         entry,
@@ -927,8 +967,19 @@ fn render_mobile_switcher_content(
                         *depth,
                         Some(bg),
                         *show_host_identity,
+                        *working_shelf,
                     );
                 }
+                render_mobile_ask_subtitle(
+                    app,
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    *depth,
+                    bg,
+                    &entry.entry,
+                );
             }
             SidebarRow::SectionHeader {
                 title,
@@ -1076,13 +1127,17 @@ fn render_mobile_switcher_content(
                 title,
                 collapsed,
                 dim,
+                activity_count,
                 ..
             } => {
-                let label = if *dim {
+                let mut label = if *dim {
                     format!("   {title}")
                 } else {
                     format!("   {} {title}", if *collapsed { "▸" } else { "▾" })
                 };
+                if let Some((working, total)) = activity_count {
+                    label.push_str(&format!(" ({working} of {total})"));
+                }
                 render_one_line_item(
                     frame,
                     viewport,
@@ -1273,6 +1328,7 @@ fn render_mobile_switcher_content(
                         dim_inactive_pane_row(frame, rect, p.overlay0);
                     }
                 }
+                render_mobile_ask_subtitle(app, frame, viewport, content, doc_y, *depth, bg, entry);
             }
             SidebarRow::NeedsYou {
                 title,
@@ -1313,7 +1369,7 @@ fn render_mobile_switcher_content(
                 );
             }
         }
-        doc_y += mobile_sidebar_row_height(row);
+        doc_y += mobile_sidebar_row_height(app, row);
     }
 
     if let Some(ws) = app.active.and_then(|idx| app.workspaces.get(idx)) {
@@ -2661,6 +2717,124 @@ mod tests {
             assert_eq!(style.fg, Some(app.palette.mauve));
             assert!(style.add_modifier.contains(Modifier::DIM));
         }
+    }
+
+    #[test]
+    fn mobile_focus_sidebar_shows_group_activity_and_pending_ask() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("Scalable")];
+        app.workspaces[0].test_add_tab(Some("build"));
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.sidebar_sections_layout = true;
+        app.view.layout = crate::app::state::ViewLayout::Mobile;
+        for tab_idx in 0..2 {
+            let pane_id = app.workspaces[0].tabs[tab_idx].root_pane;
+            let terminal_id = app.workspaces[0].tabs[tab_idx].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).expect("agent terminal");
+            terminal.detected_agent = Some(crate::detect::Agent::Pi);
+            terminal.set_raw_agent_state_for_test(if tab_idx == 0 {
+                AgentState::Blocked
+            } else {
+                AgentState::Working
+            });
+            if tab_idx == 0 {
+                terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+                    blocking: true,
+                    n: 1,
+                    label: "Answer".into(),
+                    text: "Choose a layout".into(),
+                    pr: None,
+                    ticket: None,
+                    url: None,
+                    default: None,
+                    default_at: None,
+                }];
+            }
+        }
+        app.reconcile_sidebar_presentation();
+        let area = Rect::new(0, 0, 50, 24);
+        let render = |app: &AppState| {
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 24))
+                .expect("mobile terminal");
+            terminal
+                .draw(|frame| {
+                    render_mobile_switcher_content(
+                        app,
+                        &TerminalRuntimeRegistry::new(),
+                        frame,
+                        area,
+                    )
+                })
+                .expect("mobile render");
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let shown = render(&app);
+        assert!(shown.contains("1 of 2"), "{shown}");
+        assert!(shown.contains("↳ Choose a layout"), "{shown}");
+        app.sidebar_show_ask_subtitles = false;
+        assert!(!render(&app).contains("↳ Choose a layout"));
+    }
+
+    #[test]
+    fn mobile_expanded_remote_working_row_is_dim_without_a_dot() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.sidebar_work_filter.machine_scope = crate::app::state::SidebarMachineScope::AllMachines;
+        app.view.layout = crate::app::state::ViewLayout::Mobile;
+        let mut entry = agent_entry(Some("remote worker"), Some("pi"));
+        entry.state = AgentState::Working;
+        let agent_ref = crate::api::schema::AgentRef::new("ub2", "remote-pane")
+            .expect("remote agent reference");
+        app.remote_agent_panel_entries = vec![std::sync::Arc::new(
+            crate::ui::sidebar::RemoteAgentPanelEntry::new(agent_ref, entry),
+        )];
+        app.toggle_sidebar_group("Working");
+        assert!(mobile_sidebar_rows(&app).iter().any(|row| matches!(
+            row,
+            SidebarRow::RemoteAgent {
+                working_shelf: true,
+                ..
+            }
+        )));
+
+        let area = Rect::new(0, 0, 50, 24);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 24))
+            .expect("mobile terminal");
+        terminal
+            .draw(|frame| {
+                render_mobile_switcher_content(&app, &TerminalRuntimeRegistry::new(), frame, area)
+            })
+            .expect("mobile render");
+        let y = (0..area.height)
+            .find(|y| {
+                (0..area.width)
+                    .map(|x| terminal.backend().buffer()[(x, *y)].symbol())
+                    .collect::<String>()
+                    .contains("New Thread")
+            })
+            .expect("expanded remote Working row");
+        let row = (0..area.width)
+            .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+            .collect::<String>();
+        assert!(!row.contains('●'), "{row}");
+        let title_x = (0..area.width)
+            .find(|x| terminal.backend().buffer()[(*x, y)].symbol() == "N")
+            .expect("remote title");
+        assert!(terminal.backend().buffer()[(title_x, y)]
+            .style()
+            .add_modifier
+            .contains(Modifier::DIM));
     }
 
     #[test]
