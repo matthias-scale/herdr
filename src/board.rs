@@ -98,7 +98,7 @@ impl GoalScope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct AgentLink {
     pub(crate) host: String,
     pub(crate) pane_id: String,
@@ -150,6 +150,7 @@ pub(crate) struct BoardView {
     pub(crate) board: Board,
     pub(crate) column: Column,
     pub(crate) row: usize,
+    pub(crate) goal_offset: usize,
     pub(crate) dialog: Option<Dialog>,
     pub(crate) detail: Option<Detail>,
     pub(crate) editor: Option<Editor>,
@@ -158,8 +159,8 @@ pub(crate) struct BoardView {
     pub(crate) move_mode: bool,
     pub(crate) error: Option<String>,
     baseline: String,
-    pub(crate) agent_lines: std::collections::HashMap<String, (u64, String)>,
-    pub(crate) agent_lanes: std::collections::HashMap<String, Lane>,
+    pub(crate) agent_lines: std::collections::HashMap<AgentLink, (u64, String)>,
+    pub(crate) agent_lanes: std::collections::HashMap<AgentLink, Lane>,
     pub(crate) last_agent_refresh_unix_s: u64,
 }
 
@@ -185,6 +186,7 @@ impl BoardView {
             board,
             column: Column::Draft,
             row: 0,
+            goal_offset: 0,
             dialog: None,
             detail: None,
             editor: None,
@@ -206,6 +208,7 @@ impl BoardView {
             board,
             column: Column::Draft,
             row: 0,
+            goal_offset: 0,
             dialog: None,
             detail: None,
             editor: None,
@@ -382,14 +385,26 @@ impl crate::app::state::AppState {
             .cards
             .iter()
             .flat_map(|card| card.agents.iter())
-            .filter(|agent| agent.host == self.agent_host_name)
             .cloned()
             .collect();
         let mut seen = std::collections::HashSet::new();
         let mut line_changes = Vec::new();
         let mut lane_changes = Vec::new();
         for link in links {
-            if !seen.insert(link.pane_id.clone()) {
+            if !seen.insert(link.clone()) {
+                continue;
+            }
+            if link.host != self.agent_host_name {
+                let lane = self
+                    .remote_agent_panel_entries
+                    .iter()
+                    .find(|entry| {
+                        entry.agent_ref.host == link.host && entry.agent_ref.agent == link.pane_id
+                    })
+                    .map(|entry| lane_from_state(entry.entry.state))
+                    .unwrap_or(Lane::Working);
+                lane_changes.push((link.clone(), lane));
+                line_changes.push((link, (u64::MAX, "remote terminal".into())));
                 continue;
             }
             let evidence = link
@@ -410,19 +425,15 @@ impl crate::app::state::AppState {
                             })?;
                     let pane = workspace.pane_state(pane_id)?;
                     let terminal = self.terminals.get(&pane.attached_terminal_id)?;
-                    let lane = match pane.agent_projection(terminal).state {
-                        crate::detect::AgentState::Blocked => Lane::Blocked,
-                        crate::detect::AgentState::Idle => Lane::DoneAwaitingYou,
-                        _ => Lane::Working,
-                    };
+                    let lane = lane_from_state(pane.agent_projection(terminal).state);
                     Some((pane.attached_terminal_id.clone(), lane))
                 });
             let Some((terminal_id, lane)) = evidence else {
-                lane_changes.push((link.pane_id.clone(), Lane::Working));
-                line_changes.push((link.pane_id, (u64::MAX, "terminal unavailable".into())));
+                lane_changes.push((link.clone(), Lane::Working));
+                line_changes.push((link, (u64::MAX, "terminal unavailable".into())));
                 continue;
             };
-            lane_changes.push((link.pane_id.clone(), lane));
+            lane_changes.push((link.clone(), lane));
             let Some(runtime) = runtimes.get(&terminal_id) else {
                 continue;
             };
@@ -430,7 +441,7 @@ impl crate::app::state::AppState {
             if self
                 .board_view
                 .as_ref()
-                .and_then(|view| view.agent_lines.get(&link.pane_id))
+                .and_then(|view| view.agent_lines.get(&link))
                 .is_some_and(|(known, _)| *known == revision)
             {
                 continue;
@@ -446,7 +457,7 @@ impl crate::app::state::AppState {
                 .take(7)
                 .collect::<Vec<_>>()
                 .join(" ");
-            line_changes.push((link.pane_id, (revision, line)));
+            line_changes.push((link, (revision, line)));
         }
         if let Some(view) = self.board_view.as_mut() {
             view.last_agent_refresh_unix_s = observed_unix_s;
@@ -464,31 +475,33 @@ impl crate::app::state::AppState {
             pane_id: link.pane_id.clone(),
             host: link.host.clone(),
             lane: self.board_agent_lane(link),
-            last_line: if link.host == self.agent_host_name {
-                self.board_view
-                    .as_ref()
-                    .and_then(|view| view.agent_lines.get(&link.pane_id))
-                    .map(|(_, text)| text.clone())
-                    .unwrap_or_else(|| "terminal quiet".into())
-            } else {
-                "remote terminal".into()
-            },
+            last_line: self
+                .board_view
+                .as_ref()
+                .and_then(|view| view.agent_lines.get(link))
+                .map(|(_, text)| text.clone())
+                .unwrap_or_else(|| "terminal quiet".into()),
         }
     }
 
     fn board_agent_lane(&self, link: &AgentLink) -> Lane {
-        if link.host != self.agent_host_name {
-            return Lane::Working;
-        }
         self.board_view
             .as_ref()
-            .and_then(|view| view.agent_lanes.get(&link.pane_id))
+            .and_then(|view| view.agent_lanes.get(link))
             .copied()
             .unwrap_or(Lane::Working)
     }
 
     pub(crate) fn board_lane(&self, card: &Card) -> Lane {
         worst_lane(card.agents.iter().map(|agent| self.board_agent_lane(agent)))
+    }
+}
+
+fn lane_from_state(state: crate::detect::AgentState) -> Lane {
+    match state {
+        crate::detect::AgentState::Blocked => Lane::Blocked,
+        crate::detect::AgentState::Idle => Lane::DoneAwaitingYou,
+        _ => Lane::Working,
     }
 }
 

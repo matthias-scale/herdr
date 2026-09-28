@@ -12,3 +12,5 @@ description: 週の目標と To Do をエージェントの横で管理します
 To Do、In Progress、Done にあるエージェント未リンクのカードでは **▶ spawn** または `s` でエージェントを開始できます。カードのタイトルと説明がプロンプトになり、端末がカードにリンクされます。scalable は設定済みの `scalablev2`、harness は `scalable-agent-fleet`、personal は Obsidian vault を使用します。リンク済み端末には状態、ホスト、最後の行の冒頭が表示されます。クリック、または詳細で端末を選んで `Enter` を押すと移動し、`Esc` でボードに戻ります。
 
 目標と To Do は ISO 週ごとに Obsidian vault の `todos/YYYY-Www.md` に保存されます。vault は `OBSIDIAN_VAULT`、未設定なら `~/workspaces/obsidian` です。目標は見出し、To Do はチェックボックスとして Obsidian でも読んで編集できます。外部で編集した内容はボードを開き直すと反映されます。リンクした To Do がすべて Done の場合だけ目標が完了します。ボード表示中にノートが変更された場合、古い状態で上書きしません。
+
+目標がストリップに収まりきらない場合は、矢印ボタンまたは `[` と `]` でページを切り替えます。

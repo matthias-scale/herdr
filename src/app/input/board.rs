@@ -117,6 +117,7 @@ impl App {
                     });
                 }
             }
+            Some(BoardHit::GoalPage(delta)) => self.page_board_goals(delta),
             Some(BoardHit::NewCard) => {
                 if let Some(view) = self.state.board_view.as_mut() {
                     view.column = Column::Draft;
@@ -236,6 +237,21 @@ impl App {
                     self.jump_board_agent(&link);
                 }
             }
+            Some(BoardHit::DetailEdit) => {
+                let agent_tab = self
+                    .state
+                    .board_view
+                    .as_ref()
+                    .and_then(|view| view.detail.as_ref())
+                    .is_some_and(|detail| detail.agent_tab);
+                self.handle_board_detail_key(KeyEvent::new(
+                    KeyCode::Char(if agent_tab { 's' } else { 'e' }),
+                    KeyModifiers::NONE,
+                ));
+            }
+            Some(BoardHit::DetailAppend) => {
+                self.handle_board_detail_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+            }
             None => {}
         }
     }
@@ -261,6 +277,18 @@ impl App {
         if let Some(view) = self.state.board_view.as_mut() {
             view.column = column;
             view.row = row;
+        }
+    }
+
+    fn page_board_goals(&mut self, delta: i8) {
+        let page_size = crate::ui::board::goal_page_size(self.state.view.terminal_area.width);
+        if let Some(view) = self.state.board_view.as_mut() {
+            let max_offset = view.board.goals.len().saturating_sub(page_size);
+            view.goal_offset = if delta < 0 {
+                view.goal_offset.saturating_sub(page_size)
+            } else {
+                view.goal_offset.saturating_add(page_size).min(max_offset)
+            };
         }
     }
 
@@ -389,6 +417,8 @@ impl App {
                     field: 0,
                 });
             }
+            KeyCode::Char('[') => self.page_board_goals(-1),
+            KeyCode::Char(']') => self.page_board_goals(1),
             KeyCode::Char('s') => {
                 if let Some(id) = selected_id {
                     self.spawn_board_card(&id);
@@ -746,6 +776,8 @@ impl App {
 
     fn jump_board_agent(&mut self, agent: &crate::board::AgentLink) {
         if agent.host != self.state.agent_host_name {
+            self.state.board_return = self.state.board_view.take();
+            self.open_fleet_host_focused(&agent.host, Some(&agent.pane_id));
             return;
         }
         let Some((ws_idx, pane_id)) = self.parse_current_public_pane_id(&agent.pane_id) else {

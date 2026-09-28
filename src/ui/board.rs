@@ -34,6 +34,20 @@ pub(crate) fn render(app: &AppState, area: Rect, frame: &mut Frame) {
             Rect::new(area.right() - 8, area.y, 7, 1),
         );
     }
+    let goal_page_size = goal_page_size(area.width);
+    if view.board.goals.len() > goal_page_size && area.width > 26 {
+        let first = view.goal_offset + 1;
+        let last = (view.goal_offset + goal_page_size).min(view.board.goals.len());
+        frame.render_widget(
+            Paragraph::new(format!("{first}–{last}/{}", view.board.goals.len()))
+                .style(Style::default().fg(palette.subtext0)),
+            Rect::new(area.right().saturating_sub(25), area.y, 11, 1),
+        );
+        frame.render_widget(
+            Paragraph::new("← →"),
+            Rect::new(area.right() - 13, area.y, 3, 1),
+        );
+    }
     let goals_height = if view.board.goals.is_empty() {
         2
     } else {
@@ -56,7 +70,7 @@ pub(crate) fn render(app: &AppState, area: Rect, frame: &mut Frame) {
     } else if view.detail.is_some() {
         "Tab Human/Agent · e edit · a append · ↑/↓ agent · Enter jump · Esc board"
     } else {
-        "←/→ column · ↑/↓ card · Enter detail · m then ←/→ move · n new Draft · g new goal · s spawn · Esc close"
+        "←/→ column · ↑/↓ card · Enter detail · m then ←/→ move · n Draft · g goal · [/] goals · s spawn · Esc close"
     };
     frame.render_widget(
         Paragraph::new(hint).style(Style::default().fg(palette.subtext0)),
@@ -90,9 +104,16 @@ fn render_goals(app: &AppState, view: &BoardView, area: Rect, frame: &mut Frame)
         frame.render_widget(Paragraph::new("  No goals yet · + goal"), area);
         return;
     }
-    let cols = view.board.goals.len().min(4).max(1) as u16;
+    let cols = view.board.goals.len().clamp(1, goal_page_size(area.width)) as u16;
     let width = area.width / cols;
-    for (i, goal) in view.board.goals.iter().take(cols as usize).enumerate() {
+    for (i, goal) in view
+        .board
+        .goals
+        .iter()
+        .skip(view.goal_offset)
+        .take(cols as usize)
+        .enumerate()
+    {
         let x = area.x + width * i as u16;
         let w = if i + 1 == cols as usize {
             area.right() - x
@@ -119,10 +140,13 @@ fn render_goals(app: &AppState, view: &BoardView, area: Rect, frame: &mut Frame)
             format!("{icon} {}", goal.title),
             format!("{} · {done}/{}", goal.scope.label(), linked.len()),
         ];
-        for card in linked
-            .into_iter()
-            .take(area.height.saturating_sub(3) as usize)
-        {
+        let visible = usize::from(area.height.saturating_sub(4));
+        let shown = if linked.len() > visible {
+            visible.saturating_sub(1)
+        } else {
+            visible
+        };
+        for card in linked.iter().take(shown) {
             lines.push(format!(
                 "  {} {}",
                 if card.column == Column::Done {
@@ -133,6 +157,9 @@ fn render_goals(app: &AppState, view: &BoardView, area: Rect, frame: &mut Frame)
                 card.title
             ));
         }
+        if linked.len() > shown {
+            lines.push(format!("  +{} more", linked.len() - shown));
+        }
         frame.render_widget(
             Paragraph::new(lines.join("\n"))
                 .block(Block::default().borders(Borders::ALL))
@@ -142,14 +169,16 @@ fn render_goals(app: &AppState, view: &BoardView, area: Rect, frame: &mut Frame)
     }
 }
 
+pub(crate) fn goal_page_size(width: u16) -> usize {
+    usize::from((width / 22).clamp(1, 4))
+}
+
 pub(crate) fn column_rects(area: Rect, selected: Column) -> Vec<(Column, Rect)> {
     if area.width == 0 {
         return Vec::new();
     }
     let page_size = if area.width >= 100 { 4 } else { 2 };
-    let start = if page_size == 4 {
-        0
-    } else if matches!(selected, Column::Draft | Column::Todo) {
+    let start = if page_size == 4 || matches!(selected, Column::Draft | Column::Todo) {
         0
     } else {
         2
@@ -254,7 +283,10 @@ fn render_columns(app: &AppState, view: &BoardView, area: Rect, frame: &mut Fram
             if y >= inner.bottom() {
                 break;
             }
-            let height = (4 + card.agents.len().min(3) as u16).min(inner.bottom() - y);
+            let height = u16::try_from(card.agents.len())
+                .unwrap_or(u16::MAX)
+                .saturating_add(4)
+                .min(inner.bottom() - y);
             let card_rect = Rect::new(inner.x, y, inner.width, height);
             let selected_card = selected && view.row == index;
             let text_width = usize::from(card_rect.width.saturating_sub(2));
@@ -274,7 +306,7 @@ fn render_columns(app: &AppState, view: &BoardView, area: Rect, frame: &mut Fram
                     }
                 ),
             ];
-            for agent in card.agents.iter().take(3) {
+            for agent in &card.agents {
                 let info = app.board_agent(agent);
                 let dot = match info.lane {
                     Lane::Blocked => "●",
@@ -328,6 +360,7 @@ fn render_columns(app: &AppState, view: &BoardView, area: Rect, frame: &mut Fram
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BoardHit {
     NewGoal,
+    GoalPage(i8),
     NewCard,
     Column(Column),
     Card {
@@ -342,6 +375,8 @@ pub(crate) enum BoardHit {
     EditorCancel,
     DetailTab(bool),
     DetailAgent(usize),
+    DetailEdit,
+    DetailAppend,
 }
 
 pub(crate) fn hit_at(app: &AppState, area: Rect, x: u16, y: u16) -> Option<BoardHit> {
@@ -413,6 +448,14 @@ pub(crate) fn hit_at(app: &AppState, area: Rect, x: u16, y: u16) -> Option<Board
         if x < rect.x {
             return None;
         }
+        if y == rect.bottom().saturating_sub(2) {
+            let second_button = rect.x + if detail.agent_tab { 15 } else { 12 };
+            return Some(if x < second_button {
+                BoardHit::DetailEdit
+            } else {
+                BoardHit::DetailAppend
+            });
+        }
         if y == rect.y + 1 {
             return Some(BoardHit::DetailTab(x >= rect.x + rect.width / 2));
         }
@@ -431,6 +474,14 @@ pub(crate) fn hit_at(app: &AppState, area: Rect, x: u16, y: u16) -> Option<Board
     }
     if y == area.y && x >= area.right().saturating_sub(8) {
         return Some(BoardHit::NewGoal);
+    }
+    if y == area.y && area.width > 26 && view.board.goals.len() > goal_page_size(area.width) {
+        if x == area.right().saturating_sub(13) {
+            return Some(BoardHit::GoalPage(-1));
+        }
+        if x == area.right().saturating_sub(11) {
+            return Some(BoardHit::GoalPage(1));
+        }
     }
     let board = board_rect(area, view);
     if y < board.y || y >= board.bottom() {
@@ -482,14 +533,16 @@ pub(crate) fn hit_at(app: &AppState, area: Rect, x: u16, y: u16) -> Option<Board
             if top >= inner.bottom() {
                 break;
             }
-            let height =
-                (4 + card.agents.len().min(3) as u16).min(inner.bottom().saturating_sub(top));
+            let height = u16::try_from(card.agents.len())
+                .unwrap_or(u16::MAX)
+                .saturating_add(4)
+                .min(inner.bottom().saturating_sub(top));
             if y >= top && y < top + height {
                 let offset = y - top;
                 return Some(BoardHit::Card {
                     id: card.id.clone(),
                     spawn: offset == 2 && card.agents.is_empty() && column != Column::Draft,
-                    agent: (offset >= 3 && usize::from(offset - 3) < card.agents.len().min(3))
+                    agent: (offset >= 3 && usize::from(offset - 3) < card.agents.len())
                         .then_some(usize::from(offset.saturating_sub(3))),
                 });
             }
@@ -578,6 +631,20 @@ fn render_detail(
     frame.render_widget(
         Paragraph::new(lines.join("\n")).wrap(Wrap { trim: false }),
         inner,
+    );
+    let actions = if detail.agent_tab {
+        "[ Summary ]  [ Add update ]"
+    } else {
+        "[ Edit ]  [ Append ]"
+    };
+    frame.render_widget(
+        Paragraph::new(actions).style(Style::default().fg(app.palette.accent)),
+        Rect::new(
+            rect.x + 2,
+            rect.bottom().saturating_sub(2),
+            rect.width.saturating_sub(4),
+            1,
+        ),
     );
 }
 
@@ -755,6 +822,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Column::InProgress, Column::Done]
         );
+        assert_eq!(goal_page_size(120), 4);
+        assert_eq!(goal_page_size(60), 2);
     }
 
     #[test]
@@ -801,6 +870,21 @@ mod tests {
         assert_eq!(
             hit_at(&app, area, side.x + 3, side.y + 8),
             Some(BoardHit::DialogField(2))
+        );
+        let view = app.board_view.as_mut().expect("view");
+        view.dialog = None;
+        view.detail = Some(crate::board::Detail {
+            card_id: "c1".into(),
+            agent_tab: false,
+            agent_row: 0,
+        });
+        assert_eq!(
+            hit_at(&app, area, side.x + 3, side.bottom() - 2),
+            Some(BoardHit::DetailEdit)
+        );
+        assert_eq!(
+            hit_at(&app, area, side.x + 15, side.bottom() - 2),
+            Some(BoardHit::DetailAppend)
         );
     }
 }
