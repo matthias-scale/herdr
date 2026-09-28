@@ -252,12 +252,7 @@ fn render_columns(app: &AppState, view: &BoardView, area: Rect, frame: &mut Fram
         let mut y = inner.y;
         let lanes = [Lane::Blocked, Lane::Working, Lane::DoneAwaitingYou];
         let mut lane_index = 0;
-        let start = if selected {
-            view.row
-                .saturating_sub((inner.height as usize / 4).saturating_sub(1))
-        } else {
-            0
-        };
+        let start = if selected { view.row } else { 0 };
         for (index, card) in cards.into_iter().enumerate().skip(start) {
             if y >= inner.bottom() {
                 break;
@@ -513,12 +508,7 @@ pub(crate) fn hit_at(app: &AppState, area: Rect, x: u16, y: u16) -> Option<Board
         if column == Column::InProgress {
             cards.sort_by_key(|card| app.board_lane(card));
         }
-        let start = if column == view.column {
-            view.row
-                .saturating_sub((inner.height as usize / 4).saturating_sub(1))
-        } else {
-            0
-        };
+        let start = if column == view.column { view.row } else { 0 };
         let mut top = inner.y;
         let lanes = [Lane::Blocked, Lane::Working, Lane::DoneAwaitingYou];
         let mut lane_index = 0;
