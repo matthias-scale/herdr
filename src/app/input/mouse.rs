@@ -4887,6 +4887,8 @@ mod tests {
             ..Default::default()
         });
         app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.workspaces[0].is_fleet = true;
+        app.state.workspaces[0].custom_name = Some("Fleet".to_owned());
         app.state.active = Some(0);
         app.state.ensure_test_terminals();
         app.state.fleet_snapshot = crate::fleet::Snapshot {

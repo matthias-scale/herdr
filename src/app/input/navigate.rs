@@ -990,6 +990,10 @@ impl App {
                 self.focus_pane_internal_via_api(ws_idx, pane_id);
             }
             BlockedPaneTarget::Remote(agent_ref) => {
+                self.open_fleet_host_focused(&agent_ref.host, Some(&agent_ref.agent));
+                // Focusing the attached tab clears remote row selection. Keep
+                // this anchor so the next shortcut advances to the next remote
+                // blocker rather than restarting the cycle.
                 self.state.select_remote_agent_row(agent_ref);
             }
         }
@@ -1319,7 +1323,7 @@ impl App {
     }
 
     fn relative_visible_workspace(&self, delta: isize) -> Option<usize> {
-        let order = self.state.visible_workspace_order();
+        let order = self.state.workspace_navigation_order();
         if order.is_empty() {
             return None;
         }
@@ -3626,6 +3630,56 @@ mod tests {
         app
     }
 
+    #[test]
+    fn fleet_workspace_ac6_space_navigation_obeys_fleet_section_collapse() {
+        let mut app = app_with_test_workspaces(&["local-one", "local-two"]);
+        app.state.sidebar_group_mode = crate::app::state::SidebarGroupMode::Spaces;
+        app.state.sidebar_sections_layout = true;
+        app.state.sidebar_areas.hosts = true;
+        let mut fleet = Workspace::test_new("fleet");
+        fleet.is_fleet = true;
+        app.state.workspaces.push(fleet);
+        let fleet_idx = 2;
+        let fleet_collapse_key = if app.state.sidebar_sections_layout {
+            "sections:Fleet"
+        } else {
+            "repo:Fleet"
+        };
+        if app.state.sidebar_sections_layout {
+            app.state
+                .collapsed_sidebar_groups
+                .insert(fleet_collapse_key.into());
+        } else {
+            app.state
+                .collapsed_sidebar_groups
+                .remove(fleet_collapse_key);
+        }
+        assert_eq!(app.state.visible_workspace_order(), vec![0, 1]);
+        assert_eq!(
+            app.state.workspace_navigation_order(),
+            vec![0, 1, fleet_idx]
+        );
+
+        app.state.active = Some(1);
+        assert_eq!(app.relative_visible_workspace(1), Some(fleet_idx));
+        app.state.active = Some(0);
+        assert_eq!(app.relative_visible_workspace(-1), Some(fleet_idx));
+
+        if app.state.sidebar_sections_layout {
+            app.state
+                .collapsed_sidebar_groups
+                .remove(fleet_collapse_key);
+        } else {
+            app.state
+                .collapsed_sidebar_groups
+                .insert(fleet_collapse_key.into());
+        }
+        app.state.active = Some(1);
+        assert_eq!(app.relative_visible_workspace(1), Some(0));
+        app.state.active = Some(0);
+        assert_eq!(app.relative_visible_workspace(-1), Some(1));
+    }
+
     #[cfg(unix)]
     fn assert_scratchpad_opens_as_real_pane(initially_zoomed: bool) {
         let mut env = crate::config::TestConfigEnvGuard::acquire();
@@ -3923,11 +3977,19 @@ mod tests {
         host: &str,
         pane_id: &str,
     ) -> std::sync::Arc<crate::ui::RemoteAgentPanelEntry> {
+        remote_agent_with_status(host, pane_id, "blocked")
+    }
+
+    fn remote_agent_with_status(
+        host: &str,
+        pane_id: &str,
+        agent_status: &str,
+    ) -> std::sync::Arc<crate::ui::RemoteAgentPanelEntry> {
         let info = serde_json::from_value(serde_json::json!({
             "terminal_id": format!("terminal-{pane_id}"),
             "name": pane_id,
             "agent": "codex",
-            "agent_status": "blocked",
+            "agent_status": agent_status,
             "workspace_id": "workspace",
             "tab_id": "tab",
             "pane_id": pane_id,
@@ -4412,6 +4474,197 @@ mod tests {
             next_blocked_window_target(&state),
             Some(BlockedPaneTarget::Remote(agent_ref))
         );
+    }
+
+    #[test]
+    fn fleet_workspace_ac7_next_blocked_window_focuses_remote_agent_tab() {
+        let mut config = Config::default();
+        config.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "ub2".into(),
+            target: "remote-ub2".into(),
+            ..Default::default()
+        }];
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.state.workspaces = vec![Workspace::test_new("local"), Workspace::test_new("fleet")];
+        app.state.workspaces[1].is_fleet = true;
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let remote = remote_blocker("ub2", "blocked-agent");
+        app.state.remote_agent_panel_entries = vec![remote];
+        app.state.fleet_snapshot.hosts = vec![crate::fleet::HostSnapshot {
+            name: "ub2".into(),
+            target: "remote-ub2".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            remote_identity: None,
+            entries: Vec::new(),
+        }];
+        let argv = crate::fleet::agent_attach_argv_from_config(
+            &config.remote.fleet.hosts[0],
+            "blocked-agent",
+        )
+        .expect("configured remote attach argv");
+        let fleet_tab = &app.state.workspaces[1].tabs[0];
+        let fleet_root_pane = fleet_tab.root_pane;
+        let fleet_terminal_id = fleet_tab
+            .terminal_id(fleet_tab.root_pane)
+            .expect("fleet terminal id")
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&fleet_terminal_id)
+            .expect("fleet terminal")
+            .launch_argv = Some(argv);
+        let local_tab_count = app.state.workspaces[0].tabs.len();
+        let terminal_count = app.state.terminals.len();
+
+        app.focus_next_blocked_window();
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(app.state.workspaces[1].active_tab_index(), 0);
+        assert_eq!(
+            app.state.workspaces[1].focused_pane_id(),
+            Some(fleet_root_pane)
+        );
+        assert_eq!(app.state.workspaces[0].tabs.len(), local_tab_count);
+        assert_eq!(app.state.terminals.len(), terminal_count);
+        assert_eq!(
+            app.state.sidebar_selected_remote_agent,
+            Some(
+                crate::api::schema::AgentRef::new("ub2", "blocked-agent")
+                    .expect("valid remote reference")
+            )
+        );
+    }
+
+    #[test]
+    fn fleet_workspace_ac8_blocked_filter_lists_and_cycles_only_blocked_fleet_agents() {
+        let mut config = Config::default();
+        config.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "ub2".into(),
+            target: "remote-ub2".into(),
+            ..Default::default()
+        }];
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        let mut fleet = Workspace::test_new("fleet");
+        fleet.is_fleet = true;
+        fleet.test_add_tab(Some("blocked-two"));
+        app.state.workspaces = vec![Workspace::test_new("local"), fleet];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.remote_agent_panel_entries = vec![
+            remote_blocker("ub2", "blocked-one"),
+            remote_agent_with_status("ub2", "working", "working"),
+            remote_blocker("ub2", "blocked-two"),
+        ];
+        app.state.fleet_snapshot.hosts = vec![crate::fleet::HostSnapshot {
+            name: "ub2".into(),
+            target: "remote-ub2".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            remote_identity: None,
+            entries: Vec::new(),
+        }];
+        let fleet_terminal_ids = app.state.workspaces[1]
+            .tabs
+            .iter()
+            .map(|tab| {
+                tab.terminal_id(tab.root_pane)
+                    .expect("fleet tab terminal")
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        for (tab_idx, agent) in [(0, "blocked-one"), (1, "blocked-two")] {
+            let argv =
+                crate::fleet::agent_attach_argv_from_config(&config.remote.fleet.hosts[0], agent)
+                    .expect("configured remote attach argv");
+            app.state
+                .terminals
+                .get_mut(&fleet_terminal_ids[tab_idx])
+                .expect("fleet terminal")
+                .launch_argv = Some(argv);
+        }
+        let fleet_key = if app.state.sidebar_sections_layout {
+            "sections:Fleet"
+        } else {
+            "repo:Fleet"
+        };
+        app.state.collapsed_sidebar_groups.remove(fleet_key);
+        execute_navigate_action_in_context(
+            &mut app.state,
+            &mut app.terminal_runtimes,
+            NavigateAction::ToggleBlockedFilter,
+            ActionContext::Prefix,
+        );
+        assert!(app.state.blocked_filter);
+
+        let visible_agents = crate::ui::sidebar_rows(&app.state)
+            .into_iter()
+            .filter_map(|row| match row {
+                crate::ui::SidebarRow::RemoteAgent { entry, .. } => {
+                    Some(entry.agent_ref.agent.clone())
+                }
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            visible_agents,
+            ["blocked-one".to_string(), "blocked-two".to_string()]
+                .into_iter()
+                .collect()
+        );
+        let blocked_targets = blocked_pane_cycle(&app.state)
+            .into_iter()
+            .filter_map(|(target, blocked)| blocked.then_some(target))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            blocked_targets,
+            vec![
+                BlockedPaneTarget::Remote(
+                    crate::api::schema::AgentRef::new("ub2", "blocked-one")
+                        .expect("valid remote reference")
+                ),
+                BlockedPaneTarget::Remote(
+                    crate::api::schema::AgentRef::new("ub2", "blocked-two")
+                        .expect("valid remote reference")
+                ),
+            ]
+        );
+
+        app.focus_next_blocked_window();
+        assert_eq!(
+            app.state
+                .sidebar_selected_remote_agent
+                .as_ref()
+                .unwrap()
+                .agent,
+            "blocked-one"
+        );
+        assert_eq!(app.state.workspaces[1].active_tab_index(), 0);
+        app.focus_next_blocked_window();
+        assert_eq!(
+            app.state
+                .sidebar_selected_remote_agent
+                .as_ref()
+                .unwrap()
+                .agent,
+            "blocked-two"
+        );
+        assert_eq!(app.state.workspaces[1].active_tab_index(), 1);
     }
 
     #[test]

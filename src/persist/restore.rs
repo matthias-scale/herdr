@@ -444,6 +444,7 @@ fn restore_workspace(
     (
         Some(Workspace {
             id: workspace_id,
+            is_fleet: snap.is_fleet,
             custom_name: snap.custom_name.clone(),
             identity_cwd: snap.identity_cwd.clone(),
             cached_identity_cwd: snap.identity_cwd.clone(),
@@ -1796,6 +1797,7 @@ mod tests {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             generation: None,
             workspaces: vec![WorkspaceSnapshot {
+                is_fleet: false,
                 repo_binding_cleared: false,
                 id: Some("workspace".into()),
                 custom_name: None,
@@ -1937,6 +1939,7 @@ mod tests {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             generation: None,
             workspaces: vec![WorkspaceSnapshot {
+                is_fleet: false,
                 repo_binding_cleared: false,
                 id: Some("w1".into()),
                 custom_name: None,
@@ -2097,6 +2100,7 @@ mod tests {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             generation: None,
             workspaces: vec![WorkspaceSnapshot {
+                is_fleet: false,
                 repo_binding_cleared: false,
                 id: Some("w1".into()),
                 custom_name: None,
@@ -2205,6 +2209,7 @@ mod tests {
     fn legacy_restore_precomputes_missing_public_pane_numbers() {
         let cwd = std::env::current_dir().unwrap();
         let snapshot = WorkspaceSnapshot {
+            is_fleet: false,
             repo_binding_cleared: false,
             id: Some("w1".into()),
             custom_name: None,
@@ -2253,6 +2258,7 @@ mod tests {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             generation: None,
             workspaces: vec![WorkspaceSnapshot {
+                is_fleet: false,
                 repo_binding_cleared: false,
                 id: Some("workspace".into()),
                 custom_name: None,
@@ -2519,6 +2525,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fleet_workspace_ac5_restore_keeps_fleet_out_of_upper_workspace_list() {
+        let (mut snapshot, history) = snapshot_with_saved_pane_history();
+        snapshot.workspaces[0].is_fleet = true;
+
+        let (workspaces, _) = restore_fixture_text(&snapshot, Some(&history));
+        assert!(workspaces[0].is_fleet);
+        let mut state = crate::app::AppState::test_new();
+        state.workspaces = workspaces;
+        state.active = Some(0);
+        state.selected = 0;
+
+        assert!(crate::ui::sidebar::workspace_list_entries(&state).is_empty());
+    }
+
+    #[tokio::test]
     async fn session_restore_keeps_pane_payload_with_its_public_identity() {
         let (mut snapshot, _) = snapshot_with_saved_pane_history();
         let workspace = &mut snapshot.workspaces[0];
@@ -2679,6 +2700,7 @@ mod tests {
             version: super::super::snapshot::SNAPSHOT_VERSION,
             generation: Some("saved-generation".into()),
             workspaces: vec![WorkspaceSnapshot {
+                is_fleet: false,
                 repo_binding_cleared: false,
                 id: Some("workspace".into()),
                 custom_name: None,

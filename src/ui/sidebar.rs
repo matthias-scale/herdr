@@ -7008,6 +7008,7 @@ fn workspace_list_entries_inner(
         // Spaces are the top level here: every Space is its own row, with no
         // repository grouping and no worktree indentation above it.
         SidebarGroupMode::Spaces => (0..app.workspaces.len())
+            .filter(|ws_idx| !app.workspaces[*ws_idx].is_fleet)
             .map(|ws_idx| WorkspaceListEntry::Workspace {
                 ws_idx,
                 indented: false,
@@ -7069,7 +7070,13 @@ fn workspace_list_entries_inner(
 
 fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<WorkspaceListEntry> {
     let keys = (0..app.workspaces.len())
-        .map(|ws_idx| workspace_group_ident(app, ws_idx).map(|(ident, home)| (ident.key(), home)))
+        .map(|ws_idx| {
+            if app.workspaces[ws_idx].is_fleet {
+                None
+            } else {
+                workspace_group_ident(app, ws_idx).map(|(ident, home)| (ident.key(), home))
+            }
+        })
         .collect::<Vec<_>>();
     let mut members_by_key = std::collections::HashMap::<String, Vec<usize>>::new();
     for (ws_idx, key) in keys.iter().enumerate() {
@@ -7102,6 +7109,9 @@ fn workspace_list_entries_repo(app: &AppState, force_expanded: bool) -> Vec<Work
     let mut emitted_groups = std::collections::HashSet::<String>::new();
     let mut entries = Vec::new();
     for ws_idx in 0..app.workspaces.len() {
+        if app.workspaces[ws_idx].is_fleet {
+            continue;
+        }
         let Some(group_key) = keys
             .get(ws_idx)
             .and_then(Option::as_ref)
@@ -24184,6 +24194,26 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 WorkspaceListEntry::NestedHeader { title, .. } => title,
             })
             .collect()
+    }
+
+    #[test]
+    fn fleet_workspace_ac2_is_omitted_from_upper_workspace_list_modes() {
+        let mut app = app_with_agents(&["local-one", "fleet", "local-two"]);
+        app.workspaces[1].is_fleet = true;
+
+        for mode in SidebarGroupMode::ALL {
+            let entries = workspace_list_entries_for_mode(&app, false, mode);
+            assert!(entries
+                .iter()
+                .all(|entry| !matches!(entry, WorkspaceListEntry::Workspace { ws_idx: 1, .. })));
+        }
+        assert_eq!(
+            workspace_list_entries_for_mode(&app, false, SidebarGroupMode::Repo)
+                .iter()
+                .filter(|entry| matches!(entry, WorkspaceListEntry::Workspace { .. }))
+                .count(),
+            2
+        );
     }
 
     #[test]

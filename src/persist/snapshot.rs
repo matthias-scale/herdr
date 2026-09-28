@@ -61,6 +61,9 @@ pub struct TabHistorySnapshot {
 pub struct WorkspaceSnapshot {
     #[serde(default)]
     pub id: Option<String>,
+    /// Fleet workspaces were added after the snapshot format existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_fleet: bool,
     #[serde(default)]
     pub custom_name: Option<String>,
     pub identity_cwd: PathBuf,
@@ -248,6 +251,7 @@ impl From<LegacyWorkspaceSnapshot> for WorkspaceSnapshot {
 
         Self {
             id: None,
+            is_fleet: false,
             custom_name: snap.custom_name,
             identity_cwd,
             worktree_space: None,
@@ -440,6 +444,7 @@ fn capture_workspace(
         .collect();
     WorkspaceSnapshot {
         id: Some(ws.id.clone()),
+        is_fleet: ws.is_fleet,
         custom_name: ws.custom_name.clone(),
         identity_cwd,
         worktree_space: ws.worktree_space.clone(),
@@ -912,6 +917,28 @@ mod tests {
         assert!(!encoded.contains("never-persist-this-goal"));
         assert!(!encoded.contains("never-persist-this-status"));
         assert!(!encoded.contains("agent_states"));
+    }
+
+    #[test]
+    fn fleet_workspace_ac5_snapshot_persists_marker_and_defaults_old_sessions() {
+        let mut state = state_with_workspaces(&["fleet"]);
+        state.workspaces[0].is_fleet = true;
+
+        let snapshot = capture_from_state(&state);
+        assert!(snapshot.workspaces[0].is_fleet);
+        let mut encoded = serde_json::to_value(snapshot).expect("serialize session");
+        let workspace = encoded["workspaces"][0]
+            .as_object_mut()
+            .expect("workspace JSON object");
+        assert_eq!(
+            workspace.get("is_fleet"),
+            Some(&serde_json::Value::Bool(true))
+        );
+
+        workspace.remove("is_fleet");
+        let legacy: SessionSnapshot =
+            serde_json::from_value(encoded).expect("old session without fleet marker loads");
+        assert!(!legacy.workspaces[0].is_fleet);
     }
 
     fn capture_history_from_state_with_runtimes(
@@ -1831,6 +1858,7 @@ mod tests {
         let snap = SessionSnapshot {
             generation: None,
             workspaces: vec![WorkspaceSnapshot {
+                is_fleet: false,
                 repo_binding_cleared: false,
                 id: Some("wproj".to_string()),
                 custom_name: Some("pi-mono".to_string()),
@@ -2724,6 +2752,7 @@ mod tests {
             version: SNAPSHOT_VERSION,
             generation: None,
             workspaces: vec![WorkspaceSnapshot {
+                is_fleet: false,
                 repo_binding_cleared: false,
                 id: Some("test-ws".to_string()),
                 custom_name: Some("fallback test".to_string()),

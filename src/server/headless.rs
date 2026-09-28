@@ -14753,6 +14753,7 @@ next_tab = ""
                     path: checkout.clone(),
                     workspace: Some(Box::new(crate::api::schema::WorkspaceInfo {
                         workspace_id: workspace_id.clone(),
+                        is_fleet: false,
                         number: 1,
                         label: "issue".into(),
                         focused: true,
