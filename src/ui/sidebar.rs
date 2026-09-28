@@ -29425,7 +29425,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 60, 2), false)
             })
             .expect("render icon card");
-        assert!(row_text(terminal.backend().buffer(), 0, 60).contains("\u{EBC8}"));
+        assert!(row_text(terminal.backend().buffer(), 0, 60).contains("\u{F6003}"));
         assert!(row_text(terminal.backend().buffer(), 1, 60).contains("\u{EC82}"));
     }
 
