@@ -2066,6 +2066,10 @@ enum WindowCycleTarget {
 }
 
 fn cycle_visible_workspaces(state: &AppState) -> std::collections::HashSet<usize> {
+    // A collapsed Spaces section hides every local tab row, not just grouped ones.
+    if crate::ui::sidebar::section_is_collapsed(state, crate::ui::sidebar::SPACES_SECTION_TITLE) {
+        return std::collections::HashSet::new();
+    }
     crate::ui::sidebar::workspace_list_entries_for_mode(state, false, state.sidebar_group_mode)
         .into_iter()
         .filter_map(|entry| match entry {
@@ -4130,6 +4134,33 @@ mod tests {
             .map(|(target, _)| target)
             .collect::<Vec<_>>();
         assert!(!blocked_targets.contains(&BlockedPaneTarget::Remote(agent_ref)));
+    }
+
+    #[test]
+    fn fleet_workspace_ac9_skip_collapsed_spaces_section_excludes_local_windows() {
+        let mut app = app_with_global_window_fixture();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Blocked,
+            );
+        }
+        app.state.skip_collapsed_cycle = true;
+        assert!(!window_navigation_order(&app.state).is_empty());
+        assert!(!blocked_pane_cycle(&app.state).is_empty());
+
+        let key = format!(
+            "{}:{}",
+            app.state.sidebar_group_mode.collapse_namespace(),
+            crate::ui::sidebar::SPACES_SECTION_TITLE
+        );
+        app.state.collapsed_sidebar_groups.insert(key);
+        assert!(crate::ui::sidebar::section_is_collapsed(
+            &app.state,
+            crate::ui::sidebar::SPACES_SECTION_TITLE
+        ));
+        assert!(window_navigation_order(&app.state).is_empty());
+        assert!(blocked_pane_cycle(&app.state).is_empty());
     }
 
     #[test]
