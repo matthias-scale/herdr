@@ -10,9 +10,10 @@ use ratatui::{
 use super::sidebar::agent_panel_entries;
 use super::sidebar::{
     dim_inactive_pane_row, mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout,
-    render_compact_agent_row, render_remote_compact_agent_row_with_identity, section_header_glyph,
-    section_row_style, sidebar_row_belongs_to_workspace, sidebar_space_member_indices,
-    sidebar_thread_entries_from, sidebar_workspace_labels, SidebarRow, SYMPHONY_SECTION_TITLE,
+    render_compact_agent_row, render_remote_compact_agent_row_with_identity,
+    render_sections_thread_card, section_header_glyph_for_app, section_row_style,
+    sidebar_row_belongs_to_workspace, sidebar_space_member_indices, sidebar_thread_entries_from,
+    sidebar_workspace_labels, SidebarRow, SYMPHONY_SECTION_TITLE,
 };
 #[cfg(test)]
 use super::sidebar::{AgentPanelEntry, AgentPanelEntryData};
@@ -58,6 +59,10 @@ pub(crate) enum MobileSwitcherTarget {
     },
     Snooze(crate::app::state::SidebarPaneLifecycleTarget),
     Settle(crate::app::state::SidebarPaneLifecycleTarget),
+    Pin {
+        ws_idx: usize,
+        tab_idx: usize,
+    },
     NestedHeader(String),
     RemoteAgent(crate::api::schema::AgentRef),
     AgentRun {
@@ -146,6 +151,13 @@ fn mobile_switcher_target_for_row(
         ),
         SidebarRow::Tab { entry, depth } => {
             if entry.has_sections_card() {
+                if content.width >= 24 && col == content.right().saturating_sub(1) {
+                    let target = entry.local_target()?;
+                    return Some(MobileSwitcherTarget::Pin {
+                        ws_idx: target.ws_idx,
+                        tab_idx: target.tab_idx,
+                    });
+                }
                 None
             } else {
                 super::sidebar::selected_row_control_at(
@@ -181,6 +193,9 @@ fn mobile_switcher_target_for_row(
     };
     if let Some(control) = control {
         return Some(match control {
+            crate::app::state::SidebarHoverAction::Pin { ws_idx, tab_idx } => {
+                MobileSwitcherTarget::Pin { ws_idx, tab_idx }
+            }
             crate::app::state::SidebarHoverAction::Snooze { target } => {
                 MobileSwitcherTarget::Snooze(target)
             }
@@ -250,7 +265,7 @@ fn mobile_switcher_target_for_row(
 /// flat projection with no rows.
 fn mobile_sidebar_rows_start(app: &AppState, rows: &[SidebarRow]) -> usize {
     let mut start = 1;
-    if app.sidebar_shows_spaces_tree() || rows.is_empty() {
+    if (app.sidebar_shows_spaces_tree() && !app.sidebar_sections_layout) || rows.is_empty() {
         start += 1;
     }
     start
@@ -369,7 +384,7 @@ pub(crate) fn mobile_switcher_target_at(
     let doc_row = scroll.saturating_add(row.saturating_sub(areas.viewport.y) as usize);
 
     let rows = mobile_sidebar_rows(app);
-    if app.sidebar_shows_spaces_tree() && doc_row == 1 {
+    if app.sidebar_shows_spaces_tree() && !app.sidebar_sections_layout && doc_row == 1 {
         return Some(MobileSwitcherTarget::NewWorkspace);
     }
     let mut cursor = mobile_sidebar_rows_start(app, &rows);
@@ -718,7 +733,9 @@ fn render_mobile_switcher_content(
     let mut doc_y = 0usize;
 
     let rows = mobile_sidebar_rows_from(app, terminal_runtimes);
-    let title = if app.sidebar_shows_spaces_tree() {
+    let title = if app.sidebar_sections_layout {
+        "sections".to_string()
+    } else if app.sidebar_shows_spaces_tree() {
         "spaces".to_string()
     } else {
         app.agent_view_override
@@ -736,7 +753,7 @@ fn render_mobile_switcher_content(
         p,
     );
     doc_y += 1;
-    if app.sidebar_shows_spaces_tree() {
+    if app.sidebar_shows_spaces_tree() && !app.sidebar_sections_layout {
         render_action_row_at(
             frame,
             viewport,
@@ -907,6 +924,7 @@ fn render_mobile_switcher_content(
             }
             SidebarRow::RemoteAgent {
                 entry,
+                sections_card,
                 depth,
                 show_host_identity,
                 ..
@@ -917,15 +935,25 @@ fn render_mobile_switcher_content(
                     .is_some_and(|agent_ref| agent_ref == &entry.agent_ref);
                 let bg = mobile_item_bg(selected, false, p);
                 if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
-                    render_remote_compact_agent_row_with_identity(
-                        app,
-                        frame,
-                        entry,
-                        Rect::new(content.x, y, content.width, 1),
-                        *depth,
-                        Some(bg),
-                        *show_host_identity,
-                    );
+                    if let Some(card) = sections_card {
+                        render_sections_thread_card(
+                            app,
+                            frame,
+                            card,
+                            Rect::new(content.x, y, content.width, 1),
+                            selected,
+                        );
+                    } else {
+                        render_remote_compact_agent_row_with_identity(
+                            app,
+                            frame,
+                            entry,
+                            Rect::new(content.x, y, content.width, 1),
+                            *depth,
+                            Some(bg),
+                            *show_host_identity,
+                        );
+                    }
                 }
             }
             SidebarRow::SectionHeader {
@@ -938,10 +966,22 @@ fn render_mobile_switcher_content(
                     .iter()
                     .map(|count| format!(" {}:{}", count.host, count.count))
                     .collect::<String>();
+                let count_label = if app.sidebar_sections_layout
+                    && matches!(
+                        *title,
+                        super::sidebar::PINNED_SECTION_TITLE
+                            | super::sidebar::ACTIVE_SECTION_TITLE
+                            | super::sidebar::SNOOZED_SECTION_TITLE
+                            | super::sidebar::SETTLED_SECTION_TITLE
+                    ) {
+                    format!(" {count}")
+                } else {
+                    format!(" ({count})")
+                };
                 let label = format!(
-                    "  {} {} {title} ({count}){host_counts}",
+                    "  {} {} {title}{count_label}{host_counts}",
                     if *collapsed { "▸" } else { "▾" },
-                    section_header_glyph(title)
+                    section_header_glyph_for_app(app, title)
                 );
                 let zero = *title == SYMPHONY_SECTION_TITLE && *count == 0;
                 render_one_line_item(
@@ -1209,7 +1249,35 @@ fn render_mobile_switcher_content(
                 let bg = mobile_item_bg(false, active, p);
                 if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
                     let rect = Rect::new(content.x, y, content.width, 1);
-                    render_compact_agent_row(app, frame, entry, rect, *depth, true, Some(bg));
+                    if let Some(card) = entry.sections_card.as_ref() {
+                        let content_width = rect.width.saturating_sub(u16::from(rect.width >= 24));
+                        render_sections_thread_card(
+                            app,
+                            frame,
+                            card,
+                            Rect::new(rect.x, rect.y, content_width, 1),
+                            active,
+                        );
+                        if rect.width >= 24 {
+                            let pin = if app.nerd_font {
+                                if entry.pinned {
+                                    "󰐃"
+                                } else {
+                                    "󰐀"
+                                }
+                            } else if entry.pinned {
+                                "P"
+                            } else {
+                                "p"
+                            };
+                            frame.render_widget(
+                                Paragraph::new(pin).style(Style::default().fg(p.overlay0)),
+                                Rect::new(rect.right() - 1, rect.y, 1, 1),
+                            );
+                        }
+                    } else {
+                        render_compact_agent_row(app, frame, entry, rect, *depth, true, Some(bg));
+                    }
                     if entry.local_target().is_some_and(|target| {
                         app.pane_is_settled(target.ws_idx, target.pane_id)
                             || app.pane_is_snoozed(target.ws_idx, target.pane_id)
@@ -1800,6 +1868,41 @@ fn draw_horizontal_rule(frame: &mut Frame, area: Rect, p: &Palette) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sections_mobile_switcher_uses_one_row_and_pin_target() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.workspaces = vec![crate::workspace::Workspace::test_new("agent")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.reconcile_sidebar_presentation();
+        app.view.mobile_header_rect = Rect::new(0, 0, 40, 2);
+        app.view.terminal_area = Rect::new(0, 2, 40, 18);
+        let rows = mobile_sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(row,
+            SidebarRow::SectionHeader { title, .. } if *title == super::super::sidebar::ACTIVE_SECTION_TITLE)));
+        let tab = rows
+            .iter()
+            .find(|row| matches!(row, SidebarRow::Tab { .. }))
+            .expect("tab row");
+        assert_eq!(mobile_sidebar_row_height(tab), 1);
+        let tab_pos = rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::Tab { .. }))
+            .unwrap();
+        let doc_row = mobile_sidebar_rows_start(&app, &rows) + tab_pos;
+        let viewport = mobile_switcher_areas(&app).viewport;
+        let content = inset_for_left_scrollbar(viewport);
+        assert_eq!(
+            mobile_switcher_target_at(&app, content.right() - 1, viewport.y + doc_row as u16),
+            Some(MobileSwitcherTarget::Pin {
+                ws_idx: 0,
+                tab_idx: 0
+            })
+        );
+    }
 
     #[test]
     fn mobile_header_aggregates_the_workspace_in_one_pane_pass() {

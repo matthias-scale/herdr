@@ -1,10 +1,9 @@
-# Sidebar sections visual check
+# Compact sections sidebar visual check
 
-1. Set `[ui.sidebar] layout = "sections"` and `header = "sky"`, then restart Herdr.
-2. Compare the expanded sidebar with `shot-d-normal.png` and `shot-d-light.png` from `/home/ubuntu2/.agents/briefs/mat-207/` in dark and light themes.
-3. Check the four shelf order, two-line cards, project badges, status colors, and narrow-width field removal. Click both card lines and confirm they select the same tab. Counts read `Snoozed 2` and `Settled 14`, without parentheses.
-4. Confirm AC9: open the `≡` checklist beside the bell and toggle its nine areas by mouse and keys. Open and operate it from Home, Inbox, Work, Usage, and the dock; modal owners keep control.
-5. Confirm AC10: `header = "sky"` shows the sky band and `herdr` wordmark, with Search and the goto-key hint below and the View bar beneath them. With `header = "plain"`, the sky band and wordmark disappear and the remaining header controls reflow to the plain layout.
-6. Check the host strip above the footer: the local host comes first and the help hint sits at the right. At 18 columns, the local host remains visible (truncated if needed) and the help hint yields first. Check the sidebar still keeps three tab-list rows at 80x24 with Notes, Pomodoro, and Hosts enabled.
-7. Set `ui.nerd_font = false` and check the card and shelf icons.
-8. Hide Notes, invoke the Toggle Notes action, then show Notes again. Confirm the focused pane still receives typing and the Notes editor does not.
+1. Set `[ui.sidebar] layout = "sections"` and restart Herdr. The header is plain by default. Set `header = "sky"` separately to check that the sky band and wordmark still appear.
+2. In dark and light themes, check Pinned, Active, Snoozed, and Settled in that order. Every shelf has a bare count such as `Pinned 1`. Each agent tab takes one row: colored status dot, readable title, idle age or `✓ Done` when applicable, and one machine icon. A blocked row has a red dot without a label or triangle; the Needs you strip uses dots too.
+3. Check that tabs belonging to configured `[[projects]]` appear below their project name within each shelf. Unmatched tabs stay directly in the shelf. No project letter badges, branch line, PR line, or host name should appear on section rows.
+4. At a normal sidebar width, use the row pin icon to pin and unpin a tab. Check the adjacent snooze and settle actions on a selected tab, then repeat on a different tab. At 18 columns, the dot and a useful title fragment take priority.
+5. Check ub1, ub2, mbpro, and mbair machine icons in their distinct colors. With `ui.nerd_font = false`, check the `U` and `M` fallbacks. Override one host with `icon` under `[[remote.fleet.hosts]]` and check the custom mark.
+6. Open the mobile switcher. Check the same single row, shelf counts, project groups, machine fallback, and pin target. Confirm scrolling and tab selection still align with the visible rows.
+7. Open the `≡` checklist beside the bell and toggle its areas. Check Search, goto-key hint, View bar, host strip, and Notes at 80x24 and 18 columns; the tab list retains at least three rows.

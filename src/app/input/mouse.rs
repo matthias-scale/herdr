@@ -53,6 +53,10 @@ pub(super) enum MouseAction {
         row: u16,
     },
     SettlePane(crate::app::state::SidebarPaneLifecycleTarget),
+    TogglePinTab {
+        ws_idx: usize,
+        tab_idx: usize,
+    },
     SidebarNewMenu {
         action: crate::app::state::SidebarNewMenuAction,
     },
@@ -739,6 +743,9 @@ impl AppState {
                 .and_then(|target| target.action.clone())
             {
                 return Some(match action {
+                    crate::app::state::SidebarHoverAction::Pin { ws_idx, tab_idx } => {
+                        MouseAction::TogglePinTab { ws_idx, tab_idx }
+                    }
                     crate::app::state::SidebarHoverAction::Snooze { target } => {
                         MouseAction::OpenSnoozeMenu {
                             target,
@@ -2810,6 +2817,9 @@ impl AppState {
             Some(crate::ui::MobileSwitcherTarget::Settle(target)) => {
                 self.close_workspace_picker();
                 return MobileMouseResult::Action(MouseAction::SettlePane(target));
+            }
+            Some(crate::ui::MobileSwitcherTarget::Pin { ws_idx, tab_idx }) => {
+                return MobileMouseResult::Action(MouseAction::TogglePinTab { ws_idx, tab_idx });
             }
             Some(crate::ui::MobileSwitcherTarget::NestedHeader(key)) => {
                 self.toggle_sidebar_group(&key);

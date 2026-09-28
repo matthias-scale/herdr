@@ -2059,6 +2059,9 @@ impl Default for WorkIndexConfig {
 pub struct FleetHostConfig {
     /// Stable display name and `--hosts` selector.
     pub name: String,
+    /// Optional one-cell Nerd Font icon for this machine in the sections sidebar.
+    /// Plain text terminals use the machine's initial instead.
+    pub icon: Option<String>,
     /// OpenSSH target. Required unless `local = true`.
     pub target: String,
     /// Read this machine's socket and run-state directory without SSH.
@@ -2720,6 +2723,14 @@ session = "agents"
             without_local.resolved_self_name_with_hostname(Some("workstation".into())),
             "workstation"
         );
+    }
+
+    #[test]
+    fn fleet_host_icon_is_optional_and_parses_per_host() {
+        let default: FleetHostConfig = toml::from_str("name = \"ub1\"").unwrap();
+        assert_eq!(default.icon, None);
+        let custom: FleetHostConfig = toml::from_str("name = \"ub1\"\nicon = \"◆\"").unwrap();
+        assert_eq!(custom.icon.as_deref(), Some("◆"));
     }
 
     #[test]

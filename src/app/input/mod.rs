@@ -5307,6 +5307,9 @@ impl App {
                         row,
                     } => self.open_sidebar_snooze_menu(target, column, row),
                     MouseAction::SettlePane(target) => self.settle_sidebar_pane(target),
+                    MouseAction::TogglePinTab { ws_idx, tab_idx } => {
+                        self.toggle_pin_tab_via_api(ws_idx, tab_idx)
+                    }
                     MouseAction::SidebarNewMenu { action } => {
                         if action == crate::app::state::SidebarNewMenuAction::NewSpace {
                             self.begin_tui_workspace_create("tui.mouse.workspace.create");

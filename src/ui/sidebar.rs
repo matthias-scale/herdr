@@ -1309,13 +1309,6 @@ pub(crate) enum AgentPanelIdentity {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ProjectBadge {
-    letters: String,
-    color_index: usize,
-    icon: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SidebarCardStatus {
     Working(String),
     Done,
@@ -1323,33 +1316,11 @@ pub(crate) enum SidebarCardStatus {
     Idle(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SidebarCardHostKind {
-    Linux,
-    Mac,
-    Windows,
-    Other,
-    Remote,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SidebarCardAgent {
-    Claude,
-    Codex,
-    Other,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SidebarThreadCard {
-    badge: ProjectBadge,
     title: String,
     status: SidebarCardStatus,
-    branch: Option<String>,
-    pull_request: Option<String>,
     host: String,
-    host_kind: SidebarCardHostKind,
-    agent: Option<SidebarCardAgent>,
-    agent_icon: Option<&'static str>,
 }
 
 #[derive(Clone)]
@@ -1358,7 +1329,7 @@ pub(crate) struct AgentPanelEntry {
     pub(crate) identity: AgentPanelIdentity,
     data: std::sync::Arc<AgentPanelEntryData>,
     pub(crate) pinned: bool,
-    sections_card: Option<SidebarThreadCard>,
+    pub(super) sections_card: Option<SidebarThreadCard>,
     /// Projection-only overlay. Keeping it outside shared row data lets group
     /// builders mark redundancy without copying a cached remote entry.
     pub(crate) space_label_redundant: bool,
@@ -2829,8 +2800,8 @@ pub(crate) enum SidebarRow {
 
 pub(crate) const SNOOZED_SECTION_TITLE: &str = "Snoozed";
 pub(crate) const SETTLED_SECTION_TITLE: &str = "Settled";
-const PINNED_SECTION_TITLE: &str = "Pinned";
-const ACTIVE_SECTION_TITLE: &str = "Active";
+pub(crate) const PINNED_SECTION_TITLE: &str = "Pinned";
+pub(crate) const ACTIVE_SECTION_TITLE: &str = "Active";
 pub(crate) const SPACES_SECTION_TITLE: &str = "Spaces";
 pub(crate) const FLEET_SECTION_TITLE: &str = "Fleet";
 pub(crate) const PODS_SECTION_TITLE: &str = "Pods";
@@ -2929,7 +2900,7 @@ pub(super) fn section_header_glyph(title: &str) -> &'static str {
     }
 }
 
-fn section_header_glyph_for_app(app: &AppState, title: &str) -> &'static str {
+pub(super) fn section_header_glyph_for_app(app: &AppState, title: &str) -> &'static str {
     if app.sidebar_sections_layout && !app.nerd_font {
         match title {
             PINNED_SECTION_TITLE => "P",
@@ -2997,63 +2968,64 @@ fn append_sections_block(
         collapsed,
     });
     if !collapsed {
-        append_tab_rows(rows, entries, 0);
+        if !app.sidebar_named_projects || app.projects.is_empty() {
+            append_tab_rows(rows, entries, 0);
+            return;
+        }
+        // Projects are already resolved at config load. Match against that
+        // projection; never scan roots from the pane-scaled view path.
+        let mut grouped = vec![Vec::new(); app.projects.len()];
+        let mut ungrouped = Vec::new();
+        for entry in entries {
+            let project_index = app.projects.iter().position(|project| {
+                let cwd = entry
+                    .local_target()
+                    .and_then(|target| app.workspaces.get(target.ws_idx))
+                    .map(|workspace| workspace.identity_cwd.as_path());
+                cwd.is_some_and(|cwd| project.repos.iter().any(|repo| cwd.starts_with(&repo.path)))
+                    || entry_repo_label(app, &entry).is_some_and(|label| {
+                        let name = label.rsplit('/').next().unwrap_or(label.as_str());
+                        project
+                            .repos
+                            .iter()
+                            .any(|repo| repo.name.eq_ignore_ascii_case(name))
+                    })
+            });
+            if let Some(index) = project_index {
+                grouped[index].push(entry);
+            } else {
+                ungrouped.push(entry);
+            }
+        }
+        append_tab_rows(rows, ungrouped, 0);
+        for (project, entries) in app.projects.iter().zip(grouped) {
+            if entries.is_empty() {
+                continue;
+            }
+            let key = format!("sections-project:{title}:{}", project.id);
+            let collapsed = section_is_collapsed(app, &key);
+            rows.push(SidebarRow::NestedHeader {
+                key,
+                action_key: None,
+                sort_key: None,
+                sort_mode: SidebarSortMode::Default,
+                title: project.label.clone(),
+                count: entries.len(),
+                collapsed,
+                dim: false,
+                status: None,
+                spawn: false,
+            });
+            if !collapsed {
+                append_tab_rows(rows, entries, 1);
+            }
+        }
     }
 }
 
 fn sidebar_thread_card(app: &AppState, entry: &AgentPanelEntry) -> SidebarThreadCard {
     #[cfg(test)]
     SIDEBAR_SECTION_CARD_BUILDS.with(|builds| builds.set(builds.get() + 1));
-    let context = entry_work_context(app, entry);
-    let terminal = entry_terminal(app, entry);
-    let repo_label = context
-        .and_then(|context| context.repo.as_deref())
-        .map(str::trim)
-        .filter(|label| !label.is_empty())
-        .map(|repo| {
-            repo.trim_end_matches('/')
-                .rsplit('/')
-                .next()
-                .unwrap_or(repo)
-                .to_string()
-        })
-        .or_else(|| {
-            terminal
-                .and_then(|terminal| app.git_root_for_cwd.get(&terminal.cwd))
-                .and_then(Option::as_ref)
-                .and_then(|root| root.file_name())
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| entry.space_label.clone());
-    let workspace = entry
-        .local_target()
-        .and_then(|target| app.workspaces.get(target.ws_idx));
-    let repo_binding = workspace
-        .and_then(|workspace| workspace.repo_binding.as_deref())
-        .or_else(|| context.and_then(|context| context.repo.as_deref()));
-    let repo_root = workspace
-        .and_then(|workspace| {
-            workspace
-                .cached_git_space
-                .as_ref()
-                .map(|space| space.repo_root.as_path())
-        })
-        .or_else(|| {
-            terminal
-                .and_then(|terminal| app.git_root_for_cwd.get(&terminal.cwd))
-                .and_then(Option::as_deref)
-        });
-    let mut badge = project_badge(&repo_label);
-    if app.nerd_font {
-        badge.icon = crate::ui::icons::space_badge_icon(
-            repo_binding,
-            repo_root,
-            &entry.space_label,
-            &app.space_icons,
-        )
-        .map(|icon| crate::ui::icons::themed(icon, &app.palette))
-        .map(|icon| pad_right(icon, display_width(&badge.letters)));
-    }
     let reported_age = compact_age(entry, app.view_observed_at).0;
     let age = if entry.state == AgentState::Working {
         entry_earliest_working_since(app, entry)
@@ -3073,156 +3045,17 @@ fn sidebar_thread_card(app: &AppState, entry: &AgentPanelEntry) -> SidebarThread
     } else {
         SidebarCardStatus::Idle(age)
     };
-    let pull_request = context
-        .and_then(|context| context.pr_urls.first())
-        .and_then(|url| pull_request_number(url))
-        .map(str::to_string);
-    let branch = context
-        .and_then(|context| context.branch.as_deref())
-        .filter(|branch| !branch.is_empty())
-        .map(str::to_string);
     let host = entry
         .remote_entry
         .as_ref()
         .map(|remote| remote.agent_ref.host.clone())
         .or_else(|| entry.remote_host.clone())
         .unwrap_or_else(|| app.agent_host_name.clone());
-    let remote_host = entry.remote_entry.is_some() || entry.remote_host.is_some();
-    let host_kind = if remote_host {
-        SidebarCardHostKind::Remote
-    } else {
-        match crate::platform::local_host_os() {
-            crate::platform::HostOs::Linux => SidebarCardHostKind::Linux,
-            crate::platform::HostOs::Mac => SidebarCardHostKind::Mac,
-            crate::platform::HostOs::Windows => SidebarCardHostKind::Windows,
-            crate::platform::HostOs::Other => SidebarCardHostKind::Other,
-        }
-    };
-    let detected_agent = entry.agent.or(entry.agent_context);
-    let agent = match detected_agent {
-        Some(crate::detect::Agent::Claude) => Some(SidebarCardAgent::Claude),
-        Some(crate::detect::Agent::Codex) => Some(SidebarCardAgent::Codex),
-        Some(_) => Some(SidebarCardAgent::Other),
-        None => None,
-    };
     SidebarThreadCard {
-        badge,
         title: compact_row_title(entry, true).to_string(),
         status,
-        branch,
-        pull_request,
         host,
-        host_kind,
-        agent,
-        agent_icon: if app.nerd_font {
-            detected_agent.map(|agent| crate::ui::icons::agent_icon(agent).unwrap_or("◆"))
-        } else {
-            None
-        },
     }
-}
-
-fn project_badge(label: &str) -> ProjectBadge {
-    let label = label.trim();
-    let mut first_word = None;
-    let mut first_word_digit = None;
-    let mut first_word_last = None;
-    let mut last_word_first = None;
-    let mut first_word_position = 0usize;
-    let mut word_count = 0usize;
-    let mut inside_word = false;
-    for character in label.chars() {
-        if character.is_alphanumeric() {
-            if !inside_word {
-                word_count += 1;
-                last_word_first = Some(character);
-                if word_count == 1 {
-                    first_word = Some(character);
-                }
-            }
-            if word_count == 1 {
-                if first_word_position > 0 && first_word_digit.is_none() && character.is_numeric() {
-                    first_word_digit = Some(character);
-                }
-                first_word_last = Some(character);
-                first_word_position += 1;
-            }
-            inside_word = true;
-        } else {
-            inside_word = false;
-        }
-    }
-    let first = first_word.unwrap_or('P');
-    let second = first_word_digit.or(if word_count > 1 {
-        last_word_first
-    } else {
-        first_word_last
-    });
-    let mut letters = if word_count == 0 {
-        "PR".to_string()
-    } else {
-        first.to_uppercase().collect::<String>()
-    };
-    if word_count > 0 {
-        if let Some(second) = second {
-            letters.extend(second.to_uppercase());
-        }
-    }
-    let letters = letters.chars().take(2).collect();
-    let color_seed = if label.is_empty() { "project" } else { label };
-    let color_index = color_seed.chars().fold(0usize, |hash, character| {
-        character.to_lowercase().fold(hash, |hash, lower| {
-            hash.wrapping_mul(31).wrapping_add(lower as usize) % 18
-        })
-    });
-    ProjectBadge {
-        letters,
-        color_index,
-        icon: None,
-    }
-}
-
-fn project_badge_color(index: usize) -> Color {
-    const COLORS: [(u8, u8, u8); 18] = [
-        (156, 163, 175),
-        (248, 113, 113),
-        (251, 146, 60),
-        (251, 191, 36),
-        (250, 204, 21),
-        (163, 230, 53),
-        (74, 222, 128),
-        (52, 211, 153),
-        (45, 212, 191),
-        (34, 211, 238),
-        (56, 189, 248),
-        (96, 165, 250),
-        (129, 140, 248),
-        (167, 139, 250),
-        (192, 132, 252),
-        (232, 121, 249),
-        (244, 114, 182),
-        (251, 113, 133),
-    ];
-    let (red, green, blue) = COLORS[index % COLORS.len()];
-    Color::Rgb(red, green, blue)
-}
-
-fn project_badge_style(index: usize, app: &AppState) -> (Color, Color) {
-    let color = project_badge_color(index);
-    let light_theme = crate::app::state::color_rgb(app.palette.panel_bg).is_some_and(|rgb| {
-        u32::from(rgb.r) * 299 + u32::from(rgb.g) * 587 + u32::from(rgb.b) * 114 > 140_000
-    });
-    let foreground = if light_theme {
-        blend_rgb(color, Color::Black, 28)
-    } else {
-        color
-    };
-    let background = blend_rgb(
-        app.palette.panel_bg,
-        color,
-        if light_theme { 13 } else { 28 },
-    );
-    (foreground, background)
 }
 
 /// A repo-group card folds on either disclosure state: the per-Space chevron,
@@ -3456,14 +3289,14 @@ fn sidebar_rows_from(
 }
 
 pub(crate) fn mobile_sidebar_rows(app: &AppState) -> Vec<SidebarRow> {
-    sidebar_rows_inner(app, None, true)
+    sidebar_rows_inner(app, None, !app.sidebar_sections_layout)
 }
 
 pub(crate) fn mobile_sidebar_rows_from(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Vec<SidebarRow> {
-    sidebar_rows_inner(app, Some(terminal_runtimes), true)
+    sidebar_rows_inner(app, Some(terminal_runtimes), !app.sidebar_sections_layout)
 }
 
 fn sidebar_rows_inner(
@@ -7227,7 +7060,7 @@ fn agent_entry_height_in_body_at(
     _depth: u16,
 ) -> u16 {
     if entry.sections_card.is_some() {
-        body_height.min(2)
+        body_height.min(1)
     } else {
         u16::from(body_height > 0)
     }
@@ -7252,14 +7085,14 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
             ..
         } => {
             if sections_card.is_some() {
-                body_height.min(2)
+                body_height.min(1)
             } else {
                 agent_entry_height_in_body_at(app, &entry.entry, body_height, *depth)
             }
         }
         SidebarRow::Tab { entry, .. } => {
             if entry.sections_card.is_some() {
-                body_height.min(2)
+                body_height.min(1)
             } else {
                 1
             }
@@ -7865,8 +7698,13 @@ fn render_needs_you_row(
     }
     let p = &app.palette;
     let marker_color = if blocked { p.red } else { p.peach };
-    let host_width = display_width(host);
-    // " ! " plus the right-aligned host and its gap come off the title.
+    let (machine, machine_color) = if app.sidebar_sections_layout {
+        sections_machine_mark(app, host)
+    } else {
+        (host.to_string(), p.overlay0)
+    };
+    let host_width = display_width(&machine);
+    // " ● " plus the right-aligned host and its gap come off the title.
     let title_width = usize::from(rect.width).saturating_sub(3 + host_width + 1);
     let title = truncate_end(title, title_width);
     let pad = title_width.saturating_sub(display_width(&title));
@@ -7874,7 +7712,7 @@ fn render_needs_you_row(
         Paragraph::new(Line::from(vec![
             Span::raw(" "),
             Span::styled(
-                "!",
+                "●",
                 Style::default()
                     .fg(marker_color)
                     .add_modifier(Modifier::BOLD),
@@ -7883,8 +7721,10 @@ fn render_needs_you_row(
             Span::styled(title, Style::default().fg(p.subtext0)),
             Span::raw(" ".repeat(pad)),
             Span::styled(
-                format!(" {host}"),
-                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                format!(" {machine}"),
+                Style::default()
+                    .fg(machine_color)
+                    .add_modifier(Modifier::DIM),
             ),
         ])),
         Rect::new(rect.x, rect.y, rect.width, 1),
@@ -8198,6 +8038,62 @@ pub(crate) fn compute_sidebar_hover_targets(
                 let Some(target) = entry.local_target() else {
                     continue;
                 };
+                if entry.sections_card.is_some() {
+                    if let Some(rect) = clamp_row_cells(body, row_y, 0, 1) {
+                        targets.push(crate::app::state::SidebarHoverTarget {
+                            rect,
+                            label: agent_dot_tooltip(entry),
+                            action: None,
+                        });
+                    }
+                    let controls = sections_local_controls(
+                        app,
+                        entry,
+                        Rect::new(body.x, row_y, body.width, 1),
+                    );
+                    if controls.width > 0 {
+                        let start = usize::from(body.width - controls.width);
+                        if let Some(rect) = clamp_row_cells(body, row_y, start, 1) {
+                            targets.push(crate::app::state::SidebarHoverTarget {
+                                rect,
+                                label: if entry.pinned { "Unpin" } else { "Pin" }.into(),
+                                action: Some(crate::app::state::SidebarHoverAction::Pin {
+                                    ws_idx: target.ws_idx,
+                                    tab_idx: target.tab_idx,
+                                }),
+                            });
+                        }
+                        if let Some(control) = controls.lifecycle {
+                            if let Some(rect) = clamp_row_cells(body, row_y, start + 1, 3) {
+                                targets.push(crate::app::state::SidebarHoverTarget {
+                                    rect,
+                                    label: snooze_control_tooltip(
+                                        app,
+                                        target.ws_idx,
+                                        target.pane_id,
+                                    ),
+                                    action: Some(crate::app::state::SidebarHoverAction::Snooze {
+                                        target: control.target.clone(),
+                                    }),
+                                });
+                            }
+                            if control.show_settle {
+                                if let Some(rect) = clamp_row_cells(body, row_y, start + 4, 2) {
+                                    targets.push(crate::app::state::SidebarHoverTarget {
+                                        rect,
+                                        label: "Settle".into(),
+                                        action: Some(
+                                            crate::app::state::SidebarHoverAction::Settle {
+                                                target: control.target,
+                                            },
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let tab = matches!(row, SidebarRow::Tab { .. });
                 let requested_prefix = narrow_prefix.unwrap_or_else(|| usize::from(*depth) * 3 + 1);
                 let provider = compact_provider(entry, app.nerd_font);
@@ -8268,6 +8164,16 @@ pub(crate) fn compute_sidebar_hover_targets(
                 depth,
                 show_host_identity,
             } => {
+                if sections_card.is_some() {
+                    if let Some(rect) = clamp_row_cells(body, row_y, 0, 1) {
+                        targets.push(crate::app::state::SidebarHoverTarget {
+                            rect,
+                            label: agent_dot_tooltip(entry),
+                            action: None,
+                        });
+                    }
+                    continue;
+                }
                 let requested_prefix = usize::from(*depth) * 3 + 1;
                 let total_width = usize::from(body.width);
                 let max_host_width = total_width.saturating_sub(
@@ -10159,12 +10065,13 @@ fn render_section_header(
     let p = &app.palette;
     let color = section_header_color(header.title, p);
     let count_label = if app.sidebar_sections_layout
-        && matches!(header.title, PINNED_SECTION_TITLE | ACTIVE_SECTION_TITLE)
-    {
-        String::new()
-    } else if app.sidebar_sections_layout
-        && matches!(header.title, SNOOZED_SECTION_TITLE | SETTLED_SECTION_TITLE)
-    {
+        && matches!(
+            header.title,
+            PINNED_SECTION_TITLE
+                | ACTIVE_SECTION_TITLE
+                | SNOOZED_SECTION_TITLE
+                | SETTLED_SECTION_TITLE
+        ) {
         format!(" {count}")
     } else {
         format!(" ({count})")
@@ -10832,7 +10739,51 @@ fn render_tab_card(
                     .get(target.ws_idx)
                     .is_some_and(|workspace| workspace.active_tab == target.tab_idx)
         });
-        render_sections_thread_card(app, frame, thread_card, card.rect, selected);
+        let controls = sections_local_controls(app, entry, card.rect);
+        let card_rect = Rect::new(
+            card.rect.x,
+            card.rect.y,
+            card.rect.width.saturating_sub(controls.width),
+            1,
+        );
+        render_sections_thread_card(app, frame, thread_card, card_rect, selected);
+        if controls.width > 0 {
+            let x = card.rect.right().saturating_sub(controls.width);
+            let pin = if app.nerd_font {
+                if entry.pinned {
+                    "󰐃"
+                } else {
+                    "󰐀"
+                }
+            } else if entry.pinned {
+                "P"
+            } else {
+                "p"
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    pin,
+                    Style::default().fg(if entry.pinned {
+                        app.palette.blue
+                    } else {
+                        app.palette.overlay0
+                    }),
+                )),
+                Rect::new(x, card.rect.y, 1, 1),
+            );
+            if let Some(control) = controls.lifecycle {
+                frame.render_widget(
+                    Paragraph::new(" ◷ ").style(Style::default().fg(app.palette.mauve)),
+                    Rect::new(x + 1, card.rect.y, 3, 1),
+                );
+                if control.show_settle {
+                    frame.render_widget(
+                        Paragraph::new(" ✓").style(Style::default().fg(app.palette.overlay0)),
+                        Rect::new(x + 4, card.rect.y, 2, 1),
+                    );
+                }
+            }
+        }
         return;
     }
     render_compact_agent_row_with_prefix(
@@ -10865,46 +10816,59 @@ fn render_tab_card(
     }
 }
 
-fn sidebar_card_status(
-    status: &SidebarCardStatus,
-    nerd_font: bool,
-    palette: &Palette,
-) -> (&'static str, String, Color) {
-    match status {
-        SidebarCardStatus::Working(age) => {
-            (if nerd_font { "◉" } else { "~" }, age.clone(), palette.blue)
-        }
-        SidebarCardStatus::Done => (
-            if nerd_font { "✓" } else { "v" },
-            "Done".to_string(),
-            palette.green,
-        ),
-        SidebarCardStatus::Blocked => (
-            if nerd_font { "" } else { "!" },
-            "Blocked".to_string(),
-            palette.red,
-        ),
-        SidebarCardStatus::Idle(age) => (
-            if nerd_font { "·" } else { "." },
-            age.clone(),
-            palette.overlay0,
-        ),
-    }
+struct SectionsLocalControls {
+    width: u16,
+    lifecycle: Option<SidebarRowControl>,
 }
 
-fn sidebar_card_host_icon(kind: SidebarCardHostKind, nerd_font: bool) -> &'static str {
-    match (kind, nerd_font) {
-        (SidebarCardHostKind::Linux, true) => "",
-        (SidebarCardHostKind::Linux, false) => "L",
-        (SidebarCardHostKind::Mac, true) => "",
-        (SidebarCardHostKind::Mac, false) => "A",
-        (SidebarCardHostKind::Windows, true) => "",
-        (SidebarCardHostKind::Windows, false) => "W",
-        (SidebarCardHostKind::Other, true) => "󰟀",
-        (SidebarCardHostKind::Other, false) => "?",
-        (SidebarCardHostKind::Remote, true) => "󰖟",
-        (SidebarCardHostKind::Remote, false) => "R",
+fn sections_local_controls(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    rect: Rect,
+) -> SectionsLocalControls {
+    if rect.width < 24 || entry.local_target().is_none() {
+        return SectionsLocalControls {
+            width: 0,
+            lifecycle: None,
+        };
     }
+    let lifecycle = (rect.width >= 38)
+        .then(|| row_control_pane(app, entry, true))
+        .flatten();
+    let width = 1 + lifecycle
+        .as_ref()
+        .map_or(0, |control| 3 + u16::from(control.show_settle) * 2);
+    SectionsLocalControls { width, lifecycle }
+}
+
+fn sections_machine_mark(app: &AppState, host: &str) -> (String, Color) {
+    let default = match host.to_ascii_lowercase().as_str() {
+        "ub1" => ("\u{f03a4}", "U", app.palette.blue),
+        "ub2" => ("\u{f03a7}", "U", app.palette.green),
+        "mbpro" => ("\u{f0b17}", "M", app.palette.mauve),
+        "mbair" => ("\u{f0b08}", "M", app.palette.peach),
+        _ => ("", "", app.palette.overlay0),
+    };
+    let fallback = if default.1.is_empty() {
+        host.chars()
+            .next()
+            .unwrap_or('?')
+            .to_uppercase()
+            .collect::<String>()
+    } else {
+        default.1.to_string()
+    };
+    let icon = app
+        .sidebar_machine_icons
+        .get(host)
+        .map(String::as_str)
+        .unwrap_or(default.0);
+    let mark = if app.nerd_font && display_width(icon) == 1 {
+        icon.to_string()
+    } else {
+        fallback
+    };
+    (mark, default.2)
 }
 
 fn render_sections_thread_card(
@@ -10923,181 +10887,55 @@ fn render_sections_thread_card(
             .buffer_mut()
             .set_style(rect, Style::default().bg(p.active_row_bg));
     }
-    let (status_glyph, status_label, status_color) =
-        sidebar_card_status(&card.status, app.nerd_font, p);
-    let (badge_fg, badge_bg) = project_badge_style(card.badge.color_index, app);
-    let badge_icon = if app.nerd_font {
-        card.badge.icon.as_deref()
-    } else {
-        None
+    let (dot_color, suffix) = match &card.status {
+        SidebarCardStatus::Working(_) => (p.blue, "".to_string()),
+        SidebarCardStatus::Done => (p.green, "✓ Done".to_string()),
+        SidebarCardStatus::Blocked => (p.red, "".to_string()),
+        SidebarCardStatus::Idle(age) => (p.overlay0, age.clone()),
     };
-    let badge_inner = badge_icon.unwrap_or(&card.badge.letters);
-    let badge_width = display_width(badge_inner) + 2;
-    let status_text = if rect.width < 24 {
-        match &card.status {
-            SidebarCardStatus::Working(age) => format!("{status_glyph} {age}"),
-            SidebarCardStatus::Done => status_glyph.to_string(),
-            SidebarCardStatus::Blocked => status_glyph.to_string(),
-            SidebarCardStatus::Idle(age) => format!("{status_glyph} {age}"),
-        }
+    let (machine, machine_color) = sections_machine_mark(app, &card.host);
+    // At the supported 18-column minimum, the title wins over age and machine.
+    let width = usize::from(rect.width);
+    let machine_width = if width >= 18 {
+        display_width(&machine) + 1
     } else {
-        format!("{status_glyph} {status_label}")
+        0
     };
-    let first_line_width = usize::from(rect.width);
-    let fixed_width = badge_width + 1 + display_width(&status_text) + 1;
-    let title_width = first_line_width.saturating_sub(fixed_width);
-    let title = pad_right(&truncate_end(&card.title, title_width), title_width);
-    let badge_style = Style::default()
-        .fg(badge_fg)
-        .bg(badge_bg)
-        .add_modifier(Modifier::BOLD);
-    let mut first_line = Vec::with_capacity(7);
-    first_line.extend([
-        Span::styled(" ", badge_style),
-        Span::styled(badge_inner, badge_style),
-        Span::styled(" ", badge_style),
-        Span::raw(" "),
-        Span::styled(title, Style::default().fg(p.text)),
+    let suffix_width = if width >= 28 && !suffix.is_empty() {
+        display_width(&suffix) + 1
+    } else {
+        0
+    };
+    let title_width = width
+        .saturating_sub(2 + machine_width + suffix_width)
+        .max(1);
+    let title = truncate_end(&card.title, title_width);
+    let padding = title_width.saturating_sub(display_width(&title));
+    let mut spans = vec![
+        Span::styled("●", Style::default().fg(dot_color)),
         Span::raw(" "),
         Span::styled(
-            status_text,
-            Style::default()
-                .fg(status_color)
-                .add_modifier(Modifier::BOLD),
+            title,
+            Style::default().fg(p.text).add_modifier(if selected {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
         ),
-    ]);
+        Span::raw(" ".repeat(padding)),
+    ];
+    if suffix_width > 0 {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(suffix, Style::default().fg(p.overlay0)));
+    }
+    if machine_width > 0 {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(machine, Style::default().fg(machine_color)));
+    }
     frame.render_widget(
-        Paragraph::new(Line::from(first_line)),
+        Paragraph::new(Line::from(spans)),
         Rect::new(rect.x, rect.y, rect.width, 1),
     );
-    if rect.height < 2 {
-        return;
-    }
-
-    let branch_icon = if app.nerd_font { "" } else { "b" };
-    let host_icon = sidebar_card_host_icon(card.host_kind, app.nerd_font);
-    let agent_icon = if app.nerd_font {
-        card.agent_icon
-    } else {
-        card.agent.map(|agent| match agent {
-            SidebarCardAgent::Claude => "*",
-            SidebarCardAgent::Codex => "o",
-            SidebarCardAgent::Other => "?",
-        })
-    };
-    let mut left_fields = Vec::new();
-    if let Some(branch) = card.branch.as_deref() {
-        left_fields.push((format!("{branch_icon} {branch}"), p.mauve));
-    }
-    if let Some(pull_request) = card.pull_request.as_deref() {
-        let pr_icon = if app.nerd_font {
-            crate::ui::icons::GITHUB
-        } else {
-            "#"
-        };
-        left_fields.push((format!("{pr_icon} {pull_request}"), p.blue));
-    }
-    // Keep the host before the agent so narrow cards drop the agent first;
-    // render in reverse to keep the host at the far right.
-    let mut right_fields = vec![(
-        std::borrow::Cow::Owned(format!("{host_icon} {}", card.host)),
-        p.overlay1,
-    )];
-    if let Some(agent_icon) = agent_icon {
-        let color = match card.agent {
-            Some(SidebarCardAgent::Claude) => crate::ui::icons::claude_color(p),
-            Some(SidebarCardAgent::Codex) => crate::ui::icons::codex_color(p),
-            _ => p.overlay0,
-        };
-        right_fields.push((std::borrow::Cow::Borrowed(agent_icon), color));
-    }
-    let has_branch = card.branch.is_some();
-    let available = usize::from(rect.width).saturating_sub(2);
-    loop {
-        let left_width = left_fields
-            .iter()
-            .map(|(text, _)| display_width(text))
-            .sum::<usize>()
-            + left_fields.len().saturating_sub(1);
-        let right_width = right_fields
-            .iter()
-            .map(|(text, _)| display_width(text))
-            .sum::<usize>()
-            + right_fields.len().saturating_sub(1);
-        let gap = usize::from(!left_fields.is_empty() && !right_fields.is_empty());
-        let width = left_width + right_width + gap;
-        if width <= available {
-            break;
-        }
-        if right_fields.len() > 1 {
-            right_fields.pop();
-        } else if left_fields.len() > 1 || (!has_branch && !left_fields.is_empty()) {
-            left_fields.pop();
-        } else {
-            break;
-        }
-    }
-    if has_branch && !left_fields.is_empty() {
-        let left_tail_width = left_fields
-            .iter()
-            .skip(1)
-            .map(|(text, _)| display_width(text))
-            .sum::<usize>()
-            + left_fields.len().saturating_sub(1);
-        let right_width = right_fields
-            .iter()
-            .map(|(text, _)| display_width(text))
-            .sum::<usize>()
-            + right_fields.len().saturating_sub(1);
-        let gap = usize::from(!right_fields.is_empty());
-        let branch_width = available.saturating_sub(left_tail_width + right_width + gap);
-        let branch = &mut left_fields[0].0;
-        if display_width(branch) > branch_width {
-            *branch = middle_elide(branch, branch_width);
-        }
-    }
-
-    let mut left_spans = Vec::new();
-    for (index, (text, color)) in left_fields.iter().enumerate() {
-        if index > 0 {
-            left_spans.push(Span::raw(" "));
-        }
-        left_spans.push(Span::styled(text.as_str(), Style::default().fg(*color)));
-    }
-    let mut right_spans = Vec::new();
-    for (index, (text, color)) in right_fields.iter().rev().enumerate() {
-        if index > 0 {
-            right_spans.push(Span::raw(" "));
-        }
-        right_spans.push(Span::styled(text.as_ref(), Style::default().fg(*color)));
-    }
-    let left_width = left_fields
-        .iter()
-        .map(|(text, _)| display_width(text))
-        .sum::<usize>()
-        + left_fields.len().saturating_sub(1);
-    let left_width = u16::try_from(left_width)
-        .unwrap_or(rect.width)
-        .min(rect.width.saturating_sub(2));
-    let gap = u16::from(!left_spans.is_empty() && !right_spans.is_empty());
-    let details_y = rect.y.saturating_add(1);
-    if !left_spans.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::from(left_spans)),
-            Rect::new(rect.x.saturating_add(2), details_y, left_width, 1),
-        );
-    }
-    if !right_spans.is_empty() {
-        let right_x = rect
-            .x
-            .saturating_add(2)
-            .saturating_add(left_width)
-            .saturating_add(gap);
-        frame.render_widget(
-            Paragraph::new(Line::from(right_spans)).alignment(Alignment::Right),
-            Rect::new(right_x, details_y, rect.right().saturating_sub(right_x), 1),
-        );
-    }
 }
 
 fn tab_card_entry<'a>(
@@ -28398,6 +28236,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_selected_remote_agent = Some(agent_ref);
         let rect = Rect::new(0, 0, 60, 1);
         let action_kind = |action: crate::app::state::SidebarHoverAction| match action {
+            crate::app::state::SidebarHoverAction::Pin { .. } => "pin",
             crate::app::state::SidebarHoverAction::Snooze { .. } => "snooze",
             crate::app::state::SidebarHoverAction::Settle { .. } => "settle",
         };
@@ -28940,145 +28779,185 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn project_badge_follows_t3_examples_and_uses_the_eighteen_color_hash() {
-        assert_eq!(project_badge("scalablev2").letters, "S2");
-        assert_eq!(project_badge("herdr").letters, "HR");
-        assert_eq!(project_badge("my project").letters, "MP");
-        assert_eq!(project_badge("agent-fleet").letters, "AF");
-        assert_eq!(project_badge("scalable-agent-fleet").letters, "SF");
-        assert_eq!(project_badge("11x").letters, "11");
-        assert_eq!(project_badge("").letters, "PR");
-        assert_eq!(project_badge("scalablev2").color_index, {
-            "scalablev2".chars().fold(0usize, |hash, ch| {
-                hash.wrapping_mul(31).wrapping_add(ch as usize) % 18
-            })
-        });
+    fn sections_shelf_groups_only_tabs_in_configured_projects() {
+        let mut app = app_with_agents(&["herdr", "scalablev2", "loose"]);
+        app.sidebar_sections_layout = true;
+        app.sidebar_named_projects = true;
+        for (workspace, path) in app.workspaces.iter_mut().zip([
+            "/tmp/projects/herdr",
+            "/tmp/projects/scalablev2",
+            "/tmp/loose",
+        ]) {
+            workspace.identity_cwd = std::path::PathBuf::from(path);
+        }
+        app.projects = vec![
+            crate::app::projects::Project {
+                id: "tools".into(),
+                label: "Tools".into(),
+                repos: vec![crate::app::projects::ProjectRepo {
+                    name: "herdr".into(),
+                    path: "/tmp/projects/herdr".into(),
+                }],
+            },
+            crate::app::projects::Project {
+                id: "work".into(),
+                label: "Work".into(),
+                repos: vec![crate::app::projects::ProjectRepo {
+                    name: "scalablev2".into(),
+                    path: "/tmp/projects/scalablev2".into(),
+                }],
+            },
+        ];
+        let mut rows = Vec::new();
+        append_sections_block(
+            &app,
+            &mut rows,
+            ACTIVE_SECTION_TITLE,
+            sidebar_thread_entries(&app),
+        );
+        assert!(rows.iter().any(|row| matches!(row,
+            SidebarRow::NestedHeader { title, count: 1, .. } if title == "Tools")));
+        assert!(rows.iter().any(|row| matches!(row,
+            SidebarRow::NestedHeader { title, count: 1, .. } if title == "Work")));
+        assert!(rows.iter().any(|row| matches!(row,
+            SidebarRow::Tab { entry, depth: 0 } if entry.primary_label == "loose")));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Tab { .. }))
+                .count(),
+            3
+        );
+
+        app.sidebar_named_projects = false;
+        let mut rows = Vec::new();
+        append_sections_block(
+            &app,
+            &mut rows,
+            ACTIVE_SECTION_TITLE,
+            sidebar_thread_entries(&app),
+        );
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::NestedHeader { .. })));
     }
 
     #[test]
-    fn sidebar_card_row_keeps_host_and_drops_optional_fields_when_narrow() {
+    fn sections_pin_control_targets_its_tab_without_hiding_snooze_and_settle() {
+        let mut app = app_with_agents(&["agent"]);
+        app.sidebar_sections_layout = true;
+        app.sidebar_width = 60;
+        let area = Rect::new(0, 0, 60, 24);
+        crate::ui::compute_view(&mut app, area);
+        let targets = compute_sidebar_hover_targets(&app, area);
+        assert!(targets.iter().any(|target| matches!(
+            target.action,
+            Some(crate::app::state::SidebarHoverAction::Pin {
+                ws_idx: 0,
+                tab_idx: 0
+            })
+        )));
+        assert!(targets.iter().any(|target| matches!(
+            target.action,
+            Some(crate::app::state::SidebarHoverAction::Snooze { .. })
+        )));
+        assert!(targets.iter().any(|target| matches!(
+            target.action,
+            Some(crate::app::state::SidebarHoverAction::Settle { .. })
+        )));
+    }
+
+    #[test]
+    fn sections_row_is_one_line_and_keeps_title_before_machine() {
         let mut app = AppState::test_new();
         app.nerd_font = false;
         let card = SidebarThreadCard {
-            badge: project_badge("herdr"),
-            title: "fix sidebar cards".into(),
-            status: SidebarCardStatus::Working("4m".into()),
-            branch: Some("feat/a-very-long-branch".into()),
-            pull_request: Some("207".into()),
+            title: "fix sidebar".into(),
+            status: SidebarCardStatus::Idle("8m".into()),
             host: "ub1".into(),
-            host_kind: SidebarCardHostKind::Linux,
-            agent: Some(SidebarCardAgent::Codex),
-            agent_icon: None,
         };
-        let mut terminal = Terminal::new(TestBackend::new(18, 2)).expect("card terminal");
-        terminal
-            .draw(|frame| {
-                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 18, 2), false)
-            })
-            .expect("render sections card");
-        assert!(row_text(terminal.backend().buffer(), 0, 18).contains("fix"));
-        let second = row_text(terminal.backend().buffer(), 1, 18);
-        assert!(second.contains("b"), "{second:?}");
-        assert!(
-            second.ends_with("L ub1"),
-            "host stays right-aligned: {second:?}"
-        );
-        assert!(
-            !second.contains('#'),
-            "PR field should yield to the branch and host: {second:?}"
-        );
+        for width in [18, 40] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 2)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    render_sections_thread_card(
+                        &app,
+                        frame,
+                        &card,
+                        Rect::new(0, 0, width, 2),
+                        false,
+                    )
+                })
+                .expect("draw");
+            let first = row_text(terminal.backend().buffer(), 0, width);
+            let second = row_text(terminal.backend().buffer(), 1, width);
+            assert!(first.starts_with("● fix"), "{first:?}");
+            assert!(first.trim_end().ends_with('U'), "{first:?}");
+            assert!(
+                !first.contains("HR") && !first.contains("feat/") && !first.contains("207"),
+                "{first:?}"
+            );
+            assert!(second.trim().is_empty(), "{second:?}");
+            if width == 40 {
+                assert!(first.contains("8m"), "{first:?}");
+            }
+        }
     }
 
     #[test]
-    fn sections_card_elides_a_long_branch_before_dropping_the_host() {
+    fn sections_blocked_and_done_keep_dot_and_only_done_has_text() {
         let mut app = AppState::test_new();
         app.nerd_font = false;
-        let card = SidebarThreadCard {
-            badge: project_badge("herdr"),
-            title: "fix sidebar cards".into(),
-            status: SidebarCardStatus::Working("4m".into()),
-            branch: Some("feature/a-branch-name-that-is-much-longer-than-the-card".into()),
-            pull_request: Some("207".into()),
-            host: "ub1".into(),
-            host_kind: SidebarCardHostKind::Linux,
-            agent: Some(SidebarCardAgent::Codex),
-            agent_icon: None,
-        };
-        let mut terminal = Terminal::new(TestBackend::new(36, 2)).expect("card terminal");
-        terminal
-            .draw(|frame| {
-                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 36, 2), false)
-            })
-            .expect("render sections card");
-
-        let second = row_text(terminal.backend().buffer(), 1, 36);
-        assert!(
-            second.contains('…'),
-            "long branch should be elided: {second:?}"
-        );
-        assert!(
-            second.ends_with("L ub1"),
-            "host stays right-aligned: {second:?}"
-        );
-    }
-
-    #[test]
-    fn sections_plain_thread_card_right_aligns_host_without_branch_or_pr() {
-        let mut app = AppState::test_new();
-        app.nerd_font = false;
-        let card = SidebarThreadCard {
-            badge: project_badge("shell"),
-            title: "shell".into(),
-            status: SidebarCardStatus::Idle("".into()),
-            branch: None,
-            pull_request: None,
+        let mut card = SidebarThreadCard {
+            title: "agent".into(),
+            status: SidebarCardStatus::Blocked,
             host: "ub2".into(),
-            host_kind: SidebarCardHostKind::Linux,
-            agent: None,
-            agent_icon: None,
         };
-        let mut terminal =
-            Terminal::new(TestBackend::new(40, 2)).expect("plain shell card terminal");
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
         terminal
             .draw(|frame| {
-                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 40, 2), false)
+                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 40, 1), false)
             })
-            .expect("render plain shell card");
-        let second = row_text(terminal.backend().buffer(), 1, 40);
-        assert!(second.ends_with("L ub2"), "{second:?}");
-        assert!(second.find("L ub2").unwrap_or(0) > 20, "{second:?}");
+            .unwrap();
+        let blocked = row_text(terminal.backend().buffer(), 0, 40);
+        assert!(blocked.starts_with("● agent"));
+        assert!(!blocked.contains("Blocked") && !blocked.contains('!') && !blocked.contains(''));
+        assert_eq!(terminal.backend().buffer()[(0, 0)].fg, app.palette.red);
+        card.status = SidebarCardStatus::Done;
+        terminal
+            .draw(|frame| {
+                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 40, 1), false)
+            })
+            .unwrap();
+        let done = row_text(terminal.backend().buffer(), 0, 40);
+        assert!(done.contains("✓ Done"), "{done:?}");
     }
 
     #[test]
-    fn sections_thread_card_left_aligns_branch_and_pr_and_right_aligns_host() {
+    fn needs_you_strip_uses_a_dot_instead_of_an_exclamation() {
         let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
         app.nerd_font = false;
-        let card = SidebarThreadCard {
-            badge: project_badge("shell"),
-            title: "shell".into(),
-            status: SidebarCardStatus::Idle("".into()),
-            branch: Some("feat/x".into()),
-            pull_request: Some("207".into()),
-            host: "ub2".into(),
-            host_kind: SidebarCardHostKind::Linux,
-            agent: None,
-            agent_icon: None,
-        };
-        let mut terminal = Terminal::new(TestBackend::new(40, 2)).expect("thread card terminal");
+        let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
         terminal
             .draw(|frame| {
-                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 40, 2), false)
+                render_needs_you_row(
+                    &app,
+                    frame,
+                    "Agent waiting",
+                    "ub1",
+                    true,
+                    Rect::new(0, 0, 40, 1),
+                )
             })
-            .expect("render thread card");
-        let second = row_text(terminal.backend().buffer(), 1, 40);
-        assert!(second.starts_with("  b feat/x # 207"), "{second:?}");
-        assert!(second.ends_with("L ub2"), "{second:?}");
-        let pr_end = second.find("# 207").expect("left PR field") + "# 207".len();
-        let host_start = second.find("L ub2").expect("right host field");
+            .unwrap();
+        let text = row_text(terminal.backend().buffer(), 0, 40);
+        assert!(text.starts_with(" ● Agent waiting"), "{text:?}");
+        assert!(!text.contains('!'));
         assert!(
-            host_start > pr_end + 1,
-            "fields need a visible gap: {second:?}"
+            text.trim_end().ends_with('U') && !text.contains("ub1"),
+            "{text:?}"
         );
+        assert_eq!(terminal.backend().buffer()[(1, 0)].fg, app.palette.red);
     }
 
     #[test]
@@ -29086,6 +28965,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
         for (title, count, expected) in [
+            (PINNED_SECTION_TITLE, 1, "Pinned 1"),
+            (ACTIVE_SECTION_TITLE, 3, "Active 3"),
             (SNOOZED_SECTION_TITLE, 2, "Snoozed 2"),
             (SETTLED_SECTION_TITLE, 14, "Settled 14"),
         ] {
@@ -29101,23 +28982,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             assert!(line.contains(expected), "{line:?}");
             assert!(!line.contains(&format!("({count})")), "{line:?}");
         }
-    }
-
-    #[test]
-    fn sidebar_status_icons_have_distinct_colors_and_labels() {
-        let palette = Palette::one_dark();
-        let working =
-            sidebar_card_status(&SidebarCardStatus::Working("2m".into()), false, &palette);
-        let done = sidebar_card_status(&SidebarCardStatus::Done, false, &palette);
-        let blocked = sidebar_card_status(&SidebarCardStatus::Blocked, false, &palette);
-        let idle = sidebar_card_status(&SidebarCardStatus::Idle("8m".into()), false, &palette);
-        assert_eq!((working.0, working.1.as_str()), ("~", "2m"));
-        assert_eq!((done.0, done.1.as_str()), ("v", "Done"));
-        assert_eq!((blocked.0, blocked.1.as_str()), ("!", "Blocked"));
-        assert_eq!((idle.0, idle.1.as_str()), (".", "8m"));
-        assert_ne!(working.2, done.2);
-        assert_ne!(done.2, blocked.2);
-        assert_ne!(blocked.2, idle.2);
     }
 
     #[test]
@@ -29348,200 +29212,27 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn sidebar_sections_ascii_fallback_contains_no_nerd_font_glyphs() {
+    fn sections_machine_marks_use_distinct_defaults_and_configured_icon() {
         let mut app = AppState::test_new();
-        app.sidebar_sections_layout = true;
+        app.nerd_font = true;
+        let mut colors = Vec::new();
+        for (host, icon) in [
+            ("ub1", "\u{f03a4}"),
+            ("ub2", "\u{f03a7}"),
+            ("mbpro", "\u{f0b17}"),
+            ("mbair", "\u{f0b08}"),
+        ] {
+            let (mark, color) = sections_machine_mark(&app, host);
+            assert_eq!(mark, icon);
+            assert!(!colors.contains(&color));
+            colors.push(color);
+        }
+        app.sidebar_machine_icons.insert("ub1".into(), "◆".into());
+        assert_eq!(sections_machine_mark(&app, "ub1").0, "◆");
         app.nerd_font = false;
-        for title in [
-            PINNED_SECTION_TITLE,
-            ACTIVE_SECTION_TITLE,
-            SNOOZED_SECTION_TITLE,
-            SETTLED_SECTION_TITLE,
-        ] {
-            assert!(section_header_glyph_for_app(&app, title).is_ascii());
-        }
-        for status in [
-            SidebarCardStatus::Working("1m".into()),
-            SidebarCardStatus::Done,
-            SidebarCardStatus::Blocked,
-            SidebarCardStatus::Idle("3m".into()),
-        ] {
-            assert!(sidebar_card_status(&status, false, &app.palette)
-                .0
-                .is_ascii());
-        }
-        assert_eq!(
-            sidebar_card_host_icon(SidebarCardHostKind::Remote, false),
-            "R"
-        );
-        assert!(!sidebar_card_host_icon(SidebarCardHostKind::Remote, true).is_ascii());
-        let card = SidebarThreadCard {
-            badge: project_badge("herdr"),
-            title: "sidebar".into(),
-            status: SidebarCardStatus::Working("2m".into()),
-            branch: Some("feat/sidebar".into()),
-            pull_request: Some("207".into()),
-            host: "ub1".into(),
-            host_kind: SidebarCardHostKind::Linux,
-            agent: Some(SidebarCardAgent::Codex),
-            agent_icon: None,
-        };
-        let mut terminal = Terminal::new(TestBackend::new(60, 2)).expect("ASCII card terminal");
-        terminal
-            .draw(|frame| {
-                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 60, 2), false)
-            })
-            .expect("render ASCII card");
-        assert!(row_text(terminal.backend().buffer(), 0, 60).is_ascii());
-        assert!(row_text(terminal.backend().buffer(), 1, 60).is_ascii());
-    }
-
-    #[test]
-    fn sections_thread_card_uses_shared_claude_and_repo_icons() {
-        let mut app = app_with_agents(&["herdr"]);
-        app.nerd_font = true;
-        app.workspaces[0].repo_binding = Some("herdrdev/herdr".into());
-        let pane_id = app.workspaces[0].tabs[0].root_pane;
-        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        app.terminals
-            .get_mut(&terminal_id)
-            .expect("agent terminal")
-            .detected_agent = Some(Agent::Claude);
-        app.refresh_local_agent_panel_identities();
-
-        let entry = sidebar_thread_entries(&app)
-            .into_iter()
-            .next()
-            .expect("Claude sidebar entry");
-        let card = sidebar_thread_card(&app, &entry);
-        assert_eq!(card.agent_icon, Some("\u{EC82}"));
-        assert_eq!(card.badge.icon.as_deref(), Some("\u{F6003} "));
-
-        let mut terminal = Terminal::new(TestBackend::new(60, 2)).expect("icon card terminal");
-        terminal
-            .draw(|frame| {
-                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 60, 2), false)
-            })
-            .expect("render icon card");
-        assert!(row_text(terminal.backend().buffer(), 0, 60).contains("\u{F6003}"));
-        assert!(row_text(terminal.backend().buffer(), 1, 60).contains("\u{EC82}"));
-    }
-
-    #[test]
-    fn sections_thread_card_uses_generic_icon_for_unmapped_agent() {
-        let mut app = app_with_agents(&["herdr"]);
-        app.nerd_font = true;
-        let pane_id = app.workspaces[0].tabs[0].root_pane;
-        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
-            .attached_terminal_id
-            .clone();
-        app.terminals
-            .get_mut(&terminal_id)
-            .expect("agent terminal")
-            .detected_agent = Some(Agent::Cursor);
-        app.refresh_local_agent_panel_identities();
-
-        let entry = sidebar_thread_entries(&app)
-            .into_iter()
-            .next()
-            .expect("Cursor sidebar entry");
-        let card = sidebar_thread_card(&app, &entry);
-        assert_eq!(card.agent_icon, Some("◆"));
-
-        let mut terminal = Terminal::new(TestBackend::new(60, 2)).expect("generic icon card");
-        terminal
-            .draw(|frame| {
-                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 60, 2), false)
-            })
-            .expect("render generic icon card");
-        let buffer = terminal.backend().buffer();
-        let second = row_text(buffer, 1, 60);
-        assert!(
-            second.contains("◆"),
-            "generic agent mark missing: {second:?}"
-        );
-        let icon = (0..60)
-            .map(|x| &buffer[(x, 1)])
-            .find(|cell| cell.symbol() == "◆")
-            .expect("generic agent mark cell");
-        assert_eq!(icon.fg, app.palette.overlay0);
-    }
-
-    #[test]
-    fn sections_thread_card_keeps_letters_for_unknown_repositories() {
-        let mut app = app_with_agents(&["mystery project"]);
-        app.nerd_font = true;
-        app.workspaces[0].repo_binding = Some("owner/no-such-repo".into());
-        let entry = sidebar_thread_entries(&app)
-            .into_iter()
-            .next()
-            .expect("sidebar entry");
-        let card = sidebar_thread_card(&app, &entry);
-
-        assert_eq!(card.badge.icon, None);
-        assert_eq!(card.badge.letters, "MP");
-        let mut terminal = Terminal::new(TestBackend::new(60, 2)).expect("unknown repo card");
-        terminal
-            .draw(|frame| {
-                render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 60, 2), false)
-            })
-            .expect("render unknown repo card");
-        assert!(row_text(terminal.backend().buffer(), 0, 60).contains("MP"));
-    }
-
-    #[test]
-    fn local_section_card_host_kind_comes_from_platform_and_remote_is_neutral() {
-        let app = app_with_agents(&["local"]);
-        let local_entry = sidebar_thread_entries(&app)
-            .into_iter()
-            .next()
-            .expect("local sidebar entry");
-        let local_card = sidebar_thread_card(&app, &local_entry);
-        let expected_local_kind = match crate::platform::local_host_os() {
-            crate::platform::HostOs::Linux => SidebarCardHostKind::Linux,
-            crate::platform::HostOs::Mac => SidebarCardHostKind::Mac,
-            crate::platform::HostOs::Windows => SidebarCardHostKind::Windows,
-            crate::platform::HostOs::Other => SidebarCardHostKind::Other,
-        };
-        assert_eq!(local_card.host_kind, expected_local_kind);
-
-        let mut remote_app = app;
-        remote_app.sidebar_sections_layout = true;
-        remote_app.sidebar_work_filter.machine_scope =
-            crate::app::state::SidebarMachineScope::AllMachines;
-        let snapshot = crate::fleet::Snapshot {
-            hosts: vec![fleet_host_snapshot(
-                "remote",
-                false,
-                vec![crate::fleet::FleetRow::test_agent_info_row(
-                    "remote",
-                    remote_agent_info(
-                        "remote-pane",
-                        "remote pane",
-                        crate::api::schema::AgentStatus::Working,
-                        false,
-                        false,
-                    ),
-                )],
-            )],
-            ..crate::fleet::Snapshot::default()
-        };
-        remote_app.remote_agent_panel_entries =
-            remote_agent_panel_entries_at(&snapshot, 1_725_000_000, false);
-        let remote_card = sidebar_rows(&remote_app)
-            .into_iter()
-            .find_map(|row| match row {
-                SidebarRow::RemoteAgent {
-                    sections_card: Some(card),
-                    ..
-                } => Some(card),
-                _ => None,
-            })
-            .expect("remote section card");
-        assert_eq!(remote_card.host_kind, SidebarCardHostKind::Remote);
-        assert_eq!(sidebar_card_host_icon(remote_card.host_kind, false), "R");
+        assert_eq!(sections_machine_mark(&app, "ub1").0, "U");
+        assert_eq!(sections_machine_mark(&app, "mbpro").0, "M");
+        assert_eq!(sections_machine_mark(&app, "other").0, "O");
     }
 
     #[test]

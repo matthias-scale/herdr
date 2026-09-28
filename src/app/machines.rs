@@ -230,6 +230,7 @@ mod tests {
             local,
             socket: None,
             session: None,
+            icon: None,
         }
     }
 

@@ -590,6 +590,8 @@ mod tests {
 
         assert_eq!(config.layout, SidebarLayoutConfig::Sections);
         assert_eq!(config.header, SidebarHeaderConfig::Plain);
+        let sky: SidebarConfig = toml::from_str("layout = \"sections\"\nheader = \"sky\"").unwrap();
+        assert_eq!(sky.header, SidebarHeaderConfig::Sky);
     }
 
     #[test]

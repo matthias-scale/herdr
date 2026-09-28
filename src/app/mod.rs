@@ -947,6 +947,17 @@ impl App {
             fleet_snapshot: crate::fleet::Snapshot::unpolled(&config.remote.fleet.hosts),
             local_group_snapshot: None,
             agent_host_name,
+            sidebar_machine_icons: config
+                .remote
+                .fleet
+                .hosts
+                .iter()
+                .filter_map(|host| {
+                    host.icon
+                        .as_ref()
+                        .map(|icon| (host.name.clone(), icon.clone()))
+                })
+                .collect(),
             day_board: if cfg!(test) {
                 crate::day::DayBoard::default()
             } else {
@@ -1336,6 +1347,7 @@ impl App {
             new_thread_workspace: config.ui.new_thread_workspace,
             launch_profiles: crate::app::launch_profiles::resolve(&config.launch_profiles),
             projects: crate::app::projects::resolve(&config.projects),
+            sidebar_named_projects: !config.projects.is_empty(),
             machines: crate::app::machines::resolve(&config.remote.fleet),
             add_project_start_dir: config.ui.add_project_start_dir.clone(),
             auto_settle_finished: config.session.auto_settle_finished,
@@ -2732,6 +2744,21 @@ impl App {
                 );
             }
             let agent_host_name = config.remote.fleet.resolved_self_name();
+            let machine_icons: std::collections::HashMap<String, String> = config
+                .remote
+                .fleet
+                .hosts
+                .iter()
+                .filter_map(|host| {
+                    host.icon
+                        .as_ref()
+                        .map(|icon| (host.name.clone(), icon.clone()))
+                })
+                .collect();
+            if self.state.sidebar_machine_icons != machine_icons {
+                self.state.sidebar_machine_icons = machine_icons;
+                self.state.mark_sidebar_projection_changed();
+            }
             if self.state.agent_host_name != agent_host_name {
                 self.state.agent_host_name = agent_host_name;
                 self.refresh_remote_agent_panel_entries();
@@ -2802,6 +2829,7 @@ impl App {
                 self.state.launch_profiles =
                     crate::app::launch_profiles::resolve(&config.launch_profiles);
                 self.state.projects = crate::app::projects::resolve(&config.projects);
+                self.state.sidebar_named_projects = !config.projects.is_empty();
                 self.state.machines = crate::app::machines::resolve(&config.remote.fleet);
                 self.state
                     .add_project_start_dir

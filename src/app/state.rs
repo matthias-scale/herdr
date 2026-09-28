@@ -1038,6 +1038,7 @@ pub struct SidebarHoverTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarHoverAction {
+    Pin { ws_idx: usize, tab_idx: usize },
     Snooze { target: SidebarPaneLifecycleTarget },
     Settle { target: SidebarPaneLifecycleTarget },
 }
@@ -4223,6 +4224,8 @@ pub struct AppState {
     pub(crate) local_group_snapshot: Option<crate::groups::GroupAuthoritySnapshot>,
     /// This server's configured component in cross-host agent references.
     pub(crate) agent_host_name: String,
+    /// TUI-only machine glyph overrides, resolved from fleet host config.
+    pub(crate) sidebar_machine_icons: std::collections::HashMap<String, String>,
     /// Server-owned day items. Columns and stale flags are derived from this
     /// durable membership plus current pane facts and are never stored here.
     pub(crate) day_board: crate::day::DayBoard,
@@ -4280,6 +4283,9 @@ pub struct AppState {
     /// Checkout groups resolved from `[[projects]]`, scanned once at config
     /// time. Never rescanned from the render path: the scan reads directories.
     pub(crate) projects: Vec<crate::app::projects::Project>,
+    /// Whether projects came from explicit `[[projects]]` entries. The
+    /// composer's implicit `~/Repos` project is not a sidebar group.
+    pub(crate) sidebar_named_projects: bool,
     /// Machines the composer can dispatch to, resolved from the configured
     /// fleet. Shared runtime fact: it decides where a launch actually runs.
     pub(crate) machines: Vec<crate::app::machines::Machine>,
@@ -7443,6 +7449,7 @@ impl AppState {
             fleet_snapshot: crate::fleet::Snapshot::default(),
             local_group_snapshot: None,
             agent_host_name: "localhost".to_string(),
+            sidebar_machine_icons: std::collections::HashMap::new(),
             day_board: crate::day::DayBoard::default(),
             day_stale_after: Duration::from_secs(600),
             local_agent_panel_identities: std::collections::HashMap::new(),
@@ -7467,6 +7474,7 @@ impl AppState {
             home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),
             launch_profiles: crate::app::launch_profiles::resolve(&[]),
             projects: Vec::new(),
+            sidebar_named_projects: false,
             machines: crate::app::machines::resolve(&crate::config::FleetConfig::default()),
             home_ref_cache: std::collections::HashMap::new(),
             request_home_ref_refresh: None,
