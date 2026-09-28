@@ -3547,13 +3547,13 @@ pub(crate) fn sections_tab_in_shelf(
             SidebarRow::SectionHeader { title, .. } => {
                 shelf = crate::app::sidebar_folders::SidebarShelf::from_title(title);
             }
-            SidebarRow::Tab { entry, .. } if shelf == Some(wanted) => {
-                if entry
-                    .local_target()
-                    .is_some_and(|target| target.ws_idx == ws_idx && target.tab_idx == tab_idx)
-                {
-                    return true;
-                }
+            SidebarRow::Tab { entry, .. }
+                if shelf == Some(wanted)
+                    && entry.local_target().is_some_and(|target| {
+                        target.ws_idx == ws_idx && target.tab_idx == tab_idx
+                    }) =>
+            {
+                return true;
             }
             _ => {}
         }
@@ -29775,19 +29775,36 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
-        expand_section_for_all_views(&mut app, SNOOZED_SECTION_TITLE);
         let mut workspace = Workspace::test_new("split folder");
         let snoozed_pane = workspace.test_split(Direction::Horizontal);
         app.workspaces = vec![workspace];
         app.ensure_test_terminals();
         app.active = Some(0);
         app.set_sidebar_group_mode(SidebarGroupMode::Spaces);
+        let snoozed_terminal = app.workspaces[0].tabs[0].panes[&snoozed_pane]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&snoozed_terminal)
+            .expect("snoozed pane terminal")
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                false,
+                std::time::Instant::now(),
+            );
+        app.reconcile_sidebar_presentation();
         app.create_sidebar_folder(SidebarShelf::Active, "Now")
             .expect("folder");
         assert!(app.set_tab_sidebar_folder(0, 0, Some("Now")));
         let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
         assert!(app.snooze_pane_at(0, snoozed_pane, deadline));
         assert!(!app.reconcile_sidebar_folder_memberships());
+        set_sections_group_collapsed(&mut app, SNOOZED_SECTION_TITLE, false);
         let rows = sidebar_rows(&app);
         let folder_idx = rows
             .iter()
