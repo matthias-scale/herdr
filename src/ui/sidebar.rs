@@ -16386,6 +16386,13 @@ pub(crate) mod tests {
         app
     }
 
+    fn make_agents_blocked(app: &mut AppState) {
+        for terminal in app.terminals.values_mut() {
+            terminal.detected_agent = Some(Agent::Pi);
+            terminal.set_raw_agent_state_for_test(AgentState::Blocked);
+        }
+    }
+
     fn app_with_local_pod(member: bool) -> (AppState, crate::groups::GroupId) {
         let mut app = app_with_agents(&["alpha"]);
         app.agent_host_name = "ub1".into();
@@ -29352,6 +29359,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn sections_layout_lists_each_tab_once() {
         let mut app = app_with_unlinked_tab_directories(&[None, None]);
+        make_agents_blocked(&mut app);
         app.sidebar_sections_layout = true;
         app.workspaces[0].tabs[1].pinned = true;
 
@@ -29538,6 +29546,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn collapsed_shelves_keep_counts_and_hide_their_space_trees() {
         let mut app = app_with_agents(&["pinned", "active", "snoozed", "settled"]);
+        make_agents_blocked(&mut app);
         app.sidebar_sections_layout = true;
         app.workspaces[0].tabs[0].pinned = true;
         let snoozed = app.workspaces[2].tabs[0].root_pane;
@@ -29566,6 +29575,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn pin_state_does_not_move_a_tab_out_of_active() {
         let mut app = app_with_agents(&["herdr", "scalablev2"]);
+        make_agents_blocked(&mut app);
         app.sidebar_sections_layout = true;
         app.workspaces[0].tabs[0].pinned = true;
         for pinned in [true, false] {
@@ -29668,8 +29678,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn sections_active_view_keeps_spaces_without_active_tabs() {
+    fn sections_spaces_show_only_active_attention_tabs() {
         let mut app = app_with_agents(&["active", "snoozed", "settled"]);
+        make_agents_blocked(&mut app);
         app.sidebar_sections_layout = true;
         let snoozed = app.workspaces[1].tabs[0].root_pane;
         let settled = app.workspaces[2].tabs[0].root_pane;
@@ -29688,7 +29699,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(active_spaces, vec![0, 1, 2]);
+        assert_eq!(active_spaces, vec![0]);
         assert!(!rows[..active_end].iter().any(|row| matches!(row,
             SidebarRow::Tab { entry, .. }
                 if entry.local_target().is_some_and(|target| target.ws_idx != 0)
@@ -29696,9 +29707,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn sections_space_tabs_keep_shared_hover_actions_at_normal_width() {
+    fn sections_working_shelf_tabs_keep_shared_hover_actions_at_normal_width() {
         let mut app = app_with_agents(&["alpha"]);
         app.sidebar_sections_layout = true;
+        app.toggle_sidebar_group(WORKING_SECTION_TITLE);
         app.nerd_font = false;
         let area = Rect::new(0, 0, 60, 25);
         let tab = compute_tab_card_areas(&app, area)
@@ -29728,7 +29740,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                             _ => false,
                         }
                 }),
-                "missing {action} on the shared Space row"
+                "missing {action} on the shared Working row"
             );
         }
     }
@@ -29852,6 +29864,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn machine_icon_uses_existing_sidebar_hover_target() {
         let mut app = app_with_agents(&["working"]);
+        make_agents_blocked(&mut app);
         app.agent_host_name = "ub1".into();
         app.sidebar_sections_layout = true;
         app.nerd_font = false;
