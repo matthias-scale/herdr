@@ -59,7 +59,8 @@ impl AppState {
     }
 
     pub(crate) fn set_notepad_focus(&mut self, focused: bool) {
-        if focused && !self.notes_area_visible() {
+        // A zero-row panel has nothing to focus; typing would edit a hidden note.
+        if focused && (!self.notes_area_visible() || !self.notepad.has_visible_tabs()) {
             return;
         }
         if focused {
@@ -105,7 +106,9 @@ impl AppState {
         let focused = !self.notepad.focused;
         let readonly_tab =
             self.notepad.context_active || self.notepad.agent_tab || self.notepad.usage_tab;
-        if (!self.notepad.enabled && !readonly_tab) || (focused && !self.notes_area_visible()) {
+        if (!self.notepad.enabled && !readonly_tab)
+            || (focused && (!self.notes_area_visible() || !self.notepad.has_visible_tabs()))
+        {
             return false;
         }
         self.set_notepad_focus(focused);
@@ -679,6 +682,23 @@ mod tests {
             state.notepad.active_tab_target(),
             Some(NotepadTabTarget::Usage)
         );
+    }
+
+    #[test]
+    fn hiding_every_tab_blocks_focus_so_typing_cannot_reach_a_hidden_note() {
+        let mut state = AppState::test_new();
+        state.notepad.enabled = true;
+        state.notepad.set_files(vec![crate::notepad::NotepadFile {
+            path: "/notes/hidden.md".into(),
+            name: "hidden".into(),
+        }]);
+        state.notepad.set_visible_tabs(Vec::new());
+
+        assert!(!state.notepad.has_visible_tabs());
+        assert!(!state.toggle_notepad_focus());
+        state.set_notepad_focus(true);
+        assert!(!state.notepad.focused);
+        assert!(!state.handle_notepad_key(key(KeyCode::Char('x')), Instant::now()));
     }
 
     #[test]
