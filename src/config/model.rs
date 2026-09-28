@@ -2059,6 +2059,8 @@ impl Default for WorkIndexConfig {
 pub struct FleetHostConfig {
     /// Stable display name and `--hosts` selector.
     pub name: String,
+    /// Optional sidebar machine glyph for this host (with Nerd Font enabled).
+    pub icon: Option<String>,
     /// OpenSSH target. Required unless `local = true`.
     pub target: String,
     /// Read this machine's socket and run-state directory without SSH.
@@ -2666,6 +2668,7 @@ aloop_host = "buildbox"
 name = "workbox"
 target = "workbox"
 session = "agents"
+icon = "◆"
 "#,
         )
         .expect("fleet config");
@@ -2681,6 +2684,7 @@ session = "agents"
             config.remote.fleet.hosts[0].session.as_deref(),
             Some("agents")
         );
+        assert_eq!(config.remote.fleet.hosts[0].icon.as_deref(), Some("◆"));
 
         let blank: FleetConfig = toml::from_str("aloop_host = \"  \"").expect("blank aloop host");
         assert_eq!(blank.resolved_aloop_host(), "ub2");

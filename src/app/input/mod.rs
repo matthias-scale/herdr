@@ -6244,6 +6244,7 @@ mod tests {
             env: Vec::new(),
             remote: Some(crate::app::machines::Machine {
                 name: "producer".into(),
+                icon: None,
                 target: Some("--invalid-target".into()),
                 socket: Some("/run/herdr-producer.sock".into()),
             }),

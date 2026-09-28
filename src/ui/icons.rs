@@ -47,6 +47,11 @@ const INBOX: &str = "\u{F6004}";
 const OPENCODE: &str = "\u{F6005}";
 pub(crate) const GITHUB: &str = "\u{F6006}";
 const SHELL: &str = "\u{EA85}"; // cod-terminal
+const MACHINE_UB1: &str = "\u{F01C5}"; // md-desktop_tower
+const MACHINE_UB2: &str = "\u{F048B}"; // md-server
+const MACHINE_MBPRO: &str = "\u{EEA7}"; // fa-laptop_code
+const MACHINE_MBAIR: &str = "\u{F0322}"; // md-laptop
+const MACHINE_UNKNOWN: &str = "\u{F0379}"; // md-monitor
 const ROBOT: &str = "\u{F06A9}"; // md-robot
 const HAMMER_WRENCH: &str = "\u{F1323}"; // md-hammer_wrench
 const CONFIG: &str = "\u{E615}"; // seti-config
@@ -125,6 +130,32 @@ pub(crate) fn shell_label(nerd_font: bool) -> &'static str {
         SHELL
     } else {
         ">_"
+    }
+}
+
+pub(crate) fn machine_icon<'a>(
+    host: &str,
+    override_icon: Option<&'a str>,
+    nerd_font: bool,
+) -> &'a str {
+    if !nerd_font {
+        return match host {
+            "ub1" => "1",
+            "ub2" => "2",
+            "mbpro" => "P",
+            "mbair" => "A",
+            _ => "?",
+        };
+    }
+    if let Some(icon) = override_icon.filter(|icon| crate::ui::text::display_width(icon) == 1) {
+        return icon;
+    }
+    match host {
+        "ub1" => MACHINE_UB1,
+        "ub2" => MACHINE_UB2,
+        "mbpro" => MACHINE_MBPRO,
+        "mbair" => MACHINE_MBAIR,
+        _ => MACHINE_UNKNOWN,
     }
 }
 
@@ -348,5 +379,25 @@ mod tests {
         assert_eq!(usage_label(QuotaProvider::Codex, false), "CX");
         assert_eq!(usage_label(QuotaProvider::Kimi, false), "KI");
         assert_eq!(usage_label(QuotaProvider::Agy, false), "AG");
+    }
+
+    #[test]
+    fn machine_icons_cover_named_hosts_override_and_plain_text() {
+        for (host, glyph, fallback) in [
+            ("ub1", MACHINE_UB1, "1"),
+            ("ub2", MACHINE_UB2, "2"),
+            ("mbpro", MACHINE_MBPRO, "P"),
+            ("mbair", MACHINE_MBAIR, "A"),
+            ("lab3", MACHINE_UNKNOWN, "?"),
+        ] {
+            assert_eq!(machine_icon(host, None, true), glyph);
+            assert_eq!(machine_icon(host, None, false), fallback);
+        }
+        assert_eq!(machine_icon("lab3", Some("◆"), true), "◆");
+        assert_eq!(
+            machine_icon("lab3", Some("too wide"), true),
+            MACHINE_UNKNOWN
+        );
+        assert_eq!(machine_icon("lab3", Some("◆"), false), "?");
     }
 }
