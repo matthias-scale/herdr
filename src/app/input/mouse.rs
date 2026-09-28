@@ -6382,7 +6382,7 @@ mod tests {
         }
         let bell = app.state.view.notification_hit_area;
         let cycle = app.state.view.window_cycle_mode_hit_area;
-        assert_eq!(cycle.width, 2);
+        assert_eq!(cycle.width, 1);
         assert_eq!(cycle.right(), bell.x);
         app.handle_mouse(mouse(MouseEventKind::Moved, cycle.x, cycle.y));
         assert_eq!(

@@ -26,7 +26,7 @@ const INDICATOR_WIDTH: u16 = 9;
 /// Columns the footer icon strip already owns.
 const FOOTER_ICON_COLUMNS: u16 = 13;
 const NOTIFICATION_WIDTH: u16 = 2;
-const CYCLE_MODE_WIDTH: u16 = 2;
+const CYCLE_MODE_WIDTH: u16 = 1;
 const SIDEBAR_AREAS_WIDTH: u16 = 1;
 const PROMPT_WIDTH: u16 = 62;
 const PROMPT_HEIGHT: u16 = 12;
@@ -469,12 +469,7 @@ pub(crate) fn render_window_cycle_mode_toggle(app: &AppState, frame: &mut Frame,
         Style::default().fg(app.palette.overlay0)
     };
     let glyph = crate::ui::icons::cycle_label(app.nerd_font);
-    let label = if app.nerd_font {
-        format!("{glyph} ")
-    } else {
-        glyph.to_string()
-    };
-    frame.render_widget(Paragraph::new(Span::styled(label, style)), area);
+    frame.render_widget(Paragraph::new(Span::styled(glyph, style)), area);
 }
 
 fn phase_color(app: &AppState, phase: PomodoroPhase) -> ratatui::style::Color {
@@ -1127,7 +1122,7 @@ mod tests {
         assert_eq!(notification_hit_area(&app, narrow), Rect::new(15, 19, 2, 1));
         assert_eq!(
             window_cycle_mode_hit_area(&app, narrow),
-            Rect::new(13, 19, 2, 1)
+            Rect::new(14, 19, 1, 1)
         );
 
         let almost_wide = Rect::new(0, 0, 24, 20);
@@ -1138,7 +1133,14 @@ mod tests {
         );
         assert_eq!(
             window_cycle_mode_hit_area(&app, almost_wide),
-            Rect::new(19, 19, 2, 1)
+            Rect::new(20, 19, 1, 1)
+        );
+
+        // The one-column cycle icon leaves the countdown room at 26 columns.
+        let default_width = Rect::new(0, 0, 26, 20);
+        assert_eq!(
+            pomodoro_hit_area(&app, default_width),
+            Rect::new(16, 19, 9, 1)
         );
 
         let wide = Rect::new(0, 0, 27, 20);
@@ -1147,7 +1149,7 @@ mod tests {
         assert_eq!(bell, Rect::new(15, 19, 2, 1));
         assert_eq!(
             window_cycle_mode_hit_area(&app, wide),
-            Rect::new(13, 19, 2, 1)
+            Rect::new(14, 19, 1, 1)
         );
         assert_eq!(timer, Rect::new(17, 19, 9, 1));
         assert_eq!(bell.right(), timer.x);
