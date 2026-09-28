@@ -53,7 +53,6 @@ pub(super) const DEFAULT_THREAD_TITLE: &str = "New Thread";
 #[cfg(test)]
 const ACTIVE_SUBAGENT_GLYPH: &str = "+";
 const SIDEBAR_WIDE_ROW_MIN_WIDTH: usize = 44;
-const SIDEBAR_HOST_TOKEN_MIN_TITLE_WIDTH: usize = 6;
 const SIDEBAR_HOST_TOKEN_NARROW_WIDTH: usize = 3;
 
 /// Focus-star suffix drawn immediately after a starred session's title. Kept to
@@ -241,6 +240,8 @@ pub(super) struct TabRowLayout {
 const SIDEBAR_DOT_FIELD_WIDTH: usize = 3;
 const SIDEBAR_PROVIDER_GAP_WIDTH: usize = 1;
 const SIDEBAR_AGE_FIELD_WIDTH: usize = 5;
+const SIDEBAR_AGE_MIN_ROW_WIDTH: usize = 24;
+const SIDEBAR_MACHINE_FIELD_WIDTH: usize = 2;
 const SIDEBAR_MIN_NESTED_TITLE_WIDTH: usize = 8;
 const SIDEBAR_MIN_NESTED_PREFIX_WIDTH: usize = 3;
 const SIDEBAR_TITLE_TARGET_WIDTH: usize = 16;
@@ -327,12 +328,7 @@ fn compact_provider_with(
     nerd_font: bool,
     model_letter: Option<&str>,
 ) -> String {
-    let provider = compact_provider_token(entry, nerd_font, model_letter);
-    match entry.remote_host.as_deref() {
-        Some(host) if provider.is_empty() => host.to_string(),
-        Some(host) => format!("{host} · {provider}"),
-        None => provider,
-    }
+    compact_provider_token(entry, nerd_font, model_letter)
 }
 
 fn compact_provider_token(
@@ -341,17 +337,13 @@ fn compact_provider_token(
     model_letter: Option<&str>,
 ) -> String {
     if !entry.has_agent {
-        return crate::ui::icons::shell_label(nerd_font).to_string();
+        return String::new();
     }
     let Some(agent) = entry.agent.or(entry.agent_context) else {
-        return crate::ui::icons::shell_label(nerd_font).to_string();
+        return String::new();
     };
     let Some(suffix) = crate::ui::icons::agent_label(agent, nerd_font) else {
-        return if entry.holds_shell {
-            crate::ui::icons::shell_label(nerd_font).to_string()
-        } else {
-            String::new()
-        };
+        return String::new();
     };
     let mut provider = suffix.to_string();
     if let Some(letter) = model_letter {
@@ -362,11 +354,27 @@ fn compact_provider_token(
             provider.push_str(&format!("+{count}"));
         }
     }
-    if entry.holds_shell {
-        provider.push(' ');
-        provider.push_str(crate::ui::icons::shell_label(nerd_font));
-    }
     provider
+}
+
+fn sidebar_machine_host<'a>(app: &'a AppState, entry: &'a AgentPanelEntry) -> &'a str {
+    entry
+        .remote_host
+        .as_deref()
+        .unwrap_or(app.agent_host_name.as_str())
+}
+
+fn sidebar_machine_icon<'a>(app: &'a AppState, host: &str) -> &'a str {
+    let override_icon = app
+        .machines
+        .iter()
+        .find(|machine| machine.name == host)
+        .and_then(|machine| machine.icon.as_deref());
+    crate::ui::icons::machine_icon(host, override_icon, app.nerd_font)
+}
+
+fn machine_icon_cell_offset(row_width: usize, age_width: usize) -> usize {
+    row_width.saturating_sub(age_width + 1)
 }
 
 fn compact_age(
@@ -441,7 +449,11 @@ fn compact_row_title_for_width<'a>(
         return title;
     };
     let widths = compact_row_widths(title, provider, width, requested_prefix);
-    let fixed_width = requested_prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+    let fixed_width = requested_prefix
+        + SIDEBAR_DOT_FIELD_WIDTH
+        + widths.provider
+        + SIDEBAR_MACHINE_FIELD_WIDTH
+        + widths.age;
     if display_width(title) <= width.saturating_sub(fixed_width) {
         title
     } else {
@@ -482,7 +494,11 @@ fn compact_row_layout(
         prefix_width,
     );
     let widths = compact_row_widths(title, &provider, width, prefix_width);
-    let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+    let fixed_width = widths.prefix
+        + SIDEBAR_DOT_FIELD_WIDTH
+        + widths.provider
+        + SIDEBAR_MACHINE_FIELD_WIDTH
+        + widths.age;
     TabRowLayout {
         dot: compact_row_dot_text(entry),
         title: truncate_end(title, width.saturating_sub(fixed_width)),
@@ -537,16 +553,34 @@ fn compact_row_widths(
     width: usize,
     requested_prefix: usize,
 ) -> CompactRowWidths {
+    compact_row_widths_with_machine(
+        title,
+        provider,
+        width,
+        requested_prefix,
+        SIDEBAR_MACHINE_FIELD_WIDTH,
+    )
+}
+
+fn compact_row_widths_with_machine(
+    title: &str,
+    provider: &str,
+    width: usize,
+    requested_prefix: usize,
+    machine_width: usize,
+) -> CompactRowWidths {
     let provider = compact_provider_field_width(provider);
     let title_width = display_width(title);
     let readable_title_width = title_width.min(SIDEBAR_MIN_NESTED_TITLE_WIDTH);
     let minimum_prefix_width = requested_prefix.min(SIDEBAR_MIN_NESTED_PREFIX_WIDTH);
-    let age = if width
-        >= SIDEBAR_DOT_FIELD_WIDTH
-            + provider
-            + SIDEBAR_AGE_FIELD_WIDTH
-            + readable_title_width
-            + minimum_prefix_width
+    let age = if width >= SIDEBAR_AGE_MIN_ROW_WIDTH
+        && width
+            >= SIDEBAR_DOT_FIELD_WIDTH
+                + provider
+                + machine_width
+                + SIDEBAR_AGE_FIELD_WIDTH
+                + readable_title_width
+                + minimum_prefix_width
     {
         SIDEBAR_AGE_FIELD_WIDTH
     } else {
@@ -554,12 +588,13 @@ fn compact_row_widths(
     };
     let target_title_width = title_width.min(SIDEBAR_TITLE_TARGET_WIDTH);
     let prefix_budget = width
-        .saturating_sub(SIDEBAR_DOT_FIELD_WIDTH + provider + age)
+        .saturating_sub(SIDEBAR_DOT_FIELD_WIDTH + provider + machine_width + age)
         .saturating_sub(target_title_width);
     let preserve_nested_prefix = requested_prefix > 0
         && width
             >= SIDEBAR_DOT_FIELD_WIDTH
                 + provider
+                + machine_width
                 + age
                 + readable_title_width
                 + minimum_prefix_width;
@@ -822,7 +857,7 @@ fn render_remote_compact_agent_row_with_prefix(
     depth: u16,
     bg: Option<Color>,
     prefix_override: Option<usize>,
-    show_host_identity: bool,
+    _show_host_identity: bool,
 ) {
     if rect.width == 0 || rect.height == 0 {
         return;
@@ -835,15 +870,7 @@ fn render_remote_compact_agent_row_with_prefix(
     let render_age = remote_compact_age(remote, app.view_observed_at);
     let requested_prefix = prefix_override.unwrap_or_else(|| usize::from(depth) * 3 + 1);
     let total_width = usize::from(rect.width);
-    // Host identity is the last-resort discriminator, so reserve it before
-    // indentation, provider, and age consume any cells.
-    let max_host_width = total_width.saturating_sub(
-        SIDEBAR_DOT_FIELD_WIDTH + SIDEBAR_HOST_TOKEN_MIN_TITLE_WIDTH + display_width(" · "),
-    );
-    let host_suffix = show_host_identity
-        .then(|| remote.host_suffix_for_width(max_host_width))
-        .flatten();
-    let row_width = total_width.saturating_sub(host_suffix.map_or(0, |(_, width)| width));
+    let row_width = total_width;
     let title = compact_row_title_for_width(
         &remote.render_title,
         &remote.render_provider,
@@ -853,7 +880,11 @@ fn render_remote_compact_agent_row_with_prefix(
     let widths = compact_row_widths(title, &remote.render_provider, row_width, requested_prefix);
     let provider_width = widths.provider;
     let age_width = widths.age;
-    let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + provider_width + age_width;
+    let fixed_width = widths.prefix
+        + SIDEBAR_DOT_FIELD_WIDTH
+        + provider_width
+        + SIDEBAR_MACHINE_FIELD_WIDTH
+        + age_width;
     let title_width = row_width.saturating_sub(fixed_width);
     let selected = app
         .sidebar_selected_remote_agent
@@ -940,6 +971,16 @@ fn render_remote_compact_agent_row_with_prefix(
         );
         x = x.saturating_add(provider_width as u16);
     }
+    let machine_icon = sidebar_machine_icon(app, &remote.agent_ref.host);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            machine_icon,
+            working_row_style(app, fade, Style::default().fg(p.overlay0), bg),
+        ))
+        .alignment(Alignment::Right),
+        Rect::new(x, rect.y, SIDEBAR_MACHINE_FIELD_WIDTH as u16, rect.height),
+    );
+    x = x.saturating_add(SIDEBAR_MACHINE_FIELD_WIDTH as u16);
     if age_width > 0 {
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -948,21 +989,6 @@ fn render_remote_compact_agent_row_with_prefix(
             ))
             .alignment(Alignment::Right),
             Rect::new(x, rect.y, age_width as u16, rect.height),
-        );
-        x = x.saturating_add(age_width as u16);
-    }
-    if let Some((suffix, width)) = host_suffix {
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                suffix,
-                working_row_style(
-                    app,
-                    fade,
-                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
-                    bg,
-                ),
-            )),
-            Rect::new(x, rect.y, width as u16, rect.height),
         );
     }
 }
@@ -1007,7 +1033,11 @@ fn render_compact_agent_row_with_prefix(
         tab,
         app.nerd_font,
     );
-    let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+    let fixed_width = widths.prefix
+        + SIDEBAR_DOT_FIELD_WIDTH
+        + widths.provider
+        + SIDEBAR_MACHINE_FIELD_WIDTH
+        + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
     let control_pane = row_control_pane(app, entry, tab);
     let show_controls = control_pane.as_ref().is_some_and(|control| control.snoozed)
@@ -1032,6 +1062,7 @@ fn render_compact_agent_row_with_prefix(
     let title_pad = " ".repeat(title_text_width.saturating_sub(display_width(&title_text)));
     let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
     let provider = pad_left(&layout.provider, widths.provider);
+    let machine_icon = sidebar_machine_icon(app, sidebar_machine_host(app, entry));
     let age = layout
         .activity_age
         .as_deref()
@@ -1106,10 +1137,13 @@ fn render_compact_agent_row_with_prefix(
         ]),
         None => spans.push(Span::styled(provider, provider_style)),
     }
-    spans.push(Span::styled(
-        age,
-        working_row_style(app, fade, age_style, bg),
-    ));
+    spans.extend([
+        Span::styled(
+            format!(" {machine_icon}"),
+            working_row_style(app, fade, Style::default().fg(p.overlay0), bg),
+        ),
+        Span::styled(age, working_row_style(app, fade, age_style, bg)),
+    ]);
     frame.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
 
@@ -1221,7 +1255,11 @@ pub(crate) fn selected_row_control_at(
         requested_prefix,
     );
     let widths = compact_row_widths(title, &provider, usize::from(rect.width), requested_prefix);
-    let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+    let fixed_width = widths.prefix
+        + SIDEBAR_DOT_FIELD_WIDTH
+        + widths.provider
+        + SIDEBAR_MACHINE_FIELD_WIDTH
+        + widths.age;
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
     let selected = selected_local_row_pane(app, entry, tab).is_some();
     let mobile = app.view.layout == crate::app::state::ViewLayout::Mobile;
@@ -1257,19 +1295,12 @@ pub(crate) fn selected_remote_row_control_at(
     entry: &RemoteAgentPanelEntry,
     rect: Rect,
     depth: u16,
-    show_host_identity: bool,
+    _show_host_identity: bool,
     column: u16,
 ) -> Option<crate::app::state::SidebarHoverAction> {
     let requested_prefix = usize::from(depth) * 3 + 1;
     let total_width = usize::from(rect.width);
-    let max_host_width = total_width.saturating_sub(
-        SIDEBAR_DOT_FIELD_WIDTH + SIDEBAR_HOST_TOKEN_MIN_TITLE_WIDTH + display_width(" · "),
-    );
-    let host_width = show_host_identity
-        .then(|| entry.host_suffix_for_width(max_host_width))
-        .flatten()
-        .map_or(0, |(_, width)| width);
-    let row_width = total_width.saturating_sub(host_width);
+    let row_width = total_width;
     let title = compact_row_title_for_width(
         &entry.render_title,
         &entry.render_provider,
@@ -1277,7 +1308,11 @@ pub(crate) fn selected_remote_row_control_at(
         requested_prefix,
     );
     let widths = compact_row_widths(title, &entry.render_provider, row_width, requested_prefix);
-    let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+    let fixed_width = widths.prefix
+        + SIDEBAR_DOT_FIELD_WIDTH
+        + widths.provider
+        + SIDEBAR_MACHINE_FIELD_WIDTH
+        + widths.age;
     let title_width = row_width.saturating_sub(fixed_width);
     let selected = app
         .sidebar_selected_remote_agent
@@ -1527,10 +1562,7 @@ pub(crate) struct RemoteAgentPanelEntry {
     render_dot: &'static str,
     pub(crate) render_title: String,
     render_provider: String,
-    host_suffix: String,
-    host_suffix_width: usize,
     narrow_host_suffix: String,
-    narrow_host_suffix_width: usize,
     search_key_lowercase: String,
     work_context: crate::work_context::PaneWorkContext,
     workspace_id: String,
@@ -1573,8 +1605,7 @@ impl RemoteAgentPanelEntry {
         let render_dot = compact_row_dot(&entry);
         let render_title = compact_row_title(&entry, false).to_string();
         let render_provider = compact_provider(&entry, nerd_font);
-        let host_suffix = format!(" · {narrow_host}");
-        let narrow_host_suffix = host_suffix.clone();
+        let narrow_host_suffix = format!(" · {narrow_host}");
         let search_key_lowercase = format!(
             "{} {} {} {} {}",
             agent_ref.host,
@@ -1589,9 +1620,6 @@ impl RemoteAgentPanelEntry {
             render_dot,
             render_title,
             render_provider,
-            host_suffix_width: display_width(&host_suffix),
-            narrow_host_suffix_width: display_width(&narrow_host_suffix),
-            host_suffix,
             narrow_host_suffix,
             search_key_lowercase,
             work_context,
@@ -1602,21 +1630,6 @@ impl RemoteAgentPanelEntry {
             show_host_identity: false,
             entry,
         }
-    }
-
-    fn host_suffix_for_width(&self, max_host_width: usize) -> Option<(&str, usize)> {
-        let separator_width = display_width(" · ");
-        if self.host_suffix_width.saturating_sub(separator_width) <= max_host_width {
-            return Some((&self.host_suffix, self.host_suffix_width));
-        }
-        (self
-            .narrow_host_suffix_width
-            .saturating_sub(separator_width)
-            <= max_host_width)
-            .then_some((
-                self.narrow_host_suffix.as_str(),
-                self.narrow_host_suffix_width,
-            ))
     }
 }
 
@@ -4758,7 +4771,6 @@ fn needs_you_strip_rows(
     remote_entries: &[AgentPanelEntry],
     force_expand: bool,
 ) -> Vec<SidebarRow> {
-    let local_host = middle_elide(&app.agent_host_name, SIDEBAR_HOST_TOKEN_NARROW_WIDTH);
     let mut rows = Vec::new();
     for entry in visible_entries.iter().chain(snoozed_entries) {
         if !entry_needs_human_attention(entry) {
@@ -4779,7 +4791,7 @@ fn needs_you_strip_rows(
             title: compact_row_title(entry, true).to_string(),
             space_name,
             space_icon,
-            host: local_host.clone(),
+            host: sidebar_machine_host(app, entry).to_string(),
             blocked: entry_is_blocked(entry),
             target: NeedsYouTarget::Local(target),
         });
@@ -4804,11 +4816,7 @@ fn needs_you_strip_rows(
             title: remote.render_title.clone(),
             space_icon: space_abbreviation(&space_name),
             space_name,
-            host: remote
-                .narrow_host_suffix
-                .strip_prefix(" · ")
-                .map(str::to_string)
-                .unwrap_or_else(|| remote.agent_ref.host.clone()),
+            host: remote.agent_ref.host.clone(),
             blocked: entry_is_blocked(entry),
             target: NeedsYouTarget::Remote(remote.agent_ref.clone()),
         });
@@ -7776,9 +7784,15 @@ pub(super) fn render_needs_you_row(
     }
     let p = &app.palette;
     let marker_color = p.red;
-    let host_width = display_width(host);
-    let title_width =
-        usize::from(rect.width).saturating_sub(2 + display_width(space_icon) + 1 + host_width + 1);
+    let machine_icon = sidebar_machine_icon(app, host);
+    let age_width = if usize::from(rect.width) >= SIDEBAR_AGE_MIN_ROW_WIDTH {
+        SIDEBAR_AGE_FIELD_WIDTH
+    } else {
+        0
+    };
+    let title_width = usize::from(rect.width).saturating_sub(
+        2 + display_width(space_icon) + 1 + SIDEBAR_MACHINE_FIELD_WIDTH + age_width,
+    );
     let title = truncate_end(title, title_width);
     let pad = title_width.saturating_sub(display_width(&title));
     frame.render_widget(
@@ -7794,10 +7808,8 @@ pub(super) fn render_needs_you_row(
             Span::raw(" "),
             Span::styled(title, Style::default().fg(p.subtext0)),
             Span::raw(" ".repeat(pad)),
-            Span::styled(
-                format!(" {host}"),
-                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
-            ),
+            Span::styled(format!(" {machine_icon}"), Style::default().fg(p.overlay0)),
+            Span::raw(" ".repeat(age_width)),
         ])),
         Rect::new(rect.x, rect.y, rect.width, 1),
     );
@@ -8123,12 +8135,31 @@ pub(crate) fn compute_sidebar_hover_targets(
             SidebarRow::NeedsYou {
                 space_name,
                 space_icon,
+                host,
                 ..
             } => {
                 if let Some(rect) = clamp_row_cells(body, row_y, 2, display_width(space_icon)) {
                     targets.push(crate::app::state::SidebarHoverTarget {
                         rect,
                         label: space_name.clone(),
+                        action: None,
+                        row_hover: false,
+                    });
+                }
+                let age_width = if usize::from(body.width) >= SIDEBAR_AGE_MIN_ROW_WIDTH {
+                    SIDEBAR_AGE_FIELD_WIDTH
+                } else {
+                    0
+                };
+                if let Some(rect) = clamp_row_cells(
+                    body,
+                    row_y,
+                    machine_icon_cell_offset(usize::from(body.width), age_width),
+                    1,
+                ) {
+                    targets.push(crate::app::state::SidebarHoverTarget {
+                        rect,
+                        label: host.clone(),
                         action: None,
                         row_hover: false,
                     });
@@ -8160,8 +8191,24 @@ pub(crate) fn compute_sidebar_hover_targets(
                     action: None,
                     row_hover: false,
                 });
-                let fixed_width =
-                    widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+                let fixed_width = widths.prefix
+                    + SIDEBAR_DOT_FIELD_WIDTH
+                    + widths.provider
+                    + SIDEBAR_MACHINE_FIELD_WIDTH
+                    + widths.age;
+                if let Some(rect) = clamp_row_cells(
+                    body,
+                    row_y,
+                    machine_icon_cell_offset(usize::from(body.width), widths.age),
+                    1,
+                ) {
+                    targets.push(crate::app::state::SidebarHoverTarget {
+                        rect,
+                        label: sidebar_machine_host(app, entry).to_string(),
+                        action: None,
+                        row_hover: false,
+                    });
+                }
                 let title_width = usize::from(body.width).saturating_sub(fixed_width);
                 let control_pane = row_control_pane(app, entry, tab);
                 let available_width =
@@ -8230,23 +8277,10 @@ pub(crate) fn compute_sidebar_hover_targets(
                     }
                 }
             }
-            SidebarRow::RemoteAgent {
-                entry,
-                depth,
-                show_host_identity,
-            } => {
+            SidebarRow::RemoteAgent { entry, depth, .. } => {
                 let requested_prefix = usize::from(*depth) * 3 + 1;
                 let total_width = usize::from(body.width);
-                let max_host_width = total_width.saturating_sub(
-                    SIDEBAR_DOT_FIELD_WIDTH
-                        + SIDEBAR_HOST_TOKEN_MIN_TITLE_WIDTH
-                        + display_width(" · "),
-                );
-                let host_width = (*show_host_identity)
-                    .then(|| entry.host_suffix_for_width(max_host_width))
-                    .flatten()
-                    .map_or(0, |(_, width)| width);
-                let row_width = total_width.saturating_sub(host_width);
+                let row_width = total_width;
                 let title = compact_row_title_for_width(
                     &entry.render_title,
                     &entry.render_provider,
@@ -8265,8 +8299,24 @@ pub(crate) fn compute_sidebar_hover_targets(
                         row_hover: false,
                     });
                 }
-                let fixed_width =
-                    widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+                let fixed_width = widths.prefix
+                    + SIDEBAR_DOT_FIELD_WIDTH
+                    + widths.provider
+                    + SIDEBAR_MACHINE_FIELD_WIDTH
+                    + widths.age;
+                if let Some(rect) = clamp_row_cells(
+                    body,
+                    row_y,
+                    machine_icon_cell_offset(row_width, widths.age),
+                    1,
+                ) {
+                    targets.push(crate::app::state::SidebarHoverTarget {
+                        rect,
+                        label: entry.agent_ref.host.clone(),
+                        action: None,
+                        row_hover: false,
+                    });
+                }
                 let title_width = row_width.saturating_sub(fixed_width);
                 let control = remote_row_control(entry);
                 let available_width =
@@ -8619,7 +8669,8 @@ fn render_symphony_job(
     let status = symphony_job_status(job.phase.as_str(), job.wait.as_deref());
     let width = usize::from(job.rect.width);
     let requested_prefix_width = SYMPHONY_ROW_DEPTH * 3 + 1;
-    let widths = compact_row_widths(&job.name, &status, width, requested_prefix_width);
+    let widths =
+        compact_row_widths_with_machine(&job.name, &status, width, requested_prefix_width, 0);
     let fixed_width = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = width.saturating_sub(fixed_width);
     let title = pad_right(&truncate_end(&job.name, title_width), title_width);
@@ -13259,7 +13310,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_pane_attached_to_a_fleet_host_names_the_machine_before_the_provider() {
+    fn a_pane_attached_to_a_fleet_host_shows_machine_after_provider() {
         let mut app = app_with_agents(&["attached"]);
         app.nerd_font = false;
         app.fleet_snapshot = crate::fleet::Snapshot {
@@ -13286,7 +13337,7 @@ pub(crate) mod tests {
             .expect("attached entry");
         assert_eq!(entry.remote_host.as_deref(), Some("ub1"));
         let provider = compact_provider(&entry, false);
-        assert!(provider.starts_with("ub1 · "), "{provider:?}");
+        assert_eq!(provider, "cc");
 
         let width = 40;
         let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
@@ -13305,9 +13356,9 @@ pub(crate) mod tests {
             })
             .unwrap();
         let rendered = row_text(terminal.backend().buffer(), 0, width);
-        assert!(rendered.contains(&provider), "{rendered:?}");
+        assert!(rendered.contains("cc 1"), "{rendered:?}");
 
-        // The machine name is on the row, so searching for it must keep the row.
+        // Search still matches the host even though its row shows only an icon.
         app.sidebar_work_filter.query = "ub1".into();
         assert_eq!(sidebar_filtered_agent_entries_from(&app, None).len(), 1);
         app.sidebar_work_filter.query = "ub9".into();
@@ -13390,6 +13441,11 @@ pub(crate) mod tests {
                 })
                 .unwrap();
             let rendered = row_text(terminal.backend().buffer(), 0, 80);
+            assert!(
+                rendered.contains(crate::ui::icons::machine_icon("ub1", None, true)),
+                "{rendered:?}"
+            );
+            assert!(!rendered.contains(" · ub1"), "{rendered:?}");
             assert!(rendered.contains(expected), "{rendered:?}");
         }
     }
@@ -13450,7 +13506,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn narrow_nested_remote_rows_reserve_three_cell_host_tokens() {
+    fn narrow_nested_remote_rows_show_machine_icons() {
         let snapshot = crate::fleet::Snapshot {
             hosts: vec![
                 fleet_host_snapshot(
@@ -13485,9 +13541,9 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
         let entries = remote_agent_panel_entries(&snapshot, false);
-        let app = AppState::test_new();
+        let mut app = AppState::test_new();
+        app.nerd_font = false;
         for entry in &entries {
-            assert_eq!(display_width(&entry.narrow_host_suffix), 6);
             let mut terminal = Terminal::new(TestBackend::new(18, 1)).unwrap();
             terminal
                 .draw(|frame| {
@@ -13504,10 +13560,8 @@ pub(crate) mod tests {
                 .unwrap();
             let rendered = row_text(terminal.backend().buffer(), 0, 18);
             assert!(rendered.contains('x'), "{rendered:?}");
-            assert!(
-                rendered.contains(entry.narrow_host_suffix.trim()),
-                "{rendered:?}"
-            );
+            assert!(rendered.contains('?'), "{rendered:?}");
+            assert!(!rendered.contains(" · "), "{rendered:?}");
         }
     }
 
@@ -14711,14 +14765,17 @@ pub(crate) mod tests {
                     assert!(dot_x < title_x, "{rendered:?}");
                     assert_eq!(buffer[(dot_x, 0)].style().fg, Some(expected_dot));
                     assert_eq!(buffer[(title_x, 0)].style().fg, Some(expected_title));
+                    let machine = if is_remote { "2" } else { "?" };
+                    let machine_x = find_symbol_x(buffer, 0, width, machine);
+                    assert_eq!(
+                        buffer[(machine_x, 0)].style().fg,
+                        Some(expected_remote_suffix)
+                    );
+                    assert!(!rendered.contains("· ub2"), "{rendered:?}");
                     if width == 60 {
-                        let (symbol, expected) = if is_remote {
-                            ("u", expected_remote_suffix)
-                        } else {
-                            ("c", expected_provider)
-                        };
-                        let secondary_x = find_symbol_x(buffer, 0, width, symbol);
-                        assert_eq!(buffer[(secondary_x, 0)].style().fg, Some(expected));
+                        let provider_x = find_symbol_x(buffer, 0, width, "c");
+                        assert_eq!(buffer[(provider_x, 0)].style().fg, Some(expected_provider));
+                        assert!(provider_x < machine_x, "{rendered:?}");
                     }
                 }
             }
@@ -14926,11 +14983,11 @@ pub(crate) mod tests {
         two.active_subagents = Some(2);
         assert_eq!(compact_provider(&two, false), "cc+2");
         two.holds_shell = true;
-        assert_eq!(compact_provider(&two, false), "cc+2 >_");
+        assert_eq!(compact_provider(&two, false), "cc+2");
 
         let mut stale = two;
         stale.stale = true;
-        assert_eq!(compact_provider(&stale, false), "cc >_");
+        assert_eq!(compact_provider(&stale, false), "cc");
     }
 
     #[test]
@@ -14984,7 +15041,7 @@ pub(crate) mod tests {
             vec![
                 (
                     "●".into(),
-                    "working title rem…".into(),
+                    "working title r…".into(),
                     "cx".into(),
                     Some("2m".into()),
                     Color::Rgb(137, 180, 250),
@@ -15017,7 +15074,7 @@ pub(crate) mod tests {
                 (
                     "·".into(),
                     "shell title".into(),
-                    ">_".into(),
+                    "".into(),
                     Some("2m".into()),
                     Color::Rgb(108, 112, 134),
                     Color::Rgb(108, 112, 134),
@@ -15027,9 +15084,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn compact_provider_marks_plain_shells_and_kimi() {
+    fn compact_provider_marks_kimi_and_leaves_plain_shell_to_machine_column() {
         let plain = compact_test_entry("terminal", None);
-        assert_eq!(compact_provider(&plain, false), ">_");
+        assert_eq!(compact_provider(&plain, false), "");
         assert_eq!(
             crate::ui::icons::agent_text_tag(Some(Agent::Kimi)),
             Some("ki")
@@ -15670,8 +15727,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn unified_fleet_ambiguous_row_keeps_dot_title_and_host_at_eighteen_columns() {
+    fn unified_fleet_ambiguous_row_keeps_dot_title_and_machine_at_eighteen_columns() {
         let mut app = AppState::test_new();
+        app.nerd_font = false;
         let snapshot = crate::fleet::Snapshot {
             hosts: ["ub1", "ub2"]
                 .into_iter()
@@ -15727,15 +15785,38 @@ pub(crate) mod tests {
             rendered.contains("same"),
             "missing readable title: {rendered:?}"
         );
-        assert!(
-            rendered.contains("· ub1"),
-            "missing host identity: {rendered:?}"
-        );
+        assert!(rendered.contains('1'), "missing machine icon: {rendered:?}");
+        assert!(!rendered.contains("· ub1"), "{rendered:?}");
+    }
+
+    fn assert_remote_machine_icons_and_tooltips(
+        app: &AppState,
+        buffer: &ratatui::buffer::Buffer,
+        area: Rect,
+        hosts: &[&str],
+    ) {
+        let targets = compute_sidebar_hover_targets(app, area);
+        for host in hosts {
+            let icon = sidebar_machine_icon(app, host);
+            let machine = targets
+                .iter()
+                .find(|target| {
+                    target.label == *host
+                        && target.rect.width == 1
+                        && buffer[(target.rect.x, target.rect.y)].symbol() == icon
+                })
+                .unwrap_or_else(|| panic!("missing {host} machine icon and tooltip"));
+            let rendered = row_text(buffer, machine.rect.y, area.width);
+            assert!(rendered.contains("same"), "{host}: {rendered:?}");
+            assert!(!rendered.contains(&format!("· {host}")), "{rendered:?}");
+            assert!(machine.action.is_none());
+        }
     }
 
     #[test]
-    fn full_sidebar_clamps_host_tokens_to_three_cells() {
+    fn remote_rows_use_one_machine_cell_with_full_host_tooltips() {
         let mut app = AppState::test_new();
+        app.nerd_font = false;
         let hosts = ["alpha-a1", "alpha-b1"];
         let snapshot = crate::fleet::Snapshot {
             hosts: hosts
@@ -15770,28 +15851,26 @@ pub(crate) mod tests {
         let rendered = (0..area.height)
             .map(|row| row_text(terminal.backend().buffer(), row, area.width))
             .collect::<Vec<_>>();
-        let host_tokens = short_fleet_host_names(hosts);
         assert!(
             rendered.iter().any(|row| row.contains("same")),
             "{rendered:?}"
         );
-        for (host, token) in host_tokens {
-            assert!(
-                crate::ui::text::display_width(&token) <= SIDEBAR_HOST_TOKEN_NARROW_WIDTH,
-                "{host} rendered as {token:?}"
-            );
-            assert!(
-                rendered
-                    .iter()
-                    .any(|row| row.contains(&format!("· {token}"))),
-                "host {host} ({token}) missing from {rendered:?}"
-            );
-        }
+        assert_remote_machine_icons_and_tooltips(&app, terminal.backend().buffer(), area, &hosts);
     }
 
     #[test]
-    fn full_sidebar_keeps_distinct_host_tokens_when_aliases_diverge_in_the_middle() {
+    fn remote_rows_with_similar_host_names_keep_distinct_icons_and_tooltips() {
         let mut app = AppState::test_new();
+        app.nerd_font = true;
+        app.machines
+            .extend([("alpha-a1", "◆"), ("alpha-b1", "◇")].map(|(name, icon)| {
+                crate::app::machines::Machine {
+                    name: name.into(),
+                    icon: Some(icon.into()),
+                    target: Some(name.into()),
+                    socket: None,
+                }
+            }));
         let snapshot = crate::fleet::Snapshot {
             hosts: ["alpha-a1", "alpha-b1"]
                 .into_iter()
@@ -15829,13 +15908,11 @@ pub(crate) mod tests {
             rendered.iter().any(|row| row.contains("same")),
             "{rendered:?}"
         );
-        assert!(
-            rendered.iter().any(|row| row.contains("· #1")),
-            "{rendered:?}"
-        );
-        assert!(
-            rendered.iter().any(|row| row.contains("· #2")),
-            "{rendered:?}"
+        assert_remote_machine_icons_and_tooltips(
+            &app,
+            terminal.backend().buffer(),
+            area,
+            &["alpha-a1", "alpha-b1"],
         );
     }
 
@@ -15847,6 +15924,7 @@ pub(crate) mod tests {
             ["alpha-machine", "beta-machine"],
         ] {
             let mut app = AppState::test_new();
+            app.nerd_font = false;
             let snapshot = crate::fleet::Snapshot {
                 hosts: hosts
                     .into_iter()
@@ -15864,6 +15942,7 @@ pub(crate) mod tests {
             expand_fleet(&mut app);
             let width = 30;
             let area = Rect::new(0, 0, width, 20);
+            app.view.sidebar_rect = area;
             let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
             terminal
                 .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
@@ -15871,15 +15950,16 @@ pub(crate) mod tests {
             let rendered = (0..area.height)
                 .map(|row| row_text(terminal.backend().buffer(), row, area.width))
                 .collect::<Vec<_>>();
-            let host_tokens = short_fleet_host_names(hosts);
-            for (host, short) in host_tokens {
-                assert!(
-                    rendered
-                        .iter()
-                        .any(|row| row.contains(&format!("· {short}"))),
-                    "host {host} ({short}) missing from {rendered:?}"
-                );
-            }
+            assert!(
+                rendered.iter().any(|row| row.contains("same-agent")),
+                "{rendered:?}"
+            );
+            assert_remote_machine_icons_and_tooltips(
+                &app,
+                terminal.backend().buffer(),
+                area,
+                &hosts,
+            );
         }
     }
 
@@ -17278,7 +17358,7 @@ pub(crate) mod tests {
             false,
         );
 
-        assert_eq!(display_width(&linked_layout.title), 9);
+        assert_eq!(linked_layout.title, "abcdefghij");
         assert_eq!(
             display_width(&unlinked_layout.title),
             display_width(&linked_layout.title),
@@ -20022,33 +20102,45 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         };
         let mut width_probe = entry.clone();
         width_probe.primary_tab_label = Some("sample-pr-title-uses-width".into());
-        let wide_enough_for_old_suffix = render_at_row_width(&width_probe, 44, 0);
+        let wide_with_machine = render_at_row_width(&width_probe, 44, 0);
         assert!(
-            wide_enough_for_old_suffix.contains("sample-pr-title-uses-width"),
-            "{wide_enough_for_old_suffix:?}"
+            wide_with_machine.contains("sample-pr-title-uses-wid"),
+            "{wide_with_machine:?}"
         );
-        assert!(
-            wide_enough_for_old_suffix.ends_with("2m"),
-            "{wide_enough_for_old_suffix:?}"
+        assert!(wide_with_machine.contains("pi ?"), "{wide_with_machine:?}");
+        let (before_machine, _) = wide_with_machine.split_once('?').expect("machine icon");
+        assert_eq!(
+            display_width(before_machine),
+            machine_icon_cell_offset(44, 5)
         );
+        assert!(wide_with_machine.ends_with("2m"), "{wide_with_machine:?}");
         assert!(
-            !wide_enough_for_old_suffix.contains("t3-sample"),
-            "{wide_enough_for_old_suffix:?}"
+            !wide_with_machine.contains("t3-sample"),
+            "{wide_with_machine:?}"
         );
 
         let default_width = render_first_tab_row(&app, 40);
         assert!(default_width.contains("sample-pr"), "{default_width:?}");
         assert!(default_width.contains("2m"), "{default_width:?}");
         assert!(!default_width.contains("· t3-sample"), "{default_width:?}");
-
         let github_depth = render_at_row_width(&entry, 25, 1);
-        assert_eq!(github_depth, "    ●  samp… ◷  ✓ pi   2m");
         let repo_branch_depth = render_at_row_width(&entry, 25, 2);
-        assert_eq!(repo_branch_depth, "     ●  sam… ◷  ✓ pi   2m");
+        let indent = |row: &str| row.len() - row.trim_start().len();
+        assert!(
+            // At 25 cells the machine column takes the extra nesting cells;
+            // children never start left of their parent.
+            indent(&repo_branch_depth) >= indent(&github_depth),
+            "{github_depth:?} {repo_branch_depth:?}"
+        );
+        for row in [&github_depth, &repo_branch_depth] {
+            assert!(row.contains("●  sa"), "{row:?}");
+            assert!(row.ends_with("pi ?   2m"), "{row:?}");
+        }
         let mut ticket_entry = entry.clone();
         ticket_entry.primary_tab_label = Some("SCA-3165 · sample-linear".into());
         let nested_ticket = render_at_row_width(&ticket_entry, 25, 2);
-        assert_eq!(nested_ticket, "   ●  sampl… ◷  ✓ pi   2m");
+        assert!(nested_ticket.contains("●  sam"), "{nested_ticket:?}");
+        assert!(nested_ticket.ends_with("pi ?   2m"), "{nested_ticket:?}");
 
         let wide = render_first_tab_row(&app, 80);
         assert!(wide.contains("sample-pr"), "{wide:?}");
@@ -24206,8 +24298,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn parent_rows_start_left_of_children_at_supported_widths() {
+    fn nested_rows_keep_title_and_machine_at_minimum_width_and_indent_when_space_allows() {
         let mut app = AppState::test_new();
+        app.agent_host_name = "ub1".into();
+        app.nerd_font = false;
         app.workspaces = vec![Workspace::test_new("repo")];
         app.ensure_test_terminals();
         let pane_id = app.workspaces[0].tabs[0].root_pane;
@@ -24249,11 +24343,23 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     .expect("visible row content")
             };
 
-            assert!(
-                first_non_space(header.rect.y, header.rect.width)
-                    < first_non_space(child.rect.y, child.rect.width),
-                "parent must start left of child at width {width}"
-            );
+            let child_text = row_text(terminal.backend().buffer(), child.rect.y, child.rect.width);
+            if width == 18 {
+                assert!(child_text.contains('●'), "{child_text:?}");
+                let title = child_text
+                    .split_once('●')
+                    .and_then(|(_, rest)| rest.split_once("cx"))
+                    .map(|(title, _)| title.trim())
+                    .expect("title before Codex provider");
+                assert!(display_width(title) >= 3, "{child_text:?}");
+                assert!(child_text.contains('1'), "{child_text:?}");
+            } else {
+                assert!(
+                    first_non_space(header.rect.y, header.rect.width)
+                        < first_non_space(child.rect.y, child.rect.width),
+                    "parent must start left of child at width {width}"
+                );
+            }
         }
     }
 
@@ -24711,7 +24817,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn tab_shell_marker_renders_in_the_provider_column() {
+    fn tab_shell_state_keeps_provider_and_machine_columns() {
         let mut app = app_with_agents(&["one"]);
         app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("Use Repository Instructions".into());
@@ -24734,8 +24840,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             rendered.contains("Use Repository Instructions"),
             "{rendered:?}"
         );
-        assert!(rendered.contains("pi >_"), "{rendered:?}");
-        assert!(!rendered.contains("  2 >_"), "{rendered:?}");
+        assert!(rendered.contains("pi ?"), "{rendered:?}");
+        assert!(!rendered.contains(">_"), "{rendered:?}");
 
         app.nerd_font = true;
         let mut icon_terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
@@ -24748,7 +24854,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             icon_rendered.contains("Use Repository Instructions"),
             "{icon_rendered:?}"
         );
-        assert!(icon_rendered.contains("\u{ea85}"), "{icon_rendered:?}");
+        assert!(icon_rendered.contains("\u{f0379}"), "{icon_rendered:?}");
+        assert!(!icon_rendered.contains("\u{ea85}"), "{icon_rendered:?}");
     }
 
     #[test]
@@ -29072,6 +29179,129 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn machine_column_aligns_for_tabs_and_blockers_at_narrow_and_normal_widths() {
+        let mut app = app_with_agents(&["blocked"]);
+        app.agent_host_name = "ub1".into();
+        app.nerd_font = false;
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .set_raw_agent_state_for_test(AgentState::Blocked);
+        let entry = sidebar_thread_entries(&app)
+            .into_iter()
+            .next()
+            .expect("tab");
+
+        for layout in [
+            crate::app::state::ViewLayout::Desktop,
+            crate::app::state::ViewLayout::Mobile,
+        ] {
+            app.view.layout = layout;
+            for (width, age_width) in [(18, 0), (40, SIDEBAR_AGE_FIELD_WIDTH)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 2)).expect("terminal");
+                terminal
+                    .draw(|frame| {
+                        render_compact_agent_row(
+                            &app,
+                            frame,
+                            &entry,
+                            Rect::new(0, 0, width, 1),
+                            0,
+                            true,
+                            None,
+                        );
+                        render_needs_you_row(
+                            &app,
+                            frame,
+                            "blocked",
+                            "▯",
+                            "ub1",
+                            true,
+                            Rect::new(0, 1, width, 1),
+                        );
+                    })
+                    .expect("render rows");
+                let buffer = terminal.backend().buffer();
+                let tab_x = find_symbol_x(buffer, 0, width, "1");
+                let blocker_x = find_symbol_x(buffer, 1, width, "1");
+                assert_eq!(tab_x, blocker_x);
+                assert_eq!(
+                    usize::from(tab_x),
+                    machine_icon_cell_offset(usize::from(width), age_width)
+                );
+                assert_eq!(buffer[(tab_x, 0)].style().fg, Some(app.palette.overlay0));
+                assert_eq!(
+                    buffer[(blocker_x, 1)].style().fg,
+                    Some(app.palette.overlay0)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn machine_icon_uses_existing_sidebar_hover_target() {
+        let mut app = app_with_agents(&["working"]);
+        app.agent_host_name = "ub1".into();
+        app.sidebar_sections_layout = true;
+        app.nerd_font = false;
+        let area = Rect::new(0, 0, 60, 30);
+        let targets = compute_sidebar_hover_targets(&app, area);
+        let machine = targets
+            .iter()
+            .find(|target| target.label == "ub1")
+            .expect("machine tooltip");
+        let list = workspace_list_rect_for_app(&app, area);
+        let metrics = workspace_list_scroll_metrics(&app, list);
+        let body = workspace_list_body_rect(&app, list, should_show_scrollbar(metrics));
+        assert_eq!(
+            machine.rect.x,
+            body.right() - 1 - SIDEBAR_AGE_FIELD_WIDTH as u16
+        );
+        assert_eq!(machine.rect.width, 1);
+        assert!(machine.action.is_none());
+    }
+
+    #[test]
+    fn local_machine_identity_uses_resolved_self_name() {
+        let mut app = app_with_agents(&["working"]);
+        app.agent_host_name = "ub2".into();
+        app.machines = vec![crate::app::machines::Machine {
+            name: "ub1".into(),
+            icon: None,
+            target: None,
+            socket: None,
+        }];
+        app.nerd_font = false;
+        let entry = sidebar_thread_entries(&app).remove(0);
+        assert_eq!(sidebar_machine_host(&app, &entry), "ub2");
+        let area = Rect::new(0, 0, 40, 1);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal
+            .draw(|frame| render_compact_agent_row(&app, frame, &entry, area, 0, true, None))
+            .unwrap();
+        let rendered = row_text(terminal.backend().buffer(), 0, area.width);
+        assert!(rendered.contains('2'), "{rendered:?}");
+    }
+
+    #[test]
+    fn configured_remote_machine_icon_reaches_sidebar_row() {
+        let mut app = AppState::test_new();
+        app.machines.push(crate::app::machines::Machine {
+            name: "lab3".into(),
+            icon: Some("◆".into()),
+            target: Some("lab3".into()),
+            socket: None,
+        });
+        assert_eq!(sidebar_machine_icon(&app, "lab3"), "◆");
+        app.nerd_font = false;
+        assert_eq!(sidebar_machine_icon(&app, "lab3"), "?");
+    }
+
+    #[test]
     fn needs_you_shows_five_then_more_and_less_in_both_layouts() {
         for sections in [false, true] {
             let mut app = app_with_agents(&["one", "two", "three", "four", "five", "six"]);
@@ -29263,21 +29493,25 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.machines = vec![
             crate::app::machines::Machine {
                 name: "ub2".into(),
+                icon: None,
                 target: None,
                 socket: None,
             },
             crate::app::machines::Machine {
                 name: "ub1".into(),
+                icon: None,
                 target: Some("ub1".into()),
                 socket: None,
             },
             crate::app::machines::Machine {
                 name: "mbpro".into(),
+                icon: None,
                 target: Some("mbpro".into()),
                 socket: None,
             },
             crate::app::machines::Machine {
                 name: "mbair".into(),
+                icon: None,
                 target: Some("mbair".into()),
                 socket: None,
             },
@@ -29309,6 +29543,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_areas.hosts = true;
         app.machines = vec![crate::app::machines::Machine {
             name: "local-machine-name".into(),
+            icon: None,
             target: None,
             socket: None,
         }];
@@ -29359,6 +29594,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.pomodoro.sidebar_visible = true;
         app.machines = vec![crate::app::machines::Machine {
             name: "ub2".into(),
+            icon: None,
             target: None,
             socket: None,
         }];
