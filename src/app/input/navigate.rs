@@ -2429,9 +2429,9 @@ fn blocked_pane_cycle_in_order(
             _ => {}
         }
     }
-    // Collapsed or filtered local rows remain keyboard-reachable when the
-    // operator has not enabled skip-collapsed cycling.
-    // Skip-collapsed still keeps panes whose tab a shown row stands for.
+    // Collapsed or filtered rows remain keyboard-reachable when the operator
+    // has not enabled skip-collapsed cycling. Skip-collapsed still keeps
+    // panes whose tab a shown row stands for.
     panes.extend(local.into_iter().filter(|(target, _)| {
         !state.skip_collapsed_cycle
             || matches!(
@@ -2440,6 +2440,9 @@ fn blocked_pane_cycle_in_order(
                     if visible_tabs.contains(&(*ws_idx, *tab_idx))
             )
     }));
+    if !state.skip_collapsed_cycle {
+        panes.extend(remote);
+    }
     panes
 }
 
@@ -5627,6 +5630,40 @@ mod tests {
             .state
             .focus_pane_in_workspace(original_window.0, original_pane));
         assert!(app.state.sidebar_selected_remote_agent.is_none());
+    }
+
+    #[test]
+    fn next_blocked_window_reaches_fleet_blockers_hidden_by_the_machine_filter() {
+        for sections in [false, true] {
+            let mut app = app_with_global_window_fixture();
+            app.state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
+            app.state.sidebar_sections_layout = sections;
+            let mut remote = crate::ui::all_agent_panel_entries(&app.state)
+                .into_iter()
+                .next()
+                .expect("agent panel fixture");
+            remote.state = crate::detect::AgentState::Idle;
+            remote.open_blockers = true;
+            remote.attention_tier = Some(crate::terminal::state::AttentionTier::Blocked);
+            let agent_ref = crate::api::schema::AgentRef::new("ub1", "blocked")
+                .expect("valid remote agent reference");
+            app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
+                crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), remote),
+            )];
+            app.state.sidebar_work_filter.machine_scope =
+                crate::app::state::SidebarMachineScope::ThisMachine;
+            let reaches_fleet = |state: &AppState| {
+                blocked_pane_cycle(state).iter().any(|(target, _)| {
+                    matches!(target, BlockedPaneTarget::Remote(found) if *found == agent_ref)
+                })
+            };
+
+            app.state.skip_collapsed_cycle = false;
+            assert!(reaches_fleet(&app.state), "sections={sections}");
+            // Skip-collapsed follows the sidebar, which hides the fleet row.
+            app.state.skip_collapsed_cycle = true;
+            assert!(!reaches_fleet(&app.state), "sections={sections}");
+        }
     }
 
     #[test]
