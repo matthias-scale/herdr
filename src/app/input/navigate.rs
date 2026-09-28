@@ -4255,6 +4255,12 @@ mod tests {
     #[test]
     fn fleet_workspace_ac9_skip_collapsed_sections_exclude_their_tabs() {
         let mut app = app_with_global_window_fixture();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Blocked,
+            );
+        }
         app.state.sidebar_sections_layout = true;
         app.state.skip_collapsed_cycle = true;
         assert!(!window_navigation_order(&app.state).is_empty());
