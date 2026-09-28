@@ -36,6 +36,18 @@ pub(crate) enum PaneSendError {
     Failed(String),
 }
 
+enum AgentReportPaneResolution {
+    Pane((usize, PaneId)),
+    Missing,
+    Ignore,
+}
+
+enum UniqueAgentSessionPane {
+    None,
+    One((usize, PaneId)),
+    Several,
+}
+
 impl App {
     pub(crate) fn try_send_text_to_pane(
         &mut self,
@@ -1551,11 +1563,21 @@ impl App {
         {
             return encode_success(id, ResponseResult::Ok {});
         }
-        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
-            return pane_not_found(id, &params.pane_id);
-        };
+        let parsed_pane = self.parse_pane_id(&params.pane_id);
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
+            if parsed_pane.is_none() {
+                return pane_not_found(id, &params.pane_id);
+            }
             return invalid_agent(id);
+        };
+        let (ws_idx, pane_id) = match self.resolve_agent_report_pane(
+            parsed_pane,
+            &agent_label,
+            params.agent_session_id.as_deref(),
+        ) {
+            AgentReportPaneResolution::Pane(target) => target,
+            AgentReportPaneResolution::Missing => return pane_not_found(id, &params.pane_id),
+            AgentReportPaneResolution::Ignore => return encode_success(id, ResponseResult::Ok {}),
         };
         let workers_unknown = params.workers_unknown;
         let completion = params.completion;
@@ -1718,11 +1740,21 @@ impl App {
         id: String,
         params: PaneReportAgentSessionParams,
     ) -> String {
-        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
-            return pane_not_found(id, &params.pane_id);
-        };
+        let parsed_pane = self.parse_pane_id(&params.pane_id);
         let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
+            if parsed_pane.is_none() {
+                return pane_not_found(id, &params.pane_id);
+            }
             return invalid_agent(id);
+        };
+        let (ws_idx, pane_id) = match self.resolve_agent_report_pane(
+            parsed_pane,
+            &agent_label,
+            params.agent_session_id.as_deref(),
+        ) {
+            AgentReportPaneResolution::Pane(target) => target,
+            AgentReportPaneResolution::Missing => return pane_not_found(id, &params.pane_id),
+            AgentReportPaneResolution::Ignore => return encode_success(id, ResponseResult::Ok {}),
         };
         let legacy_guard = (
             params.source.clone(),
@@ -1856,6 +1888,86 @@ impl App {
         let _ = self.sync_terminal_titles();
 
         encode_success(id, ResponseResult::Ok {})
+    }
+
+    fn resolve_agent_report_pane(
+        &self,
+        parsed_pane: Option<(usize, PaneId)>,
+        agent_label: &str,
+        session_id: Option<&str>,
+    ) -> AgentReportPaneResolution {
+        let Some((ws_idx, pane_id)) = parsed_pane else {
+            let Some(session_id) = session_id else {
+                return AgentReportPaneResolution::Missing;
+            };
+            return match self.unique_agent_session_pane(agent_label, session_id) {
+                UniqueAgentSessionPane::One(target) => AgentReportPaneResolution::Pane(target),
+                UniqueAgentSessionPane::None | UniqueAgentSessionPane::Several => {
+                    AgentReportPaneResolution::Missing
+                }
+            };
+        };
+        let Some(session_id) = session_id else {
+            return AgentReportPaneResolution::Pane((ws_idx, pane_id));
+        };
+
+        if self.pane_owns_agent_session(ws_idx, pane_id, agent_label, session_id) {
+            return AgentReportPaneResolution::Pane((ws_idx, pane_id));
+        }
+
+        match self.unique_agent_session_pane(agent_label, session_id) {
+            UniqueAgentSessionPane::One(target) => AgentReportPaneResolution::Pane(target),
+            // A report without a current owner can establish a new session on
+            // its resolved pane. Ambiguous ownership must never mutate either
+            // the addressed pane or one of the possible owners.
+            UniqueAgentSessionPane::None => AgentReportPaneResolution::Pane((ws_idx, pane_id)),
+            UniqueAgentSessionPane::Several => AgentReportPaneResolution::Ignore,
+        }
+    }
+
+    fn pane_owns_agent_session(
+        &self,
+        ws_idx: usize,
+        pane_id: PaneId,
+        agent_label: &str,
+        session_id: &str,
+    ) -> bool {
+        self.state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.pane_state(pane_id))
+            .and_then(|pane| self.state.terminals.get(&pane.attached_terminal_id))
+            .is_some_and(|terminal| {
+                terminal.agent_session_id_matches_current_agent(agent_label, session_id)
+            })
+    }
+
+    fn unique_agent_session_pane(
+        &self,
+        agent_label: &str,
+        session_id: &str,
+    ) -> UniqueAgentSessionPane {
+        let mut owner = None;
+        for (ws_idx, workspace) in self.state.workspaces.iter().enumerate() {
+            for tab in &workspace.tabs {
+                for (&pane_id, pane) in &tab.panes {
+                    let matches = self
+                        .state
+                        .terminals
+                        .get(&pane.attached_terminal_id)
+                        .is_some_and(|terminal| {
+                            terminal.agent_session_id_matches_current_agent(agent_label, session_id)
+                        });
+                    if matches {
+                        if owner.is_some() {
+                            return UniqueAgentSessionPane::Several;
+                        }
+                        owner = Some((ws_idx, pane_id));
+                    }
+                }
+            }
+        }
+        owner.map_or(UniqueAgentSessionPane::None, UniqueAgentSessionPane::One)
     }
 
     pub(super) fn handle_pane_report_metadata(
@@ -2869,6 +2981,15 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
         (app, public_pane_id)
+    }
+
+    fn add_test_workspace(app: &mut App, name: &str) -> String {
+        let workspace_idx = app.state.workspaces.len();
+        let workspace = Workspace::test_new(name);
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces.push(workspace);
+        app.state.ensure_test_terminals();
+        app.public_pane_id(workspace_idx, pane_id).unwrap()
     }
 
     fn session_name_temp_dir(label: &str) -> std::path::PathBuf {
@@ -9125,6 +9246,186 @@ mod tests {
         );
 
         assert_only_manual_work_context_remains(&app, &terminal_id);
+    }
+
+    #[test]
+    fn stale_pane_agent_reports_route_to_the_unique_session_owner() {
+        let (mut app, _) = app_with_test_workspace();
+        let owner_pane_id = add_test_workspace(&mut app, "session-owner");
+        let terminal_id = bind_test_agent_session(
+            &mut app,
+            &owner_pane_id,
+            "herdr:claude",
+            "claude",
+            "claude-session-owner",
+        );
+        let owner_internal_id = app.parse_pane_id(&owner_pane_id).unwrap().1;
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+
+        let session_response = app.handle_pane_report_agent_session(
+            "stale-session-report".into(),
+            PaneReportAgentSessionParams {
+                pane_id: "missing-workspace:p15".into(),
+                source: "herdr:claude-closing-block".into(),
+                agent: "claude".into(),
+                seq: Some(1),
+                agent_session_id: Some("claude-session-owner".into()),
+                agent_session_path: None,
+                session_start_source: None,
+            },
+        );
+        let _: SuccessResponse = serde_json::from_str(&session_response)
+            .unwrap_or_else(|_| panic!("session report was not routed: {session_response}"));
+
+        let mut report = closing_block_report("missing-workspace:p15", 2, Vec::new());
+        report.source = "herdr:claude-closing-block".into();
+        report.agent = "claude".into();
+        report.agent_session_id = Some("claude-session-owner".into());
+        let response = app.handle_pane_report_agent("stale-final-report".into(), report);
+        let _: SuccessResponse = serde_json::from_str(&response)
+            .unwrap_or_else(|_| panic!("agent report was not routed: {response}"));
+
+        let pane = app.pane_info(1, owner_internal_id).unwrap();
+        assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Done);
+        assert_eq!(
+            pane.tokens.get("closing_completion").map(String::as_str),
+            Some("complete")
+        );
+        assert_eq!(
+            app.state.terminals[&terminal_id].raw_agent_state(),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn a_reused_pane_id_cannot_take_another_sessions_report() {
+        let (mut app, reused_pane_id) = app_with_test_workspace();
+        let reused_terminal_id = bind_test_agent_session(
+            &mut app,
+            &reused_pane_id,
+            "herdr:claude",
+            "claude",
+            "other-session",
+        );
+        app.state
+            .terminals
+            .get_mut(&reused_terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+
+        let owner_pane_id = add_test_workspace(&mut app, "actual-session-owner");
+        let owner_terminal_id = bind_test_agent_session(
+            &mut app,
+            &owner_pane_id,
+            "herdr:claude",
+            "claude",
+            "wanted-session",
+        );
+        let owner_internal_id = app.parse_pane_id(&owner_pane_id).unwrap().1;
+
+        let mut report = closing_block_report(&reused_pane_id, 1, Vec::new());
+        report.source = "herdr:claude-closing-block".into();
+        report.agent = "claude".into();
+        report.agent_session_id = Some("wanted-session".into());
+        let response = app.handle_pane_report_agent("reused-pane-id-report".into(), report);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        assert_eq!(
+            app.state.terminals[&reused_terminal_id].current_agent_session_id(),
+            Some("other-session")
+        );
+        assert_eq!(
+            app.state.terminals[&reused_terminal_id].raw_agent_state(),
+            AgentState::Working
+        );
+        let owner = app.pane_info(1, owner_internal_id).unwrap();
+        assert_eq!(owner.agent_status, crate::api::schema::AgentStatus::Done);
+        assert_eq!(
+            owner.tokens.get("closing_completion").map(String::as_str),
+            Some("complete")
+        );
+        assert_eq!(
+            app.state.terminals[&owner_terminal_id].raw_agent_state(),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn unknown_or_ambiguous_session_owner_keeps_pane_not_found() {
+        let (mut app, _) = app_with_test_workspace();
+        let unknown_report = PaneReportAgentParams {
+            pane_id: "missing-workspace:p15".into(),
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            state: crate::api::schema::PaneAgentState::Idle,
+            v: None,
+            message: None,
+            seq: None,
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            agent_session_id: Some("unknown-session".into()),
+            agent_session_path: None,
+            gates: None,
+            items: None,
+            decisions: None,
+            completion: None,
+            external_wait: None,
+            parse_status: None,
+            workers_unknown: None,
+            agents: None,
+        };
+        assert_eq!(
+            metadata_error_code(
+                &app.handle_pane_report_agent("unknown-pane-report".into(), unknown_report,)
+            ),
+            "pane_not_found"
+        );
+
+        let first_owner = add_test_workspace(&mut app, "first-owner");
+        bind_test_agent_session(
+            &mut app,
+            &first_owner,
+            "herdr:claude",
+            "claude",
+            "duplicate-session",
+        );
+        let second_owner = add_test_workspace(&mut app, "second-owner");
+        bind_test_agent_session(
+            &mut app,
+            &second_owner,
+            "herdr:claude",
+            "claude",
+            "duplicate-session",
+        );
+        let mut ambiguous_report = closing_block_report("missing-workspace:p15", 1, Vec::new());
+        ambiguous_report.source = "herdr:claude-closing-block".into();
+        ambiguous_report.agent = "claude".into();
+        ambiguous_report.agent_session_id = Some("duplicate-session".into());
+        assert_eq!(
+            metadata_error_code(
+                &app.handle_pane_report_agent("ambiguous-pane-report".into(), ambiguous_report,)
+            ),
+            "pane_not_found"
+        );
+
+        let session_response = app.handle_pane_report_agent_session(
+            "unknown-session-report".into(),
+            PaneReportAgentSessionParams {
+                pane_id: "missing-workspace:p15".into(),
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                seq: None,
+                agent_session_id: Some("unknown-session".into()),
+                agent_session_path: None,
+                session_start_source: None,
+            },
+        );
+        assert_eq!(metadata_error_code(&session_response), "pane_not_found");
     }
 
     #[test]
