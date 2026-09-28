@@ -1083,11 +1083,14 @@ pub(super) fn apply_context_menu_action(
         }
         (
             ContextMenuKind::Tab {
-                ws_idx, tab_idx, ..
+                ws_idx,
+                tab_idx,
+                folder_shelf: Some(shelf),
+                ..
             },
             Some(crate::app::state::REMOVE_FROM_FOLDER_ITEM),
         ) => {
-            state.set_tab_sidebar_folder(ws_idx, tab_idx, None);
+            state.set_tab_sidebar_folder_for_shelf(ws_idx, tab_idx, shelf, None);
             state.set_server_mode(if state.active.is_some() {
                 Mode::Terminal
             } else {
@@ -1908,11 +1911,15 @@ impl App {
             }
             (
                 ContextMenuKind::Tab {
-                    ws_idx, tab_idx, ..
+                    ws_idx,
+                    tab_idx,
+                    folder_shelf: Some(shelf),
+                    ..
                 },
                 Some(crate::app::state::REMOVE_FROM_FOLDER_ITEM),
             ) => {
-                self.state.set_tab_sidebar_folder(ws_idx, tab_idx, None);
+                self.state
+                    .set_tab_sidebar_folder_for_shelf(ws_idx, tab_idx, shelf, None);
                 self.state.close_client_overlay();
             }
             (

@@ -2139,14 +2139,7 @@ impl AppState {
                 if let (Some(ws_idx), Some(tab_idx)) =
                     (self.active, self.tab_at(mouse.column, mouse.row))
                 {
-                    let folder_shelf =
-                        self.workspaces[ws_idx]
-                            .focused_pane_id()
-                            .and_then(|pane_id| {
-                                crate::ui::sidebar::sections_pane_shelf(
-                                    self, ws_idx, tab_idx, pane_id,
-                                )
-                            });
+                    let folder_shelf = self.sidebar_folder_target_shelf(ws_idx, tab_idx);
                     let workspace_id = self.workspaces[ws_idx].id.clone();
                     let tab_id = crate::workspace::public_tab_id_for_number(
                         &workspace_id,
@@ -6805,6 +6798,108 @@ mod tests {
             );
             app.state.sidebar_subgroup_picker = None;
         }
+
+        assert_eq!(
+            app.state.tab_sidebar_folder(0, 0, SidebarShelf::Active),
+            Some("Now")
+        );
+        assert_eq!(
+            app.state.tab_sidebar_folder(0, 0, SidebarShelf::Snoozed),
+            Some("Later")
+        );
+
+        app.state.close_client_overlay();
+        let snoozed_card = crate::ui::compute_tab_card_areas(&app.state, sidebar)
+            .into_iter()
+            .find(|card| card.pane_id == snoozed_pane)
+            .expect("snoozed pane row");
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Right),
+                snoozed_card.rect.x + 2,
+                snoozed_card.rect.y,
+            ),
+        );
+        let menu = app.state.context_menu.take().expect("snoozed row menu");
+        super::super::modal::apply_context_menu_action(
+            &mut app.state,
+            &mut app.terminal_runtimes,
+            menu,
+            ContextMenuAction::RemoveFromFolder,
+        );
+        assert_eq!(
+            app.state.tab_sidebar_folder(0, 0, SidebarShelf::Snoozed),
+            None
+        );
+        assert_eq!(
+            app.state.tab_sidebar_folder(0, 0, SidebarShelf::Active),
+            Some("Now")
+        );
+    }
+
+    #[test]
+    fn inactive_tab_bar_menu_moves_its_own_tab_to_a_folder() {
+        use crate::app::sidebar_folders::SidebarShelf;
+
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_sections_layout = true;
+        let mut workspace = Workspace::test_new("tab bar folders");
+        let inactive_tab = workspace.test_add_tab(Some("inactive"));
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state
+            .create_sidebar_folder(SidebarShelf::Active, "Plans")
+            .expect("folder");
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 30));
+        let tab = app.state.view.tab_hit_areas[inactive_tab];
+        assert!(tab.width > 1);
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(MouseEventKind::Down(MouseButton::Right), tab.x + 1, tab.y),
+        );
+        let menu = app.state.context_menu.take().expect("inactive tab menu");
+        assert!(matches!(
+            &menu.kind,
+            ContextMenuKind::Tab {
+                tab_idx,
+                folder_shelf: Some(SidebarShelf::Active),
+                ..
+            } if *tab_idx == inactive_tab
+        ));
+        super::super::modal::apply_context_menu_action(
+            &mut app.state,
+            &mut app.terminal_runtimes,
+            menu,
+            ContextMenuAction::MoveToFolder,
+        );
+        assert_eq!(
+            app.state
+                .sidebar_subgroup_picker
+                .as_ref()
+                .map(|picker| picker.folder_shelf),
+            Some(Some(SidebarShelf::Active))
+        );
+        let index = crate::ui::sidebar::sidebar_subgroup_picker_choices(&app.state)
+            .iter()
+            .position(|choice| {
+                *choice == crate::ui::SidebarSubgroupChoice::ExistingFolder("Plans".to_string())
+            })
+            .expect("folder choice");
+        app.state.accept_sidebar_subgroup_picker(index);
+        assert_eq!(
+            app.state
+                .tab_sidebar_folder(0, inactive_tab, SidebarShelf::Active),
+            Some("Plans")
+        );
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
     }
 
     #[test]

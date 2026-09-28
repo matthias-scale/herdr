@@ -478,7 +478,7 @@ impl AppState {
             (Some(shelf), crate::ui::SidebarSubgroupChoice::CreateFolder(name)) => {
                 match self.create_sidebar_folder(shelf, &name) {
                     Ok(name) => {
-                        self.set_tab_sidebar_folder(ws_idx, tab_idx, Some(&name));
+                        self.set_tab_sidebar_folder_for_shelf(ws_idx, tab_idx, shelf, Some(&name));
                     }
                     Err(error) => self.show_sidebar_folder_error(error),
                 }
@@ -488,11 +488,11 @@ impl AppState {
                     .sidebar_folder(&name)
                     .is_some_and(|folder| folder.shelf == shelf)
                 {
-                    self.set_tab_sidebar_folder(ws_idx, tab_idx, Some(&name));
+                    self.set_tab_sidebar_folder_for_shelf(ws_idx, tab_idx, shelf, Some(&name));
                 }
             }
-            (Some(_), crate::ui::SidebarSubgroupChoice::NoFolder) => {
-                self.set_tab_sidebar_folder(ws_idx, tab_idx, None);
+            (Some(shelf), crate::ui::SidebarSubgroupChoice::NoFolder) => {
+                self.set_tab_sidebar_folder_for_shelf(ws_idx, tab_idx, shelf, None);
             }
             _ => {}
         }

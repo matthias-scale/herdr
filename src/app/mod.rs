@@ -4162,6 +4162,7 @@ mod tests {
         let mut env = crate::config::TestConfigEnvGuard::acquire();
         let config_home = unique_temp_path("no-session-sidebar-folders");
         env.set("XDG_CONFIG_HOME", &config_home);
+        env.set("XDG_STATE_HOME", &config_home);
         env.remove(crate::session::SESSION_ENV_VAR);
 
         let saved = vec![crate::app::sidebar_folders::SidebarFolder {
@@ -4185,6 +4186,7 @@ mod tests {
 
         assert_eq!(load_sidebar_folders_for_mode(false), saved);
         env.remove("XDG_CONFIG_HOME");
+        env.remove("XDG_STATE_HOME");
         let _ = std::fs::remove_dir_all(config_home);
     }
 

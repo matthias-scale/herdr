@@ -180,40 +180,78 @@ impl AppState {
         true
     }
 
-    /// File a tab into `folder`, or take it out of any folder with `None`.
+    /// The shelf of the target tab's focused pane, or its first visible shelf.
+    /// A tab-bar action has no row to supply a shelf.
+    pub(crate) fn sidebar_folder_target_shelf(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+    ) -> Option<SidebarShelf> {
+        self.workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.tabs.get(tab_idx))
+            .and_then(|tab| {
+                crate::ui::sidebar::sections_pane_shelf(self, ws_idx, tab_idx, tab.layout.focused())
+            })
+            .or_else(|| {
+                SidebarShelf::ALL.into_iter().find(|shelf| {
+                    crate::ui::sidebar::sections_tab_in_shelf(self, ws_idx, tab_idx, *shelf)
+                })
+            })
+    }
+
+    /// Convenience for fixtures that target one folder or the focused shelf.
+    #[cfg(test)]
     pub(crate) fn set_tab_sidebar_folder(
         &mut self,
         ws_idx: usize,
         tab_idx: usize,
         folder: Option<&str>,
     ) -> bool {
-        if let Some(name) = folder {
-            let Some(folder_state) = self.sidebar_folder(name) else {
-                return false;
-            };
-            if self.sidebar_sections_layout
-                && !crate::ui::sidebar::sections_tab_in_shelf(
-                    self,
-                    ws_idx,
-                    tab_idx,
-                    folder_state.shelf,
-                )
-            {
-                return false;
-            }
+        let shelf = match folder {
+            Some(name) => self.sidebar_folder(name).map(|entry| entry.shelf),
+            None => self.sidebar_folder_target_shelf(ws_idx, tab_idx),
+        };
+        shelf.is_some_and(|shelf| {
+            self.set_tab_sidebar_folder_for_shelf(ws_idx, tab_idx, shelf, folder)
+        })
+    }
+
+    /// Change only the membership of the shelf acted on. A split tab can be
+    /// filed independently in another shelf at the same time.
+    pub(crate) fn set_tab_sidebar_folder_for_shelf(
+        &mut self,
+        ws_idx: usize,
+        tab_idx: usize,
+        shelf: SidebarShelf,
+        folder: Option<&str>,
+    ) -> bool {
+        if !crate::ui::sidebar::sections_tab_in_shelf(self, ws_idx, tab_idx, shelf)
+            || folder.is_some_and(|name| {
+                !self
+                    .sidebar_folder(name)
+                    .is_some_and(|entry| entry.shelf == shelf)
+            })
+        {
+            return false;
         }
         let Some(tab) = self.sidebar_folder_tab(ws_idx, tab_idx) else {
             return false;
         };
-        let current = self
+        let mut memberships = self
             .sidebar_folders
             .iter()
-            .find(|entry| entry.members.contains(&tab));
-        if current.map(|entry| entry.name.as_str()) == folder {
+            .filter(|entry| entry.shelf == shelf && entry.members.contains(&tab));
+        let current = memberships.next();
+        if current.map(|entry| entry.name.as_str()) == folder && memberships.next().is_none() {
             return true;
         }
         let mut changed = false;
-        for entry in &mut self.sidebar_folders {
+        for entry in self
+            .sidebar_folders
+            .iter_mut()
+            .filter(|entry| entry.shelf == shelf)
+        {
             let before = entry.members.len();
             entry.members.retain(|member| member != &tab);
             changed |= entry.members.len() != before;
@@ -395,7 +433,12 @@ impl AppState {
                         .and_then(|tab| self.sidebar_folder_tab_indices(tab))
                     {
                         if crate::ui::sidebar::sections_tab_in_shelf(self, ws_idx, tab_idx, shelf) {
-                            self.set_tab_sidebar_folder(ws_idx, tab_idx, Some(&name));
+                            self.set_tab_sidebar_folder_for_shelf(
+                                ws_idx,
+                                tab_idx,
+                                shelf,
+                                Some(&name),
+                            );
                         }
                     }
                 })
@@ -428,18 +471,7 @@ impl AppState {
         tab_idx: usize,
         anchor: (u16, u16),
     ) -> bool {
-        let shelf = self
-            .workspaces
-            .get(ws_idx)
-            .and_then(|workspace| workspace.tabs.get(tab_idx))
-            .and_then(|tab| {
-                crate::ui::sidebar::sections_pane_shelf(self, ws_idx, tab_idx, tab.layout.focused())
-            })
-            .or_else(|| {
-                SidebarShelf::ALL.into_iter().find(|shelf| {
-                    crate::ui::sidebar::sections_tab_in_shelf(self, ws_idx, tab_idx, *shelf)
-                })
-            });
+        let shelf = self.sidebar_folder_target_shelf(ws_idx, tab_idx);
         self.open_sidebar_folder_picker_for_shelf(ws_idx, tab_idx, anchor, shelf)
     }
 
@@ -674,6 +706,87 @@ mod tests {
             app.sidebar_folder("Review").expect("folder").members.len(),
             1
         );
+    }
+
+    #[test]
+    fn split_tab_folder_changes_keep_the_other_shelf_membership() {
+        let mut app = app_with_workspace();
+        let active_pane = app.workspaces[0].tabs[0].root_pane;
+        let snoozed_pane = app.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.workspaces[0].tabs[0].layout.focus_pane(active_pane);
+        app.ensure_test_terminals();
+        let deadline = app.view_observed_unix_s + 900;
+        assert!(app.snooze_pane_at(0, snoozed_pane, deadline));
+        assert!(crate::ui::sidebar::sections_tab_in_shelf(
+            &app,
+            0,
+            0,
+            SidebarShelf::Active
+        ));
+        assert!(crate::ui::sidebar::sections_tab_in_shelf(
+            &app,
+            0,
+            0,
+            SidebarShelf::Snoozed
+        ));
+        for (shelf, name) in [
+            (SidebarShelf::Active, "Now"),
+            (SidebarShelf::Active, "Next"),
+            (SidebarShelf::Snoozed, "Later"),
+        ] {
+            app.create_sidebar_folder(shelf, name).expect("folder");
+        }
+        let tab = app.sidebar_folder_tab(0, 0).expect("tab identity");
+        assert!(app.set_tab_sidebar_folder_for_shelf(0, 0, SidebarShelf::Active, Some("Now")));
+        assert!(app.set_tab_sidebar_folder_for_shelf(0, 0, SidebarShelf::Snoozed, Some("Later")));
+        assert_eq!(
+            app.tab_sidebar_folder(0, 0, SidebarShelf::Active),
+            Some("Now")
+        );
+        assert_eq!(
+            app.tab_sidebar_folder(0, 0, SidebarShelf::Snoozed),
+            Some("Later")
+        );
+
+        assert!(app.set_tab_sidebar_folder_for_shelf(0, 0, SidebarShelf::Active, Some("Next")));
+        assert!(app
+            .sidebar_folder("Now")
+            .expect("old folder")
+            .members
+            .is_empty());
+        assert_eq!(
+            app.tab_sidebar_folder(0, 0, SidebarShelf::Snoozed),
+            Some("Later")
+        );
+        assert!(app.set_tab_sidebar_folder_for_shelf(0, 0, SidebarShelf::Snoozed, None));
+        assert_eq!(
+            app.tab_sidebar_folder(0, 0, SidebarShelf::Active),
+            Some("Next")
+        );
+        assert!(app.set_tab_sidebar_folder_for_shelf(0, 0, SidebarShelf::Snoozed, Some("Later")));
+        assert!(app.set_tab_sidebar_folder_for_shelf(0, 0, SidebarShelf::Active, None));
+        assert_eq!(
+            app.tab_sidebar_folder(0, 0, SidebarShelf::Snoozed),
+            Some("Later")
+        );
+        assert!(!app.reconcile_sidebar_folder_memberships());
+        let saved = app
+            .take_sidebar_folders_persistence_request()
+            .expect("save");
+        assert_eq!(
+            saved
+                .iter()
+                .find(|folder| folder.name == "Later")
+                .expect("Later")
+                .members,
+            vec![tab]
+        );
+        app.workspaces.clear();
+        assert!(app.reconcile_sidebar_folder_memberships());
+        assert!(app
+            .sidebar_folders
+            .iter()
+            .all(|folder| folder.members.is_empty()));
     }
 
     #[test]
