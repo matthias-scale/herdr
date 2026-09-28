@@ -3419,7 +3419,7 @@ fn compact_sidebar_rows_inner(
             terminal_runtimes,
             SidebarGroupMode::Spaces,
             false,
-            true,
+            sidebar_rows_are_filtered(app),
         );
         snoozed_entries.extend(remote_snoozed);
         rows.push(SidebarRow::ShelfDivider);
@@ -28839,18 +28839,16 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 Some(SidebarRow::ShelfDivider)
             ));
         }
-        for (title, ws_idx) in [
-            (ACTIVE_SECTION_TITLE, 0),
-            (SNOOZED_SECTION_TITLE, 1),
-            (SETTLED_SECTION_TITLE, 2),
-        ] {
-            let start = if title == ACTIVE_SECTION_TITLE {
-                0
-            } else {
-                rows.iter().position(|row| matches!(row,
-                    SidebarRow::SectionHeader { title: found, count: 1, .. } if *found == title
-                )).expect("shelf with one tab") + 1
-            };
+        for (title, ws_idx) in [(SNOOZED_SECTION_TITLE, 1), (SETTLED_SECTION_TITLE, 2)] {
+            let start = rows
+                .iter()
+                .position(|row| {
+                    matches!(row,
+                        SidebarRow::SectionHeader { title: found, count: 1, .. } if *found == title
+                    )
+                })
+                .expect("shelf with one tab")
+                + 1;
             let end = rows
                 .iter()
                 .enumerate()
@@ -28879,6 +28877,34 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             assert!(body.iter().all(|row| !matches!(row, SidebarRow::Tab { .. })
                 || sidebar_row_height(&app, row, 20) == 1));
         }
+    }
+
+    #[test]
+    fn sections_active_view_keeps_spaces_without_active_tabs() {
+        let mut app = app_with_agents(&["active", "snoozed", "settled"]);
+        app.sidebar_sections_layout = true;
+        let snoozed = app.workspaces[1].tabs[0].root_pane;
+        let settled = app.workspaces[2].tabs[0].root_pane;
+        assert!(app.snooze_pane_at(1, snoozed, app.view_observed_unix_s + 60));
+        assert!(app.settle_pane_at(2, settled, app.view_observed_unix_s));
+
+        let rows = sidebar_rows(&app);
+        let active_end = rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::ShelfDivider))
+            .expect("shelf divider");
+        let active_spaces = rows[..active_end]
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Workspace { ws_idx, .. } => Some(*ws_idx),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(active_spaces, vec![0, 1, 2]);
+        assert!(!rows[..active_end].iter().any(|row| matches!(row,
+            SidebarRow::Tab { entry, .. }
+                if entry.local_target().is_some_and(|target| target.ws_idx != 0)
+        )));
     }
 
     #[test]

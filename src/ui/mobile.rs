@@ -961,6 +961,10 @@ fn render_mobile_switcher_content(
                             Style::default().fg(color).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
+                            format!(" {title}"),
+                            Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
                             format!(" {count}"),
                             Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
                         ),
