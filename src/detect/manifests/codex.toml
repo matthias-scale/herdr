@@ -125,7 +125,11 @@ priority = 975
 region = "bottom_non_empty_lines(20)"
 visible_blocker = true
 all = [
-  { contains = ["Update available", "Update now"] },
+  { contains = ["Update available"] },
+  { any = [
+    { contains = ["Update now"] },
+    { contains = ["Skip until next version"] },
+  ] },
   { regex = ['(?s)(?:^|\n)[ \t]*enter[ \t]+continue[ \t]*·[ \t]*esc\s+skip[ \t]*(?:\r?\n[ \t]*)*\z'] },
 ]
 
