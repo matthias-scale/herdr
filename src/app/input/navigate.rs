@@ -1223,14 +1223,11 @@ impl App {
     }
 
     pub(crate) fn cycle_pane_via_api(&mut self, reverse: bool) {
-        let remote_agents = crate::ui::all_agent_panel_entries(&self.state)
-            .into_iter()
-            .filter_map(|entry| {
-                entry
-                    .remote_entry
-                    .as_ref()
-                    .map(|remote| remote.agent_ref.clone())
-            })
+        let remote_agents = self
+            .state
+            .remote_agent_panel_entries
+            .iter()
+            .map(|remote| remote.agent_ref.clone())
             .collect::<Vec<_>>();
 
         if let Some(selected) = self.state.sidebar_selected_remote_agent.as_ref() {

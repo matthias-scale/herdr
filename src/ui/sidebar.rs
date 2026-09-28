@@ -1879,6 +1879,24 @@ pub(crate) fn all_agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     collect_agent_panel_entries_with_runtimes(app, None)
 }
 
+fn remote_agent_as_panel_entry(remote: &std::sync::Arc<RemoteAgentPanelEntry>) -> AgentPanelEntry {
+    let mut entry = remote.entry.clone();
+    entry.identity = AgentPanelIdentity::Remote(remote.agent_ref.clone());
+    entry.remote_entry = Some(std::sync::Arc::clone(remote));
+    entry.remote_show_host_identity = remote.show_host_identity;
+    entry
+}
+
+fn all_agent_navigation_entries(app: &AppState) -> Vec<AgentPanelEntry> {
+    let mut entries = all_agent_panel_entries(app);
+    entries.extend(
+        app.remote_agent_panel_entries
+            .iter()
+            .map(remote_agent_as_panel_entry),
+    );
+    entries
+}
+
 pub(crate) fn sidebar_thread_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     collect_sidebar_thread_entries_with_runtimes(app, None)
 }
@@ -1894,7 +1912,7 @@ pub(crate) fn relative_agent_navigation_entry(
     app: &AppState,
     forward: bool,
 ) -> Option<(usize, AgentPanelEntry)> {
-    let entries = all_agent_panel_entries(app);
+    let entries = all_agent_navigation_entries(app);
     if entries.is_empty() {
         return None;
     }
@@ -3304,13 +3322,7 @@ fn compact_sidebar_rows_inner(
                 remote_sidebar_entry_matches_query(remote, &remote_terms)
                     && (!app.blocked_filter || entry_has_red_dot(remote))
             })
-            .map(|remote| {
-                let mut entry = remote.entry.clone();
-                entry.identity = AgentPanelIdentity::Remote(remote.agent_ref.clone());
-                entry.remote_entry = Some(std::sync::Arc::clone(remote));
-                entry.remote_show_host_identity = remote.show_host_identity;
-                entry
-            })
+            .map(remote_agent_as_panel_entry)
             .collect::<Vec<_>>()
     } else {
         Vec::new()
