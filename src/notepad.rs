@@ -188,12 +188,7 @@ impl NotepadState {
         std::mem::swap(&mut self.agent_scroll, &mut other.agent_scroll);
         std::mem::swap(&mut self.usage_scroll, &mut other.usage_scroll);
         // A client's saved selection can predate a visibility change.
-        if self.agent_tab && !self.is_tab_visible(NotepadTabTarget::Agent) {
-            self.agent_tab = false;
-        }
-        if self.usage_tab && !self.is_tab_visible(NotepadTabTarget::Usage) {
-            self.usage_tab = false;
-        }
+        self.reconcile_active_tab();
     }
 
     pub(crate) fn from_config(config: &crate::config::NotepadConfig) -> Self {
@@ -913,6 +908,7 @@ mod tests {
         state.swap_presentation(&mut saved);
 
         assert!(!state.usage_tab);
+        assert_eq!(state.active_tab_target(), Some(NotepadTabTarget::Agent));
     }
 
     #[test]

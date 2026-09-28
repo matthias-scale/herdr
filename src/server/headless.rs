@@ -8777,7 +8777,7 @@ esac
 
         // Each client selects a different tab, so all of them must be visible.
         let mut visible_tabs = server.app.state.notepad.visible_tabs.clone();
-        for tab in ["agent", "usage"] {
+        for tab in ["note:todo", "agent", "usage"] {
             if !visible_tabs.iter().any(|visible| visible == tab) {
                 visible_tabs.push(tab.to_string());
             }
