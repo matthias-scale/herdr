@@ -13,6 +13,13 @@ use std::{
 use serde::{Deserialize, Serialize};
 use time::{Date, Duration, Weekday};
 
+static NEXT_REMOTE_LINE_REQUEST_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn next_remote_line_request_id() -> u64 {
+    NEXT_REMOTE_LINE_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Column {
@@ -163,6 +170,7 @@ pub(crate) struct BoardView {
     pub(crate) agent_lanes: std::collections::HashMap<AgentLink, Lane>,
     pub(crate) last_agent_refresh_unix_s: u64,
     pub(crate) remote_line_fetch_in_flight: bool,
+    pub(crate) remote_line_request_id: u64,
     pub(crate) last_remote_line_fetch_unix_s: u64,
 }
 
@@ -201,6 +209,7 @@ impl BoardView {
             agent_lanes: std::collections::HashMap::new(),
             last_agent_refresh_unix_s: 0,
             remote_line_fetch_in_flight: false,
+            remote_line_request_id: 0,
             last_remote_line_fetch_unix_s: 0,
         })
     }
@@ -225,6 +234,7 @@ impl BoardView {
             agent_lanes: std::collections::HashMap::new(),
             last_agent_refresh_unix_s: 0,
             remote_line_fetch_in_flight: false,
+            remote_line_request_id: 0,
             last_remote_line_fetch_unix_s: 0,
         }
     }

@@ -77,6 +77,8 @@ pub enum AppEvent {
     BoardRemoteLinesFetched {
         note_path: std::path::PathBuf,
         fleet_generation: u64,
+        request_id: u64,
+        complete: bool,
         lines: Vec<(crate::board::AgentLink, String)>,
     },
     /// A one-shot request to the host owning a remote pane completed. Fleet

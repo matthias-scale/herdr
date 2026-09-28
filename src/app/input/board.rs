@@ -6,6 +6,61 @@ use crate::board::{
 
 use super::super::App;
 
+fn spawn_remote_line_workers(
+    requests: Vec<(crate::board::AgentLink, crate::fleet::HostApiRoute)>,
+    event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    note_path: std::path::PathBuf,
+    fleet_generation: u64,
+    request_id: u64,
+) {
+    std::thread::spawn(move || {
+        let worker_count = requests.len().min(4);
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+            requests,
+        )));
+        let handles: Vec<_> = (0..worker_count)
+            .map(|_| {
+                let queue = std::sync::Arc::clone(&queue);
+                let event_tx = event_tx.clone();
+                let note_path = note_path.clone();
+                std::thread::spawn(move || loop {
+                    let next = queue
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .pop_front();
+                    let Some((link, route)) = next else {
+                        return;
+                    };
+                    let line = crate::fleet::read_board_remote_line(&route, &link.pane_id)
+                        .unwrap_or_else(|_| "remote terminal unavailable".into());
+                    if event_tx
+                        .blocking_send(crate::events::AppEvent::BoardRemoteLinesFetched {
+                            note_path: note_path.clone(),
+                            fleet_generation,
+                            request_id,
+                            complete: false,
+                            lines: vec![(link, line)],
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            let _ = handle.join();
+        }
+        let _ = event_tx.blocking_send(crate::events::AppEvent::BoardRemoteLinesFetched {
+            note_path,
+            fleet_generation,
+            request_id,
+            complete: true,
+            lines: Vec::new(),
+        });
+    });
+}
+
 impl App {
     pub(crate) fn refresh_board_remote_lines(&mut self) {
         let Some(view) = self.state.board_view.as_ref() else {
@@ -40,32 +95,27 @@ impl App {
         }
         let note_path = view.note.path.clone();
         let fleet_generation = self.state.fleet_snapshot.config_generation;
+        let request_id = crate::board::next_remote_line_request_id();
         if let Some(view) = self.state.board_view.as_mut() {
             view.remote_line_fetch_in_flight = true;
+            view.remote_line_request_id = request_id;
             view.last_remote_line_fetch_unix_s = now;
         }
-        let event_tx = self.event_tx.clone();
-        std::thread::spawn(move || {
-            let lines = requests
-                .into_iter()
-                .map(|(link, route)| {
-                    let line = crate::fleet::read_board_remote_line(&route, &link.pane_id)
-                        .unwrap_or_else(|_| "remote terminal unavailable".into());
-                    (link, line)
-                })
-                .collect();
-            let _ = event_tx.blocking_send(crate::events::AppEvent::BoardRemoteLinesFetched {
-                note_path,
-                fleet_generation,
-                lines,
-            });
-        });
+        spawn_remote_line_workers(
+            requests,
+            self.event_tx.clone(),
+            note_path,
+            fleet_generation,
+            request_id,
+        );
     }
 
     pub(crate) fn apply_board_remote_lines(
         &mut self,
         note_path: &std::path::Path,
         fleet_generation: u64,
+        request_id: u64,
+        complete: bool,
         lines: Vec<(crate::board::AgentLink, String)>,
     ) -> bool {
         let visible = self.state.board_view.is_some();
@@ -75,13 +125,18 @@ impl App {
             .board_view
             .as_mut()
             .or(self.state.board_return.as_mut());
-        let Some(view) = view.filter(|view| view.note.path == note_path) else {
+        let Some(view) = view.filter(|view| {
+            view.note.path == note_path && view.remote_line_request_id == request_id
+        }) else {
             return false;
         };
-        view.remote_line_fetch_in_flight = false;
+        if complete {
+            view.remote_line_fetch_in_flight = false;
+        }
         if fleet_generation != current_generation {
             return false;
         }
+        let changed = !lines.is_empty();
         for (link, line) in lines {
             if view
                 .board
@@ -92,7 +147,7 @@ impl App {
                 view.agent_lines.insert(link, (u64::MAX, line));
             }
         }
-        visible
+        visible && changed
     }
 
     pub(crate) fn board_insert_text(&mut self, text: &str) -> bool {
@@ -977,5 +1032,78 @@ impl App {
             }
             self.state.board_return = self.state.board_view.take();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_remote_line_result_cannot_change_reopened_board() {
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        let date = time::Date::from_calendar_date(2026, time::Month::September, 28).expect("date");
+        let note =
+            crate::board::WeekNote::for_date(std::path::Path::new("/vault"), date).expect("note");
+        let link = crate::board::AgentLink {
+            host: "ub1".into(),
+            pane_id: "w:p1".into(),
+        };
+        let board = crate::board::Board {
+            goals: Vec::new(),
+            cards: vec![Card {
+                id: "card".into(),
+                title: "Review".into(),
+                description: String::new(),
+                area: Area::Harness,
+                column: Column::InProgress,
+                goal_id: None,
+                agent_summary: String::new(),
+                updates: Vec::new(),
+                agents: vec![link.clone()],
+            }],
+        };
+        let mut reopened = BoardView::test_new(note.clone(), board);
+        reopened.remote_line_request_id = 2;
+        reopened.remote_line_fetch_in_flight = true;
+        app.state.board_view = Some(reopened);
+        let generation = app.state.fleet_snapshot.config_generation;
+        assert!(!app.apply_board_remote_lines(
+            &note.path,
+            generation,
+            1,
+            true,
+            vec![(link.clone(), "stale".into())]
+        ));
+        let view = app.state.board_view.as_ref().expect("board");
+        assert!(view.remote_line_fetch_in_flight);
+        assert!(!view.agent_lines.contains_key(&link));
+        assert!(app.apply_board_remote_lines(
+            &note.path,
+            generation,
+            2,
+            false,
+            vec![(link.clone(), "current".into())]
+        ));
+        let view = app.state.board_view.as_ref().expect("board");
+        assert!(view.remote_line_fetch_in_flight);
+        assert_eq!(
+            view.agent_lines.get(&link).map(|(_, line)| line.as_str()),
+            Some("current")
+        );
+        assert!(!app.apply_board_remote_lines(&note.path, generation, 2, true, Vec::new()));
+        assert!(
+            !app.state
+                .board_view
+                .as_ref()
+                .expect("board")
+                .remote_line_fetch_in_flight
+        );
     }
 }

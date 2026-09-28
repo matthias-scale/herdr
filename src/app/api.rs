@@ -356,8 +356,16 @@ impl App {
             AppEvent::BoardRemoteLinesFetched {
                 note_path,
                 fleet_generation,
+                request_id,
+                complete,
                 lines,
-            } => self.apply_board_remote_lines(&note_path, fleet_generation, lines),
+            } => self.apply_board_remote_lines(
+                &note_path,
+                fleet_generation,
+                request_id,
+                complete,
+                lines,
+            ),
             AppEvent::RemoteApiRequestFinished {
                 agent_ref,
                 response,
@@ -643,10 +651,18 @@ impl App {
         if let AppEvent::BoardRemoteLinesFetched {
             note_path,
             fleet_generation,
+            request_id,
+            complete,
             lines,
         } = ev
         {
-            return Some(self.apply_board_remote_lines(&note_path, fleet_generation, lines));
+            return Some(self.apply_board_remote_lines(
+                &note_path,
+                fleet_generation,
+                request_id,
+                complete,
+                lines,
+            ));
         }
 
         if let AppEvent::RemoteApiRequestFinished {
