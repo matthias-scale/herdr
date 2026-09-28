@@ -2208,12 +2208,6 @@ fn collect_agent_panel_entries_with_runtimes(
                         },
                     );
                     entry.pinned = pinned;
-                    if app.sidebar_sections_layout
-                        && app.sidebar_show_ask_subtitles
-                        && entry_is_blocked(&entry)
-                    {
-                        entry.pending_ask = entry_terminal(app, &entry).and_then(pending_human_ask);
-                    }
                     entry
                 })
         })
@@ -3471,6 +3465,13 @@ fn compact_sidebar_rows_inner(
                 .local_target()
                 .is_some_and(|target| visible_tabs.contains(&(target.ws_idx, target.tab_idx)))
         });
+    }
+    if app.sidebar_sections_layout && app.sidebar_show_ask_subtitles {
+        for entry in &mut entries {
+            if entry_is_blocked(entry) {
+                entry.pending_ask = entry_terminal(app, entry).and_then(pending_human_ask);
+            }
+        }
     }
     let remote_terms = sidebar_query_parts(&app.sidebar_work_filter.query).0;
     let remote_entries = if include_remote
@@ -29417,6 +29418,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             default_at: None,
         }];
         app.reconcile_sidebar_presentation();
+        assert!(sidebar_thread_entries(&app)
+            .iter()
+            .all(|entry| entry.pending_ask.is_none()));
         let row = sidebar_rows(&app)
             .into_iter()
             .find(|row| matches!(row, SidebarRow::Tab { .. }))
