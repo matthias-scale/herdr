@@ -361,13 +361,13 @@ The symbols are static, so this option does not enable spinner animation.
 
 ### Sidebar row layouts
 
-Choose the sections layout with a separate layout key. The default `current` value keeps the existing grouping. Sections show blocked and done agents in the Spaces tree, followed by Working, Snoozed, and Settled. `header = "plain"` removes the sky band and wordmark while keeping search and sidebar action controls available in the compact header.
+Choose the sections layout with a separate layout key. The default `current` value keeps the existing grouping. Sections show blocked and done agents in the Spaces tree, followed by Working, Snoozed, and Settled shelves. Pinned tabs remain in the Spaces tree. Working and Settled start collapsed. The sections header defaults to `plain`; set `header = "sky"` to show the sky band and wordmark.
 
 ```toml
 [ui.sidebar]
 layout = "sections"
-header = "sky"
 show_ask_subtitles = true
+# header = "sky"  # optional
 
 [ui.sidebar.areas]
 sky_header = true
@@ -388,7 +388,7 @@ area is shown by default. The current layout ignores this table.
 in the sections layout. It defaults to `true` and can also be changed under
 Settings → Sidebar → Show ask subtitles.
 
-Pin or unpin a tab from the CLI with `herdr tab pin <tab_id>` and `herdr tab unpin <tab_id>`. The sections layout keeps settled tabs on a collapsed shelf until you expand it.
+Pin or unpin a tab from the CLI with `herdr tab pin <tab_id>` and `herdr tab unpin <tab_id>`. The Needs you rows appear above the Spaces view in both layouts. Up to five show initially; use `▸ N more` to show the rest and `▴ less` to fold them back.
 
 The expanded desktop sidebar renders each inner array in `rows` as one line. These are the complete default layouts:
 

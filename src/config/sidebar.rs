@@ -431,7 +431,7 @@ impl Default for SpacesSidebarConfig {
 #[serde(default)]
 pub struct SidebarConfig {
     /// Sidebar row layout. `current` preserves the existing layout; `sections`
-    /// shows the Spaces tree and thread shelves.
+    /// shows the Spaces tree with focused agents and deferred shelves.
     pub layout: SidebarLayoutConfig,
     /// Header decoration used by the sections layout. `plain` removes the sky
     /// band and places search and goto in the control row.
@@ -561,9 +561,9 @@ pub enum SidebarLayoutConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SidebarHeaderConfig {
-    #[default]
     /// Draw the theme-colored half-block night sky.
     Sky,
+    #[default]
     /// Draw no header decoration.
     Plain,
 }
@@ -576,7 +576,7 @@ mod tests {
     fn defaults_show_only_thread_titles_and_space_names() {
         let config = SidebarConfig::default();
         assert_eq!(config.layout, SidebarLayoutConfig::Current);
-        assert_eq!(config.header, SidebarHeaderConfig::Sky);
+        assert_eq!(config.header, SidebarHeaderConfig::Plain);
         assert_eq!(config.areas, SidebarAreasConfig::default());
         assert_eq!(
             config.agents.rows,
@@ -610,6 +610,9 @@ mod tests {
         assert_eq!(config.layout, SidebarLayoutConfig::Sections);
         assert_eq!(config.header, SidebarHeaderConfig::Plain);
         assert!(!config.show_ask_subtitles);
+        let sky: SidebarConfig =
+            toml::from_str("layout = \"sections\"\nheader = \"sky\"\n").unwrap();
+        assert_eq!(sky.header, SidebarHeaderConfig::Sky);
     }
 
     #[test]
