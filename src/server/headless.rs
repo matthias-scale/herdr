@@ -1877,6 +1877,8 @@ impl HeadlessServer {
             self.app.state.sidebar_section_split,
             self.app.state.collapsed_space_keys.clone(),
             self.app.state.prio_panel_collapsed,
+            self.app.state.window_cycle_mode,
+            self.app.state.skip_collapsed_cycle,
         );
 
         let mut handoff_entries = Vec::new();
@@ -20082,9 +20084,11 @@ next_tab = ""
         );
         let checklist = server.app.state.view.sidebar_areas_hit_area;
         let bell = server.app.state.view.notification_hit_area;
+        let cycle = server.app.state.view.window_cycle_mode_hit_area;
         assert_eq!(checklist.width, 1);
         assert_eq!(checklist.y, bell.y);
-        assert_eq!(checklist.right(), bell.x);
+        assert_eq!(checklist.right(), cycle.x);
+        assert_eq!(cycle.right(), bell.x);
 
         let (writer, _control_rx, _render_rx) = test_client_writer();
         server.clients.insert(

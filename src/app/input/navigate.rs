@@ -956,26 +956,23 @@ impl App {
     /// Windows are Herdr tabs. Canonical workspace/vector/tab order is used so
     /// agent lifecycle or cwd changes cannot affect global navigation.
     fn focus_relative_window(&mut self, forward: bool) {
-        let windows = window_cycle_order(&self.state);
-        let Some(active_ws) = self.state.active else {
+        let windows = window_navigation_order(&self.state);
+        let Some(next) = relative_window_target_index(&self.state, &windows, forward) else {
             return;
         };
-        let active_tab = self.state.workspaces[active_ws].active_tab_index();
-        let Some(current) = windows
-            .iter()
-            .position(|window| *window == (active_ws, active_tab))
-        else {
-            return;
-        };
-        let Some(next) = crate::workspace::relative_window_index(windows.len(), current, forward)
-        else {
-            return;
-        };
-        let (ws_idx, tab_idx) = windows[next];
-        let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
-            return;
-        };
-        self.runtime_tab_focus("tui.window.focus_relative", tab_id);
+        match windows[next].clone() {
+            WindowCycleTarget::Local { ws_idx, tab_idx } => {
+                let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
+                    return;
+                };
+                self.state.sidebar_selected_remote_agent = None;
+                self.runtime_tab_focus("tui.window.focus_relative", tab_id);
+            }
+            WindowCycleTarget::Remote(agent_ref) => {
+                self.open_fleet_host_focused(&agent_ref.host, Some(&agent_ref.agent));
+                self.state.select_remote_agent_row(agent_ref);
+            }
+        }
     }
 
     fn focus_next_blocked_window(&mut self) {
@@ -2062,33 +2059,128 @@ pub(crate) fn handle_navigate_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
-/// Order `prefix+n` / `prefix+p` walk tabs in.
-///
-/// The sidebar is the projection the operator actually reads, and its row
-/// order already depends on the selected View, so the window cycle follows it
-/// instead of raw workspace/tab indices. Tabs the current View does not
-/// project -- collapsed groups, an active search filter -- are appended in
-/// index order so no tab becomes unreachable from the keyboard.
-pub(crate) fn window_cycle_order(state: &AppState) -> Vec<(usize, usize)> {
-    let mut seen = std::collections::HashSet::new();
-    let mut order = crate::ui::sidebar_rows(state)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum WindowCycleTarget {
+    Local { ws_idx: usize, tab_idx: usize },
+    Remote(crate::api::schema::AgentRef),
+}
+
+fn cycle_visible_workspaces(state: &AppState) -> std::collections::HashSet<usize> {
+    crate::ui::sidebar::workspace_list_entries_for_mode(state, false, state.sidebar_group_mode)
         .into_iter()
-        .filter_map(|row| match row {
-            crate::ui::SidebarRow::Tab { entry, .. } => entry
-                .local_target()
-                .map(|target| (target.ws_idx, target.tab_idx)),
+        .filter_map(|entry| match entry {
+            crate::ui::sidebar::WorkspaceListEntry::Workspace { ws_idx, .. }
+                if !state.workspaces[ws_idx].is_fleet =>
+            {
+                Some(ws_idx)
+            }
             _ => None,
         })
-        .filter(|window| seen.insert(*window))
-        .collect::<Vec<_>>();
-    for (ws_idx, ws) in state.workspaces.iter().enumerate() {
-        for tab_idx in 0..ws.tabs.len() {
-            if seen.insert((ws_idx, tab_idx)) {
-                order.push((ws_idx, tab_idx));
+        .collect()
+}
+
+/// Order `prefix+n` / `prefix+p` walk local tabs and, when enabled, fleet agents.
+fn window_navigation_order(state: &AppState) -> Vec<WindowCycleTarget> {
+    let include_fleet =
+        state.window_cycle_mode == crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
+    let mut seen = std::collections::HashSet::new();
+    let mut order = Vec::new();
+    let rows = crate::ui::sidebar_rows(state);
+    let visible_workspaces = cycle_visible_workspaces(state);
+    for row in rows {
+        let target = match row {
+            crate::ui::SidebarRow::Tab { entry, .. } => entry.local_target().and_then(|target| {
+                (!state.workspaces[target.ws_idx].is_fleet
+                    && (!state.skip_collapsed_cycle || visible_workspaces.contains(&target.ws_idx)))
+                .then_some(WindowCycleTarget::Local {
+                    ws_idx: target.ws_idx,
+                    tab_idx: target.tab_idx,
+                })
+            }),
+            crate::ui::SidebarRow::RemoteAgent { entry, .. } if include_fleet => {
+                Some(WindowCycleTarget::Remote(entry.agent_ref.clone()))
+            }
+            _ => None,
+        };
+        if let Some(target) = target.filter(|target| seen.insert(target.clone())) {
+            order.push(target);
+        }
+    }
+    if state.skip_collapsed_cycle {
+        for (ws_idx, workspace) in state.workspaces.iter().enumerate() {
+            if !visible_workspaces.contains(&ws_idx) {
+                continue;
+            }
+            for tab_idx in 0..workspace.tabs.len() {
+                let target = WindowCycleTarget::Local { ws_idx, tab_idx };
+                if seen.insert(target.clone()) {
+                    order.push(target);
+                }
+            }
+        }
+    }
+    if !state.skip_collapsed_cycle {
+        for (ws_idx, workspace) in state.workspaces.iter().enumerate() {
+            if workspace.is_fleet {
+                continue;
+            }
+            for tab_idx in 0..workspace.tabs.len() {
+                let target = WindowCycleTarget::Local { ws_idx, tab_idx };
+                if seen.insert(target.clone()) {
+                    order.push(target);
+                }
+            }
+        }
+        if include_fleet {
+            for entry in &state.remote_agent_panel_entries {
+                let target = WindowCycleTarget::Remote(entry.agent_ref.clone());
+                if seen.insert(target.clone()) {
+                    order.push(target);
+                }
             }
         }
     }
     order
+}
+
+/// Local-only projection kept for pane/workspace tests and call sites that need
+/// a concrete Herdr tab identity.
+#[cfg(test)]
+pub(crate) fn window_cycle_order(state: &AppState) -> Vec<(usize, usize)> {
+    window_navigation_order(state)
+        .into_iter()
+        .filter_map(|target| match target {
+            WindowCycleTarget::Local { ws_idx, tab_idx } => Some((ws_idx, tab_idx)),
+            WindowCycleTarget::Remote(_) => None,
+        })
+        .collect()
+}
+
+fn relative_window_target_index(
+    state: &AppState,
+    windows: &[WindowCycleTarget],
+    forward: bool,
+) -> Option<usize> {
+    let current = state
+        .sidebar_selected_remote_agent
+        .as_ref()
+        .map(|agent| WindowCycleTarget::Remote(agent.clone()))
+        .or_else(|| {
+            let ws_idx = state.active?;
+            let workspace = state.workspaces.get(ws_idx)?;
+            (!workspace.is_fleet).then_some(WindowCycleTarget::Local {
+                ws_idx,
+                tab_idx: workspace.active_tab_index(),
+            })
+        })
+        .and_then(|current| windows.iter().position(|target| *target == current));
+    if let Some(current) = current {
+        crate::workspace::relative_window_index(windows.len(), current, forward)
+    } else if windows.is_empty() {
+        None
+    } else {
+        Some(if forward { 0 } else { windows.len() - 1 })
+    }
 }
 
 /// Panes `next_blocked_window` visits, in sidebar row order.
@@ -2116,18 +2208,35 @@ fn blocked_pane_cycle_in_order(
     state: &AppState,
     include_needs_you: bool,
 ) -> Vec<(BlockedPaneTarget, bool)> {
-    let visible_local = crate::ui::sidebar::sidebar_navigation_agent_entries(state)
-        .into_iter()
-        .filter_map(|entry| {
-            entry
-                .local_target()
-                .map(|target| (target.ws_idx, target.pane_id))
+    let rows = crate::ui::sidebar_rows(state);
+    let visible_local = rows
+        .iter()
+        .filter_map(|row| match row {
+            crate::ui::SidebarRow::Tab { entry, .. }
+            | crate::ui::SidebarRow::Agent { entry, .. } => entry.local_target(),
+            _ => None,
+        })
+        .map(|target| (target.ws_idx, target.pane_id))
+        .collect::<std::collections::HashSet<_>>();
+    let visible_workspaces = cycle_visible_workspaces(state);
+    let visible_remote = rows
+        .iter()
+        .filter_map(|row| match row {
+            crate::ui::SidebarRow::RemoteAgent { entry, .. } => Some(entry.agent_ref.clone()),
+            _ => None,
         })
         .collect::<std::collections::HashSet<_>>();
     let mut local = crate::ui::all_agent_panel_entries(state)
         .into_iter()
         .filter_map(|entry| {
             let target = entry.local_target()?;
+            if state
+                .workspaces
+                .get(target.ws_idx)
+                .is_none_or(|workspace| workspace.is_fleet)
+            {
+                return None;
+            }
             let needs_attention = crate::ui::sidebar::entry_needs_human_attention(&entry);
             Some((
                 BlockedPaneTarget::Local {
@@ -2139,22 +2248,34 @@ fn blocked_pane_cycle_in_order(
             ))
         })
         .collect::<Vec<_>>();
-    let mut remote = state
-        .remote_agent_panel_entries
-        .iter()
-        .filter(|entry| entry.snoozed_until.is_none())
-        .map(|entry| {
-            (
-                BlockedPaneTarget::Remote(entry.agent_ref.clone()),
-                crate::ui::sidebar::entry_needs_human_attention(entry),
-            )
-        })
-        .collect::<Vec<_>>();
+    let include_fleet =
+        state.window_cycle_mode == crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
+    let mut remote = if include_fleet {
+        state
+            .remote_agent_panel_entries
+            .iter()
+            .filter(|entry| entry.snoozed_until.is_none())
+            .map(|entry| {
+                (
+                    BlockedPaneTarget::Remote(entry.agent_ref.clone()),
+                    crate::ui::sidebar::entry_needs_human_attention(entry),
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let mut panes = Vec::with_capacity(local.len() + remote.len());
-    for row in crate::ui::sidebar_rows(state) {
+    for row in rows {
         match row {
             crate::ui::SidebarRow::NeedsYou { target, .. } if include_needs_you => match target {
                 crate::ui::NeedsYouTarget::Local(entry_target) => {
+                    if state.skip_collapsed_cycle
+                        && (!visible_local.contains(&(entry_target.ws_idx, entry_target.pane_id))
+                            || !visible_workspaces.contains(&entry_target.ws_idx))
+                    {
+                        continue;
+                    }
                     if let Some(index) = local.iter().position(|(target, _)| {
                         matches!(
                             target,
@@ -2171,6 +2292,9 @@ fn blocked_pane_cycle_in_order(
                     }
                 }
                 crate::ui::NeedsYouTarget::Remote(entry_target) => {
+                    if state.skip_collapsed_cycle && !visible_remote.contains(&entry_target) {
+                        continue;
+                    }
                     if let Some(index) = remote.iter().position(|(target, _)| {
                         matches!(
                             target,
@@ -2193,6 +2317,7 @@ fn blocked_pane_cycle_in_order(
                         BlockedPaneTarget::Local { ws_idx, tab_idx, pane_id }
                             if (ws_idx, tab_idx)
                                 == (entry_target.ws_idx, entry_target.tab_idx)
+                                && visible_workspaces.contains(&ws_idx)
                                 && visible_local.contains(&(ws_idx, pane_id))
                     );
                     if same_tab {
@@ -2212,12 +2337,13 @@ fn blocked_pane_cycle_in_order(
                         BlockedPaneTarget::Local { ws_idx, pane_id, .. }
                             if (*ws_idx, *pane_id)
                                 == (entry_target.ws_idx, entry_target.pane_id)
+                                && visible_workspaces.contains(ws_idx)
                     )
                 }) {
                     panes.push(local.remove(index));
                 }
             }
-            crate::ui::SidebarRow::RemoteAgent { entry, .. } => {
+            crate::ui::SidebarRow::RemoteAgent { entry, .. } if include_fleet => {
                 if let Some(index) = remote.iter().position(|(target, _)| {
                     matches!(
                         target,
@@ -2231,10 +2357,11 @@ fn blocked_pane_cycle_in_order(
             _ => {}
         }
     }
-    // Collapsed or filtered local rows remain keyboard-reachable after the
-    // visible worklist. Remote attention rows enter through the Needs-you
-    // strip even when their Fleet body row is absent.
-    panes.extend(local);
+    // Collapsed or filtered local rows remain keyboard-reachable when the
+    // operator has not enabled skip-collapsed cycling.
+    if !state.skip_collapsed_cycle {
+        panes.extend(local);
+    }
     panes
 }
 
@@ -3001,20 +3128,17 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::PreviousWindow | NavigateAction::NextWindow => {
-            let windows = window_cycle_order(state);
-            if let Some(active_ws) = state.active {
-                let active_tab = state.workspaces[active_ws].active_tab_index();
-                if let Some(current) = windows
-                    .iter()
-                    .position(|window| *window == (active_ws, active_tab))
-                {
-                    let forward = matches!(action, NavigateAction::NextWindow);
-                    if let Some(next) =
-                        crate::workspace::relative_window_index(windows.len(), current, forward)
-                    {
-                        let (ws_idx, tab_idx) = windows[next];
+            let windows = window_navigation_order(state);
+            let forward = matches!(action, NavigateAction::NextWindow);
+            if let Some(next) = relative_window_target_index(state, &windows, forward) {
+                match windows[next].clone() {
+                    WindowCycleTarget::Local { ws_idx, tab_idx } => {
+                        state.sidebar_selected_remote_agent = None;
                         state.switch_workspace(ws_idx);
                         state.switch_tab(tab_idx);
+                    }
+                    WindowCycleTarget::Remote(agent_ref) => {
+                        state.select_remote_agent_row(agent_ref);
                     }
                 }
             }
@@ -3863,6 +3987,152 @@ mod tests {
     }
 
     #[test]
+    fn fleet_workspace_ac6_window_cycle_scope_adds_fleet_only_when_selected() {
+        let mut state = AppState::test_new();
+        let mut local = Workspace::test_new("local");
+        local.test_add_tab(Some("local-second"));
+        let mut fleet = Workspace::test_new("fleet");
+        fleet.is_fleet = true;
+        state.workspaces = vec![local, Workspace::test_new("other-local"), fleet];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.selected = 0;
+        let remote = remote_blocker("ub2", "fleet-agent");
+        let agent_ref = remote.agent_ref.clone();
+        state.remote_agent_panel_entries = vec![remote];
+
+        let local_order = window_navigation_order(&state);
+        assert!(!local_order.contains(&WindowCycleTarget::Remote(agent_ref.clone())));
+        assert!(!local_order
+            .iter()
+            .any(|target| matches!(target, WindowCycleTarget::Local { ws_idx: 2, .. })));
+
+        state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
+        let fleet_order = window_navigation_order(&state);
+        assert!(fleet_order.contains(&WindowCycleTarget::Remote(agent_ref)));
+        assert!(!fleet_order
+            .iter()
+            .any(|target| matches!(target, WindowCycleTarget::Local { ws_idx: 2, .. })));
+    }
+
+    #[test]
+    fn fleet_workspace_ac6_window_cycle_opens_remote_fleet_tab_in_fleet_mode() {
+        let mut config = Config::default();
+        config.remote.fleet.hosts = vec![crate::config::FleetHostConfig {
+            name: "ub2".into(),
+            target: "remote-ub2".into(),
+            ..Default::default()
+        }];
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        let mut fleet = Workspace::test_new("fleet");
+        fleet.is_fleet = true;
+        app.state.workspaces = vec![Workspace::test_new("local"), fleet];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let remote = remote_blocker("ub2", "cycle-agent");
+        let agent_ref = remote.agent_ref.clone();
+        app.state.remote_agent_panel_entries = vec![remote];
+        app.state.fleet_snapshot.hosts = vec![crate::fleet::HostSnapshot {
+            name: "ub2".into(),
+            target: "remote-ub2".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            remote_identity: None,
+            entries: Vec::new(),
+        }];
+        let argv = crate::fleet::agent_attach_argv_from_config(
+            &config.remote.fleet.hosts[0],
+            "cycle-agent",
+        )
+        .expect("configured remote attach argv");
+        let fleet_tab = &app.state.workspaces[1].tabs[0];
+        let fleet_root_pane = fleet_tab.root_pane;
+        let fleet_terminal_id = fleet_tab
+            .terminal_id(fleet_tab.root_pane)
+            .expect("fleet terminal id")
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&fleet_terminal_id)
+            .expect("fleet terminal")
+            .launch_argv = Some(argv);
+
+        app.state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
+        app.focus_relative_window(true);
+
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(
+            app.state.workspaces[1].focused_pane_id(),
+            Some(fleet_root_pane)
+        );
+        assert_eq!(app.state.sidebar_selected_remote_agent, Some(agent_ref));
+    }
+
+    #[test]
+    fn fleet_workspace_ac9_skip_collapsed_space_excludes_its_cycle_targets() {
+        let mut app = app_with_test_workspaces(&["main", "other", "worktree"]);
+        mark_worktree_space_member(&mut app.state, 0, "repo-key");
+        mark_worktree_space_member(&mut app.state, 2, "repo-key");
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state
+            .set_sidebar_group_mode(crate::app::state::SidebarGroupMode::Repo);
+        app.state.collapsed_space_keys.insert("repo-key".into());
+        let blocked_pane = app.state.workspaces[2].tabs[0].root_pane;
+        set_tab_agent_state(&mut app.state, 2, 0, crate::detect::AgentState::Blocked);
+
+        app.state.skip_collapsed_cycle = false;
+        assert!(window_cycle_order(&app.state).contains(&(2, 0)));
+        assert!(blocked_pane_cycle(&app.state)
+            .iter()
+            .any(|(target, _)| matches!(
+                target,
+                BlockedPaneTarget::Local { ws_idx: 2, pane_id, .. } if *pane_id == blocked_pane
+            )));
+        app.state.skip_collapsed_cycle = true;
+        let order = window_cycle_order(&app.state);
+        assert!(!order.contains(&(2, 0)));
+        assert!(order.contains(&(0, 0)));
+        assert!(order.contains(&(1, 0)), "visible window targets: {order:?}");
+        assert!(!blocked_pane_cycle(&app.state)
+            .iter()
+            .any(|(target, _)| matches!(
+                target,
+                BlockedPaneTarget::Local { ws_idx: 2, pane_id, .. } if *pane_id == blocked_pane
+            )));
+    }
+
+    #[test]
+    fn fleet_workspace_ac9_skip_collapsed_section_excludes_fleet_from_both_cycles() {
+        let mut state = AppState::test_new();
+        state.workspaces = vec![Workspace::test_new("local")];
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
+        state.skip_collapsed_cycle = true;
+        let remote = remote_blocker("ub2", "collapsed-agent");
+        let agent_ref = remote.agent_ref.clone();
+        state.remote_agent_panel_entries = vec![remote];
+        state.collapsed_sidebar_groups.insert("repo:Fleet".into());
+
+        let window_targets = window_navigation_order(&state);
+        assert!(!window_targets.contains(&WindowCycleTarget::Remote(agent_ref.clone())));
+        let blocked_targets = blocked_pane_cycle(&state)
+            .into_iter()
+            .map(|(target, _)| target)
+            .collect::<Vec<_>>();
+        assert!(!blocked_targets.contains(&BlockedPaneTarget::Remote(agent_ref)));
+    }
+
+    #[test]
     fn global_window_cycle_ignores_presentation_state() {
         let mut app = app_with_global_window_fixture();
         mark_worktree_space_member(&mut app.state, 0, "repo-key");
@@ -4431,6 +4701,7 @@ mod tests {
             ..crate::fleet::Snapshot::default()
         };
         let mut state = AppState::test_new();
+        state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
         state.remote_agent_panel_entries =
             crate::ui::remote_agent_panel_entries_at(&snapshot, 100, false);
         state.view_observed_unix_s = 100;
@@ -4452,6 +4723,7 @@ mod tests {
     #[test]
     fn next_blocked_window_reaches_remote_needs_you_row_when_fleet_is_collapsed() {
         let mut state = AppState::test_new();
+        state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
         let remote = remote_blocker("ub2", "blocked-pane");
         let agent_ref = remote.agent_ref.clone();
         state.remote_agent_panel_entries = vec![remote];
@@ -4493,6 +4765,8 @@ mod tests {
         app.state.selected = 0;
         let remote = remote_blocker("ub2", "blocked-agent");
         app.state.remote_agent_panel_entries = vec![remote];
+        assert_eq!(next_blocked_window_target(&app.state), None);
+        app.state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
         app.state.fleet_snapshot.hosts = vec![crate::fleet::HostSnapshot {
             name: "ub2".into(),
             target: "remote-ub2".into(),
@@ -4554,6 +4828,7 @@ mod tests {
         }];
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
         let mut fleet = Workspace::test_new("fleet");
         fleet.is_fleet = true;
         fleet.test_add_tab(Some("blocked-two"));
@@ -4670,6 +4945,7 @@ mod tests {
     #[test]
     fn next_blocked_window_visits_each_strip_target_once_per_lap() {
         let mut state = AppState::test_new();
+        state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
         state.workspaces = vec![Workspace::test_new("local")];
         state.ensure_test_terminals();
         state.active = Some(0);

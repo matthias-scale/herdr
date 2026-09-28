@@ -3473,12 +3473,6 @@ fn sidebar_rows_inner(
     compact_sidebar_rows_inner(app, terminal_runtimes, expand_worktrees, true)
 }
 
-pub(crate) fn sidebar_navigation_agent_entries(app: &AppState) -> Vec<AgentPanelEntry> {
-    let mut entries = sidebar_filtered_agent_entries_from(app, None);
-    crate::app::agent_view::apply_agent_view(app, &mut entries);
-    entries
-}
-
 fn sidebar_filtered_agent_entries_from(
     app: &AppState,
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
@@ -9641,6 +9635,11 @@ pub(super) fn render_sidebar(
         crate::ui::pomodoro::pomodoro_hit_area(app, area),
         app.view_observed_at,
     );
+    crate::ui::pomodoro::render_window_cycle_mode_toggle(
+        app,
+        frame,
+        crate::ui::pomodoro::window_cycle_mode_hit_area(app, area),
+    );
     crate::ui::pomodoro::render_notification_toggle(
         app,
         frame,
@@ -9662,6 +9661,7 @@ pub(super) fn render_sidebar(
         frame.render_widget(Paragraph::new(Span::styled("⟳ ", style)), refresh);
     }
     render_sidebar_areas_menu(app, frame);
+    render_window_cycle_mode_menu(app, frame);
 }
 
 fn sidebar_footer_style(
@@ -11552,6 +11552,104 @@ pub(crate) fn sidebar_areas_menu_index_at(
 ) -> Option<usize> {
     super::dropdown::hit_test(&sidebar_areas_menu_layout(app, area)?, x, y)
         .filter(|index| *index < SIDEBAR_AREAS.len())
+}
+
+pub(crate) fn window_cycle_mode_menu_layout(
+    app: &AppState,
+    area: Rect,
+) -> Option<super::dropdown::DropdownLayout> {
+    if !app.window_cycle_menu_open || app.sidebar_collapsed || area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let anchor = app.view.window_cycle_mode_hit_area;
+    if anchor.width == 0 || anchor.y <= area.y {
+        return None;
+    }
+    let rows = window_cycle_menu_rows(app);
+    let desired_width = rows
+        .iter()
+        .map(|row| display_width(row))
+        .max()
+        .unwrap_or(1)
+        .saturating_add(2);
+    let width = u16::try_from(desired_width)
+        .unwrap_or(u16::MAX)
+        .min(app.view.sidebar_rect.width)
+        .min(area.width)
+        .max(1);
+    let visible_rows = 3usize.min(usize::from(anchor.y.saturating_sub(area.y)));
+    if visible_rows == 0 {
+        return None;
+    }
+    let height = u16::try_from(visible_rows).ok()?;
+    let x = anchor.x.max(area.x).min(area.right().saturating_sub(width));
+    let rect = Rect::new(x, anchor.y.saturating_sub(height), width, height);
+    let selected = app.window_cycle_menu_selected.min(2);
+    let first_visible = selected
+        .saturating_sub(visible_rows.saturating_sub(1))
+        .min(3usize.saturating_sub(visible_rows));
+    Some(super::dropdown::DropdownLayout {
+        rect,
+        first_visible,
+        visible_rows,
+        filter_rect: None,
+        list_rect: rect,
+    })
+}
+
+fn window_cycle_menu_rows(app: &AppState) -> [String; 3] {
+    [
+        format!(
+            "({}) This machine",
+            if app.window_cycle_mode == crate::config::WindowCycleModeConfig::ThisMachine {
+                "*"
+            } else {
+                " "
+            }
+        ),
+        format!(
+            "({}) This machine + fleet",
+            if app.window_cycle_mode == crate::config::WindowCycleModeConfig::ThisMachineAndFleet {
+                "*"
+            } else {
+                " "
+            }
+        ),
+        format!(
+            "[{}] Skip collapsed",
+            if app.skip_collapsed_cycle { "x" } else { " " }
+        ),
+    ]
+}
+
+pub(crate) fn window_cycle_mode_menu_index_at(
+    app: &AppState,
+    area: Rect,
+    x: u16,
+    y: u16,
+) -> Option<usize> {
+    super::dropdown::hit_test(&window_cycle_mode_menu_layout(app, area)?, x, y)
+        .filter(|index| *index < 3)
+}
+
+fn render_window_cycle_mode_menu(app: &AppState, frame: &mut Frame) {
+    let Some(layout) = window_cycle_mode_menu_layout(app, frame.area()) else {
+        return;
+    };
+    let rows = window_cycle_menu_rows(app)
+        .into_iter()
+        .map(|label| super::dropdown::DropdownMenuRow::Item {
+            label,
+            enabled: true,
+        })
+        .collect::<Vec<_>>();
+    super::dropdown::render_menu(
+        &app.palette,
+        frame,
+        &layout,
+        &rows,
+        app.window_cycle_menu_selected.min(2),
+    );
 }
 
 pub(super) fn render_sidebar_areas_menu(app: &AppState, frame: &mut Frame) {
@@ -18612,6 +18710,8 @@ pub(crate) mod tests {
             sidebar_section_split: Some(0.4),
             collapsed_space_keys: std::collections::HashSet::new(),
             prio_panel_collapsed: false,
+            window_cycle_mode: None,
+            skip_collapsed_cycle: None,
         };
         let value = serde_json::to_value(snapshot).unwrap();
         let object = value.as_object().unwrap();
@@ -25741,6 +25841,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             sidebar_section_split: Some(app.sidebar_section_split),
             collapsed_space_keys: app.collapsed_space_keys.clone(),
             prio_panel_collapsed: app.prio_panel_collapsed,
+            window_cycle_mode: Some(app.window_cycle_mode),
+            skip_collapsed_cycle: Some(app.skip_collapsed_cycle),
         };
         let restored: crate::persist::SessionSnapshot =
             serde_json::from_value(serde_json::to_value(snapshot).unwrap()).unwrap();

@@ -1301,6 +1301,8 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: HashSet::new(),
             prio_panel_collapsed: false,
+            window_cycle_mode: None,
+            skip_collapsed_cycle: None,
         };
         let history = SessionHistorySnapshot {
             generation: Some("history-generation".into()),
@@ -1417,6 +1419,8 @@ mod tests {
             26,
             0.5,
             Default::default(),
+            false,
+            crate::config::WindowCycleModeConfig::default(),
             false,
         );
         let encoded = serde_json::to_string(&snapshot).expect("encode snapshot");
@@ -1745,6 +1749,8 @@ mod tests {
                 0.5,
                 Default::default(),
                 false,
+                crate::config::WindowCycleModeConfig::default(),
+                false,
             );
             assert_eq!(
                 captured.workspaces.len(),
@@ -1868,6 +1874,8 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
             prio_panel_collapsed: false,
+            window_cycle_mode: None,
+            skip_collapsed_cycle: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -2020,6 +2028,8 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
             prio_panel_collapsed: false,
+            window_cycle_mode: None,
+            skip_collapsed_cycle: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -2173,6 +2183,8 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
             prio_panel_collapsed: false,
+            window_cycle_mode: None,
+            skip_collapsed_cycle: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -2316,6 +2328,8 @@ mod tests {
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
             prio_panel_collapsed: false,
+            window_cycle_mode: None,
+            skip_collapsed_cycle: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -2732,6 +2746,8 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: Default::default(),
             prio_panel_collapsed: false,
+            window_cycle_mode: None,
+            skip_collapsed_cycle: None,
         };
         history.layout_fingerprint = super::super::snapshot::layout_fingerprint(&snapshot);
         (snapshot, history)

@@ -6339,7 +6339,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_linear_footer_mouse_flow_renders_seeded_wide_view() {
+    fn fleet_workspace_ac6_sidebar_footer_places_cycle_before_notifications() {
         use crate::app::state::{ControlId, SidebarFooterItem, WorkProjection};
 
         let mut app = seeded_wide_sidebar_app();
@@ -6370,6 +6370,14 @@ mod tests {
             );
         }
         let bell = app.state.view.notification_hit_area;
+        let cycle = app.state.view.window_cycle_mode_hit_area;
+        assert_eq!(cycle.width, 2);
+        assert_eq!(cycle.right(), bell.x);
+        app.handle_mouse(mouse(MouseEventKind::Moved, cycle.x, cycle.y));
+        assert_eq!(
+            app.state.hovered_control,
+            Some(ControlId::SidebarFooter(SidebarFooterItem::WindowCycleMode))
+        );
         app.handle_mouse(mouse(MouseEventKind::Moved, bell.x, bell.y));
         assert_eq!(
             app.state.hovered_control,
