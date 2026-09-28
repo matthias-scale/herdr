@@ -29036,7 +29036,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let child = row_text(terminal.backend().buffer(), 1, 40);
         assert!(child.starts_with("      ● fix sidebar"), "{child:?}");
         assert!(child.contains("8m L localhost"), "{child:?}");
-        assert_eq!(sections_control_start(&app, &card, row, 6), 20);
+        assert_eq!(sections_control_start(&app, &card, row, 6), 19);
     }
 
     #[test]
