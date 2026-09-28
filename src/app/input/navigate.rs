@@ -4640,10 +4640,10 @@ mod tests {
             };
             for (title, collapsed) in [(spaces, true), (snoozed, false)] {
                 let key = format!("{namespace}:{title}");
-                if crate::ui::sidebar::section_is_collapsed(&app.state, title) != collapsed {
-                    if !app.state.collapsed_sidebar_groups.remove(&key) {
-                        app.state.collapsed_sidebar_groups.insert(key);
-                    }
+                if crate::ui::sidebar::section_is_collapsed(&app.state, title) != collapsed
+                    && !app.state.collapsed_sidebar_groups.remove(&key)
+                {
+                    app.state.collapsed_sidebar_groups.insert(key);
                 }
             }
             app.state.skip_collapsed_cycle = true;
