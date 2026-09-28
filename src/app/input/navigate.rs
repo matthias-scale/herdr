@@ -2070,6 +2070,16 @@ fn cycle_visible_workspaces(state: &AppState) -> std::collections::HashSet<usize
     if crate::ui::sidebar::section_is_collapsed(state, crate::ui::sidebar::SPACES_SECTION_TITLE) {
         return std::collections::HashSet::new();
     }
+    // Work-item modes list groups, not spaces, so row visibility alone decides.
+    if matches!(
+        state.sidebar_group_mode,
+        crate::app::state::SidebarGroupMode::LinearTeam
+            | crate::app::state::SidebarGroupMode::Missive
+    ) {
+        return (0..state.workspaces.len())
+            .filter(|ws_idx| !state.workspaces[*ws_idx].is_fleet)
+            .collect();
+    }
     crate::ui::sidebar::workspace_list_entries_for_mode(state, false, state.sidebar_group_mode)
         .into_iter()
         .filter_map(|entry| match entry {
@@ -4237,6 +4247,26 @@ mod tests {
                 )),
                 "agent tab {ws_idx}:{tab_idx} is cycled without a visible row"
             );
+        }
+    }
+
+    #[test]
+    fn fleet_workspace_ac9_skip_collapsed_keeps_tabs_in_work_item_modes() {
+        for mode in [
+            crate::app::state::SidebarGroupMode::LinearTeam,
+            crate::app::state::SidebarGroupMode::Missive,
+        ] {
+            let mut app = app_with_global_window_fixture();
+            for terminal in app.state.terminals.values_mut() {
+                terminal.set_detected_state(
+                    Some(crate::detect::Agent::Claude),
+                    crate::detect::AgentState::Blocked,
+                );
+            }
+            app.state.set_sidebar_group_mode(mode);
+            app.state.skip_collapsed_cycle = true;
+            assert!(!window_navigation_order(&app.state).is_empty(), "{mode:?}");
+            assert!(!blocked_pane_cycle(&app.state).is_empty(), "{mode:?}");
         }
     }
 
