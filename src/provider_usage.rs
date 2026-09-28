@@ -42,6 +42,7 @@ const MAX_CCUSAGE_DISCOVERY_ENTRIES: usize = 256;
 const MAX_CCUSAGE_OUTPUT_BYTES: usize = 512 * 1024;
 const CCUSAGE_TIMEOUT: Duration = Duration::from_secs(10);
 const CCUSAGE_FAILURE_RETRY_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const CCUSAGE_SUCCESS_CACHE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const MAX_CLAUDE_USAGE_AMOUNT: f64 = 1_000_000.0;
 const MAX_CLAUDE_REMAINING_MINUTES: u64 = 24 * 60;
 const MAX_PROVIDER_PROFILES: usize = 32;
@@ -115,22 +116,32 @@ struct ClaudeUsageDetails {
 }
 
 #[derive(Debug, Default)]
-struct CcusageFailureBackoff {
+struct CcusageCache {
+    last_success: Option<(Instant, ClaudeUsageDetails)>,
     retry_at: Option<Instant>,
 }
 
-impl CcusageFailureBackoff {
+impl CcusageCache {
     fn poll(
         &mut self,
         now: Instant,
         attempt: impl FnOnce() -> Result<ClaudeUsageDetails, ()>,
     ) -> Option<ClaudeUsageDetails> {
+        if let Some((refreshed_at, details)) = self.last_success {
+            if now
+                .checked_duration_since(refreshed_at)
+                .is_some_and(|age| age < CCUSAGE_SUCCESS_CACHE_INTERVAL)
+            {
+                return Some(details);
+            }
+        }
         if self.retry_at.is_some_and(|retry_at| now < retry_at) {
             return None;
         }
         match attempt() {
             Ok(details) => {
                 self.retry_at = None;
+                self.last_success = Some((now, details));
                 Some(details)
             }
             Err(()) => {
@@ -304,9 +315,9 @@ fn fetch_claude_usage_details(now: i64) -> Result<ClaudeUsageDetails, ()> {
 }
 
 fn load_claude_usage_details(now_unix: i64, now: Instant) -> Option<ClaudeUsageDetails> {
-    static FAILURE_BACKOFF: OnceLock<Mutex<CcusageFailureBackoff>> = OnceLock::new();
-    FAILURE_BACKOFF
-        .get_or_init(|| Mutex::new(CcusageFailureBackoff::default()))
+    static CCUSAGE_CACHE: OnceLock<Mutex<CcusageCache>> = OnceLock::new();
+    CCUSAGE_CACHE
+        .get_or_init(|| Mutex::new(CcusageCache::default()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .poll(now, || fetch_claude_usage_details(now_unix))
@@ -1674,10 +1685,9 @@ pub(crate) fn five_hour_cycles_until_reset(resets_at: Option<i64>, now_unix: i64
     })
 }
 
-/// Refresh cadence shared by all provider quota snapshots. The ccusage read
-/// scans Claude logs, so ten minutes cuts its repeated CPU cost; other providers
-/// collected in the same snapshot now refresh on this cadence too.
-pub(crate) const PROVIDER_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// Refresh cadence. Quota windows move in minutes, not seconds, and the Kimi
+/// read costs a process spawn, so a minute is the right price.
+pub(crate) const PROVIDER_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 pub(crate) fn snapshot_is_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_none_or(|last| {
@@ -1752,7 +1762,7 @@ mod tests {
             cost_usd: 12.5,
             remaining_minutes: Some(45),
         };
-        let mut backoff = CcusageFailureBackoff::default();
+        let mut backoff = CcusageCache::default();
         let mut attempts = 0;
 
         assert_eq!(
@@ -1781,6 +1791,49 @@ mod tests {
             Some(details)
         );
         assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn successful_ccusage_result_is_cached_for_ten_minutes() {
+        const TEN_MINUTES: Duration = Duration::from_secs(10 * 60);
+        let start = Instant::now();
+        let first = ClaudeUsageDetails {
+            cost_usd: 12.5,
+            remaining_minutes: Some(45),
+        };
+        let refreshed = ClaudeUsageDetails {
+            cost_usd: 14.0,
+            remaining_minutes: Some(30),
+        };
+        let mut cache = CcusageCache::default();
+        let mut attempts = 0;
+
+        assert_eq!(
+            cache.poll(start, || {
+                attempts += 1;
+                Ok(first)
+            }),
+            Some(first)
+        );
+        assert_eq!(
+            cache.poll(start + TEN_MINUTES - Duration::from_millis(1), || {
+                attempts += 1;
+                Ok(refreshed)
+            }),
+            Some(first)
+        );
+        assert_eq!(attempts, 1, "a fresh success must skip ccusage");
+        assert_eq!(
+            cache.poll(start + TEN_MINUTES, || {
+                attempts += 1;
+                Ok(refreshed)
+            }),
+            Some(refreshed)
+        );
+        assert_eq!(
+            attempts, 2,
+            "ccusage must run when the success is ten minutes old"
+        );
     }
 
     struct UsageFixture {
@@ -2105,17 +2158,17 @@ mod tests {
     }
 
     #[test]
-    fn provider_usage_refresh_is_due_after_ten_minutes() {
-        const TEN_MINUTES: Duration = Duration::from_secs(10 * 60);
-        assert_eq!(PROVIDER_USAGE_REFRESH_INTERVAL, TEN_MINUTES);
+    fn all_provider_usage_snapshots_refresh_after_one_minute() {
+        const ONE_MINUTE: Duration = Duration::from_secs(60);
+        assert_eq!(PROVIDER_USAGE_REFRESH_INTERVAL, ONE_MINUTE);
 
         let start = Instant::now();
         assert!(snapshot_is_due(None, start));
         assert!(!snapshot_is_due(
             Some(start),
-            start + TEN_MINUTES - Duration::from_millis(1)
+            start + ONE_MINUTE - Duration::from_millis(1)
         ));
-        assert!(snapshot_is_due(Some(start), start + TEN_MINUTES));
+        assert!(snapshot_is_due(Some(start), start + ONE_MINUTE));
     }
 
     #[test]
