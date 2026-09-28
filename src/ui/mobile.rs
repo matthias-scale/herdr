@@ -1334,7 +1334,7 @@ fn render_mobile_switcher_content(
                 title,
                 space_icon,
                 host,
-                blocked,
+                dot,
                 subtitle,
                 ..
             } => {
@@ -1345,7 +1345,7 @@ fn render_mobile_switcher_content(
                         title,
                         space_icon,
                         host,
-                        *blocked,
+                        dot,
                         subtitle.as_deref(),
                         Rect::new(
                             content.x,
@@ -2602,7 +2602,15 @@ mod tests {
             let second_line = (1..width)
                 .map(|x| rendered.backend().buffer()[(x, ask_y + 1)].symbol())
                 .collect::<String>();
-            assert!(first_line.contains('●'), "width={width}: {first_line:?}");
+            assert!(first_line.contains('○'), "width={width}: {first_line:?}");
+            let marker_x = (1..width)
+                .find(|x| rendered.backend().buffer()[(*x, ask_y)].symbol() == "○")
+                .expect("red ask dot");
+            assert_eq!(
+                rendered.backend().buffer()[(marker_x, ask_y)].style().fg,
+                Some(app.palette.red),
+                "width={width}"
+            );
             assert!(second_line.contains("↳ "), "width={width}: {second_line:?}");
             if width > 18 {
                 assert!(second_line.contains("Choose one"), "{second_line:?}");
