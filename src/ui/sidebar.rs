@@ -28801,6 +28801,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ]);
         app.sidebar_sections_layout = true;
         app.sidebar_group_mode = SidebarGroupMode::Spaces;
+        let done_pane = app.workspaces[0].tabs[1].root_pane;
+        app.workspaces[0].tabs[1]
+            .panes
+            .get_mut(&done_pane)
+            .expect("done pane")
+            .seen = false;
 
         let rows = sidebar_rows(&app);
         assert!(rows.iter().any(|row| matches!(
