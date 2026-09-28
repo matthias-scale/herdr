@@ -1205,6 +1205,7 @@ impl AppState {
                 | crate::ui::SidebarRow::SymphonyJob { .. }
                 | crate::ui::SidebarRow::SymphonyEmpty
                 | crate::ui::SidebarRow::Divider
+                | crate::ui::SidebarRow::ShelfDivider
                 | crate::ui::SidebarRow::AloopLoop { .. }
                 | crate::ui::SidebarRow::AloopRunLine { .. }
                 | crate::ui::SidebarRow::AloopFinding { .. }
@@ -1213,6 +1214,7 @@ impl AppState {
                 | crate::ui::SidebarRow::AloopUnreachable { .. }
                 | crate::ui::SidebarRow::AloopEmpty
                 | crate::ui::SidebarRow::NeedsYou { .. }
+                | crate::ui::SidebarRow::NeedsYouMore { .. }
                 | crate::ui::SidebarRow::AgentRun { .. } => None,
             })
     }
@@ -1246,6 +1248,7 @@ impl AppState {
                 | crate::ui::SidebarRow::SymphonyJob { .. }
                 | crate::ui::SidebarRow::SymphonyEmpty
                 | crate::ui::SidebarRow::Divider
+                | crate::ui::SidebarRow::ShelfDivider
                 | crate::ui::SidebarRow::AloopLoop { .. }
                 | crate::ui::SidebarRow::AloopRunLine { .. }
                 | crate::ui::SidebarRow::AloopFinding { .. }
@@ -1254,6 +1257,7 @@ impl AppState {
                 | crate::ui::SidebarRow::AloopUnreachable { .. }
                 | crate::ui::SidebarRow::AloopEmpty
                 | crate::ui::SidebarRow::NeedsYou { .. }
+                | crate::ui::SidebarRow::NeedsYouMore { .. }
                 | crate::ui::SidebarRow::AgentRun { .. } => None,
                 crate::ui::SidebarRow::Tab { entry, .. } => entry
                     .local_target()
@@ -3075,8 +3079,11 @@ mod tests {
                 crate::ui::SidebarRow::SectionHeader { title, .. } => {
                     format!("section:{title}")
                 }
-                crate::ui::SidebarRow::Divider => "divider".to_string(),
+                crate::ui::SidebarRow::Divider | crate::ui::SidebarRow::ShelfDivider => {
+                    "divider".to_string()
+                }
                 crate::ui::SidebarRow::NeedsYou { title, .. } => format!("needs-you:{title}"),
+                crate::ui::SidebarRow::NeedsYouMore { .. } => "needs-you-more".to_string(),
                 crate::ui::SidebarRow::NestedHeader { key, .. } => format!("group:{key}"),
                 crate::ui::SidebarRow::SymphonyJob { name, .. } => format!("symphony:{name}"),
                 crate::ui::SidebarRow::SymphonyEmpty => "symphony:empty".to_string(),

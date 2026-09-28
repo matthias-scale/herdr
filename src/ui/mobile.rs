@@ -42,6 +42,8 @@ pub(crate) struct MobileSwitcherAreas {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MobileSwitcherTarget {
     Section(&'static str),
+    NeedsYou(super::sidebar::NeedsYouTarget),
+    NeedsYouMore,
     NewWorkspace,
     Workspace(usize),
     WorkspaceDisclosure(usize),
@@ -208,6 +210,8 @@ fn mobile_switcher_target_for_row(
             MobileSwitcherTarget::RemoteAgent(entry.agent_ref.clone())
         }
         SidebarRow::NestedHeader { key, .. } => MobileSwitcherTarget::NestedHeader(key.clone()),
+        SidebarRow::NeedsYou { target, .. } => MobileSwitcherTarget::NeedsYou(target.clone()),
+        SidebarRow::NeedsYouMore { .. } => MobileSwitcherTarget::NeedsYouMore,
         SidebarRow::AgentRun {
             host,
             summary: Some(summary),
@@ -219,7 +223,7 @@ fn mobile_switcher_target_for_row(
         | SidebarRow::PodHeader { .. }
         | SidebarRow::PodMember { .. }
         | SidebarRow::Divider
-        | SidebarRow::NeedsYou { .. }
+        | SidebarRow::ShelfDivider
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
         | SidebarRow::AloopLoop { .. }
@@ -250,7 +254,9 @@ fn mobile_sidebar_row_height(row: &SidebarRow) -> usize {
         | SidebarRow::Tab { .. }
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::Divider
+        | SidebarRow::ShelfDivider
         | SidebarRow::NeedsYou { .. }
+        | SidebarRow::NeedsYouMore { .. }
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
@@ -933,19 +939,39 @@ fn render_mobile_switcher_content(
                     .iter()
                     .map(|count| format!(" {}:{}", count.host, count.count))
                     .collect::<String>();
-                let label = format!(
-                    "  {} {} {title} ({count}){host_counts}",
-                    if *collapsed { "▸" } else { "▾" },
-                    section_header_glyph_for_app(app, title)
-                );
-                let zero = *title == SYMPHONY_SECTION_TITLE && *count == 0;
-                render_one_line_item(
-                    frame,
-                    viewport,
-                    content,
-                    doc_y,
-                    app.mobile_switcher_scroll,
-                    p.panel_bg,
+                let shelf = app.sidebar_sections_layout
+                    && matches!(
+                        *title,
+                        super::sidebar::SNOOZED_SECTION_TITLE
+                            | super::sidebar::SETTLED_SECTION_TITLE
+                    );
+                let line = if shelf {
+                    let color = if *title == super::sidebar::SNOOZED_SECTION_TITLE {
+                        p.peach
+                    } else {
+                        p.yellow
+                    };
+                    Line::from(vec![
+                        Span::styled(
+                            format!(" {} ", if *collapsed { "▸" } else { "▾" }),
+                            Style::default().fg(p.accent),
+                        ),
+                        Span::styled(
+                            section_header_glyph_for_app(app, title),
+                            Style::default().fg(color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(" {count}"),
+                            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                        ),
+                    ])
+                } else {
+                    let label = format!(
+                        "  {} {} {title} ({count}){host_counts}",
+                        if *collapsed { "▸" } else { "▾" },
+                        section_header_glyph_for_app(app, title)
+                    );
+                    let zero = *title == SYMPHONY_SECTION_TITLE && *count == 0;
                     Line::from(Span::styled(
                         label,
                         section_row_style(
@@ -960,7 +986,16 @@ fn render_mobile_switcher_content(
                                 })
                                 .add_modifier(Modifier::BOLD),
                         ),
-                    )),
+                    ))
+                };
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    line,
                 );
             }
             SidebarRow::PodHeader {
@@ -1003,7 +1038,7 @@ fn render_mobile_switcher_content(
                     );
                 }
             }
-            SidebarRow::Divider => {
+            SidebarRow::Divider | SidebarRow::ShelfDivider => {
                 render_one_line_item(
                     frame,
                     viewport,
@@ -1012,8 +1047,23 @@ fn render_mobile_switcher_content(
                     app.mobile_switcher_scroll,
                     p.panel_bg,
                     Line::from(Span::styled(
-                        "─".repeat(usize::from(content.width)),
-                        Style::default().fg(p.surface_dim),
+                        if matches!(row, SidebarRow::ShelfDivider) {
+                            if app.nerd_font {
+                                "┄"
+                            } else {
+                                "-"
+                            }
+                        } else {
+                            "─"
+                        }
+                        .repeat(usize::from(content.width)),
+                        if matches!(row, SidebarRow::ShelfDivider) {
+                            Style::default()
+                                .fg(p.surface_dim)
+                                .add_modifier(Modifier::DIM)
+                        } else {
+                            Style::default().fg(p.surface_dim)
+                        },
                     )),
                 );
             }
@@ -1219,9 +1269,44 @@ fn render_mobile_switcher_content(
                     }
                 }
             }
-            // The mobile switcher never receives strip rows; the projection
-            // gate in `compact_sidebar_rows_inner` keeps them desktop-only.
-            SidebarRow::NeedsYou { .. } => {}
+            SidebarRow::NeedsYou {
+                title,
+                space_icon,
+                host,
+                blocked,
+                ..
+            } => {
+                if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
+                    super::sidebar::render_needs_you_row(
+                        app,
+                        frame,
+                        title,
+                        space_icon,
+                        host,
+                        *blocked,
+                        Rect::new(content.x, y, content.width, 1),
+                    );
+                }
+            }
+            SidebarRow::NeedsYouMore {
+                remaining,
+                expanded,
+            } => {
+                let label = if *expanded {
+                    "▴ less".to_string()
+                } else {
+                    format!("▸ {remaining} more")
+                };
+                render_one_line_item(
+                    frame,
+                    viewport,
+                    content,
+                    doc_y,
+                    app.mobile_switcher_scroll,
+                    p.panel_bg,
+                    Line::from(Span::styled(label, Style::default().fg(p.overlay0))),
+                );
+            }
         }
         doc_y += mobile_sidebar_row_height(row);
     }
@@ -2759,7 +2844,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_sections_switcher_uses_the_same_three_shelves() {
+    fn mobile_sections_switcher_has_active_spaces_then_two_shelves() {
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
         let rows = mobile_sidebar_rows(&app);
@@ -2767,14 +2852,21 @@ mod tests {
             .iter()
             .filter_map(|row| match row {
                 SidebarRow::SectionHeader { title, .. }
-                    if matches!(*title, "Active" | "Snoozed" | "Settled") =>
+                    if matches!(*title, "Snoozed" | "Settled") =>
                 {
                     Some(*title)
                 }
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(shelves, ["Active", "Snoozed", "Settled"]);
+        assert_eq!(shelves, ["Snoozed", "Settled"]);
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: "Active",
+                ..
+            }
+        )));
         assert!(!rows.iter().any(|row| matches!(
             row,
             SidebarRow::SectionHeader {

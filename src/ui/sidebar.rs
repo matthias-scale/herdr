@@ -1464,7 +1464,7 @@ pub(crate) struct RemoteAgentPanelEntry {
     pub agent_ref: crate::api::schema::AgentRef,
     pub entry: AgentPanelEntry,
     render_dot: &'static str,
-    render_title: String,
+    pub(crate) render_title: String,
     render_provider: String,
     host_suffix: String,
     host_suffix_width: usize,
@@ -2656,11 +2656,17 @@ pub(crate) enum SidebarRow {
     /// because the same pane still appears under its group further down.
     NeedsYou {
         title: String,
+        space_name: String,
+        space_icon: String,
         /// Short host token, e.g. `ub1`; local rows name the current host.
         host: String,
-        /// Blocked rows read red; attention-only rows read peach.
+        /// Retained for urgency ordering; all Needs-you markers render red.
         blocked: bool,
         target: NeedsYouTarget,
+    },
+    NeedsYouMore {
+        remaining: usize,
+        expanded: bool,
     },
     /// Read-only fleet agent. It carries no local card hit area, so clicks and
     /// focus actions cannot be misrouted to a colliding local pane id.
@@ -2698,6 +2704,7 @@ pub(crate) enum SidebarRow {
         collapsed: bool,
     },
     Divider,
+    ShelfDivider,
     NestedHeader {
         key: String,
         /// Canonical provider object key for the trailing action menu.
@@ -2863,7 +2870,8 @@ fn section_title_defaults_to_collapsed(title: &str) -> bool {
     title == NEEDS_YOU_SECTION_TITLE
         || title == SETTLED_SECTION_TITLE
         || title.starts_with(aloops::ALOOP_CLEAN_KEY_PREFIX)
-        || INITIAL_COLLAPSED_SHARED_GROUP_TITLES.contains(&title)
+        || (title != SNOOZED_SECTION_TITLE
+            && INITIAL_COLLAPSED_SHARED_GROUP_TITLES.contains(&title))
         || SidebarGroupMode::ALL
             .into_iter()
             .any(|mode| unassigned_section_title(mode) == Some(title))
@@ -2892,8 +2900,8 @@ pub(super) fn section_header_glyph(title: &str) -> &'static str {
         UNASSIGNED_PRS_SECTION_TITLE => "",
         UNASSIGNED_TICKETS_SECTION_TITLE => "",
         UNASSIGNED_THREADS_SECTION_TITLE => "󰍡",
-        SNOOZED_SECTION_TITLE => "◷",
-        SETTLED_SECTION_TITLE => "✓",
+        SNOOZED_SECTION_TITLE => "\u{F0150}z",
+        SETTLED_SECTION_TITLE => "\u{F0E1E}",
         RUNS_SECTION_TITLE => "󰑮",
         SYMPHONY_SECTION_TITLE => "󰐱",
         SPACES_SECTION_TITLE => "󰉖",
@@ -2902,13 +2910,18 @@ pub(super) fn section_header_glyph(title: &str) -> &'static str {
 }
 
 pub(super) fn section_header_glyph_for_app(app: &AppState, title: &str) -> &'static str {
+    if !app.nerd_font {
+        match title {
+            SNOOZED_SECTION_TITLE => return "z",
+            SETTLED_SECTION_TITLE => return "v",
+            _ => {}
+        }
+    }
     if app.sidebar_sections_layout && !app.nerd_font {
         match title {
             PINNED_SECTION_TITLE => "P",
             ACTIVE_SECTION_TITLE => ">",
             NEEDS_YOU_SECTION_TITLE => "o",
-            SNOOZED_SECTION_TITLE => "o",
-            SETTLED_SECTION_TITLE => "v",
             _ => "#",
         }
     } else {
@@ -3348,7 +3361,7 @@ fn compact_sidebar_rows_inner(
     let active_entries =
         ordered_tab_entries_preferring(app, &active_panes, Some(&active_pane_targets));
     let snoozed_entries = ordered_tab_entries(app, &snoozed_panes);
-    let snoozed_entries = if app.blocked_filter {
+    let mut snoozed_entries = if app.blocked_filter {
         snoozed_entries
             .into_iter()
             .filter(entry_has_red_dot)
@@ -3398,14 +3411,18 @@ fn compact_sidebar_rows_inner(
             rows.push(SidebarRow::Divider);
         }
         active_entries.extend(remote_active);
-        append_shelf_space_rows(
+        append_space_tree_rows(
             app,
             &mut rows,
-            ACTIVE_SECTION_TITLE,
             active_entries,
+            false,
             terminal_runtimes,
+            SidebarGroupMode::Spaces,
+            false,
+            true,
         );
         snoozed_entries.extend(remote_snoozed);
+        rows.push(SidebarRow::ShelfDivider);
         append_shelf_space_rows(
             app,
             &mut rows,
@@ -3414,6 +3431,7 @@ fn compact_sidebar_rows_inner(
             terminal_runtimes,
         );
         settled_entries.extend(remote_settled);
+        rows.push(SidebarRow::ShelfDivider);
         append_shelf_space_rows(
             app,
             &mut rows,
@@ -3494,24 +3512,20 @@ fn compact_sidebar_rows_inner(
         &pods,
         true,
     );
-    // The Needs-you strip leads the list; the mobile switcher keeps its own
-    // flatter presentation instead.
-    if !expand_worktrees {
-        let needs_you = needs_you_strip_rows(
-            app,
-            &visible_entries,
-            &snoozed_entries,
-            &remote_entries,
-            expand_needs_you,
-        );
-        if !needs_you.is_empty() {
-            let mut strip = needs_you;
-            if !rows.is_empty() {
-                strip.push(SidebarRow::Divider);
-            }
-            strip.append(&mut rows);
-            rows = strip;
+    let needs_you = needs_you_strip_rows(
+        app,
+        &visible_entries,
+        &snoozed_entries,
+        &remote_entries,
+        expand_needs_you,
+    );
+    if !needs_you.is_empty() {
+        let mut strip = needs_you;
+        if !rows.is_empty() {
+            strip.push(SidebarRow::Divider);
         }
+        strip.append(&mut rows);
+        rows = strip;
     }
     let row_width = sidebar_row_render_width(app, &rows, expand_worktrees);
     mark_ambiguous_remote_titles(&mut rows, row_width, app.nerd_font);
@@ -4680,8 +4694,18 @@ fn needs_you_strip_rows(
         let Some(target) = entry.local_target() else {
             continue;
         };
+        let Some(workspace) = app.workspaces.get(target.ws_idx) else {
+            continue;
+        };
+        let space_name = workspace
+            .custom_name
+            .clone()
+            .unwrap_or_else(|| workspace.cached_auto_label.clone());
+        let space_icon = needs_you_space_icon(app, workspace, &space_name);
         rows.push(SidebarRow::NeedsYou {
             title: compact_row_title(entry, true).to_string(),
+            space_name,
+            space_icon,
             host: local_host.clone(),
             blocked: entry_is_blocked(entry),
             target: NeedsYouTarget::Local(target),
@@ -4694,8 +4718,19 @@ fn needs_you_strip_rows(
         let Some(remote) = entry.remote_entry.as_ref() else {
             continue;
         };
+        let space_name = if entry.space_label.is_empty() {
+            if remote.workspace_id.is_empty() {
+                "Remote".to_string()
+            } else {
+                remote.workspace_id.clone()
+            }
+        } else {
+            entry.space_label.clone()
+        };
         rows.push(SidebarRow::NeedsYou {
             title: remote.render_title.clone(),
+            space_icon: space_abbreviation(&space_name),
+            space_name,
             host: remote
                 .narrow_host_suffix
                 .strip_prefix(" · ")
@@ -4712,17 +4747,44 @@ fn needs_you_strip_rows(
     if rows.is_empty() {
         return rows;
     }
-    let collapsed = section_is_collapsed(app, NEEDS_YOU_SECTION_TITLE);
-    let mut strip = vec![SidebarRow::SectionHeader {
-        title: NEEDS_YOU_SECTION_TITLE,
-        count: rows.len(),
-        host_counts: Vec::new(),
-        collapsed,
-    }];
-    if !collapsed || force_expand {
-        strip.extend(rows);
+    let expanded = force_expand || !section_is_collapsed(app, NEEDS_YOU_SECTION_TITLE);
+    let remaining = rows.len().saturating_sub(5);
+    if !expanded {
+        rows.truncate(5);
     }
-    strip
+    if remaining > 0 {
+        rows.push(SidebarRow::NeedsYouMore {
+            remaining,
+            expanded,
+        });
+    }
+    rows
+}
+
+fn space_abbreviation(name: &str) -> String {
+    name.chars().take(3).collect::<String>().to_lowercase()
+}
+
+fn needs_you_space_icon(
+    app: &AppState,
+    workspace: &crate::workspace::Workspace,
+    name: &str,
+) -> String {
+    let icon = crate::ui::icons::space_badge_icon(
+        workspace.repo_binding.as_deref(),
+        workspace
+            .cached_git_space
+            .as_ref()
+            .map(|space| space.repo_root.as_path()),
+        name,
+        &app.space_icons,
+    );
+    if app.nerd_font {
+        icon.map(|icon| crate::ui::icons::themed(icon, &app.palette).to_string())
+            .unwrap_or_else(|| space_abbreviation(name))
+    } else {
+        space_abbreviation(name)
+    }
 }
 
 fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[AgentPanelEntry]) {
@@ -4996,28 +5058,6 @@ fn entry_terminal<'a>(
     let tab = workspace.tabs.get(target.tab_idx)?;
     let pane = tab.panes.get(&target.pane_id)?;
     app.terminals.get(&pane.attached_terminal_id)
-}
-
-fn entry_earliest_working_since(
-    app: &AppState,
-    entry: &AgentPanelEntry,
-) -> Option<std::time::Instant> {
-    let target = entry.local_target()?;
-    let tab = app
-        .workspaces
-        .get(target.ws_idx)?
-        .tabs
-        .get(target.tab_idx)?;
-    tab.panes
-        .values()
-        .filter(|pane| pane.snoozed_until().is_none())
-        .filter_map(|pane| {
-            let terminal = app.terminals.get(&pane.attached_terminal_id)?;
-            (pane.agent_projection(terminal).state == AgentState::Working)
-                .then(|| terminal.working_since())
-                .flatten()
-        })
-        .min()
 }
 
 fn preferred_pr_urls(app: &AppState, entry: &AgentPanelEntry) -> Vec<String> {
@@ -7042,8 +7082,10 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
         SidebarRow::PodHeader { .. }
         | SidebarRow::PodMember { .. }
         | SidebarRow::NeedsYou { .. }
+        | SidebarRow::NeedsYouMore { .. }
         | SidebarRow::SectionHeader { .. }
         | SidebarRow::Divider
+        | SidebarRow::ShelfDivider
         | SidebarRow::NestedHeader { .. }
         | SidebarRow::SymphonyJob { .. }
         | SidebarRow::SymphonyEmpty
@@ -7081,7 +7123,8 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
         return 0;
     };
     match (row, next) {
-        (SidebarRow::Divider, _) | (_, SidebarRow::Divider) => 0,
+        (SidebarRow::Divider | SidebarRow::ShelfDivider, _)
+        | (_, SidebarRow::Divider | SidebarRow::ShelfDivider) => 0,
         (SidebarRow::Workspace { .. }, SidebarRow::Tab { .. }) => 0,
         (SidebarRow::Workspace { .. }, SidebarRow::NestedHeader { .. }) => 0,
         (SidebarRow::NestedHeader { .. }, SidebarRow::Tab { .. }) => 0,
@@ -7138,7 +7181,8 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
             | SidebarRow::AloopEmpty,
         ) => 0,
         // Strip rows hug each other and the divider that closes the strip.
-        (SidebarRow::NeedsYou { .. }, _) | (_, SidebarRow::NeedsYou { .. }) => 0,
+        (SidebarRow::NeedsYou { .. } | SidebarRow::NeedsYouMore { .. }, _)
+        | (_, SidebarRow::NeedsYou { .. } | SidebarRow::NeedsYouMore { .. }) => 0,
     }
 }
 
@@ -7202,8 +7246,8 @@ pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) 
         // workspace must never land on one.
         SidebarRow::SectionHeader { .. } => false,
         // Strip rows duplicate a row the workspace owns further down.
-        SidebarRow::NeedsYou { .. } => false,
-        SidebarRow::Divider => false,
+        SidebarRow::NeedsYou { .. } | SidebarRow::NeedsYouMore { .. } => false,
+        SidebarRow::Divider | SidebarRow::ShelfDivider => false,
         SidebarRow::NestedHeader { .. } => false,
         // A Symphony workflow runs on a worker, not in a workspace.
         SidebarRow::SymphonyJob { .. }
@@ -7352,11 +7396,13 @@ pub(crate) fn compute_sidebar_row_areas(
             }
             SidebarRow::Tab { .. }
             | SidebarRow::NeedsYou { .. }
+            | SidebarRow::NeedsYouMore { .. }
             | SidebarRow::RemoteAgent { .. }
             | SidebarRow::PodHeader { .. }
             | SidebarRow::PodMember { .. }
             | SidebarRow::SectionHeader { .. }
             | SidebarRow::Divider
+            | SidebarRow::ShelfDivider
             | SidebarRow::NestedHeader { .. }
             | SidebarRow::SymphonyJob { .. }
             | SidebarRow::SymphonyEmpty
@@ -7601,7 +7647,10 @@ fn needs_you_row_areas_from_rows(
         if y.saturating_add(height) > body.bottom() {
             break;
         }
-        if matches!(row, SidebarRow::NeedsYou { .. }) {
+        if matches!(
+            row,
+            SidebarRow::NeedsYou { .. } | SidebarRow::NeedsYouMore { .. }
+        ) {
             out.push((idx, Rect::new(body.x, y, body.width, height)));
         }
         y = y
@@ -7627,10 +7676,24 @@ pub(crate) fn needs_you_row_at(app: &AppState, row: u16) -> Option<NeedsYouTarge
         })
 }
 
-fn render_needs_you_row(
+pub(crate) fn needs_you_more_at(app: &AppState, row: u16) -> bool {
+    let list = workspace_list_rect_for_app(app, app.view.sidebar_rect);
+    let metrics = workspace_list_scroll_metrics(app, list);
+    let body = workspace_list_body_rect(app, list, should_show_scrollbar(metrics));
+    let rows = sidebar_rows(app);
+    let scroll = workspace_list_scroll_skip(app, &metrics);
+    needs_you_row_areas_from_rows(app, &rows, body, scroll)
+        .into_iter()
+        .any(|(index, rect)| {
+            rect.y == row && matches!(rows.get(index), Some(SidebarRow::NeedsYouMore { .. }))
+        })
+}
+
+pub(super) fn render_needs_you_row(
     app: &AppState,
     frame: &mut Frame,
     title: &str,
+    space_icon: &str,
     host: &str,
     _blocked: bool,
     rect: Rect,
@@ -7641,19 +7704,20 @@ fn render_needs_you_row(
     let p = &app.palette;
     let marker_color = p.red;
     let host_width = display_width(host);
-    // The dot plus the right-aligned host and its gap come off the title.
-    let title_width = usize::from(rect.width).saturating_sub(3 + host_width + 1);
+    let title_width =
+        usize::from(rect.width).saturating_sub(2 + display_width(space_icon) + 1 + host_width + 1);
     let title = truncate_end(title, title_width);
     let pad = title_width.saturating_sub(display_width(&title));
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::raw(" "),
             Span::styled(
                 "●",
                 Style::default()
                     .fg(marker_color)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::raw(" "),
+            Span::styled(space_icon.to_string(), Style::default().fg(p.subtext0)),
             Span::raw(" "),
             Span::styled(title, Style::default().fg(p.subtext0)),
             Span::raw(" ".repeat(pad)),
@@ -7969,6 +8033,34 @@ pub(crate) fn compute_sidebar_hover_targets(
     let mut targets = Vec::new();
     for (row, row_y) in visible {
         match row {
+            SidebarRow::SectionHeader { title, .. }
+                if app.sidebar_sections_layout
+                    && matches!(*title, SNOOZED_SECTION_TITLE | SETTLED_SECTION_TITLE) =>
+            {
+                let width = display_width(section_header_glyph_for_app(app, title));
+                if let Some(rect) = clamp_row_cells(body, row_y, 3, width) {
+                    targets.push(crate::app::state::SidebarHoverTarget {
+                        rect,
+                        label: (*title).to_string(),
+                        action: None,
+                        row_hover: false,
+                    });
+                }
+            }
+            SidebarRow::NeedsYou {
+                space_name,
+                space_icon,
+                ..
+            } => {
+                if let Some(rect) = clamp_row_cells(body, row_y, 2, display_width(space_icon)) {
+                    targets.push(crate::app::state::SidebarHoverTarget {
+                        rect,
+                        label: space_name.clone(),
+                        action: None,
+                        row_hover: false,
+                    });
+                }
+            }
             SidebarRow::Agent { entry, depth } | SidebarRow::Tab { entry, depth } => {
                 let Some(target) = entry.local_target() else {
                     continue;
@@ -8164,6 +8256,18 @@ pub(crate) fn compute_sidebar_hover_targets(
                 }
             }
             _ => {}
+        }
+    }
+
+    if app.nerd_font && app.sidebar_group_mode == SidebarGroupMode::RepoPr {
+        let anchor = sidebar_group_mode_anchor_rect_for_app(app, area);
+        if anchor.width > 0 {
+            targets.push(crate::app::state::SidebarHoverTarget {
+                rect: Rect::new(anchor.x, anchor.y, 1, 1),
+                label: "GitHub".to_string(),
+                action: None,
+                row_hover: false,
+            });
         }
     }
 
@@ -8771,7 +8875,7 @@ fn compute_sidebar_divider_areas(
     body: Rect,
     rows: &[SidebarRow],
     metrics: crate::pane::ScrollMetrics,
-) -> Vec<Rect> {
+) -> Vec<(Rect, bool)> {
     let body = workspace_list_body_rect(app, body, should_show_scrollbar(metrics));
     let mut y = body.y;
     let mut out = Vec::new();
@@ -8784,8 +8888,11 @@ fn compute_sidebar_divider_areas(
         if y.saturating_add(height) > body.bottom() {
             break;
         }
-        if matches!(row, SidebarRow::Divider) {
-            out.push(Rect::new(body.x, y, body.width, height));
+        if matches!(row, SidebarRow::Divider | SidebarRow::ShelfDivider) {
+            out.push((
+                Rect::new(body.x, y, body.width, height),
+                matches!(row, SidebarRow::ShelfDivider),
+            ));
         }
         y = y
             .saturating_add(height)
@@ -9189,11 +9296,26 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     Rect::new(ws_area.x, y, ws_area.width, 1),
                 );
             }
-            SidebarRow::Divider => {
+            SidebarRow::Divider | SidebarRow::ShelfDivider => {
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
-                        "─".repeat(usize::from(ws_area.width)),
-                        Style::default().fg(p.surface_dim),
+                        if matches!(row, SidebarRow::ShelfDivider) {
+                            if app.nerd_font {
+                                "┄"
+                            } else {
+                                "-"
+                            }
+                        } else {
+                            "─"
+                        }
+                        .repeat(usize::from(ws_area.width)),
+                        if matches!(row, SidebarRow::ShelfDivider) {
+                            Style::default()
+                                .fg(p.surface_dim)
+                                .add_modifier(Modifier::DIM)
+                        } else {
+                            Style::default().fg(p.surface_dim)
+                        },
                     ))),
                     Rect::new(ws_area.x, y, ws_area.width, 1),
                 );
@@ -9246,7 +9368,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             SidebarRow::NeedsYou { blocked, .. } => {
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(
-                        "!",
+                        "●",
                         Style::default()
                             .fg(if *blocked { p.red } else { p.peach })
                             .add_modifier(Modifier::BOLD),
@@ -9254,6 +9376,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                     Rect::new(ws_area.x, y, ws_area.width, 1),
                 );
             }
+            SidebarRow::NeedsYouMore { .. } => {}
         }
     }
 
@@ -9672,16 +9795,25 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
             .strip_suffix(&chip)
             .map(str::to_string)
             .unwrap_or(label);
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                truncate_end(
-                    &label,
-                    usize::from(mode_anchor.width.saturating_sub(project_chip_rect.width)),
-                ),
-                Style::default().fg(p.overlay0).add_modifier(Modifier::BOLD),
-            )),
-            mode_anchor,
+        let label = truncate_end(
+            &label,
+            usize::from(mode_anchor.width.saturating_sub(project_chip_rect.width)),
         );
+        let normal = Style::default().fg(p.overlay0);
+        let line = if let Some((prefix, machine)) = label.rsplit_once('(') {
+            let (machine, suffix) = machine
+                .split_once(')')
+                .map(|(machine, rest)| (machine, format!("){rest}")))
+                .unwrap_or((machine, String::new()));
+            Line::from(vec![
+                Span::styled(format!("{prefix}("), normal),
+                Span::styled(machine.to_string(), normal.add_modifier(Modifier::BOLD)),
+                Span::styled(suffix, normal),
+            ])
+        } else {
+            Line::from(Span::styled(label, normal))
+        };
+        frame.render_widget(Paragraph::new(line), mode_anchor);
         if project_chip_rect.width > 0 {
             frame.render_widget(
                 Paragraph::new(Span::styled(
@@ -9981,6 +10113,36 @@ fn render_section_header(
         return;
     }
     let p = &app.palette;
+    if app.sidebar_sections_layout
+        && matches!(header.title, SNOOZED_SECTION_TITLE | SETTLED_SECTION_TITLE)
+    {
+        let glyph = section_header_glyph_for_app(app, header.title);
+        let color = if header.title == SNOOZED_SECTION_TITLE {
+            p.peach
+        } else {
+            p.yellow
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    if collapsed { "▸" } else { "▾" },
+                    Style::default().fg(p.accent),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    glyph,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {count}"),
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                ),
+            ])),
+            header.rect,
+        );
+        return;
+    }
     let color = section_header_color(header.title, p);
     let count_label = if app.sidebar_sections_layout
         && matches!(
@@ -10452,11 +10614,27 @@ fn render_workspace_list(
         render_section_header(app, frame, &header, count, host_counts, collapsed);
     }
     let divider_body = workspace_list_rect_for_app(app, sidebar_area);
-    for divider in compute_sidebar_divider_areas(app, divider_body, &row_entries, metrics) {
+    for (divider, shelf) in compute_sidebar_divider_areas(app, divider_body, &row_entries, metrics)
+    {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "─".repeat(usize::from(divider.width)),
-                Style::default().fg(p.surface_dim),
+                if shelf {
+                    if app.nerd_font {
+                        "┄"
+                    } else {
+                        "-"
+                    }
+                } else {
+                    "─"
+                }
+                .repeat(usize::from(divider.width)),
+                if shelf {
+                    Style::default()
+                        .fg(p.surface_dim)
+                        .add_modifier(Modifier::DIM)
+                } else {
+                    Style::default().fg(p.surface_dim)
+                },
             ))),
             divider,
         );
@@ -10573,16 +10751,32 @@ fn render_workspace_list(
         let body = workspace_list_body_rect(app, list_area, should_show_scrollbar(metrics));
         let scroll = workspace_list_scroll_skip(app, &metrics);
         for (row_idx, rect) in needs_you_row_areas_from_rows(app, &row_entries, body, scroll) {
-            let Some(SidebarRow::NeedsYou {
-                title,
-                host,
-                blocked,
-                ..
-            }) = row_entries.get(row_idx)
-            else {
-                continue;
-            };
-            render_needs_you_row(app, frame, title, host, *blocked, rect);
+            match row_entries.get(row_idx) {
+                Some(SidebarRow::NeedsYou {
+                    title,
+                    space_icon,
+                    host,
+                    blocked,
+                    ..
+                }) => {
+                    render_needs_you_row(app, frame, title, space_icon, host, *blocked, rect);
+                }
+                Some(SidebarRow::NeedsYouMore {
+                    remaining,
+                    expanded,
+                }) => {
+                    let label = if *expanded {
+                        "▴ less".to_string()
+                    } else {
+                        format!("▸ {remaining} more")
+                    };
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(label, Style::default().fg(p.overlay0))),
+                        rect,
+                    );
+                }
+                _ => {}
+            }
         }
     }
 
@@ -10939,13 +11133,18 @@ pub(crate) fn sidebar_header_goto_rect(app: &AppState, area: Rect) -> Rect {
 }
 
 pub(crate) fn sidebar_header_mode_label(app: &AppState) -> String {
-    let view = format!("View: {} ▾", app.sidebar_group_mode.view_label());
+    let view_name = if app.nerd_font && app.sidebar_group_mode == SidebarGroupMode::RepoPr {
+        crate::ui::icons::GITHUB
+    } else {
+        app.sidebar_group_mode.view_label()
+    };
+    let view = format!("{view_name} ▾");
     let machine = match app.sidebar_work_filter.machine_scope {
         crate::app::state::SidebarMachineScope::ThisMachine => {
-            format!("this machine ({})", app.agent_host_name)
+            format!("this ({})", app.agent_host_name)
         }
         crate::app::state::SidebarMachineScope::AllMachines => {
-            format!("all machines ({})", app.agent_host_name)
+            format!("all ({})", app.agent_host_name)
         }
     };
     let filters = match app.sidebar_group_mode {
@@ -12334,7 +12533,7 @@ pub(super) fn render_sidebar_group_menu(app: &AppState, frame: &mut Frame) {
             };
             Line::from(Span::styled(
                 super::dropdown::pad_menu_row(
-                    &format!("{marker} View: {}", mode.view_label()),
+                    &format!("{marker} {}", mode.view_label()),
                     layout.list_rect.width,
                 ),
                 style,
@@ -12696,7 +12895,7 @@ pub(crate) mod tests {
             row,
             SidebarRow::AgentRun { host, .. } if host == "remote-b"
         )));
-        assert!(sidebar_header_mode_label(&app).contains("this machine (mbpro)"));
+        assert!(sidebar_header_mode_label(&app).contains("this (mbpro)"));
 
         let all_machines = sidebar_filter_options(&app)
             .iter()
@@ -16555,7 +16754,9 @@ pub(crate) mod tests {
                 | SidebarRow::PodHeader { .. }
                 | SidebarRow::PodMember { .. }
                 | SidebarRow::Divider
+                | SidebarRow::ShelfDivider
                 | SidebarRow::NeedsYou { .. }
+                | SidebarRow::NeedsYouMore { .. }
                 | SidebarRow::SymphonyJob { .. }
                 | SidebarRow::SymphonyEmpty
                 | SidebarRow::AgentRun { .. }
@@ -18000,8 +18201,10 @@ pub(crate) mod tests {
                 | SidebarRow::PodMember { .. }
                 | SidebarRow::SectionHeader { .. }
                 | SidebarRow::Divider
+                | SidebarRow::ShelfDivider
                 | SidebarRow::NestedHeader { .. }
                 | SidebarRow::NeedsYou { .. }
+                | SidebarRow::NeedsYouMore { .. }
                 | SidebarRow::SymphonyJob { .. }
                 | SidebarRow::SymphonyEmpty
                 | SidebarRow::AloopLoop { .. }
@@ -18058,9 +18261,10 @@ pub(crate) mod tests {
                     SidebarRow::PodHeader { .. } => ("pod", 0, None, None),
                     SidebarRow::PodMember { .. } => ("pod-member", 0, None, None),
                     SidebarRow::SectionHeader { .. } => ("section", 0, None, None),
-                    SidebarRow::Divider => ("divider", 0, None, None),
+                    SidebarRow::Divider | SidebarRow::ShelfDivider => ("divider", 0, None, None),
                     SidebarRow::NestedHeader { .. } => ("section", 0, None, None),
                     SidebarRow::NeedsYou { .. } => ("needs-you", 0, None, None),
+                    SidebarRow::NeedsYouMore { .. } => ("needs-you-more", 0, None, None),
                     SidebarRow::SymphonyJob { .. } | SidebarRow::SymphonyEmpty => {
                         ("symphony", 0, None, None)
                     }
@@ -20204,7 +20408,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 | SidebarRow::PodHeader { .. }
                 | SidebarRow::PodMember { .. }
                 | SidebarRow::Divider
+                | SidebarRow::ShelfDivider
                 | SidebarRow::NeedsYou { .. }
+                | SidebarRow::NeedsYouMore { .. }
                 | SidebarRow::SymphonyJob { .. }
                 | SidebarRow::SymphonyEmpty
                 | SidebarRow::AgentRun { .. }
@@ -20342,10 +20548,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         set_sections_group_collapsed(&mut app, SETTLED_SECTION_TITLE, false);
 
         let pinned_rows = sidebar_rows(&app);
-        let active_header = pinned_rows
+        let active_space = pinned_rows
             .iter()
-            .position(|row| matches!(row, SidebarRow::SectionHeader { title, .. } if *title == ACTIVE_SECTION_TITLE))
-            .expect("Active shelf");
+            .position(|row| matches!(row, SidebarRow::Workspace { ws_idx: 0, .. }))
+            .expect("active Space");
         let pinned_tab = pinned_rows
             .iter()
             .position(|row| {
@@ -20353,7 +20559,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 if entry.local_target().is_some_and(|target| target.pane_id == pane_id))
             })
             .expect("pinned tab row");
-        assert!(active_header < pinned_tab);
+        assert!(active_space < pinned_tab);
         assert!(!pinned_rows.iter().any(|row| matches!(
             row,
             SidebarRow::SectionHeader {
@@ -20670,23 +20876,20 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .set_raw_agent_state_for_test(AgentState::Blocked);
 
         let rows = sidebar_rows(&app);
-        assert!(matches!(
-            rows.first(),
-            Some(SidebarRow::SectionHeader {
+        assert!(matches!(rows.first(), Some(SidebarRow::NeedsYou { .. })));
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
                 title: NEEDS_YOU_SECTION_TITLE,
-                count: 1,
-                collapsed: true,
                 ..
-            })
-        ));
-        app.set_sidebar_group_collapsed(NEEDS_YOU_SECTION_TITLE, false);
-        let rows = sidebar_rows(&app);
+            }
+        )));
         let Some(SidebarRow::NeedsYou {
             host,
             blocked,
             target,
             ..
-        }) = rows.get(1)
+        }) = rows.first()
         else {
             panic!("the strip leads the list");
         };
@@ -20701,7 +20904,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             })
         );
         assert!(
-            matches!(rows.get(2), Some(SidebarRow::Divider)),
+            matches!(rows.get(1), Some(SidebarRow::Divider)),
             "a divider closes the strip"
         );
         assert_eq!(
@@ -22486,7 +22689,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_work_filter = crate::app::state::SidebarWorkFilter::default();
         assert_eq!(
             sidebar_header_mode_label(&app),
-            "View: Linear ▾ · SCA · me · active ▾ · all machines (localhost) ▾"
+            "Linear ▾ · SCA · me · active ▾ · all (localhost) ▾"
         );
         app.sidebar_work_filter = crate::app::state::SidebarWorkFilter {
             team: Some("SCA".into()),
@@ -22495,23 +22698,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         };
         assert_eq!(
             sidebar_header_mode_label(&app),
-            "View: Linear ▾ · SCA · matthias · active ▾ · all machines (localhost) ▾"
+            "Linear ▾ · SCA · matthias · active ▾ · all (localhost) ▾"
         );
     }
 
     #[test]
     fn the_view_picker_lists_the_f12_labels_and_spaces() {
-        let labels = SidebarGroupMode::VIEWS.map(|mode| format!("View: {}", mode.view_label()));
-        assert_eq!(
-            labels,
-            [
-                "View: Repo",
-                "View: Spaces",
-                "View: Linear",
-                "View: GitHub",
-                "View: Missive"
-            ]
-        );
+        let labels = SidebarGroupMode::VIEWS.map(|mode| mode.view_label().to_string());
+        assert_eq!(labels, ["Repo", "Spaces", "Linear", "GitHub", "Missive"]);
         assert_eq!(SidebarGroupMode::default(), SidebarGroupMode::Repo);
     }
 
@@ -27396,7 +27590,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 | SidebarRow::PodHeader { .. }
                 | SidebarRow::PodMember { .. }
                 | SidebarRow::Divider
+                | SidebarRow::ShelfDivider
                 | SidebarRow::NeedsYou { .. }
+                | SidebarRow::NeedsYouMore { .. }
                 | SidebarRow::SymphonyJob { .. }
                 | SidebarRow::SymphonyEmpty
                 | SidebarRow::AgentRun { .. }
@@ -28299,7 +28495,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn sidebar_sections_show_three_lifecycle_shelves_and_collapse_settled() {
+    fn sidebar_sections_show_two_lifecycle_shelves_and_collapse_settled() {
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
         let rows = sidebar_rows(&app);
@@ -28310,10 +28506,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            titles,
-            ["Active", "Snoozed", "Settled", "No repo yet", "Symphony"]
-        );
+        assert_eq!(titles, ["Snoozed", "Settled", "No repo yet", "Symphony"]);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: SNOOZED_SECTION_TITLE,
+                collapsed: false,
+                ..
+            }
+        )));
         assert!(rows.iter().any(|row| matches!(
             row,
             SidebarRow::SectionHeader {
@@ -28336,6 +28537,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .filter_map(|key| key.rsplit_once(':').map(|(_, title)| title))
             .collect::<std::collections::HashSet<_>>();
         for title in default_titles {
+            if title == SNOOZED_SECTION_TITLE {
+                continue;
+            }
             assert!(
                 section_is_collapsed(&app, title),
                 "{title} should start collapsed"
@@ -28344,6 +28548,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let clean_group = format!("{}weekly", aloops::ALOOP_CLEAN_KEY_PREFIX);
         assert!(section_is_collapsed(&app, &clean_group));
+        assert!(!section_is_collapsed(&app, SNOOZED_SECTION_TITLE));
         assert!(section_is_collapsed(&app, SETTLED_SECTION_TITLE));
 
         app.toggle_sidebar_group(RUNS_SECTION_TITLE);
@@ -28496,8 +28701,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("Needs You strip");
         let active = rows
             .iter()
-            .position(|row| matches!(row, SidebarRow::SectionHeader { title, .. } if *title == ACTIVE_SECTION_TITLE))
-            .expect("Active shelf");
+            .position(|row| matches!(row, SidebarRow::Workspace { .. }))
+            .expect("active Space");
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: ACTIVE_SECTION_TITLE,
+                ..
+            }
+        )));
         let snoozed = rows
             .iter()
             .position(|row| matches!(row, SidebarRow::SectionHeader { title, .. } if *title == SNOOZED_SECTION_TITLE))
@@ -28540,21 +28752,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(app.snooze_pane_at(2, snoozed, app.view_observed_unix_s + 60));
         let settled = app.workspaces[3].tabs[0].root_pane;
         assert!(app.settle_pane_at(3, settled, app.view_observed_unix_s));
-        for title in [
-            ACTIVE_SECTION_TITLE,
-            SNOOZED_SECTION_TITLE,
-            SETTLED_SECTION_TITLE,
-        ] {
+        for title in [SNOOZED_SECTION_TITLE, SETTLED_SECTION_TITLE] {
             set_sections_group_collapsed(&mut app, title, true);
         }
 
         let rows = sidebar_rows(&app);
 
-        for (title, count) in [
-            (ACTIVE_SECTION_TITLE, 2),
-            (SNOOZED_SECTION_TITLE, 1),
-            (SETTLED_SECTION_TITLE, 1),
-        ] {
+        for (title, count) in [(SNOOZED_SECTION_TITLE, 1), (SETTLED_SECTION_TITLE, 1)] {
             assert!(rows.iter().any(|row| matches!(
                 row,
                 SidebarRow::SectionHeader { title: found, count: found_count, collapsed: true, .. }
@@ -28562,11 +28766,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             )));
         }
 
-        set_sections_group_collapsed(&mut app, ACTIVE_SECTION_TITLE, false);
-        let expanded_rows = sidebar_rows(&app);
-        assert!(expanded_rows
+        assert!(rows
             .iter()
-            .any(|row| matches!(row, SidebarRow::Workspace { .. })));
+            .any(|row| matches!(row, SidebarRow::Workspace { ws_idx: 0 | 1, .. })));
     }
 
     #[test]
@@ -28584,19 +28786,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     ..
                 }
             )));
-            let active = rows
-                .iter()
-                .position(|row| {
-                    matches!(
-                        row,
-                        SidebarRow::SectionHeader {
-                            title: ACTIVE_SECTION_TITLE,
-                            count: 2,
-                            ..
-                        }
-                    )
-                })
-                .expect("Active shelf");
+            assert!(!rows.iter().any(|row| matches!(
+                row,
+                SidebarRow::SectionHeader {
+                    title: ACTIVE_SECTION_TITLE,
+                    ..
+                }
+            )));
             let space = rows
                 .iter()
                 .position(|row| matches!(row, SidebarRow::Workspace { ws_idx: 0, .. }))
@@ -28609,7 +28805,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     )
                 })
                 .expect("tab under Space");
-            assert!(active < space && space < tab);
+            assert!(space < tab);
         }
     }
 
@@ -28625,28 +28821,45 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         set_sections_group_collapsed(&mut app, SETTLED_SECTION_TITLE, false);
 
         let rows = sidebar_rows(&app);
+        for title in [SNOOZED_SECTION_TITLE, SETTLED_SECTION_TITLE] {
+            let index = rows
+                .iter()
+                .position(|row| {
+                    matches!(row,
+                        SidebarRow::SectionHeader { title: found, .. } if *found == title
+                    )
+                })
+                .expect("shelf toggle");
+            assert!(matches!(
+                rows.get(index - 1),
+                Some(SidebarRow::ShelfDivider)
+            ));
+        }
         for (title, ws_idx) in [
             (ACTIVE_SECTION_TITLE, 0),
             (SNOOZED_SECTION_TITLE, 1),
             (SETTLED_SECTION_TITLE, 2),
         ] {
-            let start = rows
-                .iter()
-                .position(|row| {
-                    matches!(row,
-                        SidebarRow::SectionHeader { title: found, count: 1, .. } if *found == title
-                    )
-                })
-                .expect("shelf with one tab");
+            let start = if title == ACTIVE_SECTION_TITLE {
+                0
+            } else {
+                rows.iter().position(|row| matches!(row,
+                    SidebarRow::SectionHeader { title: found, count: 1, .. } if *found == title
+                )).expect("shelf with one tab") + 1
+            };
             let end = rows
                 .iter()
                 .enumerate()
-                .skip(start + 1)
+                .skip(start)
                 .find_map(|(index, row)| {
-                    matches!(row, SidebarRow::SectionHeader { .. }).then_some(index)
+                    matches!(
+                        row,
+                        SidebarRow::ShelfDivider | SidebarRow::SectionHeader { .. }
+                    )
+                    .then_some(index)
                 })
                 .unwrap_or(rows.len());
-            let body = &rows[start + 1..end];
+            let body = &rows[start..end];
             assert_eq!(
                 body.iter()
                     .filter(|row| matches!(row, SidebarRow::Workspace { .. }))
@@ -28703,7 +28916,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn needs_you_is_collapsed_with_a_red_dot_in_both_layouts() {
+    fn needs_you_has_no_header_and_a_red_dot_in_both_layouts() {
         for sections in [false, true] {
             let mut app = app_with_agents(&["blocked"]);
             app.sidebar_sections_layout = sections;
@@ -28716,46 +28929,92 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .expect("terminal")
                 .set_raw_agent_state_for_test(AgentState::Blocked);
             let rows = sidebar_rows(&app);
-            assert!(matches!(
-                rows.first(),
-                Some(SidebarRow::SectionHeader {
+            assert!(matches!(rows.first(), Some(SidebarRow::NeedsYou { .. })));
+            assert!(!rows.iter().any(|row| matches!(
+                row,
+                SidebarRow::SectionHeader {
                     title: NEEDS_YOU_SECTION_TITLE,
-                    count: 1,
-                    collapsed: true,
                     ..
-                })
-            ));
-            assert!(!rows
-                .iter()
-                .any(|row| matches!(row, SidebarRow::NeedsYou { .. })));
-            let mut terminal = Terminal::new(TestBackend::new(36, 1)).expect("header terminal");
+                }
+            )));
+            let mut terminal = Terminal::new(TestBackend::new(36, 1)).expect("needs-you terminal");
             terminal
                 .draw(|frame| {
-                    render_section_header(
-                        &app,
-                        frame,
-                        &SectionHeaderArea {
-                            title: NEEDS_YOU_SECTION_TITLE,
-                            rect: Rect::new(0, 0, 36, 1),
-                        },
-                        1,
-                        &[],
-                        true,
-                    )
+                    if let SidebarRow::NeedsYou {
+                        title,
+                        space_icon,
+                        host,
+                        blocked,
+                        ..
+                    } = &rows[0]
+                    {
+                        render_needs_you_row(
+                            &app,
+                            frame,
+                            title,
+                            space_icon,
+                            host,
+                            *blocked,
+                            Rect::new(0, 0, 36, 1),
+                        );
+                    }
                 })
-                .expect("render header");
+                .expect("render needs-you row");
             let buffer = terminal.backend().buffer();
-            let dot = section_header_glyph_for_app(&app, NEEDS_YOU_SECTION_TITLE);
-            let x = find_symbol_x(buffer, 0, 36, dot);
+            let x = find_symbol_x(buffer, 0, 36, "●");
+            assert_eq!(x, 0);
             assert_eq!(buffer[(x, 0)].style().fg, Some(app.palette.red));
+        }
+    }
+
+    #[test]
+    fn needs_you_shows_five_then_more_and_less_in_both_layouts() {
+        for sections in [false, true] {
+            let mut app = app_with_agents(&["one", "two", "three", "four", "five", "six"]);
+            app.sidebar_sections_layout = sections;
+            for workspace in &app.workspaces {
+                let pane_id = workspace.tabs[0].root_pane;
+                let terminal_id = workspace.tabs[0].panes[&pane_id]
+                    .attached_terminal_id
+                    .clone();
+                app.terminals
+                    .get_mut(&terminal_id)
+                    .expect("terminal")
+                    .set_raw_agent_state_for_test(AgentState::Blocked);
+            }
+            let rows = sidebar_rows(&app);
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| matches!(row, SidebarRow::NeedsYou { .. }))
+                    .count(),
+                5
+            );
+            assert!(matches!(
+                rows.get(5),
+                Some(SidebarRow::NeedsYouMore {
+                    remaining: 1,
+                    expanded: false
+                })
+            ));
             if sections {
                 set_sections_group_collapsed(&mut app, NEEDS_YOU_SECTION_TITLE, false);
             } else {
                 app.set_sidebar_group_collapsed(NEEDS_YOU_SECTION_TITLE, false);
             }
-            assert!(sidebar_rows(&app)
-                .iter()
-                .any(|row| matches!(row, SidebarRow::NeedsYou { .. })));
+            let rows = sidebar_rows(&app);
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| matches!(row, SidebarRow::NeedsYou { .. }))
+                    .count(),
+                6
+            );
+            assert!(matches!(
+                rows.get(6),
+                Some(SidebarRow::NeedsYouMore {
+                    remaining: 1,
+                    expanded: true
+                })
+            ));
         }
     }
 
@@ -28764,9 +29023,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
         for (title, count, expected) in [
-            (ACTIVE_SECTION_TITLE, 3, "Active 3"),
-            (SNOOZED_SECTION_TITLE, 2, "Snoozed 2"),
-            (SETTLED_SECTION_TITLE, 14, "Settled 14"),
+            (SNOOZED_SECTION_TITLE, 2, " 2"),
+            (SETTLED_SECTION_TITLE, 14, " 14"),
         ] {
             let header = SectionHeaderArea {
                 title,
@@ -28778,8 +29036,72 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .expect("render shelf header");
             let line = row_text(terminal.backend().buffer(), 0, 32);
             assert!(line.contains(expected), "{line:?}");
+            assert!(!line.contains(title), "{line:?}");
             assert!(!line.contains(&format!("({count})")), "{line:?}");
         }
+    }
+
+    #[test]
+    fn shelf_and_github_glyphs_use_existing_hover_tooltips() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.nerd_font = true;
+        app.sidebar_group_mode = SidebarGroupMode::RepoPr;
+        let area = Rect::new(0, 0, 60, 30);
+        let targets = compute_sidebar_hover_targets(&app, area);
+        for label in ["Snoozed", "Settled", "GitHub"] {
+            assert!(
+                targets.iter().any(|target| target.label == label),
+                "missing {label} tooltip"
+            );
+        }
+        assert_eq!(
+            section_header_glyph_for_app(&app, SNOOZED_SECTION_TITLE),
+            "\u{F0150}z"
+        );
+        assert_eq!(
+            section_header_glyph_for_app(&app, SETTLED_SECTION_TITLE),
+            "\u{F0E1E}"
+        );
+        assert!(sidebar_header_mode_label(&app).starts_with(crate::ui::icons::GITHUB));
+        app.nerd_font = false;
+        assert_eq!(
+            section_header_glyph_for_app(&app, SNOOZED_SECTION_TITLE),
+            "z"
+        );
+        assert_eq!(
+            section_header_glyph_for_app(&app, SETTLED_SECTION_TITLE),
+            "v"
+        );
+        assert!(sidebar_header_mode_label(&app).starts_with("GitHub"));
+    }
+
+    #[test]
+    fn sidebar_header_bolds_only_the_current_machine() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.sidebar_header_plain = true;
+        app.agent_host_name = "mbair".to_string();
+        app.sidebar_group_mode = SidebarGroupMode::Spaces;
+        let area = Rect::new(0, 0, 60, 8);
+        let anchor = sidebar_group_mode_anchor_rect_for_app(&app, area);
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).expect("header terminal");
+        terminal
+            .draw(|frame| render_sidebar_header(&app, frame, area, &app.palette))
+            .expect("render header");
+        let buffer = terminal.backend().buffer();
+        let row = row_text(buffer, anchor.y, 60);
+        assert!(row.contains("Spaces ▾ · all (mbair) ▾"), "{row:?}");
+        let machine = find_symbol_x(buffer, anchor.y, 60, "m");
+        let close = find_symbol_x(buffer, anchor.y, 60, ")");
+        assert!(buffer[(machine, anchor.y)]
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert!(!buffer[(close, anchor.y)]
+            .style()
+            .add_modifier
+            .contains(Modifier::BOLD));
     }
 
     #[test]
@@ -28823,7 +29145,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             assert!(row_text(buffer, 3, 42).contains("Search"));
             assert!(row_text(buffer, 3, 42)
                 .contains(&sidebar_prefixed_key_label(&app, &app.keybinds.goto)));
-            assert!(row_text(buffer, 4, 42).contains("View:"));
+            assert!(row_text(buffer, 4, 42).contains("Repo ▾"));
             let sky = &buffer[(20, 1)];
             assert_ne!(sky.bg, app.palette.panel_bg, "sky band should stand out");
             assert!(matches!(sky.bg, Color::Rgb(_, _, _)));

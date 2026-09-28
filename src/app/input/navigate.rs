@@ -4403,12 +4403,9 @@ mod tests {
         let rows = crate::ui::sidebar_rows(&state);
         assert!(rows.iter().any(|row| matches!(
             row,
-            crate::ui::SidebarRow::SectionHeader {
-                title: "Needs you",
-                count: 1,
-                collapsed: true,
-                ..
-            }
+            crate::ui::SidebarRow::NeedsYou {
+                target: crate::ui::sidebar::NeedsYouTarget::Remote(target), ..
+            } if *target == agent_ref
         )));
         assert!(!rows.iter().any(|row| matches!(
             row,
