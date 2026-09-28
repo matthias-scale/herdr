@@ -16,10 +16,6 @@ pub(crate) const PANE_GRAPHICS_PRIMARY_LAYER_ID: &str = "primary";
 use super::agents::AgentSessionInfo;
 use super::common::{AgentStatus, PaneAgentState, ReadFormat, ReadSource, SplitDirection};
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
 )]
@@ -43,8 +39,6 @@ pub struct PaneSplitParams {
     pub cwd: Option<String>,
     #[serde(default)]
     pub focus: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub companion: bool,
     #[serde(default)]
     pub right_click: PaneRightClickTarget,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

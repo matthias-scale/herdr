@@ -1046,7 +1046,6 @@ impl ClientShellState {
                     ratio: None,
                     cwd: None,
                     focus: true,
-                    companion: false,
                     right_click: Default::default(),
                     env: Default::default(),
                 }))

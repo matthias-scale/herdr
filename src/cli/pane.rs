@@ -819,15 +819,32 @@ fn parse_pane_input_args(
 
 fn pane_split(args: &[String]) -> std::io::Result<i32> {
     let env_pane_id = super::target::caller_pane_id();
-    let params = match parse_pane_split_args(args, env_pane_id.as_deref()) {
-        Ok(params) => params,
+    let parsed = match parse_pane_split_args(args, env_pane_id.as_deref()) {
+        Ok(parsed) => parsed,
         Err(message) => {
             eprintln!("{message}");
             return Ok(2);
         }
     };
 
-    super::runtime::pane_split(params)
+    if parsed.companion {
+        super::runtime::pane_split_companion(parsed.params)
+    } else {
+        super::runtime::pane_split(parsed.params)
+    }
+}
+
+struct ParsedPaneSplitArgs {
+    params: PaneSplitParams,
+    companion: bool,
+}
+
+impl std::ops::Deref for ParsedPaneSplitArgs {
+    type Target = PaneSplitParams;
+
+    fn deref(&self) -> &Self::Target {
+        &self.params
+    }
 }
 
 fn parse_right_click_target(value: &str) -> Result<PaneRightClickTarget, String> {
@@ -841,7 +858,7 @@ fn parse_right_click_target(value: &str) -> Result<PaneRightClickTarget, String>
 fn parse_pane_split_args(
     args: &[String],
     env_pane_id: Option<&str>,
-) -> Result<PaneSplitParams, String> {
+) -> Result<ParsedPaneSplitArgs, String> {
     let args = super::expand_equals_args(args, &["--right-click"]);
     let mut env = std::collections::HashMap::new();
     let mut pane_id = None;
@@ -947,17 +964,19 @@ fn parse_pane_split_args(
         );
     };
 
-    Ok(PaneSplitParams {
-        workspace_id: None,
-        target_pane_id: pane_id,
-        direction,
-        ratio,
-        cwd,
-        focus,
+    Ok(ParsedPaneSplitArgs {
+        params: PaneSplitParams {
+            workspace_id: None,
+            target_pane_id: pane_id,
+            direction,
+            ratio,
+            cwd,
+            focus,
+            right_click,
+            env,
+            work_context,
+        },
         companion,
-        right_click,
-        env,
-        work_context,
     })
 }
 

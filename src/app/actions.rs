@@ -2283,12 +2283,6 @@ impl AppState {
             .position(|workspace| workspace.id == workspace_id)
     }
 
-    pub(crate) fn confirm_implicit_worktree_group_close(&mut self, ws_idx: usize) -> bool {
-        self.confirm_close
-            && self.workspace_close_would_close_worktree_group(ws_idx)
-            && self.begin_workspace_close_confirmation(ws_idx)
-    }
-
     /// The pane a tab-row toggle button would close, i.e. the focused pane's
     /// nearest layout sibling in that direction. `None` means the button splits.
     pub(crate) fn pane_toggle_sibling(
@@ -2327,7 +2321,7 @@ impl AppState {
     }
 
     #[cfg(test)]
-    /// Close the focused pane. Returns true when the close was deferred to confirmation.
+    /// State-only pane close path used by tests; it never opens confirmation.
     pub fn close_pane(&mut self) -> bool {
         self.selection = None;
         self.selection_autoscroll = None;
@@ -2364,7 +2358,7 @@ impl AppState {
     }
 
     #[cfg(test)]
-    /// Close the active tab. Returns true when the close was deferred to confirmation.
+    /// State-only tab close path used by tests; it never opens confirmation.
     pub fn close_tab(&mut self) -> bool {
         self.selection = None;
         self.selection_autoscroll = None;

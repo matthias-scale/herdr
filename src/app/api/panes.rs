@@ -60,6 +60,23 @@ impl App {
 
 impl App {
     pub(super) fn handle_pane_split(&mut self, id: String, params: PaneSplitParams) -> String {
+        self.handle_pane_split_with_companion(id, params, false)
+    }
+
+    pub(super) fn handle_pane_split_companion(
+        &mut self,
+        id: String,
+        params: PaneSplitParams,
+    ) -> String {
+        self.handle_pane_split_with_companion(id, params, true)
+    }
+
+    fn handle_pane_split_with_companion(
+        &mut self,
+        id: String,
+        params: PaneSplitParams,
+        companion: bool,
+    ) -> String {
         let work_context = match self.prepare_spawn_work_context(params.work_context.clone()) {
             Ok(context) => context,
             Err(message) => return encode_error(id, "invalid_work_context", message),
@@ -146,7 +163,7 @@ impl App {
             None => return encode_error(id, "pane_not_found", "pane not found"),
         };
         if let Some(pane) = self.state.workspaces[ws_idx].pane_state_mut(new_pane.pane_id) {
-            pane.is_companion = params.companion;
+            pane.is_companion = companion;
             pane.right_click_passthrough = matches!(
                 params.right_click,
                 crate::api::schema::PaneRightClickTarget::Pane
@@ -4737,13 +4754,13 @@ mod tests {
         let (mut app, _) = app_with_test_workspace();
         let primary = app.state.workspaces[0].tabs[0].root_pane;
         let companion = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        let workspace_id = app.state.workspaces[0].id.clone();
+        let workspace_cwd = app.state.workspaces[0].identity_cwd.clone();
         app.state.workspaces[0].tabs[0].layout.focus_pane(primary);
         app.state.workspaces[0]
             .pane_state_mut(companion)
             .unwrap()
             .is_companion = true;
-        let remaining_tab = app.state.workspaces[0].test_add_tab(Some("next"));
-        let remaining_root = app.state.workspaces[0].tabs[remaining_tab].root_pane;
         app.state.ensure_test_terminals();
         let primary_terminal = app.state.terminal_id_for_pane(0, primary).unwrap();
         let companion_terminal = app.state.terminal_id_for_pane(0, companion).unwrap();
@@ -4757,10 +4774,25 @@ mod tests {
         );
 
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.workspaces[0].id, workspace_id);
+        assert_eq!(app.state.workspaces[0].identity_cwd, workspace_cwd);
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
-        assert_eq!(app.state.workspaces[0].tabs[0].root_pane, remaining_root);
+        assert_ne!(app.state.workspaces[0].tabs[0].root_pane, primary);
+        assert_ne!(app.state.workspaces[0].tabs[0].root_pane, companion);
         assert!(!app.state.terminals.contains_key(&primary_terminal));
         assert!(!app.state.terminals.contains_key(&companion_terminal));
+        let replacement_terminal = app
+            .state
+            .terminal_id_for_pane(0, app.state.workspaces[0].tabs[0].root_pane)
+            .unwrap();
+        assert_eq!(
+            app.state.terminals[&replacement_terminal].cwd,
+            workspace_cwd
+        );
+        for (_terminal_id, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
     }
 
     #[test]
