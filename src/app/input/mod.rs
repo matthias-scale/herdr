@@ -6103,6 +6103,9 @@ fn app_for_mouse_test() -> App {
     );
     app.state.set_server_mode(Mode::Terminal);
     app.state.sidebar_collapsed = false;
+    // Keep bottom-left dock geometry stable for input tests. Sidebar panel
+    // defaults are covered by tests that load `Config::default()` directly.
+    app.state.notepad.set_visible_tabs(Vec::new());
     // Deliberately not the shipped default (`Hidden`): these tests click on a
     // tab row, so they need one.
     app.state.tab_bar_position = crate::config::TabBarPositionConfig::Top;
@@ -6286,6 +6289,7 @@ enabled = true
 
 [pomodoro]
 enabled = true
+sidebar_visible = true
 "#,
         )
         .expect("write config fixture");

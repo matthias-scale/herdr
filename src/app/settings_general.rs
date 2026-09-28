@@ -251,6 +251,11 @@ pub(crate) enum ConfigEdit {
         key: &'static str,
         value: String,
     },
+    StringList {
+        section: &'static str,
+        key: &'static str,
+        value: Vec<String>,
+    },
 }
 
 /// The next value for `row`, or `None` when the row is not editable here.

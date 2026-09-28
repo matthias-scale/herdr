@@ -67,6 +67,16 @@ impl App {
             } => self.update_config_file(key, |content| {
                 crate::config::upsert_section_value(content, section, key, &format!("\"{value}\""))
             }),
+            ConfigEdit::StringList {
+                section,
+                key,
+                value,
+            } => self.update_config_file(key, |content| {
+                let value =
+                    toml::Value::Array(value.into_iter().map(toml::Value::String).collect())
+                        .to_string();
+                crate::config::upsert_section_value(content, section, key, &value)
+            }),
         };
         if saved {
             self.apply_config_from_disk(false);

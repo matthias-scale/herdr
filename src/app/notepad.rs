@@ -275,22 +275,48 @@ impl super::App {
         if next.dir != self.state.notepad.dir || next.enabled != self.state.notepad.enabled {
             self.write_notepad_now();
             let focused = self.state.notepad.focused && next.enabled;
-            // Read-only tabs are view choices, not note content.
-            let agent_tab = self.state.notepad.agent_tab && next.enabled;
-            let usage_tab = self.state.notepad.usage_tab && next.enabled;
+            let active_target = self.state.notepad.active_tab_target();
             let agent_collapsed = self.state.notepad.agent_collapsed;
             self.state.notepad = next;
             self.state.notepad.focused = focused;
-            self.state.notepad.agent_tab = agent_tab;
-            self.state.notepad.usage_tab = usage_tab;
             self.state.notepad.agent_collapsed = agent_collapsed;
+            match active_target {
+                Some(crate::notepad::NotepadTabTarget::Context) => {
+                    self.state.notepad.select_context();
+                }
+                Some(crate::notepad::NotepadTabTarget::Agent) => {
+                    self.state.notepad.select_agent_tab();
+                }
+                Some(crate::notepad::NotepadTabTarget::Usage) => {
+                    self.state.notepad.select_usage_tab();
+                }
+                _ => {}
+            }
             self.notepad_watcher = None;
             self.notepad_watched_dir = None;
-        } else if self.applied_notepad_config_height != Some(next_height) {
-            // A reload that left `[notepad] height` untouched must not stomp a
-            // height the operator dragged the panel to; one that changed it
-            // applies the new configured value.
-            self.state.notepad.height = next_height;
+        } else {
+            let previous_path = self.state.notepad.active_path().map(PathBuf::from);
+            let previous_target = self.state.notepad.active_tab_target();
+            let mut projected = self.state.notepad.clone();
+            projected.set_visible_tabs(config.visible_tabs.clone());
+            let next_path = projected.active_path().map(PathBuf::from);
+            let path_changed = previous_path != next_path;
+            let active_note_was_hidden = matches!(
+                previous_target,
+                Some(crate::notepad::NotepadTabTarget::Note(_))
+            ) && projected.active_tab_target() != previous_target;
+            if path_changed || active_note_was_hidden {
+                self.write_notepad_now();
+            }
+            self.state
+                .notepad
+                .set_visible_tabs(config.visible_tabs.clone());
+            if self.applied_notepad_config_height != Some(next_height) {
+                self.state.notepad.height = next_height;
+            }
+            if path_changed && self.state.notepad.enabled {
+                self.load_active_note();
+            }
         }
         self.applied_notepad_config_height = Some(next_height);
     }
@@ -322,6 +348,7 @@ mod tests {
                 enabled: true,
                 dir: dir.display().to_string(),
                 files: vec!["todo".into()],
+                visible_tabs: vec!["note:todo".into(), "note:ideas".into()],
                 ..Default::default()
             },
             ..Default::default()

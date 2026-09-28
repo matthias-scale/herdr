@@ -8383,6 +8383,7 @@ mod tests {
         app.state.workspaces = vec![workspace];
         app.state.active = Some(0);
         app.state.selected = 0;
+        app.state.notepad.set_visible_tabs(Vec::new());
         app.state.reconcile_sidebar_presentation();
         app.state.ensure_test_terminals();
         app.state
@@ -9456,6 +9457,7 @@ last_pane = "prefix+tab"
         app.state.selected = 0;
         app.state.set_server_mode(Mode::Terminal);
         app.state.notepad.enabled = true;
+        app.state.notepad.set_visible_tabs(Vec::new());
         app.state.notepad.focused = true;
 
         app.route_client_events_from(
