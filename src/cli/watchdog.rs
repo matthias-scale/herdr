@@ -1,6 +1,6 @@
 use std::{
-    fs::{self, OpenOptions},
-    io::{self, Write},
+    fs,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
@@ -21,11 +21,13 @@ use crate::{
     },
 };
 
+mod workers;
+
 const DEFAULT_INTERVAL_SECS: u64 = 300;
 const DEFAULT_STALL_SECS: u64 = 600;
 const DEFAULT_LINES: u32 = 40;
-const DEFAULT_MAX_MODEL_CALLS: usize = 5;
 const MODEL_TIMEOUT: Duration = Duration::from_secs(120);
+const STAGE2_MODEL_ID: &str = "gemini-3.1-flash-lite";
 
 #[derive(Debug, Clone)]
 struct WatchdogOptions {
@@ -35,9 +37,9 @@ struct WatchdogOptions {
     stall_secs: u64,
     lines: u32,
     no_model: bool,
-    max_model_calls: usize,
-    codex_bin: PathBuf,
+    gemini_bin: PathBuf,
     state_file: PathBuf,
+    status_log: PathBuf,
     json: bool,
 }
 
@@ -51,16 +53,18 @@ struct PaneEntry {
 #[derive(Debug, Serialize)]
 struct ScanSummary {
     panes: usize,
-    blocked: usize,
+    corrected: usize,
+    consistent: usize,
     ambiguous: usize,
-    ok: usize,
     model_calls: usize,
 }
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
-static TEMP_FILE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(super) fn run_watchdog_command(args: &[String]) -> io::Result<i32> {
+    if args.first().is_some_and(|arg| arg == "workers") {
+        return workers::run_worker_watchdog_command(&args[1..]);
+    }
     if matches!(
         args.first().map(String::as_str),
         Some("--help" | "-h" | "help")
@@ -104,9 +108,9 @@ fn parse_options(args: &[String]) -> Result<WatchdogOptions, String> {
         stall_secs: DEFAULT_STALL_SECS,
         lines: DEFAULT_LINES,
         no_model: false,
-        max_model_calls: DEFAULT_MAX_MODEL_CALLS,
-        codex_bin: PathBuf::from("codex"),
+        gemini_bin: PathBuf::from("gemini"),
         state_file: crate::config::state_dir().join("watchdog.json"),
+        status_log: crate::config::state_dir().join("watchdog-status-log.jsonl"),
         json: false,
     };
     let mut index = 0;
@@ -126,14 +130,14 @@ fn parse_options(args: &[String]) -> Result<WatchdogOptions, String> {
                 options.stall_secs = parse_value(args, &mut index, "--stall-secs")?;
             }
             "--lines" => options.lines = parse_value(args, &mut index, "--lines")?,
-            "--max-model-calls" => {
-                options.max_model_calls = parse_value(args, &mut index, "--max-model-calls")?;
-            }
-            "--codex-bin" => {
-                options.codex_bin = PathBuf::from(parse_string(args, &mut index, "--codex-bin")?);
+            "--gemini-bin" => {
+                options.gemini_bin = PathBuf::from(parse_string(args, &mut index, "--gemini-bin")?);
             }
             "--state-file" => {
                 options.state_file = PathBuf::from(parse_string(args, &mut index, "--state-file")?);
+            }
+            "--status-log" => {
+                options.status_log = PathBuf::from(parse_string(args, &mut index, "--status-log")?);
             }
             unknown => return Err(format!("unknown watchdog option: {unknown}")),
         }
@@ -198,14 +202,23 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
         unix_seconds()?,
         ScanOptions {
             stall_secs: options.stall_secs,
-            max_model_calls: options.max_model_calls,
             no_model: options.no_model,
             dry_run: options.dry_run,
         },
-        |agent, tail| {
-            run_model_classifier(&options.codex_bin, agent, tail).map_err(|error| error.to_string())
+        |samples| {
+            run_model_classifier(&options.gemini_bin, samples).map_err(|error| error.to_string())
         },
-        mark_blocked,
+        |pane_id, agent, old_state, new_state, evidence| {
+            report_status(pane_id, agent, new_state, evidence)?;
+            watchdog::append_status_correction(
+                &options.status_log,
+                pane_id,
+                agent,
+                old_state,
+                new_state,
+                evidence,
+            )
+        },
     );
 
     if !options.dry_run {
@@ -245,18 +258,32 @@ fn read_tail(pane_id: &str, lines: u32) -> Result<String, String> {
         .ok_or_else(|| "pane.read response did not contain result.read.text".into())
 }
 
-/// This is the single write path for watchdog blocked status. A sibling branch
-/// adds a status-log watchdog write path; switch over here when that lands.
-fn mark_blocked(pane_id: &str, agent: &str, reason: &str) -> io::Result<()> {
+fn report_status(
+    pane_id: &str,
+    agent: &str,
+    status: AgentStatus,
+    evidence: &str,
+) -> io::Result<()> {
+    let state = match status {
+        AgentStatus::Working => PaneAgentState::Working,
+        AgentStatus::Done => PaneAgentState::Idle,
+        AgentStatus::Blocked => PaneAgentState::Blocked,
+        AgentStatus::Idle | AgentStatus::Stale | AgentStatus::Unknown => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "watchdog can only correct to working, done, or blocked",
+            ));
+        }
+    };
     let response = super::send_request(&Request {
         id: next_request_id("pane-report-agent"),
         method: Method::PaneReportAgent(PaneReportAgentParams {
             pane_id: pane_id.to_string(),
             source: WATCHDOG_SOURCE.to_string(),
             agent: agent.to_string(),
-            state: PaneAgentState::Blocked,
+            state,
             v: None,
-            message: Some(reason.to_string()),
+            message: Some(evidence.to_string()),
             seq: None,
             wait: None,
             eta_s: None,
@@ -337,7 +364,7 @@ fn print_scan(result: &ScanResult, options: &WatchdogOptions) -> io::Result<()> 
     }
 
     for decision in &result.decisions {
-        let status = match decision.agent_status {
+        let old_state = match decision.old_state {
             AgentStatus::Idle => "idle",
             AgentStatus::Working => "working",
             AgentStatus::Blocked => "blocked",
@@ -345,27 +372,37 @@ fn print_scan(result: &ScanResult, options: &WatchdogOptions) -> io::Result<()> 
             AgentStatus::Stale => "stale",
             AgentStatus::Unknown => "unknown",
         };
-        let verdict = match decision.status {
-            DecisionStatus::Blocked => "blocked",
+        let new_state = decision
+            .new_state
+            .map_or("unverified", |state| match state {
+                AgentStatus::Idle => "idle",
+                AgentStatus::Working => "working",
+                AgentStatus::Blocked => "blocked",
+                AgentStatus::Done => "done",
+                AgentStatus::Stale => "stale",
+                AgentStatus::Unknown => "unknown",
+            });
+        let outcome = match decision.status {
+            DecisionStatus::Corrected => "corrected",
+            DecisionStatus::Consistent => "verified",
             DecisionStatus::Ambiguous => "ambiguous",
-            DecisionStatus::Ok => "ok",
         };
-        let mut reason = decision.reason.clone();
+        let mut evidence = decision.evidence.clone();
         if let Some(error) = &decision.write_error {
-            reason.push_str(&format!("; report failed: {error}"));
+            evidence.push_str(&format!("; correction failed: {error}"));
         }
         let dry_run = if options.dry_run { " [dry-run]" } else { "" };
         println!(
-            "pane {} {} {} -> {} ({}){}",
-            decision.pane_id, decision.agent, status, verdict, reason, dry_run
+            "pane {} {} {} -> {} {} ({}){}",
+            decision.pane_id, decision.agent, old_state, new_state, outcome, evidence, dry_run
         );
     }
     println!(
-        "watchdog summary: panes={} blocked={} ambiguous={} ok={} model_calls={}{}",
+        "watchdog summary: panes={} corrected={} consistent={} ambiguous={} model_calls={}{}",
         summary.panes,
-        summary.blocked,
+        summary.corrected,
+        summary.consistent,
         summary.ambiguous,
-        summary.ok,
         summary.model_calls,
         if options.dry_run { " dry-run" } else { "" }
     );
@@ -375,83 +412,63 @@ fn print_scan(result: &ScanResult, options: &WatchdogOptions) -> io::Result<()> 
 fn summarize(result: &ScanResult) -> ScanSummary {
     let mut summary = ScanSummary {
         panes: result.decisions.len(),
-        blocked: 0,
+        corrected: 0,
+        consistent: 0,
         ambiguous: 0,
-        ok: 0,
         model_calls: result.model_calls,
     };
     for decision in &result.decisions {
         match decision.status {
-            DecisionStatus::Blocked => summary.blocked += 1,
+            DecisionStatus::Corrected => summary.corrected += 1,
+            DecisionStatus::Consistent => summary.consistent += 1,
             DecisionStatus::Ambiguous => summary.ambiguous += 1,
-            DecisionStatus::Ok => summary.ok += 1,
         }
     }
     summary
 }
 
-struct TempOutput(PathBuf);
-
-impl Drop for TempOutput {
-    fn drop(&mut self) {
-        if let Err(error) = fs::remove_file(&self.0) {
-            if error.kind() != io::ErrorKind::NotFound {
-                tracing::debug!(
-                    path = %self.0.display(),
-                    %error,
-                    "failed to remove watchdog classifier output"
-                );
-            }
-        }
-    }
-}
-
-fn temp_output_file() -> io::Result<TempOutput> {
-    for _ in 0..64 {
-        let sequence = TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "herdr-watchdog-{}-{sequence}.txt",
-            std::process::id()
-        ));
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(_) => return Ok(TempOutput(path)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "could not allocate a temporary classifier output file",
-    ))
-}
-
-fn run_model_classifier(codex_bin: &Path, agent: &str, tail: &str) -> io::Result<Verdict> {
-    let output_file = temp_output_file()?;
-    let prompt = watchdog::classifier_prompt(agent, tail);
-    let mut child = Command::new(codex_bin)
-        .arg("exec")
-        .arg("-m")
-        .arg("gpt-6-luna")
-        .arg("-c")
-        .arg("model_reasoning_effort=\"low\"")
-        .arg("--sandbox")
-        .arg("read-only")
-        .arg("--skip-git-repo-check")
-        .arg("-o")
-        .arg(&output_file.0)
+fn run_model_classifier(
+    gemini_bin: &Path,
+    samples: &[PaneSample],
+) -> io::Result<std::collections::HashMap<String, watchdog::StatusClassification>> {
+    let prompt = watchdog::classifier_prompt(samples);
+    let mut child = Command::new(gemini_bin)
+        .arg("--model")
+        .arg(STAGE2_MODEL_ID)
+        .arg("--prompt")
         .arg(prompt)
+        .arg("--output-format")
+        .arg("text")
+        .arg("--approval-mode")
+        .arg("default")
+        .arg("--skip-trust")
+        .current_dir(std::env::temp_dir())
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("Gemini classifier stdout was not captured"))?;
+    let reader = thread::spawn(move || {
+        let mut reply = String::new();
+        stdout.read_to_string(&mut reply).map(|()| reply)
+    });
     let status = wait_for_model(&mut child)?;
     if !status.success() {
         return Err(io::Error::other(format!(
-            "codex classifier exited with {status}"
+            "Gemini classifier exited with {status}"
         )));
     }
-    let reply = fs::read_to_string(&output_file.0)?;
-    Ok(watchdog::parse_classifier_reply(&reply))
+    let reply = reader
+        .join()
+        .map_err(|_| io::Error::other("Gemini classifier output reader panicked"))??;
+    let pane_ids = samples
+        .iter()
+        .map(|sample| sample.pane_id.clone())
+        .collect::<Vec<_>>();
+    Ok(watchdog::parse_classifier_reply(&reply, &pane_ids))
 }
 
 fn wait_for_model(child: &mut Child) -> io::Result<std::process::ExitStatus> {
@@ -467,7 +484,7 @@ fn wait_for_model(child: &mut Child) -> io::Result<std::process::ExitStatus> {
             wait_result?;
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "codex classifier exceeded 120 second timeout",
+                "Gemini classifier exceeded 120 second timeout",
             ));
         }
         thread::sleep(Duration::from_millis(100));

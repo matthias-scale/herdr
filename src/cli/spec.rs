@@ -215,9 +215,9 @@ fn day_command() -> Command {
 
 pub(super) fn watchdog_command() -> Command {
     Command::new("watchdog")
-        .about("Detect and report blocked coding agents")
+        .about("Verify coding-agent status and inspect worker progress")
         .arg(flag("once").help("Scan once, then exit"))
-        .arg(flag("dry-run").help("Print decisions without reporting blocked agents"))
+        .arg(flag("dry-run").help("Print decisions without writing status corrections"))
         .arg(
             option("interval-secs", "N")
                 .default_value("300")
@@ -228,7 +228,7 @@ pub(super) fn watchdog_command() -> Command {
             option("stall-secs", "N")
                 .default_value("600")
                 .value_parser(clap::value_parser!(u64))
-                .help("Seconds without tail changes before a working pane is stalled"),
+                .help("Seconds without pane output before a working agent is blocked"),
         )
         .arg(
             option("lines", "N")
@@ -236,18 +236,12 @@ pub(super) fn watchdog_command() -> Command {
                 .value_parser(clap::value_parser!(u32))
                 .help("Recent pane lines to read"),
         )
-        .arg(flag("no-model").help("Skip ambiguous-pane model classification"))
+        .arg(flag("no-model").help("Skip model status classification"))
         .arg(
-            option("max-model-calls", "N")
-                .default_value("5")
-                .value_parser(clap::value_parser!(usize))
-                .help("Maximum model classifications per scan"),
-        )
-        .arg(
-            option("codex-bin", "PATH")
-                .default_value("codex")
+            option("gemini-bin", "PATH")
+                .default_value("gemini")
                 .value_hint(ValueHint::FilePath)
-                .help("Codex executable used for ambiguous panes"),
+                .help("Gemini executable used for stage-two status classification"),
         )
         .arg(
             path_option("state-file", "PATH")
@@ -259,7 +253,35 @@ pub(super) fn watchdog_command() -> Command {
                 )
                 .help("Path to persistent pane-tail hash JSON"),
         )
+        .arg(path_option("status-log", "PATH").help("Append status correction evidence here"))
         .arg(json_flag().help("Print decisions and summary as JSON"))
+        .subcommand(worker_watchdog_command())
+}
+
+fn worker_watchdog_command() -> Command {
+    Command::new("workers")
+        .about("Notify parent agents about stalled Codex and Claude workers")
+        .arg(flag("once").help("Scan once, then exit"))
+        .arg(flag("dry-run").help("Print stalled workers without notifying or logging"))
+        .arg(
+            option("interval-secs", "N")
+                .default_value("900")
+                .value_parser(clap::value_parser!(u64))
+                .help("Seconds between worker scans (default: 15 minutes)"),
+        )
+        .arg(
+            option("stall-minutes", "N")
+                .default_value("30")
+                .value_parser(clap::value_parser!(u64))
+                .help("No heartbeat or trace progress for this many minutes"),
+        )
+        .arg(path_option("runs-dir", "PATH").help("Codex ra-launch run directory"))
+        .arg(
+            path_option("claude-projects-dir", "PATH").help("Claude project transcripts directory"),
+        )
+        .arg(path_option("state-file", "PATH").help("Worker notification dedupe state"))
+        .arg(path_option("log-file", "PATH").help("Append worker stall notification events"))
+        .arg(json_flag())
 }
 
 fn channel_command() -> Command {
