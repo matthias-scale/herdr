@@ -1,9 +1,36 @@
 use super::*;
 
 impl HeadlessServer {
+    fn animation_patch_preserves_full_frame(
+        client: &crate::server::clients::ClientConnection,
+        app_state: &crate::app::state::AppState,
+    ) -> bool {
+        let presentation = client.presentation_policy(app_state);
+        presentation.mode() == crate::app::Mode::Terminal
+            && !presentation.owns_input()
+            && presentation.tab_surface_visible()
+            && !app_state.hover_tooltip_visible
+            && !client.dock_presentation.hover_tooltip_visible
+            && app_state.toast.is_none()
+            && app_state.config_diagnostic.is_none()
+            && app_state.copy_feedback.is_none()
+            && app_state.popup_pane.is_none()
+    }
+
     /// Updates the visible star field in each cached app frame without laying
     /// out or drawing the rest of the client UI.
     pub(super) fn render_sidebar_animation_and_stream(&mut self) -> bool {
+        if self.clients.values().any(|client| {
+            client.is_full_app_client()
+                && client.writer.is_some()
+                && client.animation_rect.width > 0
+                && client.animation_rect.height > 0
+                && !Self::animation_patch_preserves_full_frame(client, &self.app.state)
+        }) {
+            crate::render_prof::event("animation_render.fallback_overlay");
+            return false;
+        }
+
         if self.clients.values().any(|client| {
             client.is_full_app_client()
                 && client.writer.is_some()
@@ -55,6 +82,7 @@ impl HeadlessServer {
                 crate::render_prof::event("animation_render.fallback_missing_frame");
                 return false;
             };
+            frame.graphics.clear();
             let mut frame_changed = false;
             for row in 0..rect.height {
                 for column in 0..rect.width {

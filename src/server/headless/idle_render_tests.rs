@@ -71,6 +71,37 @@ fn receive_frames(receivers: &[std::sync::mpsc::Receiver<Vec<u8>>]) -> Vec<Frame
         .collect()
 }
 
+fn assert_animation_falls_back_and_matches_full_render(
+    mut server: HeadlessServer,
+    receivers: &[std::sync::mpsc::Receiver<Vec<u8>>],
+) {
+    for client in server.clients.values_mut() {
+        client.render_state.reset_baseline();
+        client.render_terminal = None;
+    }
+    server.render_and_stream();
+    let _ = receive_frames(receivers);
+
+    let now = Instant::now() + crate::hyperspace::FRAME_INTERVAL * 2;
+    let scheduled = server.handle_scheduled_tasks_headless_with_render_kind(now, false);
+    assert!(scheduled.changed);
+    assert!(scheduled.sidebar_animation_only);
+    assert!(
+        !server.render_sidebar_animation_and_stream(),
+        "overlays must take the full-render path"
+    );
+
+    server.render_and_stream();
+    let fallback_frames = receive_frames(receivers);
+    for client in server.clients.values_mut() {
+        client.render_state.reset_baseline();
+        client.render_terminal = None;
+    }
+    server.render_and_stream();
+    let fully_rendered = receive_frames(receivers);
+    assert_eq!(fallback_frames, fully_rendered);
+}
+
 #[tokio::test]
 async fn animation_patch_matches_a_full_render_for_every_client() {
     let (mut server, receivers) = animation_server(4, 15);
@@ -86,12 +117,26 @@ async fn animation_patch_matches_a_full_render_for_every_client() {
     server.render_and_stream();
     let _ = receive_frames(&receivers);
 
+    for client in server.clients.values_mut() {
+        let mut frame = client
+            .render_state
+            .last_frame()
+            .expect("cached semantic frame")
+            .clone();
+        frame.graphics = vec![0x1b, b'_'];
+        client.render_state.restore_semantic_frame(frame);
+    }
+
     let now = Instant::now() + crate::hyperspace::FRAME_INTERVAL * 2;
     let scheduled = server.handle_scheduled_tasks_headless_with_render_kind(now, false);
     assert!(scheduled.changed);
     assert!(scheduled.sidebar_animation_only);
     assert!(server.render_sidebar_animation_and_stream());
     let patched = receive_frames(&receivers);
+    assert!(
+        patched.iter().all(|frame| frame.graphics.is_empty()),
+        "animation patch frames must not replay cached graphics"
+    );
 
     for client in server.clients.values_mut() {
         client.render_state.reset_baseline();
@@ -107,6 +152,35 @@ async fn animation_patch_matches_a_full_render_for_every_client() {
     server.render_and_stream();
     let reused_terminal = receive_frames(&receivers);
     assert_eq!(fully_rendered, reused_terminal);
+}
+
+#[tokio::test]
+async fn animation_patch_falls_back_when_settings_dims_the_background() {
+    let (mut server, receivers) = animation_server(2, 15);
+    server.app.state.set_server_mode(crate::app::Mode::Settings);
+
+    assert_animation_falls_back_and_matches_full_render(server, &receivers);
+}
+
+#[tokio::test]
+async fn animation_patch_falls_back_when_a_context_menu_covers_the_panel() {
+    let (mut server, receivers) = animation_server(2, 15);
+    let workspace_id = server.app.state.workspaces[0].id.clone();
+    let client = server.clients.get_mut(&1).expect("first app client");
+    let animation_rect = client.animation_rect;
+    client.sidebar_presentation.overlay.kind = crate::app::state::ClientOverlay::ContextMenu;
+    client.sidebar_presentation.overlay.context_menu = Some(crate::app::state::ContextMenuState {
+        kind: crate::app::state::ContextMenuKind::Workspace {
+            workspace_id,
+            ws_idx: 0,
+        },
+        x: animation_rect.x,
+        y: animation_rect.y,
+        selected: crate::app::state::ContextMenuAction::RenameWorkspace,
+    });
+    assert!(animation_rect.width > 0 && animation_rect.height > 0);
+
+    assert_animation_falls_back_and_matches_full_render(server, &receivers);
 }
 
 #[tokio::test]
