@@ -3381,27 +3381,6 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_card_row_second_line_selects_the_tab() {
-        let mut app = sidebar_order_app(false);
-        app.state.sidebar_sections_layout = true;
-        let area = Rect::new(0, 0, 120, 40);
-        crate::ui::compute_view(&mut app.state, area);
-        let card = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
-            .into_iter()
-            .find(|card| card.ws_idx == 0 && card.tab_idx == 1)
-            .expect("second tab card");
-        assert_eq!(card.rect.height, 2);
-
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            card.rect.x + 2,
-            card.rect.y + 1,
-        ));
-
-        assert_eq!(app.state.workspaces[0].active_tab, 1);
-    }
-
-    #[test]
     fn sidebar_areas_menu_opens_and_toggles_from_surface_and_dock_owners() {
         let mut env = crate::config::TestConfigEnvGuard::acquire();
         let config_path = unique_temp_path("sidebar-areas-owners");

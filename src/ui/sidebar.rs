@@ -25875,11 +25875,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let rendered = (0..area.height)
             .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
             .collect::<Vec<_>>();
-        // The blocked Claude pane is hoisted into the Needs-you strip as well;
-        // the strip row leads with `!`, the group row is the one under test.
+        // The blocked Claude pane is hoisted into the Needs-you strip above the
+        // spaces as well; the later group row is the one under test.
         let claude = rendered
             .iter()
-            .find(|row| row.contains("Approve Bash command") && !row.trim_start().starts_with('!'))
+            .rfind(|row| row.contains("Approve Bash command"))
             .expect("Claude row");
         assert!(claude.contains("cc"), "{claude:?}");
         let claude_row_without_space = claude.split(" · ").next().expect("row title and provider");
