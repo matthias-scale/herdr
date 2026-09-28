@@ -9911,8 +9911,7 @@ navigate_workspace_down = "ctrl+j"
             .map(|home| home.prompt.clone())
             .expect("home");
         app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
-            ws_idx: 0,
-            tab_idx: 0,
+            tab: app.state.sidebar_folder_tab(0, 0).expect("tab identity"),
             anchor: (7, 4),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
             folder_shelf: None,
@@ -9953,8 +9952,7 @@ navigate_workspace_down = "ctrl+j"
         app.state.notepad.focused = true;
         let note_before = app.state.notepad.body().to_string();
         app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
-            ws_idx: 0,
-            tab_idx: 0,
+            tab: app.state.sidebar_folder_tab(0, 0).expect("tab identity"),
             anchor: (7, 4),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
             folder_shelf: None,

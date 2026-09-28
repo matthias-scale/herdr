@@ -2989,6 +2989,10 @@ fn append_sections_block(
     title: &'static str,
     mut entries: Vec<AgentPanelEntry>,
     probe_expanded: bool,
+    folder_by_tab: &std::collections::HashMap<
+        (&str, usize),
+        (crate::app::sidebar_folders::SidebarShelf, &str),
+    >,
 ) {
     let collapsed = !probe_expanded && section_is_collapsed(app, title);
     rows.push(SidebarRow::SectionHeader {
@@ -3020,7 +3024,12 @@ fn append_sections_block(
         for entry in entries.drain(..) {
             if let Some(name) = entry
                 .local_target()
-                .and_then(|target| app.tab_sidebar_folder(target.ws_idx, target.tab_idx, shelf))
+                .and_then(|target| {
+                    let workspace = app.workspaces.get(target.ws_idx)?;
+                    let tab = workspace.tabs.get(target.tab_idx)?;
+                    folder_by_tab.get(&(workspace.id.as_str(), tab.number))
+                })
+                .and_then(|(folder_shelf, name)| (*folder_shelf == shelf).then_some(*name))
             {
                 if let Some(members) = members_by_folder.get_mut(name) {
                     members.push(entry);
@@ -3788,12 +3797,25 @@ fn compact_sidebar_rows_inner(
             rows.extend(needs_you);
             rows.push(SidebarRow::Divider);
         }
+        let folder_by_tab = app
+            .sidebar_folders
+            .iter()
+            .flat_map(|folder| {
+                folder.members.iter().map(move |member| {
+                    (
+                        (member.workspace_id.as_str(), member.tab_number),
+                        (folder.shelf, folder.name.as_str()),
+                    )
+                })
+            })
+            .collect::<std::collections::HashMap<_, _>>();
         append_sections_block(
             app,
             &mut rows,
             PINNED_SECTION_TITLE,
             pinned_entries,
             probe_expanded,
+            &folder_by_tab,
         );
         active_entries.extend(remote_active);
         append_sections_block(
@@ -3802,6 +3824,7 @@ fn compact_sidebar_rows_inner(
             ACTIVE_SECTION_TITLE,
             active_entries,
             probe_expanded,
+            &folder_by_tab,
         );
         snoozed_entries.extend(remote_snoozed);
         append_sections_block(
@@ -3810,6 +3833,7 @@ fn compact_sidebar_rows_inner(
             SNOOZED_SECTION_TITLE,
             snoozed_entries,
             probe_expanded,
+            &folder_by_tab,
         );
         settled_entries.extend(remote_settled);
         append_sections_block(
@@ -3818,6 +3842,7 @@ fn compact_sidebar_rows_inner(
             SETTLED_SECTION_TITLE,
             settled_entries,
             probe_expanded,
+            &folder_by_tab,
         );
         append_ordered_sidebar_blocks(
             app,
@@ -12493,14 +12518,18 @@ pub(crate) fn sidebar_subgroup_picker_choices(app: &AppState) -> Vec<SidebarSubg
                 .map(|(_, name)| SidebarSubgroupChoice::ExistingFolder(name.to_string())),
         );
         if app
-            .tab_sidebar_folder(picker.ws_idx, picker.tab_idx, shelf)
+            .sidebar_folder_tab_indices(&picker.tab)
+            .and_then(|(ws_idx, tab_idx)| app.tab_sidebar_folder(ws_idx, tab_idx, shelf))
             .is_some()
         {
             choices.push(SidebarSubgroupChoice::NoFolder);
         }
         return choices;
     }
-    let suggestions = sidebar_subgroup_suggestions(app, picker.ws_idx, picker.tab_idx);
+    let Some((ws_idx, tab_idx)) = app.sidebar_folder_tab_indices(&picker.tab) else {
+        return Vec::new();
+    };
+    let suggestions = sidebar_subgroup_suggestions(app, ws_idx, tab_idx);
     let matches = picker.filter.matches(&suggestions);
     let query = picker.filter.query.trim();
     let mut choices = Vec::new();
@@ -29047,6 +29076,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(pinned_header < pinned_tab && pinned_tab < active_header);
 
         app.workspaces[0].tabs[0].pinned = false;
+        app.reconcile_sidebar_folder_memberships();
         let active_rows = sidebar_rows(&app);
         let active_header = active_rows
             .iter()
@@ -29673,7 +29703,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
 
         app.workspaces[0].tabs[0].pinned = false;
-        app.remove_tab_sidebar_folder_if_shelf_changed(0, 0);
         let active_rows = sidebar_rows(&app);
         assert!(active_rows.iter().any(|row| {
             matches!(row, SidebarRow::Tab { entry, depth: 0 }

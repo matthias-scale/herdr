@@ -763,8 +763,7 @@ mod tests {
             .map(|home| home.prompt.clone())
             .expect("home");
         app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
-            ws_idx: 0,
-            tab_idx: 0,
+            tab: app.state.sidebar_folder_tab(0, 0).expect("tab identity"),
             anchor: (7, 4),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
             folder_shelf: None,
@@ -819,8 +818,7 @@ mod tests {
         assert!(pane_input.try_recv().is_err());
 
         app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
-            ws_idx: 0,
-            tab_idx: 0,
+            tab: app.state.sidebar_folder_tab(0, 0).expect("tab identity"),
             anchor: (7, 4),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
             folder_shelf: None,

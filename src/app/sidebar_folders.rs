@@ -81,7 +81,7 @@ pub(crate) enum SidebarFolderPrompt {
 
 /// A tab by stable identity, so a prompt that stays open across tab churn
 /// never files the wrong tab.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct SidebarFolderTab {
     pub(crate) workspace_id: String,
     pub(crate) tab_number: usize,
@@ -228,79 +228,52 @@ impl AppState {
         true
     }
 
-    /// Drop a tab's membership after a shelf transition or before closing it.
-    pub(crate) fn remove_tab_sidebar_folder(&mut self, ws_idx: usize, tab_idx: usize) {
-        let Some(tab) = self.sidebar_folder_tab(ws_idx, tab_idx) else {
-            return;
-        };
-        for entry in &mut self.sidebar_folders {
-            let before = entry.members.len();
-            entry.members.retain(|member| member != &tab);
-            self.sidebar_folders_persistence_request |= entry.members.len() != before;
-        }
-    }
-
-    pub(crate) fn remove_tab_sidebar_folder_if_shelf_changed(
-        &mut self,
-        ws_idx: usize,
-        tab_idx: usize,
-    ) {
-        let Some(tab) = self.sidebar_folder_tab(ws_idx, tab_idx) else {
-            return;
-        };
-        let Some(folder) = self
-            .sidebar_folders
-            .iter()
-            .find(|entry| entry.members.contains(&tab))
-        else {
-            return;
-        };
-        if crate::ui::sidebar::sections_tab_shelf(self, ws_idx, tab_idx) != Some(folder.shelf) {
-            self.remove_tab_sidebar_folder(ws_idx, tab_idx);
-        }
-    }
-
-    pub(crate) fn remove_pane_sidebar_folder_if_shelf_changed(
-        &mut self,
-        ws_idx: usize,
-        pane_id: crate::layout::PaneId,
-    ) {
-        let tab_idx = self.workspaces.get(ws_idx).and_then(|workspace| {
-            workspace
-                .tabs
-                .iter()
-                .position(|tab| tab.panes.contains_key(&pane_id))
-        });
-        if let Some(tab_idx) = tab_idx {
-            self.remove_tab_sidebar_folder_if_shelf_changed(ws_idx, tab_idx);
-        }
-    }
-
-    pub(crate) fn prune_closed_sidebar_folder_tabs(&mut self) {
+    /// Reconcile after state changes, before persistence and presentation. A
+    /// shelf departure is permanent even if the tab later returns.
+    pub(crate) fn reconcile_sidebar_folder_memberships(&mut self) -> bool {
         if self
             .sidebar_folders
             .iter()
             .all(|folder| folder.members.is_empty())
         {
-            return;
+            return false;
         }
-        let live: std::collections::HashSet<(String, usize)> = self
-            .workspaces
-            .iter()
-            .flat_map(|workspace| {
-                workspace
-                    .tabs
-                    .iter()
-                    .map(move |tab| (workspace.id.clone(), tab.number))
+        let sections_layout = self.sidebar_sections_layout;
+        let shelves = crate::ui::sidebar::sections_tab_shelves(self);
+        let current_shelves: std::collections::HashMap<SidebarFolderTab, SidebarShelf> = shelves
+            .into_iter()
+            .filter_map(|((ws_idx, tab_idx), shelf)| {
+                self.sidebar_folder_tab(ws_idx, tab_idx)
+                    .map(|tab| (tab, shelf))
             })
             .collect();
+        let live_tabs: std::collections::HashSet<SidebarFolderTab> = if sections_layout {
+            std::collections::HashSet::new()
+        } else {
+            self.workspaces
+                .iter()
+                .flat_map(|workspace| {
+                    workspace.tabs.iter().map(|tab| SidebarFolderTab {
+                        workspace_id: workspace.id.clone(),
+                        tab_number: tab.number,
+                    })
+                })
+                .collect()
+        };
+        let mut changed = false;
         for entry in &mut self.sidebar_folders {
             let before = entry.members.len();
-            entry
-                .members
-                .retain(|member| live.contains(&(member.workspace_id.clone(), member.tab_number)));
-            self.sidebar_folders_persistence_request |= entry.members.len() != before;
+            entry.members.retain(|member| {
+                if sections_layout {
+                    current_shelves.get(member) == Some(&entry.shelf)
+                } else {
+                    live_tabs.contains(member)
+                }
+            });
+            changed |= entry.members.len() != before;
         }
+        self.sidebar_folders_persistence_request |= changed;
+        changed
     }
 
     pub(crate) fn toggle_sidebar_folder_collapsed(&mut self, name: &str) -> bool {
@@ -328,6 +301,9 @@ impl AppState {
         tab_idx: usize,
         shelf: SidebarShelf,
     ) -> Option<&str> {
+        if crate::ui::sidebar::sections_tab_shelf(self, ws_idx, tab_idx) != Some(shelf) {
+            return None;
+        }
         let workspace = self.workspaces.get(ws_idx)?;
         let tab_number = workspace.tabs.get(tab_idx)?.number;
         self.sidebar_folders
@@ -429,14 +405,9 @@ impl AppState {
         tab_idx: usize,
         anchor: (u16, u16),
     ) -> bool {
-        if self
-            .workspaces
-            .get(ws_idx)
-            .and_then(|workspace| workspace.tabs.get(tab_idx))
-            .is_none()
-        {
+        let Some(tab) = self.sidebar_folder_tab(ws_idx, tab_idx) else {
             return false;
-        }
+        };
         let folder_shelf = if self.sidebar_sections_layout {
             let Some(shelf) = crate::ui::sidebar::sections_tab_shelf(self, ws_idx, tab_idx) else {
                 return false;
@@ -446,8 +417,7 @@ impl AppState {
             None
         };
         self.sidebar_subgroup_picker = Some(super::state::SidebarSubgroupPickerState {
-            ws_idx,
-            tab_idx,
+            tab,
             anchor,
             filter: crate::ui::dropdown::DropdownFilterState::default(),
             folder_shelf,
@@ -646,7 +616,7 @@ mod tests {
             .expect("folder");
         assert!(app.set_tab_sidebar_folder(0, 0, Some("Review")));
         app.workspaces[0].tabs[0].pinned = false;
-        app.remove_tab_sidebar_folder_if_shelf_changed(0, 0);
+        app.reconcile_sidebar_folder_memberships();
         app.workspaces[0].tabs[0].pinned = true;
         assert_eq!(app.tab_sidebar_folder(0, 0, SidebarShelf::Pinned), None);
         assert!(app
@@ -702,7 +672,7 @@ mod tests {
         app.create_sidebar_folder(shelf, "Plans").expect("folder");
         assert!(app.set_tab_sidebar_folder(0, 0, Some("Plans")));
         app.workspaces.clear();
-        app.prune_closed_sidebar_folder_tabs();
+        app.reconcile_sidebar_folder_memberships();
         let saved = app
             .take_sidebar_folders_persistence_request()
             .expect("save");
@@ -724,6 +694,79 @@ mod tests {
             Some("Plans")
         );
         assert_eq!(app.tab_sidebar_folder(0, 1, SidebarShelf::Active), None);
+    }
+
+    #[test]
+    fn picker_resolves_original_tab_after_reorder_and_ignores_closed_tab() {
+        let mut app = app_with_workspace();
+        let second = app.workspaces[0].test_add_tab(Some("second"));
+        app.create_sidebar_folder(SidebarShelf::Active, "Plans")
+            .expect("folder");
+        assert!(app.open_sidebar_folder_picker(0, second, (5, 6)));
+        let original = app
+            .sidebar_subgroup_picker
+            .as_ref()
+            .expect("picker")
+            .tab
+            .clone();
+        assert!(app.workspaces[0].move_tab(second, 0));
+        app.accept_sidebar_subgroup_picker(1);
+        assert_eq!(app.sidebar_folder_tab_indices(&original), Some((0, 0)));
+        assert_eq!(
+            app.sidebar_folder("Plans").expect("folder").members,
+            vec![original.clone()]
+        );
+
+        assert!(app.open_sidebar_folder_picker(0, 0, (5, 6)));
+        assert!(app.workspaces[0].close_tab(0));
+        app.accept_sidebar_subgroup_picker(1);
+        app.reconcile_sidebar_folder_memberships();
+        assert!(app
+            .sidebar_folder("Plans")
+            .expect("folder")
+            .members
+            .is_empty());
+    }
+
+    #[test]
+    fn timed_settle_then_activity_does_not_restore_folder() {
+        let mut app = app_with_workspace();
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        app.create_sidebar_folder(SidebarShelf::Active, "Now")
+            .expect("folder");
+        assert!(app.set_tab_sidebar_folder(0, 0, Some("Now")));
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane)
+            .expect("pane")
+            .settled_at = Some(1_725_000_000);
+        assert_eq!(app.tab_sidebar_folder(0, 0, SidebarShelf::Active), None);
+        assert!(app.reconcile_sidebar_folder_memberships());
+        assert!(app.note_pane_activity_at(pane, std::time::Instant::now()));
+        assert!(app
+            .sidebar_folder("Now")
+            .expect("folder")
+            .members
+            .is_empty());
+    }
+
+    #[test]
+    fn settled_folder_does_not_rejoin_after_work_and_resettle() {
+        let mut app = app_with_workspace();
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        assert!(app.settle_pane_at(0, pane, 1_725_000_000));
+        app.create_sidebar_folder(SidebarShelf::Settled, "Done")
+            .expect("folder");
+        assert!(app.set_tab_sidebar_folder(0, 0, Some("Done")));
+        assert!(app.note_pane_activity_at(pane, std::time::Instant::now()));
+        assert!(app.reconcile_sidebar_folder_memberships());
+        assert!(app.settle_pane_at(0, pane, 1_725_000_100));
+        assert_eq!(app.tab_sidebar_folder(0, 0, SidebarShelf::Settled), None);
+        assert!(app
+            .sidebar_folder("Done")
+            .expect("folder")
+            .members
+            .is_empty());
     }
 
     #[test]

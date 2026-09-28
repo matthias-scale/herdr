@@ -444,10 +444,11 @@ impl AppState {
         let Some(choice) = choices.get(index).cloned() else {
             return;
         };
+        let Some((ws_idx, tab_idx)) = self.sidebar_folder_tab_indices(&picker.tab) else {
+            return;
+        };
         if let Some(shelf) = picker.folder_shelf {
-            if crate::ui::sidebar::sections_tab_shelf(self, picker.ws_idx, picker.tab_idx)
-                != Some(shelf)
-            {
+            if crate::ui::sidebar::sections_tab_shelf(self, ws_idx, tab_idx) != Some(shelf) {
                 return;
             }
         }
@@ -459,23 +460,25 @@ impl AppState {
             ) => {
                 if let Some(tab) = self
                     .workspaces
-                    .get_mut(picker.ws_idx)
-                    .and_then(|workspace| workspace.tabs.get_mut(picker.tab_idx))
+                    .get_mut(ws_idx)
+                    .and_then(|workspace| workspace.tabs.get_mut(tab_idx))
                 {
                     tab.set_subgroup(Some(name));
                     self.mark_session_dirty();
                 }
             }
             (Some(shelf), crate::ui::SidebarSubgroupChoice::NewFolder) => {
-                let tab = self.sidebar_folder_tab(picker.ws_idx, picker.tab_idx);
                 self.open_sidebar_folder_prompt(
-                    crate::app::sidebar_folders::SidebarFolderPrompt::Create { shelf, tab },
+                    crate::app::sidebar_folders::SidebarFolderPrompt::Create {
+                        shelf,
+                        tab: Some(picker.tab),
+                    },
                 );
             }
             (Some(shelf), crate::ui::SidebarSubgroupChoice::CreateFolder(name)) => {
                 match self.create_sidebar_folder(shelf, &name) {
                     Ok(name) => {
-                        self.set_tab_sidebar_folder(picker.ws_idx, picker.tab_idx, Some(&name));
+                        self.set_tab_sidebar_folder(ws_idx, tab_idx, Some(&name));
                     }
                     Err(error) => self.show_sidebar_folder_error(error),
                 }
@@ -485,11 +488,11 @@ impl AppState {
                     .sidebar_folder(&name)
                     .is_some_and(|folder| folder.shelf == shelf)
                 {
-                    self.set_tab_sidebar_folder(picker.ws_idx, picker.tab_idx, Some(&name));
+                    self.set_tab_sidebar_folder(ws_idx, tab_idx, Some(&name));
                 }
             }
             (Some(_), crate::ui::SidebarSubgroupChoice::NoFolder) => {
-                self.set_tab_sidebar_folder(picker.ws_idx, picker.tab_idx, None);
+                self.set_tab_sidebar_folder(ws_idx, tab_idx, None);
             }
             _ => {}
         }
@@ -4358,8 +4361,7 @@ mod tests {
     fn subgroup_picker_creates_a_name_then_offers_it_to_the_next_window() {
         let mut app = sidebar_sort_mouse_app();
         app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
-            ws_idx: 0,
-            tab_idx: 0,
+            tab: app.state.sidebar_folder_tab(0, 0).expect("tab identity"),
             anchor: (5, 5),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
             folder_shelf: None,
@@ -4391,8 +4393,7 @@ mod tests {
 
         // The next window's picker offers the name the group already has.
         app.state.sidebar_subgroup_picker = Some(crate::app::state::SidebarSubgroupPickerState {
-            ws_idx: 0,
-            tab_idx: 1,
+            tab: app.state.sidebar_folder_tab(0, 1).expect("tab identity"),
             anchor: (5, 5),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
             folder_shelf: None,

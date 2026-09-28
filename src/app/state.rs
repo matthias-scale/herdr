@@ -1989,8 +1989,7 @@ pub(crate) struct SidebarSortMenuState {
 /// attach-local sidebar presentation state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SidebarSubgroupPickerState {
-    pub(crate) ws_idx: usize,
-    pub(crate) tab_idx: usize,
+    pub(crate) tab: crate::app::sidebar_folders::SidebarFolderTab,
     /// Cell the dropdown hangs from: the context menu item the operator chose.
     pub(crate) anchor: (u16, u16),
     pub(crate) filter: crate::ui::dropdown::DropdownFilterState,
@@ -8781,8 +8780,10 @@ mod tests {
         let mut first_client = SidebarPresentationState::default();
         let mut second_client = SidebarPresentationState::default();
         app.sidebar_subgroup_picker = Some(SidebarSubgroupPickerState {
-            ws_idx: 0,
-            tab_idx: 0,
+            tab: crate::app::sidebar_folders::SidebarFolderTab {
+                workspace_id: "missing".to_string(),
+                tab_number: 0,
+            },
             anchor: (7, 4),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
             folder_shelf: None,

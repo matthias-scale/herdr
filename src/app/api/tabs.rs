@@ -247,8 +247,6 @@ impl App {
         tab.pinned = pinned;
         self.schedule_session_save();
         if changed {
-            self.state
-                .remove_tab_sidebar_folder_if_shelf_changed(ws_idx, tab_idx);
             self.state.mark_sidebar_projection_changed();
         }
         tab_info_response(id, &params.tab_id, self.tab_info(ws_idx, tab_idx))
@@ -380,7 +378,6 @@ impl App {
                 format!("tab {} could not be closed", target.tab_id),
             );
         }
-        self.state.prune_closed_sidebar_folder_tabs();
         self.state.remove_plugin_pane_records(pane_ids);
         self.state.remove_unattached_terminal_ids(terminal_ids);
         self.shutdown_detached_terminal_runtimes();

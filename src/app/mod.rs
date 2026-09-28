@@ -2218,6 +2218,9 @@ impl App {
             if self.pane_graphics.retain_live_panes(&self.state) {
                 needs_render = true;
             }
+            if needs_render {
+                self.state.reconcile_sidebar_folder_memberships();
+            }
 
             let now = Instant::now();
             self.render_dirty
@@ -9612,8 +9615,7 @@ last_pane = "prefix+tab"
         app.state.notepad.focused = true;
         let note_before = app.state.notepad.body().to_string();
         app.state.sidebar_subgroup_picker = Some(state::SidebarSubgroupPickerState {
-            ws_idx: 0,
-            tab_idx: 0,
+            tab: app.state.sidebar_folder_tab(0, 0).expect("tab identity"),
             anchor: (7, 4),
             filter: crate::ui::dropdown::DropdownFilterState::default(),
             folder_shelf: None,
@@ -9660,8 +9662,7 @@ last_pane = "prefix+tab"
             app.state.selected = 0;
             app.state.set_server_mode(Mode::Terminal);
             app.state.sidebar_subgroup_picker = Some(state::SidebarSubgroupPickerState {
-                ws_idx: 0,
-                tab_idx: 0,
+                tab: app.state.sidebar_folder_tab(0, 0).expect("tab identity"),
                 anchor: (7, 4),
                 filter: crate::ui::dropdown::DropdownFilterState::default(),
                 folder_shelf: None,

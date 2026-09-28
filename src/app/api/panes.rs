@@ -5086,6 +5086,51 @@ mod tests {
     }
 
     #[test]
+    fn moving_last_pane_prunes_source_folder_membership() {
+        let mut app = app_with_linked_worktree();
+        app.state.sidebar_sections_layout = true;
+        let source = app.state.workspaces[0].tabs[0].root_pane;
+        let source_identity = app.state.sidebar_folder_tab(0, 0).expect("source tab");
+        let target_tab = app.state.workspaces[0].test_add_tab(Some("target"));
+        let target = app.state.workspaces[0].tabs[target_tab].root_pane;
+        seed_terminal_states(&mut app);
+        app.state
+            .create_sidebar_folder(crate::app::sidebar_folders::SidebarShelf::Active, "Plans")
+            .expect("folder");
+        app.state.sidebar_folders[0]
+            .members
+            .push(source_identity.clone());
+        let source_public = app.public_pane_id(0, source).expect("source pane");
+        let target_tab_public = app.public_tab_id(0, target_tab).expect("target tab");
+        let target_public = app.public_pane_id(0, target).expect("target pane");
+        let response = app.handle_pane_move(
+            "req".into(),
+            PaneMoveParams {
+                pane_id: source_public,
+                destination: PaneMoveDestination::Tab {
+                    tab_id: target_tab_public,
+                    target_pane_id: Some(target_public),
+                    split: SplitDirection::Right,
+                    ratio: None,
+                },
+                focus: true,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).expect("response");
+        assert!(
+            matches!(success.result, ResponseResult::PaneMove { move_result } if move_result.changed)
+        );
+        assert_eq!(app.state.sidebar_folder_tab_indices(&source_identity), None);
+        assert!(app.state.reconcile_sidebar_folder_memberships());
+        assert!(app
+            .state
+            .sidebar_folder("Plans")
+            .expect("folder")
+            .members
+            .is_empty());
+    }
+
+    #[test]
     fn api_pane_move_focus_preserves_shared_mode() {
         let mut app = app_with_linked_worktree();
         app.state.set_server_mode(Mode::Settings);

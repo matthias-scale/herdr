@@ -1907,7 +1907,6 @@ impl AppState {
         for idx in close_indices.iter().rev() {
             self.workspaces.remove(*idx);
         }
-        self.prune_closed_sidebar_folder_tabs();
         self.remove_unattached_terminal_ids(terminal_ids);
         if self.workspaces.is_empty() {
             self.active = None;
@@ -2415,7 +2414,6 @@ impl AppState {
             let closing_tab_id =
                 public_tab_id_for_index(ws, ws.active_tab).unwrap_or_else(|| workspace_id.clone());
             ws.close_active_tab();
-            self.prune_closed_sidebar_folder_tabs();
             self.remove_plugin_pane_records(pane_ids);
             self.remove_unattached_terminal_ids(terminal_ids);
             crate::logging::tab_closed(&workspace_id, &closing_tab_id);
@@ -4494,7 +4492,6 @@ impl AppState {
             let ws = &mut self.workspaces[ws_idx];
             ws.remove_pane(pane_id)
         };
-        self.prune_closed_sidebar_folder_tabs();
         self.mark_session_dirty();
 
         if should_close_workspace {
@@ -4504,7 +4501,6 @@ impl AppState {
                 .map(|ws| ws.id.clone());
             let selected_workspace_id = self.workspaces.get(self.selected).map(|ws| ws.id.clone());
             self.workspaces.remove(ws_idx);
-            self.prune_closed_sidebar_folder_tabs();
             self.remove_unattached_terminal_ids(workspace_terminal_ids);
             if self.workspaces.is_empty() {
                 self.active = None;

@@ -1064,12 +1064,22 @@ pub(super) fn apply_context_menu_action(
             ContextMenuKind::Tab {
                 ws_idx, tab_idx, ..
             },
-            Some(
-                crate::app::state::REMOVE_FROM_SUBGROUP_ITEM
-                | crate::app::state::REMOVE_FROM_FOLDER_ITEM,
-            ),
+            Some(crate::app::state::REMOVE_FROM_SUBGROUP_ITEM),
         ) => {
             state.clear_tab_subgroup(ws_idx, tab_idx);
+            state.set_server_mode(if state.active.is_some() {
+                Mode::Terminal
+            } else {
+                Mode::Navigate
+            });
+        }
+        (
+            ContextMenuKind::Tab {
+                ws_idx, tab_idx, ..
+            },
+            Some(crate::app::state::REMOVE_FROM_FOLDER_ITEM),
+        ) => {
+            state.set_tab_sidebar_folder(ws_idx, tab_idx, None);
             state.set_server_mode(if state.active.is_some() {
                 Mode::Terminal
             } else {
@@ -1876,12 +1886,18 @@ impl App {
                 ContextMenuKind::Tab {
                     ws_idx, tab_idx, ..
                 },
-                Some(
-                    crate::app::state::REMOVE_FROM_SUBGROUP_ITEM
-                    | crate::app::state::REMOVE_FROM_FOLDER_ITEM,
-                ),
+                Some(crate::app::state::REMOVE_FROM_SUBGROUP_ITEM),
             ) => {
                 self.state.clear_tab_subgroup(ws_idx, tab_idx);
+                self.state.close_client_overlay();
+            }
+            (
+                ContextMenuKind::Tab {
+                    ws_idx, tab_idx, ..
+                },
+                Some(crate::app::state::REMOVE_FROM_FOLDER_ITEM),
+            ) => {
+                self.state.set_tab_sidebar_folder(ws_idx, tab_idx, None);
                 self.state.close_client_overlay();
             }
             (
@@ -3606,7 +3622,10 @@ mod tests {
             .sidebar_subgroup_picker
             .as_ref()
             .expect("the subgroup picker opens");
-        assert_eq!((picker.ws_idx, picker.tab_idx), (0, 0));
+        assert_eq!(
+            picker.tab,
+            app.state.sidebar_folder_tab(0, 0).expect("tab identity")
+        );
         assert_eq!(picker.anchor, (7, 4));
     }
 
@@ -3634,6 +3653,54 @@ mod tests {
         app.apply_context_menu_action_via_api(menu, ContextMenuAction::RemoveFromSubgroup);
 
         assert_eq!(app.state.workspaces[0].tabs[0].subgroup(), None);
+    }
+
+    #[test]
+    fn remove_from_folder_dispatchers_keep_default_subgroup() {
+        for via_api in [false, true] {
+            let mut app = app_with_test_workspaces(&["main"]);
+            app.state.sidebar_sections_layout = true;
+            app.state.workspaces[0].tabs[0].set_subgroup(Some("Layout".to_string()));
+            app.state
+                .create_sidebar_folder(crate::app::sidebar_folders::SidebarShelf::Active, "Plans")
+                .expect("folder");
+            assert!(app.state.set_tab_sidebar_folder(0, 0, Some("Plans")));
+            let (workspace_id, tab_id) = context_tab_ids(&app.state, 0, 0);
+            let menu = ContextMenuState {
+                kind: ContextMenuKind::Tab {
+                    workspace_id,
+                    tab_id,
+                    ws_idx: 0,
+                    tab_idx: 0,
+                    starred: false,
+                    has_subgroup: true,
+                    folder_menu: true,
+                    settle_pane_id: None,
+                    snooze_target: None,
+                },
+                x: 0,
+                y: 0,
+                selected: ContextMenuAction::RemoveFromFolder,
+            };
+            if via_api {
+                app.apply_context_menu_action_via_api(menu, ContextMenuAction::RemoveFromFolder);
+            } else {
+                let mut runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+                apply_context_menu_action(
+                    &mut app.state,
+                    &mut runtimes,
+                    menu,
+                    ContextMenuAction::RemoveFromFolder,
+                );
+            }
+            assert!(app
+                .state
+                .sidebar_folder("Plans")
+                .expect("folder")
+                .members
+                .is_empty());
+            assert_eq!(app.state.workspaces[0].tabs[0].subgroup(), Some("Layout"));
+        }
     }
 
     #[test]

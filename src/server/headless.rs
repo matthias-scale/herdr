@@ -950,6 +950,9 @@ impl HeadlessServer {
                 needs_render = true;
                 needs_graphics_render = true;
             }
+            if needs_full_render {
+                self.app.state.reconcile_sidebar_folder_memberships();
+            }
 
             self.drain_client_config_reload_request();
             self.sync_immediate_pty_sources();
@@ -4663,6 +4666,7 @@ impl HeadlessServer {
         {
             crate::client::presentation::save_sidebar_group_collapsed(&key, collapsed);
         }
+        self.app.state.reconcile_sidebar_folder_memberships();
         if let Some(folders) = self.app.state.take_sidebar_folders_persistence_request() {
             crate::client::presentation::save_sidebar_folders(&folders);
         }

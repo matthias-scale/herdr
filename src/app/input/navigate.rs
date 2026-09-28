@@ -6565,7 +6565,10 @@ resize_pane_left = "prefix+shift+left"
             .sidebar_subgroup_picker
             .as_ref()
             .expect("folder picker opened");
-        assert_eq!((picker.ws_idx, picker.tab_idx), (0, 0));
+        assert_eq!(
+            picker.tab,
+            state.sidebar_folder_tab(0, 0).expect("tab identity")
+        );
         assert!(picker.folder_shelf.is_some());
         assert!(state.sidebar_focused);
     }
