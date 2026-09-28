@@ -2093,93 +2093,115 @@ fn cycle_visible_workspaces(state: &AppState) -> std::collections::HashSet<usize
         .collect()
 }
 
-/// Order `prefix+n` / `prefix+p` walk local tabs and, when enabled, fleet agents.
+/// Local tabs the sidebar shows while skip-collapsed is on.
+fn cycle_shown_local_tabs(
+    state: &AppState,
+    rows: &[crate::ui::SidebarRow],
+    visible_workspaces: &std::collections::HashSet<usize>,
+) -> std::collections::HashSet<(usize, usize)> {
+    let mut shown = rows
+        .iter()
+        .filter_map(|row| match row {
+            crate::ui::SidebarRow::Tab { entry, .. } => entry.local_target(),
+            _ => None,
+        })
+        .filter(|target| {
+            !state.workspaces[target.ws_idx].is_fleet && visible_workspaces.contains(&target.ws_idx)
+        })
+        .map(|target| (target.ws_idx, target.tab_idx))
+        .collect::<std::collections::HashSet<_>>();
+    // Agent tabs own rows, taken above. Agentless tabs show only through a
+    // plain space row, so they follow the space row that holds them: object,
+    // worktree and work-item group headers hide theirs.
+    if state.sidebar_sections_layout {
+        return shown;
+    }
+    let agent_tabs = crate::ui::sidebar_thread_entries(state)
+        .into_iter()
+        .filter(|entry| entry.has_agent)
+        .filter_map(|entry| entry.local_target())
+        .map(|target| (target.ws_idx, target.tab_idx))
+        .collect::<std::collections::HashSet<_>>();
+    let mut spaces = std::collections::HashSet::new();
+    for row in rows {
+        let crate::ui::SidebarRow::Workspace {
+            ws_idx,
+            count: None,
+            ..
+        } = row
+        else {
+            continue;
+        };
+        spaces.insert(*ws_idx);
+        if state.sidebar_group_mode != crate::app::state::SidebarGroupMode::Spaces {
+            spaces.extend(crate::ui::sidebar::sidebar_space_member_indices(
+                state, *ws_idx,
+            ));
+        }
+    }
+    for (ws_idx, workspace) in state.workspaces.iter().enumerate() {
+        if !spaces.contains(&ws_idx) || !visible_workspaces.contains(&ws_idx) {
+            continue;
+        }
+        shown.extend(
+            (0..workspace.tabs.len())
+                .filter(|tab_idx| !agent_tabs.contains(&(ws_idx, *tab_idx)))
+                .map(|tab_idx| (ws_idx, tab_idx)),
+        );
+    }
+    shown
+}
+
+/// Local spaces in sidebar order; spaces the list does not name follow in
+/// index order.
+fn cycle_space_order(state: &AppState) -> Vec<usize> {
+    let mut seen = std::collections::HashSet::new();
+    crate::ui::sidebar::workspace_list_entries_for_mode(state, true, state.sidebar_group_mode)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            crate::ui::sidebar::WorkspaceListEntry::Workspace { ws_idx, .. } => Some(ws_idx),
+            _ => None,
+        })
+        .chain(0..state.workspaces.len())
+        .filter(|ws_idx| !state.workspaces[*ws_idx].is_fleet && seen.insert(*ws_idx))
+        .collect()
+}
+
+/// Order `prefix+n` / `prefix+p` walk: every tab of one space before the
+/// next space, then fleet agents when enabled.
 fn window_navigation_order(state: &AppState) -> Vec<WindowCycleTarget> {
     let include_fleet =
         state.window_cycle_mode == crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
-    let mut seen = std::collections::HashSet::new();
-    let mut order = Vec::new();
     let rows = crate::ui::sidebar_rows(state);
-    let visible_workspaces = cycle_visible_workspaces(state);
-    for row in &rows {
-        let target = match row {
-            crate::ui::SidebarRow::Tab { entry, .. } => entry.local_target().and_then(|target| {
-                (!state.workspaces[target.ws_idx].is_fleet
-                    && (!state.skip_collapsed_cycle || visible_workspaces.contains(&target.ws_idx)))
-                .then_some(WindowCycleTarget::Local {
-                    ws_idx: target.ws_idx,
-                    tab_idx: target.tab_idx,
-                })
-            }),
-            crate::ui::SidebarRow::RemoteAgent { entry, .. } if include_fleet => {
-                Some(WindowCycleTarget::Remote(entry.agent_ref.clone()))
-            }
-            _ => None,
-        };
-        if let Some(target) = target.filter(|target| seen.insert(target.clone())) {
-            order.push(target);
-        }
-    }
-    // Skip-collapsed keeps a tab only while the sidebar shows it. Agent tabs
-    // own rows, taken above. Agentless tabs show only through a plain space
-    // row, so they follow the space row that holds them: object, worktree and
-    // work-item group headers hide theirs.
-    if state.skip_collapsed_cycle && !state.sidebar_sections_layout {
-        let agent_tabs = crate::ui::sidebar_thread_entries(state)
-            .into_iter()
-            .filter(|entry| entry.has_agent)
-            .filter_map(|entry| entry.local_target())
-            .map(|target| (target.ws_idx, target.tab_idx))
-            .collect::<std::collections::HashSet<_>>();
-        let mut shown = std::collections::HashSet::new();
-        for row in &rows {
-            let crate::ui::SidebarRow::Workspace {
-                ws_idx,
-                count: None,
-                ..
-            } = row
-            else {
-                continue;
-            };
-            shown.insert(*ws_idx);
-            if state.sidebar_group_mode != crate::app::state::SidebarGroupMode::Spaces {
-                shown.extend(crate::ui::sidebar::sidebar_space_member_indices(
-                    state, *ws_idx,
-                ));
-            }
-        }
-        for (ws_idx, workspace) in state.workspaces.iter().enumerate() {
-            if !shown.contains(&ws_idx) || !visible_workspaces.contains(&ws_idx) {
-                continue;
-            }
-            for tab_idx in (0..workspace.tabs.len())
-                .filter(|tab_idx| !agent_tabs.contains(&(ws_idx, *tab_idx)))
+    let shown = state
+        .skip_collapsed_cycle
+        .then(|| cycle_shown_local_tabs(state, &rows, &cycle_visible_workspaces(state)));
+    let mut order = Vec::new();
+    for ws_idx in cycle_space_order(state) {
+        for tab_idx in 0..state.workspaces[ws_idx].tabs.len() {
+            if shown
+                .as_ref()
+                .is_none_or(|shown| shown.contains(&(ws_idx, tab_idx)))
             {
-                let target = WindowCycleTarget::Local { ws_idx, tab_idx };
-                if seen.insert(target.clone()) {
-                    order.push(target);
-                }
+                order.push(WindowCycleTarget::Local { ws_idx, tab_idx });
             }
         }
     }
-    if !state.skip_collapsed_cycle {
-        for (ws_idx, workspace) in state.workspaces.iter().enumerate() {
-            if workspace.is_fleet {
-                continue;
-            }
-            for tab_idx in 0..workspace.tabs.len() {
-                let target = WindowCycleTarget::Local { ws_idx, tab_idx };
-                if seen.insert(target.clone()) {
-                    order.push(target);
-                }
-            }
-        }
-        if include_fleet {
-            for entry in &state.remote_agent_panel_entries {
-                let target = WindowCycleTarget::Remote(entry.agent_ref.clone());
-                if seen.insert(target.clone()) {
-                    order.push(target);
-                }
+    if include_fleet {
+        let mut seen = std::collections::HashSet::new();
+        let visible = rows.iter().filter_map(|row| match row {
+            crate::ui::SidebarRow::RemoteAgent { entry, .. } => Some(entry.agent_ref.clone()),
+            _ => None,
+        });
+        // Collapsed fleet rows still cycle unless skip-collapsed is on.
+        let hidden = state
+            .remote_agent_panel_entries
+            .iter()
+            .filter(|_| !state.skip_collapsed_cycle)
+            .map(|entry| entry.agent_ref.clone());
+        for agent_ref in visible.chain(hidden) {
+            if seen.insert(agent_ref.clone()) {
+                order.push(WindowCycleTarget::Remote(agent_ref));
             }
         }
     }
@@ -4414,6 +4436,43 @@ mod tests {
                         "{mode:?} sections={sections}: tab {ws_idx}:{tab_idx} is cycled without a shown row"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn next_window_finishes_each_space_before_the_next() {
+        use crate::app::state::SidebarGroupMode;
+        for mode in [
+            SidebarGroupMode::Repo,
+            SidebarGroupMode::RepoWorktree,
+            SidebarGroupMode::Spaces,
+            SidebarGroupMode::RepoPr,
+        ] {
+            let mut app = app_with_global_window_fixture();
+            // Agents in some tabs only: agent rows must not jump the queue.
+            for terminal in app.state.terminals.values_mut() {
+                terminal.set_detected_state(
+                    Some(crate::detect::Agent::Claude),
+                    crate::detect::AgentState::Blocked,
+                );
+            }
+            if let Some(terminal) = app.state.terminals.values_mut().next() {
+                terminal.set_detected_state(None, crate::detect::AgentState::Idle);
+            }
+            app.state.set_sidebar_group_mode(mode);
+            let order = window_cycle_order(&app.state);
+            let spaces = order.iter().map(|(ws_idx, _)| *ws_idx).collect::<Vec<_>>();
+            assert_eq!(spaces.len(), 4, "{mode:?}");
+            let mut sorted = spaces.clone();
+            sorted.dedup();
+            assert_eq!(sorted.len(), 2, "{mode:?}: spaces interleave in {order:?}");
+            for (ws_idx, tabs) in [(sorted[0], &order[..2]), (sorted[1], &order[2..])] {
+                assert_eq!(
+                    tabs,
+                    &[(ws_idx, 0), (ws_idx, 1)],
+                    "{mode:?}: tabs out of order in {order:?}"
+                );
             }
         }
     }

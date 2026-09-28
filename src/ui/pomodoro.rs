@@ -408,8 +408,9 @@ pub(crate) fn window_cycle_mode_hit_area(app: &AppState, sidebar: Rect) -> Rect 
     if notification.width == 0 {
         return Rect::default();
     }
+    // The cycle icon trails the left footer icons, after refresh.
     Rect::new(
-        notification.x.saturating_sub(CYCLE_MODE_WIDTH),
+        sidebar.x + FOOTER_ICON_COLUMNS,
         notification.y,
         CYCLE_MODE_WIDTH,
         notification.height,
@@ -437,9 +438,8 @@ pub(crate) fn sidebar_areas_hit_area(app: &AppState, sidebar: Rect) -> Rect {
     } else {
         sidebar.x + content_width - NOTIFICATION_WIDTH
     };
-    let cycle = notification.saturating_sub(CYCLE_MODE_WIDTH);
     Rect::new(
-        cycle.saturating_sub(SIDEBAR_AREAS_WIDTH),
+        notification.saturating_sub(SIDEBAR_AREAS_WIDTH),
         sidebar.bottom().saturating_sub(1),
         SIDEBAR_AREAS_WIDTH,
         1,
@@ -1115,14 +1115,14 @@ mod tests {
     }
 
     #[test]
-    fn fleet_workspace_ac6_cycle_icon_fits_left_of_notification_bell() {
+    fn fleet_workspace_ac6_cycle_icon_trails_left_footer_icons() {
         let app = state();
         let narrow = Rect::new(0, 0, 18, 20);
         assert_eq!(pomodoro_hit_area(&app, narrow), Rect::default());
         assert_eq!(notification_hit_area(&app, narrow), Rect::new(15, 19, 2, 1));
         assert_eq!(
             window_cycle_mode_hit_area(&app, narrow),
-            Rect::new(14, 19, 1, 1)
+            Rect::new(13, 19, 1, 1)
         );
 
         let almost_wide = Rect::new(0, 0, 24, 20);
@@ -1133,7 +1133,7 @@ mod tests {
         );
         assert_eq!(
             window_cycle_mode_hit_area(&app, almost_wide),
-            Rect::new(20, 19, 1, 1)
+            Rect::new(13, 19, 1, 1)
         );
 
         // The one-column cycle icon leaves the countdown room at 26 columns.
@@ -1149,7 +1149,7 @@ mod tests {
         assert_eq!(bell, Rect::new(15, 19, 2, 1));
         assert_eq!(
             window_cycle_mode_hit_area(&app, wide),
-            Rect::new(14, 19, 1, 1)
+            Rect::new(13, 19, 1, 1)
         );
         assert_eq!(timer, Rect::new(17, 19, 9, 1));
         assert_eq!(bell.right(), timer.x);
