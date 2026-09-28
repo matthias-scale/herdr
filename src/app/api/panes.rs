@@ -9678,7 +9678,8 @@ mod tests {
             AgentState::Working
         );
         let owner = app.pane_info(1, owner_internal_id).unwrap();
-        assert_eq!(owner.agent_status, crate::api::schema::AgentStatus::Idle);
+        // The owner pane is not active, so a completed report reads Done, same as a direct report.
+        assert_eq!(owner.agent_status, crate::api::schema::AgentStatus::Done);
         assert_eq!(
             owner.tokens.get("closing_completion").map(String::as_str),
             Some("complete")
@@ -9848,7 +9849,8 @@ mod tests {
             Some(&path_ref)
         );
         let owner = app.pane_info(1, owner_internal_id).unwrap();
-        assert_eq!(owner.agent_status, crate::api::schema::AgentStatus::Idle);
+        // The owner pane is not active, so a completed report reads Done, same as a direct report.
+        assert_eq!(owner.agent_status, crate::api::schema::AgentStatus::Done);
         assert_eq!(
             owner.tokens.get("closing_completion").map(String::as_str),
             Some("complete")
@@ -9894,7 +9896,8 @@ mod tests {
             .as_ref()
             .is_some_and(|authority| authority.session_ref.is_none()));
         let owner = app.pane_info(1, owner_internal_id).unwrap();
-        assert_eq!(owner.agent_status, crate::api::schema::AgentStatus::Idle);
+        // The owner pane is not active, so a completed report reads Done, same as a direct report.
+        assert_eq!(owner.agent_status, crate::api::schema::AgentStatus::Done);
         assert_eq!(
             owner.tokens.get("closing_completion").map(String::as_str),
             Some("complete")
