@@ -492,9 +492,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # "sections" shows Pinned, Active, Snoozed, and Settled thread shelves.
 # [ui.sidebar]
 # layout = "current"
-# Header decoration for the sections layout. "plain" keeps the controls and
-# their positions but removes the theme-aware half-block night sky.
-# header = "sky"
+# Header decoration for the sections layout. "sky" adds a theme-aware
+# half-block night sky above the controls.
+# header = "plain"
 
 # Optional sections-layout areas. All are shown by default; the current layout
 # ignores these settings.
@@ -1259,7 +1259,7 @@ mod tests {
     #[test]
     fn default_config_exposes_sidebar_section_options() {
         assert!(DEFAULT_CONFIG.contains("# layout = \"current\""));
-        assert!(DEFAULT_CONFIG.contains("# header = \"sky\""));
+        assert!(DEFAULT_CONFIG.contains("# header = \"plain\""));
         assert!(DEFAULT_CONFIG.contains("Pinned, Active, Snoozed, and Settled"));
     }
 

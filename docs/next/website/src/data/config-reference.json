@@ -1546,8 +1546,8 @@
         {
           "key": "ui.sidebar.header",
           "type": "enum",
-          "default": "sky",
-          "description": "Header style for the sections layout. `plain` removes the sky band and wordmark while keeping search and sidebar action controls available in the compact header.",
+          "default": "plain",
+          "description": "Header style for the sections layout. `plain` keeps search and sidebar action controls in a compact header; `sky` adds the sky band and wordmark.",
           "values": [
             "sky",
             "plain"
