@@ -45,7 +45,6 @@ const SCALABLE_DARK: &str = "\u{F6007}";
 const HERDR: &str = "\u{F6003}";
 const INBOX: &str = "\u{F6004}";
 const OPENCODE: &str = "\u{F6005}";
-pub(crate) const GITHUB: &str = "\u{F6006}";
 const SHELL: &str = "\u{EA85}"; // cod-terminal
 const ROBOT: &str = "\u{F06A9}"; // md-robot
 const HAMMER_WRENCH: &str = "\u{F1323}"; // md-hammer_wrench
@@ -151,17 +150,7 @@ pub(crate) fn space_icon<'a>(
     label: &str,
     overrides: &'a BTreeMap<String, String>,
 ) -> &'a str {
-    resolved_space_icon(repo_binding, repo_root, label, overrides).0
-}
-
-pub(crate) fn space_badge_icon<'a>(
-    repo_binding: Option<&str>,
-    repo_root: Option<&Path>,
-    label: &str,
-    overrides: &'a BTreeMap<String, String>,
-) -> Option<&'a str> {
-    let (icon, is_specific) = resolved_space_icon(repo_binding, repo_root, label, overrides);
-    is_specific.then_some(icon)
+    resolved_space_icon(repo_binding, repo_root, label, overrides)
 }
 
 fn resolved_space_icon<'a>(
@@ -169,7 +158,7 @@ fn resolved_space_icon<'a>(
     repo_root: Option<&Path>,
     label: &str,
     overrides: &'a BTreeMap<String, String>,
-) -> (&'a str, bool) {
+) -> &'a str {
     let binding = repo_binding
         .map(str::trim)
         .filter(|value| !value.is_empty());
@@ -184,13 +173,13 @@ fn resolved_space_icon<'a>(
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(candidate))
         {
-            return (icon, true);
+            return icon;
         }
     }
 
     match repo_name {
-        Some(name) => builtin_repo_icon(name).map_or((REPO, false), |icon| (icon, true)),
-        None => builtin_label_icon(label).map_or((SHELL, false), |icon| (icon, true)),
+        Some(name) => builtin_repo_icon(name).unwrap_or(REPO),
+        None => builtin_label_icon(label).unwrap_or(SHELL),
     }
 }
 
@@ -328,12 +317,8 @@ mod tests {
             "♧"
         );
         assert_eq!(
-            space_badge_icon(Some("owner/herdr"), None, "Herdr", &built_in_override,),
-            Some("♧")
-        );
-        assert_eq!(
-            space_badge_icon(Some("owner/unknown"), None, "Unknown", &overrides),
-            None
+            space_icon(Some("owner/unknown"), None, "Unknown", &overrides),
+            REPO
         );
     }
 

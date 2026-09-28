@@ -3278,7 +3278,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_card_row_second_line_selects_the_tab() {
+    fn sidebar_single_line_card_selects_the_tab() {
         let mut app = sidebar_order_app(false);
         app.state.sidebar_sections_layout = true;
         let area = Rect::new(0, 0, 120, 40);
@@ -3287,12 +3287,12 @@ mod tests {
             .into_iter()
             .find(|card| card.ws_idx == 0 && card.tab_idx == 1)
             .expect("second tab card");
-        assert_eq!(card.rect.height, 2);
+        assert_eq!(card.rect.height, 1);
 
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             card.rect.x + 2,
-            card.rect.y + 1,
+            card.rect.y,
         ));
 
         assert_eq!(app.state.workspaces[0].active_tab, 1);

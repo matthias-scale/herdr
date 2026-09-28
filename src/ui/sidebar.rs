@@ -25923,11 +25923,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let rendered = (0..area.height)
             .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
             .collect::<Vec<_>>();
-        // The blocked Claude pane is hoisted into the Needs-you strip as well;
-        // the strip row leads with `!`, the group row is the one under test.
+        // The blocked Claude pane is hoisted into the Needs-you strip as well.
+        // Check its later tab row, not the strip copy.
         let claude = rendered
             .iter()
-            .find(|row| row.contains("Approve Bash command") && !row.trim_start().starts_with('!'))
+            .filter(|row| row.contains("Approve Bash command"))
+            .last()
             .expect("Claude row");
         assert!(claude.contains("cc"), "{claude:?}");
         let claude_row_without_space = claude.split(" · ").next().expect("row title and provider");
@@ -27264,7 +27265,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn section_cards_have_no_local_or_remote_lifecycle_hover_targets() {
+    fn section_rows_expose_local_controls_but_no_remote_lifecycle_controls() {
         let mut app = app_with_agents(&["local"]);
         app.sidebar_sections_layout = true;
         app.sidebar_work_filter.machine_scope = crate::app::state::SidebarMachineScope::AllMachines;
@@ -27314,16 +27315,24 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .next()
             .expect("remote section card area");
         let targets = compute_sidebar_hover_targets(&app, area);
-        for (kind, y) in [("local", local.rect.y), ("remote", remote.rect.y)] {
-            assert!(targets.iter().any(|target| target.rect.y == y));
+        assert_eq!(local.rect.height, 1);
+        assert_eq!(remote.rect.height, 1);
+        for expected in ["Pin", "Set time", "Settle"] {
             assert!(
-                targets
-                    .iter()
-                    .filter(|target| target.rect.y == y)
-                    .all(|target| target.action.is_none()),
-                "{kind} section card exposed a lifecycle target: {targets:?}"
+                targets.iter().any(|target| target.rect.y == local.rect.y
+                    && target.label == expected
+                    && target.action.is_some()),
+                "missing local {expected} control: {targets:?}"
             );
         }
+        assert!(targets.iter().any(|target| target.rect.y == remote.rect.y));
+        assert!(
+            targets
+                .iter()
+                .filter(|target| target.rect.y == remote.rect.y)
+                .all(|target| target.action.is_none()),
+            "remote section row exposed a lifecycle target: {targets:?}"
+        );
     }
 
     #[test]
