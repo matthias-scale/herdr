@@ -125,14 +125,6 @@ pub(crate) fn agent_icon_for_name(name: &str) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn shell_label(nerd_font: bool) -> &'static str {
-    if nerd_font {
-        SHELL
-    } else {
-        ">_"
-    }
-}
-
 pub(crate) fn machine_icon<'a>(
     host: &str,
     override_icon: Option<&'a str>,
@@ -374,7 +366,6 @@ mod tests {
         assert_eq!(agent_label(Agent::Codex, false), Some("cx"));
         assert_eq!(agent_label(Agent::Pi, false), Some("pi"));
         assert_eq!(agent_label(Agent::Kimi, false), Some("ki"));
-        assert_eq!(shell_label(false), ">_");
         assert_eq!(usage_label(QuotaProvider::Claude, false), "CC");
         assert_eq!(usage_label(QuotaProvider::Codex, false), "CX");
         assert_eq!(usage_label(QuotaProvider::Kimi, false), "KI");
