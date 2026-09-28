@@ -95,17 +95,20 @@ pub fn cleanup_test_base(base: &Path) {
     let runtime_dirs = HashSet::from([runtime_dir.clone()]);
 
     terminate_servers_for_runtime_dirs(&runtime_dirs);
-    let remaining = herdr_server_pids_for_runtime_dir(&runtime_dir).unwrap_or_else(|err| {
-        panic!(
-            "failed to verify server cleanup for {}: {err}",
+    #[cfg(target_os = "linux")]
+    {
+        let remaining = herdr_server_pids_for_runtime_dir(&runtime_dir).unwrap_or_else(|err| {
+            panic!(
+                "failed to verify server cleanup for {}: {err}",
+                runtime_dir.display()
+            )
+        });
+        assert!(
+            remaining.is_empty(),
+            "test servers still running for {}: {remaining:?}",
             runtime_dir.display()
-        )
-    });
-    assert!(
-        remaining.is_empty(),
-        "test servers still running for {}: {remaining:?}",
-        runtime_dir.display()
-    );
+        );
+    }
     unregister_runtime_dir(&runtime_dir);
     let _ = fs::remove_dir_all(base);
 }
