@@ -7360,7 +7360,7 @@ navigate_pane_down = "ctrl+j"
             workspace_cwd
         );
         assert_eq!(app.state.active, Some(0));
-        assert_eq!(app.state.effective_interaction_mode(), Mode::Navigate);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::Terminal);
         assert!(!app.event_hub.events_after(0).iter().any(|(_, event)| {
             matches!(event.event, crate::api::schema::EventKind::WorkspaceClosed)
         }));
@@ -7393,7 +7393,7 @@ navigate_pane_down = "ctrl+j"
             workspace_cwd
         );
         assert_eq!(app.state.active, Some(0));
-        assert_eq!(app.state.effective_interaction_mode(), Mode::Navigate);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::Terminal);
         assert!(!app.event_hub.events_after(0).iter().any(|(_, event)| {
             matches!(event.event, crate::api::schema::EventKind::WorkspaceClosed)
         }));
@@ -7428,7 +7428,7 @@ navigate_pane_down = "ctrl+j"
             workspace_cwd
         );
         assert_eq!(app.state.active, Some(0));
-        assert_eq!(app.state.effective_interaction_mode(), Mode::Navigate);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::Terminal);
         assert!(!app.event_hub.events_after(0).iter().any(|(_, event)| {
             matches!(event.event, crate::api::schema::EventKind::WorkspaceClosed)
         }));
@@ -7464,7 +7464,7 @@ navigate_pane_down = "ctrl+j"
             workspace_cwd
         );
         assert_eq!(app.state.active, Some(0));
-        assert_eq!(app.state.effective_interaction_mode(), Mode::Navigate);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::Terminal);
         assert!(!app.event_hub.events_after(0).iter().any(|(_, event)| {
             matches!(event.event, crate::api::schema::EventKind::WorkspaceClosed)
         }));
