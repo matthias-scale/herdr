@@ -2990,8 +2990,8 @@ fn append_sections_block(
     mut entries: Vec<AgentPanelEntry>,
     probe_expanded: bool,
     folder_by_tab: &std::collections::HashMap<
-        (&str, usize),
-        (crate::app::sidebar_folders::SidebarShelf, &str),
+        (&str, usize, crate::app::sidebar_folders::SidebarShelf),
+        &str,
     >,
 ) {
     let collapsed = !probe_expanded && section_is_collapsed(app, title);
@@ -3022,15 +3022,13 @@ fn append_sections_block(
             .collect::<std::collections::HashMap<_, Vec<AgentPanelEntry>>>();
         let mut loose = Vec::new();
         for entry in entries.drain(..) {
-            if let Some(name) = entry
-                .local_target()
-                .and_then(|target| {
-                    let workspace = app.workspaces.get(target.ws_idx)?;
-                    let tab = workspace.tabs.get(target.tab_idx)?;
-                    folder_by_tab.get(&(workspace.id.as_str(), tab.number))
-                })
-                .and_then(|(folder_shelf, name)| (*folder_shelf == shelf).then_some(*name))
-            {
+            if let Some(name) = entry.local_target().and_then(|target| {
+                let workspace = app.workspaces.get(target.ws_idx)?;
+                let tab = workspace.tabs.get(target.tab_idx)?;
+                folder_by_tab
+                    .get(&(workspace.id.as_str(), tab.number, shelf))
+                    .copied()
+            }) {
                 if let Some(members) = members_by_folder.get_mut(name) {
                     members.push(entry);
                     continue;
@@ -3866,8 +3864,12 @@ fn compact_sidebar_rows_inner(
             .flat_map(|folder| {
                 folder.members.iter().map(move |member| {
                     (
-                        (member.workspace_id.as_str(), member.tab_number),
-                        (folder.shelf, folder.name.as_str()),
+                        (
+                            member.workspace_id.as_str(),
+                            member.tab_number,
+                            folder.shelf,
+                        ),
+                        folder.name.as_str(),
                     )
                 })
             })
@@ -29850,6 +29852,42 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             rows.get(folder_idx + 1),
             Some(SidebarRow::Tab { depth: 1, .. })
         ));
+        let snoozed_before = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: SNOOZED_SECTION_TITLE,
+                        ..
+                    }
+                )
+            })
+            .expect("snoozed shelf");
+        assert!(rows[snoozed_before + 1..].iter().any(|row| matches!(row,
+            SidebarRow::Tab { depth: 0, entry } if entry.local_target().is_some_and(|target|
+                target.ws_idx == 0 && target.tab_idx == 0)
+        )));
+
+        app.create_sidebar_folder(SidebarShelf::Snoozed, "Later")
+            .expect("snoozed folder");
+        assert!(app.set_tab_sidebar_folder_for_shelf(0, 0, SidebarShelf::Snoozed, Some("Later")));
+        let rows = sidebar_rows(&app);
+        for name in ["Now", "Later"] {
+            let idx = rows
+                .iter()
+                .position(|row| {
+                    matches!(row,
+                        SidebarRow::Folder { name: folder, count: 1, .. } if folder == name
+                    )
+                })
+                .unwrap_or_else(|| panic!("{name} folder holds the split tab"));
+            assert!(matches!(
+                rows.get(idx + 1),
+                Some(SidebarRow::Tab { depth: 1, entry }) if entry.local_target().is_some_and(|target|
+                    target.ws_idx == 0 && target.tab_idx == 0)
+            ));
+        }
         let snoozed_idx = rows
             .iter()
             .position(|row| {
@@ -29862,7 +29900,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 )
             })
             .expect("snoozed shelf");
-        assert!(rows[snoozed_idx + 1..].iter().any(|row| matches!(row,
+        assert!(!rows[snoozed_idx + 1..].iter().any(|row| matches!(row,
             SidebarRow::Tab { depth: 0, entry } if entry.local_target().is_some_and(|target|
                 target.ws_idx == 0 && target.tab_idx == 0)
         )));
