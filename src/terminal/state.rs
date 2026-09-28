@@ -4672,6 +4672,11 @@ impl TerminalState {
         self.live_full_lifecycle_hook_authority()
     }
 
+    #[cfg(test)]
+    pub(crate) fn blocked_state_hold_active_for_test(&self) -> bool {
+        self.blocked_state_hold.is_some()
+    }
+
     pub fn hook_authority_output_retirement_eligible(&self) -> bool {
         self.hook_authority.as_ref().is_some_and(|authority| {
             authority.retired_at.is_none()

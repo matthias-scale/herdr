@@ -6734,20 +6734,26 @@ enabled = true
         app.state.set_server_mode(Mode::Terminal);
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_detected_state(
-            Some(crate::detect::Agent::Codex),
+            Some(crate::detect::Agent::Pi),
             crate::detect::AgentState::Idle,
         );
-        terminal.set_hook_authority(
-            "herdr:codex-closing-block".into(),
-            "codex".into(),
+        let session_ref =
+            crate::agent_resume::AgentSessionRef::id("pi-mouse-input").expect("Pi session ref");
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:pi".into(),
+            agent: "pi".into(),
+            session_ref: session_ref.clone(),
+        });
+        terminal.set_hook_authority_at(
+            "herdr:pi".into(),
+            "pi".into(),
             crate::detect::AgentState::Blocked,
             None,
+            Some(session_ref),
             Some(1),
+            std::time::Instant::now(),
         );
-        assert_eq!(
-            terminal.raw_agent_state(),
-            crate::detect::AgentState::Blocked
-        );
+        assert!(terminal.blocked_state_hold_active_for_test());
         assert!(terminal.full_lifecycle_hook_authority_active());
         (app, terminal_id, rx)
     }
