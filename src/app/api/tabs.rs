@@ -420,7 +420,8 @@ impl App {
         if replacement_created {
             let new_tab_idx = 0;
             if was_active_workspace {
-                self.state.switch_workspace_tab(ws_idx, new_tab_idx);
+                self.state
+                    .switch_workspace_tab_preserving_workspace_selection(ws_idx, new_tab_idx);
                 self.focus_client_on_pane();
             }
             self.emit_tab_created_events(ws_idx, new_tab_idx);

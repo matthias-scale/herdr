@@ -7418,6 +7418,7 @@ navigate_pane_down = "ctrl+j"
         assert_eq!(app.state.workspaces[0].identity_cwd, workspace_cwd);
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
         assert_ne!(app.state.workspaces[0].tabs[0].root_pane, old_root);
+        assert_eq!(app.state.selected, 1);
         let replacement_terminal = app
             .state
             .terminal_id_for_pane(0, app.state.workspaces[0].tabs[0].root_pane)
@@ -7452,6 +7453,7 @@ navigate_pane_down = "ctrl+j"
         assert_eq!(app.state.workspaces[0].identity_cwd, workspace_cwd);
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
         assert_ne!(app.state.workspaces[0].tabs[0].root_pane, pane_id);
+        assert_eq!(app.state.selected, 1);
         assert!(app.state.workspaces[0].pane_state(pane_id).is_none());
         let replacement_terminal = app
             .state

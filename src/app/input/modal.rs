@@ -3388,7 +3388,7 @@ mod tests {
         app.apply_context_menu_action_via_api(menu, ContextMenuAction::CloseTab);
 
         assert_eq!(app.state.workspaces.len(), 2);
-        assert_eq!(app.state.selected, 1);
+        assert_eq!(app.state.selected, 0);
         assert_ne!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
         assert!(!app.event_hub.events_after(0).iter().any(|(_, event)| {

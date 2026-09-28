@@ -1342,6 +1342,18 @@ impl AppState {
         true
     }
 
+    /// Focus a tab without moving the independent workspace row selection.
+    pub(crate) fn switch_workspace_tab_preserving_workspace_selection(
+        &mut self,
+        ws_idx: usize,
+        tab_idx: usize,
+    ) -> bool {
+        let selected = self.selected;
+        let switched = self.switch_workspace_tab(ws_idx, tab_idx);
+        self.selected = selected;
+        switched
+    }
+
     pub(crate) fn ensure_workspace_visible(&mut self, idx: usize) {
         if idx >= self.workspaces.len() {
             return;
