@@ -2066,10 +2066,6 @@ enum WindowCycleTarget {
 }
 
 fn cycle_visible_workspaces(state: &AppState) -> std::collections::HashSet<usize> {
-    // A collapsed Spaces section hides every local tab row, not just grouped ones.
-    if crate::ui::sidebar::section_is_collapsed(state, crate::ui::sidebar::SPACES_SECTION_TITLE) {
-        return std::collections::HashSet::new();
-    }
     // A space is hidden only when a collapsed group drops it from the list;
     // spaces a mode never lists (worktree members, work-item modes) stay.
     let listed = |force_expanded| {
@@ -2104,15 +2100,14 @@ fn cycle_shown_local_tabs(
     let mut shown = rows
         .iter()
         .filter_map(|row| match row {
-            crate::ui::SidebarRow::Tab { entry, .. } => entry.local_target(),
+            crate::ui::SidebarRow::Tab { entry, .. }
+            | crate::ui::SidebarRow::Agent { entry, .. } => entry.local_target(),
             _ => None,
         })
-        .filter(|target| {
-            !state.workspaces[target.ws_idx].is_fleet && visible_workspaces.contains(&target.ws_idx)
-        })
+        .filter(|target| !state.workspaces[target.ws_idx].is_fleet)
         .map(|target| (target.ws_idx, target.tab_idx))
         .collect::<std::collections::HashSet<_>>();
-    // Agent tabs own rows, taken above. Agentless tabs show only through a
+    // Agent tabs own rows in any section, taken above. Agentless tabs show only through a
     // plain space row, so they follow the space row that holds them: object,
     // worktree and work-item group headers hide theirs.
     if state.sidebar_sections_layout {
@@ -2294,7 +2289,6 @@ fn blocked_pane_cycle_in_order(
         })
         .map(|target| (target.ws_idx, target.pane_id))
         .collect::<std::collections::HashSet<_>>();
-    let visible_workspaces = cycle_visible_workspaces(state);
     let visible_remote = rows
         .iter()
         .filter_map(|row| match row {
@@ -2352,8 +2346,7 @@ fn blocked_pane_cycle_in_order(
             crate::ui::SidebarRow::NeedsYou { target, .. } if include_needs_you => match target {
                 crate::ui::NeedsYouTarget::Local(entry_target) => {
                     if state.skip_collapsed_cycle
-                        && (!visible_local.contains(&(entry_target.ws_idx, entry_target.pane_id))
-                            || !visible_workspaces.contains(&entry_target.ws_idx))
+                        && !visible_local.contains(&(entry_target.ws_idx, entry_target.pane_id))
                     {
                         continue;
                     }
@@ -2398,7 +2391,6 @@ fn blocked_pane_cycle_in_order(
                         BlockedPaneTarget::Local { ws_idx, tab_idx, pane_id }
                             if (ws_idx, tab_idx)
                                 == (entry_target.ws_idx, entry_target.tab_idx)
-                                && visible_workspaces.contains(&ws_idx)
                                 && visible_local.contains(&(ws_idx, pane_id))
                     );
                     if same_tab {
@@ -2418,7 +2410,6 @@ fn blocked_pane_cycle_in_order(
                         BlockedPaneTarget::Local { ws_idx, pane_id, .. }
                             if (*ws_idx, *pane_id)
                                 == (entry_target.ws_idx, entry_target.pane_id)
-                                && visible_workspaces.contains(ws_idx)
                     )
                 }) {
                     panes.push(local.remove(index));
@@ -4179,16 +4170,28 @@ mod tests {
                 BlockedPaneTarget::Local { ws_idx: 2, pane_id, .. } if *pane_id == blocked_pane
             )));
         app.state.skip_collapsed_cycle = true;
+        // The group fold hides members from the space list; the sidebar may
+        // still list their agents, and the cycles follow the sidebar.
+        let shown = crate::ui::sidebar_rows(&app.state).into_iter().any(|row| {
+            matches!(
+                row,
+                crate::ui::SidebarRow::Tab { entry, .. } | crate::ui::SidebarRow::Agent { entry, .. }
+                    if entry.local_target().is_some_and(|t| (t.ws_idx, t.tab_idx) == (2, 0))
+            )
+        });
         let order = window_cycle_order(&app.state);
-        assert!(!order.contains(&(2, 0)));
+        assert_eq!(order.contains(&(2, 0)), shown, "{order:?}");
         assert!(order.contains(&(0, 0)));
         assert!(order.contains(&(1, 0)), "visible window targets: {order:?}");
-        assert!(!blocked_pane_cycle(&app.state)
-            .iter()
-            .any(|(target, _)| matches!(
-                target,
-                BlockedPaneTarget::Local { ws_idx: 2, pane_id, .. } if *pane_id == blocked_pane
-            )));
+        assert_eq!(
+            blocked_pane_cycle(&app.state)
+                .iter()
+                .any(|(target, _)| matches!(
+                    target,
+                    BlockedPaneTarget::Local { ws_idx: 2, pane_id, .. } if *pane_id == blocked_pane
+                )),
+            shown
+        );
     }
 
     #[test]
@@ -4280,16 +4283,6 @@ mod tests {
             .into_iter()
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(cycled, shown);
-        app.state.collapsed_sidebar_groups.insert(format!(
-            "sections:{}",
-            crate::ui::sidebar::SPACES_SECTION_TITLE
-        ));
-        if crate::ui::sidebar::section_is_collapsed(
-            &app.state,
-            crate::ui::sidebar::SPACES_SECTION_TITLE,
-        ) {
-            assert!(window_navigation_order(&app.state).is_empty());
-        }
 
         app.state.skip_collapsed_cycle = false;
         assert!(!window_navigation_order(&app.state).is_empty());
@@ -4455,6 +4448,24 @@ mod tests {
                 }
                 let rows = crate::ui::sidebar_rows(&app.state);
                 let order = window_navigation_order(&app.state);
+                // Every tab the sidebar still shows keeps its place.
+                for row in &rows {
+                    let (crate::ui::SidebarRow::Tab { entry, .. }
+                    | crate::ui::SidebarRow::Agent { entry, .. }) = row
+                    else {
+                        continue;
+                    };
+                    let Some(t) = entry.local_target() else {
+                        continue;
+                    };
+                    assert!(
+                        order.contains(&WindowCycleTarget::Local {
+                            ws_idx: t.ws_idx,
+                            tab_idx: t.tab_idx
+                        }),
+                        "{mode:?} sections={sections}: shown tab {t:?} skipped"
+                    );
+                }
                 for target in &order {
                     assert!(expanded.contains(target), "{mode:?} sections={sections}");
                     let WindowCycleTarget::Local { ws_idx, tab_idx } = *target else {
@@ -4596,6 +4607,62 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn fleet_workspace_ac9_skip_collapsed_keeps_snoozed_tabs_shown_elsewhere() {
+        let spaces = crate::ui::sidebar::SPACES_SECTION_TITLE;
+        let snoozed = crate::ui::sidebar::SNOOZED_SECTION_TITLE;
+        for sections in [false, true] {
+            let mut app = app_with_global_window_fixture();
+            for terminal in app.state.terminals.values_mut() {
+                terminal.set_detected_state(
+                    Some(crate::detect::Agent::Claude),
+                    crate::detect::AgentState::Idle,
+                );
+            }
+            app.state.sidebar_sections_layout = sections;
+            let pane_id = crate::ui::sidebar_thread_entries(&app.state)
+                .into_iter()
+                .filter_map(|entry| entry.local_target())
+                .find(|target| (target.ws_idx, target.tab_idx) == (0, 0))
+                .expect("agent row for tab 0:0")
+                .pane_id;
+            assert!(app.state.snooze_pane_at(0, pane_id, u64::MAX / 2));
+            let namespace = if sections {
+                "sections".to_string()
+            } else {
+                app.state
+                    .sidebar_group_mode
+                    .collapse_namespace()
+                    .to_string()
+            };
+            for (title, collapsed) in [(spaces, true), (snoozed, false)] {
+                let key = format!("{namespace}:{title}");
+                if crate::ui::sidebar::section_is_collapsed(&app.state, title) != collapsed {
+                    if !app.state.collapsed_sidebar_groups.remove(&key) {
+                        app.state.collapsed_sidebar_groups.insert(key);
+                    }
+                }
+            }
+            app.state.skip_collapsed_cycle = true;
+            let shown = crate::ui::sidebar_rows(&app.state).into_iter().any(|row| {
+                matches!(
+                    row,
+                    crate::ui::SidebarRow::Tab { entry, .. } | crate::ui::SidebarRow::Agent { entry, .. }
+                        if entry.local_target().is_some_and(|t| (t.ws_idx, t.tab_idx) == (0, 0))
+                )
+            });
+            assert_eq!(
+                window_cycle_order(&app.state).contains(&(0, 0)),
+                shown,
+                "sections={sections}: snoozed tab cycle membership must follow its row"
+            );
+            assert!(
+                shown,
+                "sections={sections}: fixture should show the snoozed tab"
+            );
         }
     }
 
