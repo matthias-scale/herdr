@@ -17,5 +17,6 @@
 4. Move a tab into a folder and back out with the tab menu, then repeat with the `move_tab_to_folder` keybinding. The picker offers **No folder** for a filed tab.
 5. Rename a folder and confirm its tabs follow the new name. Delete it and confirm those tabs return loose to their shelf.
 6. Restart Herdr and confirm folder names, shelf placement, order, membership, and collapsed state persist.
-7. Unpin a filed tab and settle a filed tab; each should appear loose in its new shelf.
-8. Set `ui.nerd_font = false`; confirm folder rows use `F` and each shelf still shows `+ Folder` (or `+` when narrow).
+7. Unpin a filed tab and settle a filed tab; each should appear loose in its new shelf. Pin the first again and wake the second; each returns to its folder. Close a filed tab; it leaves its folder for good.
+8. Split a tab and snooze one pane, so the tab shows in Active and Snoozed. File each row into a folder on its own shelf; both folders show it, and moving or removing one leaves the other.
+9. Set `ui.nerd_font = false`; confirm folder rows use `F` and each shelf still shows `+ Folder` (or `+` when narrow).
