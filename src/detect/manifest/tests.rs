@@ -2087,6 +2087,11 @@ fn codex_v0158_question_and_confirmation_snapshots_are_blocked() {
             "live_strong_blocker",
         ),
         (
+            "wrapped approval footer",
+            include_str!("../../../tests/fixtures/agent-detection/codex-approval-wrapped-footer-20260928.txt"),
+            "live_strong_blocker",
+        ),
+        (
             "MCP elicitation approval",
             include_str!("../../../tests/fixtures/agent-detection/codex-mcp-elicitation-approval-20260928.txt"),
             "mcp_server_elicitation",

@@ -223,6 +223,7 @@ region = "after_last_prompt_marker"
 visible_blocker = true
 any = [
   { contains = ["press enter to confirm or esc to cancel"] },
+  { regex = ['(?i)press enter to confirm or esc to\s+cancel'] },
   { contains = ["press enter to confirm or esc to go back"] },
   { contains = ["enter to submit answer"] },
   { contains = ["enter to submit all"] },
