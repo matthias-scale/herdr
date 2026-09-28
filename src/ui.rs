@@ -388,6 +388,9 @@ fn compute_view_internal_at(
         if sidebar::sidebar_areas_menu_layout(app, area).is_none() {
             app.sidebar_areas_menu_selected = None;
         }
+        if sidebar::window_cycle_mode_menu_layout(app, area).is_none() {
+            app.window_cycle_menu_open = false;
+        }
         return;
     }
 
@@ -678,6 +681,7 @@ fn compute_view_internal_at(
     };
     let pomodoro_hit_area = pomodoro::pomodoro_hit_area(app, sidebar_area);
     let notification_hit_area = pomodoro::notification_hit_area(app, sidebar_area);
+    let window_cycle_mode_hit_area = pomodoro::window_cycle_mode_hit_area(app, sidebar_area);
     let sidebar_areas_hit_area = pomodoro::sidebar_areas_hit_area(app, sidebar_area);
     let hyperspace_rect = sidebar::sidebar_animation_rect(app, sidebar_area);
     let hyperspace_pause_hit_area = hyperspace::pause_hit_area(app, hyperspace_rect);
@@ -854,6 +858,7 @@ fn compute_view_internal_at(
         notepad_usage_max_scroll,
         pomodoro_hit_area,
         notification_hit_area,
+        window_cycle_mode_hit_area,
         sidebar_areas_hit_area,
         hyperspace_rect,
         hyperspace_pause_hit_area,
@@ -903,6 +908,7 @@ fn compute_view_internal_at(
         status_buttons: Vec::new(),
         status_work_links: Vec::new(),
         status_segments: Vec::new(),
+        status_segment_hit_areas: Vec::new(),
         focused_remote_host: None,
         scratchpad_link_rows: if !app.dock_collapsed
             && app.dock_tab == Some(crate::app::DockSurface::Scratchpad)
@@ -946,6 +952,9 @@ fn compute_view_internal_at(
     if sidebar::sidebar_areas_menu_layout(app, area).is_none() {
         app.sidebar_areas_menu_selected = None;
     }
+    if sidebar::window_cycle_mode_menu_layout(app, area).is_none() {
+        app.window_cycle_menu_open = false;
+    }
     // The menu anchors on the `+`, so its geometry needs the strip already
     // stored on the view.
     app.view.dock_surface_menu_layout = dock::chooser_menu_layout(app, dock_area);
@@ -957,10 +966,12 @@ fn compute_view_internal_at(
     if status_bar_is_renderable(app, area) {
         app.view.status_buttons = status::status_buttons(app, status_bar_rect);
         app.view.status_segments = status::fitted_status_segments(app, status_bar_rect);
+        app.view.status_segment_hit_areas = status::status_segment_hit_areas(app, status_bar_rect);
         app.view.status_work_links = status::status_work_links(app, status_bar_rect);
     } else {
         app.view.status_buttons = Vec::new();
         app.view.status_segments = Vec::new();
+        app.view.status_segment_hit_areas = Vec::new();
         app.view.status_work_links = Vec::new();
     }
     app.sync_copy_mode_search_geometry();
@@ -1171,6 +1182,7 @@ fn compute_mobile_view(
         notepad_usage_max_scroll: 0,
         pomodoro_hit_area: Rect::default(),
         notification_hit_area: Rect::default(),
+        window_cycle_mode_hit_area: Rect::default(),
         sidebar_areas_hit_area: Rect::default(),
         hyperspace_rect: Rect::default(),
         hyperspace_pause_hit_area: Rect::default(),
@@ -1207,6 +1219,7 @@ fn compute_mobile_view(
         status_buttons: Vec::new(),
         status_work_links: Vec::new(),
         status_segments: Vec::new(),
+        status_segment_hit_areas: Vec::new(),
         focused_remote_host: None,
         scratchpad_link_rows: Vec::new(),
         mobile_header_rect: header_rect,
