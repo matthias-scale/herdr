@@ -3185,6 +3185,7 @@ pub enum AgentPanelSort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     General,
+    Sidebar,
     Theme,
     Indicators,
     Sound,
@@ -3201,6 +3202,7 @@ pub enum SettingsSection {
 impl SettingsSection {
     pub const ALL: &[Self] = &[
         Self::General,
+        Self::Sidebar,
         Self::Theme,
         Self::Indicators,
         Self::Sound,
@@ -3217,6 +3219,7 @@ impl SettingsSection {
     pub fn label(self) -> &'static str {
         match self {
             Self::General => "general",
+            Self::Sidebar => "sidebar",
             Self::Theme => "theme",
             Self::Indicators => "indicators",
             Self::Sound => "sound",
@@ -3235,6 +3238,7 @@ impl SettingsSection {
     pub fn glyph(self) -> &'static str {
         match self {
             Self::General => "⚙",
+            Self::Sidebar => "▤",
             Self::Theme => "◐",
             Self::Indicators => "●",
             Self::Sound => "♪",
@@ -4731,6 +4735,8 @@ pub struct AppState {
     pub sidebar_areas: crate::config::SidebarAreasConfig,
     /// Config-selected sidebar presentation. It is view state, never session data.
     pub sidebar_sections_layout: bool,
+    /// Whether the sections Spaces tree shows one-line blocked-agent asks.
+    pub sidebar_show_ask_subtitles: bool,
     pub sidebar_header_plain: bool,
     pub next_agent_state_change_seq: u64,
     /// Capture mouse input for Herdr's own mouse UI. When false, Herdr only
@@ -7828,6 +7834,7 @@ impl AppState {
             sidebar_spaces: crate::config::SpacesSidebarConfig::default(),
             sidebar_areas: crate::config::SidebarAreasConfig::default(),
             sidebar_sections_layout: false,
+            sidebar_show_ask_subtitles: true,
             sidebar_header_plain: false,
             next_agent_state_change_seq: 0,
             mouse_capture: true,

@@ -361,12 +361,13 @@ The symbols are static, so this option does not enable spinner animation.
 
 ### Sidebar row layouts
 
-Choose the sections layout with a separate layout key. The default `current` value keeps the existing grouping. Sections show Pinned, Active, Snoozed, and Settled in that order; `header = "plain"` removes the sky band and wordmark while keeping search and sidebar action controls available in the compact header.
+Choose the sections layout with a separate layout key. The default `current` value keeps the existing grouping. Sections show blocked and done agents in the Spaces tree, followed by Working, Snoozed, and Settled. `header = "plain"` removes the sky band and wordmark while keeping search and sidebar action controls available in the compact header.
 
 ```toml
 [ui.sidebar]
 layout = "sections"
 header = "sky"
+show_ask_subtitles = true
 
 [ui.sidebar.areas]
 sky_header = true
@@ -382,6 +383,10 @@ hosts = true
 
 Each `areas` key hides or shows that row group in the sections layout. Every
 area is shown by default. The current layout ignores this table.
+
+`show_ask_subtitles` controls the one-line question shown below blocked agents
+in the sections layout. It defaults to `true` and can also be changed under
+Settings → Sidebar → Show ask subtitles.
 
 Pin or unpin a tab from the CLI with `herdr tab pin <tab_id>` and `herdr tab unpin <tab_id>`. The sections layout keeps settled tabs on a collapsed shelf until you expand it.
 

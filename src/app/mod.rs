@@ -1322,6 +1322,7 @@ impl App {
             sidebar_areas: config.ui.sidebar.areas.clone(),
             sidebar_sections_layout: config.ui.sidebar.layout
                 == crate::config::SidebarLayoutConfig::Sections,
+            sidebar_show_ask_subtitles: config.ui.sidebar.show_ask_subtitles,
             sidebar_header_plain: config.ui.sidebar.header
                 == crate::config::SidebarHeaderConfig::Plain,
             next_agent_state_change_seq: 0,
@@ -2843,6 +2844,7 @@ impl App {
                     || self.state.sidebar_sections_layout
                         != (config.ui.sidebar.layout
                             == crate::config::SidebarLayoutConfig::Sections)
+                    || self.state.sidebar_show_ask_subtitles != config.ui.sidebar.show_ask_subtitles
                 {
                     sidebar_projection_changed = true;
                 }
@@ -2856,6 +2858,7 @@ impl App {
                 self.state.sidebar_areas = config.ui.sidebar.areas.clone();
                 self.state.sidebar_sections_layout =
                     config.ui.sidebar.layout == crate::config::SidebarLayoutConfig::Sections;
+                self.state.sidebar_show_ask_subtitles = config.ui.sidebar.show_ask_subtitles;
                 if self.state.sidebar_sections_layout && !self.state.sidebar_areas.notes {
                     self.state.set_notepad_focus(false);
                 }

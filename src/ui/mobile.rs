@@ -163,6 +163,7 @@ fn mobile_switcher_target_for_row(
             depth,
             show_host_identity,
             sections_card,
+            ..
         } => {
             if sections_card.is_some() {
                 None
@@ -3286,6 +3287,7 @@ mod tests {
             sections_card: None,
             depth: 0,
             show_host_identity: true,
+            working_shelf: false,
         };
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 1)).expect("terminal");

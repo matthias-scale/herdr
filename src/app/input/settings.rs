@@ -181,6 +181,7 @@ fn apply_settings(state: &mut AppState) -> Option<SettingsAction> {
 pub(crate) fn settings_section_item_count(state: &AppState, section: SettingsSection) -> usize {
     match section {
         SettingsSection::General => crate::app::settings_general::GeneralRow::ALL.len(),
+        SettingsSection::Sidebar => 2,
         SettingsSection::Theme => THEME_NAMES.len(),
         SettingsSection::Indicators | SettingsSection::Sound | SettingsSection::PaneLabels => 2,
         SettingsSection::Toast => 4,
@@ -199,6 +200,7 @@ pub(crate) fn settings_section_item_count(state: &AppState, section: SettingsSec
 /// the screen tells the operator what is set without them having to read it.
 fn default_selected_index(state: &AppState, section: SettingsSection) -> usize {
     match section {
+        SettingsSection::Sidebar => usize::from(!state.sidebar_show_ask_subtitles),
         SettingsSection::Theme => current_theme_index(&state.theme_name),
         SettingsSection::Indicators => status_indicator_index(state.status_indicators),
         SettingsSection::Sound => usize::from(!state.sound_enabled()),
@@ -308,6 +310,13 @@ fn activate_selection(state: &mut AppState) -> Option<SettingsAction> {
             crate::app::settings_general::cycle_general_row(state, row)
                 .map(SettingsAction::SaveConfigEdit)
         }
+        SettingsSection::Sidebar => Some(SettingsAction::SaveConfigEdit(
+            crate::app::settings_general::ConfigEdit::Bool {
+                section: "ui.sidebar",
+                key: "show_ask_subtitles",
+                value: idx == 0,
+            },
+        )),
         SettingsSection::Indicators => Some(SettingsAction::SaveStatusIndicators(
             status_indicator_for_index(idx),
         )),
@@ -537,7 +546,10 @@ impl AppState {
                 let idx = scroll + (row - area.y) as usize;
                 (idx < THEME_NAMES.len()).then_some(idx)
             }
-            SettingsSection::Indicators | SettingsSection::Sound | SettingsSection::PaneLabels => {
+            SettingsSection::Indicators
+            | SettingsSection::Sidebar
+            | SettingsSection::Sound
+            | SettingsSection::PaneLabels => {
                 let list_y = area.y + 3;
                 if row >= list_y && row < list_y + 2 {
                     Some((row - list_y) as usize)
