@@ -1561,29 +1561,6 @@ impl TerminalState {
         self.sidebar_projection_with_pending_human_input(seen, self.has_pending_human_input())
     }
 
-    /// Recover a sidebar label when the effective lifecycle is unknown but
-    /// existing runtime evidence still identifies the state.
-    pub(crate) fn sidebar_inferred_state(&self) -> Option<AgentState> {
-        if self.state != AgentState::Unknown {
-            return None;
-        }
-        if self.supervisor_stale {
-            return self
-                .stale_resolution
-                .map(|(state, _)| state)
-                .filter(|state| *state != AgentState::Unknown);
-        }
-        if let Some(authority) = self.hook_authority.as_ref().filter(|authority| {
-            authority.retired_at.is_none() && self.hook_authority_is_effective(authority)
-        }) {
-            return (authority.state != AgentState::Unknown).then_some(authority.state);
-        }
-        if self.working_since.is_some() {
-            return Some(AgentState::Working);
-        }
-        (self.fallback_state != AgentState::Unknown).then_some(self.fallback_state)
-    }
-
     pub(crate) fn sidebar_projection_with_pending_human_input(
         &self,
         seen: bool,
@@ -4999,80 +4976,6 @@ pub(crate) fn stabilize_agent_detection(detection: crate::detect::AgentDetection
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn agent_dot_inference_uses_fallback_state_when_other_evidence_is_absent() {
-        let mut terminal = test_terminal();
-        terminal.state = AgentState::Unknown;
-        terminal.fallback_state = AgentState::Idle;
-
-        assert_eq!(terminal.sidebar_inferred_state(), Some(AgentState::Idle));
-    }
-
-    #[test]
-    fn agent_dot_inference_prefers_stale_resolution() {
-        let mut terminal = test_terminal();
-        terminal.state = AgentState::Unknown;
-        terminal.supervisor_stale = true;
-        terminal.stale_resolution = Some((AgentState::Idle, true));
-        terminal.fallback_state = AgentState::Working;
-
-        assert_eq!(terminal.sidebar_inferred_state(), Some(AgentState::Idle));
-    }
-
-    #[test]
-    fn agent_dot_inference_uses_working_since() {
-        let mut terminal = test_terminal();
-        terminal.state = AgentState::Unknown;
-        terminal.working_since = Some(Instant::now());
-        terminal.fallback_state = AgentState::Idle;
-
-        assert_eq!(terminal.sidebar_inferred_state(), Some(AgentState::Working));
-    }
-
-    #[test]
-    fn agent_dot_inference_uses_effective_hook_authority() {
-        let mut terminal = test_terminal();
-        let _ = terminal.set_hook_authority(
-            "test:hook".into(),
-            "pi".into(),
-            AgentState::Blocked,
-            None,
-            None,
-        );
-        terminal.state = AgentState::Unknown;
-        terminal.fallback_state = AgentState::Idle;
-
-        assert_eq!(terminal.sidebar_inferred_state(), Some(AgentState::Blocked));
-    }
-
-    #[test]
-    fn agent_dot_inference_ignores_unknown_or_unavailable_evidence() {
-        let mut terminal = test_terminal();
-        terminal.state = AgentState::Unknown;
-        assert_eq!(terminal.sidebar_inferred_state(), None);
-
-        terminal.supervisor_stale = true;
-        terminal.stale_resolution = Some((AgentState::Unknown, true));
-        terminal.fallback_state = AgentState::Working;
-        assert_eq!(terminal.sidebar_inferred_state(), None);
-
-        terminal.supervisor_stale = false;
-        terminal.stale_resolution = None;
-        let _ = terminal.set_hook_authority(
-            "test:hook".into(),
-            "pi".into(),
-            AgentState::Unknown,
-            None,
-            None,
-        );
-        terminal.state = AgentState::Unknown;
-        terminal.fallback_state = AgentState::Working;
-        assert_eq!(terminal.sidebar_inferred_state(), None);
-
-        terminal.state = AgentState::Idle;
-        assert_eq!(terminal.sidebar_inferred_state(), None);
-    }
 
     #[test]
     fn completed_idle_report_stays_acknowledged_after_viewing() {

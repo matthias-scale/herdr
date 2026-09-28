@@ -170,11 +170,6 @@ pub(crate) fn entry_is_blocked(entry: &AgentPanelEntry) -> bool {
         && (entry.state != AgentState::Working || entry.usage_limited)
 }
 
-fn agent_dot_is_blocked(entry: &AgentPanelEntry) -> bool {
-    entry_attention_tier(entry) == AttentionTier::Blocked
-        && (agent_dot_display_state(entry) != AgentState::Working || entry.usage_limited)
-}
-
 pub(crate) fn entry_needs_human_attention(entry: &AgentPanelEntry) -> bool {
     entry_attention_tier(entry) == AttentionTier::Attention || entry_is_blocked(entry)
 }
@@ -265,26 +260,13 @@ fn compact_row_dot(entry: &AgentPanelEntry) -> &'static str {
     if entry.waiting_on_agents && entry_attention_tier(entry) == AttentionTier::None {
         return "◌";
     }
-    let state = agent_dot_display_state(entry);
     compact_dot_for_state(
-        state,
+        entry.state,
         entry.seen,
         entry.has_agent,
-        state == AgentState::Working && entry_has_gate(entry),
+        entry.state == AgentState::Working && entry_has_gate(entry),
         entry.usage_limited,
     )
-}
-
-fn agent_dot_display_state(entry: &AgentPanelEntry) -> AgentState {
-    if entry.state != AgentState::Unknown {
-        entry.state
-    } else if !entry.has_agent {
-        AgentState::Unknown
-    } else if entry.settled {
-        AgentState::Idle
-    } else {
-        entry.inferred_state.unwrap_or(AgentState::Unknown)
-    }
 }
 
 fn compact_row_dot_text(entry: &AgentPanelEntry) -> String {
@@ -309,7 +291,8 @@ pub(crate) fn compact_dot_for_state(
         AgentState::Working => "●",
         AgentState::Blocked => "○",
         AgentState::Idle if has_agent => "○",
-        _ => "·",
+        // Unknown agent state: a solid grey dot, not an empty one.
+        _ => "●",
     }
 }
 
@@ -556,7 +539,7 @@ fn compact_row_widths(
 }
 
 fn compact_row_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
-    if agent_dot_is_blocked(entry) {
+    if entry_is_blocked(entry) {
         return p.red;
     }
     if entry_attention_tier(entry) == AttentionTier::Attention {
@@ -571,7 +554,7 @@ fn compact_row_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
     if entry.waiting_on_agents {
         return p.yellow;
     }
-    state_label_color(agent_dot_display_state(entry), entry.seen, p)
+    state_label_color(entry.state, entry.seen, p)
 }
 
 fn provider_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
@@ -616,12 +599,7 @@ fn blue_working_state(
 }
 
 fn blue_working_row(entry: &AgentPanelEntry, p: &Palette, dot_color: Color) -> bool {
-    blue_working_state(
-        agent_dot_display_state(entry),
-        entry_attention_tier(entry),
-        p,
-        dot_color,
-    )
+    blue_working_state(entry.state, entry_attention_tier(entry), p, dot_color)
 }
 
 fn opacity_style(app: &AppState, opacity: u8, style: Style, bg: Option<Color>) -> Style {
@@ -1448,11 +1426,6 @@ pub(crate) struct AgentPanelEntryData {
     pub seen: bool,
     pub done_since: Option<std::time::Instant>,
     pub stale: bool,
-    /// Strong existing runtime evidence that can label an otherwise unknown
-    /// effective state. It changes only the dot's presentation.
-    pub(crate) inferred_state: Option<AgentState>,
-    /// A settled pane intentionally projects Unknown as its lifecycle state.
-    pub(crate) settled: bool,
     pub reported_at: Option<std::time::Instant>,
     pub last_agent_state_change_seq: Option<u64>,
     pub activity_at: Option<std::time::Instant>,
@@ -2027,17 +2000,11 @@ fn collect_agent_panel_entries_with_runtimes(
                 .into_iter()
                 .map(move |detail| {
                     let space_label = workspace_label.clone();
-                    let pane_state = ws
+                    let remote_host = ws
                         .tabs
                         .get(detail.tab_idx)
-                        .and_then(|tab| tab.panes.get(&detail.pane_id));
-                    let terminal =
-                        pane_state.and_then(|pane| app.terminals.get(&pane.attached_terminal_id));
-                    let inferred_state = terminal
-                        .filter(|_| detail.has_agent)
-                        .and_then(crate::terminal::state::TerminalState::sidebar_inferred_state);
-                    let settled = pane_state.is_some_and(|pane| pane.settled_at.is_some());
-                    let remote_host = terminal
+                        .and_then(|tab| tab.panes.get(&detail.pane_id))
+                        .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
                         .and_then(|terminal| terminal.launch_argv.as_deref())
                         .and_then(|argv| {
                             crate::fleet::attached_host_name(&app.fleet_snapshot, argv)
@@ -2105,8 +2072,6 @@ fn collect_agent_panel_entries_with_runtimes(
                             seen: detail.seen,
                             done_since: detail.done_since,
                             stale: detail.stale,
-                            inferred_state,
-                            settled,
                             reported_at: detail.reported_at,
                             last_agent_state_change_seq: detail.last_agent_state_change_seq,
                             activity_at: detail.activity_at,
@@ -2259,8 +2224,6 @@ pub(crate) fn remote_agent_panel_entries_at(
                             seen: lifecycle.seen,
                             done_since: None,
                             stale: lifecycle.stale,
-                            inferred_state: None,
-                            settled: lifecycle.settled,
                             reported_at,
                             last_agent_state_change_seq: state_change_seq,
                             activity_at: reported_at,
@@ -2439,22 +2402,6 @@ fn aggregate_tab_entries(
                             .foreground_process_name
                             .clone()
                             .or_else(|| first_foreground_process_name.clone());
-                    }
-                    tab_entry.settled &= entry.settled;
-                    if tab_entry.state == AgentState::Unknown {
-                        let current_priority = tab_entry
-                            .inferred_state
-                            .map_or(0, |state| tab_lifecycle_priority(state, tab_entry.seen));
-                        if let Some(candidate_state) = entry
-                            .inferred_state
-                            .filter(|state| *state != AgentState::Unknown)
-                            .filter(|state| {
-                                tab_lifecycle_priority(*state, entry.seen) > current_priority
-                            })
-                        {
-                            tab_entry.inferred_state = Some(candidate_state);
-                            tab_entry.seen = entry.seen;
-                        }
                     }
                     tab_entry.activity_at = match (tab_entry.activity_at, entry.activity_at) {
                         (Some(current), Some(candidate)) => Some(current.max(candidate)),
@@ -8130,45 +8077,33 @@ fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
     if !entry.has_agent {
         return "No agent".to_string();
     }
-    if entry.state == AgentState::Unknown && entry.settled {
-        return "Settled".to_string();
-    }
     // A usage limit outranks every attention tier: no answer releases the
     // pane, only the reset window.
     let attention = entry_attention_tier(entry);
-    let display_state = agent_dot_display_state(entry);
-    let inferred = entry.state == AgentState::Unknown && entry.inferred_state.is_some();
     let key = if entry.usage_limited {
         "usage"
-    } else if agent_dot_is_blocked(entry) {
+    } else if entry_is_blocked(entry) {
         "blocked"
     } else if attention == AttentionTier::Attention {
         return "Needs attention".to_string();
     } else if entry.waiting_on_agents {
         "waiting_on_agents"
     } else {
-        if display_state == AgentState::Unknown {
-            return "?".to_string();
-        }
-        agent_panel_status_key(display_state, entry.seen)
+        agent_panel_status_key(entry.state, entry.seen)
     };
-    let label = entry.state_labels.get(key).cloned().unwrap_or_else(|| {
-        match key {
-            "usage" => "Usage limit",
-            "blocked" => "Blocked, waiting on you",
-            "working" => "Working",
-            "waiting_on_agents" => "Waiting on agents",
-            "done" => "Done, unread",
-            "idle" => "Idle",
-            _ => "?",
-        }
-        .to_string()
-    });
-    if inferred && key == agent_panel_status_key(display_state, entry.seen) {
-        format!("{label} (likely)")
-    } else {
-        label
+    if let Some(label) = entry.state_labels.get(key) {
+        return label.clone();
     }
+    match key {
+        "usage" => "Usage limit",
+        "blocked" => "Blocked, waiting on you",
+        "working" => "Working",
+        "waiting_on_agents" => "Waiting on agents",
+        "done" => "Done, unread",
+        "idle" => "Idle",
+        _ => "?",
+    }
+    .to_string()
 }
 
 fn snooze_deadline_tooltip(
@@ -16964,48 +16899,6 @@ pub(crate) mod tests {
         assert_eq!(agent_dot_tooltip(&entry), "Needs attention");
     }
 
-    #[test]
-    fn agent_dot_tab_aggregation_uses_highest_inferred_lifecycle_state() {
-        let mut idle = aggregation_entry(AgentState::Unknown, true, None, "unknown");
-        idle.inferred_state = Some(AgentState::Idle);
-        let mut working = aggregation_entry(AgentState::Unknown, true, None, "unknown");
-        working.inferred_state = Some(AgentState::Working);
-
-        let entry = aggregate_tab_entries(&[idle, working])
-            .into_values()
-            .next()
-            .expect("one tab entry");
-        let palette = Palette::one_dark();
-
-        assert_eq!(entry.state, AgentState::Unknown);
-        assert_eq!(entry.inferred_state, Some(AgentState::Working));
-        assert_eq!(agent_dot_tooltip(&entry), "Working (likely)");
-        assert_eq!(compact_row_dot(&entry), "●");
-        assert_eq!(compact_row_color(&entry, &palette), palette.blue);
-    }
-
-    #[test]
-    fn agent_dot_tab_says_settled_only_when_every_pane_is_settled() {
-        let mut settled = aggregation_entry(AgentState::Unknown, true, None, "unknown");
-        settled.settled = true;
-        let active = aggregation_entry(AgentState::Unknown, true, None, "unknown");
-        let mixed = aggregate_tab_entries(&[settled.clone(), active])
-            .into_values()
-            .next()
-            .expect("one tab entry");
-        assert!(!mixed.settled);
-        assert_eq!(agent_dot_tooltip(&mixed), "?");
-
-        let mut second_settled = aggregation_entry(AgentState::Unknown, true, None, "unknown");
-        second_settled.settled = true;
-        let all_settled = aggregate_tab_entries(&[settled, second_settled])
-            .into_values()
-            .next()
-            .expect("one tab entry");
-        assert!(all_settled.settled);
-        assert_eq!(agent_dot_tooltip(&all_settled), "Settled");
-    }
-
     fn aggregation_entry(
         state: AgentState,
         seen: bool,
@@ -17053,8 +16946,6 @@ pub(crate) mod tests {
                 seen,
                 done_since: None,
                 stale: false,
-                inferred_state: None,
-                settled: false,
                 reported_at: None,
                 last_agent_state_change_seq: None,
                 activity_at: None,
@@ -17793,9 +17684,11 @@ pub(crate) mod tests {
         let settled = sidebar_thread_entries(&app).remove(0);
         assert_eq!(settled.attention_tier, Some(AttentionTier::None));
         assert_eq!(entry_attention_tier(&settled), AttentionTier::None);
-        assert_eq!(compact_row_color(&settled, &app.palette), app.palette.green);
-        assert_eq!(compact_row_dot(&settled), "○");
-        assert_eq!(agent_dot_tooltip(&settled), "Settled");
+        assert_eq!(
+            compact_row_color(&settled, &app.palette),
+            app.palette.overlay0
+        );
+        assert_eq!(agent_dot_tooltip(&settled), "?");
     }
 
     /// Owner correction to #77: the same latched gate is not blocking while
@@ -27386,6 +27279,22 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn agent_dot_unknown_state_is_a_solid_grey_dot_with_question_tooltip() {
+        assert_eq!(
+            compact_dot_for_state(AgentState::Unknown, false, true, false, false),
+            "●"
+        );
+        assert_eq!(
+            state_label_color(AgentState::Unknown, false, &Palette::catppuccin()),
+            Palette::catppuccin().overlay0
+        );
+        assert_eq!(
+            compact_dot_for_state(AgentState::Unknown, false, false, false, false),
+            "·"
+        );
+    }
+
+    #[test]
     fn agent_dot_tooltip_says_what_the_dot_means() {
         let mut entry = compact_test_entry("task", Some(Agent::Claude));
         entry.state = AgentState::Working;
@@ -27419,73 +27328,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let shell = compact_test_entry("terminal", None);
         assert_eq!(agent_dot_tooltip(&shell), "No agent");
-    }
-
-    #[test]
-    fn agent_dot_unknown_without_evidence_shows_a_question_mark() {
-        let entry = compact_test_entry("task", Some(Agent::Claude));
-        let palette = Palette::one_dark();
-
-        assert_eq!(entry.state, AgentState::Unknown);
-        assert_eq!(entry.inferred_state, None);
-        assert_eq!(agent_dot_tooltip(&entry), "?");
-        assert_eq!(compact_row_dot(&entry), "·");
-        assert_eq!(compact_row_color(&entry, &palette), palette.overlay0);
-
-        let mut shell = compact_test_entry("terminal", None);
-        shell.settled = true;
-        assert_eq!(agent_dot_tooltip(&shell), "No agent");
-        assert_eq!(compact_row_dot(&shell), "·");
-        assert_eq!(compact_row_color(&shell, &palette), palette.overlay0);
-    }
-
-    #[test]
-    fn agent_dot_collection_uses_existing_terminal_fallback_evidence() {
-        let mut app = app_with_agents(&["task"]);
-        let pane = app.workspaces[0].tabs[0].root_pane;
-        let terminal_id = app.workspaces[0].terminal_id(pane).unwrap().clone();
-        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
-        terminal.set_raw_agent_state_for_test(AgentState::Unknown);
-        terminal.fallback_state = AgentState::Idle;
-
-        let entry = sidebar_thread_entries(&app).remove(0);
-        assert_eq!(entry.state, AgentState::Unknown);
-        assert_eq!(entry.inferred_state, Some(AgentState::Idle));
-        assert_eq!(agent_dot_tooltip(&entry), "Idle (likely)");
-        assert_eq!(compact_row_dot(&entry), "○");
-        assert_eq!(compact_row_color(&entry, &app.palette), app.palette.green);
-    }
-
-    #[test]
-    fn agent_dot_inferred_states_control_tooltip_glyph_and_color() {
-        let palette = Palette::one_dark();
-        for (state, label, glyph, color) in [
-            (AgentState::Idle, "Idle (likely)", "○", palette.green),
-            (AgentState::Working, "Working (likely)", "●", palette.blue),
-            (
-                AgentState::Blocked,
-                "Blocked, waiting on you (likely)",
-                "○",
-                palette.red,
-            ),
-        ] {
-            let mut entry = compact_test_entry("task", Some(Agent::Claude));
-            entry.inferred_state = Some(state);
-
-            assert_eq!(agent_dot_tooltip(&entry), label);
-            assert_eq!(compact_row_dot(&entry), glyph);
-            assert_eq!(compact_row_color(&entry, &palette), color);
-        }
-
-        let mut working_with_gate = compact_test_entry("task", Some(Agent::Claude));
-        working_with_gate.inferred_state = Some(AgentState::Working);
-        working_with_gate.open_blockers = true;
-        assert_eq!(agent_dot_tooltip(&working_with_gate), "Working (likely)");
-        assert_eq!(compact_row_dot(&working_with_gate), "●");
-        assert_eq!(
-            compact_row_color(&working_with_gate, &palette),
-            palette.blue
-        );
     }
 
     #[test]
