@@ -1102,6 +1102,7 @@ impl TerminalState {
     fn release_full_lifecycle_blocked_hold_for_visible_working(
         &mut self,
         agent: Option<Agent>,
+        previous_screen_settled_after_report: bool,
         observed_at: Instant,
     ) -> bool {
         let Some(agent) = agent else {
@@ -1110,20 +1111,21 @@ impl TerminalState {
         let owner = self.blocked_hold_owner_for_agent(agent);
         let should_release = self.blocked_state_hold.as_ref().is_some_and(|hold| {
             owner.matches_blocked_hold(&hold.owner) && observed_at >= hold.since
-        }) && self.hook_authority.as_ref().is_some_and(|authority| {
-            authority.state == AgentState::Blocked
-                && authority.retired_at.is_none()
-                && authority
-                    .reported_at
-                    .checked_add(crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH)
-                    .is_some_and(|stable_at| observed_at >= stable_at)
-                && self.hook_authority_is_effective(authority)
-                && crate::detect::full_lifecycle_hook_authority(
-                    &authority.source,
-                    &authority.agent_label,
-                )
-                && crate::detect::parse_agent_label(&authority.agent_label) == Some(agent)
-        });
+        }) && previous_screen_settled_after_report
+            && self.hook_authority.as_ref().is_some_and(|authority| {
+                authority.state == AgentState::Blocked
+                    && authority.retired_at.is_none()
+                    && authority
+                        .reported_at
+                        .checked_add(crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH)
+                        .is_some_and(|stable_at| observed_at >= stable_at)
+                    && self.hook_authority_is_effective(authority)
+                    && crate::detect::full_lifecycle_hook_authority(
+                        &authority.source,
+                        &authority.agent_label,
+                    )
+                    && crate::detect::parse_agent_label(&authority.agent_label) == Some(agent)
+            });
         if !should_release {
             return false;
         }
@@ -2096,7 +2098,11 @@ impl TerminalState {
             && !newer_custom_authority
             && (previous_agent_label.is_some() || self.agent_name.is_some());
         if visible_working_signal {
-            self.release_full_lifecycle_blocked_hold_for_visible_working(agent, now);
+            self.release_full_lifecycle_blocked_hold_for_visible_working(
+                agent,
+                previous_screen_settled_after_report,
+                now,
+            );
         }
         if self.should_ignore_detected_state_under_full_lifecycle_hook(agent, process_exited) {
             if self
@@ -9881,6 +9887,17 @@ mod tests {
         );
         assert!(terminal.blocked_state_hold.is_some());
 
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            false,
+            false,
+            observed + Duration::from_millis(1),
+        );
+
         let working_at = observed + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH;
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Pi),
@@ -9899,6 +9916,63 @@ mod tests {
             terminal.hook_authority.as_ref().unwrap().retired_at,
             Some(working_at)
         );
+    }
+
+    #[test]
+    fn continuous_visible_working_keeps_same_owner_full_lifecycle_blocked_hold() {
+        let observed = Instant::now() + Duration::from_secs(10);
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let session_ref =
+            crate::agent_resume::AgentSessionRef::id("pi-continuous-visible-working").unwrap();
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Pi,
+            "herdr:pi",
+            "pi",
+            session_ref.clone(),
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            observed - Duration::from_millis(1),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Blocked,
+            None,
+            Some(session_ref),
+            Some(1),
+            observed,
+        );
+        assert!(terminal.blocked_state_hold.is_some());
+
+        for working_at in [
+            observed + Duration::from_millis(1),
+            observed + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH / 2,
+            observed + crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH + Duration::from_millis(1),
+        ] {
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                false,
+                false,
+                working_at,
+            );
+        }
+
+        assert!(terminal.blocked_state_hold.is_some());
+        assert_eq!(terminal.state, AgentState::Blocked);
+        assert!(terminal.full_lifecycle_hook_authority_active());
     }
 
     #[test]
