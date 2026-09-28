@@ -422,7 +422,14 @@ impl App {
             if was_active_workspace {
                 self.state
                     .switch_workspace_tab_preserving_workspace_selection(ws_idx, new_tab_idx);
-                self.focus_client_on_pane();
+                if matches!(
+                    self.state.server_mode(),
+                    crate::app::Mode::Terminal
+                        | crate::app::Mode::Navigate
+                        | crate::app::Mode::Prefix
+                ) {
+                    self.focus_client_on_pane();
+                }
             }
             self.emit_tab_created_events(ws_idx, new_tab_idx);
         }
