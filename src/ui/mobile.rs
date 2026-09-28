@@ -1926,10 +1926,10 @@ mod tests {
             panic!("tab row")
         };
         let card = entry.sections_card.as_ref().expect("sections card");
-        let pin_col = super::sidebar::sections_control_start(
+        let pin_col = super::super::sidebar::sections_control_start(
             &app,
             card,
-            super::sidebar::sections_thread_rect(
+            super::super::sidebar::sections_thread_rect(
                 Rect::new(content.x, content.y, content.width, 1),
                 *depth,
             ),

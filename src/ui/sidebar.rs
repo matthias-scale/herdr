@@ -1321,6 +1321,16 @@ pub(crate) struct SidebarThreadCard {
     title: String,
     status: SidebarCardStatus,
     host: String,
+    host_kind: SidebarCardHostKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarCardHostKind {
+    Linux,
+    Mac,
+    Windows,
+    Other,
+    Remote,
 }
 
 #[derive(Clone)]
@@ -3051,10 +3061,21 @@ fn sidebar_thread_card(app: &AppState, entry: &AgentPanelEntry) -> SidebarThread
         .map(|remote| remote.agent_ref.host.clone())
         .or_else(|| entry.remote_host.clone())
         .unwrap_or_else(|| app.agent_host_name.clone());
+    let host_kind = if entry.remote_entry.is_some() || entry.remote_host.is_some() {
+        SidebarCardHostKind::Remote
+    } else {
+        match crate::platform::local_host_os() {
+            crate::platform::HostOs::Linux => SidebarCardHostKind::Linux,
+            crate::platform::HostOs::Mac => SidebarCardHostKind::Mac,
+            crate::platform::HostOs::Windows => SidebarCardHostKind::Windows,
+            crate::platform::HostOs::Other => SidebarCardHostKind::Other,
+        }
+    };
     SidebarThreadCard {
         title: compact_row_title(entry, true).to_string(),
         status,
         host,
+        host_kind,
     }
 }
 
@@ -8040,7 +8061,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                 let Some(target) = entry.local_target() else {
                     continue;
                 };
-                if entry.sections_card.is_some() {
+                if let Some(sections_card) = entry.sections_card.as_ref() {
                     if let Some(rect) = clamp_row_cells(body, row_y, 0, 1) {
                         targets.push(crate::app::state::SidebarHoverTarget {
                             rect,
@@ -8057,13 +8078,8 @@ pub(crate) fn compute_sidebar_hover_targets(
                         let row_rect =
                             sections_thread_rect(Rect::new(body.x, row_y, body.width, 1), *depth);
                         let start = usize::from(
-                            sections_control_start(
-                                app,
-                                entry.sections_card.as_ref().expect("sections card"),
-                                row_rect,
-                                controls.width,
-                            )
-                            .saturating_sub(body.x),
+                            sections_control_start(app, sections_card, row_rect, controls.width)
+                                .saturating_sub(body.x),
                         );
                         if let Some(rect) = clamp_row_cells(body, row_y, start, 1) {
                             targets.push(crate::app::state::SidebarHoverTarget {
@@ -10890,6 +10906,21 @@ pub(super) fn render_sections_thread_card(
     render_sections_thread_card_with_controls(app, frame, card, rect, selected, 0);
 }
 
+fn sidebar_card_host_icon(kind: SidebarCardHostKind, nerd_font: bool) -> &'static str {
+    match (kind, nerd_font) {
+        (SidebarCardHostKind::Linux, true) => "",
+        (SidebarCardHostKind::Linux, false) => "L",
+        (SidebarCardHostKind::Mac, true) => "",
+        (SidebarCardHostKind::Mac, false) => "A",
+        (SidebarCardHostKind::Windows, true) => "",
+        (SidebarCardHostKind::Windows, false) => "W",
+        (SidebarCardHostKind::Other, true) => "󰟀",
+        (SidebarCardHostKind::Other, false) => "?",
+        (SidebarCardHostKind::Remote, true) => "󰖟",
+        (SidebarCardHostKind::Remote, false) => "R",
+    }
+}
+
 fn sections_tail_width(app: &AppState, card: &SidebarThreadCard, width: usize) -> (usize, usize) {
     let suffix = match &card.status {
         SidebarCardStatus::Done => "✓ Done",
@@ -10901,8 +10932,10 @@ fn sections_tail_width(app: &AppState, card: &SidebarThreadCard, width: usize) -
     } else {
         0
     };
-    let host_width = if card.host != app.agent_host_name && width >= 32 {
-        display_width(&card.host) + 1
+    let host_width = if width >= 32 {
+        display_width(&card.host)
+            + display_width(sidebar_card_host_icon(card.host_kind, app.nerd_font))
+            + 2
     } else {
         0
     };
@@ -10971,6 +11004,11 @@ pub(super) fn render_sections_thread_card_with_controls(
         spans.push(Span::styled(suffix, Style::default().fg(p.overlay0)));
     }
     if host_width > 0 {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            sidebar_card_host_icon(card.host_kind, app.nerd_font),
+            Style::default().fg(p.overlay0),
+        ));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(&card.host, Style::default().fg(p.overlay0)));
     }
@@ -28929,6 +28967,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             title: "fix sidebar".into(),
             status: SidebarCardStatus::Idle("8m".into()),
             host: "ub1".into(),
+            host_kind: SidebarCardHostKind::Linux,
         };
         for width in [18, 40] {
             let mut terminal = Terminal::new(TestBackend::new(width, 2)).expect("terminal");
@@ -28946,7 +28985,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             let first = row_text(terminal.backend().buffer(), 0, width);
             let second = row_text(terminal.backend().buffer(), 1, width);
             assert!(first.starts_with("      ● fix"), "{first:?}");
-            assert!(!first.contains("◆") && !first.contains("ub1"), "{first:?}");
+            assert!(!first.contains("◆"), "{first:?}");
             assert!(
                 !first.contains("HR") && !first.contains("feat/") && !first.contains("207"),
                 "{first:?}"
@@ -28954,6 +28993,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             assert!(second.trim().is_empty(), "{second:?}");
             if width == 40 {
                 assert!(first.contains("8m"), "{first:?}");
+                assert!(first.contains("L ub1"), "{first:?}");
+            } else {
+                assert!(!first.contains("ub1"), "{first:?}");
             }
         }
     }
@@ -28980,6 +29022,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             title: "fix sidebar".into(),
             status: SidebarCardStatus::Idle("8m".into()),
             host: app.agent_host_name.clone(),
+            host_kind: SidebarCardHostKind::Linux,
         };
         let row = sections_thread_rect(Rect::new(0, 1, 40, 1), 1);
         let mut terminal = Terminal::new(TestBackend::new(40, 2)).expect("terminal");
@@ -28992,8 +29035,58 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(row_text(terminal.backend().buffer(), 0, 40).starts_with("  ▾ # Tools (2)"));
         let child = row_text(terminal.backend().buffer(), 1, 40);
         assert!(child.starts_with("      ● fix sidebar"), "{child:?}");
-        assert!(child.trim_end().ends_with("8m"), "{child:?}");
-        assert_eq!(sections_control_start(&app, &card, row, 6), 31);
+        assert!(child.contains("8m L localhost"), "{child:?}");
+        assert_eq!(sections_control_start(&app, &card, row, 6), 20);
+    }
+
+    #[test]
+    fn local_section_host_uses_platform_kind_and_remote_host_is_neutral() {
+        let app = app_with_agents(&["local"]);
+        let local_entry = sidebar_thread_entries(&app).remove(0);
+        let local_card = sidebar_thread_card(&app, &local_entry);
+        let expected = match crate::platform::local_host_os() {
+            crate::platform::HostOs::Linux => SidebarCardHostKind::Linux,
+            crate::platform::HostOs::Mac => SidebarCardHostKind::Mac,
+            crate::platform::HostOs::Windows => SidebarCardHostKind::Windows,
+            crate::platform::HostOs::Other => SidebarCardHostKind::Other,
+        };
+        assert_eq!(local_card.host_kind, expected);
+
+        let mut remote_app = app;
+        remote_app.sidebar_sections_layout = true;
+        remote_app.sidebar_work_filter.machine_scope =
+            crate::app::state::SidebarMachineScope::AllMachines;
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot(
+                "remote",
+                false,
+                vec![crate::fleet::FleetRow::test_agent_info_row(
+                    "remote",
+                    remote_agent_info(
+                        "remote-pane",
+                        "remote pane",
+                        crate::api::schema::AgentStatus::Working,
+                        false,
+                        false,
+                    ),
+                )],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+        remote_app.remote_agent_panel_entries =
+            remote_agent_panel_entries_at(&snapshot, 1_725_000_000, false);
+        let remote_card = sidebar_rows(&remote_app)
+            .into_iter()
+            .find_map(|row| match row {
+                SidebarRow::RemoteAgent {
+                    sections_card: Some(card),
+                    ..
+                } => Some(card),
+                _ => None,
+            })
+            .expect("remote section card");
+        assert_eq!(remote_card.host_kind, SidebarCardHostKind::Remote);
+        assert_eq!(sidebar_card_host_icon(remote_card.host_kind, false), "R");
     }
 
     #[test]
@@ -29004,6 +29097,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             title: "agent".into(),
             status: SidebarCardStatus::Blocked,
             host: "ub2".into(),
+            host_kind: SidebarCardHostKind::Remote,
         };
         let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
         terminal
