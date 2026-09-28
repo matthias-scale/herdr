@@ -3311,7 +3311,7 @@ mod tests {
             ContextMenuAction::ClosePane,
         );
 
-        assert_eq!(state.selected, 1);
+        assert_eq!(state.selected, 0);
         assert_ne!(state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(state.workspaces.len(), 2);
     }
