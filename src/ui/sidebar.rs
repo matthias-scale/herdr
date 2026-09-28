@@ -28796,7 +28796,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn focus_sidebar_keeps_blocked_tabs_in_spaces_and_folds_working_tabs() {
         let mut app = sort_app(&[
             sort_tab("review", "owner/herdr", AgentState::Blocked, 1),
-            sort_tab("answer", "owner/herdr", AgentState::Blocked, 2),
+            sort_tab("done", "owner/herdr", AgentState::Idle, 2),
             sort_tab("build", "owner/herdr", AgentState::Working, 3),
         ]);
         app.sidebar_sections_layout = true;
@@ -28852,12 +28852,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .count(),
             3
         );
-        assert_eq!(
-            rows.iter()
-                .filter(|row| matches!(row, SidebarRow::Tab { entry, .. } if entry.working_shelf))
-                .count(),
-            1
-        );
+        let working = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Tab { entry, .. } if entry.working_shelf => Some(entry),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(working.len(), 1);
+        assert_eq!(compact_row_dot(working[0]), " ");
     }
 
     #[test]
@@ -28891,8 +28894,22 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         };
         assert_eq!(entry.pending_ask.as_deref(), Some("Choose a layout"));
         assert_eq!(sidebar_row_height(&app, &row, 20), 2);
+        let area = Rect::new(0, 0, 42, 32);
+        let render = |app: &AppState| {
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height))
+                .expect("ask subtitle terminal");
+            terminal
+                .draw(|frame| render_sidebar(app, &TerminalRuntimeRegistry::new(), frame, area))
+                .expect("render ask subtitle");
+            (0..area.height)
+                .map(|y| row_text(terminal.backend().buffer(), y, area.width))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(render(&app).contains("↳ Choose a layout"));
         app.sidebar_show_ask_subtitles = false;
         assert_eq!(sidebar_row_height(&app, &row, 20), 1);
+        assert!(!render(&app).contains("↳ Choose a layout"));
     }
 
     #[test]
