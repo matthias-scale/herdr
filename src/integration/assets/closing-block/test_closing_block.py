@@ -2116,6 +2116,7 @@ class NeedsYouBlockTests(unittest.TestCase):
             "codex reviewer — inspecting PR while CI checks running",
             "luna: awaiting deploy",
             "worker executing your approval check",
+            "build worker — compiling",
         ):
             with self.subTest(line=line):
                 block = closing_block.parse(f"Needs you: nothing.\n**Now:** {line}\n")
@@ -2134,6 +2135,14 @@ class NeedsYouBlockTests(unittest.TestCase):
                 self.assertEqual(block.agents, [])
                 self.assertFalse(block.workers_unknown)
                 self.assertEqual(block.external_wait, line)
+
+    def test_now_finished_external_work_is_neither_worker_nor_wait(self):
+        for line in ("CI passed", "build complete", "deploy done."):
+            with self.subTest(line=line):
+                block = closing_block.parse(f"Needs you: nothing.\n**Now:** {line}\n")
+                self.assertEqual(block.agents, [])
+                self.assertFalse(block.workers_unknown)
+                self.assertIsNone(block.external_wait)
 
     def test_now_after_done_makes_completion_incomplete(self):
         block = closing_block.parse(
