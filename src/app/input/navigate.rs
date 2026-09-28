@@ -2123,7 +2123,13 @@ fn window_navigation_order(state: &AppState) -> Vec<WindowCycleTarget> {
     // The sections layout gives every tab its own row, so skip-collapsed takes
     // visible rows only. The plain layout lists agentless tabs only through
     // their space row, so a visible space keeps all of its tabs.
-    if state.skip_collapsed_cycle && !state.sidebar_sections_layout {
+    let work_item_mode = matches!(
+        state.sidebar_group_mode,
+        crate::app::state::SidebarGroupMode::LinearTeam
+            | crate::app::state::SidebarGroupMode::Missive
+    );
+    // Work-item groups own their tab rows too, so they take visible rows only.
+    if state.skip_collapsed_cycle && !state.sidebar_sections_layout && !work_item_mode {
         // Agent tabs own a row that a collapsed section can hide; only
         // agentless tabs rely on their space row.
         let agent_tabs = crate::ui::sidebar_thread_entries(state)
@@ -4267,6 +4273,40 @@ mod tests {
             app.state.skip_collapsed_cycle = true;
             assert!(!window_navigation_order(&app.state).is_empty(), "{mode:?}");
             assert!(!blocked_pane_cycle(&app.state).is_empty(), "{mode:?}");
+
+            // One agentless tab, then collapse every work-item group.
+            if let Some(terminal) = app.state.terminals.values_mut().next() {
+                terminal.set_detected_state(None, crate::detect::AgentState::Idle);
+            }
+            let namespace = app.state.sidebar_group_mode.collapse_namespace();
+            let keys = crate::ui::sidebar::workspace_list_entries_for_mode(&app.state, false, mode)
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    crate::ui::sidebar::WorkspaceListEntry::NestedHeader { key, .. } => Some(key),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert!(!keys.is_empty(), "{mode:?}");
+            for key in keys {
+                app.state
+                    .collapsed_sidebar_groups
+                    .insert(format!("{namespace}:{key}"));
+            }
+            let rows = crate::ui::sidebar_rows(&app.state);
+            let order = window_navigation_order(&app.state);
+            for target in &order {
+                let WindowCycleTarget::Local { ws_idx, tab_idx } = target else {
+                    continue;
+                };
+                assert!(
+                    rows.iter().any(|row| matches!(
+                        row,
+                        crate::ui::SidebarRow::Tab { entry, .. }
+                            if entry.local_target().is_some_and(|t| (t.ws_idx, t.tab_idx) == (*ws_idx, *tab_idx))
+                    )),
+                    "{mode:?}: tab {ws_idx}:{tab_idx} is cycled without a visible row"
+                );
+            }
         }
     }
 
