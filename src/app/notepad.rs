@@ -266,6 +266,10 @@ impl super::App {
     /// Applies a live config reload to both surfaces.
     pub(crate) fn apply_notepad_config(&mut self, config: &crate::config::NotepadConfig) {
         self.notepad_preferred_files = config.files.clone();
+        self.state.sidebar_note_names = crate::app::state::sidebar_panel_note_names(
+            &self.notepad_preferred_files,
+            &self.pomodoro_log_file,
+        );
         self.notepad_git_sync = config.git_sync;
         self.notepad_git_sync_interval =
             std::time::Duration::from_secs(config.git_sync_interval_seconds.clamp(15, 3600));
@@ -323,7 +327,55 @@ impl super::App {
 
     pub(crate) fn apply_pomodoro_config(&mut self, config: &crate::config::PomodoroConfig) {
         self.pomodoro_log_file = config.log_file.clone();
+        self.state.sidebar_note_names = crate::app::state::sidebar_panel_note_names(
+            &self.notepad_preferred_files,
+            &self.pomodoro_log_file,
+        );
         self.state.pomodoro.apply_config(config, Instant::now());
+    }
+
+    /// Creates a note chosen from Sidebar panels and refreshes discovery so its
+    /// newly enabled tab is immediately available.
+    pub(crate) fn ensure_notepad_note_file(&mut self, note_name: &str) {
+        let name = note_name.trim().trim_end_matches(".md");
+        if name.is_empty() || name.contains(['/', '\\']) {
+            return;
+        }
+        let Some(dir) = self.state.notepad.dir.clone() else {
+            return;
+        };
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(error = %error, path = %dir.display(), "failed to create notepad directory");
+            self.state.notepad.error = Some(error.to_string());
+            return;
+        }
+        let path = dir.join(format!("{name}.md"));
+        let created = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(error) => {
+                tracing::warn!(error = %error, path = %path.display(), "failed to create notepad note");
+                self.state.notepad.error = Some(error.to_string());
+                return;
+            }
+        };
+        let watched = self.notepad_watched_dir.as_ref() == Some(&dir);
+        if watched {
+            if created {
+                let previous = self.state.notepad.active_path().map(PathBuf::from);
+                self.rescan_notepad_files();
+                if previous != self.state.notepad.active_path().map(PathBuf::from) {
+                    self.load_active_note();
+                }
+                self.request_notepad_repaint();
+            }
+        } else {
+            self.ensure_notepad();
+        }
     }
 }
 

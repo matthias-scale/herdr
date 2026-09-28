@@ -3279,8 +3279,9 @@ pub fn settings_sections_matching(query: &str) -> Vec<SettingsSection> {
         .collect()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SidebarPanelSettingTarget {
+    Note(String),
     NotepadTab(crate::notepad::NotepadTabTarget),
     Goals,
     Pomodoro,
@@ -3294,20 +3295,32 @@ pub(crate) struct SidebarPanelSettingItem {
 }
 
 pub(crate) fn settings_sidebar_panel_items(state: &AppState) -> Vec<SidebarPanelSettingItem> {
-    let mut items = state
-        .notepad
-        .files
-        .iter()
-        .enumerate()
-        .map(|(index, file)| {
-            let target = crate::notepad::NotepadTabTarget::Note(index);
-            SidebarPanelSettingItem {
-                target: SidebarPanelSettingTarget::NotepadTab(target),
-                label: format!("Note · {}", file.name),
-                visible: state.notepad.is_tab_visible(target),
-            }
-        })
-        .collect::<Vec<_>>();
+    let mut note_names = state.sidebar_note_names.clone();
+    note_names.extend(state.notepad.files.iter().map(|file| file.name.clone()));
+    note_names.extend(
+        state
+            .notepad
+            .visible_tabs
+            .iter()
+            .filter_map(|tab| tab.strip_prefix("note:").map(str::to_string)),
+    );
+    let mut items = Vec::new();
+    for name in note_names {
+        if name.is_empty()
+            || name.contains(['/', '\\'])
+            || items.iter().any(|item: &SidebarPanelSettingItem| {
+                matches!(&item.target, SidebarPanelSettingTarget::Note(existing) if existing == &name)
+            })
+        {
+            continue;
+        }
+        let key = format!("note:{name}");
+        items.push(SidebarPanelSettingItem {
+            target: SidebarPanelSettingTarget::Note(name.clone()),
+            label: format!("Note · {name}"),
+            visible: state.notepad.visible_tabs.iter().any(|tab| tab == &key),
+        });
+    }
     for (target, label) in [
         (crate::notepad::NotepadTabTarget::Context, "Context tab"),
         (crate::notepad::NotepadTabTarget::Agent, "Agent tab"),
@@ -3330,6 +3343,30 @@ pub(crate) fn settings_sidebar_panel_items(state: &AppState) -> Vec<SidebarPanel
         visible: state.pomodoro.sidebar_visible,
     });
     items
+}
+
+pub(crate) fn sidebar_panel_note_names(
+    configured_files: &[String],
+    pomodoro_log_file: &str,
+) -> Vec<String> {
+    let mut names = vec!["notes".to_string()];
+    for configured in configured_files {
+        let name = configured.trim().trim_end_matches(".md");
+        if !name.is_empty()
+            && !name.contains(['/', '\\'])
+            && !names.iter().any(|existing| existing == name)
+        {
+            names.push(name.to_string());
+        }
+    }
+    let log_name = pomodoro_log_file.trim().trim_end_matches(".md");
+    if !log_name.is_empty()
+        && !log_name.contains(['/', '\\'])
+        && !names.iter().any(|existing| existing == log_name)
+    {
+        names.push(log_name.to_string());
+    }
+    names
 }
 
 /// All built-in theme names in display order.
@@ -4760,6 +4797,8 @@ pub struct AppState {
     pub(crate) scratchpad: crate::scratchpad::ScratchpadDoc,
     /// The sidebar notepad: a folder of Markdown notes edited in place.
     pub(crate) notepad: crate::notepad::NotepadState,
+    /// Configured note names available to Sidebar panels before files are discovered.
+    pub(crate) sidebar_note_names: Vec<String>,
     /// Cached goals for the focused session. Rendering never reads the file.
     pub(crate) goals: crate::goals::GoalsPanelState,
     /// The break reminder shown next to it.
@@ -7869,6 +7908,10 @@ impl AppState {
                 notepad.set_visible_tabs(Vec::new());
                 notepad
             },
+            sidebar_note_names: sidebar_panel_note_names(
+                &crate::config::NotepadConfig::default().files,
+                &crate::config::PomodoroConfig::default().log_file,
+            ),
             goals: crate::goals::GoalsPanelState::default(),
             pomodoro: crate::pomodoro::PomodoroState::default(),
             // Off in fixtures, the way the break timer is: a decorative panel

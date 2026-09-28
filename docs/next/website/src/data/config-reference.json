@@ -2408,7 +2408,7 @@
           "key": "notepad.visible_tabs",
           "type": "array of strings",
           "default": "[\"usage\"]",
-          "description": "Stable tab keys to show in the sidebar. Note files use `note:<stem>`; the built-in tabs use `context`, `agent`, and `usage`."
+          "description": "Stable tab keys to show in the sidebar. Note files use `note:<stem>`; the built-in tabs use `context`, `agent`, and `usage`. Turning on a note in Sidebar panels also enables the notepad backend and creates a missing note file."
         },
         {
           "key": "notepad.dir",
@@ -2470,7 +2470,7 @@
           "key": "pomodoro.sidebar_visible",
           "type": "boolean",
           "default": "false",
-          "description": "Show the countdown widget in the sidebar footer."
+          "description": "Show the countdown widget in the sidebar footer. Turning it on in Sidebar panels also enables the timer; turning it off leaves the timer setting alone."
         },
         {
           "key": "pomodoro.work_minutes",

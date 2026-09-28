@@ -1298,6 +1298,10 @@ impl App {
             dock_editor_requested_paths: std::collections::HashMap::new(),
             scratchpad: crate::scratchpad::ScratchpadDoc::default(),
             notepad: crate::notepad::NotepadState::from_config(&config.notepad),
+            sidebar_note_names: crate::app::state::sidebar_panel_note_names(
+                &config.notepad.files,
+                &config.pomodoro.log_file,
+            ),
             goals: crate::goals::GoalsPanelState::from_config(&config.goals_panel),
             pomodoro: crate::pomodoro::PomodoroState::from_config(&config.pomodoro, Instant::now()),
             hyperspace: crate::hyperspace::HyperspaceState::new(

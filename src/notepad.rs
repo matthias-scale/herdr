@@ -265,14 +265,22 @@ impl NotepadState {
         let Some(key) = self.tab_config_key(target) else {
             return false;
         };
-        let was_visible = self.visible_tabs.iter().any(|item| item == &key);
+        self.set_tab_key_visible(&key, visible)
+    }
+
+    pub(crate) fn set_note_tab_visible(&mut self, name: &str, visible: bool) -> bool {
+        self.set_tab_key_visible(&format!("note:{name}"), visible)
+    }
+
+    fn set_tab_key_visible(&mut self, key: &str, visible: bool) -> bool {
+        let was_visible = self.visible_tabs.iter().any(|item| item == key);
         if was_visible == visible {
             return false;
         }
         if visible {
-            self.visible_tabs.push(key);
+            self.visible_tabs.push(key.to_string());
         } else {
-            self.visible_tabs.retain(|item| item != &key);
+            self.visible_tabs.retain(|item| item != key);
         }
         self.reconcile_active_tab();
         true

@@ -541,7 +541,9 @@ pub struct NotepadConfig {
     /// Show the notepad panel at the bottom of the sidebar.
     pub enabled: bool,
     /// Stable tab keys to show in the sidebar. Note files use `note:<stem>`;
-    /// the built-in tabs use `context`, `agent`, and `usage`.
+    /// the built-in tabs use `context`, `agent`, and `usage`. Turning on a note
+    /// in Sidebar panels also enables the notepad backend and creates a missing
+    /// note file.
     pub visible_tabs: Vec<String>,
     /// Notes directory. Empty uses `<config dir>/notes`. `~` is expanded.
     pub dir: String,
@@ -583,7 +585,9 @@ pub struct GoalsPanelConfig {
 #[serde(default)]
 pub struct PomodoroConfig {
     pub enabled: bool,
-    /// Show the countdown widget in the sidebar footer.
+    /// Show the countdown widget in the sidebar footer. Turning it on in
+    /// Sidebar panels also enables the timer; turning it off leaves the timer
+    /// setting alone.
     pub sidebar_visible: bool,
     /// Minutes of focus before a break is due.
     pub work_minutes: u64,

@@ -63,10 +63,18 @@ impl AppState {
             return;
         }
         if focused {
-            // Read-only Agent and Usage tabs have no editor focus. Taking the
-            // editor focus returns to the active note, as before.
-            self.notepad.agent_tab = false;
-            self.notepad.usage_tab = false;
+            let visible_note = self.notepad.enabled
+                && self.notepad.files.iter().enumerate().any(|(index, _)| {
+                    self.notepad
+                        .is_tab_visible(crate::notepad::NotepadTabTarget::Note(index))
+                });
+            if visible_note {
+                // Read-only tabs have no editor focus. Return to the active
+                // note only when an enabled, visible note can take over.
+                self.notepad.context_active = false;
+                self.notepad.agent_tab = false;
+                self.notepad.usage_tab = false;
+            }
         }
         if self.notepad.focused == focused {
             return;
@@ -637,6 +645,25 @@ mod tests {
         ]);
         state.notepad.focused = true;
         state
+    }
+
+    #[test]
+    fn focusing_the_default_usage_only_panel_keeps_the_usage_tab() {
+        let mut state = AppState::test_new();
+        let config = crate::config::Config::default();
+        state.notepad = crate::notepad::NotepadState::from_config(&config.notepad);
+
+        assert_eq!(
+            state.notepad.active_tab_target(),
+            Some(NotepadTabTarget::Usage)
+        );
+        assert!(state.toggle_notepad_focus());
+
+        assert!(state.notepad.usage_tab);
+        assert_eq!(
+            state.notepad.active_tab_target(),
+            Some(NotepadTabTarget::Usage)
+        );
     }
 
     #[test]

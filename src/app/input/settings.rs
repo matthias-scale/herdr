@@ -324,6 +324,18 @@ fn activate_selection(state: &mut AppState) -> Option<SettingsAction> {
                 .into_iter()
                 .nth(idx)?;
             match item.target {
+                crate::app::state::SidebarPanelSettingTarget::Note(name) => {
+                    let visible = !item.visible;
+                    let mut notepad = state.notepad.clone();
+                    notepad.set_note_tab_visible(&name, visible);
+                    Some(SettingsAction::SaveConfigEdit(
+                        crate::app::settings_general::ConfigEdit::NotepadTabVisibility {
+                            visible_tabs: notepad.visible_tabs,
+                            enable_notepad: visible,
+                            ensure_note: visible.then_some(name),
+                        },
+                    ))
+                }
                 crate::app::state::SidebarPanelSettingTarget::NotepadTab(target) => {
                     let mut notepad = state.notepad.clone();
                     notepad.set_tab_visible(target, !item.visible);
@@ -346,10 +358,8 @@ fn activate_selection(state: &mut AppState) -> Option<SettingsAction> {
                 }
                 crate::app::state::SidebarPanelSettingTarget::Pomodoro => {
                     Some(SettingsAction::SaveConfigEdit(
-                        crate::app::settings_general::ConfigEdit::Bool {
-                            section: "pomodoro",
-                            key: "sidebar_visible",
-                            value: !item.visible,
+                        crate::app::settings_general::ConfigEdit::PomodoroSidebarVisible {
+                            visible: !item.visible,
                         },
                     ))
                 }
@@ -1252,8 +1262,30 @@ mod tests {
 
         assert_eq!(state.notepad.visible_tabs, vec!["usage".to_string()]);
         assert_eq!(visible, vec!["Usage tab"]);
+        assert!(items
+            .iter()
+            .any(|item| { item.label == "Note · notes" && !item.visible }));
+        assert!(items
+            .iter()
+            .any(|item| { item.label == "Note · pomodoro-log" && !item.visible }));
         assert!(!state.goals.enabled);
         assert!(!state.pomodoro.sidebar_visible);
+    }
+
+    #[test]
+    fn sidebar_panel_note_rows_include_configured_and_log_notes_before_discovery() {
+        let mut state = AppState::test_new();
+        state.sidebar_note_names = crate::app::state::sidebar_panel_note_names(
+            &["journal.md".to_string(), "weekly".to_string()],
+            "break-notes.md",
+        );
+
+        let rows = crate::app::state::settings_sidebar_panel_items(&state);
+
+        assert!(state.notepad.files.is_empty());
+        for name in ["notes", "journal", "weekly", "break-notes"] {
+            assert!(rows.iter().any(|row| row.label == format!("Note · {name}")));
+        }
     }
 
     #[test]
@@ -1315,7 +1347,16 @@ mod tests {
     fn sidebar_panel_settings_toggle_from_keyboard_and_mouse() {
         let mut keyboard = AppState::test_new();
         open_settings_at(&mut keyboard, SettingsSection::SidebarPanels);
-        keyboard.settings.list.selected = 2;
+        let usage_index = crate::app::state::settings_sidebar_panel_items(&keyboard)
+            .iter()
+            .position(|item| {
+                item.target
+                    == crate::app::state::SidebarPanelSettingTarget::NotepadTab(
+                        crate::notepad::NotepadTabTarget::Usage,
+                    )
+            })
+            .expect("usage row");
+        keyboard.settings.list.selected = usage_index;
         assert_eq!(
             update_settings_state(
                 &mut keyboard,
@@ -1335,20 +1376,102 @@ mod tests {
         mouse.view.terminal_area = Rect::new(26, 0, 80, 40);
         open_settings_at(&mut mouse, SettingsSection::SidebarPanels);
         let area = mouse.settings_content_rect();
+        let pomodoro_index = crate::app::state::settings_sidebar_panel_items(&mouse)
+            .iter()
+            .position(|item| item.target == crate::app::state::SidebarPanelSettingTarget::Pomodoro)
+            .expect("pomodoro row");
         assert_eq!(
-            mouse.settings_list_index_at(area.x, area.y + 3 + 4),
-            Some(4)
+            mouse.settings_list_index_at(area.x, area.y + 3 + pomodoro_index as u16),
+            Some(pomodoro_index)
         );
         assert_eq!(
-            mouse.handle_settings_mouse(mouse_down(area.x, area.y + 3 + 4)),
+            mouse.handle_settings_mouse(mouse_down(area.x, area.y + 3 + pomodoro_index as u16,)),
             Some(SettingsAction::SaveConfigEdit(
-                crate::app::settings_general::ConfigEdit::Bool {
-                    section: "pomodoro",
-                    key: "sidebar_visible",
-                    value: true,
-                }
+                crate::app::settings_general::ConfigEdit::PomodoroSidebarVisible { visible: true }
             ))
         );
+    }
+
+    #[test]
+    fn enabling_a_note_from_sidebar_panels_enables_and_creates_it() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-sidebar-note-setting-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&directory).expect("scratch directory");
+        let config_path = directory.join("config.toml");
+        let notes_dir = directory.join("notes");
+        std::fs::write(
+            &config_path,
+            format!("[notepad]\ndir = {:?}\n", notes_dir.display().to_string()),
+        )
+        .expect("seed config");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &config_path);
+        let config = crate::config::Config::load().config;
+        let mut app = crate::app::App::new(
+            &config,
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        open_settings_at(&mut app.state, SettingsSection::SidebarPanels);
+        let note_index = crate::app::state::settings_sidebar_panel_items(&app.state)
+            .iter()
+            .position(|item| {
+                item.target
+                    == crate::app::state::SidebarPanelSettingTarget::Note("notes".to_string())
+            })
+            .expect("default note row");
+        app.state.settings.list.selected = note_index;
+        let action = update_settings_state(
+            &mut app.state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        )
+        .expect("note toggle action");
+
+        app.apply_settings_action(action);
+
+        assert!(app.state.notepad.enabled);
+        assert!(app
+            .state
+            .notepad
+            .visible_tabs
+            .contains(&"note:notes".to_string()));
+        assert!(notes_dir.join("notes.md").is_file());
+        assert!(app
+            .state
+            .notepad
+            .files
+            .iter()
+            .any(|file| file.name == "notes"));
+
+        let pomodoro_index = crate::app::state::settings_sidebar_panel_items(&app.state)
+            .iter()
+            .position(|item| item.target == crate::app::state::SidebarPanelSettingTarget::Pomodoro)
+            .expect("pomodoro row");
+        app.state.settings.list.selected = pomodoro_index;
+        let action = update_settings_state(
+            &mut app.state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        )
+        .expect("pomodoro toggle action");
+        app.apply_settings_action(action);
+        assert!(app.state.pomodoro.enabled);
+        assert!(app.state.pomodoro.sidebar_visible);
+
+        let action = update_settings_state(
+            &mut app.state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        )
+        .expect("pomodoro hide action");
+        app.apply_settings_action(action);
+        assert!(app.state.pomodoro.enabled);
+        assert!(!app.state.pomodoro.sidebar_visible);
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     fn mouse_down(column: u16, row: u16) -> MouseEvent {
