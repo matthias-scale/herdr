@@ -2310,6 +2310,7 @@ mod tests {
             .create_sidebar_folder(crate::app::sidebar_folders::SidebarShelf::Active, "Plans")
             .expect("create folder");
         app.state.workspaces[0].tabs[0].set_subgroup(Some("Plans".to_string()));
+        assert!(app.state.set_tab_sidebar_folder(0, 0, Some("Plans")));
         let menu = || ContextMenuState {
             kind: ContextMenuKind::Folder {
                 shelf: crate::app::sidebar_folders::SidebarShelf::Active,
@@ -2330,7 +2331,15 @@ mod tests {
 
         app.apply_context_menu_action_via_api(menu(), ContextMenuAction::DeleteFolder);
         assert!(app.state.sidebar_folder("Plans").is_none());
-        assert_eq!(app.state.workspaces[0].tabs[0].subgroup(), None);
+        assert_eq!(
+            app.state.tab_sidebar_folder(
+                0,
+                0,
+                crate::app::sidebar_folders::SidebarShelf::Active,
+            ),
+            None
+        );
+        assert_eq!(app.state.workspaces[0].tabs[0].subgroup(), Some("Plans"));
     }
 
     fn context_tab_ids(state: &AppState, ws_idx: usize, tab_idx: usize) -> (String, String) {
