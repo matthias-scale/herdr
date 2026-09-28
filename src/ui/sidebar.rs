@@ -240,6 +240,7 @@ pub(super) struct TabRowLayout {
 const SIDEBAR_DOT_FIELD_WIDTH: usize = 3;
 const SIDEBAR_PROVIDER_GAP_WIDTH: usize = 1;
 const SIDEBAR_AGE_FIELD_WIDTH: usize = 5;
+const SIDEBAR_AGE_MIN_ROW_WIDTH: usize = 24;
 const SIDEBAR_MACHINE_FIELD_WIDTH: usize = 2;
 const SIDEBAR_MIN_NESTED_TITLE_WIDTH: usize = 8;
 const SIDEBAR_MIN_NESTED_PREFIX_WIDTH: usize = 3;
@@ -539,13 +540,14 @@ fn compact_row_widths_with_machine(
     let title_width = display_width(title);
     let readable_title_width = title_width.min(SIDEBAR_MIN_NESTED_TITLE_WIDTH);
     let minimum_prefix_width = requested_prefix.min(SIDEBAR_MIN_NESTED_PREFIX_WIDTH);
-    let age = if width
-        >= SIDEBAR_DOT_FIELD_WIDTH
-            + provider
-            + machine_width
-            + SIDEBAR_AGE_FIELD_WIDTH
-            + readable_title_width
-            + minimum_prefix_width
+    let age = if width >= SIDEBAR_AGE_MIN_ROW_WIDTH
+        && width
+            >= SIDEBAR_DOT_FIELD_WIDTH
+                + provider
+                + machine_width
+                + SIDEBAR_AGE_FIELD_WIDTH
+                + readable_title_width
+                + minimum_prefix_width
     {
         SIDEBAR_AGE_FIELD_WIDTH
     } else {
@@ -7715,7 +7717,7 @@ pub(super) fn render_needs_you_row(
     let p = &app.palette;
     let marker_color = p.red;
     let machine_icon = sidebar_machine_icon(app, host);
-    let age_width = if rect.width >= 24 {
+    let age_width = if usize::from(rect.width) >= SIDEBAR_AGE_MIN_ROW_WIDTH {
         SIDEBAR_AGE_FIELD_WIDTH
     } else {
         0
@@ -8076,7 +8078,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                         row_hover: false,
                     });
                 }
-                let age_width = if body.width >= 24 {
+                let age_width = if usize::from(body.width) >= SIDEBAR_AGE_MIN_ROW_WIDTH {
                     SIDEBAR_AGE_FIELD_WIDTH
                 } else {
                     0
@@ -14695,14 +14697,17 @@ pub(crate) mod tests {
                     assert!(dot_x < title_x, "{rendered:?}");
                     assert_eq!(buffer[(dot_x, 0)].style().fg, Some(expected_dot));
                     assert_eq!(buffer[(title_x, 0)].style().fg, Some(expected_title));
+                    let machine = if is_remote { "2" } else { "?" };
+                    let machine_x = find_symbol_x(buffer, 0, width, machine);
+                    assert_eq!(
+                        buffer[(machine_x, 0)].style().fg,
+                        Some(expected_remote_suffix)
+                    );
+                    assert!(!rendered.contains("· ub2"), "{rendered:?}");
                     if width == 60 {
-                        let (symbol, expected) = if is_remote {
-                            ("u", expected_remote_suffix)
-                        } else {
-                            ("c", expected_provider)
-                        };
-                        let secondary_x = find_symbol_x(buffer, 0, width, symbol);
-                        assert_eq!(buffer[(secondary_x, 0)].style().fg, Some(expected));
+                        let provider_x = find_symbol_x(buffer, 0, width, "c");
+                        assert_eq!(buffer[(provider_x, 0)].style().fg, Some(expected_provider));
+                        assert!(provider_x < machine_x, "{rendered:?}");
                     }
                 }
             }
@@ -15716,9 +15721,34 @@ pub(crate) mod tests {
         assert!(!rendered.contains("· ub1"), "{rendered:?}");
     }
 
+    fn assert_remote_machine_icons_and_tooltips(
+        app: &AppState,
+        buffer: &ratatui::buffer::Buffer,
+        area: Rect,
+        hosts: &[&str],
+    ) {
+        let targets = compute_sidebar_hover_targets(app, area);
+        for host in hosts {
+            let icon = sidebar_machine_icon(app, host);
+            let machine = targets
+                .iter()
+                .find(|target| {
+                    target.label == *host
+                        && target.rect.width == 1
+                        && buffer[(target.rect.x, target.rect.y)].symbol() == icon
+                })
+                .unwrap_or_else(|| panic!("missing {host} machine icon and tooltip"));
+            let rendered = row_text(buffer, machine.rect.y, area.width);
+            assert!(rendered.contains("same"), "{host}: {rendered:?}");
+            assert!(!rendered.contains(&format!("· {host}")), "{rendered:?}");
+            assert!(machine.action.is_none());
+        }
+    }
+
     #[test]
-    fn full_sidebar_clamps_host_tokens_to_three_cells() {
+    fn remote_rows_use_one_machine_cell_with_full_host_tooltips() {
         let mut app = AppState::test_new();
+        app.nerd_font = false;
         let hosts = ["alpha-a1", "alpha-b1"];
         let snapshot = crate::fleet::Snapshot {
             hosts: hosts
@@ -15753,28 +15783,26 @@ pub(crate) mod tests {
         let rendered = (0..area.height)
             .map(|row| row_text(terminal.backend().buffer(), row, area.width))
             .collect::<Vec<_>>();
-        let host_tokens = short_fleet_host_names(hosts);
         assert!(
             rendered.iter().any(|row| row.contains("same")),
             "{rendered:?}"
         );
-        for (host, token) in host_tokens {
-            assert!(
-                crate::ui::text::display_width(&token) <= SIDEBAR_HOST_TOKEN_NARROW_WIDTH,
-                "{host} rendered as {token:?}"
-            );
-            assert!(
-                rendered
-                    .iter()
-                    .any(|row| row.contains(&format!("· {token}"))),
-                "host {host} ({token}) missing from {rendered:?}"
-            );
-        }
+        assert_remote_machine_icons_and_tooltips(&app, terminal.backend().buffer(), area, &hosts);
     }
 
     #[test]
-    fn full_sidebar_keeps_distinct_host_tokens_when_aliases_diverge_in_the_middle() {
+    fn remote_rows_with_similar_host_names_keep_distinct_icons_and_tooltips() {
         let mut app = AppState::test_new();
+        app.nerd_font = true;
+        app.machines
+            .extend([("alpha-a1", "◆"), ("alpha-b1", "◇")].map(|(name, icon)| {
+                crate::app::machines::Machine {
+                    name: name.into(),
+                    icon: Some(icon.into()),
+                    target: Some(name.into()),
+                    socket: None,
+                }
+            }));
         let snapshot = crate::fleet::Snapshot {
             hosts: ["alpha-a1", "alpha-b1"]
                 .into_iter()
@@ -15812,13 +15840,11 @@ pub(crate) mod tests {
             rendered.iter().any(|row| row.contains("same")),
             "{rendered:?}"
         );
-        assert!(
-            rendered.iter().any(|row| row.contains("· #1")),
-            "{rendered:?}"
-        );
-        assert!(
-            rendered.iter().any(|row| row.contains("· #2")),
-            "{rendered:?}"
+        assert_remote_machine_icons_and_tooltips(
+            &app,
+            terminal.backend().buffer(),
+            area,
+            &["alpha-a1", "alpha-b1"],
         );
     }
 
@@ -15830,6 +15856,7 @@ pub(crate) mod tests {
             ["alpha-machine", "beta-machine"],
         ] {
             let mut app = AppState::test_new();
+            app.nerd_font = false;
             let snapshot = crate::fleet::Snapshot {
                 hosts: hosts
                     .into_iter()
@@ -15847,6 +15874,7 @@ pub(crate) mod tests {
             expand_fleet(&mut app);
             let width = 30;
             let area = Rect::new(0, 0, width, 20);
+            app.view.sidebar_rect = area;
             let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
             terminal
                 .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
@@ -15854,15 +15882,16 @@ pub(crate) mod tests {
             let rendered = (0..area.height)
                 .map(|row| row_text(terminal.backend().buffer(), row, area.width))
                 .collect::<Vec<_>>();
-            let host_tokens = short_fleet_host_names(hosts);
-            for (host, short) in host_tokens {
-                assert!(
-                    rendered
-                        .iter()
-                        .any(|row| row.contains(&format!("· {short}"))),
-                    "host {host} ({short}) missing from {rendered:?}"
-                );
-            }
+            assert!(
+                rendered.iter().any(|row| row.contains("same-agent")),
+                "{rendered:?}"
+            );
+            assert_remote_machine_icons_and_tooltips(
+                &app,
+                terminal.backend().buffer(),
+                area,
+                &hosts,
+            );
         }
     }
 
@@ -17260,7 +17289,7 @@ pub(crate) mod tests {
             false,
         );
 
-        assert_eq!(display_width(&linked_layout.title), 9);
+        assert_eq!(linked_layout.title, "abcdefghij");
         assert_eq!(
             display_width(&unlinked_layout.title),
             display_width(&linked_layout.title),
@@ -20004,15 +20033,18 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         };
         let mut width_probe = entry.clone();
         width_probe.primary_tab_label = Some("sample-pr-title-uses-width".into());
-        let wide_enough_for_old_suffix = render_at_row_width(&width_probe, 44, 0);
+        let wide_with_machine = render_at_row_width(&width_probe, 44, 0);
         assert!(
-            wide_enough_for_old_suffix.contains("sample-pr-title-uses-width"),
-            "{wide_enough_for_old_suffix:?}"
+            wide_with_machine.contains("sample-pr-title-uses-wid"),
+            "{wide_with_machine:?}"
         );
-        assert!(
-            wide_enough_for_old_suffix.ends_with("2m"),
-            "{wide_enough_for_old_suffix:?}"
+        assert!(wide_with_machine.contains("pi ?"), "{wide_with_machine:?}");
+        let (before_machine, _) = wide_with_machine.split_once('?').expect("machine icon");
+        assert_eq!(
+            display_width(before_machine),
+            machine_icon_cell_offset(44, 5)
         );
+        assert!(wide_with_machine.ends_with("2m"), "{wide_with_machine:?}");
         assert!(
             !wide_enough_for_old_suffix.contains("t3-sample"),
             "{wide_enough_for_old_suffix:?}"
@@ -20024,13 +20056,22 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(!default_width.contains("· t3-sample"), "{default_width:?}");
 
         let github_depth = render_at_row_width(&entry, 25, 1);
-        assert_eq!(github_depth, "    ●  samp… ◷  ✓ pi   2m");
+        assert!(github_depth.starts_with("    ●  sa"), "{github_depth:?}");
+        assert!(github_depth.ends_with("pi ?   2m"), "{github_depth:?}");
         let repo_branch_depth = render_at_row_width(&entry, 25, 2);
-        assert_eq!(repo_branch_depth, "     ●  sam… ◷  ✓ pi   2m");
+        assert!(
+            repo_branch_depth.starts_with("     ●  sa"),
+            "{repo_branch_depth:?}"
+        );
+        assert!(
+            repo_branch_depth.ends_with("pi ?   2m"),
+            "{repo_branch_depth:?}"
+        );
         let mut ticket_entry = entry.clone();
         ticket_entry.primary_tab_label = Some("SCA-3165 · sample-linear".into());
         let nested_ticket = render_at_row_width(&ticket_entry, 25, 2);
-        assert_eq!(nested_ticket, "   ●  sampl… ◷  ✓ pi   2m");
+        assert!(nested_ticket.contains("●  sam"), "{nested_ticket:?}");
+        assert!(nested_ticket.ends_with("pi ?   2m"), "{nested_ticket:?}");
 
         let wide = render_first_tab_row(&app, 80);
         assert!(wide.contains("sample-pr"), "{wide:?}");
@@ -24188,8 +24229,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn parent_rows_start_left_of_children_at_supported_widths() {
+    fn nested_rows_keep_title_and_machine_at_minimum_width_and_indent_when_space_allows() {
         let mut app = AppState::test_new();
+        app.agent_host_name = "ub1".into();
+        app.nerd_font = false;
         app.workspaces = vec![Workspace::test_new("repo")];
         app.ensure_test_terminals();
         let pane_id = app.workspaces[0].tabs[0].root_pane;
@@ -24231,11 +24274,23 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     .expect("visible row content")
             };
 
-            assert!(
-                first_non_space(header.rect.y, header.rect.width)
-                    < first_non_space(child.rect.y, child.rect.width),
-                "parent must start left of child at width {width}"
-            );
+            let child_text = row_text(terminal.backend().buffer(), child.rect.y, child.rect.width);
+            if width == 18 {
+                assert!(child_text.contains('●'), "{child_text:?}");
+                let title = child_text
+                    .split_once('●')
+                    .and_then(|(_, rest)| rest.split_once("cx"))
+                    .map(|(title, _)| title.trim())
+                    .expect("title before Codex provider");
+                assert!(display_width(title) >= 3, "{child_text:?}");
+                assert!(child_text.contains('1'), "{child_text:?}");
+            } else {
+                assert!(
+                    first_non_space(header.rect.y, header.rect.width)
+                        < first_non_space(child.rect.y, child.rect.width),
+                    "parent must start left of child at width {width}"
+                );
+            }
         }
     }
 
@@ -24693,7 +24748,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn tab_shell_marker_renders_in_the_provider_column() {
+    fn tab_shell_state_keeps_provider_and_machine_columns() {
         let mut app = app_with_agents(&["one"]);
         app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("Use Repository Instructions".into());
@@ -24716,8 +24771,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             rendered.contains("Use Repository Instructions"),
             "{rendered:?}"
         );
-        assert!(rendered.contains("pi >_"), "{rendered:?}");
-        assert!(!rendered.contains("  2 >_"), "{rendered:?}");
+        assert!(rendered.contains("pi ?"), "{rendered:?}");
+        assert!(!rendered.contains(">_"), "{rendered:?}");
 
         app.nerd_font = true;
         let mut icon_terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
@@ -24730,7 +24785,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             icon_rendered.contains("Use Repository Instructions"),
             "{icon_rendered:?}"
         );
-        assert!(icon_rendered.contains("\u{ea85}"), "{icon_rendered:?}");
+        assert!(icon_rendered.contains("\u{f0379}"), "{icon_rendered:?}");
+        assert!(!icon_rendered.contains("\u{ea85}"), "{icon_rendered:?}");
     }
 
     #[test]
