@@ -1896,6 +1896,23 @@ impl App {
         agent_label: &str,
         session_id: Option<&str>,
     ) -> AgentReportPaneResolution {
+        // Live hook ownership outranks persisted identity: after a restore an
+        // older pane can still carry the same persisted session id.
+        if let Some(session_id) = session_id {
+            match self.unique_live_agent_session_pane(agent_label, session_id) {
+                UniqueAgentSessionPane::One(target) => {
+                    return AgentReportPaneResolution::Pane(target);
+                }
+                UniqueAgentSessionPane::Several => {
+                    return if parsed_pane.is_some() {
+                        AgentReportPaneResolution::Ignore
+                    } else {
+                        AgentReportPaneResolution::Missing
+                    };
+                }
+                UniqueAgentSessionPane::None => {}
+            }
+        }
         let Some((ws_idx, pane_id)) = parsed_pane else {
             let Some(session_id) = session_id else {
                 return AgentReportPaneResolution::Missing;
@@ -9378,6 +9395,60 @@ mod tests {
             app.state.terminals[&terminal_id].raw_agent_state(),
             AgentState::Idle
         );
+    }
+
+    #[test]
+    fn agent_reports_prefer_the_live_owner_over_a_persisted_duplicate() {
+        for addressed in ["stale", "persisted-pane"] {
+            let (mut app, old_pane_id) = app_with_test_workspace();
+            let old_terminal_id = bind_test_agent_session(
+                &mut app,
+                &old_pane_id,
+                "herdr:claude",
+                "claude",
+                "restored-session",
+            );
+            let old_state = app.state.terminals[&old_terminal_id].raw_agent_state();
+            let live_pane_id = add_test_workspace(&mut app, "live-owner");
+            let live_terminal_id = bind_test_live_agent_session(
+                &mut app,
+                &live_pane_id,
+                "herdr:claude",
+                "claude",
+                "restored-session",
+            );
+            let (live_ws_idx, live_internal_id) = app.parse_pane_id(&live_pane_id).unwrap();
+            app.state
+                .terminals
+                .get_mut(&live_terminal_id)
+                .unwrap()
+                .set_detected_state(Some(Agent::Claude), AgentState::Working);
+
+            let target = if addressed == "stale" {
+                "missing-workspace:p15".to_string()
+            } else {
+                old_pane_id.clone()
+            };
+            let mut report = closing_block_report(&target, 2, Vec::new());
+            report.source = "herdr:claude-closing-block".into();
+            report.agent = "claude".into();
+            report.agent_session_id = Some("restored-session".into());
+            let response = app.handle_pane_report_agent("live-owner-report".into(), report);
+            let _: SuccessResponse = serde_json::from_str(&response)
+                .unwrap_or_else(|_| panic!("{addressed}: report was not routed: {response}"));
+
+            let pane = app.pane_info(live_ws_idx, live_internal_id).unwrap();
+            assert_eq!(
+                pane.tokens.get("closing_completion").map(String::as_str),
+                Some("complete"),
+                "{addressed}: the live owner receives the report"
+            );
+            assert_eq!(
+                app.state.terminals[&old_terminal_id].raw_agent_state(),
+                old_state,
+                "{addressed}: the persisted duplicate stays untouched"
+            );
+        }
     }
 
     #[test]
