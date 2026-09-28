@@ -7073,6 +7073,54 @@ mod tests {
     }
 
     #[test]
+    fn nonblocking_closing_report_stays_blocked_until_pane_input() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Codex), crate::detect::AgentState::Idle);
+
+        let mut blocked = closing_block_report(&pane_id, 1, vec![test_gate()]);
+        blocked.state = crate::api::schema::PaneAgentState::Blocked;
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent("blocked".into(), blocked)).unwrap();
+        let _: SuccessResponse = serde_json::from_str(&app.handle_pane_report_agent(
+            "working-report".into(),
+            closing_block_report(&pane_id, 2, Vec::new()),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            app.pane_info(0, internal_pane_id).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Blocked
+        );
+        assert_eq!(
+            app.state.terminals[&terminal_id].closing_gates(),
+            &[test_gate()]
+        );
+
+        app.try_send_text_to_pane(&pane_id, "continue\n")
+            .expect("pane input is sent");
+        let _: SuccessResponse = serde_json::from_str(&app.handle_pane_report_agent(
+            "after-input".into(),
+            closing_block_report(&pane_id, 3, Vec::new()),
+        ))
+        .unwrap();
+
+        assert_ne!(
+            app.pane_info(0, internal_pane_id).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Blocked
+        );
+    }
+
+    #[test]
     fn missing_short_reply_preserves_the_previous_human_blocker() {
         let (mut app, pane_id) = app_with_test_workspace();
         let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
