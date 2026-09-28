@@ -6,12 +6,38 @@ use crate::board::{
 
 use super::super::App;
 
+static REMOTE_LINE_BATCH_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+struct RemoteLineBatchPermit;
+
+impl RemoteLineBatchPermit {
+    fn try_acquire() -> Option<Self> {
+        REMOTE_LINE_BATCH_ACTIVE
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::Acquire,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for RemoteLineBatchPermit {
+    fn drop(&mut self) {
+        REMOTE_LINE_BATCH_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 fn spawn_remote_line_workers(
     requests: Vec<(crate::board::AgentLink, crate::fleet::HostApiRoute)>,
     event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
     note_path: std::path::PathBuf,
     fleet_generation: u64,
     request_id: u64,
+    permit: RemoteLineBatchPermit,
 ) {
     std::thread::spawn(move || {
         let worker_count = requests.len().min(4);
@@ -51,6 +77,7 @@ fn spawn_remote_line_workers(
         for handle in handles {
             let _ = handle.join();
         }
+        drop(permit);
         let _ = event_tx.blocking_send(crate::events::AppEvent::BoardRemoteLinesFetched {
             note_path,
             fleet_generation,
@@ -93,6 +120,9 @@ impl App {
         if requests.is_empty() {
             return;
         }
+        let Some(permit) = RemoteLineBatchPermit::try_acquire() else {
+            return;
+        };
         let note_path = view.note.path.clone();
         let fleet_generation = self.state.fleet_snapshot.config_generation;
         let request_id = crate::board::next_remote_line_request_id();
@@ -107,6 +137,7 @@ impl App {
             note_path,
             fleet_generation,
             request_id,
+            permit,
         );
     }
 
@@ -128,12 +159,18 @@ impl App {
         let Some(view) = view.filter(|view| {
             view.note.path == note_path && view.remote_line_request_id == request_id
         }) else {
+            if complete {
+                self.refresh_board_remote_lines();
+            }
             return false;
         };
         if complete {
             view.remote_line_fetch_in_flight = false;
         }
         if fleet_generation != current_generation {
+            if complete {
+                self.refresh_board_remote_lines();
+            }
             return false;
         }
         let changed = !lines.is_empty();
@@ -1038,6 +1075,15 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_line_batch_remains_bounded_across_board_reopens() {
+        let first = RemoteLineBatchPermit::try_acquire().expect("first board fetch");
+        assert!(RemoteLineBatchPermit::try_acquire().is_none());
+        drop(first);
+        let reopened = RemoteLineBatchPermit::try_acquire().expect("reopen can fetch after finish");
+        drop(reopened);
+    }
 
     #[test]
     fn stale_remote_line_result_cannot_change_reopened_board() {

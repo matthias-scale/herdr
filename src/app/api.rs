@@ -348,9 +348,7 @@ impl App {
         match ev {
             AppEvent::FleetRefreshed { snapshot } => {
                 let changed = self.install_fleet_snapshot(snapshot);
-                if changed {
-                    self.refresh_board_remote_lines();
-                }
+                self.refresh_board_remote_lines();
                 changed
             }
             AppEvent::BoardRemoteLinesFetched {
@@ -642,9 +640,7 @@ impl App {
 
         if let AppEvent::FleetRefreshed { snapshot } = ev {
             let changed = self.install_fleet_snapshot(snapshot);
-            if changed {
-                self.refresh_board_remote_lines();
-            }
+            self.refresh_board_remote_lines();
             return Some(changed);
         }
 
