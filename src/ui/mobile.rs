@@ -2602,7 +2602,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_subagent_count_is_dimmed_and_aligned_at_supported_widths() {
+    fn mobile_provider_without_subagent_count_is_dimmed_at_supported_widths() {
         for width in [18, 40] {
             let mut app = crate::app::state::AppState::test_new();
             app.nerd_font = false;
@@ -2622,6 +2622,7 @@ mod tests {
             app.view.mobile_header_rect = Rect::new(0, 0, width, 2);
             app.view.terminal_area = Rect::new(0, 2, width, 16);
             app.reconcile_sidebar_presentation();
+            app.toggle_sidebar_group("Working");
 
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 18)).unwrap();
@@ -2647,8 +2648,9 @@ mod tests {
                             .collect::<String>(),
                     )
                 })
-                .find(|(_, row)| row.contains("pi+3"))
-                .unwrap_or_else(|| panic!("width {width} omitted provider count"));
+                .find(|(_, row)| row.contains("pi"))
+                .unwrap_or_else(|| panic!("width {width} omitted provider"));
+            assert!(!_row.contains("pi+3"), "width {width} retained sub-agent count");
             let provider_x = (content.x..content.x + content.width)
                 .find(|x| terminal.backend().buffer()[(*x, provider_y)].symbol() == "p")
                 .expect("provider start");
