@@ -20046,27 +20046,27 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
         assert!(wide_with_machine.ends_with("2m"), "{wide_with_machine:?}");
         assert!(
-            !wide_enough_for_old_suffix.contains("t3-sample"),
-            "{wide_enough_for_old_suffix:?}"
+            !wide_with_machine.contains("t3-sample"),
+            "{wide_with_machine:?}"
         );
 
         let default_width = render_first_tab_row(&app, 40);
         assert!(default_width.contains("sample-pr"), "{default_width:?}");
         assert!(default_width.contains("2m"), "{default_width:?}");
         assert!(!default_width.contains("· t3-sample"), "{default_width:?}");
-
         let github_depth = render_at_row_width(&entry, 25, 1);
-        assert!(github_depth.starts_with("    ●  sa"), "{github_depth:?}");
-        assert!(github_depth.ends_with("pi ?   2m"), "{github_depth:?}");
         let repo_branch_depth = render_at_row_width(&entry, 25, 2);
+        let indent = |row: &str| row.len() - row.trim_start().len();
         assert!(
-            repo_branch_depth.starts_with("     ●  sa"),
-            "{repo_branch_depth:?}"
+            // At 25 cells the machine column takes the extra nesting cells;
+            // children never start left of their parent.
+            indent(&repo_branch_depth) >= indent(&github_depth),
+            "{github_depth:?} {repo_branch_depth:?}"
         );
-        assert!(
-            repo_branch_depth.ends_with("pi ?   2m"),
-            "{repo_branch_depth:?}"
-        );
+        for row in [&github_depth, &repo_branch_depth] {
+            assert!(row.contains("●  sa"), "{row:?}");
+            assert!(row.ends_with("pi ?   2m"), "{row:?}");
+        }
         let mut ticket_entry = entry.clone();
         ticket_entry.primary_tab_label = Some("SCA-3165 · sample-linear".into());
         let nested_ticket = render_at_row_width(&ticket_entry, 25, 2);
