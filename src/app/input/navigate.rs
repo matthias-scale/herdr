@@ -1180,17 +1180,12 @@ impl App {
         let Some(tab_id) = self.public_tab_id(ws_idx, tab_idx) else {
             return;
         };
-        let (title, was_pinned) = self
+        let title = self
             .state
             .workspaces
             .get(ws_idx)
-            .and_then(|workspace| {
-                Some((
-                    workspace.tab_display_name_from(&self.state.terminals, tab_idx)?,
-                    workspace.tabs.get(tab_idx)?.pinned,
-                ))
-            })
-            .unwrap_or_else(|| (String::new(), false));
+            .and_then(|workspace| workspace.tab_display_name_from(&self.state.terminals, tab_idx))
+            .unwrap_or_default();
         let response = self.runtime_tab_pin(
             "tui.tab.pin",
             crate::api::schema::TabPinParams {
@@ -1201,7 +1196,9 @@ impl App {
         if !title.is_empty()
             && serde_json::from_str::<crate::api::schema::ErrorResponse>(&response).is_err()
         {
-            self.show_sidebar_action_toast(if was_pinned { "Unpinned" } else { "Pinned" }, title);
+            let destination =
+                crate::ui::sidebar::sidebar_local_tab_destination(&self.state, ws_idx, tab_idx);
+            self.show_sidebar_action_toast(destination, title);
         }
     }
 

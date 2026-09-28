@@ -1945,6 +1945,57 @@ mod tests {
     }
 
     #[test]
+    fn sections_mobile_rows_keep_title_and_provider_at_minimum_width() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.nerd_font = false;
+        app.workspaces = vec![crate::workspace::Workspace::test_new("sidebar task")];
+        app.ensure_test_terminals();
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0]
+            .terminal_id(pane)
+            .expect("terminal")
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
+        terminal.detected_agent = Some(crate::detect::Agent::Codex);
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Working);
+        app.active = Some(0);
+        app.selected = 0;
+        app.reconcile_sidebar_presentation();
+        for width in [18, 40] {
+            let area = Rect::new(0, 0, width, 20);
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 20))
+                    .expect("mobile terminal");
+            terminal
+                .draw(|frame| {
+                    render_mobile_switcher_content(
+                        &app,
+                        &TerminalRuntimeRegistry::new(),
+                        frame,
+                        area,
+                    )
+                })
+                .expect("render");
+            let rows = (0..area.height)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rows.iter().any(|row| {
+                    row.find("● ")
+                        .zip(row.find(" cx"))
+                        .is_some_and(|(dot, provider)| provider > dot + 4)
+                }),
+                "{width}: {rows:?}"
+            );
+        }
+    }
+
+    #[test]
     fn mobile_header_aggregates_the_workspace_in_one_pane_pass() {
         let mut app = AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("one")];

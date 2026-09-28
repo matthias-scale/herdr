@@ -1813,6 +1813,32 @@ impl super::super::App {
         self.sync_toast_deadline(previous_toast);
     }
 
+    fn sidebar_local_destination(
+        &self,
+        target: &crate::app::state::PaneFocusTarget,
+    ) -> &'static str {
+        let Some((ws_idx, tab_idx)) =
+            self.state
+                .workspaces
+                .iter()
+                .enumerate()
+                .find_map(|(ws_idx, workspace)| {
+                    (workspace.id == target.workspace_id)
+                        .then(|| {
+                            workspace
+                                .tabs
+                                .iter()
+                                .position(|tab| tab.panes.contains_key(&target.pane_id))
+                                .map(|tab_idx| (ws_idx, tab_idx))
+                        })
+                        .flatten()
+                })
+        else {
+            return crate::ui::sidebar::ACTIVE_SECTION_TITLE;
+        };
+        crate::ui::sidebar::sidebar_local_tab_destination(&self.state, ws_idx, tab_idx)
+    }
+
     fn show_local_pane_lifecycle_error(&mut self, action: &str, response: &str) -> bool {
         let Ok(error) = serde_json::from_str::<crate::api::schema::ErrorResponse>(response) else {
             return false;
@@ -1881,12 +1907,15 @@ impl super::super::App {
     ) {
         let title = self.sidebar_lifecycle_title(&target);
         match &target {
-            crate::app::state::SidebarPaneLifecycleTarget::Local(_) => {
+            crate::app::state::SidebarPaneLifecycleTarget::Local(pane_target) => {
                 if let Some(pane_id) = self.sidebar_pane_lifecycle_public_id(&target) {
                     let response = self.runtime_pane_unsnooze("tui.sidebar.unsnooze", pane_id);
                     if !self.show_local_pane_lifecycle_error("unsnooze", &response) {
                         if let Some(title) = title {
-                            self.show_sidebar_action_toast("Active", title);
+                            self.show_sidebar_action_toast(
+                                self.sidebar_local_destination(pane_target),
+                                title,
+                            );
                         }
                     }
                 }
@@ -2581,11 +2610,11 @@ impl super::super::App {
         } else {
             self.state.note_pane_activity_at(target.pane_id, now);
         }
-        self.focus_settled_pane(target);
+        self.focus_settled_pane(target.clone());
         self.flush_pane_settlement_events();
         if was_settled {
             if let Some(title) = title {
-                self.show_sidebar_action_toast("Active", title);
+                self.show_sidebar_action_toast(self.sidebar_local_destination(&target), title);
             }
         }
     }
@@ -3217,7 +3246,7 @@ mod tests {
                 pane_id,
             },
         );
-        for (destination, action) in [("Pinned", true), ("Unpinned", false)] {
+        for (destination, action) in [("Pinned", true), ("Active", false)] {
             app.toggle_pin_tab_via_api(0, 0);
             assert_eq!(app.state.workspaces[0].tabs[0].pinned, action);
             assert_eq!(
@@ -3259,6 +3288,77 @@ mod tests {
         assert_eq!(
             app.state.toast.as_ref().map(|toast| toast.title.as_str()),
             Some(format!("Active · {title}").as_str())
+        );
+    }
+
+    #[test]
+    fn sections_pinned_unsnooze_and_resume_toasts_name_pinned() {
+        let mut app = sidebar_order_app(false);
+        app.state.sidebar_sections_layout = true;
+        app.state.workspaces[0].tabs[0].pinned = true;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let title = app.state.workspaces[0]
+            .tab_display_name_from(&app.state.terminals, 0)
+            .expect("title");
+        let local = crate::app::state::PaneFocusTarget {
+            workspace_id: app.state.workspaces[0].id.clone(),
+            pane_id,
+        };
+        let target = crate::app::state::SidebarPaneLifecycleTarget::Local(local.clone());
+        let public_pane_id = app
+            .sidebar_pane_lifecycle_public_id(&target)
+            .expect("pane id");
+        app.dispatch_sidebar_pane_snooze(
+            target.clone(),
+            crate::api::schema::PaneSnoozeParams {
+                pane_id: public_pane_id,
+                duration_s: Some(900),
+                snoozed_until: None,
+            },
+        );
+        app.dispatch_sidebar_pane_unsnooze(target.clone());
+        assert_eq!(
+            app.state.toast.as_ref().map(|toast| toast.title.as_str()),
+            Some(format!("Pinned · {title}").as_str())
+        );
+        app.settle_sidebar_pane(target);
+        app.resume_settled_pane(local);
+        assert_eq!(
+            app.state.toast.as_ref().map(|toast| toast.title.as_str()),
+            Some(format!("Pinned · {title}").as_str())
+        );
+    }
+
+    #[test]
+    fn sections_unpinning_old_done_tab_toasts_settled() {
+        let mut app = sidebar_order_app(false);
+        app.state.sidebar_sections_layout = true;
+        app.state.workspaces[0].tabs[0].pinned = true;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let done_since = std::time::Instant::now();
+        let pane = app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("pane");
+        pane.seen = false;
+        pane.done_since = Some(done_since);
+        let terminal = app
+            .state
+            .terminals
+            .get_mut(&pane.attached_terminal_id)
+            .expect("terminal");
+        terminal.detected_agent = Some(crate::detect::Agent::Codex);
+        terminal.set_raw_agent_state_for_test(crate::detect::AgentState::Idle);
+        app.state.hide_done_after = std::time::Duration::from_secs(60);
+        app.state.view_observed_at = done_since + std::time::Duration::from_secs(61);
+        let title = app.state.workspaces[0]
+            .tab_display_name_from(&app.state.terminals, 0)
+            .expect("title");
+        app.toggle_pin_tab_via_api(0, 0);
+        assert!(!app.state.workspaces[0].tabs[0].pinned);
+        assert_eq!(
+            app.state.toast.as_ref().map(|toast| toast.title.as_str()),
+            Some(format!("Settled · {title}").as_str())
         );
     }
 

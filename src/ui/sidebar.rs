@@ -1320,6 +1320,7 @@ pub(crate) enum SidebarCardStatus {
 pub(crate) struct SidebarThreadCard {
     title: String,
     status: SidebarCardStatus,
+    agent: Option<Agent>,
     host: String,
     host_kind: SidebarCardHostKind,
 }
@@ -2995,7 +2996,9 @@ fn append_sections_block(
                         project.repos.iter().map(move |repo| (index, repo))
                     })
                     .filter(|(_, repo)| cwd.starts_with(&repo.path))
-                    .max_by_key(|(_, repo)| repo.path.components().count())
+                    .max_by_key(|(index, repo)| {
+                        (repo.path.components().count(), std::cmp::Reverse(*index))
+                    })
                     .map(|(index, _)| index)
             };
             let project_index = entry_terminal(app, &entry)
@@ -3096,6 +3099,7 @@ fn sidebar_thread_card(app: &AppState, entry: &AgentPanelEntry) -> SidebarThread
     SidebarThreadCard {
         title: compact_row_title(entry, true).to_string(),
         status,
+        agent: if entry.has_agent { entry.agent } else { None },
         host,
         host_kind,
     }
@@ -3512,7 +3516,11 @@ fn compact_sidebar_rows_inner(
     };
     let (recently_done, visible_entries): (Vec<_>, Vec<_>) =
         visible_entries.into_iter().partition(|entry| {
-            (!sections_layout || !entry.pinned) && entry_is_past_done_hide_threshold(app, entry)
+            if sections_layout {
+                active_sections_destination(app, entry) == SETTLED_SECTION_TITLE
+            } else {
+                entry_is_past_done_hide_threshold(app, entry)
+            }
         });
     settled_entries.extend(recently_done);
     settled_entries = ordered_tab_entries(app, &settled_entries);
@@ -4996,6 +5004,69 @@ fn sidebar_entry_lifecycle(app: &AppState, entry: &AgentPanelEntry) -> SidebarEn
         SidebarEntryLifecycle::Snoozed
     } else {
         SidebarEntryLifecycle::Active
+    }
+}
+
+fn active_sections_destination(app: &AppState, entry: &AgentPanelEntry) -> &'static str {
+    if entry.pinned {
+        PINNED_SECTION_TITLE
+    } else if entry_is_past_done_hide_threshold(app, entry) {
+        SETTLED_SECTION_TITLE
+    } else {
+        ACTIVE_SECTION_TITLE
+    }
+}
+
+/// Use the same lifecycle and tab aggregation as the sections renderer for
+/// action feedback, including mixed active and settled panes.
+pub(crate) fn sidebar_local_tab_destination(
+    app: &AppState,
+    ws_idx: usize,
+    tab_idx: usize,
+) -> &'static str {
+    let entries = sidebar_thread_entries(app)
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .local_target()
+                .is_some_and(|target| target.ws_idx == ws_idx && target.tab_idx == tab_idx)
+        })
+        .collect::<Vec<_>>();
+    let active_targets = entries
+        .iter()
+        .filter_map(|entry| {
+            (sidebar_entry_lifecycle(app, entry) == SidebarEntryLifecycle::Active)
+                .then(|| {
+                    entry
+                        .local_target()
+                        .map(|target| (ws_idx, tab_idx, target.pane_id))
+                })
+                .flatten()
+        })
+        .collect::<std::collections::HashSet<_>>();
+    if !active_targets.is_empty() {
+        let active = entries
+            .into_iter()
+            .filter(|entry| {
+                matches!(
+                    sidebar_entry_lifecycle(app, entry),
+                    SidebarEntryLifecycle::Active | SidebarEntryLifecycle::Settled
+                )
+            })
+            .collect::<Vec<_>>();
+        return ordered_tab_entries_preferring(app, &active, Some(&active_targets))
+            .first()
+            .map_or(ACTIVE_SECTION_TITLE, |entry| {
+                active_sections_destination(app, entry)
+            });
+    }
+    if entries
+        .iter()
+        .any(|entry| sidebar_entry_lifecycle(app, entry) == SidebarEntryLifecycle::Snoozed)
+    {
+        SNOOZED_SECTION_TITLE
+    } else {
+        SETTLED_SECTION_TITLE
     }
 }
 
@@ -10964,9 +11035,14 @@ fn sections_tail_width(
     } else {
         0
     };
+    let provider_width = card
+        .agent
+        .and_then(|agent| crate::ui::icons::agent_label(agent, app.nerd_font))
+        .map_or(0, |label| display_width(label) + 1);
     // The host is optional. Keep a useful title fragment and all controls and
     // status text before reserving any space for it.
-    let max_host_width = width.saturating_sub(2 + usize::from(controls_width) + suffix_width + 8);
+    let max_host_width =
+        width.saturating_sub(2 + usize::from(controls_width) + suffix_width + provider_width + 8);
     let host_width = if width >= 32 {
         let needed = display_width(&card.host)
             + display_width(sidebar_card_host_icon(card.host_kind, app.nerd_font))
@@ -11021,8 +11097,14 @@ pub(super) fn render_sections_thread_card_with_controls(
     // At the supported 18-column minimum, the title wins over age and host.
     let width = usize::from(rect.width);
     let (suffix_width, host_width) = sections_tail_width(app, card, width, controls_width);
+    let provider = card
+        .agent
+        .and_then(|agent| crate::ui::icons::agent_label(agent, app.nerd_font));
+    let provider_width = provider.map_or(0, |label| display_width(label) + 1);
     let title_width = width
-        .saturating_sub(2 + usize::from(controls_width) + host_width + suffix_width)
+        .saturating_sub(
+            2 + usize::from(controls_width) + host_width + suffix_width + provider_width,
+        )
         .max(1);
     let title = truncate_end(&card.title, title_width);
     let padding = title_width.saturating_sub(display_width(&title));
@@ -11037,8 +11119,21 @@ pub(super) fn render_sections_thread_card_with_controls(
                 Modifier::empty()
             }),
         ),
-        Span::raw(" ".repeat(padding)),
     ];
+    if let Some(provider) = provider {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            provider,
+            Style::default().fg(match card.agent {
+                Some(Agent::Claude) => crate::ui::icons::claude_color(p),
+                Some(Agent::Codex) => crate::ui::icons::codex_color(p),
+                Some(Agent::Pi) => p.mauve,
+                Some(Agent::Kimi) => p.yellow,
+                _ => p.overlay0,
+            }),
+        ));
+    }
+    spans.push(Span::raw(" ".repeat(padding)));
     spans.push(Span::raw(" ".repeat(usize::from(controls_width))));
     if suffix_width > 0 {
         spans.push(Span::raw(" "));
@@ -29059,6 +29154,89 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn sections_duplicate_checkout_path_prefers_first_configured_project() {
+        let mut app = app_with_agents(&["agent"]);
+        app.sidebar_sections_layout = true;
+        app.sidebar_named_projects = true;
+        app.workspaces[0].identity_cwd = "/tmp/shared/checkout".into();
+        let pane = &app.workspaces[0].tabs[0].panes[&app.workspaces[0].tabs[0].root_pane];
+        app.terminals
+            .get_mut(&pane.attached_terminal_id)
+            .expect("terminal")
+            .cwd = "/tmp/shared/checkout".into();
+        app.projects = ["first", "second"]
+            .into_iter()
+            .map(|id| crate::app::projects::Project {
+                id: id.into(),
+                label: id.into(),
+                repos: vec![crate::app::projects::ProjectRepo {
+                    name: "checkout".into(),
+                    path: "/tmp/shared/checkout".into(),
+                }],
+            })
+            .collect();
+        let mut rows = Vec::new();
+        append_sections_block(
+            &app,
+            &mut rows,
+            ACTIVE_SECTION_TITLE,
+            sidebar_thread_entries(&app),
+        );
+        assert!(rows.iter().any(|row| matches!(row, SidebarRow::NestedHeader { title, count: 1, .. } if title == "first")));
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::NestedHeader { title, .. } if title == "second")));
+    }
+
+    #[test]
+    fn sections_provider_survives_narrow_and_normal_desktop_rows() {
+        let mut app = AppState::test_new();
+        app.nerd_font = false;
+        let card = SidebarThreadCard {
+            title: "fix sidebar".into(),
+            status: SidebarCardStatus::Idle("8m".into()),
+            agent: Some(Agent::Codex),
+            host: "a-long-hostname".into(),
+            host_kind: SidebarCardHostKind::Remote,
+        };
+        for width in [18, 40] {
+            for depth in [0, 1] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
+                terminal
+                    .draw(|frame| {
+                        render_sections_thread_card(
+                            &app,
+                            frame,
+                            &card,
+                            sections_thread_rect(Rect::new(0, 0, width, 1), depth),
+                            false,
+                        )
+                    })
+                    .expect("draw");
+                let row = row_text(terminal.backend().buffer(), 0, width);
+                assert!(row.contains("● fix"), "{width} {depth}: {row:?}");
+                assert!(row.contains(" cx"), "{width} {depth}: {row:?}");
+                assert!(row.find("fix") < row.find(" cx"), "{row:?}");
+                if width == 18 {
+                    assert!(!row.contains("8m") && !row.contains("hostname"), "{row:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sections_card_omits_provider_for_agentless_row() {
+        let mut app = app_with_agents(&["shell"]);
+        let pane = &app.workspaces[0].tabs[0].panes[&app.workspaces[0].tabs[0].root_pane];
+        app.terminals
+            .get_mut(&pane.attached_terminal_id)
+            .expect("terminal")
+            .detected_agent = None;
+        let entry = sidebar_thread_entries(&app).remove(0);
+        assert_eq!(sidebar_thread_card(&app, &entry).agent, None);
+    }
+
+    #[test]
     fn sections_pin_control_targets_its_tab_without_hiding_snooze_and_settle() {
         let mut app = app_with_agents(&["agent"]);
         app.sidebar_sections_layout = true;
@@ -29091,6 +29269,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let card = SidebarThreadCard {
             title: "fix sidebar".into(),
             status: SidebarCardStatus::Idle("8m".into()),
+            agent: None,
             host: "ub1".into(),
             host_kind: SidebarCardHostKind::Linux,
         };
@@ -29146,6 +29325,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let card = SidebarThreadCard {
             title: "fix sidebar".into(),
             status: SidebarCardStatus::Idle("8m".into()),
+            agent: None,
             host: app.agent_host_name.clone(),
             host_kind: SidebarCardHostKind::Linux,
         };
@@ -29171,6 +29351,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let card = SidebarThreadCard {
             title: "fix sidebar".into(),
             status: SidebarCardStatus::Idle("8m".into()),
+            agent: None,
             host: "a-very-long-machine-name-that-exceeds-the-row".into(),
             host_kind: SidebarCardHostKind::Remote,
         };
@@ -29310,6 +29491,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let mut card = SidebarThreadCard {
             title: "agent".into(),
             status: SidebarCardStatus::Blocked,
+            agent: None,
             host: "ub2".into(),
             host_kind: SidebarCardHostKind::Remote,
         };
