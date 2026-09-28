@@ -806,8 +806,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn final_report_from_a_stale_pane_id_clears_staleness_before_nudging() {
+    #[tokio::test]
+    async fn final_report_from_a_stale_pane_id_clears_staleness_before_nudging() {
         let now = Instant::now();
         let (mut app, pane_id, terminal_id, _rx) = app_with_stalled_pane(now);
         let session_id = "stale-pane-final-report-session";
