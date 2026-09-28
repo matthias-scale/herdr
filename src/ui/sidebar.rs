@@ -3790,8 +3790,8 @@ fn append_legacy_space_rows(
         terminal_runtimes,
         app.sidebar_group_mode,
         true,
-        sidebar_rows_are_filtered(app),
-        None,
+        only_populated || sidebar_rows_are_filtered(app),
+        activity,
     );
 }
 
@@ -28790,6 +28790,109 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn focus_sidebar_keeps_blocked_tabs_in_spaces_and_folds_working_tabs() {
+        let mut app = sort_app(&[
+            sort_tab("review", "owner/herdr", AgentState::Blocked, 1),
+            sort_tab("answer", "owner/herdr", AgentState::Blocked, 2),
+            sort_tab("build", "owner/herdr", AgentState::Working, 3),
+        ]);
+        app.sidebar_sections_layout = true;
+        app.sidebar_group_mode = SidebarGroupMode::Spaces;
+
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Workspace {
+                activity_count: Some((1, 3)),
+                ..
+            }
+        )));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Tab { .. }))
+                .count(),
+            2
+        );
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: WORKING_SECTION_TITLE,
+                count: 1,
+                collapsed: true,
+                ..
+            }
+        )));
+
+        let area = Rect::new(0, 0, 42, 32);
+        let mut rendered = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("focus sidebar terminal");
+        rendered
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .expect("render focus sidebar");
+        let snapshot = (0..area.height)
+            .map(|y| row_text(rendered.backend().buffer(), y, area.width))
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(snapshot.contains("1 of 3"), "{snapshot}");
+        assert!(
+            snapshot.find("Working").unwrap_or(usize::MAX) < snapshot.find("Snoozed").unwrap_or(0),
+            "{snapshot}"
+        );
+        println!("FOCUS_SIDEBAR_ASCII\n{snapshot}");
+
+        app.toggle_sidebar_group(WORKING_SECTION_TITLE);
+        let rows = sidebar_rows(&app);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Tab { .. }))
+                .count(),
+            3
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Tab { entry, .. } if entry.working_shelf))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn focus_sidebar_ask_subtitle_follows_setting() {
+        let mut app = app_with_agents(&["herdr"]);
+        app.sidebar_sections_layout = true;
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).expect("agent terminal");
+        terminal.set_raw_agent_state_for_test(AgentState::Blocked);
+        terminal.closing_items = vec![crate::api::schema::ClosingBlockItem {
+            blocking: true,
+            n: 1,
+            label: "Answer".into(),
+            text: "Choose a layout\nextra line".into(),
+            pr: None,
+            ticket: None,
+            url: None,
+            default: None,
+            default_at: None,
+        }];
+        app.reconcile_sidebar_presentation();
+        let row = sidebar_rows(&app)
+            .into_iter()
+            .find(|row| matches!(row, SidebarRow::Tab { .. }))
+            .expect("blocked tab");
+        let SidebarRow::Tab { entry, .. } = &row else {
+            unreachable!()
+        };
+        assert_eq!(entry.pending_ask.as_deref(), Some("Choose a layout"));
+        assert_eq!(sidebar_row_height(&app, &row, 20), 2);
+        app.sidebar_show_ask_subtitles = false;
+        assert_eq!(sidebar_row_height(&app, &row, 20), 1);
     }
 
     #[test]
