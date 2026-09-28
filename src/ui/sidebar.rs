@@ -6962,7 +6962,7 @@ fn entry_is_past_done_hide_threshold(app: &AppState, entry: &AgentPanelEntry) ->
         })
 }
 
-pub(super) fn sidebar_space_member_indices(app: &AppState, root_idx: usize) -> Vec<usize> {
+pub(crate) fn sidebar_space_member_indices(app: &AppState, root_idx: usize) -> Vec<usize> {
     if workspace_parent_group_state(app, root_idx).is_none() {
         return vec![root_idx];
     }

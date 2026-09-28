@@ -2101,7 +2101,7 @@ fn window_navigation_order(state: &AppState) -> Vec<WindowCycleTarget> {
     let mut order = Vec::new();
     let rows = crate::ui::sidebar_rows(state);
     let visible_workspaces = cycle_visible_workspaces(state);
-    for row in rows {
+    for row in &rows {
         let target = match row {
             crate::ui::SidebarRow::Tab { entry, .. } => entry.local_target().and_then(|target| {
                 (!state.workspaces[target.ws_idx].is_fleet
@@ -2120,26 +2120,36 @@ fn window_navigation_order(state: &AppState) -> Vec<WindowCycleTarget> {
             order.push(target);
         }
     }
-    // The sections layout gives every tab its own row, so skip-collapsed takes
-    // visible rows only. The plain layout lists agentless tabs only through
-    // their space row, so a visible space keeps all of its tabs.
-    let work_item_mode = matches!(
-        state.sidebar_group_mode,
-        crate::app::state::SidebarGroupMode::LinearTeam
-            | crate::app::state::SidebarGroupMode::Missive
-    );
-    // Work-item groups own their tab rows too, so they take visible rows only.
-    if state.skip_collapsed_cycle && !state.sidebar_sections_layout && !work_item_mode {
-        // Agent tabs own a row that a collapsed section can hide; only
-        // agentless tabs rely on their space row.
+    // Skip-collapsed keeps a tab only while the sidebar shows it. Agent tabs
+    // own rows, taken above. Agentless tabs show only through a plain space
+    // row, so they follow the space row that holds them: object, worktree and
+    // work-item group headers hide theirs.
+    if state.skip_collapsed_cycle && !state.sidebar_sections_layout {
         let agent_tabs = crate::ui::sidebar_thread_entries(state)
             .into_iter()
             .filter(|entry| entry.has_agent)
             .filter_map(|entry| entry.local_target())
             .map(|target| (target.ws_idx, target.tab_idx))
             .collect::<std::collections::HashSet<_>>();
+        let mut shown = std::collections::HashSet::new();
+        for row in &rows {
+            let crate::ui::SidebarRow::Workspace {
+                ws_idx,
+                count: None,
+                ..
+            } = row
+            else {
+                continue;
+            };
+            shown.insert(*ws_idx);
+            if state.sidebar_group_mode != crate::app::state::SidebarGroupMode::Spaces {
+                shown.extend(crate::ui::sidebar::sidebar_space_member_indices(
+                    state, *ws_idx,
+                ));
+            }
+        }
         for (ws_idx, workspace) in state.workspaces.iter().enumerate() {
-            if !visible_workspaces.contains(&ws_idx) {
+            if !shown.contains(&ws_idx) || !visible_workspaces.contains(&ws_idx) {
                 continue;
             }
             for tab_idx in (0..workspace.tabs.len())
@@ -4306,6 +4316,104 @@ mod tests {
                     )),
                     "{mode:?}: tab {ws_idx}:{tab_idx} is cycled without a visible row"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn fleet_workspace_ac9_skip_collapsed_cycles_only_shown_tabs_in_every_mode() {
+        use crate::app::state::SidebarGroupMode;
+        for sections in [false, true] {
+            for mode in [
+                SidebarGroupMode::Repo,
+                SidebarGroupMode::RepoWorktree,
+                SidebarGroupMode::Spaces,
+                SidebarGroupMode::RepoPr,
+                SidebarGroupMode::LinearTeam,
+                SidebarGroupMode::Missive,
+            ] {
+                let mut app = app_with_global_window_fixture();
+                mark_worktree_space_member(&mut app.state, 0, "repo-key");
+                mark_worktree_space_member(&mut app.state, 1, "repo-key");
+                for terminal in app.state.terminals.values_mut() {
+                    terminal.set_detected_state(
+                        Some(crate::detect::Agent::Claude),
+                        crate::detect::AgentState::Blocked,
+                    );
+                }
+                // One agentless tab: it has no row of its own.
+                if let Some(terminal) = app.state.terminals.values_mut().next() {
+                    terminal.set_detected_state(None, crate::detect::AgentState::Idle);
+                }
+                app.state.sidebar_sections_layout = sections;
+                app.state.set_sidebar_group_mode(mode);
+                app.state.skip_collapsed_cycle = true;
+                let expanded = window_navigation_order(&app.state);
+
+                // Collapse every group header except the Spaces section.
+                let namespace = mode.collapse_namespace();
+                app.state.collapsed_space_keys.insert("repo-key".into());
+                for _ in 0..3 {
+                    let mut keys = crate::ui::sidebar_rows(&app.state)
+                        .into_iter()
+                        .filter_map(|row| match row {
+                            crate::ui::SidebarRow::Workspace {
+                                count: Some(_),
+                                sort_key: Some(key),
+                                ..
+                            } => Some(key),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    keys.extend(
+                        crate::ui::sidebar::workspace_list_entries_for_mode(
+                            &app.state, false, mode,
+                        )
+                        .into_iter()
+                        .filter_map(|entry| match entry {
+                            crate::ui::sidebar::WorkspaceListEntry::NestedHeader {
+                                key, ..
+                            } => Some(key),
+                            _ => None,
+                        }),
+                    );
+                    for key in keys {
+                        app.state
+                            .collapsed_sidebar_groups
+                            .insert(format!("{namespace}:{key}"));
+                    }
+                }
+                let rows = crate::ui::sidebar_rows(&app.state);
+                let order = window_navigation_order(&app.state);
+                for target in &order {
+                    assert!(expanded.contains(target), "{mode:?} sections={sections}");
+                    let WindowCycleTarget::Local { ws_idx, tab_idx } = *target else {
+                        continue;
+                    };
+                    let shown = rows.iter().any(|row| match row {
+                        crate::ui::SidebarRow::Tab { entry, .. } => entry
+                            .local_target()
+                            .is_some_and(|t| (t.ws_idx, t.tab_idx) == (ws_idx, tab_idx)),
+                        crate::ui::SidebarRow::Workspace {
+                            ws_idx: row_ws,
+                            count: None,
+                            ..
+                        } => {
+                            !sections
+                                && (*row_ws == ws_idx
+                                    || (mode != SidebarGroupMode::Spaces
+                                        && crate::ui::sidebar::sidebar_space_member_indices(
+                                            &app.state, *row_ws,
+                                        )
+                                        .contains(&ws_idx)))
+                        }
+                        _ => false,
+                    });
+                    assert!(
+                        shown,
+                        "{mode:?} sections={sections}: tab {ws_idx}:{tab_idx} is cycled without a shown row"
+                    );
+                }
             }
         }
     }
