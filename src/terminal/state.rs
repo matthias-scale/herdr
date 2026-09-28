@@ -6050,10 +6050,10 @@ mod tests {
     fn handoff_preserves_agent_scoped_blocked_hold() {
         let blocked_at = Instant::now();
         let mut source = test_terminal();
-        source.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        source.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         source.set_hook_authority_at(
-            "herdr:claude".into(),
-            "claude".into(),
+            "herdr:pi".into(),
+            "pi".into(),
             AgentState::Blocked,
             None,
             None,
@@ -6071,9 +6071,11 @@ mod tests {
         let mut restored = test_terminal();
         restored
             .restore_terminal_agent_handoff_state(decoded, captured_at + Duration::from_secs(1));
+        assert_eq!(restored.state, AgentState::Blocked);
+        assert!(restored.blocked_state_hold.is_some());
 
         restored.set_detected_state_with_screen_signals_at(
-            Some(Agent::Claude),
+            Some(Agent::Pi),
             AgentState::Idle,
             false,
             false,
@@ -6083,15 +6085,15 @@ mod tests {
             captured_at + Duration::from_secs(2),
         );
         assert_eq!(restored.state, AgentState::Blocked);
+        assert!(restored.blocked_state_hold.is_some());
 
-        restored.set_detected_state_with_screen_signals_at(
-            Some(Agent::Claude),
+        restored.set_hook_authority_at(
+            "herdr:pi".into(),
+            "pi".into(),
             AgentState::Working,
-            false,
-            false,
-            true,
-            false,
-            false,
+            None,
+            None,
+            Some(2),
             captured_at + Duration::from_secs(3),
         );
         assert_eq!(restored.state, AgentState::Working);
@@ -9405,8 +9407,23 @@ mod tests {
         let observed = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.apply_closing_block_payload(
+            Vec::new(),
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Needs you".into(),
+                text: "Choose a release path".into(),
+                blocking: true,
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+        );
         terminal.set_hook_authority_at(
-            "herdr:claude".into(),
+            "herdr:claude-closing-block".into(),
             "claude".into(),
             AgentState::Blocked,
             None,
@@ -9436,8 +9453,23 @@ mod tests {
         let observed = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.apply_closing_block_payload(
+            Vec::new(),
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Needs you".into(),
+                text: "Choose a release path".into(),
+                blocking: true,
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+        );
         terminal.set_hook_authority_at(
-            "herdr:claude".into(),
+            "herdr:claude-closing-block".into(),
             "claude".into(),
             AgentState::Blocked,
             None,
@@ -9584,8 +9616,23 @@ mod tests {
         let observed = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.apply_closing_block_payload(
+            Vec::new(),
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Needs you".into(),
+                text: "Choose a release path".into(),
+                blocking: true,
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+        );
         terminal.set_hook_authority_at(
-            "herdr:claude".into(),
+            "herdr:claude-closing-block".into(),
             "claude".into(),
             AgentState::Blocked,
             None,
@@ -9656,10 +9703,10 @@ mod tests {
     fn explicit_input_releases_full_lifecycle_blocked_hold() {
         let observed = Instant::now();
         let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority_at(
-            "herdr:claude".into(),
-            "claude".into(),
+            "herdr:pi".into(),
+            "pi".into(),
             AgentState::Blocked,
             None,
             None,
@@ -9679,10 +9726,10 @@ mod tests {
     fn working_report_releases_full_lifecycle_blocked_hold() {
         let observed = Instant::now();
         let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority_at(
-            "herdr:claude".into(),
-            "claude".into(),
+            "herdr:pi".into(),
+            "pi".into(),
             AgentState::Blocked,
             None,
             None,
@@ -9692,8 +9739,8 @@ mod tests {
         assert!(terminal.blocked_state_hold.is_some());
 
         terminal.set_hook_authority_at(
-            "herdr:claude".into(),
-            "claude".into(),
+            "herdr:pi".into(),
+            "pi".into(),
             AgentState::Working,
             None,
             None,
@@ -9756,10 +9803,10 @@ mod tests {
     fn process_exit_releases_full_lifecycle_blocked_hold() {
         let observed = Instant::now();
         let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
         terminal.set_hook_authority_at(
-            "herdr:claude".into(),
-            "claude".into(),
+            "herdr:pi".into(),
+            "pi".into(),
             AgentState::Blocked,
             None,
             None,
@@ -9769,7 +9816,7 @@ mod tests {
         assert!(terminal.blocked_state_hold.is_some());
 
         terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Claude),
+            Some(Agent::Pi),
             AgentState::Idle,
             false,
             false,
