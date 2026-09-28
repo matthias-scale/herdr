@@ -545,9 +545,9 @@ pub enum SidebarLayoutConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SidebarHeaderConfig {
-    #[default]
     /// Draw the theme-colored half-block night sky.
     Sky,
+    #[default]
     /// Draw no header decoration.
     Plain,
 }
@@ -560,7 +560,7 @@ mod tests {
     fn defaults_show_only_thread_titles_and_space_names() {
         let config = SidebarConfig::default();
         assert_eq!(config.layout, SidebarLayoutConfig::Current);
-        assert_eq!(config.header, SidebarHeaderConfig::Sky);
+        assert_eq!(config.header, SidebarHeaderConfig::Plain);
         assert_eq!(config.areas, SidebarAreasConfig::default());
         assert_eq!(
             config.agents.rows,
