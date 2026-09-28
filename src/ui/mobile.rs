@@ -1993,8 +1993,10 @@ mod tests {
         app.nerd_font = false;
         app.workspaces = vec![crate::workspace::Workspace::test_new("agent")];
         app.ensure_test_terminals();
+        app.refresh_local_agent_panel_identities();
         for terminal in app.terminals.values_mut() {
             terminal.agent_name = Some("codex".to_string());
+            terminal.detected_agent = Some(crate::detect::Agent::Codex);
             terminal.set_raw_agent_state_for_test(AgentState::Working);
         }
         app.active = Some(0);
