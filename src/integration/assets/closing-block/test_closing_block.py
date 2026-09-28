@@ -2074,15 +2074,7 @@ class NeedsYouBlockTests(unittest.TestCase):
         self.assertEqual(block.herdr_state, "idle")
 
     def test_now_waiting_on_human_is_not_a_worker(self):
-        for line in (
-            "waiting on your choice.",
-            "Waiting for your reply",
-            "awaiting your approval",
-            "waiting on you",
-            "blocked on Matthias",
-            "idle",
-            "nothing running",
-        ):
+        for line in ("waiting on you.", "Waiting on you", "idle", "nothing running"):
             with self.subTest(line=line):
                 block = closing_block.parse(
                     "Needs you (1)\n1. **Decide** — ship?\n   a) yes\n   b) no\n"
@@ -2092,6 +2084,18 @@ class NeedsYouBlockTests(unittest.TestCase):
                 self.assertEqual(block.declared_agents, 0)
                 self.assertFalse(block.workers_unknown)
                 self.assertEqual(block.herdr_state, "blocked")
+
+    def test_now_other_human_wait_prose_stays_a_worker(self):
+        for line in (
+            "waiting on your choice",
+            "awaiting your approval",
+            "waiting for CI checks and for your approval",
+            "waiting on you while build worker compiles",
+        ):
+            with self.subTest(line=line):
+                block = closing_block.parse(f"Needs you: nothing.\n**Now:** {line}\n")
+                self.assertEqual(block.agents, [line])
+                self.assertTrue(block.workers_unknown)
 
     def test_now_external_waits_need_the_wait_form(self):
         block = closing_block.parse(
@@ -2112,7 +2116,7 @@ class NeedsYouBlockTests(unittest.TestCase):
     def test_now_named_worker_stays_unverified_beside_human_wait(self):
         block = closing_block.parse(
             "Needs you: nothing.\n"
-            "**Now:** codex reviewer — inspecting diff · waiting on your choice\n"
+            "**Now:** codex reviewer — inspecting diff · waiting on you\n"
         )
         self.assertEqual(block.agents, ["codex reviewer — inspecting diff"])
         self.assertTrue(block.workers_unknown)

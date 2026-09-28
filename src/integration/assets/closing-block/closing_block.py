@@ -656,17 +656,9 @@ def _decision_fields(body: str) -> tuple[str, str | None]:
     return recommendation, decided_at
 
 
-_NOW_HUMAN_WAIT_RE = re.compile(
-    r"^(?:(?:still[ \t]+)?(?:waiting|awaiting|blocked)\b.*?\b(?:on|for)[ \t]+"
-    r"(?:you|your|the[ \t]+human|human|matthias|user|operator)\b)"
-    r"|^(?:(?:still[ \t]+)?(?:waiting|awaiting|blocked)(?:[ \t]+(?:on|for))?[ \t]+)?"
-    r"your[ \t]+(?:choice|reply|answer|approval|decision|input|sign-?off|call|review|go-?ahead|pick)\b",
-    re.IGNORECASE,
-)
-_NOW_IDLE_RE = re.compile(
-    r"^(?:idle|nothing(?:[ \t]+(?:running|active|in[ \t]+flight))?|none|no[ \t]+"
-    r"(?:active[ \t]+)?(?:work|workers?|agents?)(?:[ \t]+running)?)\.?$",
-    re.IGNORECASE,
+# Only the exact policy forms are dropped; any other prose is a worker.
+_NOW_NOT_WORK_RE = re.compile(
+    r"^(?:waiting[ \t]+on[ \t]+you|idle|nothing[ \t]+running)\.?$", re.IGNORECASE
 )
 def _now_entries(rest: str) -> tuple[list[str], list[str]]:
     streams: list[str] = []
@@ -680,7 +672,7 @@ def _now_entries(rest: str) -> tuple[list[str], list[str]]:
             waits.append(wait.group("event").strip())
         elif re.match(r"^stopped(?:$|[ \t]*[—–:]|[ \t]+-[ \t]+)", entry, re.I):
             continue
-        elif _NOW_HUMAN_WAIT_RE.search(entry) or _NOW_IDLE_RE.match(entry):
+        elif _NOW_NOT_WORK_RE.match(entry):
             # Waiting on the human is already carried by Needs you; it is not
             # a running worker and must not make the worker count unknown.
             # External waits use the `wait — <event>` form; other prose is a
