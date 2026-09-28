@@ -1912,6 +1912,25 @@ impl TerminalState {
         })
     }
 
+    /// Where this pane's session log names the model in use, when known.
+    pub(crate) fn agent_model_log_source(
+        &self,
+    ) -> Option<crate::app::agent_model_log::ModelLogSource> {
+        use crate::app::agent_model_log::ModelLogSource;
+        match self.effective_known_agent()? {
+            Agent::Claude => self
+                .claude_transcript_path
+                .clone()
+                .map(ModelLogSource::ClaudeTranscript),
+            Agent::Codex => {
+                let (_, agent, kind, value) = self.current_session_identity_for_persistence()?;
+                (agent == "codex" && kind == crate::agent_resume::AgentSessionRefKind::Id)
+                    .then_some(ModelLogSource::CodexSession(value))
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn foreground_process_active(&self) -> bool {
         self.foreground_process_active
     }
