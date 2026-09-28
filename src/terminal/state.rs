@@ -1113,7 +1113,10 @@ impl TerminalState {
         }) && self.hook_authority.as_ref().is_some_and(|authority| {
             authority.state == AgentState::Blocked
                 && authority.retired_at.is_none()
-                && authority.reported_at < observed_at
+                && authority
+                    .reported_at
+                    .checked_add(crate::pane::STABLE_VISIBLE_SIGNAL_REFRESH)
+                    .is_some_and(|stable_at| observed_at >= stable_at)
                 && self.hook_authority_is_effective(authority)
                 && crate::detect::full_lifecycle_hook_authority(
                     &authority.source,
@@ -9896,6 +9899,47 @@ mod tests {
             terminal.hook_authority.as_ref().unwrap().retired_at,
             Some(working_at)
         );
+    }
+
+    #[test]
+    fn recent_visible_working_does_not_release_full_lifecycle_blocked_hold() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let session_ref =
+            crate::agent_resume::AgentSessionRef::id("pi-recent-visible-working").unwrap();
+        anchor_full_lifecycle_session(
+            &mut terminal,
+            Agent::Pi,
+            "herdr:pi",
+            "pi",
+            session_ref.clone(),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:pi".into(),
+            "pi".into(),
+            AgentState::Blocked,
+            None,
+            Some(session_ref),
+            Some(1),
+            observed,
+        );
+        assert!(terminal.blocked_state_hold.is_some());
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Pi),
+            AgentState::Working,
+            false,
+            false,
+            true,
+            false,
+            false,
+            observed + Duration::from_millis(1),
+        );
+
+        assert!(terminal.blocked_state_hold.is_some());
+        assert_eq!(terminal.state, AgentState::Blocked);
+        assert!(terminal.full_lifecycle_hook_authority_active());
     }
 
     #[test]
