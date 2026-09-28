@@ -431,9 +431,14 @@ impl AppState {
         let shelf = self
             .workspaces
             .get(ws_idx)
-            .and_then(|workspace| workspace.focused_pane_id())
-            .and_then(|pane_id| {
-                crate::ui::sidebar::sections_pane_shelf(self, ws_idx, tab_idx, pane_id)
+            .and_then(|workspace| workspace.tabs.get(tab_idx))
+            .and_then(|tab| {
+                crate::ui::sidebar::sections_pane_shelf(self, ws_idx, tab_idx, tab.layout.focused())
+            })
+            .or_else(|| {
+                SidebarShelf::ALL.into_iter().find(|shelf| {
+                    crate::ui::sidebar::sections_tab_in_shelf(self, ws_idx, tab_idx, *shelf)
+                })
             });
         self.open_sidebar_folder_picker_for_shelf(ws_idx, tab_idx, anchor, shelf)
     }
