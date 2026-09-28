@@ -6405,7 +6405,7 @@ mod tests {
             );
         }
         let board = app.state.view.sidebar_footer_board_hit_area;
-        assert_eq!(board.width, 2);
+        assert_eq!(board.width, 1);
         assert_eq!(
             board.x,
             app.state.view.sidebar_footer_refresh_hit_area.right()

@@ -1886,7 +1886,16 @@ pub(crate) fn sidebar_footer_refresh_hit_area(area: Rect) -> Rect {
 }
 
 pub(crate) fn sidebar_footer_board_hit_area(area: Rect) -> Rect {
-    sidebar_footer_slot(area, 6)
+    let content_width = area.width.saturating_sub(1);
+    if content_width < 14 || area.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(
+        area.x.saturating_add(13),
+        area.bottom().saturating_sub(1),
+        1,
+        1,
+    )
 }
 
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
@@ -9674,7 +9683,7 @@ pub(super) fn render_sidebar(
             p,
         );
         frame.render_widget(
-            Paragraph::new(Span::styled(if app.nerd_font { "▦ " } else { "B " }, style)),
+            Paragraph::new(Span::styled(if app.nerd_font { "▦" } else { "B" }, style)),
             board,
         );
     }
@@ -29816,11 +29825,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn focus_board_and_window_cycle_footer_targets_do_not_overlap() {
         let app = AppState::test_new();
-        let sidebar = Rect::new(0, 0, 26, 20);
-        let board = sidebar_footer_board_hit_area(sidebar);
-        let cycle = crate::ui::pomodoro::window_cycle_mode_hit_area(&app, sidebar);
-        let notification = crate::ui::pomodoro::notification_hit_area(&app, sidebar);
-        assert_eq!(board.right(), cycle.x);
-        assert!(cycle.right() <= notification.x);
+        for width in [18, 26] {
+            let sidebar = Rect::new(0, 0, width, 20);
+            let board = sidebar_footer_board_hit_area(sidebar);
+            let cycle = crate::ui::pomodoro::window_cycle_mode_hit_area(&app, sidebar);
+            let notification = crate::ui::pomodoro::notification_hit_area(&app, sidebar);
+            assert_eq!(board.width, 1);
+            assert_eq!(board.right(), cycle.x);
+            assert!(cycle.right() <= notification.x);
+        }
     }
 }
