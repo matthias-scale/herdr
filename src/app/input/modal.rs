@@ -3360,8 +3360,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn api_context_menu_close_tab_last_parent_group_workspace_keeps_group() {
+    #[tokio::test]
+    async fn api_context_menu_close_tab_last_parent_group_workspace_keeps_group() {
         let mut app = app_with_test_workspaces(&["main", "issue"]);
         mark_worktree_space_member(&mut app.state, 0, "repo-key");
         mark_worktree_space_member(&mut app.state, 1, "repo-key");
@@ -3569,8 +3569,8 @@ mod tests {
         assert_eq!(app.state.workspaces[0].tabs[0].subgroup(), None);
     }
 
-    #[test]
-    fn api_context_menu_enter_close_pane_last_parent_group_pane_keeps_group() {
+    #[tokio::test]
+    async fn api_context_menu_enter_close_pane_last_parent_group_pane_keeps_group() {
         let mut app = app_with_test_workspaces(&["main", "issue"]);
         mark_worktree_space_member(&mut app.state, 0, "repo-key");
         mark_worktree_space_member(&mut app.state, 1, "repo-key");

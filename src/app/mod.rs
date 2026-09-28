@@ -8297,8 +8297,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn pane_close_request_keeps_parent_worktree_group_open() {
+    #[tokio::test]
+    async fn pane_close_request_keeps_parent_worktree_group_open() {
         let mut app = test_app();
         let mut parent = Workspace::test_new("api-pane-close-parent");
         parent.worktree_space = Some(crate::workspace::WorktreeSpaceMembership {

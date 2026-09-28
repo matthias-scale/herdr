@@ -7399,8 +7399,8 @@ navigate_pane_down = "ctrl+j"
         }));
     }
 
-    #[test]
-    fn tui_close_tab_last_parent_group_workspace_keeps_group_via_api() {
+    #[tokio::test]
+    async fn tui_close_tab_last_parent_group_workspace_keeps_group_via_api() {
         let mut app = app_with_test_workspaces(&["main", "issue"]);
         mark_worktree_space_member(&mut app.state, 0, "repo-key");
         mark_worktree_space_member(&mut app.state, 1, "repo-key");
@@ -7433,8 +7433,8 @@ navigate_pane_down = "ctrl+j"
         }));
     }
 
-    #[test]
-    fn tui_close_pane_last_parent_group_pane_keeps_group_via_api() {
+    #[tokio::test]
+    async fn tui_close_pane_last_parent_group_pane_keeps_group_via_api() {
         let mut app = app_with_test_workspaces(&["main", "issue"]);
         mark_worktree_space_member(&mut app.state, 0, "repo-key");
         mark_worktree_space_member(&mut app.state, 1, "repo-key");

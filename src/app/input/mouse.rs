@@ -10104,8 +10104,8 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn clicking_pane_context_menu_close_last_parent_group_pane_keeps_group() {
+    #[tokio::test]
+    async fn clicking_pane_context_menu_close_last_parent_group_pane_keeps_group() {
         let mut app = app_for_mouse_test();
         let mut parent = Workspace::test_new("main");
         let pane_id = parent.tabs[0].root_pane;
