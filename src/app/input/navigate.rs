@@ -5012,6 +5012,7 @@ mod tests {
     #[test]
     fn next_blocked_window_selects_remote_row_without_focusing_a_local_pane() {
         let mut app = app_with_global_window_fixture();
+        app.state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
         let original_window = active_window(&app.state);
         let original_pane = app.state.workspaces[original_window.0]
             .focused_pane_id()
