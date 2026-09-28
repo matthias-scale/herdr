@@ -1014,7 +1014,7 @@ mod tests {
         assert!(state.request_tool_probes, "open_settings_at requests");
 
         state.request_tool_probes = false;
-        open_settings_at(&mut state, SettingsSection::SourceControl);
+        open_settings_at(&mut state, SettingsSection::General);
         assert!(!state.request_tool_probes, "an unprobed section does not");
 
         // Keyboard: tab through to Integrations.
@@ -1027,7 +1027,7 @@ mod tests {
         assert!(state.request_tool_probes, "the keyboard path requests");
 
         state.request_tool_probes = false;
-        open_settings_at(&mut state, SettingsSection::General);
+        open_settings_at(&mut state, SettingsSection::SourceControl);
         let (col, row) =
             nav_row_for(&state, SettingsSection::Providers).expect("providers nav row");
         state.handle_settings_mouse(mouse_down(col, row));
