@@ -8204,9 +8204,9 @@ pub(crate) fn compute_sidebar_hover_targets(
                 ..
             } => (
                 if *collapsed {
-                    "Collapsed. The watchdog re-checks every agent state every 5 min.".into()
+                    "Collapsed. The watchdog checks working agents for stale status.".into()
                 } else {
-                    "The watchdog re-checks every agent state every 5 min.".into()
+                    "The watchdog checks working agents for stale status.".into()
                 },
                 false,
             ),
