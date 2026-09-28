@@ -55,7 +55,7 @@ all = [
     { contains = ["Open existing task"] },
     { contains = ["Open restricted"] },
   ] },
-  { line_regex = ['^[ \t]*› 1\.[ \t]+(?:Trust and continue|Open existing task|Open restricted)[ \t]*$'] },
+  { line_regex = ['^[ \t]*(?:›[ \t]+)?1\.[ \t]+(?:Trust and continue|Open existing task|Open restricted)[ \t]*$'] },
   { regex = ['(?s)(?:^|\n)[ \t]*enter[ \t]+continue(?:[ \t]+and[ \t]+create[ \t]+sandbox)?[ \t]*·[ \t]*esc[ \t]+(?:quit|back)[ \t]*(?:\r?\n[ \t]*)*\z'] },
 ]
 
@@ -67,7 +67,7 @@ region = "bottom_non_empty_lines(16)"
 visible_blocker = true
 all = [
   { contains = ["Hooks need review", "Trust all and continue"] },
-  { line_regex = ['^[ \t]*› 1\. Review hooks[ \t]*$'] },
+  { line_regex = ['^[ \t]*(?:›[ \t]+)?1\. Review hooks[ \t]*$'] },
   { line_regex = ['^[ \t]*enter confirm · esc skip[ \t]*$'] },
 ]
 
@@ -152,8 +152,8 @@ region = "bottom_non_empty_lines(12)"
 visible_blocker = true
 all = [
   { contains = ["Stop this attempt and retry?"] },
-  { line_regex = ['^[ \t]*› 1\. Keep waiting[ \t]*$'] },
-  { line_regex = ['^[ \t]*2\. Stop and retry[ \t]*$'] },
+  { line_regex = ['^[ \t]*(?:›[ \t]+)?1\. Keep waiting[ \t]*$'] },
+  { line_regex = ['^[ \t]*(?:›[ \t]+)?2\. Stop and retry[ \t]*$'] },
 ]
 
 [[rules]]

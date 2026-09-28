@@ -2047,6 +2047,11 @@ fn codex_v0158_question_and_confirmation_snapshots_are_blocked() {
             "startup_hooks_review",
         ),
         (
+            "startup hooks review with option 2 selected",
+            include_str!("../../../tests/fixtures/agent-detection/codex-startup-hooks-review-selection-moved-20260928.txt"),
+            "startup_hooks_review",
+        ),
+        (
             "startup hooks review with trust error",
             include_str!("../../../tests/fixtures/agent-detection/codex-startup-hooks-review-trust-error-20260928.txt"),
             "startup_hooks_review",
@@ -2054,6 +2059,11 @@ fn codex_v0158_question_and_confirmation_snapshots_are_blocked() {
         (
             "folder access",
             include_str!("../../../tests/fixtures/agent-detection/codex-folder-access-20260928.txt"),
+            "folder_access_prompt",
+        ),
+        (
+            "folder access with option 2 selected",
+            include_str!("../../../tests/fixtures/agent-detection/codex-folder-access-selection-moved-20260928.txt"),
             "folder_access_prompt",
         ),
         (
@@ -2159,6 +2169,11 @@ fn codex_v0158_question_and_confirmation_snapshots_are_blocked() {
         (
             "safety retry confirmation",
             include_str!("../../../tests/fixtures/agent-detection/codex-safety-retry-confirmation-20260928.txt"),
+            "safety_retry_confirmation",
+        ),
+        (
+            "safety retry confirmation with option 2 selected",
+            include_str!("../../../tests/fixtures/agent-detection/codex-safety-retry-confirmation-selection-moved-20260928.txt"),
             "safety_retry_confirmation",
         ),
     ];
