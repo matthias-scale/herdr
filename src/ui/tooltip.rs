@@ -118,6 +118,10 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
             view.sidebar_footer_refresh_hit_area,
         ),
         (
+            ControlId::SidebarFooter(SidebarFooterItem::Board),
+            view.sidebar_footer_board_hit_area,
+        ),
+        (
             ControlId::SidebarFooter(SidebarFooterItem::Notifications),
             view.notification_hit_area,
         ),
@@ -186,6 +190,7 @@ fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> 
                 SidebarFooterItem::Linear => (view.sidebar_footer_ticket_hit_area, "Linear"),
                 SidebarFooterItem::Missive => (view.sidebar_footer_missive_hit_area, "Missive"),
                 SidebarFooterItem::Refresh => (view.sidebar_footer_refresh_hit_area, "Refresh"),
+                SidebarFooterItem::Board => (view.sidebar_footer_board_hit_area, "Focus board"),
                 SidebarFooterItem::Notifications => (
                     view.notification_hit_area,
                     if app.notifications_enabled() {

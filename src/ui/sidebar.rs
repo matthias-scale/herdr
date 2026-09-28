@@ -1871,6 +1871,10 @@ pub(crate) fn sidebar_footer_refresh_hit_area(area: Rect) -> Rect {
     sidebar_footer_slot(area, 5)
 }
 
+pub(crate) fn sidebar_footer_board_hit_area(area: Rect) -> Rect {
+    sidebar_footer_slot(area, 6)
+}
+
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     agent_panel_entries_with_runtimes(app, None)
 }
@@ -9590,6 +9594,19 @@ pub(super) fn render_sidebar(
         crate::ui::pomodoro::sidebar_areas_hit_area(app, area),
     );
     let refresh = sidebar_footer_refresh_hit_area(area);
+    let board = sidebar_footer_board_hit_area(area);
+    if board.width > 0 {
+        let style = sidebar_footer_style(
+            app,
+            crate::app::state::SidebarFooterItem::Board,
+            app.board_view.is_some(),
+            p,
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(if app.nerd_font { "▦ " } else { "B " }, style)),
+            board,
+        );
+    }
     if refresh.width > 0 {
         let style = sidebar_footer_style(
             app,
