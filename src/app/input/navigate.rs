@@ -2114,11 +2114,21 @@ fn window_navigation_order(state: &AppState) -> Vec<WindowCycleTarget> {
     // visible rows only. The plain layout lists agentless tabs only through
     // their space row, so a visible space keeps all of its tabs.
     if state.skip_collapsed_cycle && !state.sidebar_sections_layout {
+        // Agent tabs own a row that a collapsed section can hide; only
+        // agentless tabs rely on their space row.
+        let agent_tabs = crate::ui::sidebar_thread_entries(state)
+            .into_iter()
+            .filter(|entry| entry.has_agent)
+            .filter_map(|entry| entry.local_target())
+            .map(|target| (target.ws_idx, target.tab_idx))
+            .collect::<std::collections::HashSet<_>>();
         for (ws_idx, workspace) in state.workspaces.iter().enumerate() {
             if !visible_workspaces.contains(&ws_idx) {
                 continue;
             }
-            for tab_idx in 0..workspace.tabs.len() {
+            for tab_idx in (0..workspace.tabs.len())
+                .filter(|tab_idx| !agent_tabs.contains(&(ws_idx, *tab_idx)))
+            {
                 let target = WindowCycleTarget::Local { ws_idx, tab_idx };
                 if seen.insert(target.clone()) {
                     order.push(target);
@@ -4187,6 +4197,47 @@ mod tests {
 
         app.state.skip_collapsed_cycle = false;
         assert!(!window_navigation_order(&app.state).is_empty());
+    }
+
+    #[test]
+    fn fleet_workspace_ac9_skip_collapsed_plain_layout_skips_hidden_agent_tabs() {
+        let mut app = app_with_global_window_fixture();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        }
+        app.state.skip_collapsed_cycle = true;
+        let expanded = window_navigation_order(&app.state);
+        assert!(!expanded.is_empty());
+
+        let namespace = app.state.sidebar_group_mode.collapse_namespace();
+        for title in [
+            crate::ui::sidebar::SNOOZED_SECTION_TITLE,
+            crate::ui::sidebar::SETTLED_SECTION_TITLE,
+            "Active",
+            "Pinned",
+        ] {
+            app.state
+                .collapsed_sidebar_groups
+                .insert(format!("{namespace}:{title}"));
+        }
+        let rows = crate::ui::sidebar_rows(&app.state);
+        let order = window_navigation_order(&app.state);
+        for target in &order {
+            let WindowCycleTarget::Local { ws_idx, tab_idx } = target else {
+                continue;
+            };
+            assert!(
+                rows.iter().any(|row| matches!(
+                    row,
+                    crate::ui::SidebarRow::Tab { entry, .. }
+                        if entry.local_target().is_some_and(|t| (t.ws_idx, t.tab_idx) == (*ws_idx, *tab_idx))
+                )),
+                "agent tab {ws_idx}:{tab_idx} is cycled without a visible row"
+            );
+        }
     }
 
     #[test]
