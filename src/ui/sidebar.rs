@@ -2280,6 +2280,12 @@ fn collect_sidebar_thread_entries_with_runtimes(
     // order and includes agentless terminals. Do not apply attention sorting:
     // lifecycle changes must never move sidebar rows.
     let mut entries = collect_agent_panel_entries_with_runtimes(app, terminal_runtimes);
+    // Fleet tabs belong to the Fleet section only, never to local rows.
+    entries.retain(|entry| {
+        entry
+            .local_target()
+            .is_none_or(|target| !app.workspaces[target.ws_idx].is_fleet)
+    });
     let mut previous_tab = None;
     for entry in &mut entries {
         let Some(target) = entry.local_target() else {
@@ -24393,6 +24399,21 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn fleet_workspace_ui1_fleet_tabs_never_become_local_sidebar_rows() {
+        let mut app = app_with_agents(&["local-one", "fleet", "local-two"]);
+        assert!(sidebar_thread_entries(&app).iter().any(|entry| entry
+            .local_target()
+            .is_some_and(|target| target.ws_idx == 1)));
+        app.workspaces[1].is_fleet = true;
+
+        let entries = sidebar_thread_entries(&app);
+        assert!(entries
+            .iter()
+            .all(|entry| entry.local_target().is_none_or(|target| target.ws_idx != 1)));
+        assert!(!entries.is_empty());
     }
 
     #[test]

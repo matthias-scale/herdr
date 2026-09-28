@@ -2110,7 +2110,10 @@ fn window_navigation_order(state: &AppState) -> Vec<WindowCycleTarget> {
             order.push(target);
         }
     }
-    if state.skip_collapsed_cycle {
+    // The sections layout gives every tab its own row, so skip-collapsed takes
+    // visible rows only. The plain layout lists agentless tabs only through
+    // their space row, so a visible space keeps all of its tabs.
+    if state.skip_collapsed_cycle && !state.sidebar_sections_layout {
         for (ws_idx, workspace) in state.workspaces.iter().enumerate() {
             if !visible_workspaces.contains(&ws_idx) {
                 continue;
@@ -4161,6 +4164,29 @@ mod tests {
         ));
         assert!(window_navigation_order(&app.state).is_empty());
         assert!(blocked_pane_cycle(&app.state).is_empty());
+    }
+
+    #[test]
+    fn fleet_workspace_ac9_skip_collapsed_sections_exclude_their_tabs() {
+        let mut app = app_with_global_window_fixture();
+        app.state.sidebar_sections_layout = true;
+        app.state.skip_collapsed_cycle = true;
+        assert!(!window_navigation_order(&app.state).is_empty());
+
+        for title in ["Pinned", "Active", "Snoozed", "Settled", "No repo yet"] {
+            app.state
+                .collapsed_sidebar_groups
+                .insert(format!("sections:{title}"));
+            if !crate::ui::sidebar::section_is_collapsed(&app.state, title) {
+                app.state
+                    .collapsed_sidebar_groups
+                    .remove(&format!("sections:{title}"));
+            }
+        }
+        assert!(window_navigation_order(&app.state).is_empty());
+
+        app.state.skip_collapsed_cycle = false;
+        assert!(!window_navigation_order(&app.state).is_empty());
     }
 
     #[test]
