@@ -2127,14 +2127,6 @@ impl TerminalState {
         }
         if process_exited && !newer_custom_authority {
             self.release_blocked_hold_at(now);
-        } else if visible_blocker
-            && fallback_state == AgentState::Blocked
-            && self.visible_blocker_belongs_to_detected_agent(agent, now)
-        {
-            if let Some(agent) = agent {
-                let owner = self.blocked_hold_owner_for_agent(agent);
-                self.hold_blocked_state_for(owner, now);
-            }
         }
         self.detected_agent = agent;
         if let Some(agent) = agent {
@@ -2613,9 +2605,7 @@ impl TerminalState {
         let hold_owner =
             self.blocked_hold_owner_for_hook(&source, &agent_label, session_ref.as_ref());
         self.reconcile_blocked_state_hold_owner(&hold_owner, now);
-        if state == AgentState::Working {
-            self.release_blocked_state_hold_for(&hold_owner, now);
-        } else if closing_report && !self.has_pending_human_input() {
+        if state == AgentState::Working || (closing_report && !self.has_pending_human_input()) {
             self.release_blocked_state_hold_for(&hold_owner, now);
         } else if state == AgentState::Blocked
             && (crate::detect::full_lifecycle_hook_authority(&source, &agent_label)
@@ -3567,42 +3557,6 @@ impl TerminalState {
                     .and_then(AgentActivityOwner::session),
                 agent_label: agent_label.to_string(),
             })
-    }
-
-    fn visible_blocker_belongs_to_detected_agent(
-        &self,
-        agent: Option<Agent>,
-        observed_at: Instant,
-    ) -> bool {
-        let Some(agent) = agent else {
-            return false;
-        };
-        let expected_label = crate::detect::agent_label(agent);
-        let Some(current_label) = self.effective_agent_label() else {
-            return true;
-        };
-        if current_label == expected_label {
-            return self
-                .hook_authority
-                .as_ref()
-                .filter(|authority| {
-                    crate::detect::parse_agent_label(&authority.agent_label) == Some(agent)
-                })
-                .is_none_or(|authority| observed_at > authority.reported_at);
-        }
-        let current_label_is_detected_owner = self
-            .detected_agent
-            .is_some_and(|detected| crate::detect::agent_label(detected) == current_label);
-        let different_agent_detected = self
-            .detected_agent
-            .is_some_and(|detected| detected != agent);
-        let conflicting_hook = self.hook_authority_conflicts_with_detected_agent(Some(agent));
-        let conflicting_hook_is_stale =
-            conflicting_hook && self.hook_authority_not_newer_than(observed_at);
-        let no_newer_conflicting_hook =
-            !conflicting_hook || self.hook_authority_not_newer_than(observed_at);
-        (current_label_is_detected_owner && different_agent_detected && no_newer_conflicting_hook)
-            || conflicting_hook_is_stale
     }
 
     pub(crate) fn agent_session_matches(
@@ -6096,14 +6050,14 @@ mod tests {
     fn handoff_preserves_agent_scoped_blocked_hold() {
         let blocked_at = Instant::now();
         let mut source = test_terminal();
-        source.set_detected_state_with_screen_signals_at(
-            Some(Agent::Claude),
+        source.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        source.set_hook_authority_at(
+            "herdr:claude".into(),
+            "claude".into(),
             AgentState::Blocked,
-            true,
-            false,
-            false,
-            false,
-            false,
+            None,
+            None,
+            Some(1),
             blocked_at,
         );
         let captured_at = blocked_at + Duration::from_secs(1);
@@ -9416,7 +9370,7 @@ mod tests {
     }
 
     #[test]
-    fn transient_idle_screen_does_not_clear_visible_blocker() {
+    fn screen_blocker_does_not_create_a_persistent_hold() {
         let observed = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state_with_screen_signals_at(
@@ -9429,7 +9383,39 @@ mod tests {
             false,
             observed,
         );
+        assert!(terminal.blocked_state_hold.is_none());
+
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            false,
+            false,
+            observed + Duration::from_secs(1),
+        );
+
+        assert_eq!(terminal.state, AgentState::Idle);
+        assert!(terminal.blocked_state_hold.is_none());
+    }
+
+    #[test]
+    fn transient_idle_screen_does_not_clear_hook_blocked_hold() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(1),
+            observed,
+        );
         assert_eq!(terminal.state, AgentState::Blocked);
+        assert!(terminal.blocked_state_hold.is_some());
 
         terminal.set_detected_state_with_screen_signals_at(
             None,
@@ -9449,16 +9435,17 @@ mod tests {
     fn blocked_hold_releases_when_a_different_agent_takes_over() {
         let observed = Instant::now();
         let mut terminal = test_terminal();
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Claude),
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:claude".into(),
+            "claude".into(),
             AgentState::Blocked,
-            true,
-            false,
-            false,
-            false,
-            false,
+            None,
+            None,
+            Some(1),
             observed,
         );
+        assert!(terminal.blocked_state_hold.is_some());
 
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Grok),
@@ -9479,26 +9466,31 @@ mod tests {
     fn blocked_hold_releases_when_a_different_hook_agent_takes_over() {
         let observed = Instant::now();
         let mut terminal = test_terminal();
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Claude),
+        terminal.apply_closing_block_payload(
+            Vec::new(),
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Needs you".into(),
+                text: "Choose a release path".into(),
+                blocking: true,
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
             AgentState::Blocked,
-            true,
-            false,
-            false,
-            false,
-            false,
+            None,
+            None,
+            Some(1),
             observed,
         );
-        terminal.set_detected_state_with_screen_signals_at(
-            None,
-            AgentState::Unknown,
-            false,
-            false,
-            false,
-            false,
-            false,
-            observed + Duration::from_secs(1),
-        );
+        assert!(terminal.blocked_state_hold.is_some());
 
         terminal.set_hook_authority_at(
             "custom:grok".into(),
@@ -9519,32 +9511,34 @@ mod tests {
         let observed = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Mastracode), AgentState::Idle);
+        let old_session = crate::agent_resume::AgentSessionRef::id("blocked-hold-old-session")
+            .expect("session id should be valid");
         terminal
             .set_agent_session_ref_for_session_start(
                 "herdr:mastracode".into(),
                 "mastracode".into(),
-                crate::agent_resume::AgentSessionRef::id("blocked-hold-old-session"),
+                Some(old_session.clone()),
                 Some(1),
                 Some("startup".into()),
             )
             .expect("initial session should be accepted");
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Mastracode),
+        terminal.set_hook_authority_at(
+            "herdr:mastracode".into(),
+            "mastracode".into(),
             AgentState::Blocked,
-            true,
-            false,
-            false,
-            false,
-            false,
+            None,
+            Some(old_session),
+            Some(2),
             observed,
         );
+        assert!(terminal.blocked_state_hold.is_some());
 
         let replacement = terminal
             .set_agent_session_ref_for_session_start(
                 "herdr:mastracode".into(),
                 "mastracode".into(),
                 crate::agent_resume::AgentSessionRef::id("blocked-hold-new-session"),
-                Some(2),
+                Some(3),
                 Some("startup".into()),
             )
             .expect("replacement session should be accepted");
@@ -9586,19 +9580,20 @@ mod tests {
     }
 
     #[test]
-    fn transient_idle_hook_report_does_not_clear_visible_blocker() {
+    fn transient_idle_hook_report_does_not_clear_hook_blocked_hold() {
         let observed = Instant::now();
         let mut terminal = test_terminal();
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Claude),
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:claude".into(),
+            "claude".into(),
             AgentState::Blocked,
-            true,
-            false,
-            false,
-            false,
-            false,
+            None,
+            None,
+            Some(1),
             observed,
         );
+        assert!(terminal.blocked_state_hold.is_some());
 
         terminal.set_hook_authority_at(
             "herdr:claude".into(),
@@ -9606,7 +9601,7 @@ mod tests {
             AgentState::Idle,
             None,
             None,
-            None,
+            Some(2),
             observed + Duration::from_secs(1),
         );
 
@@ -9618,102 +9613,6 @@ mod tests {
         let observed = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
-        terminal.set_hook_authority_at(
-            "herdr:claude-closing-block".into(),
-            "claude".into(),
-            AgentState::Blocked,
-            None,
-            None,
-            Some(1),
-            observed,
-        );
-
-        terminal.set_hook_authority_at(
-            "herdr:claude".into(),
-            "claude".into(),
-            AgentState::Idle,
-            None,
-            None,
-            None,
-            observed + Duration::from_secs(1),
-        );
-
-        assert_eq!(terminal.state, AgentState::Blocked);
-    }
-
-    #[test]
-    fn explicit_input_releases_visible_blocker_hold() {
-        let observed = Instant::now();
-        let mut terminal = test_terminal();
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Claude),
-            AgentState::Blocked,
-            true,
-            false,
-            false,
-            false,
-            false,
-            observed,
-        );
-
-        terminal
-            .retire_blocked_full_lifecycle_hook_authority_at(observed + Duration::from_secs(1))
-            .expect("input releases the visible blocker hold");
-
-        assert_eq!(terminal.state, AgentState::Idle);
-    }
-
-    #[test]
-    fn working_report_releases_visible_blocker_hold() {
-        let observed = Instant::now();
-        let mut terminal = test_terminal();
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Claude),
-            AgentState::Blocked,
-            true,
-            false,
-            false,
-            false,
-            false,
-            observed,
-        );
-
-        terminal.set_hook_authority_at(
-            "herdr:claude".into(),
-            "claude".into(),
-            AgentState::Working,
-            None,
-            None,
-            None,
-            observed + Duration::from_secs(1),
-        );
-
-        assert_eq!(terminal.state, AgentState::Working);
-    }
-
-    #[test]
-    fn empty_closing_report_releases_visible_blocker_hold() {
-        let observed = Instant::now();
-        let mut terminal = test_terminal();
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Claude),
-            AgentState::Blocked,
-            true,
-            false,
-            false,
-            false,
-            false,
-            observed,
-        );
-        terminal.set_hook_authority_at(
-            "herdr:claude-closing-block".into(),
-            "claude".into(),
-            AgentState::Blocked,
-            None,
-            None,
-            Some(1),
-            observed,
-        );
         terminal.apply_closing_block_payload(
             Vec::new(),
             vec![crate::api::schema::ClosingBlockItem {
@@ -9729,6 +9628,112 @@ mod tests {
             }],
             Vec::new(),
         );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(1),
+            observed,
+        );
+        assert!(terminal.blocked_state_hold.is_some());
+
+        terminal.set_hook_authority_at(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+            None,
+            observed + Duration::from_secs(1),
+        );
+
+        assert_eq!(terminal.state, AgentState::Blocked);
+    }
+
+    #[test]
+    fn explicit_input_releases_full_lifecycle_blocked_hold() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(1),
+            observed,
+        );
+        assert!(terminal.blocked_state_hold.is_some());
+
+        terminal
+            .retire_blocked_full_lifecycle_hook_authority_at(observed + Duration::from_secs(1))
+            .expect("input releases the full-lifecycle blocked hold");
+
+        assert_eq!(terminal.state, AgentState::Idle);
+    }
+
+    #[test]
+    fn working_report_releases_full_lifecycle_blocked_hold() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(1),
+            observed,
+        );
+        assert!(terminal.blocked_state_hold.is_some());
+
+        terminal.set_hook_authority_at(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+            Some(2),
+            observed + Duration::from_secs(1),
+        );
+
+        assert_eq!(terminal.state, AgentState::Working);
+    }
+
+    #[test]
+    fn newer_empty_closing_report_releases_closing_block_hold() {
+        let observed = Instant::now();
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.apply_closing_block_payload(
+            Vec::new(),
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Needs you".into(),
+                text: "Choose a release path".into(),
+                blocking: true,
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+        );
+        terminal.set_hook_authority_at(
+            "herdr:claude-closing-block".into(),
+            "claude".into(),
+            AgentState::Blocked,
+            None,
+            None,
+            Some(1),
+            observed,
+        );
+        assert!(terminal.blocked_state_hold.is_some());
         terminal.set_hook_authority_at(
             "herdr:claude-closing-block".into(),
             "claude".into(),
@@ -9748,19 +9753,20 @@ mod tests {
     }
 
     #[test]
-    fn process_exit_releases_visible_blocker_hold() {
+    fn process_exit_releases_full_lifecycle_blocked_hold() {
         let observed = Instant::now();
         let mut terminal = test_terminal();
-        terminal.set_detected_state_with_screen_signals_at(
-            Some(Agent::Claude),
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_hook_authority_at(
+            "herdr:claude".into(),
+            "claude".into(),
             AgentState::Blocked,
-            true,
-            false,
-            false,
-            false,
-            false,
+            None,
+            None,
+            Some(1),
             observed,
         );
+        assert!(terminal.blocked_state_hold.is_some());
 
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Claude),
