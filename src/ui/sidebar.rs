@@ -7698,13 +7698,18 @@ fn render_needs_you_row(
     }
     let p = &app.palette;
     let marker_color = if blocked { p.red } else { p.peach };
+    let marker = if app.sidebar_sections_layout {
+        "●"
+    } else {
+        "!"
+    };
     let (machine, machine_color) = if app.sidebar_sections_layout {
         sections_machine_mark(app, host)
     } else {
         (host.to_string(), p.overlay0)
     };
     let host_width = display_width(&machine);
-    // " ● " plus the right-aligned host and its gap come off the title.
+    // The marker and gap plus the right-aligned host come off the title.
     let title_width = usize::from(rect.width).saturating_sub(3 + host_width + 1);
     let title = truncate_end(title, title_width);
     let pad = title_width.saturating_sub(display_width(&title));
@@ -7712,7 +7717,7 @@ fn render_needs_you_row(
         Paragraph::new(Line::from(vec![
             Span::raw(" "),
             Span::styled(
-                "●",
+                marker,
                 Style::default()
                     .fg(marker_color)
                     .add_modifier(Modifier::BOLD),
@@ -25923,12 +25928,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let rendered = (0..area.height)
             .map(|row| row_text(terminal.backend().buffer(), row, area.width - 1))
             .collect::<Vec<_>>();
-        // The blocked Claude pane is hoisted into the Needs-you strip as well.
-        // Check its later tab row, not the strip copy.
+        // The current layout keeps the ! marker in its Needs-you strip; the
+        // later tab row is the one whose provider identity we check.
         let claude = rendered
             .iter()
-            .filter(|row| row.contains("Approve Bash command"))
-            .last()
+            .find(|row| row.contains("Approve Bash command") && !row.trim_start().starts_with('!'))
             .expect("Claude row");
         assert!(claude.contains("cc"), "{claude:?}");
         let claude_row_without_space = claude.split(" · ").next().expect("row title and provider");
@@ -28967,6 +28971,23 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             "{text:?}"
         );
         assert_eq!(terminal.backend().buffer()[(1, 0)].fg, app.palette.red);
+
+        app.sidebar_sections_layout = false;
+        terminal
+            .draw(|frame| {
+                render_needs_you_row(
+                    &app,
+                    frame,
+                    "Agent waiting",
+                    "ub1",
+                    true,
+                    Rect::new(0, 0, 40, 1),
+                )
+            })
+            .unwrap();
+        let current = row_text(terminal.backend().buffer(), 0, 40);
+        assert!(current.starts_with(" ! Agent waiting"), "{current:?}");
+        assert!(current.trim_end().ends_with("ub1"), "{current:?}");
     }
 
     #[test]
