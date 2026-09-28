@@ -3329,6 +3329,7 @@ mod tests {
 
         match guard {
             "closing gate" => {
+                app.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
                 let response = app.handle_pane_report_agent(
                     "clear-working-gate".into(),
                     closing_block_report(&public_pane_id, 2, Vec::new()),
@@ -3412,6 +3413,7 @@ mod tests {
 
         match blocker {
             "closing gate" => {
+                app.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
                 let response = app.handle_pane_report_agent(
                     "clear-gate".into(),
                     closing_block_report(&public_pane_id, 2, Vec::new()),
@@ -7106,8 +7108,7 @@ mod tests {
             &[test_gate()]
         );
 
-        app.try_send_text_to_pane(&pane_id, "continue\n")
-            .expect("pane input is sent");
+        app.retire_blocked_hook_authority_for_pane(internal_pane_id, std::time::Instant::now());
         let _: SuccessResponse = serde_json::from_str(&app.handle_pane_report_agent(
             "after-input".into(),
             closing_block_report(&pane_id, 3, Vec::new()),
@@ -7269,7 +7270,8 @@ mod tests {
         assert_eq!(terminal.effective_active_subagents(), Some(2));
         assert_eq!(
             app.pane_info(0, internal_pane_id).unwrap().agent_status,
-            crate::api::schema::AgentStatus::Working
+            crate::api::schema::AgentStatus::Blocked,
+            "a malformed report cannot answer the live gate"
         );
     }
 
@@ -7701,6 +7703,7 @@ mod tests {
             "blocked pane received an auto-nudge"
         );
 
+        app.retire_blocked_hook_authority_for_pane(internal_pane_id, std::time::Instant::now());
         let requests =
             closing_block_adapter_requests(&pane_id, "session-current", serde_json::json!([]));
         apply_closing_block_adapter_requests(&mut app, "clear-action-point", requests);

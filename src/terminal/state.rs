@@ -1000,12 +1000,15 @@ impl TerminalState {
             }
         }
 
-        let agent_label = self
-            .hook_authority
-            .as_ref()
-            .map(|authority| authority.agent_label.clone());
+        let live_closing_block_report = self.hook_authority.as_ref().is_some_and(|authority| {
+            crate::detect::is_closing_block_source(&authority.source, &authority.agent_label)
+        });
         let report = self.closing_report.get_or_insert_default();
-        if report.unanswered.is_none() && has_blockers {
+        if report.unanswered.is_none() && has_blockers && live_closing_block_report {
+            let agent_label = self
+                .hook_authority
+                .as_ref()
+                .map(|authority| authority.agent_label.clone());
             report.unanswered = Some(UnansweredClosingBlockers {
                 agent_label,
                 ..UnansweredClosingBlockers::default()
@@ -1191,14 +1194,16 @@ impl TerminalState {
     }
 
     fn clear_unanswered_closing_blockers(&mut self) -> bool {
-        let cleared = self
-            .closing_report
-            .as_mut()
-            .is_some_and(|report| report.unanswered.take().is_some());
-        if cleared {
-            self.revision = self.revision.saturating_add(1);
+        let Some(report) = self.closing_report.as_mut() else {
+            return false;
+        };
+        // Answering drops only the latch; answered entries stay displayed
+        // until the next report replaces them, as queued input always has.
+        if report.unanswered.take().is_none() {
+            return false;
         }
-        cleared
+        self.revision = self.revision.saturating_add(1);
+        true
     }
 
     fn release_blocked_hold_for_visible_working(
@@ -1592,6 +1597,8 @@ impl TerminalState {
         }) {
             authority.retired_at = Some(now);
         }
+        // The gate belonged to a session that no longer owns the pane.
+        self.clear_unanswered_closing_blockers();
         let changed = self.clear_closing_task_report(now);
         if changed {
             self.closing_report
@@ -2768,6 +2775,19 @@ impl TerminalState {
                     || (session_ref.is_some() && authority.session_ref != session_ref)
             });
         let closing_report = crate::detect::is_closing_block_source(&source, &agent_label);
+        let incoming_agent = crate::detect::parse_agent_label(&agent_label);
+        let latch_agent = self
+            .closing_report
+            .as_ref()
+            .and_then(|report| report.unanswered.as_ref())
+            .and_then(|unanswered| unanswered.agent_label.as_deref())
+            .and_then(crate::detect::parse_agent_label);
+        if incoming_agent
+            .zip(latch_agent)
+            .is_some_and(|(incoming, latched)| incoming != latched)
+        {
+            self.clear_unanswered_closing_blockers();
+        }
         if closing_report && state == AgentState::Blocked {
             let report = self.closing_report.get_or_insert_default();
             let latch_created = report.unanswered.is_none();
@@ -7788,7 +7808,8 @@ mod tests {
         assert!(!terminal.supervisor_stale);
         assert_eq!(
             terminal.hook_authority.as_ref().unwrap().retired_at,
-            Some(input_at)
+            Some(turn_started),
+            "the stable visible Working signal retires the answered closing authority"
         );
         assert_eq!(
             terminal.agent_status_watchdog_deadline(TEST_AGENT_STALE_AFTER),
@@ -10424,7 +10445,7 @@ mod tests {
     }
 
     #[test]
-    fn newer_empty_closing_report_releases_closing_block_hold() {
+    fn newer_empty_closing_report_clears_gate_after_human_input() {
         let observed = Instant::now();
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
@@ -10464,6 +10485,9 @@ mod tests {
         );
         assert_eq!(terminal.state, AgentState::Blocked);
 
+        terminal
+            .retire_blocked_full_lifecycle_hook_authority_at(observed + Duration::from_secs(2))
+            .expect("human input answers the gate");
         terminal.apply_closing_block_payload(Vec::new(), Vec::new(), Vec::new());
         terminal.recompute_effective_state_from_current_at(observed + Duration::from_secs(1));
 
@@ -10985,6 +11009,7 @@ mod tests {
             now + Duration::from_secs(2),
         );
         terminal.apply_closing_block_payload(Vec::new(), Vec::new(), Vec::new());
+        terminal.recompute_effective_state_from_current_at(now + Duration::from_secs(2));
 
         assert_eq!(terminal.state, AgentState::Idle);
         assert!(terminal.closing_gates.is_empty());
@@ -14249,8 +14274,8 @@ mod tests {
             .is_some());
         assert_eq!(
             terminal.state,
-            AgentState::Idle,
-            "sustained new-turn output retires gate"
+            AgentState::Blocked,
+            "sustained new-turn output cannot answer a human gate"
         );
     }
 }
