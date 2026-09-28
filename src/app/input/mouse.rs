@@ -7491,6 +7491,9 @@ mod tests {
             })
             .expect("work context");
         app.state.notepad.enabled = true;
+        app.state
+            .notepad
+            .set_visible_tabs(vec!["context".to_string()]);
         app.state.notepad.context_active = true;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 30));
         let panel = app.state.view.notepad_rect;
@@ -11230,6 +11233,7 @@ mod tests {
     #[test]
     fn repo_editor_button_queues_only_when_an_editor_is_available() {
         let mut app = app_for_mouse_test();
+        app.state.nerd_font = false;
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
         app.state.selected = 0;
