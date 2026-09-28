@@ -314,7 +314,7 @@ fn compact_provider_token(entry: &AgentPanelEntry, nerd_font: bool) -> String {
     let Some(suffix) = crate::ui::icons::agent_label(agent, nerd_font) else {
         return String::new();
     };
-    let mut provider = suffix.to_string();
+    let provider = suffix.to_string();
     // Agent rows show only the provider; machine identity has its own icon.
     provider
 }
@@ -8478,8 +8478,8 @@ pub(crate) fn compute_sidebar_hover_targets(
             SidebarRow::RemoteAgent {
                 entry,
                 depth,
-                show_host_identity,
                 working_shelf,
+                ..
             } => {
                 let requested_prefix = usize::from(*depth) * 3 + 1;
                 let total_width = usize::from(body.width);
