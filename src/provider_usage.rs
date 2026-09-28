@@ -1392,6 +1392,7 @@ fn load_codex_usage_from(root: &Path, now_unix: Option<i64>) -> AccountUsage {
 
     let mut usage = AccountUsage {
         account: codex_account_code(root),
+        email: codex_account_email(root),
         ..AccountUsage::default()
     };
     for path in files {
@@ -2008,6 +2009,31 @@ mod tests {
         let profiles = named_profile_dirs(&root, &["config.toml", "auth.json"]);
 
         assert_eq!(profiles, vec![("scalable".into(), root.join("scalable"))]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn codex_usage_carries_the_account_email_when_sessions_exist() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-codex-usage-email-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("sessions")).expect("sessions dir");
+        // {"email":"matthias@scalablehq.com"}
+        fs::write(
+            root.join("auth.json"),
+            r#"{"tokens":{"id_token":"header.eyJlbWFpbCI6Im1hdHRoaWFzQHNjYWxhYmxlaHEuY29tIn0.signature"}}"#,
+        )
+        .expect("auth file");
+
+        let usage = load_codex_usage_from(&root, Some(NOW));
+
+        assert_eq!(usage.email.as_deref(), Some("matthias@scalablehq.com"));
+        assert_eq!(usage.account.as_deref(), Some("SHQ"));
         let _ = fs::remove_dir_all(root);
     }
 
