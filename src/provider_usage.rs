@@ -1674,9 +1674,10 @@ pub(crate) fn five_hour_cycles_until_reset(resets_at: Option<i64>, now_unix: i64
     })
 }
 
-/// Refresh cadence. Quota windows move in minutes, not seconds, and the Kimi
-/// read costs a process spawn, so a minute is the right price.
-pub(crate) const PROVIDER_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+/// Refresh cadence shared by all provider quota snapshots. The ccusage read
+/// scans Claude logs, so ten minutes cuts its repeated CPU cost; other providers
+/// collected in the same snapshot now refresh on this cadence too.
+pub(crate) const PROVIDER_USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 pub(crate) fn snapshot_is_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_none_or(|last| {
@@ -2104,17 +2105,17 @@ mod tests {
     }
 
     #[test]
-    fn refresh_is_due_once_the_interval_has_passed_and_not_before() {
+    fn provider_usage_refresh_is_due_after_ten_minutes() {
+        const TEN_MINUTES: Duration = Duration::from_secs(10 * 60);
+        assert_eq!(PROVIDER_USAGE_REFRESH_INTERVAL, TEN_MINUTES);
+
         let start = Instant::now();
         assert!(snapshot_is_due(None, start));
         assert!(!snapshot_is_due(
             Some(start),
-            start + PROVIDER_USAGE_REFRESH_INTERVAL - Duration::from_millis(1)
+            start + TEN_MINUTES - Duration::from_millis(1)
         ));
-        assert!(snapshot_is_due(
-            Some(start),
-            start + PROVIDER_USAGE_REFRESH_INTERVAL
-        ));
+        assert!(snapshot_is_due(Some(start), start + TEN_MINUTES));
     }
 
     #[test]
