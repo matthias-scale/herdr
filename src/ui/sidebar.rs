@@ -1331,6 +1331,7 @@ pub(crate) enum SidebarCardStatus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SidebarThreadCard {
     title: String,
+    dot: &'static str,
     status: SidebarCardStatus,
     agent: Option<Agent>,
     host: String,
@@ -2685,6 +2686,7 @@ pub(crate) enum SidebarRow {
     /// because the same pane still appears under its group further down.
     NeedsYou {
         title: String,
+        dot: &'static str,
         /// Short host token, e.g. `ub1`; local rows name the current host.
         host: String,
         /// Blocked rows read red; attention-only rows read peach.
@@ -3110,6 +3112,7 @@ fn sidebar_thread_card(app: &AppState, entry: &AgentPanelEntry) -> SidebarThread
     };
     SidebarThreadCard {
         title: compact_row_title(entry, true).to_string(),
+        dot: compact_row_dot(entry),
         status,
         agent: if entry.has_agent { entry.agent } else { None },
         host,
@@ -4797,6 +4800,7 @@ fn needs_you_strip_rows(
         };
         rows.push(SidebarRow::NeedsYou {
             title: compact_row_title(entry, true).to_string(),
+            dot: compact_row_dot(entry),
             host: local_host.clone(),
             blocked: entry_is_blocked(entry),
             target: NeedsYouTarget::Local(target),
@@ -4811,6 +4815,7 @@ fn needs_you_strip_rows(
         };
         rows.push(SidebarRow::NeedsYou {
             title: remote.render_title.clone(),
+            dot: compact_row_dot(entry),
             host: remote
                 .narrow_host_suffix
                 .strip_prefix(" · ")
@@ -7816,6 +7821,7 @@ fn render_needs_you_row(
     frame: &mut Frame,
     title: &str,
     host: &str,
+    dot: &str,
     blocked: bool,
     rect: Rect,
 ) {
@@ -7825,7 +7831,7 @@ fn render_needs_you_row(
     let p = &app.palette;
     let marker_color = if blocked { p.red } else { p.peach };
     let marker = if app.sidebar_sections_layout {
-        "●"
+        dot
     } else {
         "!"
     };
@@ -10869,13 +10875,14 @@ fn render_workspace_list(
             let Some(SidebarRow::NeedsYou {
                 title,
                 host,
+                dot,
                 blocked,
                 ..
             }) = row_entries.get(row_idx)
             else {
                 continue;
             };
-            render_needs_you_row(app, frame, title, host, *blocked, rect);
+            render_needs_you_row(app, frame, title, host, dot, *blocked, rect);
         }
     }
 
@@ -11182,7 +11189,7 @@ pub(super) fn render_sections_thread_card_with_controls(
     let title = truncate_end(&card.title, title_width);
     let padding = title_width.saturating_sub(display_width(&title));
     let mut spans = vec![
-        Span::styled("●", Style::default().fg(dot_color)),
+        Span::styled(card.dot, Style::default().fg(dot_color)),
         Span::raw(" "),
         Span::styled(
             title,
@@ -11208,10 +11215,6 @@ pub(super) fn render_sections_thread_card_with_controls(
     }
     spans.push(Span::raw(" ".repeat(padding)));
     spans.push(Span::raw(" ".repeat(usize::from(controls_width))));
-    if suffix_width > 0 {
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(suffix, Style::default().fg(p.overlay0)));
-    }
     if host_width > 0 {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
@@ -11220,6 +11223,10 @@ pub(super) fn render_sections_thread_card_with_controls(
         ));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(&card.host, Style::default().fg(p.overlay0)));
+    }
+    if suffix_width > 0 {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(suffix, Style::default().fg(p.overlay0)));
     }
     frame.render_widget(
         Paragraph::new(Line::from(spans)),
@@ -29408,6 +29415,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.nerd_font = false;
         let card = SidebarThreadCard {
             title: "fix sidebar".into(),
+            dot: "○",
             status: SidebarCardStatus::Idle("8m".into()),
             agent: Some(Agent::Codex),
             host: "a-long-hostname".into(),
@@ -29428,7 +29436,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     })
                     .expect("draw");
                 let row = row_text(terminal.backend().buffer(), 0, width);
-                assert!(row.contains("● fix"), "{width} {depth}: {row:?}");
+                assert!(row.contains("○ fix"), "{width} {depth}: {row:?}");
                 assert!(row.contains(" cx"), "{width} {depth}: {row:?}");
                 assert!(row.find("fix") < row.find(" cx"), "{row:?}");
                 if width == 18 {
@@ -29482,6 +29490,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.agent_host_name = "ub1".into();
         let card = SidebarThreadCard {
             title: "fix sidebar".into(),
+            dot: "·",
             status: SidebarCardStatus::Idle("8m".into()),
             agent: None,
             host: "ub1".into(),
@@ -29502,7 +29511,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .expect("draw");
             let first = row_text(terminal.backend().buffer(), 0, width);
             let second = row_text(terminal.backend().buffer(), 1, width);
-            assert!(first.starts_with("      ● fix"), "{first:?}");
+            assert!(first.starts_with("      · fix"), "{first:?}");
             assert!(!first.contains("◆"), "{first:?}");
             assert!(
                 !first.contains("HR") && !first.contains("feat/") && !first.contains("207"),
@@ -29510,8 +29519,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             );
             assert!(second.trim().is_empty(), "{second:?}");
             if width == 40 {
-                assert!(first.contains("8m"), "{first:?}");
-                assert!(first.contains("L ub1"), "{first:?}");
+                assert!(first.contains("L ub1 8m"), "{first:?}");
             } else {
                 assert!(!first.contains("ub1"), "{first:?}");
             }
@@ -29538,6 +29546,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         };
         let card = SidebarThreadCard {
             title: "fix sidebar".into(),
+            dot: "·",
             status: SidebarCardStatus::Idle("8m".into()),
             agent: None,
             host: app.agent_host_name.clone(),
@@ -29553,8 +29562,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("draw");
         assert!(row_text(terminal.backend().buffer(), 0, 40).starts_with("  ▾ # Tools (2)"));
         let child = row_text(terminal.backend().buffer(), 1, 40);
-        assert!(child.starts_with("      ● fix sidebar"), "{child:?}");
-        assert!(child.contains("8m L localhost"), "{child:?}");
+        assert!(child.starts_with("      · fix sidebar"), "{child:?}");
+        assert!(child.contains("L localhost 8m"), "{child:?}");
         assert_eq!(sections_control_start(&app, &card, row, 6), 19);
     }
 
@@ -29564,6 +29573,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.nerd_font = false;
         let card = SidebarThreadCard {
             title: "fix sidebar".into(),
+            dot: "·",
             status: SidebarCardStatus::Idle("8m".into()),
             agent: None,
             host: "a-very-long-machine-name-that-exceeds-the-row".into(),
@@ -29695,6 +29705,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             })
             .expect("remote section card");
         assert_eq!(remote_card.host_kind, SidebarCardHostKind::Remote);
+        assert_eq!(remote_card.dot, "●");
         assert_eq!(sidebar_card_host_icon(remote_card.host_kind, false), "R");
     }
 
@@ -29704,6 +29715,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.nerd_font = false;
         let mut card = SidebarThreadCard {
             title: "agent".into(),
+            dot: "○",
             status: SidebarCardStatus::Blocked,
             agent: None,
             host: "ub2".into(),
@@ -29716,7 +29728,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             })
             .unwrap();
         let blocked = row_text(terminal.backend().buffer(), 0, 40);
-        assert!(blocked.starts_with("● agent"));
+        assert!(blocked.starts_with("○ agent"));
         assert!(!blocked.contains("Blocked") && !blocked.contains('!') && !blocked.contains(''));
         assert_eq!(terminal.backend().buffer()[(0, 0)].fg, app.palette.red);
         card.status = SidebarCardStatus::Done;
@@ -29726,7 +29738,61 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             })
             .unwrap();
         let done = row_text(terminal.backend().buffer(), 0, 40);
-        assert!(done.contains("✓ Done"), "{done:?}");
+        assert!(done.starts_with("○ agent"), "{done:?}");
+        assert!(done.contains("R ub2 ✓ Done"), "{done:?}");
+    }
+
+    #[test]
+    fn sections_cards_reuse_default_dot_shapes() {
+        let app = AppState::test_new();
+        let mut entry = aggregation_entry(AgentState::Working, true, None, "working");
+        for (state, has_agent, waiting, expected) in [
+            (AgentState::Working, true, false, "●"),
+            (AgentState::Blocked, true, false, "○"),
+            (AgentState::Idle, true, false, "○"),
+            (AgentState::Idle, false, false, "·"),
+            (AgentState::Working, true, true, "◌"),
+        ] {
+            entry.state = state;
+            entry.has_agent = has_agent;
+            entry.waiting_on_agents = waiting;
+            let card = sidebar_thread_card(&app, &entry);
+            assert_eq!(card.dot, compact_row_dot(&entry));
+            assert_eq!(card.dot, expected);
+            let mut terminal = Terminal::new(TestBackend::new(40, 1)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    render_sections_thread_card(&app, frame, &card, Rect::new(0, 0, 40, 1), false)
+                })
+                .expect("draw");
+            assert_eq!(terminal.backend().buffer()[(0, 0)].symbol(), expected);
+        }
+    }
+
+    #[test]
+    fn needs_you_strip_reuses_default_dot_for_blocked_and_attention() {
+        let app = AppState::test_new();
+        let mut entry = aggregation_entry(AgentState::Blocked, true, None, "blocked");
+        let rows = needs_you_strip_rows(&app, &[entry.clone()], &[], &[]);
+        assert!(matches!(
+            &rows[0],
+            SidebarRow::NeedsYou {
+                dot: "○",
+                blocked: true,
+                ..
+            }
+        ));
+        entry.state = AgentState::Working;
+        entry.attention_tier = Some(AttentionTier::Attention);
+        let rows = needs_you_strip_rows(&app, &[entry], &[], &[]);
+        assert!(matches!(
+            &rows[0],
+            SidebarRow::NeedsYou {
+                dot: "●",
+                blocked: false,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -29742,13 +29808,14 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     frame,
                     "Agent waiting",
                     "ub1",
+                    "○",
                     true,
                     Rect::new(0, 0, 40, 1),
                 )
             })
             .unwrap();
         let text = row_text(terminal.backend().buffer(), 0, 40);
-        assert!(text.starts_with(" ● Agent waiting"), "{text:?}");
+        assert!(text.starts_with(" ○ Agent waiting"), "{text:?}");
         assert!(!text.contains('!'));
         assert!(text.trim_end().ends_with("ub1"), "{text:?}");
         assert_eq!(terminal.backend().buffer()[(1, 0)].fg, app.palette.red);
@@ -29761,6 +29828,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     frame,
                     "Agent waiting",
                     "ub1",
+                    "○",
                     true,
                     Rect::new(0, 0, 40, 1),
                 )

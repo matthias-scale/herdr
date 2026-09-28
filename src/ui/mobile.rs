@@ -1990,6 +1990,7 @@ mod tests {
     fn sections_mobile_switcher_uses_one_row_and_pin_target() {
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
+        app.nerd_font = false;
         app.workspaces = vec![crate::workspace::Workspace::test_new("agent")];
         app.ensure_test_terminals();
         for terminal in app.terminals.values_mut() {
@@ -2075,6 +2076,16 @@ mod tests {
             terminal.backend().buffer()[(pin_col + 5, row)].symbol(),
             "✓"
         );
+        let dot_col = super::super::sidebar::sections_thread_rect(
+            Rect::new(content.x, content.y, content.width, 1),
+            *depth,
+        )
+        .x;
+        assert_eq!(terminal.backend().buffer()[(dot_col, row)].symbol(), "●");
+        let rendered = (0..40)
+            .map(|col| terminal.backend().buffer()[(col, row)].symbol())
+            .collect::<String>();
+        assert!(rendered.contains("L localhost"), "{rendered:?}");
     }
 
     #[test]
