@@ -2074,7 +2074,12 @@ fn collect_agent_panel_entries_with_runtimes(
                         },
                     );
                     entry.pinned = pinned;
-                    entry.pending_ask = entry_terminal(app, &entry).and_then(pending_human_ask);
+                    if app.sidebar_sections_layout
+                        && app.sidebar_show_ask_subtitles
+                        && entry_is_blocked(&entry)
+                    {
+                        entry.pending_ask = entry_terminal(app, &entry).and_then(pending_human_ask);
+                    }
                     entry
                 })
         })
@@ -2754,6 +2759,8 @@ pub(crate) enum SidebarRow {
         sort_mode: SidebarSortMode,
         title: String,
         count: usize,
+        /// Working and total agents in a remote Space in the focus layout.
+        activity_count: Option<(usize, usize)>,
         collapsed: bool,
         /// A work item with no pane: rendered dim, never collapsible.
         dim: bool,
@@ -3434,6 +3441,7 @@ fn compact_sidebar_rows_inner(
             &remote_entries,
             expand_needs_you,
         );
+        let remote_activity = sidebar_remote_activity(app, &remote_entries);
         let mut space_entries = Vec::new();
         let mut working_entries = Vec::new();
         for mut entry in visible_entries.iter().cloned() {
@@ -3480,6 +3488,7 @@ fn compact_sidebar_rows_inner(
             false,
             true,
             workspace_activity.as_ref(),
+            Some(&remote_activity),
         );
         let working_collapsed = section_is_collapsed(app, WORKING_SECTION_TITLE);
         rows.push(SidebarRow::SectionHeader {
@@ -3719,6 +3728,35 @@ struct SidebarActivityCount {
     total: usize,
 }
 
+fn sidebar_remote_activity(
+    app: &AppState,
+    entries: &[AgentPanelEntry],
+) -> std::collections::HashMap<(String, String), SidebarActivityCount> {
+    let mut activity = std::collections::HashMap::new();
+    for entry in entries {
+        let Some(remote) = entry.remote_entry.as_ref() else {
+            continue;
+        };
+        if !entry.has_agent || sidebar_entry_lifecycle(app, entry) != SidebarEntryLifecycle::Active
+        {
+            continue;
+        }
+        let workspace_id = if remote.workspace_id.is_empty() {
+            "Remote".to_string()
+        } else {
+            remote.workspace_id.clone()
+        };
+        let count = activity
+            .entry((remote.agent_ref.host.clone(), workspace_id))
+            .or_insert(SidebarActivityCount::default());
+        count.total = count.total.saturating_add(1);
+        if entry.state == AgentState::Working && !entry.usage_limited {
+            count.working = count.working.saturating_add(1);
+        }
+    }
+    activity
+}
+
 fn sidebar_workspace_activity(
     entries: &[AgentPanelEntry],
 ) -> std::collections::HashMap<usize, SidebarActivityCount> {
@@ -3792,6 +3830,7 @@ fn append_legacy_space_rows(
         true,
         only_populated || sidebar_rows_are_filtered(app),
         activity,
+        None,
     );
 }
 
@@ -3820,6 +3859,7 @@ fn append_shelf_space_rows(
             false,
             true,
             None,
+            None,
         );
     }
 }
@@ -3834,6 +3874,7 @@ fn append_space_tree_rows(
     show_header: bool,
     populated_only: bool,
     activity: Option<&std::collections::HashMap<usize, SidebarActivityCount>>,
+    remote_activity: Option<&std::collections::HashMap<(String, String), SidebarActivityCount>>,
 ) {
     let empty_runtimes;
     let terminal_runtimes = match terminal_runtimes {
@@ -3986,6 +4027,7 @@ fn append_space_tree_rows(
                     sort_mode: sort,
                     title: group.title,
                     count: group.entries.len(),
+                    activity_count: None,
                     collapsed,
                     dim: false,
                     status: None,
@@ -4018,6 +4060,9 @@ fn append_space_tree_rows(
         let key = format!("remote-space:{host}:{workspace_id}");
         let collapsed = section_is_collapsed(app, &key);
         let sort = effective_sidebar_group_sort(app, &key, SidebarSortMode::Default);
+        let activity_count = remote_activity
+            .and_then(|activity| activity.get(&(host.clone(), workspace_id.clone())))
+            .map(|count| (count.working, count.total));
         let title = if remote_title_counts
             .get(workspace_id.as_str())
             .is_some_and(|count| *count > 1)
@@ -4033,6 +4078,7 @@ fn append_space_tree_rows(
             sort_mode: sort,
             title,
             count: entries.len(),
+            activity_count,
             collapsed,
             dim: false,
             status: None,
@@ -4252,6 +4298,7 @@ fn append_subgrouped_tab_rows(
             sort_mode: sort,
             title: name,
             count: sub_entries.len(),
+            activity_count: None,
             collapsed,
             dim: false,
             status: None,
@@ -4337,6 +4384,7 @@ fn append_repo_group_rows(
                     sort_mode: group_sort,
                     title: group.title.clone(),
                     count: group.entries.len(),
+                    activity_count: None,
                     collapsed,
                     dim: false,
                     status: None,
@@ -4355,6 +4403,7 @@ fn append_repo_group_rows(
                 sort_mode: group_sort,
                 title: group.title.clone(),
                 count: group.entries.len(),
+                activity_count: None,
                 collapsed,
                 dim: false,
                 status: None,
@@ -4423,6 +4472,7 @@ fn append_repo_group_rows(
                 sort_mode: branch_sort,
                 title,
                 count: entries.len(),
+                activity_count: None,
                 collapsed,
                 dim: false,
                 status: None,
@@ -4467,6 +4517,7 @@ fn append_object_group_rows(
             sort_mode: group_sort,
             title: group.title.clone(),
             count: group.entries.len(),
+            activity_count: None,
             collapsed,
             dim: false,
             status: group.status,
@@ -5014,6 +5065,7 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
                 .cloned()
                 .expect("host token for Fleet host"),
             count: host_entries.len(),
+            activity_count: None,
             collapsed,
             dim: false,
             status: None,
@@ -6581,6 +6633,7 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
             sort_mode: SidebarSortMode::Default,
             title: unassigned_empty_text(app),
             count: 0,
+            activity_count: None,
             collapsed: false,
             dim: true,
             status: None,
@@ -6608,6 +6661,7 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
             sort_mode: SidebarSortMode::Default,
             title: object.title.clone(),
             count: 0,
+            activity_count: None,
             collapsed: false,
             dim: true,
             status: object.status,
@@ -6623,6 +6677,7 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
             sort_mode: SidebarSortMode::Default,
             title: format!("show {remaining} more…"),
             count: 0,
+            activity_count: None,
             collapsed: false,
             dim: true,
             status: None,
@@ -7654,6 +7709,7 @@ struct NestedHeaderArea {
     sort_mode: SidebarSortMode,
     title: String,
     count: usize,
+    activity_count: Option<(usize, usize)>,
     collapsed: bool,
     dim: bool,
     status: Option<WorkGroupStatus>,
@@ -7692,6 +7748,7 @@ fn nested_header_areas_from_rows(
             sort_mode,
             title,
             count,
+            activity_count,
             collapsed,
             dim,
             status,
@@ -7705,6 +7762,7 @@ fn nested_header_areas_from_rows(
                 sort_mode: *sort_mode,
                 title: title.clone(),
                 count: *count,
+                activity_count: *activity_count,
                 collapsed: *collapsed,
                 dim: *dim,
                 status: *status,
@@ -8195,6 +8253,10 @@ pub(crate) fn compute_sidebar_hover_targets(
     for (row, row_y) in &visible {
         let (label, row_hover) = match row {
             SidebarRow::Workspace {
+                activity_count: Some((working, total)),
+                ..
+            } => (format!("{working} of {total} agents working"), false),
+            SidebarRow::NestedHeader {
                 activity_count: Some((working, total)),
                 ..
             } => (format!("{working} of {total} agents working"), false),
@@ -10425,12 +10487,20 @@ struct NestedHeaderSpans {
 /// its trailing actions.
 const SIDEBAR_SORT_GLYPH: &str = "⇅";
 
-fn nested_header_spans(header: &NestedHeaderArea) -> NestedHeaderSpans {
-    let count_width = if header.dim {
-        0
+fn nested_header_count_label(header: &NestedHeaderArea) -> Option<String> {
+    if header.dim {
+        None
+    } else if let Some((working, total)) = header.activity_count {
+        Some(format!(" ({working} of {total})"))
     } else {
-        display_width(&format!(" ({})", header.count))
-    };
+        Some(format!(" ({})", header.count))
+    }
+}
+
+fn nested_header_spans(header: &NestedHeaderArea) -> NestedHeaderSpans {
+    let count_width = nested_header_count_label(header)
+        .as_deref()
+        .map_or(0, display_width);
     let action_width = usize::from(header.action_key.is_some()) * 2;
     let spawn_width = usize::from(header.spawn) * 2;
     let sort_width = usize::from(header.sort_key.is_some()) * 2;
@@ -10463,11 +10533,9 @@ fn nested_header_spans(header: &NestedHeaderArea) -> NestedHeaderSpans {
 fn nested_header_sort_col(header: &NestedHeaderArea) -> Option<u16> {
     header.sort_key.as_ref()?;
     let spans = nested_header_spans(header);
-    let count_width = if header.dim {
-        0
-    } else {
-        display_width(&format!(" ({})", header.count))
-    };
+    let count_width = nested_header_count_label(header)
+        .as_deref()
+        .map_or(0, display_width);
     // Prefix, status glyph, title, count, then the space before the glyph.
     let offset =
         spans.prefix_width + spans.glyph_width + display_width(&spans.title) + count_width + 1;
@@ -10480,7 +10548,7 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
         return;
     }
     let p = &app.palette;
-    let count_label = (!header.dim).then(|| format!(" ({})", header.count));
+    let count_label = nested_header_count_label(header);
     let NestedHeaderSpans { glyph, title, .. } = nested_header_spans(header);
     // A dim header carries no live state colour: nothing is running under it.
     let color = if header.dim { p.overlay0 } else { p.subtext0 };
@@ -27286,6 +27354,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             sort_mode: SidebarSortMode::Default,
             title: title.into(),
             count: 2,
+            activity_count: None,
             collapsed: false,
             dim: false,
             status,
@@ -28916,6 +28985,65 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_show_ask_subtitles = false;
         assert_eq!(sidebar_row_height(&app, &row, 20), 1);
         assert!(!render(&app).contains("↳ Choose a layout"));
+    }
+
+    #[test]
+    fn focus_sidebar_remote_space_counts_working_agents_hidden_in_the_shelf() {
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot(
+                "ub2",
+                false,
+                vec![
+                    crate::fleet::FleetRow::test_agent_info_row(
+                        "ub2",
+                        remote_agent_info(
+                            "blocked",
+                            "needs answer",
+                            crate::api::schema::AgentStatus::Blocked,
+                            true,
+                            false,
+                        ),
+                    ),
+                    crate::fleet::FleetRow::test_agent_info_row(
+                        "ub2",
+                        remote_agent_info(
+                            "working",
+                            "building",
+                            crate::api::schema::AgentStatus::Working,
+                            false,
+                            false,
+                        ),
+                    ),
+                ],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.sidebar_work_filter.machine_scope = crate::app::state::SidebarMachineScope::AllMachines;
+        app.remote_agent_panel_entries =
+            remote_agent_panel_entries_at(&snapshot, 1_725_000_000, false);
+
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader {
+                key,
+                count: 1,
+                activity_count: Some((1, 2)),
+                ..
+            } if key.starts_with("remote-space:ub2:"))));
+        let area = Rect::new(0, 0, 42, 32);
+        let mut rendered = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("remote focus sidebar terminal");
+        rendered
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .expect("render remote focus sidebar");
+        let snapshot = (0..area.height)
+            .map(|y| row_text(rendered.backend().buffer(), y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(snapshot.contains("1 of 2"), "{snapshot}");
     }
 
     #[test]
