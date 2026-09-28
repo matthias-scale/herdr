@@ -453,7 +453,7 @@ fn run_model_classifier(
         .ok_or_else(|| io::Error::other("Gemini classifier stdout was not captured"))?;
     let reader = thread::spawn(move || {
         let mut reply = String::new();
-        stdout.read_to_string(&mut reply).map(|()| reply)
+        stdout.read_to_string(&mut reply).map(|_| reply)
     });
     let status = wait_for_model(&mut child)?;
     if !status.success() {

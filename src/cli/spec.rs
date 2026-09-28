@@ -249,7 +249,8 @@ pub(super) fn watchdog_command() -> Command {
                     crate::config::state_dir()
                         .join("watchdog.json")
                         .to_string_lossy()
-                        .into_owned(),
+                        .into_owned()
+                        .leak() as &str,
                 )
                 .help("Path to persistent pane-tail hash JSON"),
         )
