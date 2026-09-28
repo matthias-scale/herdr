@@ -1987,9 +1987,13 @@ impl App {
             .get(ws_idx)
             .and_then(|workspace| workspace.pane_state(pane_id))
             .and_then(|pane| self.state.terminals.get(&pane.attached_terminal_id))
-            .and_then(crate::terminal::TerminalState::effective_non_retired_hook_session)
-            .is_some_and(|(current_agent, current_session)| {
-                current_agent != agent_label || current_session != session_id
+            .and_then(crate::terminal::TerminalState::effective_non_retired_hook_authority)
+            .is_some_and(|authority| {
+                authority.agent_label != agent_label
+                    || !authority.session_ref.as_ref().is_some_and(|session_ref| {
+                        session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id
+                            && session_ref.value == session_id
+                    })
             })
     }
 
@@ -2007,7 +2011,7 @@ impl App {
                         .terminals
                         .get(&pane.attached_terminal_id)
                         .and_then(
-                            crate::terminal::TerminalState::effective_non_retired_hook_session,
+                            crate::terminal::TerminalState::effective_non_retired_hook_session_id,
                         )
                         .is_some_and(|(current_agent, current_session)| {
                             current_agent == agent_label && current_session == session_id
@@ -4354,19 +4358,47 @@ mod tests {
         agent_label: &str,
         session_id: &str,
     ) -> crate::terminal::TerminalId {
-        let terminal_id = bind_test_agent_session(app, pane_id, source, agent_label, session_id);
+        bind_test_live_agent_authority(
+            app,
+            pane_id,
+            source,
+            agent_label,
+            Some(
+                crate::agent_resume::AgentSessionRef::id(session_id)
+                    .expect("valid test session id"),
+            ),
+        )
+    }
+
+    fn bind_test_live_agent_authority(
+        app: &mut App,
+        pane_id: &str,
+        source: &str,
+        agent_label: &str,
+        session_ref: Option<crate::agent_resume::AgentSessionRef>,
+    ) -> crate::terminal::TerminalId {
+        let (workspace_idx, internal_pane_id) = app.parse_pane_id(pane_id).unwrap();
+        let terminal_id = app.state.workspaces[workspace_idx]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
         let agent = crate::detect::parse_agent_label(agent_label).expect("known test agent");
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        if let Some(session_ref) = session_ref.as_ref() {
+            terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: source.into(),
+                agent: agent_label.into(),
+                session_ref: session_ref.clone(),
+            });
+        }
         terminal.set_detected_state(Some(agent), AgentState::Working);
         terminal.set_hook_authority_with_session_ref(
             source.into(),
             agent_label.into(),
             AgentState::Working,
             None,
-            Some(
-                crate::agent_resume::AgentSessionRef::id(session_id)
-                    .expect("valid test session id"),
-            ),
+            session_ref,
             Some(1),
         );
         terminal_id
@@ -9611,6 +9643,102 @@ mod tests {
             app.state.terminals[&reused_terminal_id].raw_agent_state(),
             AgentState::Working
         );
+        let owner = app.pane_info(1, owner_internal_id).unwrap();
+        assert_eq!(owner.agent_status, crate::api::schema::AgentStatus::Idle);
+        assert_eq!(
+            owner.tokens.get("closing_completion").map(String::as_str),
+            Some("complete")
+        );
+        assert_eq!(
+            app.state.terminals[&owner_terminal_id].raw_agent_state(),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn report_agent_on_reused_pane_id_conflicts_with_live_path_session() {
+        let (mut app, reused_pane_id) = app_with_test_workspace();
+        let path_ref = crate::agent_resume::AgentSessionRef::path("/tmp/pi-session.json")
+            .expect("valid test session path");
+        let pi_terminal_id = bind_test_live_agent_authority(
+            &mut app,
+            &reused_pane_id,
+            "herdr:pi",
+            "pi",
+            Some(path_ref.clone()),
+        );
+        let pi_authority = app.state.terminals[&pi_terminal_id].hook_authority.clone();
+
+        let owner_pane_id = add_test_workspace(&mut app, "path-session-report-owner");
+        let owner_terminal_id = bind_test_live_agent_session(
+            &mut app,
+            &owner_pane_id,
+            "herdr:claude",
+            "claude",
+            "wanted-path-session-report",
+        );
+        let owner_internal_id = app.parse_pane_id(&owner_pane_id).unwrap().1;
+
+        let mut report = closing_block_report(&reused_pane_id, 1, Vec::new());
+        report.source = "herdr:claude-closing-block".into();
+        report.agent = "claude".into();
+        report.agent_session_id = Some("wanted-path-session-report".into());
+        let response = app.handle_pane_report_agent("path-session-conflict".into(), report);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let pi_terminal = &app.state.terminals[&pi_terminal_id];
+        assert_eq!(pi_terminal.raw_agent_state(), AgentState::Working);
+        assert_eq!(pi_terminal.hook_authority, pi_authority);
+        assert_eq!(
+            pi_terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| &session.session_ref),
+            Some(&path_ref)
+        );
+        let owner = app.pane_info(1, owner_internal_id).unwrap();
+        assert_eq!(owner.agent_status, crate::api::schema::AgentStatus::Idle);
+        assert_eq!(
+            owner.tokens.get("closing_completion").map(String::as_str),
+            Some("complete")
+        );
+        assert_eq!(
+            app.state.terminals[&owner_terminal_id].raw_agent_state(),
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn report_agent_on_reused_pane_id_conflicts_with_live_ref_less_authority() {
+        let (mut app, reused_pane_id) = app_with_test_workspace();
+        let pi_terminal_id =
+            bind_test_live_agent_authority(&mut app, &reused_pane_id, "herdr:pi", "pi", None);
+        let pi_authority = app.state.terminals[&pi_terminal_id].hook_authority.clone();
+
+        let owner_pane_id = add_test_workspace(&mut app, "ref-less-report-owner");
+        let owner_terminal_id = bind_test_live_agent_session(
+            &mut app,
+            &owner_pane_id,
+            "herdr:claude",
+            "claude",
+            "wanted-ref-less-report",
+        );
+        let owner_internal_id = app.parse_pane_id(&owner_pane_id).unwrap().1;
+
+        let mut report = closing_block_report(&reused_pane_id, 1, Vec::new());
+        report.source = "herdr:claude-closing-block".into();
+        report.agent = "claude".into();
+        report.agent_session_id = Some("wanted-ref-less-report".into());
+        let response = app.handle_pane_report_agent("ref-less-conflict".into(), report);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let pi_terminal = &app.state.terminals[&pi_terminal_id];
+        assert_eq!(pi_terminal.raw_agent_state(), AgentState::Working);
+        assert_eq!(pi_terminal.hook_authority, pi_authority);
+        assert!(pi_terminal
+            .hook_authority
+            .as_ref()
+            .is_some_and(|authority| authority.session_ref.is_none()));
         let owner = app.pane_info(1, owner_internal_id).unwrap();
         assert_eq!(owner.agent_status, crate::api::schema::AgentStatus::Idle);
         assert_eq!(
