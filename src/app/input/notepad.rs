@@ -63,17 +63,32 @@ impl AppState {
             return;
         }
         if focused {
-            let visible_note = self.notepad.enabled
-                && self.notepad.files.iter().enumerate().any(|(index, _)| {
-                    self.notepad
-                        .is_tab_visible(crate::notepad::NotepadTabTarget::Note(index))
-                });
-            if visible_note {
+            let active_note = crate::notepad::NotepadTabTarget::Note(self.notepad.active);
+            let active_note_visible = self.notepad.enabled
+                && self.notepad.active_file().is_some()
+                && self.notepad.is_tab_visible(active_note);
+            if active_note_visible {
                 // Read-only tabs have no editor focus. Return to the active
                 // note only when an enabled, visible note can take over.
                 self.notepad.context_active = false;
                 self.notepad.agent_tab = false;
                 self.notepad.usage_tab = false;
+            } else if self.notepad.enabled {
+                if let Some(index) = self
+                    .notepad
+                    .files
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, _)| {
+                        self.notepad
+                            .is_tab_visible(crate::notepad::NotepadTabTarget::Note(index))
+                            .then_some(index)
+                    })
+                {
+                    // Keep the read-only tab active until the app has loaded
+                    // the visible note through its normal selection path.
+                    self.request_notepad(NotepadRequest::Select(index));
+                }
             }
         }
         if self.notepad.focused == focused {
@@ -663,6 +678,43 @@ mod tests {
         assert_eq!(
             state.notepad.active_tab_target(),
             Some(NotepadTabTarget::Usage)
+        );
+    }
+
+    #[test]
+    fn focusing_from_usage_selects_a_visible_note_when_the_active_note_is_hidden() {
+        let mut state = AppState::test_new();
+        state.notepad.enabled = true;
+        state.notepad.set_files(vec![
+            crate::notepad::NotepadFile {
+                path: "/notes/hidden.md".into(),
+                name: "hidden".into(),
+            },
+            crate::notepad::NotepadFile {
+                path: "/notes/visible.md".into(),
+                name: "visible".into(),
+            },
+        ]);
+        state
+            .notepad
+            .set_visible_tabs(vec!["note:visible".into(), "usage".into()]);
+        state.notepad.active = 0;
+        state.notepad.usage_tab = true;
+
+        assert_eq!(
+            state.notepad.active_tab_target(),
+            Some(NotepadTabTarget::Usage)
+        );
+        assert!(state.toggle_notepad_focus());
+
+        assert_eq!(state.notepad_request, Some(NotepadRequest::Select(1)));
+        assert_eq!(
+            state.notepad.active, 0,
+            "selection waits for the app to load it"
+        );
+        assert!(
+            state.notepad.usage_tab,
+            "keep the read-only tab active until load"
         );
     }
 
