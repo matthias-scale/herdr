@@ -668,23 +668,6 @@ _NOW_IDLE_RE = re.compile(
     r"(?:active[ \t]+)?(?:work|workers?|agents?)(?:[ \t]+running)?)\.?$",
     re.IGNORECASE,
 )
-_NOW_EXTERNAL_WORD = r"(?:checks?|ci|build|deploy(?:ment)?|pipeline|workflow)"
-_NOW_EXTERNAL_RE = re.compile(
-    rf"\b{_NOW_EXTERNAL_WORD}\b.*?\b(?:running|pending|queued|in[ \t]+progress)\b"
-    rf"|^(?:still[ \t]+)?(?:waiting[ \t]+(?:on|for)|awaiting)[ \t]+.*?\b{_NOW_EXTERNAL_WORD}\b"
-    rf"|^{_NOW_EXTERNAL_WORD}[ \t]+(?:on|for)\b",
-    re.IGNORECASE,
-)
-_NOW_EXTERNAL_DONE_RE = re.compile(
-    rf"^{_NOW_EXTERNAL_WORD}\b.*?\b(?:passed|green|complete[d]?|done|finished|succeeded|merged)\b\.?$",
-    re.IGNORECASE,
-)
-# `<worker> — <activity>` names a worker whatever its activity text says.
-_NOW_LABELLED_WORKER_RE = re.compile(
-    r"^(?P<name>[^—–:·]+?)[ \t]*(?:[—–:]|[ \t]-[ \t])[ \t]*\S"
-)
-
-
 def _now_entries(rest: str) -> tuple[list[str], list[str]]:
     streams: list[str] = []
     waits: list[str] = []
@@ -697,21 +680,12 @@ def _now_entries(rest: str) -> tuple[list[str], list[str]]:
             waits.append(wait.group("event").strip())
         elif re.match(r"^stopped(?:$|[ \t]*[—–:]|[ \t]+-[ \t]+)", entry, re.I):
             continue
-        elif (labelled := _NOW_LABELLED_WORKER_RE.match(entry)) and not (
-            _NOW_HUMAN_WAIT_RE.search(labelled.group("name"))
-        ):
-            streams.append(entry)
-        elif (
-            _NOW_HUMAN_WAIT_RE.search(entry)
-            or _NOW_IDLE_RE.match(entry)
-            or _NOW_EXTERNAL_DONE_RE.match(entry)
-        ):
+        elif _NOW_HUMAN_WAIT_RE.search(entry) or _NOW_IDLE_RE.match(entry):
             # Waiting on the human is already carried by Needs you; it is not
             # a running worker and must not make the worker count unknown.
+            # External waits use the `wait — <event>` form; other prose is a
+            # worker, so the parser never guesses from free text.
             continue
-        elif _NOW_EXTERNAL_RE.search(entry):
-            # CI, checks, deploys and bots are external waits, not workers.
-            waits.append(entry.rstrip("."))
         else:
             streams.append(entry)
     return streams, waits
