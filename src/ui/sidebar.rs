@@ -10871,7 +10871,7 @@ fn sections_machine_mark(app: &AppState, host: &str) -> (String, Color) {
     (mark, default.2)
 }
 
-fn render_sections_thread_card(
+pub(super) fn render_sections_thread_card(
     app: &AppState,
     frame: &mut Frame,
     card: &SidebarThreadCard,
