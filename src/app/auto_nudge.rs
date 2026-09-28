@@ -868,8 +868,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn an_older_report_does_not_clear_a_stale_working_session_or_its_nudge() {
+    #[tokio::test]
+    async fn an_older_report_does_not_clear_a_stale_working_session_or_its_nudge() {
         let now = Instant::now();
         let (mut app, pane_id, terminal_id, mut rx) = app_with_stalled_pane(now);
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
