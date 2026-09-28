@@ -128,11 +128,18 @@ impl CcusageCache {
         attempt: impl FnOnce() -> Result<ClaudeUsageDetails, ()>,
     ) -> Option<ClaudeUsageDetails> {
         if let Some((refreshed_at, details)) = self.last_success {
-            if now
+            if let Some(age) = now
                 .checked_duration_since(refreshed_at)
-                .is_some_and(|age| age < CCUSAGE_SUCCESS_CACHE_INTERVAL)
+                .filter(|age| *age < CCUSAGE_SUCCESS_CACHE_INTERVAL)
             {
-                return Some(details);
+                // The block keeps counting down while its cost is reused.
+                let elapsed_minutes = age.as_secs() / 60;
+                return Some(ClaudeUsageDetails {
+                    remaining_minutes: details
+                        .remaining_minutes
+                        .map(|minutes| minutes.saturating_sub(elapsed_minutes)),
+                    ..details
+                });
             }
         }
         if self.retry_at.is_some_and(|retry_at| now < retry_at) {
@@ -1820,7 +1827,11 @@ mod tests {
                 attempts += 1;
                 Ok(refreshed)
             }),
-            Some(first)
+            Some(ClaudeUsageDetails {
+                remaining_minutes: Some(36),
+                ..first
+            }),
+            "a cached block keeps counting down"
         );
         assert_eq!(attempts, 1, "a fresh success must skip ccusage");
         assert_eq!(
