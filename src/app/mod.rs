@@ -6,6 +6,7 @@
 
 pub(crate) mod actions;
 mod add_project;
+pub(crate) mod agent_model_log;
 pub(crate) mod agent_resume;
 pub(crate) mod agent_view;
 mod agents;
@@ -54,6 +55,7 @@ pub(crate) mod settings_keybindings;
 pub(crate) mod settings_providers;
 pub(crate) mod settled;
 pub mod state;
+pub(crate) mod status_log;
 mod tab_bar_status;
 mod terminal_targets;
 mod terminal_titles;
@@ -321,6 +323,9 @@ pub struct App {
     pub(crate) claude_subagent_refresh_rotation: usize,
     pub(crate) claude_subagent_trackers:
         HashMap<crate::terminal::TerminalId, claude_subagents::TranscriptTracker>,
+    pub(crate) last_status_observed: Option<Instant>,
+    pub(crate) last_status_states: HashMap<crate::terminal::TerminalId, crate::detect::AgentState>,
+    pub(crate) status_log_sink: status_log::StatusLogSink,
     #[cfg(test)]
     pub(crate) git_program_override: Option<std::path::PathBuf>,
     #[cfg(test)]
@@ -1201,6 +1206,7 @@ impl App {
                 status_buttons: Vec::new(),
                 status_work_links: Vec::new(),
                 status_segments: Vec::new(),
+                status_segment_hit_areas: Vec::new(),
                 focused_remote_host: None,
             },
             drag: None,
@@ -1664,6 +1670,9 @@ impl App {
             next_claude_subagent_target_generation: 0,
             claude_subagent_refresh_rotation: 0,
             claude_subagent_trackers: HashMap::new(),
+            last_status_observed: None,
+            last_status_states: HashMap::new(),
+            status_log_sink: status_log::StatusLogSink::default(),
             #[cfg(test)]
             git_program_override: None,
             #[cfg(test)]
@@ -4189,7 +4198,11 @@ mod tests {
             row: marker.y,
             modifiers: KeyModifiers::NONE,
         });
-        assert_eq!(app.state.hovered_control, None);
+        // The cell beside the marker is a status segment with its own tooltip.
+        assert_ne!(
+            app.state.hovered_control,
+            Some(state::ControlId::ConfigDiagnostic)
+        );
 
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
