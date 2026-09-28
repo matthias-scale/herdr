@@ -634,6 +634,7 @@ mod tests {
             .expect("folder");
         assert!(app.set_tab_sidebar_folder(0, 0, Some("Now")));
         assert!(app.snooze_pane_at(0, pane, app.view_observed_unix_s + 900));
+        app.reconcile_sidebar_folder_memberships();
         assert!(app
             .sidebar_folder("Now")
             .expect("folder")
@@ -656,6 +657,7 @@ mod tests {
             .expect("folder");
         assert!(app.set_tab_sidebar_folder(0, 0, Some("Now")));
         assert!(app.settle_pane_at(0, pane, 1_725_000_000));
+        app.reconcile_sidebar_folder_memberships();
         assert!(app
             .sidebar_folder("Now")
             .expect("folder")
@@ -683,6 +685,7 @@ mod tests {
     fn membership_follows_public_tab_number_after_reorder() {
         let mut app = app_with_workspace();
         let second = app.workspaces[0].test_add_tab(Some("second"));
+        app.ensure_test_terminals();
         let identity = app.sidebar_folder_tab(0, second).expect("tab identity");
         app.create_sidebar_folder(SidebarShelf::Active, "Plans")
             .expect("folder");
@@ -700,6 +703,7 @@ mod tests {
     fn picker_resolves_original_tab_after_reorder_and_ignores_closed_tab() {
         let mut app = app_with_workspace();
         let second = app.workspaces[0].test_add_tab(Some("second"));
+        app.ensure_test_terminals();
         app.create_sidebar_folder(SidebarShelf::Active, "Plans")
             .expect("folder");
         assert!(app.open_sidebar_folder_picker(0, second, (5, 6)));
