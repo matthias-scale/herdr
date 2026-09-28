@@ -68,7 +68,7 @@ visible_blocker = true
 all = [
   { contains = ["Hooks need review", "Trust all and continue"] },
   { line_regex = ['^[ \t]*(?:›[ \t]+)?1\. Review hooks[ \t]*$'] },
-  { line_regex = ['^[ \t]*enter confirm · esc skip[ \t]*$'] },
+  { regex = ['(?s)(?:^|\n)[ \t]*enter confirm · esc skip[ \t]*(?:\r?\n[ \t]*)*\z'] },
 ]
 
 [[rules]]
@@ -79,7 +79,7 @@ region = "bottom_non_empty_lines(12)"
 visible_blocker = true
 all = [
   { contains = ["Finish signing in via your browser"] },
-  { line_regex = ['^[ \t]*Press esc to cancel[ \t]*$'] },
+  { regex = ['(?s)(?:^|\n)[ \t]*Press esc to cancel[ \t]*(?:\r?\n[ \t]*)*\z'] },
 ]
 
 [[rules]]
@@ -90,7 +90,7 @@ region = "bottom_non_empty_lines(12)"
 visible_blocker = true
 all = [
   { contains = ["Question ", "unanswered"] },
-  { any = [{ contains = ["to submit answer"] }, { contains = ["to submit all"] }] },
+  { regex = ['(?s)(?:^|\n)[ \t]*(?:[\w+]+[ \t]+)*to[ \t]+submit[ \t]+(?:answer|all)[ \t]*\|[ \t]*esc[ \t]+to[ \t]+interrupt[ \t]*(?:\r?\n[ \t]*)*\z'] },
 ]
 
 [[rules]]
@@ -101,7 +101,7 @@ region = "bottom_non_empty_lines(18)"
 visible_blocker = true
 all = [
   { regex = ['(?m)^[ \t]*Field [0-9]+/[0-9]+(?: \([0-9]+ required unanswered\))?[ \t]*$'] },
-  { contains = ["enter to submit", "esc to cancel"] },
+  { regex = ['(?s)(?:^|\n)[ \t]*(?:enter|ctrl\+x enter)[ \t]+to submit[ \t]*\|[ \t]*esc to cancel[ \t]*(?:\r?\n[ \t]*)*\z'] },
 ]
 
 [[rules]]
@@ -156,8 +156,7 @@ region = "bottom_non_empty_lines(12)"
 visible_blocker = true
 all = [
   { contains = ["Stop this attempt and retry?"] },
-  { line_regex = ['^[ \t]*(?:›[ \t]+)?1\. Keep waiting[ \t]*$'] },
-  { line_regex = ['^[ \t]*(?:›[ \t]+)?2\. Stop and retry[ \t]*$'] },
+  { regex = ['(?s)(?:^|\n)[ \t]*(?:›[ \t]+)?1\.[ \t]+Keep waiting[ \t]*\r?\n[ \t]*(?:›[ \t]+)?2\.[ \t]+Stop and retry[ \t]*(?:\r?\n[ \t]*)*\z'] },
 ]
 
 [[rules]]

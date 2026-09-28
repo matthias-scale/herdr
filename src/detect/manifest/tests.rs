@@ -2047,6 +2047,11 @@ fn codex_v0158_question_and_confirmation_snapshots_are_blocked() {
             "startup_hooks_review",
         ),
         (
+            "live startup hooks review",
+            include_str!("../../../tests/fixtures/agent-detection/codex-startup-hooks-review-live-20260928.txt"),
+            "startup_hooks_review",
+        ),
+        (
             "startup hooks review with option 2 selected",
             include_str!("../../../tests/fixtures/agent-detection/codex-startup-hooks-review-selection-moved-20260928.txt"),
             "startup_hooks_review",
@@ -2059,6 +2064,11 @@ fn codex_v0158_question_and_confirmation_snapshots_are_blocked() {
         (
             "folder access",
             include_str!("../../../tests/fixtures/agent-detection/codex-folder-access-20260928.txt"),
+            "folder_access_prompt",
+        ),
+        (
+            "live folder access",
+            include_str!("../../../tests/fixtures/agent-detection/codex-folder-access-live-20260928.txt"),
             "folder_access_prompt",
         ),
         (
@@ -2191,6 +2201,39 @@ fn codex_v0158_question_and_confirmation_snapshots_are_blocked() {
             Some(expected_rule),
             "{name}"
         );
+    }
+}
+
+#[test]
+fn codex_question_prompts_above_idle_composer_are_not_blocked() {
+    let fixtures = [
+        (
+            "startup hooks review",
+            include_str!("../../../tests/fixtures/agent-detection/codex-startup-hooks-review-20260928.txt"),
+        ),
+        (
+            "browser sign in",
+            include_str!("../../../tests/fixtures/agent-detection/codex-browser-sign-in-20260928.txt"),
+        ),
+        (
+            "request user input",
+            include_str!("../../../tests/fixtures/agent-detection/codex-request-user-input-remapped-submit-20260928.txt"),
+        ),
+        (
+            "MCP server elicitation",
+            include_str!("../../../tests/fixtures/agent-detection/codex-mcp-elicitation-approval-20260928.txt"),
+        ),
+        (
+            "safety retry confirmation",
+            include_str!("../../../tests/fixtures/agent-detection/codex-safety-retry-confirmation-20260928.txt"),
+        ),
+    ];
+
+    for (name, prompt) in fixtures {
+        let screen = format!("{prompt}\n› follow-up text\n\n  GPT-6-Luna default · /repo");
+        let result = bundled_explain(Agent::Codex, &screen);
+
+        assert_ne!(result.state, AgentState::Blocked, "{name}");
     }
 }
 
