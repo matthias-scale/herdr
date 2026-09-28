@@ -2332,11 +2332,8 @@ mod tests {
         app.apply_context_menu_action_via_api(menu(), ContextMenuAction::DeleteFolder);
         assert!(app.state.sidebar_folder("Plans").is_none());
         assert_eq!(
-            app.state.tab_sidebar_folder(
-                0,
-                0,
-                crate::app::sidebar_folders::SidebarShelf::Active,
-            ),
+            app.state
+                .tab_sidebar_folder(0, 0, crate::app::sidebar_folders::SidebarShelf::Active,),
             None
         );
         assert_eq!(app.state.workspaces[0].tabs[0].subgroup(), Some("Plans"));
