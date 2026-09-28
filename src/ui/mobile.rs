@@ -2650,7 +2650,10 @@ mod tests {
                 })
                 .find(|(_, row)| row.contains("pi"))
                 .unwrap_or_else(|| panic!("width {width} omitted provider"));
-            assert!(!_row.contains("pi+3"), "width {width} retained sub-agent count");
+            assert!(
+                !_row.contains("pi+3"),
+                "width {width} retained sub-agent count"
+            );
             let provider_x = (content.x..content.x + content.width)
                 .find(|x| terminal.backend().buffer()[(*x, provider_y)].symbol() == "p")
                 .expect("provider start");

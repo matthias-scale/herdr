@@ -47,11 +47,17 @@ const INBOX: &str = "\u{F6004}";
 const OPENCODE: &str = "\u{F6005}";
 pub(crate) const GITHUB: &str = "\u{F6006}";
 const SHELL: &str = "\u{EA85}"; // cod-terminal
+const MACHINE_UB1: &str = "\u{F01C5}"; // md-desktop_tower
+const MACHINE_UB2: &str = "\u{F048B}"; // md-server
+const MACHINE_MBPRO: &str = "\u{EEA7}"; // fa-laptop_code
+const MACHINE_MBAIR: &str = "\u{F0322}"; // md-laptop
+const MACHINE_UNKNOWN: &str = "\u{F0379}"; // md-monitor
 const ROBOT: &str = "\u{F06A9}"; // md-robot
 const HAMMER_WRENCH: &str = "\u{F1323}"; // md-hammer_wrench
 const CONFIG: &str = "\u{E615}"; // seti-config
 const OBSIDIAN: &str = "\u{E6BB}"; // custom-obsidian
 const REPO: &str = "\u{EA62}"; // cod-repo
+const CYCLE: &str = "\u{F021}"; // fa-refresh
 
 pub(crate) fn agent_text_tag(agent: Option<Agent>) -> Option<&'static str> {
     match agent {
@@ -120,11 +126,80 @@ pub(crate) fn agent_icon_for_name(name: &str) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn shell_label(nerd_font: bool) -> &'static str {
+pub(crate) fn machine_icon<'a>(
+    host: &str,
+    override_icon: Option<&'a str>,
+    nerd_font: bool,
+) -> &'a str {
+    if !nerd_font {
+        return match host {
+            "ub1" => "1",
+            "ub2" => "2",
+            "mbpro" => "P",
+            "mbair" => "A",
+            _ => "?",
+        };
+    }
+    if let Some(icon) = override_icon.filter(|icon| crate::ui::text::display_width(icon) == 1) {
+        return icon;
+    }
+    match host {
+        "ub1" => MACHINE_UB1,
+        "ub2" => MACHINE_UB2,
+        "mbpro" => MACHINE_MBPRO,
+        "mbair" => MACHINE_MBAIR,
+        _ => MACHINE_UNKNOWN,
+    }
+}
+
+pub(crate) fn cycle_label(nerd_font: bool) -> &'static str {
     if nerd_font {
-        SHELL
+        CYCLE
     } else {
-        ">_"
+        "cy"
+    }
+}
+
+const CHIP: &str = "\u{F061A}"; // md-chip
+const MEMORY: &str = "\u{F035B}"; // md-memory
+const HARDDISK: &str = "\u{F02CA}"; // md-harddisk
+const FOLDER_OPEN: &str = "\u{F07C}"; // fa-folder_open
+const LIGHTBULB_ON_OUTLINE: &str = "\u{F0A00}"; // md-lightbulb_on_outline
+
+/// Host metrics shown in the status row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Metric {
+    Cpu,
+    Mem,
+    Dsk,
+}
+
+pub(crate) fn metric_label(metric: Metric, nerd_font: bool) -> &'static str {
+    match (metric, nerd_font) {
+        (Metric::Cpu, true) => CHIP,
+        (Metric::Mem, true) => MEMORY,
+        (Metric::Dsk, true) => HARDDISK,
+        (Metric::Cpu, false) => "CPU",
+        (Metric::Mem, false) => "MEM",
+        (Metric::Dsk, false) => "DSK",
+    }
+}
+
+/// Tab-row "open repo in editor" button label, padded one cell each side.
+pub(crate) fn repo_editor_button_label(nerd_font: bool) -> String {
+    if nerd_font {
+        format!(" {FOLDER_OPEN} ")
+    } else {
+        " nvim ".to_string()
+    }
+}
+
+/// Tab-row "add action" button label, padded one cell each side.
+pub(crate) fn add_action_button_label(nerd_font: bool) -> String {
+    if nerd_font {
+        format!(" {LIGHTBULB_ON_OUTLINE} ")
+    } else {
+        " + Action ".to_string()
     }
 }
 
@@ -338,15 +413,36 @@ mod tests {
     }
 
     #[test]
-    fn nerd_font_off_keeps_the_text_labels() {
+    fn fleet_workspace_ac6_cycle_icon_uses_nerd_font_and_ascii_fallback() {
         assert_eq!(agent_label(Agent::Claude, false), Some("cc"));
         assert_eq!(agent_label(Agent::Codex, false), Some("cx"));
         assert_eq!(agent_label(Agent::Pi, false), Some("pi"));
         assert_eq!(agent_label(Agent::Kimi, false), Some("ki"));
-        assert_eq!(shell_label(false), ">_");
         assert_eq!(usage_label(QuotaProvider::Claude, false), "CC");
         assert_eq!(usage_label(QuotaProvider::Codex, false), "CX");
         assert_eq!(usage_label(QuotaProvider::Kimi, false), "KI");
         assert_eq!(usage_label(QuotaProvider::Agy, false), "AG");
+        assert_eq!(cycle_label(false), "cy");
+        assert_eq!(cycle_label(true), "\u{F021}");
+    }
+
+    #[test]
+    fn machine_icons_cover_named_hosts_override_and_plain_text() {
+        for (host, glyph, fallback) in [
+            ("ub1", MACHINE_UB1, "1"),
+            ("ub2", MACHINE_UB2, "2"),
+            ("mbpro", MACHINE_MBPRO, "P"),
+            ("mbair", MACHINE_MBAIR, "A"),
+            ("lab3", MACHINE_UNKNOWN, "?"),
+        ] {
+            assert_eq!(machine_icon(host, None, true), glyph);
+            assert_eq!(machine_icon(host, None, false), fallback);
+        }
+        assert_eq!(machine_icon("lab3", Some("◆"), true), "◆");
+        assert_eq!(
+            machine_icon("lab3", Some("too wide"), true),
+            MACHINE_UNKNOWN
+        );
+        assert_eq!(machine_icon("lab3", Some("◆"), false), "?");
     }
 }

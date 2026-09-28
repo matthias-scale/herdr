@@ -213,6 +213,9 @@ impl App {
         owner: InputOwner,
     ) -> Option<super::TerminalInputTarget> {
         let key_event = key.as_key_event();
+        if self.handle_window_cycle_menu_key(key_event, owner) {
+            return None;
+        }
         if self.handle_sidebar_areas_menu_key(key_event, owner) {
             return None;
         }
@@ -4953,6 +4956,9 @@ impl App {
             }
             return;
         }
+        if self.handle_window_cycle_menu_mouse(mouse, owner) {
+            return;
+        }
         if self.handle_sidebar_areas_menu_mouse(mouse, owner) {
             return;
         }
@@ -6165,6 +6171,8 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
         state.sidebar_section_split,
         state.collapsed_space_keys.clone(),
         state.prio_panel_collapsed,
+        state.window_cycle_mode,
+        state.skip_collapsed_cycle,
     )
 }
 
@@ -6256,6 +6264,7 @@ mod tests {
             env: Vec::new(),
             remote: Some(crate::app::machines::Machine {
                 name: "producer".into(),
+                icon: None,
                 target: Some("--invalid-target".into()),
                 socket: Some("/run/herdr-producer.sock".into()),
             }),
