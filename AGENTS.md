@@ -424,6 +424,25 @@ Do not run the upgrade from a pane owned by the server being restarted: `herdr s
 stop` kills that pane, so the run dies partway with the old server already down.
 Drive it over SSH, from a different multiplexer, or accept losing the session.
 
+### Test builds in WezTerm
+
+When you hand Matthias a test build, open it in its own WezTerm window with two tabs so he
+can tell it apart from other windows:
+
+1. The first tab runs the build under test. Rename it to name the test case, the PR, and
+   the exact head, e.g. `QA #435 sidebar focus (deed9f2e)`.
+2. The second tab shows the QA card or the steps to test, and its title says so, e.g.
+   `QA card #435`.
+
+```sh
+P=$(wezterm cli spawn --new-window -- <command that runs the test build>)
+wezterm cli set-tab-title --pane-id "$P" "QA #<pr> <test case> (<short head>)"
+W=$(wezterm cli list --format json | jq -r ".[] | select(.pane_id == $P) | .window_id")
+P2=$(wezterm cli spawn --window-id "$W" -- less -R <qa-card file>)
+wezterm cli set-tab-title --pane-id "$P2" "QA card #<pr>"
+wezterm cli activate-pane --pane-id "$P"
+```
+
 ### Closing-block blocker detection
 
 A Claude pane shows as blocked only when the Stop hook in
