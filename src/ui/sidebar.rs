@@ -3719,7 +3719,7 @@ fn compact_sidebar_rows_inner(
                 working_entries,
                 false,
                 terminal_runtimes,
-                SidebarGroupMode::Spaces,
+                SidebarGroupMode::Repo,
                 false,
                 true,
                 workspace_activity.as_ref(),
@@ -29601,8 +29601,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let working_label = expanded_snapshot
             .find("Working")
             .expect("rendered Working header");
-        let group_label = expanded_snapshot
+        let group_label = expanded_snapshot[working_label..]
             .find("scalablev2")
+            .map(|offset| working_label + offset)
             .expect("rendered Space header");
         let working_tab_label = expanded_snapshot
             .find("build")
@@ -29620,6 +29621,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn focus_sidebar_ask_subtitle_follows_setting() {
         let mut app = app_with_agents(&["herdr"]);
         app.sidebar_sections_layout = true;
+        app.sidebar_show_ask_subtitles = true;
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id

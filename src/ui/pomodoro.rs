@@ -393,7 +393,9 @@ pub(crate) fn notification_hit_area(app: &AppState, sidebar: Rect) -> Rect {
     }
     let content_width = sidebar.width.saturating_sub(1);
     if app.sidebar_sections_layout {
-        let x = sidebar.x.saturating_add(18);
+        let x = sidebar
+            .x
+            .saturating_add(FOOTER_ICON_COLUMNS + CYCLE_MODE_WIDTH + SIDEBAR_AREAS_WIDTH + 1);
         let timer = pomodoro_hit_area(app, sidebar);
         let right_limit = sidebar.x.saturating_add(content_width).saturating_sub(2);
         if x.saturating_add(NOTIFICATION_WIDTH) > right_limit
@@ -448,10 +450,7 @@ pub(crate) fn sidebar_areas_hit_area(app: &AppState, sidebar: Rect) -> Rect {
     let x = sidebar.x.saturating_add(16);
     let right_limit = sidebar.x.saturating_add(content_width).saturating_sub(2);
     let bell = notification_hit_area(app, sidebar);
-    if content_width < 22
-        || x.saturating_add(SIDEBAR_AREAS_WIDTH) > right_limit
-        || (bell.width > 0 && x >= bell.x)
-    {
+    if content_width < 22 || x.saturating_add(SIDEBAR_AREAS_WIDTH) > right_limit {
         return Rect::default();
     }
     Rect::new(
@@ -1208,7 +1207,7 @@ mod tests {
             terminal.backend().buffer()[(areas.x, areas.y)].symbol(),
             "≡"
         );
-        assert_eq!(terminal.backend().buffer()[(bell.x, bell.y)].symbol(), "🔔");
+        assert_eq!(terminal.backend().buffer()[(bell.x, bell.y)].symbol(), "🔕");
 
         let narrow = Rect::new(0, 0, 18, 20);
         assert_eq!(sidebar_areas_hit_area(&app, narrow).width, 0);

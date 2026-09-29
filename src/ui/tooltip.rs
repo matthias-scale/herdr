@@ -439,6 +439,7 @@ mod tests {
     #[test]
     fn control_hit_test_covers_header_footer_dock_and_top_bar() {
         let mut app = AppState::test_new();
+        app.sidebar_show_ask_subtitles = true;
         app.view.sidebar_rect = Rect::new(0, 0, 26, 24);
         app.view.sidebar_footer_settings_hit_area = Rect::new(1, 23, 2, 1);
         app.view.sidebar_footer_ask_subtitles_hit_area = Rect::new(0, 23, 1, 1);

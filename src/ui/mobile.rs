@@ -2547,6 +2547,7 @@ mod tests {
             app.workspaces = vec![crate::workspace::Workspace::test_new("herdr")];
             app.active = Some(0);
             app.sidebar_sections_layout = true;
+            app.sidebar_show_ask_subtitles = true;
             app.view.layout = crate::app::state::ViewLayout::Mobile;
             app.ensure_test_terminals();
             let pane = app.workspaces[0].tabs[0].root_pane;
@@ -2826,6 +2827,7 @@ mod tests {
         app.active = Some(0);
         app.selected = 0;
         app.sidebar_sections_layout = true;
+        app.sidebar_show_ask_subtitles = true;
         app.view.layout = crate::app::state::ViewLayout::Mobile;
         for tab_idx in 0..2 {
             let pane_id = app.workspaces[0].tabs[tab_idx].root_pane;
