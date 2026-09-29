@@ -29747,7 +29747,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .into_iter()
             .find(|row| row.agent_ref == entry.agent_ref)
             .expect("remote row geometry");
-        let hover = crate::ui::hovered_control_at(&app, row.rect.right() - 1, row.rect.y)
+        let hover = crate::ui::hovered_control_at(&app, row.rect.x + 3, row.rect.y)
             .expect("row-wide hover target");
         assert_eq!(
             hover,
