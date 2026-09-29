@@ -2071,6 +2071,13 @@ impl App {
         self.pending_client_pane_focus = true;
     }
 
+    /// Set the shared default focus for future attaches without changing any
+    /// currently attached client's presentation.
+    pub(crate) fn focus_shared_default_on_pane(&mut self) {
+        self.state.focus_client_on_pane();
+        self.pending_client_pane_focus = false;
+    }
+
     pub(crate) fn take_pending_client_pane_focus(&mut self) -> bool {
         std::mem::take(&mut self.pending_client_pane_focus)
     }

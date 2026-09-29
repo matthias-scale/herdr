@@ -1843,13 +1843,32 @@ impl HeadlessServer {
         self.app.set_host_terminal_theme(host_terminal_theme);
     }
 
-    /// API focus updates the shared default in `AppState`. Existing attaches
-    /// keep their local presentation; fresh attaches inherit the shared intent.
+    /// Client-routed completions already update the presentation swapped into
+    /// `AppState`. External API focus has no originating client, so project its
+    /// mode-neutral pane intent into every attached full-app presentation.
     fn finish_pending_client_pane_focus(&mut self) -> bool {
         if !self.app.take_pending_client_pane_focus() {
             return false;
         }
-        false
+        if self.app.active_overlay_client_id.is_some() {
+            return false;
+        }
+        let client_ids = self
+            .clients
+            .iter()
+            .filter_map(|(client_id, client)| client.is_full_app_client().then_some(*client_id))
+            .collect::<Vec<_>>();
+        for client_id in &client_ids {
+            if let Some(client) = self.clients.get_mut(client_id) {
+                client.sidebar_presentation.focus_intent =
+                    crate::app::state::ClientFocusIntent::Pane;
+                client.request_repaint();
+            }
+            if let Some(policy) = self.client_presentation_policy(*client_id) {
+                self.sync_client_input_source(*client_id, &policy);
+            }
+        }
+        !client_ids.is_empty()
     }
 
     #[cfg(unix)]
