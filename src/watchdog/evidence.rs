@@ -207,14 +207,7 @@ pub(crate) fn finished_reply(text: &str) -> bool {
     }
     let reply = reply_text(text);
     let last = reply.lines().rev().find(|line| !line.trim().is_empty());
-    let composer_line = text
-        .lines()
-        .filter_map(|line| COMPOSER_PROMPT.captures(line))
-        .last();
-    let explicit_empty = composer_line.and_then(|c| c.get(1)).is_some_and(|s| {
-        s.as_str().trim().is_empty() || EMPTY_COMPOSER_PLACEHOLDER.is_match(s.as_str().trim())
-    });
-    (explicit_empty || last.is_some_and(|line| DONE_HERE.is_match(line.trim())))
+    last.is_some_and(|line| DONE_HERE.is_match(line.trim()))
         && !reply.lines().rev().skip(1).take(2).any(spinner_line)
         && !reply
             .lines()
@@ -224,15 +217,14 @@ pub(crate) fn finished_reply(text: &str) -> bool {
 }
 
 fn spinner_line(line: &str) -> bool {
-    line.chars().any(spinner)
-        || PROGRESS.is_match(line.trim())
-        || line.to_ascii_lowercase().contains("esc to interrupt")
-        || line.to_ascii_lowercase().contains("working (")
+    line.chars().any(spinner) || PROGRESS.is_match(line.trim())
 }
 pub(crate) fn has_visible_progress(text: &str) -> bool {
-    bottom(&reply_text(text), 6)
-        .iter()
-        .any(|line| spinner_line(line))
+    bottom(&reply_text(text), 6).iter().any(|line| {
+        spinner_line(line)
+            || line.to_ascii_lowercase().contains("esc to interrupt")
+            || line.to_ascii_lowercase().contains("working (")
+    })
 }
 
 pub(crate) fn stable_hash(text: &str) -> u64 {
