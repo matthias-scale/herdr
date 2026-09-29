@@ -4027,8 +4027,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn close_plain_local_pane_stays_local_when_remote_selection_was_cleared() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn close_plain_local_pane_stays_local_when_remote_selection_was_cleared() {
         let (mut app, _) = app_with_remote_agent();
         let pane_id = app.state.workspaces[0]
             .focused_pane_id()
