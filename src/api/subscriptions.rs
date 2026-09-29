@@ -199,6 +199,7 @@ impl ActiveSubscription {
                     request_prefix: format!("{request_id}:sub:{index}"),
                 }))
             }
+            Subscription::SessionChanged {} => Ok(event_subscription(EventKind::SessionChanged)),
             Subscription::PaneOutputMatched {
                 pane_id,
                 source,
@@ -453,6 +454,7 @@ fn changes_fleet_agent_inventory(event: EventKind) -> bool {
             | EventKind::PaneAgentDetected
             | EventKind::PaneAgentStatusChanged
             | EventKind::LayoutUpdated
+            | EventKind::SessionChanged
     )
 }
 

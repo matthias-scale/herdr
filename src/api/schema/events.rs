@@ -96,6 +96,8 @@ pub enum Subscription {
     LayoutUpdated {},
     #[serde(rename = "fleet.agents_changed")]
     FleetAgentsChanged {},
+    #[serde(rename = "session.changed")]
+    SessionChanged {},
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -239,6 +241,7 @@ pub enum EventKind {
     #[serde(rename = "authority.catalogs_updated")]
     AuthorityCatalogsUpdated,
     LayoutUpdated,
+    SessionChanged,
 }
 
 impl EventKind {
@@ -276,6 +279,7 @@ impl EventKind {
             EventKind::PaneAgentStatusChanged => "pane.agent_status_changed",
             EventKind::AuthorityCatalogsUpdated => "authority.catalogs_updated",
             EventKind::LayoutUpdated => "layout.updated",
+            EventKind::SessionChanged => "session.changed",
         }
     }
 }
@@ -314,6 +318,7 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneAgentStatusChanged,
     EventKind::AuthorityCatalogsUpdated,
     EventKind::LayoutUpdated,
+    EventKind::SessionChanged,
 ];
 
 pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
@@ -411,6 +416,8 @@ pub enum SubscriptionEventKind {
     ScrollChanged,
     #[serde(rename = "fleet.agents_changed")]
     FleetAgentsChanged,
+    #[serde(rename = "session.changed")]
+    SessionChanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -426,6 +433,14 @@ pub enum SubscriptionEventData {
     PaneAgentStatusChanged(PaneAgentStatusChangedEvent),
     ScrollChanged(PaneScrollChangedEvent),
     FleetAgentsChanged(FleetAgentsChangedEvent),
+    SessionChanged(SessionChangedEvent),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SessionChangedEvent {
+    pub epoch: String,
+    pub revision: u64,
+    pub snapshot: Box<super::SessionSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -473,6 +488,11 @@ pub struct PaneScrollChangedEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventData {
+    SessionChanged {
+        epoch: String,
+        revision: u64,
+        snapshot: Box<super::SessionSnapshot>,
+    },
     WorkspaceCreated {
         workspace: WorkspaceInfo,
     },

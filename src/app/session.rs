@@ -98,6 +98,20 @@ impl App {
     }
 
     pub(crate) fn sync_session_save_schedule(&mut self) {
+        if self.state.session_dirty_revision > self.state.session_event_revision {
+            let revision = self.state.session_dirty_revision;
+            let epoch = self.state.session_epoch.clone();
+            let snapshot = self.session_snapshot();
+            self.event_hub.push(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::SessionChanged,
+                data: crate::api::schema::EventData::SessionChanged {
+                    epoch,
+                    revision,
+                    snapshot: Box::new(snapshot),
+                },
+            });
+            self.state.session_event_revision = revision;
+        }
         self.reap_finished_session_save();
         if let Some(retry_at) = self.session_save_retry_deadline {
             self.session_save_deadline = Some(retry_at);

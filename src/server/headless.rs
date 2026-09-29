@@ -461,6 +461,8 @@ struct ScheduledTaskRender {
 /// is resolved. Cell and pixel input share this transaction so hit geometry
 /// cannot be computed from another client's sidebar, dock, or detail state.
 struct ClientInputPresentation {
+    active_workspace: Option<usize>,
+    selected_pane: usize,
     sidebar: crate::app::state::SidebarPresentationState,
     dock: crate::app::state::DockPresentationState,
     notepad: crate::notepad::NotepadPresentationState,
@@ -472,8 +474,25 @@ struct ClientInputPresentation {
 }
 
 impl ClientInputPresentation {
-    fn take(client: &mut ClientConnection) -> Self {
+    fn take(client: &mut ClientConnection, state: &crate::app::state::AppState) -> Self {
         Self {
+            active_workspace: if client.focus_initialized {
+                match client.active_workspace_id.as_ref() {
+                    Some(workspace_id) => state
+                        .workspaces
+                        .iter()
+                        .position(|workspace| &workspace.workspace_id == workspace_id)
+                        .or(state.active),
+                    None => client.active_workspace,
+                }
+            } else {
+                state.active
+            },
+            selected_pane: if client.focus_initialized {
+                std::mem::replace(&mut client.selected_pane, 0)
+            } else {
+                state.selected
+            },
             sidebar: std::mem::take(&mut client.sidebar_presentation),
             dock: std::mem::take(&mut client.dock_presentation),
             notepad: std::mem::take(&mut client.notepad_presentation),
@@ -486,6 +505,8 @@ impl ClientInputPresentation {
     }
 
     fn install(&mut self, state: &mut crate::app::state::AppState) {
+        std::mem::swap(&mut state.active, &mut self.active_workspace);
+        std::mem::swap(&mut state.selected, &mut self.selected_pane);
         state.swap_sidebar_presentation(&mut self.sidebar);
         state.reconcile_sidebar_presentation();
         state.swap_dock_presentation(&mut self.dock);
@@ -499,6 +520,8 @@ impl ClientInputPresentation {
     }
 
     fn uninstall(&mut self, state: &mut crate::app::state::AppState) {
+        std::mem::swap(&mut state.selected, &mut self.selected_pane);
+        std::mem::swap(&mut state.active, &mut self.active_workspace);
         state.swap_usage_view(&mut self.usage_view);
         state.swap_work_view(&mut self.work_view);
         state.swap_symphony_detail(&mut self.symphony_detail);
@@ -509,7 +532,14 @@ impl ClientInputPresentation {
         state.notepad.swap_presentation(&mut self.notepad);
     }
 
-    fn store(self, client: &mut ClientConnection) {
+    fn store(self, client: &mut ClientConnection, state: &crate::app::state::AppState) {
+        client.active_workspace = self.active_workspace;
+        client.active_workspace_id = self
+            .active_workspace
+            .and_then(|index| state.workspaces.get(index))
+            .map(|workspace| workspace.workspace_id.clone());
+        client.selected_pane = self.selected_pane;
+        client.focus_initialized = true;
         client.sidebar_presentation = self.sidebar;
         client.dock_presentation = self.dock;
         client.notepad_presentation = self.notepad;
@@ -4623,7 +4653,7 @@ impl HeadlessServer {
         let mut input_presentation = if source_is_full_app {
             self.clients
                 .get_mut(&client_id)
-                .map(ClientInputPresentation::take)
+                .map(|client| ClientInputPresentation::take(client, &self.app.state))
         } else {
             None
         };
@@ -4675,7 +4705,7 @@ impl HeadlessServer {
         if let Some(mut presentation) = input_presentation {
             presentation.uninstall(&mut self.app.state);
             if let Some(client) = self.clients.get_mut(&client_id) {
-                presentation.store(client);
+                presentation.store(client, &self.app.state);
             }
         }
         if self.app.take_config_reloaded_from_disk() {
@@ -4830,6 +4860,15 @@ impl HeadlessServer {
                 );
                 connection.direct_graphics = direct_graphics;
                 connection.pixel_mouse = direct_graphics;
+                connection.active_workspace = self.app.state.active;
+                connection.active_workspace_id = self
+                    .app
+                    .state
+                    .active
+                    .and_then(|index| self.app.state.workspaces.get(index))
+                    .map(|workspace| workspace.workspace_id.clone());
+                connection.selected_pane = self.app.state.selected;
+                connection.focus_initialized = true;
                 self.clients.insert(client_id, connection);
                 if first_app_client {
                     self.app.tick_pomodoro(attach_now, false);
@@ -6535,6 +6574,35 @@ impl HeadlessServer {
             let is_app_client = matches!(mode, ClientConnectionMode::App);
             let mut frame = match mode {
                 ClientConnectionMode::App => {
+                    let focus_initialized = self.clients[&client_id].focus_initialized;
+                    let mut active_workspace = if focus_initialized {
+                        let client = &self.clients[&client_id];
+                        match client.active_workspace_id.as_ref() {
+                            Some(workspace_id) => self
+                                .app
+                                .state
+                                .workspaces
+                                .iter()
+                                .position(|workspace| &workspace.workspace_id == workspace_id)
+                                .or(self.app.state.active),
+                            None => client.active_workspace,
+                        }
+                    } else {
+                        self.app.state.active
+                    };
+                    let mut selected_pane = self
+                        .clients
+                        .get_mut(&client_id)
+                        .map(|client| {
+                            if focus_initialized {
+                                std::mem::replace(&mut client.selected_pane, 0)
+                            } else {
+                                self.app.state.selected
+                            }
+                        })
+                        .unwrap_or_default();
+                    std::mem::swap(&mut self.app.state.active, &mut active_workspace);
+                    std::mem::swap(&mut self.app.state.selected, &mut selected_pane);
                     let mut sidebar_presentation = self
                         .clients
                         .get_mut(&client_id)
@@ -6683,6 +6751,8 @@ impl HeadlessServer {
                     self.app.state.swap_symphony_detail(&mut symphony_detail);
                     self.app.state.swap_work_view(&mut work_view);
                     self.app.state.swap_usage_view(&mut usage_view);
+                    std::mem::swap(&mut self.app.state.selected, &mut selected_pane);
+                    std::mem::swap(&mut self.app.state.active, &mut active_workspace);
                     changed_terminal_geometries
                         .extend(self.update_client_terminal_geometries(client_id));
                     if let Some(client) = self.clients.get_mut(&client_id) {
@@ -6691,6 +6761,12 @@ impl HeadlessServer {
                         client.retained_pane_cursor = retained_pane_cursor;
                         client.animation_rect = animation_rect;
                         client.sidebar_presentation = sidebar_presentation;
+                        client.active_workspace = active_workspace;
+                        client.active_workspace_id = active_workspace
+                            .and_then(|index| self.app.state.workspaces.get(index))
+                            .map(|workspace| workspace.workspace_id.clone());
+                        client.selected_pane = selected_pane;
+                        client.focus_initialized = true;
                         client.dock_presentation = dock_presentation;
                         client.notepad_presentation = notepad_presentation;
                         client.loop_run_history_detail = loop_run_history_detail;
