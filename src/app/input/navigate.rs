@@ -1357,7 +1357,7 @@ impl App {
         self.focus_client_on_pane();
     }
 
-    fn focused_pane_target(&self) -> Option<(usize, crate::layout::PaneId)> {
+    pub(crate) fn focused_pane_target(&self) -> Option<(usize, crate::layout::PaneId)> {
         let ws_idx = self.state.active?;
         let pane_id = self.state.workspaces.get(ws_idx)?.focused_pane_id()?;
         Some((ws_idx, pane_id))
