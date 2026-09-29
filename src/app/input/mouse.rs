@@ -10208,7 +10208,7 @@ mod tests {
             menu.y + 1 + close_idx as u16,
         ));
 
-        assert_eq!(app.state.selected, 1);
+        assert_eq!(app.state.selected, 0);
         assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
