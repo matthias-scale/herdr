@@ -740,9 +740,12 @@ fn discover_codex_runs(runs_dir: &Path) -> io::Result<Vec<WorkerObservation>> {
         let descendants = pid
             .map(|pid| evidence::descendants(&process_samples, pid))
             .unwrap_or_default();
-        let tool_alive =
-            !evidence::current_tool_processes(&descendants, pid, now.saturating_sub(last_activity))
-                .is_empty();
+        let tool_alive = !evidence::current_tool_processes(
+            &descendants,
+            pid,
+            now.saturating_sub(started_at.unwrap_or(last_activity)),
+        )
+        .is_empty();
         let outstanding_op = worker_watchdog::outstanding_codex_operation(&trace);
         let receipt: Option<Value> = fs::read(turn_dir.join("receipt.json"))
             .ok()
