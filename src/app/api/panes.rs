@@ -2698,6 +2698,23 @@ impl App {
                 (tab.layout.pane_count() <= 1 || leaves_only_companions).then_some(tab_idx)
             });
             if let Some(tab_idx) = close_tab_idx {
+                if self
+                    .state
+                    .workspaces
+                    .get(ws_idx)
+                    .is_some_and(|workspace| workspace.tabs.len() == 1)
+                {
+                    return self
+                        .close_last_tab_workspace(ws_idx, tab_idx)
+                        .map_err(|message| {
+                            let code = if message.starts_with("confirmation_required:") {
+                                "confirmation_required"
+                            } else {
+                                "pane_close_failed"
+                            };
+                            encode_error(id, code, message)
+                        });
+                }
                 return self
                     .close_tab_preserving_workspace(ws_idx, tab_idx, true)
                     .map_err(|message| encode_error(id, "pane_close_failed", message));

@@ -331,16 +331,26 @@ impl App {
         {
             return match self.close_last_tab_workspace(ws_idx, tab_idx) {
                 Ok(()) => encode_success(id, ResponseResult::Ok {}),
+                Err(message) if message.starts_with("confirmation_required:") => {
+                    encode_error(id, "confirmation_required", message)
+                }
                 Err(message) => encode_error(id, "tab_close_failed", message),
             };
         }
         match self.close_tab_preserving_workspace(ws_idx, tab_idx, false) {
             Ok(()) => encode_success(id, ResponseResult::Ok {}),
+            Err(message) if message.starts_with("confirmation_required:") => {
+                encode_error(id, "confirmation_required", message)
+            }
             Err(message) => encode_error(id, "tab_close_failed", message),
         }
     }
 
-    fn close_last_tab_workspace(&mut self, ws_idx: usize, tab_idx: usize) -> Result<(), String> {
+    pub(crate) fn close_last_tab_workspace(
+        &mut self,
+        ws_idx: usize,
+        tab_idx: usize,
+    ) -> Result<(), String> {
         let tab_id = self
             .public_tab_id(ws_idx, tab_idx)
             .ok_or_else(|| "tab not found".to_string())?;
@@ -351,6 +361,11 @@ impl App {
             .filter_map(|pane_id| self.public_pane_id(ws_idx, *pane_id))
             .collect::<Vec<_>>();
         let close_indices = self.state.workspace_close_indices(ws_idx);
+        if close_indices.len() > 1 {
+            return Err(
+                "confirmation_required: closing this tab would close a worktree group".into(),
+            );
+        }
         let closed_workspaces = close_indices
             .iter()
             .map(|index| {
@@ -362,7 +377,9 @@ impl App {
             .collect::<Vec<_>>();
         self.state.selected = ws_idx;
         self.state.close_selected_workspace();
+        self.state.remove_plugin_pane_records(pane_ids);
         self.shutdown_detached_terminal_runtimes();
+        self.schedule_session_save();
         for pane_id in public_pane_ids {
             self.emit_event(EventEnvelope {
                 event: EventKind::PaneClosed,
@@ -407,9 +424,6 @@ impl App {
         if tab_idx >= workspace.tabs.len() {
             return Err("tab not found".into());
         }
-        let replace_last_tab = workspace.tabs.len() == 1;
-        let was_active_workspace = self.state.active == Some(ws_idx);
-        let replacement_cwd = replace_last_tab.then(|| workspace.identity_cwd.clone());
         let terminal_ids = self.state.terminal_ids_for_tab(ws_idx, tab_idx);
         let pane_ids = self.state.pane_ids_for_tab(ws_idx, tab_idx);
         for pane_id in &pane_ids {
@@ -421,37 +435,6 @@ impl App {
                 .filter_map(|pane_id| self.public_pane_id(ws_idx, *pane_id))
                 .collect::<Vec<_>>()
         });
-        let replacement_created = replacement_cwd.is_some();
-
-        if let Some(cwd) = replacement_cwd {
-            let (rows, cols) = self.state.estimate_pane_size();
-            let default_shell = self.state.default_shell.clone();
-            let shell_mode = self.state.shell_mode;
-            let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
-            let theme = self.state.pane_terminal_theme();
-            let appearance = Some(self.state.pane_terminal_appearance());
-            let (new_tab_idx, terminal, runtime) = self
-                .state
-                .workspaces
-                .get_mut(ws_idx)
-                .ok_or_else(|| "workspace not found".to_string())?
-                .create_tab(
-                    rows,
-                    cols,
-                    cwd,
-                    scrollback_limit_bytes,
-                    theme,
-                    appearance,
-                    crate::pane::PaneShellConfig::new(&default_shell, shell_mode),
-                    Vec::new(),
-                )
-                .map_err(|err| format!("could not create replacement tab: {err}"))?;
-            let root = self.state.workspaces[ws_idx].tabs[new_tab_idx].root_pane;
-            self.terminal_runtimes.insert(terminal.id.clone(), runtime);
-            self.state.terminals.insert(terminal.id.clone(), terminal);
-            self.state.remove_alias_shadowed_by_new_pane(root);
-        }
-
         let closed = self
             .state
             .workspaces
@@ -482,22 +465,6 @@ impl App {
                 workspace_id,
             },
         });
-        if replacement_created {
-            let new_tab_idx = 0;
-            if was_active_workspace {
-                self.state
-                    .switch_workspace_tab_preserving_workspace_selection(ws_idx, new_tab_idx);
-                if matches!(
-                    self.state.server_mode(),
-                    crate::app::Mode::Terminal
-                        | crate::app::Mode::Navigate
-                        | crate::app::Mode::Prefix
-                ) {
-                    self.focus_client_on_pane();
-                }
-            }
-            self.emit_tab_created_events(ws_idx, new_tab_idx);
-        }
         Ok(())
     }
 

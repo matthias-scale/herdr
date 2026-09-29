@@ -124,6 +124,33 @@ fn tab_close_stays_immediate_with_confirmation_disabled_or_other_tabs() {
 }
 
 #[test]
+fn final_pane_close_uses_workspace_confirmation_after_server_group_guard() {
+    let mut state = close_state(true, 1);
+    let mut requested = ClientShellInput::default();
+    state.record_binding(
+        crate::input::KeybindMatch::Action(crate::input::KeybindAction::ClosePane),
+        &mut requested,
+    );
+    let [ClientShellAction::Endpoint { request, .. }] = requested.actions.as_slice() else {
+        panic!("pane close request");
+    };
+    assert!(matches!(&request.method, Method::PaneClose(_)));
+
+    state.handle_endpoint_result(
+        "boot-1",
+        &request.id,
+        Err(ClientShellEndpointError {
+            code: Some("confirmation_required".into()),
+            message: "closing this pane would close a worktree group".into(),
+        }),
+    );
+    assert!(matches!(
+        state.overlay,
+        Some(ClientShellOverlay::ConfirmClose(_))
+    ));
+}
+
+#[test]
 fn last_tab_confirmation_preserves_target_across_focus_changes_and_new_tabs() {
     let mut state = close_state(true, 1);
     let mut projected = state.snapshot.as_deref().unwrap().clone();

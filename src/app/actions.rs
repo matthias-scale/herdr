@@ -2429,7 +2429,18 @@ impl AppState {
             return false;
         };
         if close_tab {
-            self.close_tab_preserving_workspace_for_test(ws_idx, tab_idx);
+            if self.workspaces[ws_idx].tabs.len() == 1 {
+                if self.confirm_close
+                    && self.workspace_close_indices(ws_idx).len() > 1
+                    && self.begin_workspace_close_confirmation(ws_idx)
+                {
+                    return false;
+                }
+                self.selected = ws_idx;
+                self.close_selected_workspace();
+            } else {
+                self.close_tab_preserving_workspace_for_test(ws_idx, tab_idx);
+            }
         } else {
             let terminal_id = self.terminal_id_for_pane(ws_idx, pane_id);
             self.workspaces[ws_idx].close_pane(pane_id);
@@ -2452,6 +2463,12 @@ impl AppState {
                 .map(|ws| ws.active_tab)
                 .unwrap_or(0);
             if self.workspaces[ws_idx].tabs.len() == 1 {
+                if self.confirm_close
+                    && self.workspace_close_indices(ws_idx).len() > 1
+                    && self.begin_workspace_close_confirmation(ws_idx)
+                {
+                    return false;
+                }
                 self.selected = ws_idx;
                 self.close_selected_workspace();
             } else {
@@ -8310,7 +8327,7 @@ mod tests {
     }
 
     #[test]
-    fn close_pane_last_pane_keeps_active_workspace_not_selected_workspace() {
+    fn close_pane_last_pane_closes_active_workspace_not_selected_workspace() {
         let mut state = app_with_workspaces(&["selected", "active"]);
         let active_terminal_id = state
             .terminal_id_for_pane(1, state.workspaces[1].tabs[0].root_pane)
@@ -8320,29 +8337,24 @@ mod tests {
 
         state.close_pane();
 
-        assert_eq!(state.workspaces.len(), 2);
+        assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "selected");
-        assert_eq!(state.workspaces[1].display_name(), "active");
-        assert_eq!(state.workspaces[1].tabs.len(), 1);
-        assert_eq!(state.active, Some(1));
+        assert_eq!(state.active, Some(0));
         assert!(!state.terminals.contains_key(&active_terminal_id));
         state.assert_invariants_for_test();
     }
 
     #[test]
-    fn close_pane_last_pane_in_parent_worktree_group_keeps_workspaces() {
+    fn close_pane_last_pane_in_parent_worktree_group_closes_workspaces() {
         let mut state = app_with_workspaces(&["parent", "child"]);
         mark_parent_worktree(&mut state, 0);
         mark_linked_worktree(&mut state, 1);
         state.active = Some(0);
         state.selected = 1;
 
-        let deferred = state.close_pane();
+        state.close_pane();
 
-        assert!(!deferred);
-        assert_ne!(state.effective_interaction_mode(), Mode::ConfirmClose);
-        assert_eq!(state.selected, 1);
-        assert_eq!(state.workspaces.len(), 2);
+        assert!(state.workspaces.is_empty());
     }
 
     #[test]
@@ -8374,7 +8386,7 @@ mod tests {
     }
 
     #[test]
-    fn close_pane_last_pane_in_linked_worktree_keeps_worktree_workspace() {
+    fn close_pane_last_pane_in_linked_worktree_closes_worktree_workspace() {
         let mut state = app_with_workspaces(&["selected", "active"]);
         mark_linked_worktree(&mut state, 1);
         state.active = Some(1);
@@ -8382,10 +8394,8 @@ mod tests {
 
         state.close_pane();
 
-        assert_eq!(state.request_remove_linked_worktree, None);
-        assert_eq!(state.workspaces.len(), 2);
+        assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "selected");
-        assert_eq!(state.workspaces[1].display_name(), "active");
     }
 
     #[test]
