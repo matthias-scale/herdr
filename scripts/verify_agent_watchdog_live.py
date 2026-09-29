@@ -712,7 +712,7 @@ def main() -> int:
                 harness.call("pane.report_agent_session", {"pane_id": pane_id,
                     "source": "watchdog-harness", "agent": "codex",
                     "agent_session_id": session_id})
-                status = "idle" if ident == "a-finished-idle" else (
+                status = "idle" if ident in ("a-finished-idle", "stale_draft_promised_work_stalled") else (
                     "blocked" if ident == "a-approval-hook" else "working")
                 report: dict[str, Any] = {"pane_id": pane_id, "source": "watchdog-harness",
                     "agent": "codex", "state": status}
@@ -780,8 +780,14 @@ def main() -> int:
             calls_expected = 1 if ident == "a-prose-question" and args.gemini_bin else 0
             case_match = actual == expected and calls == calls_expected
             if ident == "stale_draft_promised_work_stalled":
+                pane_text = (harness.call("pane.read", {"pane_id": pane_id,
+                    "source": "detection", "lines": 40, "format": "text"})
+                    .get("read", {}).get("text", ""))
                 case_match = (actual == expected and decision.get("action") == "nudge"
                               and decision.get("delivered") is True
+                              and decision.get("status") == "nudged"
+                              and "❯ \n" in pane_text
+                              and pane_text.count("cont — resume: continue your open work to its done criterion") == 1
                               and "cont — resume: continue your open work to its done criterion"
                               in str(decision.get("action_text", "")))
             elif ident in ("fresh_draft_typing", "done_here_negative_control"):
