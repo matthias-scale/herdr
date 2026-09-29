@@ -8881,6 +8881,7 @@ navigate_pane_down = "ctrl+j"
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.set_server_mode(Mode::Navigate);
+        app.state.confirm_close = false;
 
         app.execute_tui_navigate_action(NavigateAction::CloseTab, ActionContext::Navigate);
 
