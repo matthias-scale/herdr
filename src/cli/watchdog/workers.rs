@@ -249,8 +249,7 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
             let found = if worker.parent_scope_local {
                 local_second
                     .as_deref()
-                    .map(|panes| parent_matches(worker, panes))
-                    .flatten()
+                    .and_then(|panes| parent_matches(worker, panes))
             } else {
                 remote_parent_present(worker, options).unwrap_or(None)
             };
