@@ -374,7 +374,12 @@ pub(crate) fn parse_process_args(text: &str) -> Vec<(u32, String)> {
         })
         .filter(|(_, args)| {
             let executable = args.split_whitespace().next().unwrap_or_default();
-            executable.rsplit('/').next().unwrap_or(executable).trim_start_matches('-') == "claude"
+            executable
+                .rsplit('/')
+                .next()
+                .unwrap_or(executable)
+                .trim_start_matches('-')
+                == "claude"
         })
         .collect()
 }
@@ -383,21 +388,33 @@ pub(crate) fn parse_process_args(text: &str) -> Vec<(u32, String)> {
 pub(crate) fn claude_pending_tool(transcript_tail: &str) -> Option<String> {
     let mut pending = std::collections::BTreeMap::<String, String>::new();
     for line in transcript_tail.lines() {
-        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        if let Some(blocks) = record.pointer("/message/content").and_then(serde_json::Value::as_array) {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(blocks) = record
+            .pointer("/message/content")
+            .and_then(serde_json::Value::as_array)
+        {
             for block in blocks {
                 if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_use") {
                     if let (Some(id), Some(name)) = (
                         block.get("id").and_then(serde_json::Value::as_str),
                         block.get("name").and_then(serde_json::Value::as_str),
-                    ) { pending.insert(id.to_owned(), name.to_owned()); }
+                    ) {
+                        pending.insert(id.to_owned(), name.to_owned());
+                    }
                 }
             }
         }
-        if let Some(blocks) = record.pointer("/message/content").and_then(serde_json::Value::as_array) {
+        if let Some(blocks) = record
+            .pointer("/message/content")
+            .and_then(serde_json::Value::as_array)
+        {
             for block in blocks {
                 if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result") {
-                    if let Some(id) = block.get("tool_use_id").and_then(serde_json::Value::as_str) { pending.remove(id); }
+                    if let Some(id) = block.get("tool_use_id").and_then(serde_json::Value::as_str) {
+                        pending.remove(id);
+                    }
                 }
             }
         }
@@ -567,7 +584,8 @@ mod tests {
 
     #[test]
     fn claude_pending_tool_requires_matching_result() {
-        let pending = r#"{"message":{"content":[{"type":"tool_use","id":"tool-1","name":"Bash"}]}}"#;
+        let pending =
+            r#"{"message":{"content":[{"type":"tool_use","id":"tool-1","name":"Bash"}]}}"#;
         assert_eq!(claude_pending_tool(pending).as_deref(), Some("Bash"));
         let completed = format!(
             "{pending}\n{}",
