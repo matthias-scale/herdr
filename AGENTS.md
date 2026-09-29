@@ -443,6 +443,21 @@ wezterm cli set-tab-title --pane-id "$P2" "QA card #<pr>"
 wezterm cli activate-pane --pane-id "$P"
 ```
 
+### Verify test builds visually before handing them over
+
+Before you hand Matthias any test build, run it yourself and look at it. A green CI run
+and passing tests do not show that the change is visible on his machine.
+
+1. Run the exact build on the host he will test on, or in an isolated session with the
+   same config. Set every precondition the change depends on (for example
+   `[ui.sidebar] layout = "sections"`) and name each one on the QA card.
+2. Drive the UI to every surface the QA card lists.
+3. Capture each one with Peekaboo, e.g.
+   `peekaboo image --app WezTerm --window-title "<tab title>" --path /tmp/qa-<pr>-<step>.png`,
+   or another screenshot tool, and check the image against the card yourself.
+4. Attach the screenshots to the QA card comment. If a surface does not match, fix it
+   before you ask him to test.
+
 ### Closing-block blocker detection
 
 A Claude pane shows as blocked only when the Stop hook in
