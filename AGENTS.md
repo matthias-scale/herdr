@@ -453,8 +453,10 @@ and passing tests do not show that the change is visible on his machine.
    `[ui.sidebar] layout = "sections"`) and name each one on the QA card.
 2. Drive the UI to every surface the QA card lists.
 3. Capture each one with Peekaboo, e.g.
-   `peekaboo image --app WezTerm --window-title "<tab title>" --path /tmp/qa-<pr>-<step>.png`,
-   or another screenshot tool, and check the image against the card yourself.
+   `peekaboo image --app WezTerm --window-id <id> --path /tmp/qa-<pr>-<step>.png`,
+   or another screenshot tool, and check the image against the card yourself. Get
+   `<id>` from `peekaboo list windows --app WezTerm`: the window title is the active
+   pane's title, not the tab title, so `--window-title "<tab title>"` finds nothing.
 4. Attach the screenshots to the QA card comment. If a surface does not match, fix it
    before you ask him to test.
 
