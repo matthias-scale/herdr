@@ -10,13 +10,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    api::schema::{AgentPromptParams, AgentSessionInfo, Method, PaneListParams, Request},
+    api::schema::{
+        AgentSessionInfo, Method, NotificationShowParams, NotificationShowSound, PaneListParams,
+        Request,
+    },
     watchdog::workers::{
-        self as worker_watchdog, StallAction, WorkerMemory, WorkerObservation, WorkerStallDecision,
+        self as worker_watchdog, ParentState, StallAction, WorkerMemory, WorkerObservation,
+        WorkerStallDecision,
     },
 };
 
-const DEFAULT_INTERVAL_SECS: u64 = 900;
+const DEFAULT_INTERVAL_SECS: u64 = 30;
 const DEFAULT_STALL_MINUTES: u64 = 30;
 
 #[derive(Debug, Clone)]
@@ -55,6 +59,7 @@ struct WorkerStallLog {
     parent_session: String,
     last_activity: u64,
     age_secs: u64,
+    parent_state: ParentState,
 }
 
 pub(super) fn run_worker_watchdog_command(args: &[String]) -> io::Result<i32> {
@@ -156,7 +161,7 @@ fn home_dir() -> PathBuf {
 
 fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
     let mut memory = load_memory(&options.state_file)?;
-    let observations = discover_workers(&options.runs_dir, &options.claude_projects_dir)?;
+    let mut observations = discover_workers(&options.runs_dir, &options.claude_projects_dir)?;
     let pane_list = super::super::send_request(&Request {
         id: super::next_request_id("worker-watchdog-pane-list"),
         method: Method::PaneList(PaneListParams { workspace_id: None }),
@@ -165,6 +170,15 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
     let panes: Vec<PaneEntry> =
         serde_json::from_value(pane_list["result"]["panes"].clone()).map_err(io::Error::other)?;
     let parents = parent_panes(&panes);
+    for worker in &mut observations {
+        worker.parent_state = if parents.contains_key(&worker.parent_session) {
+            ParentState::Present
+        } else if worker.parent_scope_local {
+            ParentState::Absent
+        } else {
+            ParentState::Unknown
+        };
+    }
     let now = unix_seconds()?;
 
     let decisions = worker_watchdog::process_stalls(
@@ -207,26 +221,34 @@ fn notify_parent(
     age_secs: u64,
     parents: &std::collections::HashMap<String, String>,
 ) -> io::Result<()> {
-    let pane_id = parents.get(&worker.parent_session).ok_or_else(|| {
-        io::Error::new(
+    let pane_id = parents.get(&worker.parent_session);
+    if pane_id.is_none() && worker.parent_state != ParentState::Absent {
+        return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!(
-                "no live Herdr pane for parent session {}",
-                worker.parent_session
-            ),
-        )
-    })?;
+            format!("parent session {} is not connected", worker.parent_session),
+        ));
+    }
     let text = format!(
-        "Watchdog: worker {} has had no heartbeat or trace progress for {} minutes; please inspect it.",
+        "Worker {} on {}: no semantic progress for {} minutes; parent session {}.",
         worker.worker_id,
-        age_secs / 60
+        worker.source,
+        age_secs / 60,
+        worker.parent_session
     );
     let response = super::super::send_request(&Request {
-        id: super::next_request_id("worker-stall-agent-prompt"),
-        method: Method::AgentPrompt(AgentPromptParams {
-            target: pane_id.clone(),
-            text,
-            wait: None,
+        id: super::next_request_id("worker-stall-notification"),
+        method: Method::NotificationShow(NotificationShowParams {
+            title: if worker.parent_state == ParentState::Absent {
+                "Orphaned worker".into()
+            } else {
+                "Worker watchdog".into()
+            },
+            body: Some(match pane_id {
+                Some(pane_id) => format!("Parent {pane_id}: {text}"),
+                None => format!("Operator queue: {text}"),
+            }),
+            position: None,
+            sound: NotificationShowSound::None,
         }),
     })?;
     super::ensure_api_success(&response)
@@ -246,6 +268,7 @@ fn append_stall_log(path: &Path, worker: &WorkerObservation, age_secs: u64) -> i
         parent_session: worker.parent_session.clone(),
         last_activity: worker.last_activity,
         age_secs,
+        parent_state: worker.parent_state,
     };
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     serde_json::to_writer(&mut file, &record).map_err(io::Error::other)?;
@@ -278,6 +301,10 @@ fn print_worker_scan(
 
     for decision in decisions {
         let status = match decision.action {
+            StallAction::ParentChecking => "checking parent",
+            StallAction::ParentUnknown => "parent unknown",
+            StallAction::Orphaned => "orphaned",
+            StallAction::Confirming => "confirming stall",
             StallAction::WouldNotify => "would notify",
             StallAction::Notified => "notified",
             StallAction::AlreadyNotified => "already notified",
@@ -353,6 +380,12 @@ fn discover_codex_runs(runs_dir: &Path) -> io::Result<Vec<WorkerObservation>> {
         let worker_id = entry.file_name().to_string_lossy().into_owned();
         let last_activity = codex_last_activity(&run_dir, &state)?;
         let state_name = json_string(&state, &["state"]).unwrap_or_default();
+        let worker_host = json_string(&state, &["host"]);
+        let parent_host = json_string(&state, &["parent", "host"]);
+        let parent_scope_local = worker_host
+            .as_deref()
+            .zip(parent_host.as_deref())
+            .is_some_and(|(worker_host, parent_host)| worker_host == parent_host);
         let finished = matches!(
             state_name.to_ascii_lowercase().as_str(),
             "complete"
@@ -373,6 +406,8 @@ fn discover_codex_runs(runs_dir: &Path) -> io::Result<Vec<WorkerObservation>> {
             parent_session,
             last_activity,
             finished,
+            parent_scope_local,
+            parent_state: ParentState::Unknown,
         });
     }
     Ok(workers)
@@ -396,7 +431,10 @@ fn launch_parent_session(run_dir: &Path) -> Option<String> {
 
 fn codex_last_activity(run_dir: &Path, state: &Value) -> io::Result<u64> {
     // Heartbeat and atomic state rewrites prove liveness, not semantic progress.
-    let mut last_activity = state.get("progress_at").and_then(json_timestamp).unwrap_or_default();
+    let mut last_activity = state
+        .get("progress_at")
+        .and_then(json_timestamp)
+        .unwrap_or_default();
     for name in ["trace.log", "out.log", ".session-log"] {
         if let Some(modified) = modified_unix_seconds(&run_dir.join(name))? {
             last_activity = last_activity.max(modified);
@@ -466,6 +504,8 @@ fn discover_claude_subagents(projects_dir: &Path) -> io::Result<Vec<WorkerObserv
                     parent_session: parent_session.clone(),
                     last_activity,
                     finished: claude_subagent_finished(&subagent.path())?,
+                    parent_scope_local: true,
+                    parent_state: ParentState::Unknown,
                 });
             }
         }
@@ -522,12 +562,10 @@ fn json_timestamp(value: &Value) -> Option<u64> {
         return Some(timestamp);
     }
     let raw = value.as_str()?;
-    let timestamp = time::OffsetDateTime::parse(
-        raw,
-        &time::format_description::well_known::Rfc3339,
-    )
-    .ok()?
-    .unix_timestamp();
+    let timestamp =
+        time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339)
+            .ok()?
+            .unix_timestamp();
     u64::try_from(timestamp).ok()
 }
 
@@ -578,8 +616,7 @@ mod tests {
 
     impl TestDir {
         fn new() -> Self {
-            static NEXT: std::sync::atomic::AtomicU64 =
-                std::sync::atomic::AtomicU64::new(1);
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
             let path = std::env::temp_dir().join(format!(
                 "herdr-worker-watchdog-test-{}-{}",
                 std::process::id(),

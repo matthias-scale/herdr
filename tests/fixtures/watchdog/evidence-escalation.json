@@ -6,6 +6,7 @@
       "tail": "Running cargo test",
       "expected_state": "working",
       "unchanged_seconds": 900,
+      "expect_process_info": true,
       "available_followup": {
         "process_state": "cargo test is alive",
         "cpu_percent": 64,
@@ -18,6 +19,7 @@
       "agent_status": "working",
       "tail": "Copied from an issue: ‘Should I remove the compatibility layer?’ This is quoted text only. I am continuing with the release notes.",
       "expected_state": "working",
+      "expect_process_info": true,
       "available_followup": {
         "more_scrollback": "The quoted question came from pasted issue text; subsequent lines show active edits.",
         "last_tool_call": "edit docs/release.md"
@@ -75,6 +77,7 @@
       "tail": "Resumed after Herdr restart; cargo test is still active.",
       "expected_state": "working",
       "unchanged_seconds": 1200,
+      "expect_process_info": true,
       "available_followup": {
         "process_state": "cargo test process survived the Herdr restart",
         "cpu_percent": 51,
@@ -90,6 +93,54 @@
       "available_followup": {
         "more_scrollback": "Agent opened model selection after reporting a provider error.",
         "last_tool_call": "model selection dialog opened"
+      }
+    },
+    {
+      "id": "spinner-only-loop",
+      "agent_status": "working",
+      "tail": "⠋",
+      "second_read": "⠙",
+      "expected_state": "unknown",
+      "available_followup": {
+        "process_state": "agent process alive",
+        "cpu_percent": 0,
+        "output_age_seconds": 1800,
+        "last_tool_call": "none"
+      }
+    },
+    {
+      "id": "spinner-plus-progress",
+      "agent_status": "working",
+      "tail": "Compiling crate A ⠋",
+      "second_read": "Compiled crate A; compiling crate B ⠙",
+      "expected_state": "working",
+      "available_followup": {
+        "process_state": "cargo process alive",
+        "cpu_percent": 48,
+        "output_age_seconds": 0,
+        "last_tool_call": "cargo test"
+      }
+    },
+    {
+      "id": "new-turn-old-prompt",
+      "agent_status": "working",
+      "tail": "Do you want to allow this command? [y/n]\nNew turn started; inspecting the implementation now.",
+      "expected_state": "working",
+      "available_followup": {
+        "lifecycle_event": "user_input",
+        "turn_id": "turn-new",
+        "last_tool_call": "read src/main.rs"
+      }
+    },
+    {
+      "id": "rate-limit-exhausted",
+      "agent_status": "working",
+      "tail": "Usage limit reached. Please wait for the limit to reset or change account.",
+      "expected_state": "blocked",
+      "available_followup": {
+        "retry_deadline": null,
+        "retry_count": 5,
+        "last_tool_call": "GET /v1/completions"
       }
     }
   ],

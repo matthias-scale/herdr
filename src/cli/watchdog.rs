@@ -13,8 +13,8 @@ use serde_json::Value;
 
 use crate::{
     api::schema::{
-        AgentStatus, Method, PaneAgentState, PaneListParams, PaneReadParams, PaneReportAgentParams,
-        ReadFormat, ReadSource, Request,
+        AgentStatus, Method, PaneAgentState, PaneListParams, PaneProcessInfoParams, PaneReadParams,
+        PaneReportAgentParams, ReadFormat, ReadSource, Request,
     },
     watchdog::{
         self, DecisionStatus, Memory, PaneSample, ScanOptions, ScanResult, Verdict, WATCHDOG_SOURCE,
@@ -26,8 +26,10 @@ mod workers;
 const DEFAULT_INTERVAL_SECS: u64 = 300;
 const DEFAULT_STALL_SECS: u64 = 600;
 const DEFAULT_LINES: u32 = 40;
-const MODEL_TIMEOUT: Duration = Duration::from_secs(120);
+const MODEL_TIMEOUT: Duration = Duration::from_secs(45);
 const STAGE2_MODEL_ID: &str = "gemini-3.1-flash-lite";
+const MODEL_STDOUT_MAX_BYTES: usize = 8 * 1024;
+const MODEL_STDERR_MAX_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone)]
 struct WatchdogOptions {
@@ -57,6 +59,7 @@ struct ScanSummary {
     consistent: usize,
     ambiguous: usize,
     model_calls: usize,
+    model_latency_ms: Option<u128>,
 }
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -172,6 +175,7 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
     ensure_api_success(&pane_list)?;
     let panes: Vec<PaneEntry> =
         serde_json::from_value(pane_list["result"]["panes"].clone()).map_err(io::Error::other)?;
+    let now = unix_seconds()?;
     let listed_pane_ids = panes
         .iter()
         .map(|pane| pane.pane_id.clone())
@@ -186,27 +190,46 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
             Ok(tail) => (tail, None),
             Err(error) => (String::new(), Some(error)),
         };
+        let unchanged_secs = memory
+            .get(&pane.pane_id)
+            .filter(|entry| entry.hash == watchdog::tail_hash(&tail))
+            .map_or(0, |entry| now.saturating_sub(entry.since));
+        let process_evidence = if read_error.is_none()
+            && (matches!(watchdog::classify_text(&tail), Verdict::Ambiguous(_))
+                || (pane.agent_status == AgentStatus::Working
+                    && unchanged_secs >= options.stall_secs))
+        {
+            read_process_evidence(&pane.pane_id).ok()
+        } else {
+            None
+        };
         samples.push(PaneSample {
             pane_id: pane.pane_id,
             agent: pane.agent,
             status: pane.agent_status,
             tail,
+            process_evidence,
             read_error,
         });
     }
 
-    let result = watchdog::scan_decisions(
+    let mut model_latency_ms = None;
+    let mut result = watchdog::scan_decisions(
         &listed_pane_ids,
         &samples,
         &mut memory,
-        unix_seconds()?,
+        now,
         ScanOptions {
             stall_secs: options.stall_secs,
             no_model: options.no_model,
             dry_run: options.dry_run,
         },
         |samples| {
-            run_model_classifier(&options.gemini_bin, samples).map_err(|error| error.to_string())
+            let started = Instant::now();
+            let result = run_model_classifier(&options.gemini_bin, samples)
+                .map_err(|error| error.to_string());
+            model_latency_ms = Some(started.elapsed().as_millis());
+            result
         },
         |pane_id, agent, old_state, new_state, evidence| {
             report_status(pane_id, agent, new_state, evidence)?;
@@ -220,6 +243,7 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
             )
         },
     );
+    result.model_latency_ms = model_latency_ms;
 
     if !options.dry_run {
         save_memory(&options.state_file, &memory)?;
@@ -243,7 +267,7 @@ fn read_tail(pane_id: &str, lines: u32) -> Result<String, String> {
         id: next_request_id("pane-read"),
         method: Method::PaneRead(PaneReadParams {
             pane_id: pane_id.to_string(),
-            source: ReadSource::Recent,
+            source: ReadSource::Detection,
             lines: Some(lines),
             format: ReadFormat::Text,
             strip_ansi: true,
@@ -256,6 +280,18 @@ fn read_tail(pane_id: &str, lines: u32) -> Result<String, String> {
         .as_str()
         .map(str::to_string)
         .ok_or_else(|| "pane.read response did not contain result.read.text".into())
+}
+
+fn read_process_evidence(pane_id: &str) -> io::Result<String> {
+    let response = super::send_request(&Request {
+        id: next_request_id("watchdog-process-info"),
+        method: Method::PaneProcessInfo(PaneProcessInfoParams {
+            pane_id: Some(pane_id.to_string()),
+        }),
+    })?;
+    ensure_api_success(&response)?;
+    let evidence = &response["result"]["process_info"];
+    serde_json::to_string(evidence).map_err(io::Error::other)
 }
 
 fn report_status(
@@ -398,12 +434,13 @@ fn print_scan(result: &ScanResult, options: &WatchdogOptions) -> io::Result<()> 
         );
     }
     println!(
-        "watchdog summary: panes={} corrected={} consistent={} ambiguous={} model_calls={}{}",
+        "watchdog summary: panes={} corrected={} consistent={} ambiguous={} model_calls={} model_latency_ms={:?}{}",
         summary.panes,
         summary.corrected,
         summary.consistent,
         summary.ambiguous,
         summary.model_calls,
+        summary.model_latency_ms,
         if options.dry_run { " dry-run" } else { "" }
     );
     Ok(())
@@ -416,6 +453,7 @@ fn summarize(result: &ScanResult) -> ScanSummary {
         consistent: 0,
         ambiguous: 0,
         model_calls: result.model_calls,
+        model_latency_ms: result.model_latency_ms,
     };
     for decision in &result.decisions {
         match decision.status {
@@ -432,6 +470,7 @@ fn run_model_classifier(
     samples: &[PaneSample],
 ) -> io::Result<std::collections::HashMap<String, watchdog::StatusClassification>> {
     let prompt = watchdog::classifier_prompt(samples);
+    let policy_file = ModelPolicyFile::new()?;
     let mut child = Command::new(gemini_bin)
         .arg("--model")
         .arg(STAGE2_MODEL_ID)
@@ -441,34 +480,119 @@ fn run_model_classifier(
         .arg("text")
         .arg("--approval-mode")
         .arg("default")
+        .arg("--policy")
+        .arg(policy_file.path())
         .arg("--skip-trust")
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()?;
-    let mut stdout = child
+    let stdout = child
         .stdout
         .take()
         .ok_or_else(|| io::Error::other("Gemini classifier stdout was not captured"))?;
-    let reader = thread::spawn(move || {
-        let mut reply = String::new();
-        stdout.read_to_string(&mut reply).map(|_| reply)
-    });
-    let status = wait_for_model(&mut child)?;
+    let stdout_reader = thread::spawn(move || read_bounded(stdout, MODEL_STDOUT_MAX_BYTES));
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("Gemini classifier stderr was not captured"))?;
+    let stderr_reader = thread::spawn(move || read_bounded(stderr, MODEL_STDERR_MAX_BYTES));
+    let status = wait_for_model(&mut child);
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| io::Error::other("Gemini stdout reader panicked"))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| io::Error::other("Gemini stderr reader panicked"))??;
+    let stderr = redact_model_diagnostics(&String::from_utf8_lossy(&stderr));
+    let status = match status {
+        Ok(status) => status,
+        Err(error) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("{error}; stderr: {}", stderr.trim()),
+            ));
+        }
+    };
     if !status.success() {
         return Err(io::Error::other(format!(
-            "Gemini classifier exited with {status}"
+            "Gemini classifier exited with {status}; stderr: {}",
+            stderr.trim()
         )));
     }
-    let reply = reader
-        .join()
-        .map_err(|_| io::Error::other("Gemini classifier output reader panicked"))??;
+    let reply = String::from_utf8(stdout)
+        .map_err(|_| io::Error::other("Gemini classifier output was not UTF-8"))?;
     let pane_ids = samples
         .iter()
         .map(|sample| sample.pane_id.clone())
         .collect::<Vec<_>>();
     Ok(watchdog::parse_classifier_reply(&reply, &pane_ids))
+}
+
+fn read_bounded(reader: impl Read, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(max_bytes.min(1024));
+    reader
+        .take(max_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Gemini output exceeded {max_bytes} byte limit"),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn redact_model_diagnostics(stderr: &str) -> String {
+    let mut safe = String::new();
+    for line in stderr.lines().take(80) {
+        let lower = line.to_ascii_lowercase();
+        if [
+            "api_key",
+            "access_token",
+            "refresh_token",
+            "authorization",
+            "bearer ",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+        {
+            safe.push_str("[redacted credential diagnostic]\n");
+        } else {
+            safe.push_str(line);
+            safe.push('\n');
+        }
+    }
+    safe
+}
+
+struct ModelPolicyFile(PathBuf);
+
+impl ModelPolicyFile {
+    fn new() -> io::Result<Self> {
+        static NEXT_POLICY: AtomicU64 = AtomicU64::new(1);
+        let path = std::env::temp_dir().join(format!(
+            "herdr-watchdog-gemini-policy-{}-{}.toml",
+            std::process::id(),
+            NEXT_POLICY.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(
+            &path,
+            "[[rule]]\ntoolName = \"*\"\ndecision = \"deny\"\npriority = 100\n",
+        )?;
+        Ok(Self(path))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ModelPolicyFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 fn wait_for_model(child: &mut Child) -> io::Result<std::process::ExitStatus> {
@@ -484,7 +608,10 @@ fn wait_for_model(child: &mut Child) -> io::Result<std::process::ExitStatus> {
             wait_result?;
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "Gemini classifier exceeded 120 second timeout",
+                format!(
+                    "Gemini classifier exceeded {} second timeout",
+                    MODEL_TIMEOUT.as_secs()
+                ),
             ));
         }
         thread::sleep(Duration::from_millis(100));

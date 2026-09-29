@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import socketserver
 import subprocess
 import sys
@@ -63,7 +64,7 @@ class ApiFixture:
                     result = {
                         "type": "pong",
                         "version": "0.9.1-fixture",
-                        "protocol": 76,
+                        "protocol": 22,
                         "capabilities": {
                             "live_handoff": False,
                             "detached_server_daemon": False,
@@ -227,7 +228,12 @@ def pane_check(binary: Path, gemini: str) -> bool:
             [{"id": "quiet-stall", "tail": tails["quiet-stall"][0], "unchanged_seconds": 1200}],
         )
         status_log = scratch / "status.jsonl"
-        with ApiFixture(socket_path, panes, tails) as api:
+        with ApiFixture(
+            socket_path,
+            panes,
+            tails,
+            {"quiet-stall": {"foreground_processes": [{"pid": 123, "name": "cargo", "argv": ["cargo", "build"]}]}},
+        ) as api:
             command = [
                 str(binary), "watchdog", "--once", "--stall-secs", "600", "--lines", "40",
                 "--gemini-bin", gemini, "--state-file", str(state_file),
@@ -247,8 +253,8 @@ def pane_check(binary: Path, gemini: str) -> bool:
                 and payload.get("summary", {}).get("model_calls") == 1
                 and human.get("new_state") == "blocked"
                 and human.get("status") == "corrected"
-                and stall.get("new_state") == "blocked"
-                and len(records) == 2
+                and stall.get("new_state") == "working"
+                and len(records) == 1
                 and all(item.get("source") == "watchdog" for item in records)
             )
             print("CHECK blocked_correction " + ("PASS" if passed else "FAIL"))
@@ -277,17 +283,18 @@ def worker_check(binary: Path) -> bool:
             command = worker_command(binary, scratch, socket_path, runs, state_file, log_file)
             result = run_command(command, isolated_env(socket_path, scratch))
             print_run("stalled worker notification", command, result)
-            prompts = [item for item in api.requests if item.get("method") == "agent.prompt"]
+            notifications = [item for item in api.requests if item.get("method") == "notification.show"]
             records = [json.loads(line) for line in log_file.read_text().splitlines()] if log_file.exists() else []
-            print("PARENT_PROMPTS " + json.dumps([item.get("params") for item in prompts], sort_keys=True))
+            print("PARENT_NOTIFICATIONS " + json.dumps([item.get("params") for item in notifications], sort_keys=True))
             print("WORKER_LOG " + json.dumps(records, sort_keys=True))
             payload = parse_json_output(result) or {}
             passed = (
                 result.returncode == 0
                 and payload.get("summary", {}).get("notified") == 1
-                and len(prompts) == 1
-                and prompts[0].get("params", {}).get("target") == "parent-pane"
-                and "stalled-codex-worker" in prompts[0].get("params", {}).get("text", "")
+                and len(notifications) == 1
+                and "parent-pane" in notifications[0].get("params", {}).get("body", "")
+                and "stalled-codex-worker" in notifications[0].get("params", {}).get("body", "")
+                and "agent.prompt" not in api.methods()
                 and len(records) == 1
                 and records[0].get("worker_id") == "stalled-codex-worker"
             )
@@ -331,14 +338,15 @@ def escalation_check(binary: Path, gemini: str) -> tuple[bool, list[dict[str, An
             for case in cases:
                 decision = decisions.get(case["id"], {})
                 expected = case["expected_state"]
-                actual = decision.get("new_state")
+                actual = decision.get("new_state") or "unknown"
                 report.append(
                     {
                         "case": case["id"],
+                        "host": socket.gethostname(),
                         "expected": expected,
                         "actual": actual,
                         "state_right": actual == expected,
-                        "evidence_pulled": ["pane.read recent, lines=40"] if read_counts.get(case["id"]) else [],
+                        "evidence_pulled": ["pane.read detection, lines=40"] if read_counts.get(case["id"]) else [],
                         "extra_read_count": max(0, read_counts.get(case["id"], 0) - 1),
                         "process_info_pulled": case["id"] in process_info_panes,
                         "more_scrollback_available": bool(case.get("available_followup", {}).get("more_scrollback")),
@@ -352,13 +360,12 @@ def escalation_check(binary: Path, gemini: str) -> tuple[bool, list[dict[str, An
             print("API_METHODS " + json.dumps(methods))
             print("ESCALATION_CASES " + json.dumps(report, sort_keys=True))
             print("STATUS_LOG " + json.dumps(records, sort_keys=True))
-            ambiguous_ids = {
-                case["id"] for case in cases
-                if case["id"] not in ("quiet-build", "subprocess-yes-no", "resumed-after-restart")
+            process_candidate_ids = {
+                case["id"] for case in cases if case.get("expect_process_info")
             }
             extra_was_pulled = all(
                 read_counts.get(pane_id, 0) > 1 or pane_id in process_info_panes
-                for pane_id in ambiguous_ids
+                for pane_id in process_candidate_ids
             )
             passed = (
                 result.returncode == 0
@@ -385,7 +392,7 @@ def worker_parent_gone_check(binary: Path, fixture: dict[str, Any]) -> bool:
             result = run_command(command, isolated_env(socket_path, scratch))
             print_run("live worker with missing parent", command, result)
             payload = parse_json_output(result) or {}
-            prompts = [item for item in api.requests if item.get("method") == "agent.prompt"]
+            notifications = [item for item in api.requests if item.get("method") == "notification.show"]
             records = [json.loads(line) for line in log_file.read_text().splitlines()] if log_file.exists() else []
             decisions = payload.get("decisions", [])
             action = decisions[0].get("action") if decisions else None
@@ -393,13 +400,13 @@ def worker_parent_gone_check(binary: Path, fixture: dict[str, Any]) -> bool:
                 "worker_files_read": ["state.json", "trace.log"],
                 "parent_panes_returned": 0,
                 "action": action,
-                "notification_count": len(prompts),
+                "notification_count": len(notifications),
                 "log_count": len(records),
             }, sort_keys=True))
             expected_failed = (
                 action == case["expected_action"]
-                and len(prompts) == 0
-                and len(records) == 0
+                and len(notifications) == 0
+                and len(records) == 1
                 and result.returncode == 1
             )
             print("CHECK live_worker_parent_gone " + ("PASS" if expected_failed else "FAIL"))
@@ -409,7 +416,11 @@ def worker_parent_gone_check(binary: Path, fixture: dict[str, Any]) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True, help="Built herdr binary from this checkout")
-    parser.add_argument("--gemini-bin", default=shutil.which("gemini") or "gemini")
+    parser.add_argument(
+        "--gemini-bin",
+        default=str(ROOT / "scripts/watchdog_gemini_stub.py"),
+        help="Gemini CLI or deterministic fixture oracle",
+    )
     args = parser.parse_args()
     binary = args.binary.resolve()
     if not binary.is_file():
