@@ -2371,7 +2371,8 @@ impl AppState {
             ws.find_tab_index_for_pane(pane_id).is_some_and(|tab_idx| {
                 let tab = &ws.tabs[tab_idx];
                 let pane_is_non_companion = tab
-                    .pane_state(pane_id)
+                    .panes
+                    .get(&pane_id)
                     .is_some_and(|pane| !pane.is_companion);
                 pane_is_non_companion
                     && ws.tabs.len() == 1
