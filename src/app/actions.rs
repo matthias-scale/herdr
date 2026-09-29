@@ -8211,7 +8211,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_primary_closes_orphaned_companion_and_replaces_last_tab() {
+    fn closing_primary_closes_orphaned_companion_and_final_workspace() {
         let mut state = app_with_workspaces(&["test"]);
         let primary = state.workspaces[0].tabs[0].root_pane;
         let companion = state.workspaces[0].test_split(Direction::Horizontal);
@@ -8222,15 +8222,9 @@ mod tests {
             .is_companion = true;
         state.ensure_test_terminals();
         let old_companion_terminal = state.terminal_id_for_pane(0, companion).unwrap();
-        let workspace_id = state.workspaces[0].id.clone();
-
         state.close_pane();
 
-        assert_eq!(state.workspaces.len(), 1);
-        assert_eq!(state.workspaces[0].id, workspace_id);
-        assert_eq!(state.workspaces[0].tabs.len(), 1);
-        assert!(state.workspaces[0].pane_state(primary).is_none());
-        assert!(state.workspaces[0].pane_state(companion).is_none());
+        assert!(state.workspaces.is_empty());
         assert!(!state.terminals.contains_key(&old_companion_terminal));
         state.assert_invariants_for_test();
     }
