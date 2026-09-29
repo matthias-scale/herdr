@@ -3956,6 +3956,12 @@ impl AppState {
         else {
             return false;
         };
+        // A proxy's terminal modes describe the remote application, but local
+        // selection must remain available over its rendered frame. Shift is
+        // the established terminal mouse override for forwarding the gesture.
+        if proxy_mouse_selection_is_local(rt.is_remote_proxy(), mouse) {
+            return false;
+        }
         let Some(position) = self.pane_mouse_position(rt, info.inner_rect, mouse) else {
             return false;
         };
@@ -4158,6 +4164,19 @@ impl AppState {
             grab_row_offset,
         ))
     }
+}
+
+fn proxy_mouse_selection_is_local(is_proxy: bool, mouse: MouseEvent) -> bool {
+    is_proxy
+        && !mouse
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::SHIFT)
+        && matches!(
+            mouse.kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+        )
 }
 
 #[cfg(test)]
@@ -11526,5 +11545,26 @@ mod tests {
                 crate::app::state::ClientOverlay::RenameWorkspace
             );
         }
+    }
+
+    #[test]
+    fn proxy_selection_uses_local_mouse_without_shift_override() {
+        let down = mouse(MouseEventKind::Down(MouseButton::Left), 4, 3);
+        let drag = mouse(MouseEventKind::Drag(MouseButton::Left), 8, 3);
+
+        assert!(proxy_mouse_selection_is_local(true, down));
+        assert!(proxy_mouse_selection_is_local(true, drag));
+        assert!(!proxy_mouse_selection_is_local(false, down));
+    }
+
+    #[test]
+    fn proxy_selection_shift_override_keeps_remote_mouse_forwarding() {
+        let mut down = mouse(MouseEventKind::Down(MouseButton::Left), 4, 3);
+        let mut drag = mouse(MouseEventKind::Drag(MouseButton::Left), 8, 3);
+        down.modifiers = crossterm::event::KeyModifiers::SHIFT;
+        drag.modifiers = crossterm::event::KeyModifiers::SHIFT;
+
+        assert!(!proxy_mouse_selection_is_local(true, down));
+        assert!(!proxy_mouse_selection_is_local(true, drag));
     }
 }
