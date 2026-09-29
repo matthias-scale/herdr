@@ -435,39 +435,31 @@ def _script(text: str, repeat: bool = False) -> str:
     return _fixture_command(code)
 
 
-def _promised_draft_agent() -> str:
-    code = '''import sys, termios, tty
-header = ["Now: Codex reviewers — reviewing PR 1656; the config-folder worker starts after it merges",
-          "⎿ Stop says: /review completed — invoke /retro to capture lessons.",
-          "● Background shell command didn't finish before the previous session ended"]
-rule = "────────────────────────"
-footer = ["────────────────────────", "░░░░░░ 92% 78k tokens │ 2h 24m ago │ -- INSERT -- · 1 feedback draft"]
-draft = "cont"
-turns = []
-def draw():
-    sys.stdout.write("\\x1b[2J\\x1b[H" + "\\n".join(header + turns + [rule, "❯ " + draft] + footer) + "\\n")
-    sys.stdout.flush()
-fd = sys.stdin.fileno()
-old = termios.tcgetattr(fd)
-try:
-    tty.setcbreak(fd)
-    draw()
-    while True:
-        char = sys.stdin.read(1)
-        if not char or char == "\\x03":
-            break
-        if char in ("\\r", "\\n"):
-            turns.extend(["❯ " + draft, "Working on the open task"])
-            draft = ""
-        elif char in ("\\x7f", "\\b"):
-            draft = draft[:-1]
-        elif char.isprintable():
-            draft += char
-        draw()
-finally:
-    termios.tcsetattr(fd, termios.TCSADRAIN, old)
-'''
-    return _fixture_command(code)
+def _promised_draft_agent(root: Path) -> str:
+    script = root / "fake_agent.sh"
+    script.write_text('''#!/bin/sh
+draft=cont
+draw() {
+  printf '\\033[2J\\033[H'
+  printf '%s\\n' \\
+    "Now: Codex reviewers — reviewing PR 1656; the config-folder worker starts after it merges" \\
+    "⎿ Stop says: /review completed — invoke /retro to capture lessons." \\
+    "● Background shell command didn't finish before the previous session ended"
+  if [ -n "${turn1:-}" ]; then printf '%s\\n' "$turn1" "$turn2"; fi
+  printf '%s\\n' '────────────────────────' "❯ $draft" \\
+    '────────────────────────' \\
+    '░░░░░░ 92% 78k tokens │ 2h 24m ago │ -- INSERT -- · 1 feedback draft'
+}
+draw
+while IFS= read -r submitted; do
+  turn1="❯ $draft"
+  turn2='Working on the open task'
+  draft=
+  draw
+done
+''', encoding="utf-8")
+    script.chmod(0o755)
+    return "clear; exec /bin/sh " + shlex.quote(str(script))
 
 
 def setup_quiet(h: Harness, ident: str) -> str:
@@ -503,7 +495,7 @@ def setup_promised_draft(h: Harness, ident: str) -> str:
               "────────────────────────\n❯ cont\n────────────────────────\n"
               "░░░░░░ 92% 78k tokens │ 2h 24m ago │ -- INSERT -- · 1 feedback draft")
     ready = tuple(screen.splitlines())
-    return h.workspace(ident, _promised_draft_agent(), ready)
+    return h.workspace(ident, _promised_draft_agent(h.root), ready)
 
 
 def setup_done_here(h: Harness, ident: str) -> str:
@@ -721,7 +713,7 @@ def main() -> int:
     parser.add_argument("--peer")
     parser.add_argument("--peer-binary", type=Path)
     parser.add_argument("--confirm-secs", type=int, default=5)
-    parser.add_argument("--only", help="comma-separated case ids")
+    parser.add_argument("--only", action="append", help="case id to run (repeatable; comma-separated also accepted)")
     parser.add_argument("--gemini-bin", help="pass through to the pane watchdog")
     parser.add_argument("--self-test", action="store_true", help="exercise fixture setup/teardown only")
     args = parser.parse_args()
@@ -737,7 +729,8 @@ def main() -> int:
         return self_test(args)
     # Filter is validated before touching the server. CASES is the audited
     # source of ids and expected classes for every matrix entry.
-    selected = {part.strip() for part in args.only.split(",")} if args.only else None
+    selected = ({part.strip() for value in args.only for part in value.split(",")}
+                if args.only else None)
     known = {case[0] for case in CASES}
     if selected and selected - known:
         parser.error("unknown --only case(s): " + ", ".join(sorted(selected - known)))
@@ -788,7 +781,8 @@ def main() -> int:
                     cmd_options += ["--gemini-bin", args.gemini_bin]
                 else:
                     cmd_options.append("--no-model")
-                harness.run_watchdog("A", cmd_options)
+                harness.run_watchdog("A", cmd_options,
+                                     dry=ident != "stale_draft_promised_work_stalled")
                 age = 900 if ident in ("stale_draft_promised_work_stalled", "a-quiet-build", "a-silent-stall", "a-spinner-only",
                                        "a-spinner-progress", "a-resumed") else 0
                 if ident == "a-retry-renewed":
@@ -798,7 +792,8 @@ def main() -> int:
                 if age:
                     harness.age_memory(state, pane_id, age,
                                        session="old-session" if ident == "a-resumed" else None)
-                payload = harness.run_watchdog("A", cmd_options)
+                payload = harness.run_watchdog("A", cmd_options,
+                                               dry=ident != "stale_draft_promised_work_stalled")
                 decisions = payload.get("decisions", [])
                 decision = next((d for d in decisions if d.get("pane_id") == pane_id), {})
                 actual = decision.get("class", "missing")
@@ -853,13 +848,15 @@ def main() -> int:
                          "match": case_match,
                          "evidence": evidence, "wall_time_ms": payload.get("_wall_time_ms"),
                          "model_latency_ms": payload.get("_model_latency_ms")})
-        incident = harness.incident_rearm_check()
-        incident["match"] = (incident["first_action"] == "logged"
+        incident = (harness.incident_rearm_check() if selected is None else
+                    {"skipped": True, "match": True})
+        incident["match"] = incident.get("match", False) and (incident.get("skipped", False) or (
+            incident["first_action"] == "logged"
             and incident["second_action"] == "already_logged"
             and incident["records_after_second"] == 1
             and incident["recovery_class"] == "working"
             and incident["rearmed_action"] == "logged"
-            and incident["records_after_rearm"] == 2)
+            and incident["records_after_rearm"] == 2))
         digest = hashlib.sha256(args.binary.read_bytes()).hexdigest()
         source = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.strip()
