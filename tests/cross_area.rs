@@ -1007,7 +1007,18 @@ fn cross_area_workspace_create_preserves_client_focus_and_detach_stability() {
         .and_then(|workspace| workspace["workspace_id"].as_str())
         .expect("attached clients should have an initial workspace")
         .to_string();
-    let focused_pane_id = format!("{initial_workspace_id}:p1");
+    let initial_panes = send_json_request(
+        &api_socket,
+        "initial_panes",
+        "pane.list",
+        json!({ "workspace_id": initial_workspace_id }),
+    );
+    let focused_pane_id = initial_panes["result"]["panes"]
+        .as_array()
+        .and_then(|panes| panes.iter().find(|pane| pane["focused"] == true))
+        .and_then(|pane| pane["pane_id"].as_str())
+        .expect("initial workspace should have a focused pane")
+        .to_string();
 
     let created = workspace_create(&api_socket, "shared-view");
     let created_pane_id = created["result"]["root_pane"]["pane_id"]
