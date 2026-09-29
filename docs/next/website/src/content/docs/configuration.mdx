@@ -368,7 +368,7 @@ Choose the sections layout with a separate layout key. The default `current` val
 ```toml
 [ui.sidebar]
 layout = "sections"
-show_ask_subtitles = true
+show_ask_subtitles = false
 # header = "sky"  # optional
 
 [ui.sidebar.areas]
@@ -387,7 +387,7 @@ Each `areas` key hides or shows that row group in the sections layout. Every
 area is shown by default. The current layout ignores this table.
 
 `show_ask_subtitles` controls the one-line question shown below blocked agents
-in the sections layout. It defaults to `true` and can also be changed under
+in the sections layout. It defaults to `false` and can also be changed under
 Settings → Sidebar → Show ask subtitles.
 
 Pin or unpin a tab from the CLI with `herdr tab pin <tab_id>` and `herdr tab unpin <tab_id>`. The Needs you rows appear above the Spaces view in both layouts. Up to five show initially; use `▸ N more` to show the rest and `▴ less` to fold them back.

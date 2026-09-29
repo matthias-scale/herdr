@@ -7994,7 +7994,7 @@ impl AppState {
             sidebar_spaces: crate::config::SpacesSidebarConfig::default(),
             sidebar_areas: crate::config::SidebarAreasConfig::default(),
             sidebar_sections_layout: false,
-            sidebar_show_ask_subtitles: true,
+            sidebar_show_ask_subtitles: false,
             sidebar_header_plain: false,
             next_agent_state_change_seq: 0,
             mouse_capture: true,

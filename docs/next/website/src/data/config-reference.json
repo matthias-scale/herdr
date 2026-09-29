@@ -1650,8 +1650,8 @@
         {
           "key": "ui.sidebar.show_ask_subtitles",
           "type": "boolean",
-          "default": "true",
-          "description": "Show the pending human question under blocked rows in the sections layout. Settings: Sidebar → Show ask subtitles. Default: true."
+          "default": "false",
+          "description": "Show the pending human question under blocked rows in the sections layout. Settings: Sidebar → Show ask subtitles. Default: false."
         },
         {
           "key": "ui.accent",

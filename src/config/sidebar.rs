@@ -442,7 +442,7 @@ pub struct SidebarConfig {
     pub agents: AgentsSidebarConfig,
     pub spaces: SpacesSidebarConfig,
     /// Show the pending human question under blocked rows in the sections
-    /// layout. Settings: Sidebar → Show ask subtitles. Default: true.
+    /// layout. Settings: Sidebar → Show ask subtitles. Default: false.
     pub show_ask_subtitles: bool,
 }
 
@@ -454,7 +454,7 @@ impl Default for SidebarConfig {
             areas: SidebarAreasConfig::default(),
             agents: AgentsSidebarConfig::default(),
             spaces: SpacesSidebarConfig::default(),
-            show_ask_subtitles: true,
+            show_ask_subtitles: false,
         }
     }
 }
@@ -597,7 +597,7 @@ mod tests {
         );
         // ac3: distinct Space groups get one compact blank row by default.
         assert_eq!(config.spaces.row_gap, 1);
-        assert!(config.show_ask_subtitles);
+        assert!(!config.show_ask_subtitles);
     }
 
     #[test]

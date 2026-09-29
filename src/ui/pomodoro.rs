@@ -392,6 +392,17 @@ pub(crate) fn notification_hit_area(app: &AppState, sidebar: Rect) -> Rect {
         return Rect::default();
     }
     let content_width = sidebar.width.saturating_sub(1);
+    if app.sidebar_sections_layout {
+        let x = sidebar.x.saturating_add(18);
+        let timer = pomodoro_hit_area(app, sidebar);
+        let right_limit = sidebar.x.saturating_add(content_width).saturating_sub(2);
+        if x.saturating_add(NOTIFICATION_WIDTH) > right_limit
+            || (timer.width > 0 && x.saturating_add(NOTIFICATION_WIDTH) > timer.x)
+        {
+            return Rect::default();
+        }
+        return Rect::new(x, sidebar.bottom().saturating_sub(1), NOTIFICATION_WIDTH, 1);
+    }
     if content_width < FOOTER_ICON_COLUMNS + CYCLE_MODE_WIDTH + NOTIFICATION_WIDTH {
         return Rect::default();
     }
@@ -405,6 +416,17 @@ pub(crate) fn notification_hit_area(app: &AppState, sidebar: Rect) -> Rect {
 }
 
 pub(crate) fn window_cycle_mode_hit_area(app: &AppState, sidebar: Rect) -> Rect {
+    if app.sidebar_sections_layout {
+        if app.sidebar_collapsed || sidebar.height == 0 || sidebar.width.saturating_sub(1) < 17 {
+            return Rect::default();
+        }
+        return Rect::new(
+            sidebar.x.saturating_add(14),
+            sidebar.bottom().saturating_sub(1),
+            CYCLE_MODE_WIDTH,
+            1,
+        );
+    }
     let notification = notification_hit_area(app, sidebar);
     if notification.width == 0 {
         return Rect::default();
@@ -423,24 +445,17 @@ pub(crate) fn sidebar_areas_hit_area(app: &AppState, sidebar: Rect) -> Rect {
         return Rect::default();
     }
     let content_width = sidebar.width.saturating_sub(1);
-    let timer = pomodoro_hit_area(app, sidebar);
-    let reserved_timer = timer.width;
-    if content_width
-        < FOOTER_ICON_COLUMNS
-            + CYCLE_MODE_WIDTH
-            + NOTIFICATION_WIDTH
-            + SIDEBAR_AREAS_WIDTH
-            + reserved_timer
+    let x = sidebar.x.saturating_add(16);
+    let right_limit = sidebar.x.saturating_add(content_width).saturating_sub(2);
+    let bell = notification_hit_area(app, sidebar);
+    if content_width < 22
+        || x.saturating_add(SIDEBAR_AREAS_WIDTH) > right_limit
+        || (bell.width > 0 && x >= bell.x)
     {
         return Rect::default();
     }
-    let notification = if timer.width > 0 {
-        timer.x.saturating_sub(NOTIFICATION_WIDTH)
-    } else {
-        sidebar.x + content_width - NOTIFICATION_WIDTH
-    };
     Rect::new(
-        notification.saturating_sub(SIDEBAR_AREAS_WIDTH),
+        x,
         sidebar.bottom().saturating_sub(1),
         SIDEBAR_AREAS_WIDTH,
         1,
@@ -1166,6 +1181,38 @@ mod tests {
         );
         assert_eq!(timer, Rect::new(18, 19, 8, 1));
         assert_eq!(bell.right(), timer.x);
+    }
+
+    #[test]
+    fn sections_footer_controls_render_in_left_slots_with_matching_hit_areas() {
+        let mut app = state();
+        app.sidebar_sections_layout = true;
+        let sidebar = Rect::new(0, 0, 40, 20);
+        let areas = sidebar_areas_hit_area(&app, sidebar);
+        let bell = notification_hit_area(&app, sidebar);
+        let cycle = window_cycle_mode_hit_area(&app, sidebar);
+        assert!(areas.x < bell.x);
+        assert!(bell.right() <= sidebar.x + sidebar.width - 3);
+        assert!(areas.x >= cycle.right() + 1);
+        assert!(bell.right() <= pomodoro_hit_area(&app, sidebar).x);
+
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 20))
+            .expect("footer terminal");
+        terminal
+            .draw(|frame| {
+                render_sidebar_areas_toggle(&app, frame, areas);
+                render_notification_toggle(&app, frame, bell);
+            })
+            .expect("draw footer controls");
+        assert_eq!(
+            terminal.backend().buffer()[(areas.x, areas.y)].symbol(),
+            "≡"
+        );
+        assert_eq!(terminal.backend().buffer()[(bell.x, bell.y)].symbol(), "🔔");
+
+        let narrow = Rect::new(0, 0, 18, 20);
+        assert_eq!(sidebar_areas_hit_area(&app, narrow).width, 0);
+        assert_eq!(notification_hit_area(&app, narrow).width, 0);
     }
 
     #[test]

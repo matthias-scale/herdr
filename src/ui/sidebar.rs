@@ -3713,7 +3713,18 @@ fn compact_sidebar_rows_inner(
             collapsed: working_collapsed,
         });
         if !working_collapsed {
-            append_tab_rows(&mut rows, working_entries, 0);
+            append_space_tree_rows(
+                app,
+                &mut rows,
+                working_entries,
+                false,
+                terminal_runtimes,
+                SidebarGroupMode::Spaces,
+                false,
+                true,
+                workspace_activity.as_ref(),
+                Some(&remote_activity),
+            );
         }
         snoozed_entries.extend(remote_snoozed);
         rows.push(SidebarRow::ShelfDivider);
@@ -29473,6 +29484,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         ]);
         app.sidebar_sections_layout = true;
         app.sidebar_group_mode = SidebarGroupMode::Spaces;
+        app.workspaces[0].custom_name = Some("scalablev2".into());
         let review_pane = app.workspaces[0].tabs[0].root_pane;
         let review_terminal = app.workspaces[0].tabs[0].panes[&review_pane]
             .attached_terminal_id
@@ -29558,6 +29570,50 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect::<Vec<_>>();
         assert_eq!(working.len(), 1);
         assert_eq!(compact_row_dot(working[0]), " ");
+        let working_header = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: WORKING_SECTION_TITLE,
+                        ..
+                    }
+                )
+            })
+            .expect("working header");
+        assert!(matches!(
+            rows.get(working_header + 1),
+            Some(SidebarRow::Workspace { .. })
+        ));
+        assert!(
+            matches!(rows.get(working_header + 2), Some(SidebarRow::Tab { entry, .. }) if entry.working_shelf)
+        );
+        let mut expanded = Terminal::new(TestBackend::new(area.width, area.height))
+            .expect("expanded focus sidebar terminal");
+        expanded
+            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .expect("render expanded focus sidebar");
+        let expanded_snapshot = (0..area.height)
+            .map(|y| row_text(expanded.backend().buffer(), y, area.width))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let working_label = expanded_snapshot
+            .find("Working")
+            .expect("rendered Working header");
+        let group_label = expanded_snapshot
+            .find("scalablev2")
+            .expect("rendered Space header");
+        let working_tab_label = expanded_snapshot
+            .find("build")
+            .expect("rendered working tab");
+        assert!(
+            working_label < group_label && group_label < working_tab_label,
+            "{expanded_snapshot}"
+        );
+        assert!(rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::Workspace { .. })));
     }
 
     #[test]
