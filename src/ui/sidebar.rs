@@ -28611,7 +28611,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             }),
             "unhovered rows keep lifecycle hit areas hidden"
         );
-        let hover = crate::ui::hovered_control_at(&app, row.rect.right() - 1, row.rect.y)
+        let hover = crate::ui::hovered_control_at(&app, row.rect.x + 3, row.rect.y)
             .expect("row-wide hover target");
         assert_eq!(
             hover,
