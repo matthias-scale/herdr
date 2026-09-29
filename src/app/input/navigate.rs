@@ -758,6 +758,7 @@ impl App {
     }
 
     pub(crate) fn focus_workspace_idx_via_api(&mut self, ws_idx: usize) {
+        self.state.sidebar_selected_remote_agent = None;
         let workspace_id = self.public_workspace_id(ws_idx);
         self.runtime_workspace_focus("tui.workspace.focus", workspace_id);
     }
@@ -941,6 +942,7 @@ impl App {
     }
 
     pub(crate) fn focus_tab_idx_via_api(&mut self, tab_idx: usize) {
+        self.state.sidebar_selected_remote_agent = None;
         let Some(ws_idx) = self.state.active else {
             return;
         };
@@ -1034,6 +1036,7 @@ impl App {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
     ) {
+        self.state.sidebar_selected_remote_agent = None;
         let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) else {
             return;
         };
@@ -1161,6 +1164,22 @@ impl App {
         let Some((ws_idx, pane_id)) = self.focused_pane_target() else {
             return false;
         };
+        let remote_agent = self.fleet_attach_agents.get(&pane_id).cloned().or_else(|| {
+            self.remote_focus_operations
+                .agent_ref_for_proxy_pane(pane_id)
+                .cloned()
+        });
+        if let Some(agent_ref) = remote_agent {
+            if self.state.confirm_close {
+                self.state.confirm_close_workspace_id = None;
+                self.state.confirm_close_remote_agent_ref = Some(agent_ref);
+                self.state
+                    .open_client_overlay(crate::app::state::ClientOverlay::ConfirmClose);
+            } else if let Err(error) = self.remote_pane_close(agent_ref.clone()) {
+                self.show_remote_pane_lifecycle_error(&agent_ref, error);
+            }
+            return self.state.client_overlay == crate::app::state::ClientOverlay::ConfirmClose;
+        }
         let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) else {
             return false;
         };
@@ -1338,7 +1357,7 @@ impl App {
         self.focus_client_on_pane();
     }
 
-    fn focused_pane_target(&self) -> Option<(usize, crate::layout::PaneId)> {
+    pub(crate) fn focused_pane_target(&self) -> Option<(usize, crate::layout::PaneId)> {
         let ws_idx = self.state.active?;
         let pane_id = self.state.workspaces.get(ws_idx)?.focused_pane_id()?;
         Some((ws_idx, pane_id))
@@ -3942,11 +3961,117 @@ mod tests {
     }
 
     #[test]
+    fn close_fleet_attach_pane_uses_owner_confirmation() {
+        let (mut app, agent_ref) = app_with_remote_agent();
+        let pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        app.fleet_attach_agents.insert(pane_id, agent_ref.clone());
+        app.state.confirm_close = true;
+
+        app.execute_tui_navigate_action(NavigateAction::ClosePane, ActionContext::Prefix);
+
+        assert_eq!(
+            app.state.client_overlay,
+            crate::app::state::ClientOverlay::ConfirmClose
+        );
+        assert_eq!(app.state.confirm_close_remote_agent_ref, Some(agent_ref));
+        assert!(app.state.workspaces[0].pane_state(pane_id).is_some());
+    }
+
+    #[test]
+    fn close_fleet_attach_pane_without_confirmation_keeps_local_pane() {
+        let (mut app, agent_ref) = app_with_remote_agent();
+        let pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        app.fleet_attach_agents.insert(pane_id, agent_ref);
+        app.state.confirm_close = false;
+
+        app.execute_tui_navigate_action(NavigateAction::ClosePane, ActionContext::Prefix);
+
+        assert!(app.state.workspaces[0].pane_state(pane_id).is_some());
+        assert_eq!(
+            app.state.toast.as_ref().map(|toast| toast.title.as_str()),
+            Some("ub2 pane action failed")
+        );
+        assert!(app
+            .state
+            .toast
+            .as_ref()
+            .unwrap()
+            .context
+            .contains("unreachable"));
+    }
+
+    #[test]
+    fn confirming_fleet_attach_close_dispatches_owner_close() {
+        let (mut app, agent_ref) = app_with_remote_agent();
+        let pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        app.fleet_attach_agents.insert(pane_id, agent_ref.clone());
+        app.state.confirm_close = true;
+        app.execute_tui_navigate_action(NavigateAction::ClosePane, ActionContext::Prefix);
+
+        app.handle_confirm_close_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert!(app.state.workspaces[0].pane_state(pane_id).is_some());
+        assert_eq!(
+            app.state.client_overlay,
+            crate::app::state::ClientOverlay::None
+        );
+        assert_eq!(
+            app.state.toast.as_ref().map(|toast| toast.title.as_str()),
+            Some("ub2 pane action failed")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn close_plain_local_pane_stays_local_when_remote_selection_was_cleared() {
+        let (mut app, _) = app_with_remote_agent();
+        let pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        app.state.confirm_close = false;
+        app.state.sidebar_selected_remote_agent = None;
+
+        app.execute_tui_navigate_action(NavigateAction::ClosePane, ActionContext::Prefix);
+
+        assert!(app.state.workspaces[0].pane_state(pane_id).is_none());
+    }
+
+    #[test]
+    fn focusing_a_local_pane_clears_remote_close_selection() {
+        let (mut app, agent_ref) = app_with_remote_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.sidebar_selected_remote_agent = Some(agent_ref);
+
+        app.focus_pane_internal_via_api(0, pane_id);
+
+        assert!(app.state.sidebar_selected_remote_agent.is_none());
+    }
+
+    #[test]
     fn fleet_workspace_ac6_space_navigation_obeys_fleet_section_collapse() {
         let mut app = app_with_test_workspaces(&["local-one", "local-two"]);
         app.state.sidebar_group_mode = crate::app::state::SidebarGroupMode::Spaces;
         app.state.sidebar_sections_layout = true;
         app.state.sidebar_areas.hosts = true;
+        for ws_idx in 0..2 {
+            let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("local agent terminal")
+                .set_detected_state(
+                    Some(crate::detect::Agent::Claude),
+                    crate::detect::AgentState::Blocked,
+                );
+        }
         let mut fleet = Workspace::test_new("fleet");
         fleet.is_fleet = true;
         app.state.workspaces.push(fleet);
@@ -4174,6 +4299,111 @@ mod tests {
     }
 
     #[test]
+    fn focus_sidebar_shortcuts_follow_filtered_and_expanded_rows() {
+        let mut app = app_with_test_workspaces(&["blocked", "done", "working"]);
+        app.state.sidebar_sections_layout = true;
+        app.state.sidebar_group_mode = crate::app::state::SidebarGroupMode::Spaces;
+
+        for (ws_idx, status) in [
+            crate::detect::AgentState::Blocked,
+            crate::detect::AgentState::Idle,
+            crate::detect::AgentState::Working,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.state.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .expect("agent terminal")
+                .set_detected_state(Some(crate::detect::Agent::Claude), status);
+            if ws_idx == 1 {
+                app.state.workspaces[ws_idx].tabs[0]
+                    .panes
+                    .get_mut(&pane_id)
+                    .expect("done pane")
+                    .seen = false;
+            }
+        }
+
+        let working = "Working";
+        assert!(crate::ui::sidebar::section_is_collapsed(
+            &app.state, working
+        ));
+        assert_eq!(app.state.visible_workspace_order(), vec![0, 1]);
+        assert_eq!(app.state.workspace_at_visible_position(2), None);
+        let third_workspace = navigate_reserved_action_for_key(
+            &app.state,
+            &TerminalKey::new(KeyCode::Char('3'), KeyModifiers::empty()),
+        )
+        .expect("workspace jump shortcut");
+        assert_eq!(third_workspace, NavigateAction::SwitchWorkspace(2));
+        execute_navigate_action(&mut app.state, third_workspace);
+        assert_eq!(
+            app.state.active,
+            Some(0),
+            "hidden workspaces have no jump number"
+        );
+        app.state.selected = 2;
+        app.state.move_selected_workspace_by_visible_delta(-1);
+        assert_eq!(
+            app.state.selected, 1,
+            "up from a hidden row starts at the last visible row"
+        );
+        app.state.selected = 2;
+        app.state.move_selected_workspace_by_visible_delta(1);
+        assert_eq!(
+            app.state.selected, 0,
+            "down from a hidden row starts at the first visible row"
+        );
+
+        app.state.toggle_sidebar_group(working);
+        assert_eq!(app.state.visible_workspace_order(), vec![0, 1, 2]);
+        let third_workspace = navigate_reserved_action_for_key(
+            &app.state,
+            &TerminalKey::new(KeyCode::Char('3'), KeyModifiers::empty()),
+        )
+        .expect("workspace jump shortcut");
+        execute_navigate_action(&mut app.state, third_workspace);
+        assert_eq!(
+            app.state.active,
+            Some(2),
+            "expanded Working rows get jump numbers"
+        );
+
+        app.state.sidebar_work_filter.query = "done".into();
+        assert_eq!(app.state.visible_workspace_order(), vec![1]);
+        assert_eq!(app.state.workspace_at_visible_position(0), Some(1));
+        assert_eq!(app.state.workspace_at_visible_position(1), None);
+        let second_workspace = navigate_reserved_action_for_key(
+            &app.state,
+            &TerminalKey::new(KeyCode::Char('2'), KeyModifiers::empty()),
+        )
+        .expect("workspace jump shortcut");
+        execute_navigate_action(&mut app.state, second_workspace);
+        assert_eq!(
+            app.state.active,
+            Some(2),
+            "filtered workspaces have no jump number"
+        );
+        let first_workspace = navigate_reserved_action_for_key(
+            &app.state,
+            &TerminalKey::new(KeyCode::Char('1'), KeyModifiers::empty()),
+        )
+        .expect("workspace jump shortcut");
+        execute_navigate_action(&mut app.state, first_workspace);
+        assert_eq!(
+            app.state.active,
+            Some(1),
+            "jump numbers follow filtered row order"
+        );
+    }
+
+    #[test]
     fn fleet_workspace_ac6_window_cycle_scope_adds_fleet_only_when_selected() {
         let mut state = AppState::test_new();
         let mut local = Workspace::test_new("local");
@@ -4361,6 +4591,12 @@ mod tests {
     #[test]
     fn fleet_workspace_ac9_skip_collapsed_sections_exclude_their_tabs() {
         let mut app = app_with_global_window_fixture();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Blocked,
+            );
+        }
         app.state.sidebar_sections_layout = true;
         app.state.skip_collapsed_cycle = true;
         assert!(!window_navigation_order(&app.state).is_empty());

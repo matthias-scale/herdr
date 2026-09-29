@@ -626,6 +626,8 @@ fn compute_view_internal_at(
     } else {
         sidebar::sidebar_footer_settings_hit_area(sidebar_area)
     };
+    let sidebar_footer_ask_subtitles_hit_area =
+        sidebar::sidebar_footer_ask_subtitles_hit_area(app, sidebar_area);
     let sidebar_footer_usage_hit_area = if app.sidebar_collapsed {
         Rect::default()
     } else {
@@ -658,6 +660,7 @@ fn compute_view_internal_at(
     };
     let notepad_rect = sidebar::sidebar_notepad_rect(app, sidebar_area);
     let notepad_tab_hit_areas = notepad::notepad_tab_hit_areas(app, notepad_rect);
+    let notepad_usage_toggle_hit_area = notepad::usage_toggle_hit_area(app, notepad_rect);
     // The agent tab's rows live on the view so a click resolves to the exact
     // row the operator saw. Deriving them takes a snapshot of the focused
     // pane's agent state, so it only happens while the tab is showing.
@@ -674,7 +677,9 @@ fn compute_view_internal_at(
         app.notepad.agent_scroll = 0;
         (Vec::new(), 0)
     };
-    let (notepad_usage_rows, notepad_usage_max_scroll) = if app.notepad.usage_tab
+    let (notepad_usage_rows, notepad_usage_max_scroll, notepad_usage_hit_areas) = if app
+        .notepad
+        .usage_tab
         && notepad_rect.height > 1
     {
         let body = notepad::notepad_body_rect(notepad_rect);
@@ -682,10 +687,11 @@ fn compute_view_internal_at(
         let (rows, max_scroll) =
             notepad_usage::usage_rows_window(app, body.width, app.notepad.usage_scroll, visible);
         app.notepad.usage_scroll = app.notepad.usage_scroll.min(max_scroll);
-        (rows, max_scroll)
+        let hit_areas = notepad_usage::usage_row_hit_areas(&rows, body);
+        (rows, max_scroll, hit_areas)
     } else {
         app.notepad.usage_scroll = 0;
-        (Vec::new(), 0)
+        (Vec::new(), 0, Vec::new())
     };
     let pomodoro_hit_area = pomodoro::pomodoro_hit_area(app, sidebar_area);
     let notification_hit_area = pomodoro::notification_hit_area(app, sidebar_area);
@@ -853,16 +859,19 @@ fn compute_view_internal_at(
         status_bar_rect,
         sidebar_rect: sidebar_area,
         sidebar_footer_settings_hit_area,
+        sidebar_footer_ask_subtitles_hit_area,
         sidebar_footer_work_hit_area,
         sidebar_footer_usage_hit_area,
         usage_hit_areas,
         sidebar_footer_ticket_hit_area,
         sidebar_footer_missive_hit_area,
         notepad_rect,
+        notepad_usage_toggle_hit_area,
         notepad_tab_hit_areas,
         notepad_agent_rows,
         notepad_agent_max_scroll,
         notepad_usage_rows,
+        notepad_usage_hit_areas,
         notepad_usage_max_scroll,
         pomodoro_hit_area,
         notification_hit_area,
@@ -1178,16 +1187,19 @@ fn compute_mobile_view(
         status_bar_rect: Rect::default(),
         sidebar_rect: Rect::default(),
         sidebar_footer_settings_hit_area: Rect::default(),
+        sidebar_footer_ask_subtitles_hit_area: Rect::default(),
         sidebar_footer_work_hit_area: Rect::default(),
         sidebar_footer_usage_hit_area: Rect::default(),
         usage_hit_areas: Vec::new(),
         sidebar_footer_ticket_hit_area: Rect::default(),
         sidebar_footer_missive_hit_area: Rect::default(),
         notepad_rect: Rect::default(),
+        notepad_usage_toggle_hit_area: Rect::default(),
         notepad_tab_hit_areas: Vec::new(),
         notepad_agent_rows: Vec::new(),
         notepad_agent_max_scroll: 0,
         notepad_usage_rows: Vec::new(),
+        notepad_usage_hit_areas: Vec::new(),
         notepad_usage_max_scroll: 0,
         pomodoro_hit_area: Rect::default(),
         notification_hit_area: Rect::default(),
