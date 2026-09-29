@@ -767,7 +767,7 @@ def main() -> int:
                 pane_id = harness.panes[ident]
                 session_id = "session-" + ident
                 harness.call("pane.report_agent_session", {"pane_id": pane_id,
-                    "source": "watchdog-harness", "agent": "codex",
+                    "source": "herdr:codex", "agent": "codex",
                     "agent_session_id": session_id})
                 status = "idle" if ident in ("a-finished-idle", "stale_draft_promised_work_stalled") else (
                     "blocked" if ident == "a-approval-hook" else "working")
@@ -797,7 +797,9 @@ def main() -> int:
                 age = 1800 if ident == "stale_draft_promised_work_stalled" else 900 if ident in ("a-quiet-build", "a-silent-stall", "a-spinner-only",
                                        "a-spinner-progress", "a-resumed") else 0
                 if ident.startswith("promised_"):
-                    age = 3
+                    # These cases exercise promised-work policy. Keep the
+                    # composer draft, but age it past the human-typing guard.
+                    age = 1800
                 if ident == "a-retry-renewed":
                     age = 1200
                 elif ident == "a-prose-question":
