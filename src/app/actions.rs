@@ -3398,7 +3398,7 @@ impl AppState {
                             .iter()
                             .any(|item| item.requires_human_input());
                     auto_settle = terminal.observe_auto_settle_transition(
-                        before.previous_state == AgentState::Blocked || has_blockers,
+                        has_blockers,
                         after.state == AgentState::Idle
                             && terminal.closing_task_complete()
                             && !has_blockers,
