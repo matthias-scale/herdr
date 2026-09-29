@@ -435,7 +435,7 @@ def _script(text: str, repeat: bool = False) -> str:
     return _fixture_command(code)
 
 
-def _promised_draft_agent(root: Path) -> str:
+def _promised_draft_agent(root: Path, account: str) -> str:
     script = root / "fake_agent.sh"
     script.write_text('''#!/bin/sh
 draft=cont
@@ -444,7 +444,7 @@ draw() {
   printf '%s\\n' \\
     "Now: Codex reviewers — reviewing PR 1656; the config-folder worker starts after it merges" \\
     "⎿ Stop says: /review completed — invoke /retro to capture lessons." \\
-    "● Background shell command didn't finish before the previous session ended"
+    "__ACCOUNT_LINE__"
   if [ -n "${turn1:-}" ]; then printf '%s\\n' "$turn1" "$turn2"; fi
   printf '%s\\n' '────────────────────────' "❯ $draft" \\
     '────────────────────────' \\
@@ -457,7 +457,7 @@ while IFS= read -r submitted; do
   draft=
   draw
 done
-''', encoding="utf-8")
+'''.replace("__ACCOUNT_LINE__", account), encoding="utf-8")
     script.chmod(0o755)
     return "clear; exec /bin/sh " + shlex.quote(str(script))
 
@@ -491,15 +491,15 @@ def setup_summary(h: Harness, ident: str) -> str:
 def setup_promised_draft(h: Harness, ident: str) -> str:
     account = ("You hit your usage limit" if "usage_limit" in ident else
                "Please sign in" if "logged_out" in ident else
-               "Now: Codex reviewers — reviewing PR 1656; the config-folder worker starts after it merges")
+               "● Background shell command didn't finish before the previous session ended")
     screen = ("Now: Codex reviewers — reviewing PR 1656; the config-folder worker starts after it merges\n"
-              f"{account}\n"
               "⎿ Stop says: /review completed — invoke /retro to capture lessons.\n"
-              "● Background shell command didn't finish before the previous session ended\n"
+              f"{account}\n"
               "────────────────────────\n❯ cont\n────────────────────────\n"
               "░░░░░░ 92% 78k tokens │ 2h 24m ago │ -- INSERT -- · 1 feedback draft")
     ready = tuple(screen.splitlines())
-    return h.workspace(ident, _promised_draft_agent(h.root), ready)
+    pane_id = h.workspace(ident, _promised_draft_agent(h.root, account), ready)
+    return pane_id
 
 
 def setup_done_here(h: Harness, ident: str) -> str:
