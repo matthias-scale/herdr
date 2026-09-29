@@ -195,6 +195,8 @@ pub struct App {
     /// Server-owned remote focus operations. This state is touched only by
     /// API requests and transport events, never by render or pane loops.
     pub(crate) remote_focus_operations: remote_focus::RemoteFocusOperations,
+    pub(crate) fleet_attach_agents:
+        std::collections::HashMap<crate::layout::PaneId, crate::api::schema::AgentRef>,
     pub(crate) remote_focus_transport: Box<dyn remote_focus::RemoteFocusTransport>,
     pub(crate) fleet_poller_config: crate::fleet::FleetPollerHandle,
     /// Server-owned group authority. Persistence is separate from client presentation state.
@@ -1137,16 +1139,19 @@ impl App {
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
                 sidebar_footer_settings_hit_area: Rect::default(),
+                sidebar_footer_ask_subtitles_hit_area: Rect::default(),
                 sidebar_footer_work_hit_area: Rect::default(),
                 sidebar_footer_usage_hit_area: Rect::default(),
                 usage_hit_areas: Vec::new(),
                 sidebar_footer_ticket_hit_area: Rect::default(),
                 sidebar_footer_missive_hit_area: Rect::default(),
                 notepad_rect: Rect::default(),
+                notepad_usage_toggle_hit_area: Rect::default(),
                 notepad_tab_hit_areas: Vec::new(),
                 notepad_agent_rows: Vec::new(),
                 notepad_agent_max_scroll: 0,
                 notepad_usage_rows: Vec::new(),
+                notepad_usage_hit_areas: Vec::new(),
                 notepad_usage_max_scroll: 0,
                 pomodoro_hit_area: Rect::default(),
                 notification_hit_area: Rect::default(),
@@ -1362,6 +1367,7 @@ impl App {
             sidebar_areas: config.ui.sidebar.areas.clone(),
             sidebar_sections_layout: config.ui.sidebar.layout
                 == crate::config::SidebarLayoutConfig::Sections,
+            sidebar_show_ask_subtitles: config.ui.sidebar.show_ask_subtitles,
             sidebar_header_plain: config.ui.sidebar.header
                 == crate::config::SidebarHeaderConfig::Plain,
             next_agent_state_change_seq: 0,
@@ -1587,6 +1593,7 @@ impl App {
             terminal_runtimes: restored_terminal_runtimes,
             status_log: crate::status_log::StatusLog::for_server(),
             remote_focus_operations: remote_focus::RemoteFocusOperations::default(),
+            fleet_attach_agents: std::collections::HashMap::new(),
             remote_focus_transport: Box::new(crate::remote::SshRemoteFocusTransport::new(
                 &config.remote.fleet,
             )),
@@ -2909,6 +2916,7 @@ impl App {
                     || self.state.sidebar_sections_layout
                         != (config.ui.sidebar.layout
                             == crate::config::SidebarLayoutConfig::Sections)
+                    || self.state.sidebar_show_ask_subtitles != config.ui.sidebar.show_ask_subtitles
                 {
                     sidebar_projection_changed = true;
                 }
@@ -2922,6 +2930,7 @@ impl App {
                 self.state.sidebar_areas = config.ui.sidebar.areas.clone();
                 self.state.sidebar_sections_layout =
                     config.ui.sidebar.layout == crate::config::SidebarLayoutConfig::Sections;
+                self.state.sidebar_show_ask_subtitles = config.ui.sidebar.show_ask_subtitles;
                 if self.state.sidebar_sections_layout && !self.state.sidebar_areas.notes {
                     self.state.set_notepad_focus(false);
                 }

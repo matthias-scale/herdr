@@ -2646,6 +2646,8 @@ pub struct ViewState {
     pub sidebar_rect: Rect,
     /// Sidebar-footer entry for the settings screen.
     pub(crate) sidebar_footer_settings_hit_area: Rect,
+    /// Sidebar-footer toggle for pending ask subtitles.
+    pub(crate) sidebar_footer_ask_subtitles_hit_area: Rect,
     /// Sidebar-footer entry for the full-screen pull-request view.
     pub(crate) sidebar_footer_work_hit_area: Rect,
     /// Sidebar-footer entry for the client-local historical usage view.
@@ -2658,6 +2660,8 @@ pub struct ViewState {
     pub(crate) sidebar_footer_missive_hit_area: Rect,
     /// The notepad panel at the bottom of the sidebar. Empty when it is off.
     pub(crate) notepad_rect: Rect,
+    /// Clickable fold control in the active Usage-tab header.
+    pub(crate) notepad_usage_toggle_hit_area: Rect,
     /// Clickable tabs in the notepad header: note names, the Context tab and
     /// the agent tab.
     pub(crate) notepad_tab_hit_areas: Vec<(crate::notepad::NotepadTabTarget, Rect)>,
@@ -2668,6 +2672,8 @@ pub struct ViewState {
     pub(crate) notepad_agent_max_scroll: usize,
     /// Visible Usage-tab rows, materialized with their click actions.
     pub(crate) notepad_usage_rows: Vec<crate::ui::notepad_usage::NotepadUsageRow>,
+    /// Per-row hover targets derived from the same visible rows as rendering.
+    pub(crate) notepad_usage_hit_areas: Vec<Rect>,
     /// Maximum attach-local Usage-tab offset for the last computed geometry.
     pub(crate) notepad_usage_max_scroll: usize,
     /// The break-timer countdown in the sidebar footer row.
@@ -3192,6 +3198,7 @@ pub enum AgentPanelSort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     General,
+    Sidebar,
     Theme,
     Indicators,
     Sound,
@@ -3209,6 +3216,7 @@ pub enum SettingsSection {
 impl SettingsSection {
     pub const ALL: &[Self] = &[
         Self::General,
+        Self::Sidebar,
         Self::Theme,
         Self::Indicators,
         Self::Sound,
@@ -3226,6 +3234,7 @@ impl SettingsSection {
     pub fn label(self) -> &'static str {
         match self {
             Self::General => "general",
+            Self::Sidebar => "sidebar",
             Self::Theme => "theme",
             Self::Indicators => "indicators",
             Self::Sound => "sound",
@@ -3245,6 +3254,7 @@ impl SettingsSection {
     pub fn glyph(self) -> &'static str {
         match self {
             Self::General => "⚙",
+            Self::Sidebar => "▤",
             Self::Theme => "◐",
             Self::Indicators => "●",
             Self::Sound => "♪",
@@ -4851,6 +4861,8 @@ pub struct AppState {
     pub sidebar_areas: crate::config::SidebarAreasConfig,
     /// Config-selected sidebar presentation. It is view state, never session data.
     pub sidebar_sections_layout: bool,
+    /// Whether the sections Spaces tree shows one-line blocked-agent asks.
+    pub sidebar_show_ask_subtitles: bool,
     pub sidebar_header_plain: bool,
     pub next_agent_state_change_seq: u64,
     /// Capture mouse input for Herdr's own mouse UI. When false, Herdr only
@@ -5351,6 +5363,7 @@ impl From<crate::config::LinearLayoutConfig> for LinearViewLayout {
 pub(crate) enum SidebarFooterItem {
     Board,
     Settings,
+    AskSubtitles,
     PullRequests,
     Usage,
     Linear,
@@ -5370,6 +5383,8 @@ pub(crate) enum ControlId {
     SidebarFooter(SidebarFooterItem),
     SidebarHover(usize),
     SidebarRowHover(u16),
+    NotepadUsageRow(usize),
+    NotepadUsageToggle,
     SidebarAnimationPause,
     DockTab(usize),
     DockClose,
@@ -7768,16 +7783,19 @@ impl AppState {
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
                 sidebar_footer_settings_hit_area: Rect::default(),
+                sidebar_footer_ask_subtitles_hit_area: Rect::default(),
                 sidebar_footer_work_hit_area: Rect::default(),
                 sidebar_footer_usage_hit_area: Rect::default(),
                 usage_hit_areas: Vec::new(),
                 sidebar_footer_ticket_hit_area: Rect::default(),
                 sidebar_footer_missive_hit_area: Rect::default(),
                 notepad_rect: Rect::default(),
+                notepad_usage_toggle_hit_area: Rect::default(),
                 notepad_tab_hit_areas: Vec::new(),
                 notepad_agent_rows: Vec::new(),
                 notepad_agent_max_scroll: 0,
                 notepad_usage_rows: Vec::new(),
+                notepad_usage_hit_areas: Vec::new(),
                 notepad_usage_max_scroll: 0,
                 pomodoro_hit_area: Rect::default(),
                 notification_hit_area: Rect::default(),
@@ -7997,6 +8015,7 @@ impl AppState {
             sidebar_spaces: crate::config::SpacesSidebarConfig::default(),
             sidebar_areas: crate::config::SidebarAreasConfig::default(),
             sidebar_sections_layout: false,
+            sidebar_show_ask_subtitles: false,
             sidebar_header_plain: false,
             next_agent_state_change_seq: 0,
             mouse_capture: true,
