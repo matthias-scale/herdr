@@ -385,6 +385,9 @@ pub struct ClosingReport {
     external_wait: Option<String>,
     parse_status: Option<crate::api::schema::ClosingParseStatus>,
     workers_unknown: Option<bool>,
+    /// A needs-you report in the current agent session arms one automatic
+    /// settlement when that session later reports complete and idle.
+    auto_settle_armed: bool,
 }
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -416,6 +419,7 @@ impl Default for ClosingReport {
             external_wait: None,
             parse_status: None,
             workers_unknown: None,
+            auto_settle_armed: false,
         }
     }
 }
@@ -1441,6 +1445,30 @@ impl TerminalState {
             report.completion == Some(crate::api::schema::ClosingCompletion::Complete)
                 || report.closing_contract_met == Some(true)
         })
+    }
+
+    /// Remember that this session asked for human attention, and consume that
+    /// evidence exactly once when its closing report becomes complete and idle.
+    /// The marker intentionally survives working reports and user prompts; a
+    /// replacement agent session clears it with the closing report lifecycle.
+    pub(crate) fn observe_auto_settle_transition(
+        &mut self,
+        needs_you: bool,
+        complete_idle_without_blockers: bool,
+        session_replaced: bool,
+    ) -> bool {
+        if session_replaced {
+            if let Some(report) = self.closing_report.as_mut() {
+                report.auto_settle_armed = false;
+            }
+        }
+        let report = self.closing_report.get_or_insert_default();
+        report.auto_settle_armed |= needs_you;
+        if report.auto_settle_armed && complete_idle_without_blockers {
+            report.auto_settle_armed = false;
+            return true;
+        }
+        false
     }
 
     pub(crate) fn take_retired_closing_report_completion(&mut self) -> bool {
@@ -5820,6 +5848,27 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn auto_settle_requires_needs_you_and_consumes_each_transition_once() {
+        let mut terminal = test_terminal();
+        assert!(!terminal.observe_auto_settle_transition(false, true, false));
+        assert!(!terminal.observe_auto_settle_transition(true, false, false));
+        // Working reports and a fresh prompt do not erase the same session's
+        // needs-you evidence; the next complete idle report consumes it.
+        assert!(terminal.observe_auto_settle_transition(false, true, false));
+        assert!(!terminal.observe_auto_settle_transition(false, true, false));
+        // A later needs-you episode can arm another one-shot transition.
+        assert!(!terminal.observe_auto_settle_transition(true, false, false));
+        assert!(terminal.observe_auto_settle_transition(false, true, false));
+    }
+
+    #[test]
+    fn new_session_clears_pending_auto_settle_evidence() {
+        let mut terminal = test_terminal();
+        assert!(!terminal.observe_auto_settle_transition(true, false, false));
+        assert!(!terminal.observe_auto_settle_transition(false, true, true));
     }
 
     #[test]
