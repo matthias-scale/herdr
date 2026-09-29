@@ -29781,6 +29781,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn ask_subtitle_footer_uses_a_bell_at_supported_sidebar_widths() {
         let mut app = app_with_agents(&["herdr"]);
         app.sidebar_sections_layout = true;
+        app.sidebar_show_ask_subtitles = true;
         app.nerd_font = true;
         for width in [18, 42] {
             let area = Rect::new(0, 0, width, 20);
@@ -29832,6 +29833,16 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .set_raw_agent_state_for_test(AgentState::Blocked);
 
         let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader { key, count: 1, activity_count: Some((1, 2)), .. }
+                if key.starts_with("remote-space:ub2:")
+        )));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader { title, collapsed: true, .. }
+                if title == WORKING_SECTION_TITLE
+        )));
         let groups = rows
             .iter()
             .filter_map(|row| match row {
@@ -29909,7 +29920,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect::<Vec<_>>()
             .join("\n");
         assert!(snapshot.contains("1 of 2"), "{snapshot}");
-        assert!(snapshot.contains("↳ Approve remote work"), "{snapshot}");
+        assert!(!snapshot.contains("↳ Approve remote work"), "{snapshot}");
         let blocked = rows
             .iter()
             .find(|row| matches!(row, SidebarRow::RemoteAgent { entry, .. } if entry.entry.state == AgentState::Blocked))

@@ -371,9 +371,9 @@ pub(crate) fn pomodoro_hit_area(app: &AppState, sidebar: Rect) -> Rect {
     } else {
         0
     };
-    let left_controls =
-        FOOTER_ICON_COLUMNS + CYCLE_MODE_WIDTH + area_width + NOTIFICATION_WIDTH + 3;
-    if content_width < left_controls + INDICATOR_WIDTH {
+    if content_width
+        < FOOTER_ICON_COLUMNS + CYCLE_MODE_WIDTH + NOTIFICATION_WIDTH + area_width + INDICATOR_WIDTH
+    {
         return Rect::default();
     }
     Rect::new(
@@ -422,12 +422,18 @@ pub(crate) fn window_cycle_mode_hit_area(app: &AppState, sidebar: Rect) -> Rect 
         if app.sidebar_collapsed || sidebar.height == 0 || sidebar.width.saturating_sub(1) < 17 {
             return Rect::default();
         }
-        return Rect::new(
+        let slot = Rect::new(
             sidebar.x.saturating_add(FOOTER_ICON_COLUMNS),
             sidebar.bottom().saturating_sub(1),
             CYCLE_MODE_WIDTH,
             1,
         );
+        let timer = pomodoro_hit_area(app, sidebar);
+        return if timer.width > 0 && slot.right() > timer.x {
+            Rect::default()
+        } else {
+            slot
+        };
     }
     let notification = notification_hit_area(app, sidebar);
     if notification.width == 0 {
@@ -451,8 +457,10 @@ pub(crate) fn sidebar_areas_hit_area(app: &AppState, sidebar: Rect) -> Rect {
         .x
         .saturating_add(FOOTER_ICON_COLUMNS + CYCLE_MODE_WIDTH + 1);
     let right_limit = sidebar.x.saturating_add(content_width).saturating_sub(2);
+    let timer = pomodoro_hit_area(app, sidebar);
     if content_width < FOOTER_ICON_COLUMNS + CYCLE_MODE_WIDTH + SIDEBAR_AREAS_WIDTH + 3
         || x.saturating_add(SIDEBAR_AREAS_WIDTH) > right_limit
+        || (timer.width > 0 && x.saturating_add(SIDEBAR_AREAS_WIDTH) > timer.x)
     {
         return Rect::default();
     }
@@ -1233,11 +1241,34 @@ mod tests {
             .filter(|area| area.width > 0)
             .collect();
             for (index, left) in areas.iter().enumerate() {
-                assert!(left.right() <= width - 2, "width {width}: {left:?}");
+                if *left != pomodoro_hit_area(&app, sidebar) {
+                    assert!(left.right() <= width - 2, "width {width}: {left:?}");
+                }
                 for right in &areas[index + 1..] {
                     assert!(
                         left.right() <= right.x || right.right() <= left.x,
                         "width {width}: overlapping {left:?} and {right:?}"
+                    );
+                }
+            }
+        }
+        app.pomodoro.enabled = false;
+        for width in 18..=60 {
+            let sidebar = Rect::new(0, 0, width, 20);
+            let areas: Vec<Rect> = [
+                sidebar_areas_hit_area(&app, sidebar),
+                window_cycle_mode_hit_area(&app, sidebar),
+                notification_hit_area(&app, sidebar),
+                pomodoro_hit_area(&app, sidebar),
+            ]
+            .into_iter()
+            .filter(|area| area.width > 0)
+            .collect();
+            for (index, left) in areas.iter().enumerate() {
+                for right in &areas[index + 1..] {
+                    assert!(
+                        left.right() <= right.x || right.right() <= left.x,
+                        "disabled timer width {width}: overlapping {left:?} and {right:?}"
                     );
                 }
             }
