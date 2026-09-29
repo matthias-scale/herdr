@@ -1252,8 +1252,10 @@ fn multi_client_broadcasts_frame_updates_to_all_clients() {
     let (_workspace_id, pane_id) =
         create_workspace_and_root_pane(&api_socket, "broadcast-client-a-to-b");
 
-    let mut client_a = connect_raw_client(&client_socket, 100, 30);
+    // The last attached client owns foreground input, so attach A last while
+    // retaining the A-to-B broadcast assertion below.
     let mut client_b = connect_raw_client(&client_socket, 100, 30);
+    let mut client_a = connect_raw_client(&client_socket, 100, 30);
 
     // Drain initial frames so we measure the frame caused by new input.
     drain_server_messages(&mut client_a, Duration::from_millis(300));
@@ -1311,8 +1313,31 @@ fn multi_client_attach_starts_on_shared_active_workspace() {
     drain_server_messages(&mut client_a, Duration::from_millis(300));
 
     let (workspace_b, pane_b) = create_workspace_and_root_pane(&api_socket, "attach-shared-active");
+    let marker_b = format!(
+        "BB{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    pane_send_input(&api_socket, &pane_b, &format!("echo {marker_b}"));
+    assert!(pane_read_recent_contains(
+        &api_socket,
+        &pane_b,
+        &marker_b,
+        Duration::from_secs(5)
+    ));
     let mut client_b = connect_raw_client(&client_socket, 100, 30);
-    drain_server_messages(&mut client_b, Duration::from_millis(300));
+    let (received, frames) =
+        wait_for_frame_matching_with_snapshots(&mut client_b, Duration::from_secs(10), |frame| {
+            frame_contains_text(frame, &marker_b)
+        })
+        .expect("frame decoding should succeed");
+    assert!(
+        received,
+        "new client should render the shared active workspace {workspace_b}; frames:\n{}",
+        frames.join("\n--- frame ---\n")
+    );
 
     let marker_a = format!(
         "AA{}",
@@ -1326,20 +1351,6 @@ fn multi_client_attach_starts_on_shared_active_workspace() {
         pane_read_recent_contains(&api_socket, &pane_a, &marker_a, Duration::from_secs(5)),
         "API workspace.create focus must not move an attached client; pane output:\n{}",
         pane_read_recent(&api_socket, &pane_a, 200)
-    );
-
-    let marker_b = format!(
-        "BB{}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    );
-    send_client_input(&mut client_b, format!("echo {marker_b}\n").as_bytes());
-    assert!(
-        pane_read_recent_contains(&api_socket, &pane_b, &marker_b, Duration::from_secs(5)),
-        "newly attached client should start on shared active workspace {workspace_b}; pane output:\n{}",
-        pane_read_recent(&api_socket, &pane_b, 200)
     );
 
     cleanup_spawned_herdr(server, base);
