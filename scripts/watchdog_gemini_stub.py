@@ -36,11 +36,12 @@ def main() -> int:
     if mode == "timeout":
         time.sleep(120)
         return 0
+    status_to_class = {"working": "working", "blocked": "waiting_human", "done": "finished_idle"}
     expected = {
-        case["id"]: case["expected_state"]
+        case["id"]: status_to_class.get(case["expected_state"], "unknown")
         for case in json.loads(FIXTURE.read_text())["cases"]
     }
-    expected.update({"human-wait": "blocked", "quiet-stall": "working"})
+    expected.update({"human-wait": "waiting_human", "quiet-stall": "working"})
     for match in re.finditer(r'<pane id="([^"]+)" pane_id="([^"]+)"', args.prompt):
         observation_id, pane_id = match.groups()
         state = expected.get(pane_id, "unknown")

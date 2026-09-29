@@ -243,7 +243,7 @@ pub(super) fn watchdog_command() -> Command {
         )
         .arg(
             option("op-deadline-secs", "N")
-                .help("Maximum foreground tool operation duration (default: 3 x stall-secs)")
+                .help("Maximum tool or background-shell wait without semantic progress (default: 3 x stall-secs)")
                 .value_parser(clap::value_parser!(u64)),
         )
         .arg(
