@@ -1173,6 +1173,7 @@ fn worktree_request_and_response_round_trip() {
             workspace: WorkspaceInfo {
                 repo_binding: None,
                 workspace_id: "w_1".into(),
+                is_fleet: false,
                 number: 2,
                 label: "herdr".into(),
                 focused: true,
@@ -1273,6 +1274,7 @@ fn worktree_lifecycle_events_round_trip() {
     let workspace = WorkspaceInfo {
         repo_binding: None,
         workspace_id: "w_2".into(),
+        is_fleet: false,
         number: 2,
         label: "herdr".into(),
         focused: true,
