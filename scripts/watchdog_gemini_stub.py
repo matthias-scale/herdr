@@ -42,8 +42,9 @@ def main() -> int:
         for case in json.loads(FIXTURE.read_text())["cases"]
     }
     expected.update({"human-wait": "waiting_human", "quiet-stall": "working"})
-    for match in re.finditer(r'<pane id="([^"]+)" pane_id="([^"]+)"', args.prompt):
-        observation_id, pane_id = match.groups()
+    for match in re.finditer(r"^OBSERVATION (\S+)$", args.prompt, re.MULTILINE):
+        observation_id = match.group(1)
+        pane_id = observation_id.split("#", 1)[0]
         state = expected.get(pane_id, "unknown")
         if mode == "stale":
             observation_id += "-stale"

@@ -926,6 +926,20 @@ pub(crate) fn classify_pane_v3(
             } else if o.status == AgentStatus::Blocked {
                 class = PaneClass::WaitingHuman;
                 ev = "agent hook reports input required".into();
+            } else if evidence::composer_is_empty(&o.tail)
+                && evidence::background_shell_count(&o.tail) > 0
+            {
+                let shells = evidence::background_shell_count(&o.tail);
+                class = if age >= opt.op_deadline_secs {
+                    PaneClass::Stalled
+                } else {
+                    PaneClass::Working
+                };
+                ev = if class == PaneClass::Stalled {
+                    format!("waiting on event with {shells} background shells; operation deadline exceeded")
+                } else {
+                    format!("waiting on event with {shells} background shells")
+                };
             } else if matches!(o.status, AgentStatus::Idle | AgentStatus::Done) {
                 class = PaneClass::FinishedIdle;
                 ev = "agent reports idle or done".into();
@@ -942,20 +956,6 @@ pub(crate) fn classify_pane_v3(
             } else if age < opt.stall_secs {
                 class = PaneClass::Working;
                 ev = "semantic progress is within stall window".into();
-            } else if evidence::composer_is_empty(&o.tail)
-                && evidence::background_shell_count(&o.tail) > 0
-            {
-                let shells = evidence::background_shell_count(&o.tail);
-                class = if age >= opt.op_deadline_secs {
-                    PaneClass::Stalled
-                } else {
-                    PaneClass::Working
-                };
-                ev = if class == PaneClass::Stalled {
-                    format!("waiting on event with {shells} background shells; operation deadline exceeded")
-                } else {
-                    format!("waiting on event with {shells} background shells")
-                };
             } else {
                 let group = o.process_group.as_deref().unwrap_or(&[]);
                 let leader = group.iter().find(|p| p.pid == p.pgid).map(|p| p.pid);
@@ -1611,7 +1611,9 @@ mod tests {
     }
 
     fn claude_pane(reply: &str, composer: &str, footer: &str) -> String {
-        format!("{reply}\n────────────────────────\n❯ {composer}\n────────────────────────\n{footer}")
+        format!(
+            "{reply}\n────────────────────────\n❯ {composer}\n────────────────────────\n{footer}"
+        )
     }
 
     #[test]
@@ -1653,6 +1655,17 @@ mod tests {
         let watching = claude_pane("Waiting for test results.", "", "1 shell");
         o = pane_v3(AgentStatus::Working, &watching);
         memory = old_pane_memory(&o, 1);
+        let d = classify_pane_v3(&o, &mut memory, 300, v3opt());
+        assert_eq!(d.class, PaneClass::Working);
+        assert_eq!(d.evidence, "waiting on event with 1 background shells");
+        o.status = AgentStatus::Idle;
+        memory = old_pane_memory(&o, 1);
+        assert_eq!(
+            classify_pane_v3(&o, &mut memory, 1000, v3opt()).class,
+            PaneClass::Working
+        );
+        o.status = AgentStatus::Working;
+        memory = old_pane_memory(&o, 1);
         let d = classify_pane_v3(&o, &mut memory, 1000, v3opt());
         assert_eq!(d.class, PaneClass::Working);
         assert_eq!(d.evidence, "waiting on event with 1 background shells");
@@ -1660,6 +1673,25 @@ mod tests {
         let d = classify_pane_v3(&o, &mut memory, 2000, v3opt());
         assert_eq!(d.class, PaneClass::Stalled);
         assert!(d.evidence.contains("1 background shells"));
+
+        o = pane_v3(
+            AgentStatus::Working,
+            &claude_pane("Waiting for test results.", "", "0 shells"),
+        );
+        memory = old_pane_memory(&o, 1);
+        assert!(classify_pane_v3(&o, &mut memory, 1000, v3opt())
+            .evidence
+            .contains("no semantic progress"));
+
+        o = pane_v3(
+            AgentStatus::Working,
+            &claude_pane("Now: wait — test event", "", "0 shells"),
+        );
+        memory = old_pane_memory(&o, 1);
+        assert_eq!(
+            classify_pane_v3(&o, &mut memory, 1000, v3opt()).class,
+            PaneClass::Unknown
+        );
     }
 
     #[test]
