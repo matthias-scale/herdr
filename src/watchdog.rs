@@ -18,6 +18,7 @@ pub(crate) mod evidence;
 pub(crate) mod workers;
 
 pub(crate) const WATCHDOG_SOURCE: &str = "watchdog";
+pub(crate) const STALE_DRAFT_SECS: u64 = 300;
 #[cfg(test)]
 const PROMPT_WINDOW_LINES: usize = 12;
 #[cfg(test)]
@@ -765,6 +766,12 @@ pub(crate) struct PaneV3Memory {
     pub retry_since: Option<u64>,
     #[serde(default)]
     pub model_cache: HashMap<String, CachedPaneClass>,
+    #[serde(default)]
+    pub draft_hash: Option<u64>,
+    #[serde(default)]
+    pub draft_since: Option<u64>,
+    #[serde(default)]
+    pub nudged_stall: bool,
 }
 pub(crate) type PaneV3MemoryMap = HashMap<String, PaneV3Memory>;
 
@@ -811,6 +818,12 @@ pub(crate) struct PaneV3Decision {
     pub evidence: String,
     pub samples: Vec<serde_json::Value>,
     pub write_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered: Option<bool>,
     #[serde(skip)]
     pub observed_terminal_id: Option<String>,
     #[serde(skip)]
@@ -824,6 +837,7 @@ pub(crate) struct PaneV3Options {
     pub stall_secs: u64,
     pub retry_window_secs: u64,
     pub op_deadline_secs: u64,
+    pub stale_draft_secs: u64,
 }
 
 pub(crate) fn pane_status(class: PaneClass) -> Option<AgentStatus> {
@@ -859,6 +873,7 @@ pub(crate) fn classify_pane_v3(
     } else if new_turn {
         m.since = now;
         m.retry_since = None;
+        m.nudged_stall = false;
         ev = "new turn".into();
     } else if m.hash != hash {
         m.since = now;
@@ -872,10 +887,19 @@ pub(crate) fn classify_pane_v3(
     m.agent_session = o.agent_session.clone();
     m.hash = hash;
     m.last_status = Some(o.status);
+    let composer = evidence::composer_text(&o.tail);
+    let stale_draft_age = composer.as_ref().map(|draft| {
+        let draft_hash = evidence::stable_hash(draft);
+        if m.draft_hash != Some(draft_hash) {
+            m.draft_hash = Some(draft_hash);
+            m.draft_since = Some(now);
+        }
+        now.saturating_sub(m.draft_since.unwrap_or(now))
+    });
     let mut class = PaneClass::Unknown;
     if let Some(error) = &o.read_error {
         ev = format!("pane read failed: {error}");
-    } else if !evidence::composer_is_empty(&o.tail) && evidence::reply_text(&o.tail) != o.tail {
+    } else if stale_draft_age.is_some_and(|age| age < opt.stale_draft_secs) {
         class = PaneClass::Working;
         ev = "human is typing".into();
     } else if evidence::closing_block_waiting(&o.tail) || o.transcript_waiting {
@@ -886,6 +910,9 @@ pub(crate) fn classify_pane_v3(
             "closing block is waiting on human input".into()
         };
     } else {
+        if let Some(age) = stale_draft_age.filter(|age| *age >= opt.stale_draft_secs) {
+            ev = format!("stale draft ({age}s)");
+        }
         let low = o.wait.as_deref().unwrap_or("").to_ascii_lowercase();
         let hook_retry = ["retry", "rate", "backoff", "limit"]
             .iter()
@@ -917,6 +944,25 @@ pub(crate) fn classify_pane_v3(
             if evidence::finished_reply(&o.tail) {
                 class = PaneClass::FinishedIdle;
                 ev = "reply finished; idle composer".into();
+            } else if let Some(work) = evidence::promised_work(&o.tail) {
+                let dead_marker = o
+                    .tail
+                    .to_ascii_lowercase()
+                    .contains("background shell command didn't finish")
+                    || o.tail
+                        .to_ascii_lowercase()
+                        .contains("background shell command did not finish");
+                let processes = o.process_group.as_deref().unwrap_or(&[]);
+                let leader = processes.iter().find(|p| p.pid == p.pgid).map(|p| p.pid);
+                let active_tool =
+                    !evidence::current_tool_processes(processes, leader, age).is_empty();
+                if !active_tool && (dead_marker || age >= opt.stall_secs) {
+                    class = PaneClass::Stalled;
+                    ev = format!("promised work stopped: {work}");
+                } else {
+                    class = PaneClass::Working;
+                    ev = "semantic progress is within stall window".into();
+                }
             } else if let Some(p) = evidence::active_prompt(&o.tail) {
                 let tools = o.process_group.as_deref().unwrap_or(&[]);
                 let has_tool = !evidence::current_tool_processes(
@@ -1015,6 +1061,9 @@ pub(crate) fn classify_pane_v3(
     if ev.is_empty() {
         ev = "state remains undecided".into();
     }
+    if let Some(age) = stale_draft_age.filter(|age| *age >= opt.stale_draft_secs) {
+        ev.push_str(&format!("; stale draft ({age}s)"));
+    }
     if rebound && !ev.starts_with("rebound identity") {
         ev = format!("rebound identity; {ev}");
     } else if new_turn && !ev.starts_with("new turn") {
@@ -1030,6 +1079,9 @@ pub(crate) fn classify_pane_v3(
         evidence: ev,
         samples,
         write_error: None,
+        action: None,
+        action_text: None,
+        delivered: None,
         observed_terminal_id: o.terminal_id.clone(),
         observed_agent_session: o.agent_session.clone(),
         observed_hash: hash,
@@ -1618,6 +1670,7 @@ mod tests {
             stall_secs: 600,
             retry_window_secs: 600,
             op_deadline_secs: 1800,
+            stale_draft_secs: STALE_DRAFT_SECS,
         }
     }
 
@@ -1760,6 +1813,48 @@ mod tests {
         assert_eq!(decision.class, PaneClass::Working);
         assert_eq!(decision.new_state, None);
         assert_eq!(decision.status, "consistent");
+    }
+
+    #[test]
+    fn stale_composer_draft_is_empty_for_promised_work_but_fresh_draft_is_typing() {
+        let tail = claude_pane(
+            "Now: Codex reviewers — reviewing PR 1656; the config-folder worker starts after it merges\n\n⎿ Stop says: /review completed — invoke /retro to capture lessons.\n\n● Background shell command didn't finish before the previous session ended",
+            "cont",
+            "1 feedback draft",
+        );
+        let mut memory = PaneV3Memory::default();
+        let fresh = classify_pane_v3(
+            &pane_v3(AgentStatus::Working, &tail),
+            &mut memory,
+            1000,
+            v3opt(),
+        );
+        assert_eq!(fresh.class, PaneClass::Working);
+        assert_eq!(fresh.evidence, "human is typing");
+        memory.draft_since = Some(1000 - STALE_DRAFT_SECS);
+        let stale = classify_pane_v3(
+            &pane_v3(AgentStatus::Working, &tail),
+            &mut memory,
+            1000,
+            v3opt(),
+        );
+        assert_eq!(stale.class, PaneClass::Stalled);
+        assert!(stale
+            .evidence
+            .starts_with("promised work stopped: Codex reviewers"));
+    }
+
+    #[test]
+    fn done_here_empty_composer_remains_finished_idle() {
+        let tail = claude_pane("Needs you: nothing.\nDone here.", "", "0 shells");
+        let decision = classify_pane_v3(
+            &pane_v3(AgentStatus::Working, &tail),
+            &mut PaneV3Memory::default(),
+            1000,
+            v3opt(),
+        );
+        assert_eq!(decision.class, PaneClass::FinishedIdle);
+        assert!(!decision.evidence.starts_with("promised work stopped:"));
     }
 
     #[test]

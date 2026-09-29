@@ -259,6 +259,8 @@ class Harness:
                 entry[field] = aged
         if "since" not in entry:
             entry["since"] = aged
+        if "draft_since" in entry:
+            entry["draft_since"] = aged
         if session is not None:
             entry["agent_session"] = session
         path.write_text(json.dumps(memory) + "\n", encoding="utf-8")
@@ -439,6 +441,21 @@ def setup_summary(h: Harness, ident: str) -> str:
                        ("Build completed successfully",))
 
 
+def setup_promised_draft(h: Harness, ident: str) -> str:
+    screen = ("Now: Codex reviewers — reviewing PR 1656; the config-folder worker starts after it merges\n"
+              "⎿ Stop says: /review completed — invoke /retro to capture lessons.\n"
+              "● Background shell command didn't finish before the previous session ended\n"
+              "────────────────────────\n❯ cont\n────────────────────────\n"
+              "░░░░░░ 92% 78k tokens │ 2h 24m ago │ -- INSERT -- · 1 feedback draft")
+    return h.workspace(ident, _script(screen), tuple(screen.splitlines()))
+
+
+def setup_done_here(h: Harness, ident: str) -> str:
+    screen = ("Needs you: nothing.\nDone here.\n────────────────────────\n❯ \n"
+              "────────────────────────\n0 shells")
+    return h.workspace(ident, _script(screen), ("Needs you: nothing.", "Done here."))
+
+
 def setup_retry(h: Harness, ident: str) -> str:
     return h.workspace(ident, _script("API 429; retry in 120 seconds"),
                        ("API 429; retry in 120 seconds",))
@@ -565,6 +582,9 @@ CASES: list[tuple[str, str, Callable[[Harness, str], Any], str]] = [
     ("a-quoted-question", "A", setup_quote, "working"),
     ("a-subprocess-yn", "A", setup_prompt, "waiting_tool_input"),
     ("a-finished-idle", "A", setup_summary, "finished_idle"),
+    ("stale_draft_promised_work_stalled", "A", setup_promised_draft, "stalled"),
+    ("fresh_draft_typing", "A", setup_promised_draft, "working"),
+    ("done_here_negative_control", "A", setup_done_here, "finished_idle"),
     ("a-retry-backoff", "A", setup_retry, "waiting_retry"),
     ("a-retry-renewed", "A", setup_retry, "stalled"),
     ("a-account-limit", "A", setup_account, "waiting_human"),
@@ -705,12 +725,15 @@ def main() -> int:
                 cmd_options = ["--dry-run", "--stall-secs", "600", "--confirm-secs",
                                str(args.confirm_secs), "--state-file", str(state),
                                "--status-log", str(log)]
+                if ident == "stale_draft_promised_work_stalled":
+                    cmd_options.remove("--dry-run")
+                    cmd_options += ["--stale-draft-secs", "2"]
                 if args.gemini_bin:
                     cmd_options += ["--gemini-bin", args.gemini_bin]
                 else:
                     cmd_options.append("--no-model")
                 harness.run_watchdog("A", cmd_options)
-                age = 900 if ident in ("a-quiet-build", "a-silent-stall", "a-spinner-only",
+                age = 900 if ident in ("stale_draft_promised_work_stalled", "a-quiet-build", "a-silent-stall", "a-spinner-only",
                                        "a-spinner-progress", "a-resumed") else 0
                 if ident == "a-retry-renewed":
                     age = 1200
@@ -724,6 +747,9 @@ def main() -> int:
                 decision = next((d for d in decisions if d.get("pane_id") == pane_id), {})
                 actual = decision.get("class", "missing")
                 evidence = decision.get("evidence", payload.get("_stderr_tail"))
+                if ident == "stale_draft_promised_work_stalled":
+                    actual = decision.get("class", "missing")
+                    evidence = f"{evidence}; action={decision.get('action')} delivered={decision.get('delivered')}"
             elif family in ("B", "P"):
                 opts = ["--stall-minutes", "1", "--runs-dir",
                         str(result["runs"]), "--history-days", "3650", "--all",
@@ -752,9 +778,17 @@ def main() -> int:
                 payload = {"_wall_time_ms": 0, "_model_latency_ms": None}
             calls = (payload.get("summary") or {}).get("model_calls", 0)
             calls_expected = 1 if ident == "a-prose-question" and args.gemini_bin else 0
+            case_match = actual == expected and calls == calls_expected
+            if ident == "stale_draft_promised_work_stalled":
+                case_match = (actual == expected and decision.get("action") == "nudge"
+                              and decision.get("delivered") is True
+                              and "cont — resume: continue your open work to its done criterion"
+                              in str(decision.get("action_text", "")))
+            elif ident in ("fresh_draft_typing", "done_here_negative_control"):
+                case_match = (actual == expected and decision.get("action") is None)
             rows.append({"id": ident, "watchdog": family, "expected": expected,
                          "actual": actual, "model_calls": calls,
-                         "match": actual == expected and calls == calls_expected,
+                         "match": case_match,
                          "evidence": evidence, "wall_time_ms": payload.get("_wall_time_ms"),
                          "model_latency_ms": payload.get("_model_latency_ms")})
         incident = harness.incident_rearm_check()
@@ -768,6 +802,7 @@ def main() -> int:
         source = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.strip()
         doc = {"host": args.host_label, "binary_sha256": digest, "source_sha": source,
+               "source": source,
                "cases": rows, "incident_rearm": incident}
         (args.out / "matrix.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
         lines = ["# Watchdog live matrix", "", f"Host: `{args.host_label}`  ",
