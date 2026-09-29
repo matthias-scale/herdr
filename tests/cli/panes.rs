@@ -76,10 +76,6 @@ fn pane_close_of_final_tab_closes_the_workspace() {
     );
     assert!(created.status.success());
     let created_json: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
-    let workspace_id = created_json["result"]["workspace"]["workspace_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
     let root_pane_id = created_json["result"]["root_pane"]["pane_id"]
         .as_str()
         .unwrap()

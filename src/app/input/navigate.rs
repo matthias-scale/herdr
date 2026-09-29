@@ -8886,7 +8886,6 @@ navigate_pane_down = "ctrl+j"
     #[tokio::test]
     async fn tui_close_last_pane_closes_workspace() {
         let mut app = app_with_test_workspaces(&["main"]);
-        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.set_server_mode(Mode::Navigate);
