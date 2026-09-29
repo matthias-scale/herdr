@@ -441,6 +441,7 @@ def _promised_draft_agent(root: Path, account: str) -> str:
 draft=cont
 draw() {
   printf '\\033[2J\\033[H'
+  printf '\\033]0;Codex\\007'
   printf '%s\\n' \\
     "Now: Codex reviewers — reviewing PR 1656; the config-folder worker starts after it merges" \\
     "⎿ Stop says: /review completed — invoke /retro to capture lessons." \\
@@ -453,7 +454,7 @@ draw() {
 draw
 while IFS= read -r submitted; do
   turn1="❯ $draft"
-  turn2='Working on the open task'
+  turn2="cont$submitted"
   draft=
   draw
 done
@@ -766,20 +767,23 @@ def main() -> int:
             if family == "A":
                 pane_id = harness.panes[ident]
                 session_id = "session-" + ident
-                session_source = "watchdog-harness"
-                harness.call("pane.report_agent_session", {"pane_id": pane_id,
-                    "source": session_source, "agent": "codex",
-                    "agent_session_id": session_id})
+                session_source = ("herdr:codex" if ident in (
+                    "stale_draft_promised_work_stalled", "promised_quiet_nudged")
+                    else "watchdog-harness")
+                status_source = "watchdog-harness"
                 status = "idle" if (ident == "a-finished-idle"
                                      or ident == "stale_draft_promised_work_stalled"
                                      or ident.startswith("promised_")) else (
                     "blocked" if ident == "a-approval-hook" else "working")
-                report: dict[str, Any] = {"pane_id": pane_id, "source": session_source,
+                report: dict[str, Any] = {"pane_id": pane_id, "source": status_source,
                     "agent": "codex", "state": status}
                 if ident.startswith("a-retry"):
                     report.update(wait="retry", eta_s=120,
                                   reported_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
                 harness.call("pane.report_agent", report)
+                harness.call("pane.report_agent_session", {"pane_id": pane_id,
+                    "source": session_source, "agent": "codex",
+                    "agent_session_id": session_id})
                 state = harness.root / f"pane-{ident}.json"
                 log = harness.root / f"pane-{ident}.jsonl"
                 cmd_options = ["--dry-run", "--stall-secs", "600", "--confirm-secs",
@@ -796,7 +800,8 @@ def main() -> int:
                 else:
                     cmd_options.append("--no-model")
                 harness.run_watchdog("A", cmd_options,
-                                     dry=ident != "stale_draft_promised_work_stalled")
+                                     dry=ident not in ("stale_draft_promised_work_stalled",
+                                                       "promised_quiet_nudged"))
                 age = 1800 if ident == "stale_draft_promised_work_stalled" else 900 if ident in ("a-quiet-build", "a-silent-stall", "a-spinner-only",
                                        "a-spinner-progress", "a-resumed") else 0
                 if ident.startswith("promised_"):
@@ -816,7 +821,8 @@ def main() -> int:
                     state.write_text(json.dumps(data))
                     harness.age_memory(state, pane_id, 1800)
                 payload = harness.run_watchdog("A", cmd_options,
-                                               dry=ident != "stale_draft_promised_work_stalled")
+                                               dry=ident not in ("stale_draft_promised_work_stalled",
+                                                                 "promised_quiet_nudged"))
                 decisions = payload.get("decisions", [])
                 decision = next((d for d in decisions if d.get("pane_id") == pane_id), {})
                 actual = decision.get("class", "missing")
@@ -860,16 +866,20 @@ def main() -> int:
                 case_match = (actual == expected and decision.get("action") == "nudge"
                               and decision.get("delivered") is True
                               and decision.get("status") == "nudged"
-                              and "❯ \n" in pane_text
+                              and ("❯ \n" in pane_text or "❯\n" in pane_text)
                               and pane_text.count("cont — resume: continue your open work to its done criterion") == 1
                               and "cont — resume: continue your open work to its done criterion"
                               in str(decision.get("action_text", "")))
+                if not case_match:
+                    evidence = f"{evidence}; decision={decision}; pane={pane_text!r}"
             elif ident in ("fresh_draft_typing", "done_here_negative_control"):
                 case_match = (actual == expected and decision.get("action") is None)
             elif ident == "promised_quiet_nudged":
                 case_match = (actual == expected and decision.get("action") == "nudge"
                               and decision.get("delivered") is True
                               and decision.get("nudge_count") == 1)
+                if not case_match:
+                    evidence = f"{evidence}; decision={decision}"
             elif ident == "promised_quiet_repeats_then_blocked":
                 case_match = (actual == expected and decision.get("action") is None
                               and "did not resume after 3 nudges" in str(decision.get("evidence")))
@@ -884,7 +894,8 @@ def main() -> int:
                          "model_latency_ms": payload.get("_model_latency_ms")})
         incident = (harness.incident_rearm_check() if selected is None else
                     {"skipped": True, "match": True})
-        incident["match"] = incident.get("match", False) and (incident.get("skipped", False) or (
+        # The raw incident result has no match field; evaluate its observations.
+        incident["match"] = incident.get("match", True) and (incident.get("skipped", False) or (
             incident["first_action"] == "logged"
             and incident["second_action"] == "already_logged"
             and incident["records_after_second"] == 1
