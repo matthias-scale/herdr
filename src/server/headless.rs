@@ -8961,7 +8961,7 @@ esac
         let mut client_a = test_app_client(Some(true), 1);
         client_a.focus_initialized = true;
         client_a.active_workspace = Some(0);
-        client_a.active_workspace_id = Some(workspace_a);
+        client_a.active_workspace_id = Some(workspace_a.clone());
         client_a.selected_pane = 0;
         let mut client_b = test_app_client(Some(true), 2);
         client_b.focus_initialized = true;
