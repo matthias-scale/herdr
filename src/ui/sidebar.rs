@@ -4947,9 +4947,10 @@ fn append_fleet_rows(
     local_entries: &[AgentPanelEntry],
     entries: &[AgentPanelEntry],
 ) {
-    if app.fleet_snapshot.configured_hosts.is_empty()
-        && !app.fleet_snapshot.hosts.iter().any(|host| !host.local)
-        && entries.is_empty()
+    if app.sidebar_work_filter.machine_scope != crate::app::state::SidebarMachineScope::AllMachines
+        || (app.fleet_snapshot.configured_hosts.is_empty()
+            && !app.fleet_snapshot.hosts.iter().any(|host| !host.local)
+            && entries.is_empty())
     {
         return;
     }
@@ -5049,15 +5050,13 @@ fn append_fleet_rows(
             sort_key: None,
             sort_mode: SidebarSortMode::Default,
             title: if host == app.agent_host_name {
-                format!(
-                    "{} · this device",
-                    host_tokens.get(&host).map(String::as_str).unwrap_or(&host)
-                )
+                format!("{host} · this device")
             } else {
                 host_tokens
                     .get(&host)
+                    .filter(|_| !host_entries.is_empty())
                     .cloned()
-                    .unwrap_or_else(|| middle_elide(&host, SIDEBAR_HOST_TOKEN_NARROW_WIDTH))
+                    .unwrap_or_else(|| host.clone())
             },
             count: host_entries.len(),
             collapsed,
@@ -9920,14 +9919,6 @@ pub(super) fn render_sidebar(
     }
     render_sidebar_areas_menu(app, frame);
     render_window_cycle_mode_menu(app, frame);
-    // The list scrollbar shares the sidebar's outer column; restore the
-    // persistent border after all list overlays have rendered.
-    if let Some(separator) = sidebar_separator_col(area) {
-        for y in area.y..area.bottom() {
-            frame.buffer_mut()[(separator, y)].set_symbol("│");
-            frame.buffer_mut()[(separator, y)].set_style(sep_style);
-        }
-    }
 }
 
 fn sidebar_footer_style(
@@ -15012,11 +15003,11 @@ pub(crate) mod tests {
     #[test]
     fn collapsed_and_expanded_sidebars_render_separator_on_shared_column() {
         let app = AppState::test_new();
-        let area = Rect::new(3, 1, 26, 8);
+        let area = Rect::new(3, 1, 26, 16);
         let separator_col = sidebar_separator_col(area).expect("non-empty sidebar");
 
         for collapsed in [true, false] {
-            let mut terminal = Terminal::new(TestBackend::new(32, 10)).unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(32, 18)).unwrap();
             terminal
                 .draw(|frame| {
                     if collapsed {
@@ -15580,6 +15571,7 @@ pub(crate) mod tests {
             row,
             SidebarRow::SectionHeader {
                 title: SNOOZED_SECTION_TITLE,
+                count: 1..,
                 ..
             }
         )));
@@ -15721,6 +15713,7 @@ pub(crate) mod tests {
             row,
             SidebarRow::SectionHeader {
                 title: SNOOZED_SECTION_TITLE,
+                count: 1..,
                 ..
             }
         )));
@@ -15837,6 +15830,7 @@ pub(crate) mod tests {
             row,
             SidebarRow::SectionHeader {
                 title: SNOOZED_SECTION_TITLE,
+                count: 1..,
                 ..
             }
         )));
@@ -15854,6 +15848,7 @@ pub(crate) mod tests {
             row,
             SidebarRow::SectionHeader {
                 title: SNOOZED_SECTION_TITLE,
+                count: 1..,
                 ..
             }
         )));
@@ -15972,6 +15967,7 @@ pub(crate) mod tests {
                     row,
                     SidebarRow::SectionHeader {
                         title: SETTLED_SECTION_TITLE,
+                        count: 1..,
                         ..
                     }
                 )),
@@ -16056,6 +16052,7 @@ pub(crate) mod tests {
                         row,
                         SidebarRow::SectionHeader {
                             title: SETTLED_SECTION_TITLE,
+                            count: 1..,
                             ..
                         }
                     )),
@@ -21054,7 +21051,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(
             !rows.iter().any(|row| matches!(
                 row,
-                SidebarRow::SectionHeader { title, .. } if *title == SETTLED_SECTION_TITLE
+                SidebarRow::SectionHeader { title, count: 1.., .. } if *title == SETTLED_SECTION_TITLE
             )),
             "a pane waiting on a human must not be filed under Settled"
         );
@@ -21078,7 +21075,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let boundary = sidebar_rows(&app);
         assert!(!boundary.iter().any(|row| matches!(
             row,
-            SidebarRow::SectionHeader { title, .. }
+            SidebarRow::SectionHeader { title, count: 1.., .. }
                 if *title == SETTLED_SECTION_TITLE
         )));
         assert!(boundary
@@ -24706,7 +24703,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             "{}:{group_key}",
             app.sidebar_group_mode.collapse_namespace()
         );
-        let area = Rect::new(0, 0, 40, 12);
+        let area = Rect::new(0, 0, 40, 20);
         let render_header = |app: &AppState| {
             let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
             terminal
@@ -25817,7 +25814,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
 
         assert_eq!(metrics.viewport_rows, 3);
-        assert_eq!(metrics.max_offset_from_bottom, 3);
+        // Three display rows plus the always-visible Snoozed/Settled shelves
+        // and their divider.
+        assert_eq!(metrics.max_offset_from_bottom, 6);
         assert_eq!(metrics.offset_from_bottom, metrics.max_offset_from_bottom);
     }
 
@@ -26178,6 +26177,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "---",
                 SNOOZED_SECTION_TITLE,
                 SETTLED_SECTION_TITLE,
+                "---",
+                FLEET_SECTION_TITLE,
                 "---",
                 RUNS_SECTION_TITLE,
                 SYMPHONY_SECTION_TITLE,
