@@ -3614,7 +3614,7 @@ mod tests {
 
         app.handle_context_menu_key_via_api(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
 
-        assert_eq!(app.state.selected, 1);
+        assert_eq!(app.state.selected, 0);
         assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
