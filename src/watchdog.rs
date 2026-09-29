@@ -1,12 +1,15 @@
 //! Deterministic classification and scan decisions for the blocked-agent watchdog.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::Value;
 
 use crate::api::schema::AgentStatus;
@@ -15,12 +18,17 @@ pub(crate) mod evidence;
 pub(crate) mod workers;
 
 pub(crate) const WATCHDOG_SOURCE: &str = "watchdog";
+#[cfg(test)]
 const PROMPT_WINDOW_LINES: usize = 12;
+#[cfg(test)]
 const CLASSIFIER_TAIL_CHARS: usize = 3_000;
+#[cfg(test)]
 const CLASSIFIER_PACKET_BYTES: usize = 12 * 1024;
+#[cfg(test)]
 const CLASSIFIER_EVIDENCE_CHARS: usize = 160;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) enum Verdict {
     Blocked(String),
     NotBlocked,
@@ -28,14 +36,17 @@ pub(crate) enum Verdict {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg(test)]
 pub(crate) struct PaneMemory {
     pub hash: u64,
     pub since: u64,
 }
 
+#[cfg(test)]
 pub(crate) type Memory = HashMap<String, PaneMemory>;
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub(crate) struct PaneSample {
     pub pane_id: String,
     pub agent: Option<String>,
@@ -46,6 +57,7 @@ pub(crate) struct PaneSample {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg(test)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DecisionStatus {
     Corrected,
@@ -54,6 +66,7 @@ pub(crate) enum DecisionStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg(test)]
 pub(crate) struct PaneDecision {
     pub pane_id: String,
     pub agent: String,
@@ -67,7 +80,7 @@ pub(crate) struct PaneDecision {
     pub write_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum PaneClass {
     Working,
@@ -80,13 +93,14 @@ pub(crate) enum PaneClass {
 }
 
 #[derive(Debug, Clone, Default)]
+#[cfg(test)]
 pub(crate) struct ScanResult {
     pub decisions: Vec<PaneDecision>,
     pub model_calls: usize,
-    pub model_latency_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(test)]
 pub(crate) struct ScanOptions {
     pub stall_secs: u64,
     pub no_model: bool,
@@ -94,6 +108,7 @@ pub(crate) struct ScanOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct StatusClassification {
     pub state: AgentStatus,
     pub evidence: String,
@@ -111,6 +126,7 @@ pub(crate) fn status_in_scope(status: AgentStatus) -> bool {
     )
 }
 
+#[cfg(test)]
 const PERMISSION_MARKERS: &[&str] = &[
     "(y/n)",
     "[y/n]",
@@ -138,6 +154,7 @@ const PERMISSION_MARKERS: &[&str] = &[
     "choose a model",
 ];
 
+#[cfg(test)]
 const ERROR_MARKERS: &[&str] = &[
     "you've hit your usage limit",
     "usage limit reached",
@@ -150,6 +167,7 @@ const ERROR_MARKERS: &[&str] = &[
     "panicked at",
 ];
 
+#[cfg(test)]
 const SOFT_MARKERS: &[&str] = &[
     "error:",
     "failed",
@@ -161,6 +179,7 @@ const SOFT_MARKERS: &[&str] = &[
     "please confirm",
 ];
 
+#[cfg(test)]
 fn tail_window(tail: &str) -> Vec<String> {
     let lines: Vec<&str> = tail
         .lines()
@@ -173,6 +192,7 @@ fn tail_window(tail: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn classify_text(tail: &str) -> Verdict {
     if let Some(prompt) = evidence::active_prompt(tail) {
         let prefix = if prompt.kind == evidence::PromptKind::AccountAction {
@@ -246,12 +266,14 @@ pub(crate) fn classify_text(tail: &str) -> Verdict {
     Verdict::NotBlocked
 }
 
+#[cfg(test)]
 fn is_quoted_line(line: &str) -> bool {
     (line.starts_with('"') && line.ends_with('"'))
         || (line.starts_with('\'') && line.ends_with('\''))
         || (line.starts_with('`') && line.ends_with('`'))
 }
 
+#[cfg(test)]
 fn is_fresh_progress_line(line: &str) -> bool {
     [
         "new turn",
@@ -269,11 +291,13 @@ fn is_fresh_progress_line(line: &str) -> bool {
 }
 
 /// Stable FNV-1a hash so fingerprints survive rebuilds.
+#[cfg(test)]
 pub(crate) fn tail_hash(tail: &str) -> u64 {
     evidence::semantic_hash(tail)
 }
 
 /// Update remembered fingerprint; return seconds the tail has been unchanged.
+#[cfg(test)]
 pub(crate) fn observe(memory: &mut Memory, pane_id: &str, hash: u64, now: u64) -> u64 {
     let entry = memory
         .entry(pane_id.to_string())
@@ -284,6 +308,7 @@ pub(crate) fn observe(memory: &mut Memory, pane_id: &str, hash: u64, now: u64) -
     now.saturating_sub(entry.since)
 }
 
+#[cfg(test)]
 pub(crate) fn stage1(
     status: AgentStatus,
     tail: &str,
@@ -303,6 +328,7 @@ pub(crate) fn stage1(
     Verdict::NotBlocked
 }
 
+#[cfg(test)]
 pub(crate) fn classifier_prompt(samples: &[PaneSample]) -> String {
     let mut prompt = String::from(
         "Classify each coding agent's current state from its recent terminal evidence. \
@@ -351,6 +377,7 @@ header, Markdown, or other text.\n",
     prompt
 }
 
+#[cfg(test)]
 pub(crate) fn observation_id(sample: &PaneSample) -> String {
     format!(
         "{}#{:016x}",
@@ -359,6 +386,7 @@ pub(crate) fn observation_id(sample: &PaneSample) -> String {
     )
 }
 
+#[cfg(test)]
 fn classifier_attribute(value: &str) -> String {
     value
         .chars()
@@ -370,6 +398,7 @@ fn classifier_attribute(value: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 fn truncate_utf8_suffix(value: &str, max_bytes: usize) -> &str {
     let mut start = value.len().saturating_sub(max_bytes);
     while !value.is_char_boundary(start) {
@@ -378,6 +407,7 @@ fn truncate_utf8_suffix(value: &str, max_bytes: usize) -> &str {
     &value[start..]
 }
 
+#[cfg(test)]
 pub(crate) fn parse_classifier_reply(
     reply: &str,
     expected_pane_ids: &[String],
@@ -423,6 +453,7 @@ pub(crate) fn parse_classifier_reply(
     classifications
 }
 
+#[cfg(test)]
 fn status_name(status: AgentStatus) -> &'static str {
     match status {
         AgentStatus::Idle => "idle",
@@ -435,6 +466,7 @@ fn status_name(status: AgentStatus) -> &'static str {
 }
 
 /// Verify every listed agent and keep model and status writes injectable.
+#[cfg(test)]
 pub(crate) fn scan_decisions<M, W>(
     listed_pane_ids: &[String],
     samples: &[PaneSample],
@@ -631,12 +663,14 @@ where
     result
 }
 
+#[cfg(test)]
 fn decision_evidence_stalled(evidence: &str) -> bool {
     evidence.starts_with("stall candidate:")
         || evidence.starts_with("no semantic progress")
         || evidence.starts_with("retries renewed")
 }
 
+#[cfg(test)]
 fn process_evidence_has_tool(evidence: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(evidence) else {
         return false;
@@ -711,6 +745,387 @@ pub(crate) fn append_status_correction(
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     serde_json::to_writer(&mut file, &record).map_err(io::Error::other)?;
     file.write_all(b"\n")
+}
+
+// The v3 pane classifier keeps identity and timing independent from the legacy
+// classifier types above so the worker watchdog can continue sharing this module.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct PaneV3Memory {
+    #[serde(default)]
+    pub terminal_id: Option<String>,
+    #[serde(default)]
+    pub agent_session: Option<String>,
+    #[serde(default)]
+    pub hash: u64,
+    #[serde(default)]
+    pub since: u64,
+    #[serde(default)]
+    pub last_status: Option<AgentStatus>,
+    #[serde(default)]
+    pub retry_since: Option<u64>,
+    #[serde(default)]
+    pub model_cache: HashMap<String, CachedPaneClass>,
+}
+pub(crate) type PaneV3MemoryMap = HashMap<String, PaneV3Memory>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CachedPaneClass {
+    pub class: PaneClass,
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PaneV3Observation {
+    pub pane_id: String,
+    pub agent: String,
+    pub terminal_id: Option<String>,
+    pub agent_session: Option<String>,
+    pub status: AgentStatus,
+    pub wait: Option<String>,
+    pub eta_s: Option<u64>,
+    pub reported_at: Option<String>,
+    pub tail: String,
+    pub process_group: Option<Vec<evidence::ProcSample>>,
+    pub read_error: Option<String>,
+}
+
+pub(crate) fn pane_v3_observation_is_current(
+    observed: &PaneV3Decision,
+    current: &PaneV3Observation,
+) -> bool {
+    observed.observed_terminal_id == current.terminal_id
+        && observed.observed_agent_session == current.agent_session
+        && observed.old_state == current.status
+        && observed.observed_hash == evidence::semantic_hash(&current.tail)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct PaneV3Decision {
+    pub pane_id: String,
+    pub agent: String,
+    pub class: PaneClass,
+    pub old_state: AgentStatus,
+    pub new_state: Option<AgentStatus>,
+    pub status: String,
+    pub evidence: String,
+    pub samples: Vec<serde_json::Value>,
+    pub write_error: Option<String>,
+    #[serde(skip)]
+    pub observed_terminal_id: Option<String>,
+    #[serde(skip)]
+    pub observed_agent_session: Option<String>,
+    #[serde(skip)]
+    pub observed_hash: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PaneV3Options {
+    pub stall_secs: u64,
+    pub retry_window_secs: u64,
+    pub op_deadline_secs: u64,
+}
+
+pub(crate) fn pane_status(class: PaneClass) -> Option<AgentStatus> {
+    match class {
+        PaneClass::Working | PaneClass::WaitingRetry => Some(AgentStatus::Working),
+        PaneClass::WaitingHuman | PaneClass::WaitingToolInput | PaneClass::Stalled => {
+            Some(AgentStatus::Blocked)
+        }
+        PaneClass::FinishedIdle => Some(AgentStatus::Done),
+        PaneClass::Unknown => None,
+    }
+}
+
+pub(crate) fn classify_pane_v3(
+    o: &PaneV3Observation,
+    m: &mut PaneV3Memory,
+    now: u64,
+    opt: PaneV3Options,
+) -> PaneV3Decision {
+    use evidence::{ProcSample, PromptKind};
+    let hash = evidence::semantic_hash(&o.tail);
+    let mut ev = String::new();
+    let mut samples = Vec::new();
+    let rebound = m.terminal_id.as_ref() != o.terminal_id.as_ref()
+        || m.agent_session.as_ref() != o.agent_session.as_ref();
+    let new_turn = !rebound
+        && m.last_status.is_some_and(|s| s != AgentStatus::Working)
+        && o.status == AgentStatus::Working;
+    if rebound {
+        m.since = now;
+        m.retry_since = None;
+        ev = "rebound identity".into();
+    } else if new_turn {
+        m.since = now;
+        m.retry_since = None;
+        ev = "new turn".into();
+    } else if m.hash != hash {
+        m.since = now;
+        m.retry_since = None;
+    }
+    if m.since == 0 {
+        m.since = now;
+    }
+    let age = now.saturating_sub(m.since);
+    m.terminal_id = o.terminal_id.clone();
+    m.agent_session = o.agent_session.clone();
+    m.hash = hash;
+    m.last_status = Some(o.status);
+    let mut class = PaneClass::Unknown;
+    if let Some(error) = &o.read_error {
+        ev = format!("pane read failed: {error}");
+    } else {
+        let low = o.wait.as_deref().unwrap_or("").to_ascii_lowercase();
+        let hook_retry = ["retry", "rate", "backoff", "limit"]
+            .iter()
+            .any(|x| low.contains(x))
+            && o.eta_s.is_some();
+        let text_retry = evidence::scheduled_retry_secs(&o.tail);
+        if hook_retry || text_retry.is_some() {
+            let since = *m.retry_since.get_or_insert(now);
+            if now.saturating_sub(since) > opt.retry_window_secs {
+                class = PaneClass::Stalled;
+                ev = format!("retries renewed for {}s without progress", now - since);
+            } else {
+                let deadline = if hook_retry {
+                    parse_epoch(o.reported_at.as_deref())
+                        .unwrap_or(since)
+                        .saturating_add(o.eta_s.unwrap_or(0))
+                } else {
+                    m.since.saturating_add(text_retry.unwrap_or(0))
+                };
+                if now <= deadline.saturating_add(60) {
+                    class = PaneClass::WaitingRetry;
+                    ev = "scheduled retry window active".into();
+                }
+            }
+        } else {
+            m.retry_since = None;
+        }
+        if class == PaneClass::Unknown {
+            if let Some(p) = evidence::active_prompt(&o.tail) {
+                let tools = o.process_group.as_deref().unwrap_or(&[]);
+                let has_tool = !evidence::current_tool_processes(
+                    tools,
+                    tools.iter().find(|x| x.pid == x.pgid).map(|x| x.pid),
+                    age,
+                )
+                .is_empty();
+                class = if p.kind != PromptKind::AccountAction && has_tool {
+                    PaneClass::WaitingToolInput
+                } else {
+                    PaneClass::WaitingHuman
+                };
+                ev = format!("active {:?} prompt: {}", p.kind, p.line);
+            } else if o.status == AgentStatus::Blocked {
+                class = PaneClass::WaitingHuman;
+                ev = "agent hook reports input required".into();
+            } else if matches!(o.status, AgentStatus::Idle | AgentStatus::Done) {
+                class = PaneClass::FinishedIdle;
+                ev = "agent reports idle or done".into();
+            } else if let Some(q) = evidence::prose_question(&o.tail) {
+                if age >= 60 {
+                    ev = format!("model candidate: {q}");
+                } else {
+                    class = if age < opt.stall_secs {
+                        PaneClass::Working
+                    } else {
+                        PaneClass::Unknown
+                    };
+                }
+            } else if age < opt.stall_secs {
+                class = PaneClass::Working;
+                ev = "semantic progress is within stall window".into();
+            } else {
+                let group = o.process_group.as_deref().unwrap_or(&[]);
+                let leader = group.iter().find(|p| p.pid == p.pgid).map(|p| p.pid);
+                let tools = evidence::current_tool_processes(group, leader, age);
+                if let Some(tool) = tools.first() {
+                    class = if tool.elapsed_secs > opt.op_deadline_secs {
+                        PaneClass::Stalled
+                    } else {
+                        PaneClass::Working
+                    };
+                    ev = format!("tool {} running; silence is not a stall", tool.name);
+                } else {
+                    ev=format!("no semantic progress for {}m across two samples; no tool child or scheduled retry",age/60);
+                }
+            }
+        }
+        let leader = o
+            .process_group
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .find(|p: &&ProcSample| p.pid == p.pgid);
+        samples.push(serde_json::json!({"hash":format!("{hash:016x}"),"tail":evidence::semantic_lines(&o.tail),"processes":o.process_group,"leader_cpu_ms":leader.map(|p|p.cpu_ms),"leader_state":leader.map(|p|p.state)}));
+    }
+    let new_state = pane_status(class);
+    let status = if class == PaneClass::Unknown {
+        "unverified"
+    } else if new_state == Some(o.status)
+        || (matches!(o.status, AgentStatus::Idle | AgentStatus::Done)
+            && class == PaneClass::FinishedIdle)
+    {
+        "consistent"
+    } else {
+        "corrected"
+    };
+    if ev.is_empty() {
+        ev = "state remains undecided".into();
+    }
+    if rebound && !ev.starts_with("rebound identity") {
+        ev = format!("rebound identity; {ev}");
+    } else if new_turn && !ev.starts_with("new turn") {
+        ev = format!("new turn; {ev}");
+    }
+    PaneV3Decision {
+        pane_id: o.pane_id.clone(),
+        agent: o.agent.clone(),
+        class,
+        old_state: o.status,
+        new_state,
+        status: status.into(),
+        evidence: ev,
+        samples,
+        write_error: None,
+        observed_terminal_id: o.terminal_id.clone(),
+        observed_agent_session: o.agent_session.clone(),
+        observed_hash: hash,
+    }
+}
+
+pub(crate) fn confirm_pane_v3(
+    mut decision: PaneV3Decision,
+    second: &PaneV3Observation,
+    op_deadline_secs: u64,
+) -> PaneV3Decision {
+    if second.read_error.is_some() {
+        decision.class = PaneClass::Unknown;
+        decision.new_state = None;
+        decision.status = "unverified".into();
+        decision.evidence = format!(
+            "second sample failed: {}",
+            second.read_error.as_deref().unwrap_or("unavailable")
+        );
+        return decision;
+    }
+    let hash = evidence::semantic_hash(&second.tail);
+    if hash != decision.observed_hash {
+        decision.class = PaneClass::Working;
+        decision.new_state = Some(AgentStatus::Working);
+        decision.status = if decision.old_state == AgentStatus::Working {
+            "consistent"
+        } else {
+            "corrected"
+        }
+        .into();
+        decision.evidence = "semantic output changed between samples".into();
+        decision.observed_hash = hash;
+    } else if decision.evidence.contains("no semantic progress") {
+        let processes = second.process_group.as_deref().unwrap_or(&[]);
+        let leader = processes.iter().find(|p| p.pid == p.pgid).map(|p| p.pid);
+        let tools = evidence::current_tool_processes(processes, leader, u64::MAX);
+        if let Some(tool) = tools.first() {
+            decision.class = if tool.elapsed_secs > op_deadline_secs {
+                PaneClass::Stalled
+            } else {
+                PaneClass::Working
+            };
+            decision.new_state = pane_status(decision.class);
+            decision.evidence = if decision.class == PaneClass::Stalled {
+                format!("tool {} exceeded operation deadline", tool.name)
+            } else {
+                format!("tool {} running; silence is not a stall", tool.name)
+            };
+        } else {
+            decision.class = PaneClass::Stalled;
+            decision.new_state = Some(AgentStatus::Blocked);
+            decision.evidence =
+                "no semantic progress across two samples; no tool child or scheduled retry".into();
+        }
+        decision.status = if decision.new_state == Some(decision.old_state) {
+            "consistent"
+        } else {
+            "corrected"
+        }
+        .into();
+    }
+    decision
+}
+
+pub(crate) fn parse_pane_model_reply(
+    reply: &str,
+    expected_obs_id: &str,
+) -> Result<(PaneClass, String), String> {
+    let mut lines = reply.lines();
+    let line = lines
+        .next()
+        .ok_or_else(|| "empty model reply".to_string())?;
+    if lines.next().is_some() {
+        return Err("malformed multi-line model reply".into());
+    }
+    let fields = line.split('\t').collect::<Vec<_>>();
+    if fields.len() != 3 || fields[0] != expected_obs_id || fields[2].trim().is_empty() {
+        return Err("malformed or stale model observation reply".into());
+    }
+    let class = match fields[1] {
+        "working" => PaneClass::Working,
+        "waiting_human" => PaneClass::WaitingHuman,
+        "waiting_tool_input" => PaneClass::WaitingToolInput,
+        "finished_idle" => PaneClass::FinishedIdle,
+        "waiting_retry" => PaneClass::WaitingRetry,
+        "stalled" => PaneClass::Stalled,
+        "unknown" => PaneClass::Unknown,
+        _ => return Err("unsupported model class".into()),
+    };
+    Ok((class, fields[2].chars().take(160).collect()))
+}
+
+fn parse_epoch(s: Option<&str>) -> Option<u64> {
+    let s = s?;
+    if let Ok(n) = s.parse::<u64>() {
+        return Some(n);
+    }
+    let t = s.find('T').or_else(|| s.find(' '))?;
+    let (date, rest) = s.split_at(t);
+    let rest = &rest[1..];
+    let offset_at = rest
+        .char_indices()
+        .skip(1)
+        .find(|(_, c)| *c == '+' || *c == '-')
+        .map(|(i, _)| i);
+    let (clock, offset) = offset_at.map_or((rest, None), |i| (&rest[..i], Some(&rest[i..])));
+    let clock = clock.trim_end_matches('Z').split('.').next()?;
+    let mut date_fields = date.split('-');
+    let mut time_fields = clock.split(':');
+    let y = date_fields.next()?.parse::<i64>().ok()?;
+    let mo = date_fields.next()?.parse::<i64>().ok()?;
+    let d = date_fields.next()?.parse::<i64>().ok()?;
+    let h = time_fields.next()?.parse::<u64>().ok()?;
+    let mi = time_fields.next()?.parse::<u64>().ok()?;
+    let se = time_fields.next()?.parse::<u64>().ok()?;
+    let offset_secs = if let Some(offset) = offset {
+        let sign = if offset.starts_with('-') { -1i64 } else { 1 };
+        let raw = offset[1..].replace(':', "");
+        if raw.len() != 4 {
+            return None;
+        }
+        let hours = raw[..2].parse::<i64>().ok()?;
+        let minutes = raw[2..].parse::<i64>().ok()?;
+        sign * (hours * 3600 + minutes * 60)
+    } else {
+        0
+    };
+    // Gregorian UTC conversion, independent of local timezone.
+    let y = y - if mo <= 2 { 1 } else { 0 };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = mo + if mo > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    u64::try_from(days * 86400 + h as i64 * 3600 + mi as i64 * 60 + se as i64 - offset_secs).ok()
 }
 
 #[cfg(test)]
@@ -1139,5 +1554,293 @@ mod tests {
             event["evidence"],
             "fresh tool activity in the terminal tail"
         );
+    }
+
+    fn pane_v3(status: AgentStatus, tail: &str) -> PaneV3Observation {
+        PaneV3Observation {
+            pane_id: "p".into(),
+            agent: "claude".into(),
+            terminal_id: Some("t".into()),
+            agent_session: Some("s".into()),
+            status,
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            tail: tail.into(),
+            process_group: None,
+            read_error: None,
+        }
+    }
+    fn v3opt() -> PaneV3Options {
+        PaneV3Options {
+            stall_secs: 600,
+            retry_window_secs: 600,
+            op_deadline_secs: 1800,
+        }
+    }
+
+    #[test]
+    fn pane_v3_classifies_hooked_wait_idle_and_recent_progress() {
+        let mut m = PaneV3Memory::default();
+        assert_eq!(
+            classify_pane_v3(
+                &pane_v3(AgentStatus::Working, "Running cargo test"),
+                &mut m,
+                100,
+                v3opt()
+            )
+            .class,
+            PaneClass::Working
+        );
+        assert_eq!(
+            classify_pane_v3(
+                &pane_v3(AgentStatus::Blocked, "Continuing"),
+                &mut PaneV3Memory::default(),
+                100,
+                v3opt()
+            )
+            .class,
+            PaneClass::WaitingHuman
+        );
+        assert_eq!(
+            classify_pane_v3(
+                &pane_v3(AgentStatus::Idle, "Finished"),
+                &mut PaneV3Memory::default(),
+                100,
+                v3opt()
+            )
+            .class,
+            PaneClass::FinishedIdle
+        );
+        assert_eq!(
+            classify_pane_v3(
+                &pane_v3(AgentStatus::Working, "Usage limit reached"),
+                &mut PaneV3Memory::default(),
+                100,
+                v3opt()
+            )
+            .class,
+            PaneClass::WaitingHuman
+        );
+    }
+
+    #[test]
+    fn pane_v3_identity_rebind_resets_age_and_retry_window() {
+        let mut m = PaneV3Memory {
+            terminal_id: Some("old".into()),
+            agent_session: Some("old-session".into()),
+            hash: 3,
+            since: 1,
+            last_status: Some(AgentStatus::Working),
+            retry_since: Some(2),
+            ..Default::default()
+        };
+        let d = classify_pane_v3(
+            &pane_v3(AgentStatus::Working, "New turn started"),
+            &mut m,
+            900,
+            v3opt(),
+        );
+        assert_eq!(m.since, 900);
+        assert_eq!(m.retry_since, None);
+        assert!(d.evidence.contains("rebound identity"));
+    }
+
+    #[test]
+    fn pane_v3_new_turn_resets_age_without_identity_change() {
+        let mut memory = PaneV3Memory {
+            terminal_id: Some("t".into()),
+            agent_session: Some("s".into()),
+            hash: evidence::semantic_hash("resume"),
+            since: 5,
+            last_status: Some(AgentStatus::Idle),
+            retry_since: Some(7),
+            ..Default::default()
+        };
+        let d = classify_pane_v3(
+            &pane_v3(AgentStatus::Working, "resume"),
+            &mut memory,
+            900,
+            v3opt(),
+        );
+        assert_eq!(memory.since, 900);
+        assert_eq!(memory.retry_since, None);
+        assert!(d.evidence.contains("new turn"));
+    }
+
+    #[test]
+    fn pane_v3_retry_renewal_stalls_and_deadline_waits() {
+        let mut m = PaneV3Memory::default();
+        let mut o = pane_v3(AgentStatus::Working, "API 429 retry in 120 seconds");
+        assert_eq!(
+            classify_pane_v3(&o, &mut m, 100, v3opt()).class,
+            PaneClass::WaitingRetry
+        );
+        assert_eq!(
+            classify_pane_v3(&o, &mut m, 800, v3opt()).class,
+            PaneClass::Stalled
+        );
+        o.wait = Some("rate limit".into());
+        o.eta_s = Some(120);
+        o.reported_at = Some("2026-09-29T00:00:00Z".into());
+        assert!(parse_epoch(o.reported_at.as_deref()).is_some());
+        assert_eq!(
+            parse_epoch(Some("2026-09-29T01:00:00+01:00")),
+            parse_epoch(Some("2026-09-29T00:00:00Z"))
+        );
+        assert_eq!(
+            parse_epoch(Some("2026-09-29T00:00:00.123Z")),
+            parse_epoch(Some("2026-09-29T00:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn pane_v3_active_yes_no_with_tool_child_waits_for_tool_input() {
+        let mut o = pane_v3(AgentStatus::Working, "Overwrite generated snapshot? [y/n]");
+        o.process_group=Some(evidence::parse_ps_rows("100 1 100 S 00:05 0:00.01 codex\n101 100 100 S 00:04 0:00.00 bash\n102 101 100 S 00:03 0:00.52 cargo test"));
+        assert_eq!(
+            classify_pane_v3(&o, &mut PaneV3Memory::default(), 100, v3opt()).class,
+            PaneClass::WaitingToolInput
+        );
+    }
+
+    #[test]
+    fn pane_v3_stall_and_unknown_read_error_are_explicit() {
+        let mut m = PaneV3Memory {
+            hash: evidence::semantic_hash("unchanged"),
+            since: 1,
+            terminal_id: Some("t".into()),
+            agent_session: Some("s".into()),
+            last_status: Some(AgentStatus::Working),
+            ..Default::default()
+        };
+        let d = classify_pane_v3(
+            &pane_v3(AgentStatus::Working, "unchanged"),
+            &mut m,
+            1000,
+            v3opt(),
+        );
+        assert_eq!(d.class, PaneClass::Unknown);
+        assert!(d.evidence.contains("two samples"));
+        let mut o = pane_v3(AgentStatus::Working, "");
+        o.read_error = Some("unavailable".into());
+        assert_eq!(
+            classify_pane_v3(&o, &mut PaneV3Memory::default(), 100, v3opt()).class,
+            PaneClass::Unknown
+        );
+    }
+
+    #[test]
+    fn pane_v3_confirmation_resolves_stall_progress_and_tool_deadline() {
+        let first = pane_v3(AgentStatus::Working, "quiet tail");
+        let mut memory = PaneV3Memory {
+            terminal_id: first.terminal_id.clone(),
+            agent_session: first.agent_session.clone(),
+            hash: evidence::semantic_hash(&first.tail),
+            since: 1,
+            last_status: Some(AgentStatus::Working),
+            ..Default::default()
+        };
+        let candidate = classify_pane_v3(&first, &mut memory, 1000, v3opt());
+        let unchanged = confirm_pane_v3(candidate.clone(), &first, 1800);
+        assert_eq!(unchanged.class, PaneClass::Stalled);
+        let mut progressing = first.clone();
+        progressing.tail.push_str("\nCompiling crate");
+        assert_eq!(
+            confirm_pane_v3(candidate.clone(), &progressing, 1800).class,
+            PaneClass::Working
+        );
+        let mut tool = first;
+        tool.process_group = Some(evidence::parse_ps_rows(
+            "100 1 100 S 00:05 0:00.01 codex\n102 100 100 R 00:40 0:00.52 cargo test",
+        ));
+        assert_eq!(
+            confirm_pane_v3(candidate, &tool, 30).class,
+            PaneClass::Stalled
+        );
+    }
+
+    #[test]
+    fn pane_v3_memory_serializes_backdated_fields() {
+        let mut m = PaneV3Memory {
+            since: 123,
+            retry_since: Some(45),
+            ..Default::default()
+        };
+        m.model_cache.insert(
+            "hash".into(),
+            CachedPaneClass {
+                class: PaneClass::Stalled,
+                evidence: "cached".into(),
+            },
+        );
+        let value = serde_json::to_value(m).expect("serialize memory");
+        assert_eq!(value["since"], 123);
+        assert_eq!(value["retry_since"], 45);
+        assert!(value.get("terminal_id").is_some());
+        assert!(value.get("model_cache").is_some());
+    }
+
+    #[test]
+    fn pane_v3_decision_json_has_the_stable_contract_fields() {
+        let d = classify_pane_v3(
+            &pane_v3(AgentStatus::Working, "Running tests"),
+            &mut PaneV3Memory::default(),
+            100,
+            v3opt(),
+        );
+        let value = serde_json::to_value(d).expect("decision JSON");
+        for field in [
+            "class",
+            "old_state",
+            "new_state",
+            "status",
+            "evidence",
+            "samples",
+            "write_error",
+        ] {
+            assert!(value.get(field).is_some(), "missing {field}");
+        }
+        assert_eq!(value["class"], "working");
+        assert_eq!(value["status"], "consistent");
+    }
+
+    #[test]
+    fn pane_v3_model_reply_requires_exact_observation_and_valid_shape() {
+        let id = "p#0123456789abcdef";
+        assert_eq!(
+            parse_pane_model_reply(&format!("{id}\tstalled\tno progress"), id)
+                .expect("valid reply")
+                .0,
+            PaneClass::Stalled
+        );
+        assert!(parse_pane_model_reply("other#0123456789abcdef\tworking\tfresh", id).is_err());
+        assert!(parse_pane_model_reply(&format!("{id}\tworking"), id).is_err());
+        assert!(parse_pane_model_reply(&format!("{id}\tworking\tfresh\textra"), id).is_err());
+        assert!(parse_pane_model_reply(&format!("{id}\tblocked\twaiting"), id).is_err());
+        assert!(parse_pane_model_reply(
+            &format!("{id}\tunknown\tunknown\n{id}\tworking\tfresh"),
+            id
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn pane_v3_revalidation_rejects_identity_status_and_tail_changes() {
+        let original = pane_v3(AgentStatus::Working, "original output");
+        let decision = classify_pane_v3(&original, &mut PaneV3Memory::default(), 100, v3opt());
+        assert!(pane_v3_observation_is_current(&decision, &original));
+        let mut changed = original.clone();
+        changed.terminal_id = Some("new terminal".into());
+        assert!(!pane_v3_observation_is_current(&decision, &changed));
+        let mut changed = original.clone();
+        changed.agent_session = Some("new session".into());
+        assert!(!pane_v3_observation_is_current(&decision, &changed));
+        let mut changed = original.clone();
+        changed.status = AgentStatus::Blocked;
+        assert!(!pane_v3_observation_is_current(&decision, &changed));
+        let mut changed = original;
+        changed.tail.push_str("\nFresh output");
+        assert!(!pane_v3_observation_is_current(&decision, &changed));
     }
 }

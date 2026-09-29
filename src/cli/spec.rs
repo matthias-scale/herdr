@@ -231,6 +231,28 @@ pub(super) fn watchdog_command() -> Command {
                 .help("Seconds without pane output before a working agent is blocked"),
         )
         .arg(
+            option("confirm-secs", "N")
+                .default_value("20")
+                .value_parser(clap::value_parser!(u64))
+                .help("Seconds between confirmation samples"),
+        )
+        .arg(
+            option("retry-window-secs", "N")
+                .help("Maximum retry renewal window (default: stall-secs)")
+                .value_parser(clap::value_parser!(u64)),
+        )
+        .arg(
+            option("op-deadline-secs", "N")
+                .help("Maximum foreground tool operation duration (default: 3 x stall-secs)")
+                .value_parser(clap::value_parser!(u64)),
+        )
+        .arg(
+            option("model-timeout-secs", "N")
+                .default_value("45")
+                .value_parser(clap::value_parser!(u64))
+                .help("Gemini classifier timeout"),
+        )
+        .arg(
             option("lines", "N")
                 .default_value("40")
                 .value_parser(clap::value_parser!(u32))
