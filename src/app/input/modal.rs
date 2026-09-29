@@ -3366,12 +3366,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_context_menu_close_tab_last_parent_group_workspace_keeps_group() {
+    async fn api_context_menu_close_tab_last_parent_group_workspace_confirms_group_close() {
         let mut app = app_with_test_workspaces(&["main", "issue"]);
         mark_worktree_space_member(&mut app.state, 0, "repo-key");
         mark_worktree_space_member(&mut app.state, 1, "repo-key");
         app.state.active = Some(0);
         app.state.selected = 1;
+        app.state.confirm_close = true;
         app.state
             .open_client_overlay(crate::app::state::ClientOverlay::ContextMenu);
         let (workspace_id, tab_id) = context_tab_ids(&app.state, 0, 0);
@@ -3394,7 +3395,7 @@ mod tests {
 
         assert_eq!(app.state.workspaces.len(), 2);
         assert_eq!(app.state.selected, 0);
-        assert_ne!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
         assert!(!app.event_hub.events_after(0).iter().any(|(_, event)| {
             matches!(event.event, crate::api::schema::EventKind::WorkspaceClosed)

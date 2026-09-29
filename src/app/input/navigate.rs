@@ -1189,6 +1189,15 @@ impl App {
             }
             return self.state.client_overlay == crate::app::state::ClientOverlay::ConfirmClose;
         }
+        let closes_workspace = self.state.close_pane_would_close_workspace(ws_idx, pane_id);
+        let closes_worktree_group =
+            closes_workspace && self.state.workspace_close_indices(ws_idx).len() > 1;
+        if closes_workspace
+            && (self.state.confirm_close || closes_worktree_group)
+            && self.state.begin_workspace_close_confirmation(ws_idx)
+        {
+            return true;
+        }
         let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) else {
             return false;
         };
@@ -8852,18 +8861,19 @@ navigate_pane_down = "ctrl+j"
     }
 
     #[test]
-    fn prefix_close_pane_last_parent_group_pane_keeps_group() {
+    fn prefix_close_pane_last_parent_group_pane_confirms_group_close() {
         let mut state = state_with_workspaces(&["main", "issue"]);
         mark_worktree_space_member(&mut state, 0, "repo-key");
         mark_worktree_space_member(&mut state, 1, "repo-key");
         state.selected = 1;
         state.active = Some(0);
+        state.confirm_close = true;
         state.set_server_mode(Mode::Navigate);
 
         execute_navigate_action(&mut state, NavigateAction::ClosePane);
 
         assert_eq!(state.selected, 1);
-        assert_ne!(state.effective_interaction_mode(), Mode::ConfirmClose);
+        assert_eq!(state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(state.workspaces.len(), 2);
     }
 

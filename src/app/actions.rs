@@ -2369,7 +2369,16 @@ impl AppState {
     pub(crate) fn close_pane_would_close_workspace(&self, ws_idx: usize, pane_id: PaneId) -> bool {
         self.workspaces.get(ws_idx).is_some_and(|ws| {
             ws.find_tab_index_for_pane(pane_id).is_some_and(|tab_idx| {
-                ws.tabs[tab_idx].layout.pane_count() <= 1 && ws.tabs.len() <= 1
+                let tab = &ws.tabs[tab_idx];
+                let pane_is_non_companion = tab
+                    .pane_state(pane_id)
+                    .is_some_and(|pane| !pane.is_companion);
+                pane_is_non_companion
+                    && ws.tabs.len() == 1
+                    && !tab
+                        .panes
+                        .iter()
+                        .any(|(candidate, pane)| *candidate != pane_id && !pane.is_companion)
             })
         })
     }
