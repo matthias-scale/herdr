@@ -15,6 +15,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import shlex
 import signal
 import socket
 import subprocess
@@ -39,6 +40,9 @@ class Harness:
         self.started: list[subprocess.Popen[Any]] = []
         self.panes: dict[str, str] = {}
         self.timeline = self.args.out / "timeline.jsonl"
+        self.peer_root: str | None = None
+        self.peer_session: str | None = None
+        self.probe_wrapper: Path | None = None
 
     def start(self) -> None:
         app = "herdr-dev" if "debug" in str(self.args.binary) else "herdr"
@@ -84,6 +88,80 @@ class Harness:
         if result.get("error"):
             raise RuntimeError(f"{method}: {result['error']}")
         return result.get("result", {})
+
+    def setup_peer_parent(self) -> None:
+        if self.peer_session:
+            return
+        if not self.args.peer or not self.args.peer_binary:
+            raise RuntimeError("p-cross-host requires --peer and --peer-binary")
+        self.peer_root = f"/tmp/wdl.{os.getpid()}"
+        peer = self.args.peer
+        binary = str(self.args.peer_binary)
+        xdg_cfg = f"{self.peer_root}/cfg"
+        xdg_state = f"{self.peer_root}/state"
+        sock = f"{self.peer_root}/s.sock"
+        app = "herdr-dev" if "debug" in binary else "herdr"
+        root_q, cfg_q, state_q, sock_q = map(shlex.quote,
+            (self.peer_root, xdg_cfg, xdg_state, sock))
+        binary_q = shlex.quote(binary)
+        script = (f"mkdir -p {cfg_q}/{app} {state_q}; "
+                  f"printf '%s\\n' 'allow_nested = true' > {cfg_q}/{app}/config.toml; "
+                  f"nohup env -i PATH=/usr/bin:/bin XDG_CONFIG_HOME={cfg_q} "
+                  f"XDG_STATE_HOME={state_q} HERDR_SOCKET_PATH={sock_q} {binary_q} server "
+                  f"</dev/null >/dev/null 2>&1 & "
+                  f"i=0; while [ $i -lt 100 ] && [ ! -S {sock_q} ]; do sleep .1; i=$((i+1)); done; "
+                  f"[ -S {sock_q} ] || exit 3; "
+                  f"env -i PATH=/usr/bin:/bin XDG_CONFIG_HOME={cfg_q} XDG_STATE_HOME={state_q} "
+                  f"HERDR_SOCKET_PATH={sock_q} {binary_q} workspace create --cwd /tmp "
+                  f"--label watchdog-peer-parent")
+        preflight = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                                    peer, "sh", "-lc", f"hostname -s; whoami; test -x {binary_q}"], text=True,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=12)
+        if preflight.returncode:
+            raise RuntimeError(f"peer SSH preflight failed ({preflight.returncode}): {preflight.stderr[-500:]}")
+        result = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                                 peer, "sh", "-lc", script], text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40)
+        if result.returncode:
+            raise RuntimeError(f"peer fixture startup failed ({result.returncode}): {result.stderr[-500:]}")
+        payload = _last_json(result.stdout)
+        pane_id = _find_value(payload, "pane_id")
+        if not pane_id:
+            raise RuntimeError(f"peer workspace response omitted pane_id: {result.stdout[-500:]}")
+        self.peer_session = f"watchdog-peer-{os.getpid()}"
+        report = [binary, "pane", "report-agent-session", str(pane_id), "--source",
+                  "watchdog-harness", "--agent", "codex", "--agent-session-id", self.peer_session]
+        command = (f"env -i PATH=/usr/bin:/bin XDG_CONFIG_HOME={cfg_q} XDG_STATE_HOME={state_q} "
+                   f"HERDR_SOCKET_PATH={sock_q} " + " ".join(map(shlex.quote, report)))
+        reported = subprocess.run(["ssh", "-o", "BatchMode=yes", peer, command], text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        if reported.returncode:
+            raise RuntimeError(f"peer session report failed: {reported.stderr[-500:]}")
+        self.probe_wrapper = self.root / "parent-probe"
+        self.probe_wrapper.write_text("#!/usr/bin/env python3\nimport os, subprocess, sys\n"
+            f"cfg={cfg_q!r}; state={state_q!r}; sock={sock_q!r}; binary={binary!r}\n"
+            "host=sys.argv[1]\n"
+            "p=subprocess.run(['ssh','-o','BatchMode=yes','-o','ConnectTimeout=5',host,'env',"
+            "'XDG_CONFIG_HOME='+cfg,'XDG_STATE_HOME='+state,'HERDR_SOCKET_PATH='+sock,"
+            "binary,'pane','list'],text=True)\n"
+            "sys.exit(p.returncode)\n", encoding="utf-8")
+        self.probe_wrapper.chmod(0o755)
+
+    def cleanup_peer(self) -> None:
+        if not self.peer_root or not self.args.peer or not self.args.peer_binary:
+            return
+        app = "herdr-dev" if "debug" in str(self.args.peer_binary) else "herdr"
+        cfg = f"{self.peer_root}/cfg"
+        state = f"{self.peer_root}/state"
+        sock = f"{self.peer_root}/s.sock"
+        env = (f"env -i PATH=/usr/bin:/bin XDG_CONFIG_HOME={shlex.quote(cfg)} "
+               f"XDG_STATE_HOME={shlex.quote(state)} HERDR_SOCKET_PATH={shlex.quote(sock)} ")
+        binary = shlex.quote(str(self.args.peer_binary))
+        cmd = (env + binary + " server stop >/dev/null 2>&1 || true; "
+               f"rm -rf {shlex.quote(self.peer_root)}")
+        subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                        self.args.peer, "sh", "-lc", cmd], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=20, check=False)
 
     def cli(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         result = subprocess.run([str(self.args.binary), *args], cwd=self.root, env=self.env,
@@ -147,7 +225,27 @@ class Harness:
             entry["agent_session"] = session
         path.write_text(json.dumps(memory) + "\n", encoding="utf-8")
 
+    def age_worker_memory(self, path: Path, worker_id: str, seconds: int,
+                          *, previous_turn: bool = False) -> None:
+        try:
+            memory = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            memory = {}
+        key = next((k for k in memory if k == worker_id or k.endswith(":" + worker_id)), worker_id)
+        entry = memory.setdefault(key, {})
+        aged = int(time.time()) - seconds
+        for field in ("since", "retry_since", "op_since"):
+            if field in entry:
+                entry[field] = aged
+        entry.setdefault("since", aged)
+        if previous_turn:
+            entry["turn_id"] = "previous-turn"
+            if entry.get("op_signature"):
+                entry["op_since"] = aged
+        path.write_text(json.dumps(memory) + "\n", encoding="utf-8")
+
     def cleanup(self) -> None:
+        self.cleanup_peer()
         for proc in reversed(self.started):
             if proc.poll() is None:
                 if os.name == "posix" and proc.pid != os.getpid():
@@ -176,6 +274,54 @@ class Harness:
                     pass
                 self.server.wait()
         shutil.rmtree(self.root, ignore_errors=True)
+
+    def incident_rearm_check(self) -> dict[str, Any]:
+        parent_pane = self.workspace("incident-parent", _script("Parent remains available"))
+        parent_session = "incident-parent-session"
+        self.call("pane.report_agent_session", {"pane_id": parent_pane,
+            "source": "watchdog-harness", "agent": "codex", "agent_session_id": parent_session})
+        runs = self.root / "incident-runs" / "incident-worker"
+        turn = runs / "turns" / "turn-1"
+        turn.mkdir(parents=True)
+        worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"],
+            cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        self.started.append(worker)
+        now = int(time.time())
+        old = now - 3600
+        trace = turn / "trace.log"
+        trace.write_text("codex\nwaiting for external operation\n")
+        os.utime(trace, (old, old))
+        (turn / "start.json").write_text(json.dumps({"started_at": now - 3600}))
+        (runs / "state.json").write_text(json.dumps({"schema": 1, "run_id": "incident-worker",
+            "host": self.args.host_label, "agent": "codex", "pid": worker.pid,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "state": "active",
+            "parent": {"host": self.args.host_label, "pane": parent_pane,
+                       "session": parent_session}}))
+        state = self.root / "incident-state.json"
+        log = self.root / "incident-log.jsonl"
+        options = ["--stall-minutes", "1", "--runs-dir", str(runs.parent),
+                   "--claude-projects-dir", str(self.root / "claude-projects"),
+                   "--state-file", str(state), "--log-file", str(log),
+                   "--local-host", self.args.host_label]
+        first = self.run_watchdog("B", options, dry=False)
+        second = self.run_watchdog("B", options, dry=False)
+        records_after_second = len(log.read_text().splitlines()) if log.exists() else 0
+        with trace.open("a", encoding="utf-8") as output:
+            output.write("new semantic progress\n")
+        recovered = self.run_watchdog("B", options, dry=False)
+        self.age_worker_memory(state, "incident-worker", 3600)
+        rearmed = self.run_watchdog("B", options, dry=False)
+        records_after_rearm = len(log.read_text().splitlines()) if log.exists() else 0
+        def incident_action(payload: dict[str, Any]) -> str | None:
+            decisions = payload.get("decisions", [])
+            item = next((d for d in decisions if d.get("worker_id") == "incident-worker"), {})
+            return (item.get("incident") or {}).get("action")
+        return {"first_action": incident_action(first), "second_action": incident_action(second),
+                "records_after_second": records_after_second,
+                "recovery_class": next((d.get("class") for d in recovered.get("decisions", [])
+                    if d.get("worker_id") == "incident-worker"), None),
+                "rearmed_action": incident_action(rearmed), "records_after_rearm": records_after_rearm}
 
 
 def _last_json(text: str) -> Any:
@@ -215,7 +361,9 @@ def _script(text: str, repeat: bool = False) -> str:
 
 
 def setup_quiet(h: Harness, ident: str) -> str:
-    return h.workspace(ident, _script("Running cargo test"))
+    code = "import subprocess,time; print('Running cargo test', flush=True); " \
+           "subprocess.Popen(['sleep','3600']); time.sleep(3600)"
+    return h.workspace(ident, "python3 -u -c " + repr(code))
 
 
 def setup_stall(h: Harness, ident: str) -> str:
@@ -223,7 +371,9 @@ def setup_stall(h: Harness, ident: str) -> str:
 
 
 def setup_prompt(h: Harness, ident: str) -> str:
-    return h.workspace(ident, _script("Overwrite generated snapshot? [y/n]"))
+    code = "import subprocess,time; print('Overwrite generated snapshot? [y/n]', flush=True); " \
+           "subprocess.Popen(['bash','-c','read -r answer']); time.sleep(3600)"
+    return h.workspace(ident, "python3 -u -c " + repr(code))
 
 
 def setup_progress(h: Harness, ident: str) -> str:
@@ -243,7 +393,9 @@ def setup_account(h: Harness, ident: str) -> str:
 
 
 def setup_spinner(h: Harness, ident: str) -> str:
-    return h.workspace(ident, _script("◐ working", repeat=True))
+    code = "import itertools,time; glyphs=itertools.cycle('◐◓◑◒'); " \
+           "exec(\"while True:\\n print(next(glyphs), flush=True)\\n time.sleep(2)\")"
+    return h.workspace(ident, "python3 -u -c " + repr(code))
 
 
 def setup_quote(h: Harness, ident: str) -> str:
@@ -260,20 +412,52 @@ def setup_prose_question(h: Harness, ident: str) -> str:
 
 def setup_worker(h: Harness, ident: str) -> dict[str, str]:
     # Each run directory has its own live fixture process and aged trace.
+    if ident == "b-claude-subagent":
+        parent_pane = h.workspace("parent-" + ident, _script("Parent Claude fixture"))
+        session = "claude-parent-" + ident
+        h.call("pane.report_agent_session", {"pane_id": parent_pane,
+            "source": "watchdog-harness", "agent": "claude", "agent_session_id": session})
+        transcript = h.root / "claude-projects" / "project" / session / "subagents" / f"{ident}.jsonl"
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(json.dumps({"type": "assistant", "message": {
+            "content": [{"type": "text", "text": "Working through the task"}]}}) + "\n")
+        return {"runs": str(h.root / "runs")}
     runs = h.root / "runs" / ident
     runs.mkdir(parents=True, exist_ok=True)
-    worker = subprocess.Popen([sys.executable, "-c", "import subprocess,time; "
-        "subprocess.Popen(['sleep','3600']); time.sleep(3600)"], cwd=h.root,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    h.started.append(worker)
+    current_turn = "turn-2" if ident in ("b-resumed", "b-resumed-same-op") else "turn-1"
+    if current_turn == "turn-2":
+        prior = runs / "turns" / "turn-1"
+        prior.mkdir(parents=True, exist_ok=True)
+        (prior / "start.json").write_text(json.dumps({"started_at": time.time() - 60}))
+        (prior / "trace.log").write_text("older turn output\n")
+    turn = runs / "turns" / current_turn
+    turn.mkdir(parents=True, exist_ok=True)
     old = int(time.time()) - 3600
     terminal = ident == "b-finished"
     retry = "retry in 120 seconds\n" if "retry" in ident else ""
     prompt = "Overwrite? [y/n]\n" if "subprocess-yn" in ident else ""
     approval = ident == "b-approval"
-    trace = runs / "trace.log"
-    trace.write_text(retry + prompt + "codex\nexec\necho build\n")
-    os.utime(trace, (old, old))
+    trace = turn / "trace.log"
+    quote = '> "Should I continue?"\nprogress made\n' if ident == "b-quoted-question" else ""
+    trace.write_text(retry + prompt + quote + "codex\nexec\necho build\n")
+    if ident == "b-spinner-progress":
+        code = ("import time; p=" + repr(str(trace)) + "; i=0\nwhile True:\n "
+                "i+=1; open(p,'a').write(f'progress {i}\\n'); time.sleep(1)\n")
+        process_code = code
+    elif ident == "b-spinner-only":
+        code = ("import time; p=" + repr(str(trace)) + "; glyph='◐◓◑◒'; i=0\nwhile True:\n "
+                "open(p,'a').write(glyph[i%4]+' (12s)\\n'); i+=1; time.sleep(1)\n")
+        process_code = code
+    elif ident in ("b-quiet-build", "b-subprocess-yn"):
+        process_code = "import subprocess,time; subprocess.Popen(['sleep','3600']); time.sleep(3600)"
+    else:
+        process_code = "import time; time.sleep(3600)"
+    worker = subprocess.Popen([sys.executable, "-u", "-c", process_code], cwd=h.root,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    h.started.append(worker)
+    if ident not in ("b-quiet-build", "b-silent-stall", "b-retry-renewed",
+                     "b-spinner-only", "b-resumed-same-op"):
+        os.utime(trace, (time.time(), time.time()))
     parent: dict[str, Any] = {"host": h.args.host_label, "pane": "nonexistent",
                               "workspace": "missing", "session": "missing"}
     if ident == "p-unreachable":
@@ -284,18 +468,21 @@ def setup_worker(h: Harness, ident: str) -> dict[str, str]:
         h.call("pane.report_agent_session", {"pane_id": parent_pane,
             "source": "watchdog-harness", "agent": "codex", "agent_session_id": parent_session})
         parent.update(pane=parent_pane, session=parent_session)
+    elif ident == "p-cross-host":
+        h.setup_peer_parent()
+        parent.update(host=h.args.peer, session=h.peer_session)
+    worker_pid = 99999999 if ident == "b-dead-pid" else worker.pid
     (runs / "state.json").write_text(json.dumps({"schema": 1, "run_id": ident,
-        "host": h.args.host_label, "agent": "codex", "pid": worker.pid,
+        "host": h.args.host_label, "agent": "codex", "pid": worker_pid,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "state": "complete" if terminal else ("blocked" if approval else "active"),
         "blocked_reason": "approval required" if approval else None,
         "progress_at": None, "parent": parent}))
     os.utime(runs / "state.json", (old, old))
-    turn = runs / "turns" / "turn-1"
-    turn.mkdir(parents=True, exist_ok=True)
     (turn / "start.json").write_text(json.dumps({"started_at": time.time()}))
-    (turn / "trace.log").write_text(trace.read_text())
-    os.utime(turn / "trace.log", (old, old))
+    if ident in ("b-quiet-build", "b-silent-stall", "b-retry-renewed",
+                 "b-spinner-only", "b-resumed-same-op"):
+        os.utime(trace, (old, old))
     if terminal:
         (turn / "receipt.json").write_text(json.dumps({"status": "ended-unverified", "exit_code": 0}))
     return {"runs": str(h.root / "runs")}
@@ -348,7 +535,14 @@ def self_test(args: argparse.Namespace) -> int:
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"],
                                 cwd=h.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         h.started.append(proc)
-        (h.root / "self-test-runs").mkdir()
+        run_dir = h.root / "self-test-runs" / "self-test-run"
+        (run_dir / "turns" / "turn-1").mkdir(parents=True)
+        (run_dir / "state.json").write_text(json.dumps({"schema": 1, "run_id": "self-test-run",
+            "host": args.host_label, "agent": "codex", "pid": proc.pid,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "state": "active"}))
+        (run_dir / "turns" / "turn-1" / "start.json").write_text(
+            json.dumps({"started_at": time.time()}))
+        (run_dir / "turns" / "turn-1" / "trace.log").write_text("codex\nself-test fixture\n")
         (h.root / "timeline.jsonl").write_text(json.dumps({"self_test": True}) + "\n")
         print("SELF_TEST server_started=true workspace_created=true pane_created=true "
               f"worker_pid={proc.pid} timeline_written=true")
@@ -390,8 +584,11 @@ def main() -> int:
     if selected and selected - known:
         parser.error("unknown --only case(s): " + ", ".join(sorted(selected - known)))
     if args.gemini_bin:
-        shutil.which(args.gemini_bin) or Path(args.gemini_bin).is_file() or parser.error(
-            f"Gemini executable not found: {args.gemini_bin}")
+        located = shutil.which(args.gemini_bin)
+        gemini_path = Path(located or args.gemini_bin).resolve()
+        if not gemini_path.is_file():
+            parser.error(f"Gemini executable not found: {args.gemini_bin}")
+        args.gemini_bin = str(gemini_path)
     harness = Harness(args)
     rows: list[dict[str, Any]] = []
     try:
@@ -420,10 +617,15 @@ def main() -> int:
                                "--status-log", str(log)]
                 if args.gemini_bin:
                     cmd_options += ["--gemini-bin", args.gemini_bin]
+                else:
+                    cmd_options.append("--no-model")
                 harness.run_watchdog("A", cmd_options)
-                age = 900 if ident not in ("a-retry-backoff",) else 0
+                age = 900 if ident in ("a-quiet-build", "a-silent-stall", "a-spinner-only",
+                                       "a-spinner-progress", "a-resumed") else 0
                 if ident == "a-retry-renewed":
                     age = 1200
+                elif ident == "a-prose-question":
+                    age = 90
                 if age:
                     harness.age_memory(state, pane_id, age,
                                        session="old-session" if ident == "a-resumed" else None)
@@ -435,7 +637,20 @@ def main() -> int:
             elif family in ("B", "P"):
                 opts = ["--dry-run", "--stall-minutes", "1", "--runs-dir",
                         str(Path(result["runs"]).parent), "--state-file", str(harness.root / f"worker-{ident}.json"),
+                        "--claude-projects-dir", str(harness.root / "claude-projects"),
+                        "--local-host", args.host_label,
                         "--log-file", str(harness.root / f"worker-{ident}.jsonl")]
+                (harness.root / "claude-projects").mkdir(exist_ok=True)
+                if ident == "p-cross-host" and harness.probe_wrapper:
+                    opts += ["--parent-probe", str(harness.probe_wrapper)]
+                memory_path = harness.root / f"worker-{ident}.json"
+                harness.run_watchdog("B", opts)
+                memory_age = (7200 if ident == "b-resumed-same-op" else
+                    0 if ident in ("b-retry-backoff", "b-quoted-question", "b-claude-subagent") else 3600)
+                harness.age_worker_memory(memory_path, ident, memory_age,
+                    previous_turn=ident in ("b-resumed", "b-resumed-same-op"))
+                if ident == "b-spinner-progress":
+                    time.sleep(2.1)
                 payload = harness.run_watchdog("B", opts)
                 decision = next((d for d in payload.get("decisions", []) if d.get("worker_id") == ident), {})
                 actual = decision.get("parent", "missing") if family == "P" else decision.get("class", "missing")
@@ -443,22 +658,34 @@ def main() -> int:
             else:
                 actual, evidence = "not_checked", "parent check included in worker result"
                 payload = {"_wall_time_ms": 0, "_model_latency_ms": None}
+            calls = (payload.get("summary") or {}).get("model_calls", 0)
+            calls_expected = 1 if ident == "a-prose-question" and args.gemini_bin else 0
             rows.append({"id": ident, "watchdog": family, "expected": expected,
-                         "actual": actual, "match": actual == expected,
+                         "actual": actual, "model_calls": calls,
+                         "match": actual == expected and calls == calls_expected,
                          "evidence": evidence, "wall_time_ms": payload.get("_wall_time_ms"),
                          "model_latency_ms": payload.get("_model_latency_ms")})
+        incident = harness.incident_rearm_check()
+        incident["match"] = (incident["first_action"] == "logged"
+            and incident["second_action"] == "already_logged"
+            and incident["records_after_second"] == 1
+            and incident["recovery_class"] == "working"
+            and incident["rearmed_action"] == "logged"
+            and incident["records_after_rearm"] == 2)
         digest = hashlib.sha256(args.binary.read_bytes()).hexdigest()
         source = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.strip()
-        doc = {"host": args.host_label, "binary_sha256": digest, "source_sha": source, "cases": rows}
+        doc = {"host": args.host_label, "binary_sha256": digest, "source_sha": source,
+               "cases": rows, "incident_rearm": incident}
         (args.out / "matrix.json").write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
         lines = ["# Watchdog live matrix", "", f"Host: `{args.host_label}`  ",
                  f"Source: `{source}`  ", f"Binary SHA256: `{digest}`", "",
                  "| Case | Watchdog | Expected | Actual | Match |", "|---|---|---|---|---|"]
         lines.extend(f"| {r['id']} | {r['watchdog']} | {r['expected']} | {r['actual']} | {'yes' if r['match'] else 'no'} |" for r in rows)
         (args.out / "matrix.md").write_text("\n".join(lines) + "\n")
-        print(f"MATRIX {args.out / 'matrix.md'} matched={sum(r['match'] for r in rows)}/{len(rows)}")
-        return 0 if rows and all(r["match"] for r in rows) else 1
+        print(f"MATRIX {args.out / 'matrix.md'} matched={sum(r['match'] for r in rows)}/{len(rows)} "
+              f"incident_rearm={'pass' if incident['match'] else 'fail'}")
+        return 0 if rows and all(r["match"] for r in rows) and incident["match"] else 1
     finally:
         harness.cleanup()
 
