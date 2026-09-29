@@ -1338,6 +1338,7 @@ fn render_mobile_switcher_content(
                 blocked,
                 dot_color,
                 subtitle,
+                provider,
                 ..
             } => {
                 if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
@@ -1351,6 +1352,7 @@ fn render_mobile_switcher_content(
                         *blocked,
                         *dot_color,
                         subtitle.as_deref(),
+                        provider,
                         Rect::new(
                             content.x,
                             y,

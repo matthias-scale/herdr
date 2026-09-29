@@ -238,8 +238,9 @@ pub(super) struct TabRowLayout {
 }
 
 const SIDEBAR_DOT_FIELD_WIDTH: usize = 3;
-/// Prefix of a task row at depth 1 (`depth * 3 + 1`), shared by the Needs-you strip.
-const NEEDS_YOU_DOT_PREFIX_WIDTH: usize = 4;
+/// Requested prefix of a task row at depth 1 (`depth * 3 + 1`); the Needs-you
+/// strip lines its dot up with these rows.
+const NEEDS_YOU_REQUESTED_PREFIX_WIDTH: usize = 4;
 const SIDEBAR_PROVIDER_GAP_WIDTH: usize = 1;
 const SIDEBAR_AGE_FIELD_WIDTH: usize = 5;
 const SIDEBAR_AGE_MIN_ROW_WIDTH: usize = 24;
@@ -546,6 +547,18 @@ struct CompactRowWidths {
     prefix: usize,
     provider: usize,
     age: usize,
+}
+
+/// The prefix a compact task row with this title and provider gets at `width`,
+/// computed exactly as `render_compact_agent_row_with_prefix` does.
+fn compact_row_prefix_width(
+    title: &str,
+    provider: &str,
+    width: usize,
+    requested_prefix: usize,
+) -> usize {
+    let title = compact_row_title_for_width(title, provider, width, requested_prefix);
+    compact_row_widths(title, provider, width, requested_prefix).prefix
 }
 
 fn compact_row_widths(
@@ -2057,6 +2070,24 @@ pub(crate) fn all_agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     collect_agent_panel_entries_with_runtimes(app, None)
 }
 
+fn remote_agent_as_panel_entry(remote: &std::sync::Arc<RemoteAgentPanelEntry>) -> AgentPanelEntry {
+    let mut entry = remote.entry.clone();
+    entry.identity = AgentPanelIdentity::Remote(remote.agent_ref.clone());
+    entry.remote_entry = Some(std::sync::Arc::clone(remote));
+    entry.remote_show_host_identity = remote.show_host_identity;
+    entry
+}
+
+fn all_agent_navigation_entries(app: &AppState) -> Vec<AgentPanelEntry> {
+    let mut entries = all_agent_panel_entries(app);
+    entries.extend(
+        app.remote_agent_panel_entries
+            .iter()
+            .map(remote_agent_as_panel_entry),
+    );
+    entries
+}
+
 pub(crate) fn sidebar_thread_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     collect_sidebar_thread_entries_with_runtimes(app, None)
 }
@@ -2072,7 +2103,7 @@ pub(crate) fn relative_agent_navigation_entry(
     app: &AppState,
     forward: bool,
 ) -> Option<(usize, AgentPanelEntry)> {
-    let entries = all_agent_panel_entries(app);
+    let entries = all_agent_navigation_entries(app);
     if entries.is_empty() {
         return None;
     }
@@ -2082,13 +2113,26 @@ pub(crate) fn relative_agent_navigation_entry(
             .and_then(crate::workspace::Workspace::focused_pane_id)
             .map(|pane_id| (ws_idx, pane_id))
     });
-    let current_idx = entries.iter().position(|entry| {
-        focused.is_some_and(|(ws_idx, pane_id)| {
-            entry
-                .local_target()
-                .is_some_and(|target| target.ws_idx == ws_idx && target.pane_id == pane_id)
+    let current_idx = app
+        .sidebar_selected_remote_agent
+        .as_ref()
+        .and_then(|selected| {
+            entries.iter().position(|entry| {
+                matches!(
+                    &entry.identity,
+                    AgentPanelIdentity::Remote(agent_ref) if agent_ref == selected
+                )
+            })
         })
-    });
+        .or_else(|| {
+            entries.iter().position(|entry| {
+                focused.is_some_and(|(ws_idx, pane_id)| {
+                    entry
+                        .local_target()
+                        .is_some_and(|target| target.ws_idx == ws_idx && target.pane_id == pane_id)
+                })
+            })
+        });
     let next_idx = match (current_idx, forward) {
         (Some(idx), true) => (idx + 1) % entries.len(),
         (Some(0), false) => entries.len() - 1,
@@ -2875,6 +2919,8 @@ pub(crate) enum SidebarRow {
         dot_color: Color,
         /// Human ask shown beneath the row when the shared subtitle setting is on.
         subtitle: Option<String>,
+        /// Provider cell of the matching task row, used to size the dot prefix.
+        provider: String,
         target: NeedsYouTarget,
     },
     NeedsYouMore {
@@ -3512,13 +3558,7 @@ fn compact_sidebar_rows_inner(
                 remote_sidebar_entry_matches_query(remote, &remote_terms)
                     && (!app.blocked_filter || entry_has_red_dot(remote))
             })
-            .map(|remote| {
-                let mut entry = remote.entry.clone();
-                entry.identity = AgentPanelIdentity::Remote(remote.agent_ref.clone());
-                entry.remote_entry = Some(std::sync::Arc::clone(remote));
-                entry.remote_show_host_identity = remote.show_host_identity;
-                entry
-            })
+            .map(remote_agent_as_panel_entry)
             .collect::<Vec<_>>()
     } else {
         Vec::new()
@@ -5101,6 +5141,7 @@ fn needs_you_strip_rows(
             dot: compact_row_dot_text(entry),
             dot_color: compact_row_color(entry, &app.palette),
             subtitle: visible_pending_ask(app, entry).map(str::to_owned),
+            provider: compact_provider(entry, app.nerd_font),
             target: NeedsYouTarget::Local(target),
         });
     }
@@ -5129,6 +5170,7 @@ fn needs_you_strip_rows(
             dot: compact_row_dot_text(entry),
             dot_color: compact_row_color(entry, &app.palette),
             subtitle: visible_pending_ask(app, entry).map(str::to_owned),
+            provider: compact_provider(entry, app.nerd_font),
             target: NeedsYouTarget::Remote(remote.agent_ref.clone()),
         });
     }
@@ -8118,6 +8160,7 @@ pub(super) fn render_needs_you_row(
     blocked: bool,
     dot_color: Color,
     subtitle: Option<&str>,
+    provider: &str,
     rect: Rect,
 ) {
     if rect.width == 0 || rect.height == 0 {
@@ -8132,7 +8175,12 @@ pub(super) fn render_needs_you_row(
     };
     // The dot sits in the same column as the dots of task rows nested one
     // level under a group header, so the strip and the list line up.
-    let prefix = NEEDS_YOU_DOT_PREFIX_WIDTH.min(usize::from(rect.width) / 4);
+    let prefix = compact_row_prefix_width(
+        title,
+        provider,
+        usize::from(rect.width),
+        NEEDS_YOU_REQUESTED_PREFIX_WIDTH,
+    );
     let title_width = usize::from(rect.width).saturating_sub(
         prefix
             + SIDEBAR_DOT_FIELD_WIDTH
@@ -11360,6 +11408,7 @@ fn render_workspace_list(
                     blocked,
                     dot_color,
                     subtitle,
+                    provider,
                     ..
                 }) => {
                     render_needs_you_row(
@@ -11372,6 +11421,7 @@ fn render_workspace_list(
                         *blocked,
                         *dot_color,
                         subtitle.as_deref(),
+                        provider,
                         rect,
                     );
                 }
@@ -29556,6 +29606,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             blocked,
             dot_color,
             subtitle,
+            provider,
             ..
         } = &needs_you_row
         else {
@@ -29576,6 +29627,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     *blocked,
                     *dot_color,
                     subtitle.as_deref(),
+                    provider,
                     Rect::new(0, 0, 42, 2),
                 )
             })
@@ -29636,6 +29688,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                         blocked,
                         app.palette.peach,
                         None,
+                        "",
                         Rect::new(0, 0, 42, 1),
                     )
                 })
@@ -30217,6 +30270,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn needs_you_has_no_header_and_a_red_dot_in_both_layouts() {
         for sections in [false, true] {
             let mut app = app_with_agents(&["blocked"]);
+            // A long title makes narrow task rows shrink their nested prefix.
+            app.workspaces[0].tabs[0].custom_name = Some("Herdr UI improvements long".into());
             app.sidebar_sections_layout = sections;
             let pane_id = app.workspaces[0].tabs[0].root_pane;
             let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
@@ -30239,51 +30294,72 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .into_iter()
                 .next()
                 .expect("tab");
-            let mut terminal = Terminal::new(TestBackend::new(36, 2)).expect("needs-you terminal");
-            terminal
-                .draw(|frame| {
-                    if let SidebarRow::NeedsYou {
-                        title,
-                        space_icon,
-                        host,
-                        dot,
-                        blocked,
-                        dot_color,
-                        ..
-                    } = &rows[0]
-                    {
-                        render_needs_you_row(
-                            &app,
-                            frame,
+
+            let mut prefixes = Vec::new();
+            for width in [13u16, 18, 26, 36, 60] {
+                let mut terminal =
+                    Terminal::new(TestBackend::new(width, 2)).expect("needs-you terminal");
+                terminal
+                    .draw(|frame| {
+                        if let SidebarRow::NeedsYou {
                             title,
                             space_icon,
                             host,
                             dot,
-                            *blocked,
-                            *dot_color,
+
+                            dot_color,
+                            provider,
+                            ..
+                        } = &rows[0]
+                        {
+                            prefixes.push(compact_row_prefix_width(
+                                title,
+                                provider,
+                                usize::from(width),
+                                NEEDS_YOU_REQUESTED_PREFIX_WIDTH,
+                            ));
+                            render_needs_you_row(
+                                &app,
+                                frame,
+                                title,
+                                space_icon,
+                                host,
+                                dot,
+                                true,
+                                *dot_color,
+                                None,
+                                provider,
+                                Rect::new(0, 0, width, 1),
+                            );
+                        }
+                        // A task row nested one level under a group header.
+                        render_compact_agent_row(
+                            &app,
+                            frame,
+                            &entry,
+                            Rect::new(0, 1, width, 1),
+                            1,
+                            true,
                             None,
-                            Rect::new(0, 0, 36, 1),
                         );
-                    }
-                    // A task row nested one level under a group header.
-                    render_compact_agent_row(
-                        &app,
-                        frame,
-                        &entry,
-                        Rect::new(0, 1, 36, 1),
-                        1,
-                        true,
-                        None,
-                    );
-                })
-                .expect("render needs-you row");
-            let buffer = terminal.backend().buffer();
-            let task_x = find_symbol_x(buffer, 1, 36, "○");
-            let x = find_symbol_x(buffer, 0, 36, "○");
-            assert_eq!(x, task_x, "needs-you dot aligns with the task dot");
-            assert!(x > 0);
-            assert_eq!(buffer[(x, 0)].style().fg, buffer[(task_x, 1)].style().fg);
-            assert_eq!(buffer[(x, 0)].style().fg, Some(app.palette.red));
+                    })
+                    .expect("render needs-you row");
+                let buffer = terminal.backend().buffer();
+                let task_x = find_symbol_x(buffer, 1, width, "○");
+                let x = find_symbol_x(buffer, 0, width, "○");
+                assert_eq!(
+                    x, task_x,
+                    "needs-you dot aligns with the task dot at {width}"
+                );
+                assert_eq!(buffer[(x, 0)].style().fg, buffer[(task_x, 1)].style().fg);
+                assert_eq!(buffer[(x, 0)].style().fg, Some(app.palette.red));
+            }
+            assert!(
+                prefixes
+                    .iter()
+                    .any(|prefix| *prefix < NEEDS_YOU_REQUESTED_PREFIX_WIDTH),
+                "narrow widths must exercise a shrunken prefix: {prefixes:?}"
+            );
         }
     }
 
@@ -30333,6 +30409,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                             true,
                             app.palette.red,
                             None,
+                            "",
                             Rect::new(0, 1, width, 1),
                         );
                     })
