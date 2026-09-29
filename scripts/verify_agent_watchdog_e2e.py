@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import socketserver
@@ -33,6 +34,30 @@ def fnv1a(text: str) -> int:
         value ^= byte
         value = value * 0x100000001B3 & 0xFFFFFFFFFFFFFFFF
     return value
+
+
+def semantic_hash(text: str) -> int:
+    spinner = re.compile(r"[\u2800-\u28ff✻✶✳✢✽·◐◓◑◒⏺●○◌]")
+    timers = (
+        re.compile(r"\((?:[^()]*\d+\s*(?:ms|s|m|h)\b[^()]*|[^()]*esc to interrupt[^()]*)\)"),
+        re.compile(r"\b\d+(?:\.\d+)?\s*[kKmM]?\s*tokens?\b"),
+        re.compile(r"\b\d+h\s*\d+m\b|\b\d+m\s*\d+s\b|\b\d+(?:\.\d+)?\s*(?:ms|s)\b"),
+        re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b"),
+        re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"),
+        re.compile(r"\b\d{1,3}(?:\.\d+)?\s*%"),
+    )
+    lines = []
+    for raw in text.splitlines():
+        line = spinner.sub("", raw)
+        for pattern in timers:
+            line = pattern.sub("", line)
+        line = " ".join(line.split())
+        if re.match(r"(?i)^\[?(?:heartbeat|keepalive|still (?:running|working)|tick)\b", line):
+            continue
+        line = line.strip(" |/-\\.…")
+        if line:
+            lines.append(line)
+    return fnv1a("\n".join(lines[-40:]))
 
 
 class ApiFixture:
@@ -197,7 +222,7 @@ def write_stale_worker(runs_dir: Path, worker_id: str, parent: str, age: int) ->
 def seed_pane_memory(path: Path, cases: list[dict[str, Any]]) -> None:
     now = int(time.time())
     memory = {
-        case["id"]: {"hash": fnv1a(case["tail"]), "since": now - case["unchanged_seconds"]}
+        case["id"]: {"hash": semantic_hash(case["tail"]), "since": now - case["unchanged_seconds"]}
         for case in cases
         if case.get("unchanged_seconds")
     }
@@ -281,7 +306,10 @@ def worker_check(binary: Path) -> bool:
         panes = [pane("parent-pane", "working")]
         with ApiFixture(socket_path, panes, {}) as api:
             command = worker_command(binary, scratch, socket_path, runs, state_file, log_file)
-            result = run_command(command, isolated_env(socket_path, scratch))
+            env = isolated_env(socket_path, scratch)
+            first = run_command(command, env)
+            print_run("stalled worker first sample", command, first)
+            result = run_command(command, env)
             print_run("stalled worker notification", command, result)
             notifications = [item for item in api.requests if item.get("method") == "notification.show"]
             records = [json.loads(line) for line in log_file.read_text().splitlines()] if log_file.exists() else []
@@ -389,7 +417,10 @@ def worker_parent_gone_check(binary: Path, fixture: dict[str, Any]) -> bool:
         log_file = scratch / "worker-watchdog.jsonl"
         with ApiFixture(socket_path, [], {}) as api:
             command = worker_command(binary, scratch, socket_path, runs, state_file, log_file)
-            result = run_command(command, isolated_env(socket_path, scratch))
+            env = isolated_env(socket_path, scratch)
+            first = run_command(command, env)
+            print_run("live worker parent first sample", command, first)
+            result = run_command(command, env)
             print_run("live worker with missing parent", command, result)
             payload = parse_json_output(result) or {}
             notifications = [item for item in api.requests if item.get("method") == "notification.show"]
@@ -404,13 +435,45 @@ def worker_parent_gone_check(binary: Path, fixture: dict[str, Any]) -> bool:
                 "log_count": len(records),
             }, sort_keys=True))
             expected_failed = (
-                action == case["expected_action"]
-                and len(notifications) == 0
+                action == "orphaned"
+                and len(notifications) == 1
                 and len(records) == 1
-                and result.returncode == 1
+                and result.returncode == 0
             )
             print("CHECK live_worker_parent_gone " + ("PASS" if expected_failed else "FAIL"))
             return expected_failed
+
+
+def model_binding_failure_modes(binary: Path, gemini: str) -> bool:
+    passed = True
+    for mode in ("malformed", "stale", "timeout"):
+        with tempfile.TemporaryDirectory(prefix="herdr-watchdog-model-", dir="/tmp") as raw:
+            scratch = Path(raw)
+            socket_path = scratch / "api.sock"
+            pane_id = "model-candidate"
+            with ApiFixture(socket_path, [pane(pane_id, "working")], {pane_id: ["Which option should I choose?"]}) as api:
+                command = [
+                    str(binary), "watchdog", "--once", "--gemini-bin", gemini,
+                    "--state-file", str(scratch / "state.json"),
+                    "--status-log", str(scratch / "status.jsonl"), "--json",
+                ]
+                env = isolated_env(socket_path, scratch)
+                env["WATCHDOG_STUB_MODE"] = mode
+                result = run_command(command, env, timeout=90)
+                payload = parse_json_output(result) or {}
+                decisions = payload.get("decisions", [])
+                decision = decisions[0] if decisions else {}
+                ok = (
+                    result.returncode == 0
+                    and decision.get("class") == "unknown"
+                    and decision.get("new_state") is None
+                    and payload.get("summary", {}).get("model_calls") == 1
+                )
+                print(f"CHECK model_reply_{mode} " + ("PASS" if ok else "FAIL"))
+                if not ok:
+                    print_run(f"model reply {mode}", command, result)
+                passed = passed and ok
+    return passed
 
 
 def main() -> int:
@@ -425,7 +488,7 @@ def main() -> int:
     binary = args.binary.resolve()
     if not binary.is_file():
         parser.error(f"Herdr binary does not exist: {binary}")
-    gemini = shutil.which(args.gemini_bin) or args.gemini_bin
+    gemini = str(Path(shutil.which(args.gemini_bin) or args.gemini_bin).resolve())
     print(f"HERDR_BINARY {binary}")
     print(f"GEMINI_BINARY {gemini}")
     print(f"EDGE_FIXTURE {EDGE_FIXTURE}")
@@ -435,11 +498,13 @@ def main() -> int:
     escalation_ok, _ = escalation_check(binary, gemini)
     fixture = json.loads(EDGE_FIXTURE.read_text())
     orphan_ok = worker_parent_gone_check(binary, fixture)
+    binding_ok = model_binding_failure_modes(binary, gemini)
     summary = {
         "blocked_stuck_detection_and_log": blocked_ok,
         "worker_stall_notifies_parent": worker_ok,
         "evidence_escalation": escalation_ok,
         "live_worker_parent_gone_handled": orphan_ok,
+        "model_reply_binding_failures_unknown": binding_ok,
     }
     print("FINAL " + json.dumps(summary, sort_keys=True))
     return 0 if all(summary.values()) else 1

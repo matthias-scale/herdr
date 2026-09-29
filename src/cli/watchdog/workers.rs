@@ -190,9 +190,7 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
         |worker, age_secs| notify_parent(worker, age_secs, &parents),
         |worker, age_secs| append_stall_log(&options.log_file, worker, age_secs),
     );
-    if !options.dry_run {
-        save_memory(&options.state_file, &memory)?;
-    }
+    save_memory(&options.state_file, &memory)?;
     print_worker_scan(observations.len(), &decisions, options)?;
     Ok(
         if decisions.iter().any(|decision| {
@@ -382,10 +380,9 @@ fn discover_codex_runs(runs_dir: &Path) -> io::Result<Vec<WorkerObservation>> {
         let state_name = json_string(&state, &["state"]).unwrap_or_default();
         let worker_host = json_string(&state, &["host"]);
         let parent_host = json_string(&state, &["parent", "host"]);
-        let parent_scope_local = worker_host
+        let parent_scope_local = parent_host
             .as_deref()
-            .zip(parent_host.as_deref())
-            .is_some_and(|(worker_host, parent_host)| worker_host == parent_host);
+            .is_none_or(|parent_host| worker_host.as_deref() == Some(parent_host));
         let finished = matches!(
             state_name.to_ascii_lowercase().as_str(),
             "complete"
@@ -716,7 +713,7 @@ mod tests {
         .expect("parse worker options");
         assert!(options.once);
         assert!(options.dry_run);
-        assert_eq!(options.interval_secs, 900);
+        assert_eq!(options.interval_secs, 30);
         assert_eq!(options.stall_secs, 420);
     }
 }

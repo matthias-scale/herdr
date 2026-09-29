@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import re
 import sys
+import os
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,25 +18,38 @@ FIXTURE = ROOT / "tests/fixtures/watchdog/evidence-escalation.json"
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--prompt", required=True)
-    parser.add_argument("--output-format", required=True)
+    parser.add_argument("-m", "--model", required=True)
+    parser.add_argument("-p", "--prompt", required=True)
+    parser.add_argument("-o", "--output-format", required=True)
     parser.add_argument("--approval-mode", required=True)
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--skip-trust", action="store_true")
+    parser.add_argument("-e", dest="extensions", nargs="?")
+    parser.add_argument("--allowed-mcp-server-names", nargs="?")
     args = parser.parse_args()
 
     policy = args.policy.read_text()
     if 'toolName = "*"' not in policy or 'decision = "deny"' not in policy:
         print("watchdog Gemini policy did not deny every tool", file=sys.stderr)
         return 3
+    mode = os.environ.get("WATCHDOG_STUB_MODE", "")
+    if mode == "timeout":
+        time.sleep(120)
+        return 0
     expected = {
         case["id"]: case["expected_state"]
         for case in json.loads(FIXTURE.read_text())["cases"]
     }
     expected.update({"human-wait": "blocked", "quiet-stall": "working"})
-    for pane_id in re.findall(r'<pane id="([^"]+)"', args.prompt):
-        print(f"{pane_id}\t{expected.get(pane_id, 'unknown')}\tdeterministic watchdog fixture oracle")
+    for match in re.finditer(r'<pane id="([^"]+)" pane_id="([^"]+)"', args.prompt):
+        observation_id, pane_id = match.groups()
+        state = expected.get(pane_id, "unknown")
+        if mode == "stale":
+            observation_id += "-stale"
+        if mode == "malformed":
+            print("not a bound observation reply")
+        else:
+            print(f"{observation_id}\t{state}\tdeterministic watchdog fixture oracle")
     return 0
 
 

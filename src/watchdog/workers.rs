@@ -115,7 +115,9 @@ where
         .orphaned_notified
         .retain(|key| live_keys.contains(key));
     memory.orphaned_logged.retain(|key| live_keys.contains(key));
-    memory.stale_candidates.retain(|key, _| live_keys.contains(key));
+    memory
+        .stale_candidates
+        .retain(|key, _| live_keys.contains(key));
 
     let mut decisions = Vec::new();
     for worker in observations {
@@ -150,10 +152,6 @@ where
                 if absence.samples == 0 {
                     absence.samples = 1;
                     absence.last_seen = now;
-                    decisions.push(parent_decision(worker, 0, StallAction::ParentChecking));
-                    continue;
-                }
-                if now.saturating_sub(absence.last_seen) < 30 {
                     decisions.push(parent_decision(worker, 0, StallAction::ParentChecking));
                     continue;
                 }
@@ -232,10 +230,6 @@ where
             continue;
         }
         if candidate.samples < 2 {
-            if now.saturating_sub(candidate.last_seen) < 30 {
-                decisions.push(parent_decision(worker, age_secs, StallAction::Confirming));
-                continue;
-            }
             candidate.samples = 2;
             candidate.last_seen = now;
         }
@@ -393,16 +387,39 @@ mod tests {
                 Ok(())
             },
         );
-        assert_eq!(first[0].action, StallAction::Notified);
-        assert_eq!(second[0].action, StallAction::AlreadyNotified);
+        assert_eq!(first[0].action, StallAction::Confirming);
+        assert_eq!(second[0].action, StallAction::Notified);
         assert_eq!(notifications, 1);
         assert_eq!(logs, 1);
 
+        let already = process_stalls(
+            std::slice::from_ref(&stale),
+            &mut memory,
+            730,
+            300,
+            false,
+            |_, _| panic!("the same incident is not delivered twice"),
+            |_, _| panic!("the same incident is not logged twice"),
+        );
+        assert_eq!(already[0].action, StallAction::AlreadyNotified);
+
         let resumed = worker(600, false);
+        let _ = process_stalls(
+            std::slice::from_ref(&resumed),
+            &mut memory,
+            1_000,
+            300,
+            false,
+            |_, _| {
+                notifications += 1;
+                Ok(())
+            },
+            |_, _| Ok(()),
+        );
         let after_new_stall = process_stalls(
             &[resumed],
             &mut memory,
-            1_000,
+            1_030,
             300,
             false,
             |_, _| {
@@ -421,10 +438,25 @@ mod tests {
         let mut memory = WorkerMemory::default();
         let mut notifications = 0;
         let mut logs = 0;
+        let _ = process_stalls(
+            std::slice::from_ref(&stale),
+            &mut memory,
+            500,
+            300,
+            true,
+            |_, _| {
+                notifications += 1;
+                Ok(())
+            },
+            |_, _| {
+                logs += 1;
+                Ok(())
+            },
+        );
         let decisions = process_stalls(
             &[stale],
             &mut memory,
-            500,
+            530,
             300,
             true,
             |_, _| {
@@ -447,10 +479,19 @@ mod tests {
         let stale = worker(100, false);
         let mut memory = WorkerMemory::default();
         let events = std::cell::RefCell::new(Vec::new());
-        let first = process_stalls(
+        let _ = process_stalls(
             std::slice::from_ref(&stale),
             &mut memory,
             500,
+            300,
+            false,
+            |_, _| panic!("first stale sample only starts confirmation"),
+            |_, _| panic!("confirmation must precede incident persistence"),
+        );
+        let first = process_stalls(
+            std::slice::from_ref(&stale),
+            &mut memory,
+            530,
             300,
             false,
             |_, _| {
@@ -468,7 +509,7 @@ mod tests {
         let second = process_stalls(
             std::slice::from_ref(&stale),
             &mut memory,
-            530,
+            560,
             300,
             false,
             |_, _| {
@@ -483,7 +524,7 @@ mod tests {
         let third = process_stalls(
             &[stale],
             &mut memory,
-            560,
+            590,
             300,
             false,
             |_, _| panic!("successful delivery must be deduplicated"),

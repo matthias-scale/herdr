@@ -23,7 +23,7 @@ use crate::{
 
 mod workers;
 
-const DEFAULT_INTERVAL_SECS: u64 = 300;
+const DEFAULT_INTERVAL_SECS: u64 = 30;
 const DEFAULT_STALL_SECS: u64 = 600;
 const DEFAULT_LINES: u32 = 40;
 const MODEL_TIMEOUT: Duration = Duration::from_secs(45);
@@ -245,9 +245,7 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
     );
     result.model_latency_ms = model_latency_ms;
 
-    if !options.dry_run {
-        save_memory(&options.state_file, &memory)?;
-    }
+    save_memory(&options.state_file, &memory)?;
     print_scan(&result, options)?;
     Ok(
         if result
@@ -290,8 +288,35 @@ fn read_process_evidence(pane_id: &str) -> io::Result<String> {
         }),
     })?;
     ensure_api_success(&response)?;
-    let evidence = &response["result"]["process_info"];
-    serde_json::to_string(evidence).map_err(io::Error::other)
+    let process_info = &response["result"]["process_info"];
+    #[cfg(unix)]
+    {
+        let pgid = process_info["foreground_process_group_id"].as_u64();
+        let output = Command::new("ps")
+            .args(["-A", "-o", "pid=,ppid=,pgid=,stat=,etime=,time=,comm="])
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "ps exited with {}",
+                output.status
+            )));
+        }
+        let table = String::from_utf8(output.stdout).map_err(io::Error::other)?;
+        let group = crate::watchdog::evidence::parse_ps_rows(&table)
+            .into_iter()
+            .filter(|process| Some(u64::from(process.pgid)) == pgid)
+            .collect::<Vec<_>>();
+        serde_json::to_string(&serde_json::json!({
+            "foreground_process_group_id": pgid,
+            "foreground_processes": group,
+        }))
+        .map_err(io::Error::other)
+    }
+    #[cfg(windows)]
+    {
+        let _ = process_info;
+        Ok("{}".to_string())
+    }
 }
 
 fn report_status(
@@ -470,20 +495,26 @@ fn run_model_classifier(
     samples: &[PaneSample],
 ) -> io::Result<std::collections::HashMap<String, watchdog::StatusClassification>> {
     let prompt = watchdog::classifier_prompt(samples);
+    let model_home = ModelHome::new()?;
     let policy_file = ModelPolicyFile::new()?;
     let mut child = Command::new(gemini_bin)
-        .arg("--model")
+        .arg("-m")
         .arg(STAGE2_MODEL_ID)
-        .arg("--prompt")
+        .arg("-p")
         .arg(prompt)
-        .arg("--output-format")
+        .arg("-o")
         .arg("text")
         .arg("--approval-mode")
         .arg("default")
+        .arg("--skip-trust")
+        .arg("-e")
+        .arg("none")
+        .arg("--allowed-mcp-server-names")
+        .arg("none")
         .arg("--policy")
         .arg(policy_file.path())
-        .arg("--skip-trust")
-        .current_dir(std::env::temp_dir())
+        .env("GEMINI_CLI_HOME", &model_home.0)
+        .current_dir(&model_home.0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -523,11 +554,45 @@ fn run_model_classifier(
     }
     let reply = String::from_utf8(stdout)
         .map_err(|_| io::Error::other("Gemini classifier output was not UTF-8"))?;
-    let pane_ids = samples
+    let observation_ids = samples
         .iter()
-        .map(|sample| sample.pane_id.clone())
+        .map(watchdog::observation_id)
         .collect::<Vec<_>>();
-    Ok(watchdog::parse_classifier_reply(&reply, &pane_ids))
+    let parsed = watchdog::parse_classifier_reply(&reply, &observation_ids);
+    Ok(samples
+        .iter()
+        .filter_map(|sample| {
+            parsed
+                .get(&watchdog::observation_id(sample))
+                .cloned()
+                .map(|value| (sample.pane_id.clone(), value))
+        })
+        .collect())
+}
+
+struct ModelHome(PathBuf);
+
+impl ModelHome {
+    fn new() -> io::Result<Self> {
+        static NEXT_HOME: AtomicU64 = AtomicU64::new(1);
+        let path = std::env::temp_dir().join(format!(
+            "herdr-watchdog-gemini-home-{}-{}",
+            std::process::id(),
+            NEXT_HOME.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(path.join(".gemini"))?;
+        fs::write(
+            path.join(".gemini/settings.json"),
+            r#"{"security":{"auth":{"selectedType":"gemini-api-key"}},"hooksConfig":{"enabled":false},"telemetry":{"enabled":false}}"#,
+        )?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for ModelHome {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 fn read_bounded(reader: impl Read, max_bytes: usize) -> io::Result<Vec<u8>> {

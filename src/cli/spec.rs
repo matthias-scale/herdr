@@ -220,7 +220,7 @@ pub(super) fn watchdog_command() -> Command {
         .arg(flag("dry-run").help("Print decisions without writing status corrections"))
         .arg(
             option("interval-secs", "N")
-                .default_value("300")
+                .default_value("30")
                 .value_parser(clap::value_parser!(u64))
                 .help("Seconds between scans"),
         )
@@ -266,7 +266,7 @@ fn worker_watchdog_command() -> Command {
         .arg(flag("dry-run").help("Print stalled workers without notifying or logging"))
         .arg(
             option("interval-secs", "N")
-                .default_value("900")
+                .default_value("30")
                 .value_parser(clap::value_parser!(u64))
                 .help("Seconds between worker scans (default: 15 minutes)"),
         )

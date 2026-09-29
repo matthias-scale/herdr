@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::api::schema::AgentStatus;
 
+pub(crate) mod evidence;
 pub(crate) mod workers;
 
 pub(crate) const WATCHDOG_SOURCE: &str = "watchdog";
@@ -60,9 +61,22 @@ pub(crate) struct PaneDecision {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_state: Option<AgentStatus>,
     pub status: DecisionStatus,
+    pub class: PaneClass,
     pub evidence: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PaneClass {
+    Working,
+    WaitingHuman,
+    WaitingToolInput,
+    FinishedIdle,
+    WaitingRetry,
+    Stalled,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -160,6 +174,14 @@ fn tail_window(tail: &str) -> Vec<String> {
 }
 
 pub(crate) fn classify_text(tail: &str) -> Verdict {
+    if let Some(prompt) = evidence::active_prompt(tail) {
+        let prefix = if prompt.kind == evidence::PromptKind::AccountAction {
+            "error: account action required"
+        } else {
+            "active prompt"
+        };
+        return Verdict::Blocked(format!("{prefix}: {}", prompt.line));
+    }
     let window = tail_window(tail);
     if window.is_empty() {
         return Verdict::NotBlocked;
@@ -215,6 +237,12 @@ pub(crate) fn classify_text(tail: &str) -> Verdict {
     }) {
         return Verdict::Ambiguous(format!("soft marker: {}", marker.trim()));
     }
+    if let Some(question) = evidence::prose_question(tail) {
+        return Verdict::Ambiguous(format!(
+            "prose question near tail: {}",
+            question.to_ascii_lowercase()
+        ));
+    }
     Verdict::NotBlocked
 }
 
@@ -242,12 +270,7 @@ fn is_fresh_progress_line(line: &str) -> bool {
 
 /// Stable FNV-1a hash so fingerprints survive rebuilds.
 pub(crate) fn tail_hash(tail: &str) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in tail.trim_end().bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    hash
+    evidence::semantic_hash(tail)
 }
 
 /// Update remembered fingerprint; return seconds the tail has been unchanged.
@@ -297,10 +320,11 @@ header, Markdown, or other text.\n",
         let lines = sample.tail.lines().collect::<Vec<_>>();
         let start = lines.len().saturating_sub(40);
         let excerpt = lines[start..].join("\n");
-        let id = classifier_attribute(&sample.pane_id);
+        let id = classifier_attribute(&observation_id(sample));
+        let pane_id = classifier_attribute(&sample.pane_id);
         let agent = classifier_attribute(agent);
         let prefix = format!(
-            "\n<pane id=\"{id}\" agent=\"{agent}\" reported_state=\"{}\">\n",
+            "\n<pane id=\"{id}\" pane_id=\"{pane_id}\" agent=\"{agent}\" reported_state=\"{}\">\n",
             status_name(sample.status)
         );
         let suffix = "\n</pane>\n";
@@ -325,6 +349,14 @@ header, Markdown, or other text.\n",
         prompt.push_str(suffix);
     }
     prompt
+}
+
+pub(crate) fn observation_id(sample: &PaneSample) -> String {
+    format!(
+        "{}#{:016x}",
+        sample.pane_id,
+        evidence::semantic_hash(&sample.tail)
+    )
 }
 
 fn classifier_attribute(value: &str) -> String {
@@ -524,6 +556,7 @@ where
                     old_state: sample.status,
                     new_state: None,
                     status: DecisionStatus::Ambiguous,
+                    class: PaneClass::Unknown,
                     evidence,
                     write_error: None,
                 });
@@ -540,13 +573,34 @@ where
                 old_state: sample.status,
                 new_state: None,
                 status: DecisionStatus::Ambiguous,
+                class: PaneClass::Unknown,
                 evidence: "classifier returned an unsupported state".into(),
                 write_error: None,
             });
             continue;
         }
 
-        let changed = classification.state != sample.status;
+        let changed = classification.state != sample.status
+            && !(sample.status == AgentStatus::Idle && classification.state == AgentStatus::Done);
+        let class = match classification.state {
+            AgentStatus::Working if evidence::scheduled_retry_secs(&sample.tail).is_some() => {
+                PaneClass::WaitingRetry
+            }
+            AgentStatus::Working if decision_evidence_stalled(&classification.evidence) => {
+                PaneClass::Stalled
+            }
+            AgentStatus::Working => PaneClass::Working,
+            AgentStatus::Blocked
+                if process_evidence_has_tool(
+                    sample.process_evidence.as_deref().unwrap_or_default(),
+                ) =>
+            {
+                PaneClass::WaitingToolInput
+            }
+            AgentStatus::Blocked => PaneClass::WaitingHuman,
+            AgentStatus::Done | AgentStatus::Idle => PaneClass::FinishedIdle,
+            AgentStatus::Unknown | AgentStatus::Stale => PaneClass::Unknown,
+        };
         let mut decision = PaneDecision {
             pane_id: sample.pane_id.clone(),
             agent: agent.to_string(),
@@ -557,6 +611,7 @@ where
             } else {
                 DecisionStatus::Consistent
             },
+            class,
             evidence: classification.evidence,
             write_error: None,
         };
@@ -576,11 +631,13 @@ where
     result
 }
 
+fn decision_evidence_stalled(evidence: &str) -> bool {
+    evidence.starts_with("stall candidate:")
+        || evidence.starts_with("no semantic progress")
+        || evidence.starts_with("retries renewed")
+}
+
 fn process_evidence_has_tool(evidence: &str) -> bool {
-    const TOOL_NAMES: &[&str] = &[
-        "cargo", "rustc", "rustfmt", "clang", "clang++", "gcc", "g++", "cmake", "ninja", "make",
-        "pytest", "nextest", "go", "javac", "gradle", "mvn", "npm", "pnpm", "yarn", "bun", "deno",
-    ];
     let Ok(value) = serde_json::from_str::<Value>(evidence) else {
         return false;
     };
@@ -588,11 +645,26 @@ fn process_evidence_has_tool(evidence: &str) -> bool {
         .get("foreground_processes")
         .and_then(Value::as_array)
         .is_some_and(|processes| {
+            let samples = serde_json::from_value::<Vec<evidence::ProcSample>>(Value::Array(
+                processes.clone(),
+            ));
+            if let Ok(samples) = samples {
+                let root = samples.first().map(|process| process.pgid);
+                let descendants = root
+                    .map(|root| evidence::descendants(&samples, root))
+                    .unwrap_or(samples);
+                return !evidence::current_tool_processes(&descendants, None, 600).is_empty();
+            }
             processes.iter().any(|process| {
                 process
                     .get("name")
                     .and_then(Value::as_str)
-                    .is_some_and(|name| TOOL_NAMES.contains(&name.to_ascii_lowercase().as_str()))
+                    .is_some_and(|name| {
+                        matches!(
+                            name.to_ascii_lowercase().as_str(),
+                            "cargo" | "rustc" | "pytest" | "go" | "npm" | "pnpm" | "make" | "ninja"
+                        )
+                    })
             })
         })
 }
@@ -853,7 +925,8 @@ mod tests {
         ]);
         assert!(prompt.contains("line 99"));
         assert!(!prompt.contains("line 10\n"));
-        assert!(prompt.contains("id=\"p1\""));
+        assert!(prompt.contains("pane_id=\"p1\""));
+        assert!(prompt.contains("id=\"p1#"));
         assert!(prompt.contains("reported_state=\"done\""));
     }
 
