@@ -4048,15 +4048,13 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn close_plain_local_pane_stays_local_when_remote_selection_was_cleared() {
         let (mut app, _) = app_with_remote_agent();
-        let pane_id = app.state.workspaces[0]
-            .focused_pane_id()
-            .expect("focused pane");
         app.state.confirm_close = false;
         app.state.sidebar_selected_remote_agent = None;
 
         app.execute_tui_navigate_action(NavigateAction::ClosePane, ActionContext::Prefix);
 
-        assert!(app.state.workspaces[0].pane_state(pane_id).is_none());
+        assert!(app.state.workspaces.is_empty());
+        assert_eq!(app.state.remote_agent_panel_entries.len(), 1);
     }
 
     #[test]
