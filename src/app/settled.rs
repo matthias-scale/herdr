@@ -1901,6 +1901,7 @@ mod tests {
                 workers_unknown: None,
                 dependencies_authoritative: true,
                 session_id: None,
+                last_turn_at: None,
             })),
         });
         state.workspaces[0].tabs[0]
@@ -1935,6 +1936,7 @@ mod tests {
                 workers_unknown: None,
                 dependencies_authoritative: true,
                 session_id: None,
+                last_turn_at: None,
             })),
         });
         let settled_at = now + Duration::from_secs(1);

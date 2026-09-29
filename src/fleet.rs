@@ -3769,6 +3769,7 @@ impl FleetRow {
             native_session: None,
             agent_info: None,
             run_summary: Some(summary),
+            last_turn_at: None,
         })
     }
 
@@ -3855,6 +3856,7 @@ impl FleetRow {
             native_session: None,
             agent_info: None,
             run_summary: None,
+            last_turn_at: None,
         }
     }
 

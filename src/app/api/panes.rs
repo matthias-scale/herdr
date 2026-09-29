@@ -3587,6 +3587,7 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                last_turn_at: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -6896,6 +6897,7 @@ mod tests {
             parse_status: None,
             workers_unknown: None,
             agents: None,
+            last_turn_at: None,
         };
 
         let response = app.handle_pane_report_agent("working-1".into(), report(1));
@@ -6985,6 +6987,7 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                last_turn_at: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -7049,6 +7052,7 @@ mod tests {
                 parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
                 workers_unknown: Some(false),
                 agents: Some(1),
+                last_turn_at: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -7990,6 +7994,7 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                last_turn_at: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -8056,6 +8061,7 @@ mod tests {
             parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
             workers_unknown: Some(false),
             agents: None,
+            last_turn_at: None,
         };
 
         let _: SuccessResponse = serde_json::from_str(
@@ -8234,6 +8240,7 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                last_turn_at: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -8287,6 +8294,7 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                last_turn_at: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -8316,6 +8324,7 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                last_turn_at: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -9456,6 +9465,7 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                last_turn_at: None,
             },
         );
         let _: SuccessResponse =
@@ -10066,6 +10076,7 @@ mod tests {
             parse_status: None,
             workers_unknown: None,
             agents: None,
+            last_turn_at: None,
         };
         assert_eq!(
             metadata_error_code(
@@ -10226,6 +10237,7 @@ mod tests {
                 parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
                 workers_unknown: Some(false),
                 agents: Some(0),
+                last_turn_at: None,
             }
         };
         let metadata = |seq: u64| PaneReportMetadataParams {

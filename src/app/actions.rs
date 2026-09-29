@@ -1212,6 +1212,8 @@ impl AppState {
                     agent_released: false,
                     agent_release_status: None,
                     suppress_completion: false,
+                    last_turn_at: None,
+                    previous_last_turn_at: None,
                 };
                 Some(update)
             })
@@ -7225,6 +7227,7 @@ mod tests {
                 workers_unknown: None,
                 dependencies_authoritative: true,
                 session_id: None,
+                last_turn_at: None,
             })),
         });
         assert_eq!(started.len(), 1);
@@ -7254,6 +7257,7 @@ mod tests {
                 workers_unknown: None,
                 dependencies_authoritative: true,
                 session_id: None,
+                last_turn_at: None,
             })),
         });
         assert_eq!(finished.len(), 1);
@@ -7312,6 +7316,7 @@ mod tests {
                 workers_unknown: Some(false),
                 dependencies_authoritative: true,
                 session_id: Some(session.into()),
+                last_turn_at: None,
             })),
         };
 

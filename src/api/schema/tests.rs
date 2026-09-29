@@ -1285,6 +1285,7 @@ fn worktree_request_and_response_round_trip() {
                 agent_session: None,
                 scroll: None,
                 revision: 0,
+                last_turn_at: None,
             },
             worktree: WorktreeInfo {
                 path: "/worktrees/herdr/worktree-api".into(),
@@ -1764,6 +1765,7 @@ fn create_response_round_trips_with_root_pane() {
                 agent_session: None,
                 scroll: None,
                 revision: 0,
+                last_turn_at: None,
             },
         },
     };

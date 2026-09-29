@@ -863,6 +863,7 @@ mod tests {
                 title: title.map(str::to_string),
                 display_agent: None,
                 state_labels: HashMap::new(),
+                last_turn_at: None,
             },
         }
     }
@@ -908,6 +909,7 @@ mod tests {
             agent_session: None,
             scroll,
             revision: 0,
+            last_turn_at: None,
         }
     }
 
@@ -1012,6 +1014,7 @@ mod tests {
                 eta_s: None,
                 reported_at: None,
                 waiting_on_agents: false,
+                last_turn_at: None,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: None,
@@ -1053,6 +1056,7 @@ mod tests {
                 eta_s: None,
                 reported_at: None,
                 waiting_on_agents: false,
+                last_turn_at: None,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: None,
@@ -1093,6 +1097,7 @@ mod tests {
                 eta_s: None,
                 reported_at: None,
                 waiting_on_agents: false,
+                last_turn_at: None,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: Some(PaneAgentStatusChangedEvent {
@@ -1107,6 +1112,7 @@ mod tests {
                 title: None,
                 display_agent: None,
                 state_labels: HashMap::new(),
+                last_turn_at: None,
             }),
             request_prefix: "test".into(),
         };
@@ -1146,6 +1152,7 @@ mod tests {
                 eta_s: None,
                 reported_at: None,
                 waiting_on_agents: false,
+                last_turn_at: None,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: Some(PaneAgentStatusChangedEvent {
@@ -1160,6 +1167,7 @@ mod tests {
                 title: Some("short lived".into()),
                 display_agent: None,
                 state_labels: HashMap::new(),
+                last_turn_at: None,
             }),
             request_prefix: "test".into(),
         };
