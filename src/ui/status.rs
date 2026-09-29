@@ -498,12 +498,7 @@ fn metrics_or_unavailable(app: &AppState) -> &crate::platform::status_metrics::S
     app.status_metrics
         .as_ref()
         .map(|snapshot| &snapshot.metrics)
-        .unwrap_or_else(|| {
-            UNAVAILABLE.get_or_init(|| crate::platform::status_metrics::StatusMetrics {
-                hostname: "--".into(),
-                ..Default::default()
-            })
-        })
+        .unwrap_or_else(|| UNAVAILABLE.get_or_init(Default::default))
 }
 
 pub(crate) struct Segment {
@@ -764,7 +759,7 @@ fn status_segments(
     }
 
     out.push(Segment {
-        text: format!(" {} ", metrics.hostname),
+        text: format!(" {} ", app.chrome_host_label),
         style: Style::default().fg(p.green),
         preserve_bg: false,
         elide_rank: Some(4),
@@ -1459,7 +1454,6 @@ mod tests {
                 mem_used_gib: Some(17_179_869_184.0),
                 mem_total_gib: Some(17_179_869_184.0),
                 disk_percent: None,
-                hostname: "host-with-a-long-device-name".into(),
             },
             sampled_at: std::time::Instant::now(),
         });
@@ -1490,7 +1484,6 @@ mod tests {
                 mem_used_gib: Some(9_999.9),
                 mem_total_gib: Some(9_999.9),
                 disk_percent: None,
-                hostname: "wide-metrics".into(),
             },
             sampled_at: std::time::Instant::now(),
         });
@@ -1692,7 +1685,6 @@ mod tests {
                 mem_used_gib: Some(8.0),
                 mem_total_gib: Some(16.0),
                 disk_percent: None,
-                hostname: "testhost".into(),
             },
             &app.palette,
         );
@@ -1701,7 +1693,6 @@ mod tests {
             mem_used_gib: Some(10_000.0),
             mem_total_gib: Some(10_000.0),
             disk_percent: None,
-            hostname: "testhost".into(),
         };
         let rendered = status_segments(&app, &metrics, &app.palette)
             .iter()
@@ -1768,7 +1759,7 @@ mod tests {
             .collect::<String>();
         assert!(!rendered.contains("KI"), "{rendered}");
         assert!(rendered.contains("CC"), "{rendered}");
-        assert!(rendered.contains("testhost"), "{rendered}");
+        assert!(rendered.contains("TESTHOST"), "{rendered}");
 
         let optional_width = full
             .iter()
@@ -1784,7 +1775,7 @@ mod tests {
             .map(|segment| segment.text.as_str())
             .collect::<String>();
         assert!(!rendered.contains("CC"), "{rendered}");
-        assert!(!rendered.contains("testhost"), "{rendered}");
+        assert!(!rendered.contains("TESTHOST"), "{rendered}");
         assert!(rendered.contains("CPU \u{2581}"), "{rendered}");
         assert!(rendered.contains("MEM \u{2584}"), "{rendered}");
     }
@@ -1902,10 +1893,10 @@ mod tests {
         let remote = rendered
             .find("\u{2192} workbox")
             .expect("remote segment renders");
-        let local = rendered.find("testhost").expect("local hostname renders");
+        let local = rendered.find("TESTHOST").expect("local host label renders");
         assert!(
             remote < local,
-            "remote segment precedes the local hostname: {rendered}"
+            "remote segment precedes the local host label: {rendered}"
         );
         assert!(rendered.contains("CPU"), "{rendered}");
     }
@@ -1929,7 +1920,7 @@ mod tests {
         let rendered = render_status_row(&app, 120);
 
         assert_eq!(app.view.focused_remote_host, None);
-        assert!(rendered.contains("testhost"), "{rendered}");
+        assert!(rendered.contains("TESTHOST"), "{rendered}");
         assert!(!rendered.contains('\u{2192}'), "{rendered}");
     }
 
@@ -2038,7 +2029,7 @@ mod tests {
             .map(|segment| segment.text.as_str())
             .collect::<String>();
         assert!(!rendered.contains("workbox"), "{rendered}");
-        assert!(rendered.contains("testhost"), "{rendered}");
+        assert!(rendered.contains("TESTHOST"), "{rendered}");
         assert!(rendered.contains("CPU \u{2581}"), "{rendered}");
         assert!(rendered.contains("MEM \u{2584}"), "{rendered}");
 
@@ -2121,7 +2112,7 @@ mod tests {
             "CX SHQ \u{2582}",
             "KI \u{2582}",
             "\u{25cf}",
-            "testhost",
+            "TESTHOST",
             "CPU \u{2581}",
             "MEM \u{2584}",
         ];
@@ -2171,7 +2162,7 @@ mod tests {
         assert_eq!(
             segments
                 .iter()
-                .find(|segment| segment.text.contains("testhost"))
+                .find(|segment| segment.text.contains("TESTHOST"))
                 .unwrap()
                 .style
                 .fg,

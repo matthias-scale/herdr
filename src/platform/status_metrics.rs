@@ -18,7 +18,6 @@ pub(crate) struct StatusMetrics {
     /// Percentage of the volume that actually fills up: the data volume on
     /// macOS, the root filesystem elsewhere. `None` when it cannot be read.
     pub disk_percent: Option<u8>,
-    pub hostname: String,
 }
 
 /// Disk is the one metric that stays hidden until it matters, so it needs its
@@ -132,10 +131,6 @@ impl StatusMetricRefresh {
     }
 }
 
-pub(super) fn short_hostname(hostname: &str) -> String {
-    hostname.split('.').next().unwrap_or(hostname).to_string()
-}
-
 #[cfg(test)]
 pub(crate) fn status_metrics_fixture() -> StatusMetrics {
     StatusMetrics {
@@ -143,7 +138,6 @@ pub(crate) fn status_metrics_fixture() -> StatusMetrics {
         mem_used_gib: Some(8.0),
         mem_total_gib: Some(16.0),
         disk_percent: Some(41),
-        hostname: "testhost".into(),
     }
 }
 
