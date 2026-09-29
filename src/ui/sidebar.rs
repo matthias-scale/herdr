@@ -5331,11 +5331,7 @@ fn append_fleet_rows(
             title: if host == app.agent_host_name {
                 format!("{host} · this device")
             } else {
-                host_tokens
-                    .get(&host)
-                    .filter(|_| !host_entries.is_empty())
-                    .cloned()
-                    .unwrap_or_else(|| host.clone())
+                host.clone()
             },
             count: host_entries.len(),
             activity_count: None,
