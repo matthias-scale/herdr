@@ -87,6 +87,9 @@ impl App {
 
     pub(super) fn schedule_session_save(&mut self) {
         if self.no_session {
+            // Nothing is persisted, but connected clients still need the
+            // structural change announced as a session revision.
+            self.state.mark_session_dirty();
             return;
         }
 
@@ -118,6 +121,7 @@ impl App {
             return;
         }
         if self.state.session_dirty
+            && !self.no_session
             && self.session_save_thread.is_none()
             && (self.session_save_deadline.is_none()
                 || self.session_save_scheduled_revision != Some(self.state.session_dirty_revision))
