@@ -46,6 +46,10 @@ struct PaneEntry {
     pane_id: String,
     #[serde(default)]
     agent_session: Option<AgentSessionInfo>,
+    #[serde(default)]
+    terminal_id: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -209,17 +213,62 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
         method: Method::PaneList(PaneListParams { workspace_id: None }),
     })?;
     super::ensure_api_success(&pane_list)?;
-    let panes: Vec<PaneEntry> =
-        serde_json::from_value(pane_list["result"]["panes"].clone()).map_err(io::Error::other)?;
+    let panes = parse_pane_entries(&pane_list)?;
     let parents = parent_panes(&panes);
     for worker in &mut observations {
-        worker.parent_state = if parents.contains_key(&worker.parent_session) {
-            ParentState::Present
-        } else if worker.parent_scope_local {
-            ParentState::Absent
+        let host_is_local = worker.parent_host.as_deref().is_none_or(|host| {
+            local_host_aliases(&options.local_hosts)
+                .iter()
+                .any(|alias| alias == host)
+        });
+        let found = if host_is_local {
+            parent_matches(worker, &panes)
         } else {
-            ParentState::Unknown
+            remote_parent_present(worker, options).unwrap_or(None)
         };
+        worker.parent_scope_local = host_is_local;
+        worker.parent_state = match found {
+            Some(true) => ParentState::Present,
+            Some(false) => ParentState::Absent,
+            None => ParentState::Unknown,
+        };
+    }
+    if observations
+        .iter()
+        .any(|worker| worker.parent_state == ParentState::Absent)
+    {
+        thread::sleep(Duration::from_secs(options.confirm_secs));
+        let local_second = if observations
+            .iter()
+            .any(|w| w.parent_state == ParentState::Absent && w.parent_scope_local)
+        {
+            let response = super::super::send_request(&Request {
+                id: super::next_request_id("worker-watchdog-parent-confirm"),
+                method: Method::PaneList(PaneListParams { workspace_id: None }),
+            })?;
+            super::ensure_api_success(&response)?;
+            Some(parse_pane_entries(&response)?)
+        } else {
+            None
+        };
+        for worker in observations
+            .iter_mut()
+            .filter(|worker| worker.parent_state == ParentState::Absent)
+        {
+            let found = if worker.parent_scope_local {
+                local_second
+                    .as_deref()
+                    .map(|panes| parent_matches(worker, panes))
+                    .flatten()
+            } else {
+                remote_parent_present(worker, options).unwrap_or(None)
+            };
+            worker.parent_state = match found {
+                Some(true) => ParentState::Present,
+                Some(false) => ParentState::Absent,
+                None => ParentState::Unknown,
+            };
+        }
     }
     let now = unix_seconds()?;
 
@@ -244,10 +293,10 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
                 gate_verdict: worker.gate_verdict.clone(),
                 blocked_reason: worker.blocked_reason.clone(),
                 state: worker.state.clone(),
-                parent_host: None,
+                parent_host: worker.parent_host.clone(),
                 parent_session: Some(worker.parent_session.clone()),
-                parent_terminal: None,
-                parent_pane: None,
+                parent_terminal: worker.parent_terminal.clone(),
+                parent_pane: worker.parent_pane.clone(),
             };
             let key = worker.key();
             let entry = memory.semantic.workers.entry(key).or_default();
@@ -267,7 +316,7 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
                 class,
                 parent: match worker.parent_state {
                     ParentState::Present => "present",
-                    ParentState::Absent => "absent_unconfirmed",
+                    ParentState::Absent => "orphaned",
                     ParentState::Unknown => "parent_unknown",
                 },
                 age_secs,
@@ -324,6 +373,115 @@ fn parent_panes(panes: &[PaneEntry]) -> std::collections::HashMap<String, String
         }
     }
     parents
+}
+
+fn parse_pane_entries(value: &Value) -> io::Result<Vec<PaneEntry>> {
+    serde_json::from_value(value["result"]["panes"].clone()).map_err(io::Error::other)
+}
+
+fn parent_matches(worker: &WorkerObservation, panes: &[PaneEntry]) -> Option<bool> {
+    let session = &worker.parent_session;
+    if panes.iter().any(|pane| {
+        pane.agent_session
+            .as_ref()
+            .is_some_and(|s| &s.value == session)
+    }) {
+        return Some(true);
+    }
+    if let Some(terminal) = &worker.parent_terminal {
+        if panes
+            .iter()
+            .any(|pane| pane.terminal_id.as_ref() == Some(terminal))
+        {
+            return Some(true);
+        }
+    }
+    if let Some(pane_id) = &worker.parent_pane {
+        return Some(
+            panes
+                .iter()
+                .any(|pane| &pane.pane_id == pane_id && pane.agent.is_some()),
+        );
+    }
+    Some(false)
+}
+
+fn local_host_aliases(extra: &[String]) -> std::collections::HashSet<String> {
+    let hostname = std::process::Command::new("hostname")
+        .arg("-s")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_default();
+    let mut aliases = extra
+        .iter()
+        .map(|host| host.to_ascii_lowercase())
+        .collect::<std::collections::HashSet<_>>();
+    aliases.insert(hostname.clone());
+    if matches!(hostname.as_str(), "ubuntu-direct" | "ub1") {
+        aliases.insert("ubuntu-direct".into());
+        aliases.insert("ub1".into());
+    }
+    if matches!(hostname.as_str(), "ubuntu2-direct" | "ub2") {
+        aliases.insert("ubuntu2-direct".into());
+        aliases.insert("ub2".into());
+    }
+    if hostname.contains("macbook") && hostname.contains("air") {
+        aliases.insert("air".into());
+    }
+    if hostname.contains("macbook") && hostname.contains("pro") {
+        aliases.insert("mac".into());
+    }
+    aliases
+}
+
+fn remote_parent_present(
+    worker: &WorkerObservation,
+    options: &WorkerOptions,
+) -> io::Result<Option<bool>> {
+    let Some(host) = worker.parent_host.as_deref() else {
+        return Ok(None);
+    };
+    let mut parts = options.parent_probe.split_whitespace();
+    let Some(program) = parts.next() else {
+        return Ok(None);
+    };
+    let mut command = std::process::Command::new(program);
+    command
+        .args(parts)
+        .arg(host)
+        .args(["herdr", "pane", "list"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child = command.spawn()?;
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            if !status.success() {
+                return Ok(None);
+            }
+            let output = child.wait_with_output()?;
+            let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) else {
+                return Ok(None);
+            };
+            let Ok(panes) = parse_pane_entries(&value) else {
+                return Ok(None);
+            };
+            return Ok(parent_matches(worker, &panes));
+        }
+        if started.elapsed() >= Duration::from_secs(20) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn notify_parent(
@@ -545,6 +703,9 @@ fn discover_codex_runs(runs_dir: &Path) -> io::Result<Vec<WorkerObservation>> {
             source: "codex".into(),
             worker_id,
             parent_session,
+            parent_host: json_string(&state, &["parent", "host"]),
+            parent_terminal: json_string(&state, &["parent", "terminal"]),
+            parent_pane: json_string(&state, &["parent", "pane"]),
             last_activity,
             finished,
             parent_scope_local,
@@ -681,6 +842,9 @@ fn discover_claude_subagents(projects_dir: &Path) -> io::Result<Vec<WorkerObserv
                     source: "claude".into(),
                     worker_id,
                     parent_session: parent_session.clone(),
+                    parent_host: None,
+                    parent_terminal: None,
+                    parent_pane: None,
                     last_activity,
                     finished: claude_subagent_finished(&subagent.path())?,
                     parent_scope_local: true,
