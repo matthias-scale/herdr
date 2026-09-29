@@ -1874,6 +1874,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn pane_v3_active_yes_no_with_tool_child_waits_for_tool_input() {
         let mut o = pane_v3(AgentStatus::Working, "Overwrite generated snapshot? [y/n]");
@@ -1910,6 +1911,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn pane_v3_confirmation_resolves_stall_progress_and_tool_deadline() {
         let first = pane_v3(AgentStatus::Working, "quiet tail");
