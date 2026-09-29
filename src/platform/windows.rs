@@ -431,6 +431,11 @@ pub(crate) fn sample_status_metrics(
         },
     };
 
+    let hostname = std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|value| super::status_metrics::short_hostname(&value))
+        .unwrap_or_else(|| "localhost".into());
     let mut memory = MEMORYSTATUSEX {
         dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
         ..MEMORYSTATUSEX::default()
@@ -462,6 +467,7 @@ pub(crate) fn sample_status_metrics(
         mem_used_gib,
         mem_total_gib,
         disk_percent: status_disk_percent(),
+        hostname,
     }
 }
 
@@ -497,7 +503,7 @@ mod status_metric_tests {
         let metrics = super::sample_status_metrics(
             &mut crate::platform::status_metrics::StatusMetricSampler::new(),
         );
-        let _ = metrics;
+        assert!(!metrics.hostname.is_empty());
     }
 }
 

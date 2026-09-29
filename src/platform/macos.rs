@@ -56,6 +56,7 @@ pub(crate) fn remove_file_durably(path: &Path, _tombstone: &Path) -> std::io::Re
 pub(crate) fn sample_status_metrics(
     sampler: &mut super::status_metrics::StatusMetricSampler,
 ) -> super::status_metrics::StatusMetrics {
+    let hostname = status_hostname();
     let total_bytes = status_sysctl_u64(c"hw.memsize");
     let mem_total_gib = total_bytes.map(|value| value as f32 / 1_073_741_824.0);
     let mem_used_gib = total_bytes
@@ -69,6 +70,7 @@ pub(crate) fn sample_status_metrics(
         mem_used_gib,
         mem_total_gib,
         disk_percent,
+        hostname,
     }
 }
 
@@ -78,6 +80,20 @@ pub(crate) fn sample_status_metrics(
 fn status_disk_percent() -> Option<u8> {
     super::unix_common::volume_used_percent(c"/System/Volumes/Data")
         .or_else(|| super::unix_common::volume_used_percent(c"/"))
+}
+
+fn status_hostname() -> String {
+    let mut hostname = [0u8; 256];
+    // SAFETY: `hostname` is writable for the length passed to libc.
+    if unsafe { libc::gethostname(hostname.as_mut_ptr().cast(), hostname.len()) } == 0 {
+        let end = hostname
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(hostname.len());
+        super::status_metrics::short_hostname(&String::from_utf8_lossy(&hostname[..end]))
+    } else {
+        "localhost".into()
+    }
 }
 
 fn status_sysctl_u64(name: &std::ffi::CStr) -> Option<u64> {
@@ -263,7 +279,7 @@ mod status_metric_tests {
         let metrics = super::sample_status_metrics(
             &mut crate::platform::status_metrics::StatusMetricSampler::new(),
         );
-        let _ = metrics;
+        assert!(!metrics.hostname.is_empty());
     }
 
     #[test]

@@ -498,7 +498,12 @@ fn metrics_or_unavailable(app: &AppState) -> &crate::platform::status_metrics::S
     app.status_metrics
         .as_ref()
         .map(|snapshot| &snapshot.metrics)
-        .unwrap_or_else(|| UNAVAILABLE.get_or_init(Default::default))
+        .unwrap_or_else(|| {
+            UNAVAILABLE.get_or_init(|| crate::platform::status_metrics::StatusMetrics {
+                hostname: "--".into(),
+                ..Default::default()
+            })
+        })
 }
 
 pub(crate) struct Segment {
@@ -1454,6 +1459,7 @@ mod tests {
                 mem_used_gib: Some(17_179_869_184.0),
                 mem_total_gib: Some(17_179_869_184.0),
                 disk_percent: None,
+                hostname: "metric-host".into(),
             },
             sampled_at: std::time::Instant::now(),
         });
@@ -1484,6 +1490,7 @@ mod tests {
                 mem_used_gib: Some(9_999.9),
                 mem_total_gib: Some(9_999.9),
                 disk_percent: None,
+                hostname: "metric-host".into(),
             },
             sampled_at: std::time::Instant::now(),
         });
@@ -1685,6 +1692,7 @@ mod tests {
                 mem_used_gib: Some(8.0),
                 mem_total_gib: Some(16.0),
                 disk_percent: None,
+                hostname: "metric-host".into(),
             },
             &app.palette,
         );
@@ -1693,6 +1701,7 @@ mod tests {
             mem_used_gib: Some(10_000.0),
             mem_total_gib: Some(10_000.0),
             disk_percent: None,
+            hostname: "metric-host".into(),
         };
         let rendered = status_segments(&app, &metrics, &app.palette)
             .iter()
