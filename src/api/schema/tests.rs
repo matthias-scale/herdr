@@ -1105,6 +1105,7 @@ fn success_response_round_trips() {
                 live_handoff: true,
                 detached_server_daemon: true,
                 groups_v1: true,
+                fleet_agent_events: true,
             }),
         },
     };

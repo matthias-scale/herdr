@@ -2271,6 +2271,7 @@ impl AppState {
             return false;
         };
         self.selected = ws_idx;
+        self.confirm_close_remote_agent_ref = None;
         self.confirm_close_workspace_id = Some(workspace_id);
         self.open_client_overlay(ClientOverlay::ConfirmClose);
         true
@@ -3368,6 +3369,7 @@ impl AppState {
     pub fn handle_app_event(&mut self, event: AppEvent) -> Vec<PaneStateUpdate> {
         match event {
             AppEvent::FleetRefreshed { .. } => Vec::new(),
+            AppEvent::FleetAgentInventoryChanged { .. } => Vec::new(),
             AppEvent::AuthorityAcceptanceLedgerPersisted { .. } => Vec::new(),
             AppEvent::AuthorityAcceptanceLedgerReconciled { .. } => Vec::new(),
             AppEvent::RemoteFocusTransition { .. } => Vec::new(),

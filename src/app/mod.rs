@@ -1435,6 +1435,7 @@ impl App {
             session_dirty_revision: 0,
             terminal_runtime_shutdowns: Vec::new(),
             confirm_close_workspace_id: None,
+            confirm_close_remote_agent_ref: None,
             rename_target: None,
         };
 

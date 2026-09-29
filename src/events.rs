@@ -73,6 +73,12 @@ pub struct WorktreeRemoveResult {
 pub enum AppEvent {
     /// A read-only fleet host inventory poll completed.
     FleetRefreshed { snapshot: crate::fleet::Snapshot },
+    /// A remote owner pushed its current agent inventory over the host event stream.
+    FleetAgentInventoryChanged {
+        host: crate::config::FleetHostConfig,
+        config_generation: u64,
+        agents: Vec<crate::api::schema::AgentInfo>,
+    },
     /// A one-shot request to the host owning a remote pane completed. Fleet
     /// polling remains the only source of rendered remote lifecycle state.
     RemoteApiRequestFinished {
