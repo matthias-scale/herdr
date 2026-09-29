@@ -2073,6 +2073,8 @@ pub(crate) fn start_poller(
     if cfg!(test) {
         return poller_config;
     }
+    let stream_config = Arc::clone(&poller_config);
+    let stream_events = event_tx.clone();
     let poller_config_for_thread = Arc::clone(&poller_config);
     std::thread::spawn(move || loop {
         let state = poller_config_for_thread.snapshot();
@@ -2089,8 +2091,6 @@ pub(crate) fn start_poller(
             Duration::from_millis(state.fleet.refresh_interval_ms.max(MIN_REFRESH_INTERVAL_MS)),
         );
     });
-    let stream_config = Arc::clone(&poller_config);
-    let stream_events = event_tx.clone();
     let _ = std::thread::Builder::new()
         .name("herdr-fleet-agent-streams".into())
         .spawn(move || supervise_remote_agent_streams(stream_config, stream_events));
@@ -2304,17 +2304,12 @@ fn parse_remote_agent_stream_line(line: &str) -> Result<RemoteAgentStreamMessage
     }
 }
 
+type RemoteAgentStreamLines = std::sync::mpsc::Receiver<Result<String, std::io::Error>>;
+
 fn spawn_remote_agent_stream(
     host: &FleetHostConfig,
     timeout: Duration,
-) -> Result<
-    (
-        Child,
-        std::sync::mpsc::Receiver<Result<String, std::io::Error>>,
-        std::thread::JoinHandle<()>,
-    ),
-    String,
-> {
+) -> Result<(Child, RemoteAgentStreamLines, std::thread::JoinHandle<()>), String> {
     let route = HostApiRoute::from_config(host);
     let request = Request {
         id: "fleet-agent-events".into(),

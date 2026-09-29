@@ -80,7 +80,7 @@ fn api_authority_snapshot(args: &[String]) -> std::io::Result<i32> {
 }
 
 fn api_relay(args: &[String]) -> std::io::Result<i32> {
-    if args.as_slice() == ["--stream"] {
+    if matches!(args, [flag] if flag == "--stream") {
         let request: Request = serde_json::from_reader(std::io::stdin())?;
         let mut output = std::io::stdout().lock();
         crate::api::client::ApiClient::local()
