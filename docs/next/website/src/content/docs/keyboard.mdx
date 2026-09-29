@@ -103,6 +103,28 @@ The Missive view is read-only. It lists configured team conversations, shows mes
 
 The full keymap and the binding syntax live in the [keybinding reference](/docs/configuration/#keybindings).
 
+## Focus board
+
+These keys apply while the focus board is open. `Enter` keeps its existing card-detail and linked-terminal behavior; `e` edits the selected card in the full-screen zen editor.
+
+| Action | Key |
+| --- | --- |
+| Previous / next column | `←` / `→` |
+| Select a card | `↑` / `↓` |
+| Jump to Draft / To Do / In Progress / Done | `1`–`4` |
+| Open selected card details | `Enter` |
+| Edit selected card in zen mode | `e` |
+| Move selected card | `m`, then `←` / `→` |
+| New Draft card | `n` |
+| New goal / page goals | `g` / `[` and `]` |
+| Spawn selected card | `s` |
+| Cycle All / scalable / harness / personal filter | `f` |
+| Open zen editor; no selection starts a Draft card | `z` |
+| Show or close board shortcut help | `?` |
+| Save zen editor and stay / save and return | `Ctrl+S` / `Esc` |
+
+The area filter only changes the current board view. New cards use the filtered area, or harness when All is selected.
+
 The Goto picker (`prefix+g`) lists each agent or terminal on its own row, grouped by workspace. Split tabs never hide their panes behind another row. Click a row or press Enter to jump directly to it. Press `/` to search names, agent kinds, tabs, workspaces, branches, or paths; use Up/Down or `j/k` to move between rows when not typing a search. Left/Right jumps to the first agent or terminal in the previous/next workspace section, without wrapping. While editing a search, Left/Right moves the text cursor instead. Outside search, `b/w/i/d` filter blocked, working, idle, or done agents, and `a` shows all terminals again. The selected destination's location and path appear below the list. When the list overflows, use the mouse wheel, click the scrollbar track, or drag its thumb to scroll without opening a destination.
 
 ## Editing text fields

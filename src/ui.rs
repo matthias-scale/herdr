@@ -1317,6 +1317,14 @@ fn render_with_runtime_registry_inner(
     frame: &mut Frame,
     input_owner: InputOwner,
 ) {
+    if app
+        .board_view
+        .as_ref()
+        .is_some_and(|view| view.zen_editor.is_some())
+    {
+        board::render(app, frame.area(), frame);
+        return;
+    }
     let tab_bar_area = app.view.tab_bar_rect;
     let terminal_area = app.view.terminal_area;
 

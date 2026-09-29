@@ -7,13 +7,17 @@ use ratatui::{
 
 use crate::{
     app::state::AppState,
-    board::{BoardView, Column, Dialog, EditField, Lane},
+    board::{BoardView, Column, Dialog, EditField, Lane, ZenEditor},
 };
 
 pub(crate) fn render(app: &AppState, area: Rect, frame: &mut Frame) {
     let Some(view) = app.board_view.as_ref() else {
         return;
     };
+    if let Some(editor) = &view.zen_editor {
+        render_zen(app, editor, area, frame);
+        return;
+    }
     if area.width < 30 || area.height < 12 {
         frame.render_widget(Paragraph::new("Board needs at least 30 × 12 cells"), area);
         return;
@@ -21,7 +25,12 @@ pub(crate) fn render(app: &AppState, area: Rect, frame: &mut Frame) {
     let palette = &app.palette;
     let header = Rect::new(area.x, area.y, area.width, 1);
     frame.render_widget(
-        Paragraph::new(format!("  {}", view.note.header())).style(
+        Paragraph::new(format!(
+            "  {}   ◉ Area: {} (f)",
+            view.note.header(),
+            view.area_filter.label()
+        ))
+        .style(
             Style::default()
                 .fg(palette.text)
                 .add_modifier(Modifier::BOLD),
@@ -35,11 +44,12 @@ pub(crate) fn render(app: &AppState, area: Rect, frame: &mut Frame) {
         );
     }
     let goal_page_size = goal_page_size(area.width);
-    if view.board.goals.len() > goal_page_size && area.width > 26 {
+    let goals = view.visible_goals();
+    if goals.len() > goal_page_size && area.width > 26 {
         let first = view.goal_offset + 1;
-        let last = (view.goal_offset + goal_page_size).min(view.board.goals.len());
+        let last = (view.goal_offset + goal_page_size).min(goals.len());
         frame.render_widget(
-            Paragraph::new(format!("{first}–{last}/{}", view.board.goals.len()))
+            Paragraph::new(format!("{first}–{last}/{}", goals.len()))
                 .style(Style::default().fg(palette.subtext0)),
             Rect::new(area.right().saturating_sub(25), area.y, 11, 1),
         );
@@ -61,17 +71,22 @@ pub(crate) fn render(app: &AppState, area: Rect, frame: &mut Frame) {
     );
     render_columns(app, view, board_area, frame);
     let footer = Rect::new(area.x, area.bottom() - 1, area.width, 1);
-    let hint = if view.dialog.is_some() || view.editor.is_some() {
+    let hint = if view.shortcuts_open {
+        "Board shortcuts · ?/Esc close"
+    } else if view.dialog.is_some() || view.editor.is_some() {
         "Tab field · Enter newline · Ctrl+Enter save · Esc cancel"
     } else if view.detail.is_some() {
         "Tab Human/Agent · e edit · a append · ↑/↓ agent · Enter jump · Esc board"
     } else {
-        "←/→ column · ↑/↓ card · Enter detail · m then ←/→ move · n Draft · g goal · [/] goals · s spawn · Esc close"
+        "←/→ column · ↑/↓ card · 1–4 column · Enter detail · e edit · m move · n Draft · f area · z zen · ? help · g goal · [/] goals · s spawn"
     };
     frame.render_widget(
         Paragraph::new(hint).style(Style::default().fg(palette.subtext0)),
         footer,
     );
+    if view.shortcuts_open {
+        render_shortcuts(app, area, frame);
+    }
     if let Some(detail) = &view.detail {
         render_detail(app, view, detail, area, frame);
     }
@@ -96,15 +111,14 @@ pub(crate) fn render(app: &AppState, area: Rect, frame: &mut Frame) {
 }
 
 fn render_goals(app: &AppState, view: &BoardView, area: Rect, frame: &mut Frame) {
-    if view.board.goals.is_empty() {
+    let goals = view.visible_goals();
+    if goals.is_empty() {
         frame.render_widget(Paragraph::new("  No goals yet · + goal"), area);
         return;
     }
-    let cols = view.board.goals.len().clamp(1, goal_page_size(area.width)) as u16;
+    let cols = goals.len().clamp(1, goal_page_size(area.width)) as u16;
     let width = area.width / cols;
-    for (i, goal) in view
-        .board
-        .goals
+    for (i, goal) in goals
         .iter()
         .skip(view.goal_offset)
         .take(cols as usize)
@@ -122,12 +136,13 @@ fn render_goals(app: &AppState, view: &BoardView, area: Rect, frame: &mut Frame)
             .cards
             .iter()
             .filter(|card| card.goal_id.as_deref() == Some(&goal.id))
+            .filter(|card| view.area_filter.area().is_none_or(|area| card.area == area))
             .collect();
         let done = linked
             .iter()
             .filter(|card| card.column == Column::Done)
             .count();
-        let icon = if view.board.goal_done(&goal.id) {
+        let icon = if !linked.is_empty() && linked.iter().all(|card| card.column == Column::Done) {
             "✓"
         } else {
             "○"
@@ -170,7 +185,7 @@ pub(crate) fn goal_page_size(width: u16) -> usize {
 }
 
 fn goals_height(view: &BoardView, screen_height: u16) -> u16 {
-    if view.board.goals.is_empty() {
+    if view.visible_goals().is_empty() {
         return 2;
     }
     8.min((screen_height / 3).max(4))
@@ -227,6 +242,7 @@ fn render_columns(app: &AppState, view: &BoardView, area: Rect, frame: &mut Fram
             .cards
             .iter()
             .filter(|card| card.column == column)
+            .filter(|card| view.area_filter.area().is_none_or(|area| card.area == area))
             .count();
         let title = format!(" {} · {count} ", column.label());
         let block = Block::default()
@@ -246,6 +262,7 @@ fn render_columns(app: &AppState, view: &BoardView, area: Rect, frame: &mut Fram
             .cards
             .iter()
             .filter(|card| card.column == column)
+            .filter(|card| view.area_filter.area().is_none_or(|area| card.area == area))
             .collect();
         if column == Column::InProgress {
             cards.sort_by_key(|card| app.board_lane(card));
@@ -355,6 +372,7 @@ fn render_columns(app: &AppState, view: &BoardView, area: Rect, frame: &mut Fram
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BoardHit {
+    Filter,
     NewGoal,
     GoalPage(i8),
     NewCard,
@@ -379,6 +397,12 @@ pub(crate) fn hit_at(app: &AppState, area: Rect, x: u16, y: u16) -> Option<Board
     let view = app.board_view.as_ref()?;
     if x < area.x || x >= area.right() || y < area.y || y >= area.bottom() {
         return None;
+    }
+    if view.zen_editor.is_some() {
+        return None;
+    }
+    if view.shortcuts_open {
+        return Some(BoardHit::EditorCancel);
     }
     if view.editor.is_some() {
         let rect = side_rect(area);
@@ -473,13 +497,17 @@ pub(crate) fn hit_at(app: &AppState, area: Rect, x: u16, y: u16) -> Option<Board
     if y == area.y && x >= area.right().saturating_sub(8) {
         return Some(BoardHit::NewGoal);
     }
-    if y == area.y && area.width > 26 && view.board.goals.len() > goal_page_size(area.width) {
+    if y == area.y && area.width > 26 && view.visible_goals().len() > goal_page_size(area.width) {
         if x == area.right().saturating_sub(13) {
             return Some(BoardHit::GoalPage(-1));
         }
         if x == area.right().saturating_sub(11) {
             return Some(BoardHit::GoalPage(1));
         }
+    }
+    let filter_start = area.x + 2 + super::text::display_width_u16(&view.note.header()) + 3;
+    if y == area.y && (filter_start..filter_start.saturating_add(20)).contains(&x) {
+        return Some(BoardHit::Filter);
     }
     let board = board_rect(area, view);
     if y < board.y || y >= board.bottom() {
@@ -507,6 +535,7 @@ pub(crate) fn hit_at(app: &AppState, area: Rect, x: u16, y: u16) -> Option<Board
             .cards
             .iter()
             .filter(|card| card.column == column)
+            .filter(|card| view.area_filter.area().is_none_or(|area| card.area == area))
             .collect();
         if column == Column::InProgress {
             cards.sort_by_key(|card| app.board_lane(card));
@@ -772,11 +801,196 @@ fn render_editor(app: &AppState, editor: &crate::board::Editor, area: Rect, fram
     );
 }
 
+fn render_zen(app: &AppState, editor: &ZenEditor, area: Rect, frame: &mut Frame) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(app.palette.panel_bg)),
+        area,
+    );
+    let title = if editor.title_active {
+        format!(
+            "▸ {}",
+            if editor.title.is_empty() {
+                "Title"
+            } else {
+                &editor.title
+            }
+        )
+    } else {
+        editor.title.clone()
+    };
+    frame.render_widget(
+        Paragraph::new(title).style(
+            Style::default()
+                .fg(app.palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(area.x + 2, area.y + 1, area.width.saturating_sub(4), 2),
+    );
+    frame.render_widget(
+        Paragraph::new("Human text").style(Style::default().fg(app.palette.subtext0)),
+        Rect::new(area.x + 2, area.y + 3, area.width.saturating_sub(4), 1),
+    );
+    frame.render_widget(
+        Paragraph::new(editor.text.as_str()).wrap(Wrap { trim: false }),
+        Rect::new(
+            area.x + 2,
+            area.y + 4,
+            area.width.saturating_sub(4),
+            area.height.saturating_sub(7),
+        ),
+    );
+    frame.render_widget(
+        Paragraph::new("Ctrl+S save · Esc save and return")
+            .style(Style::default().fg(app.palette.subtext0)),
+        Rect::new(
+            area.x + 2,
+            area.bottom().saturating_sub(2),
+            area.width.saturating_sub(4),
+            1,
+        ),
+    );
+}
+
+fn render_shortcuts(app: &AppState, area: Rect, frame: &mut Frame) {
+    let width = area.width.min(68).saturating_sub(2);
+    let height = area.height.min(22).saturating_sub(2);
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Board shortcuts ")
+            .style(
+                Style::default()
+                    .bg(app.palette.panel_bg)
+                    .fg(app.palette.text),
+            ),
+        rect,
+    );
+    let rows = [
+        "← / →   Previous / next column",
+        "↑ / ↓   Select a card",
+        "1–4     Jump to Draft / To Do / In Progress / Done",
+        "Enter   Open selected card details",
+        "e       Edit selected card",
+        "m ←/→   Move selected card",
+        "n       New Draft card",
+        "g       New goal       [ / ]  Page goals",
+        "s       Spawn selected card    f  Cycle area filter",
+        "z       Zen editor; no selection starts a new card",
+        "?       Toggle this help       Esc  Close / save and exit",
+        "Ctrl+S  Save board / zen editor",
+        "Details: Tab Human/Agent · ↑/↓ terminal · Enter jump",
+        "Details: e edit · a append / update · s edit Agent summary",
+        "Forms: Tab/Shift+Tab field · ←/→ or Space cycle choices",
+        "Forms: Enter newline · Ctrl+Enter save · Esc cancel",
+        "Zen: Tab title/Human · Enter title/body · Ctrl+S save · Esc save",
+    ];
+    frame.render_widget(
+        Paragraph::new(rows.join("\n")),
+        Rect::new(
+            rect.x + 2,
+            rect.y + 1,
+            rect.width.saturating_sub(4),
+            rect.height.saturating_sub(2),
+        ),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::board::{Area, Board, Card, Goal, GoalScope, WeekNote};
     use ratatui::{backend::TestBackend, Terminal};
+
+    fn rendered(app: &AppState, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| render(app, frame.area(), frame))
+            .expect("board render");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(usize::from(width))
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn filtered_board_limits_cards_and_goals_to_active_area() {
+        let date = time::Date::from_calendar_date(2026, time::Month::September, 28).expect("date");
+        let note = WeekNote::for_date(std::path::Path::new("/vault"), date).expect("note");
+        let mut app = AppState::test_new();
+        let mut view = BoardView::test_new(
+            note,
+            Board {
+                goals: ["harness", "personal"]
+                    .into_iter()
+                    .map(|id| Goal {
+                        id: id.into(),
+                        title: format!("{id} goal"),
+                        scope: GoalScope::Week,
+                    })
+                    .collect(),
+                cards: [("harness", Area::Harness), ("personal", Area::Personal)]
+                    .into_iter()
+                    .map(|(id, area)| Card {
+                        id: id.into(),
+                        title: format!("{id} card"),
+                        description: String::new(),
+                        area,
+                        column: Column::Todo,
+                        goal_id: Some(id.into()),
+                        agent_summary: String::new(),
+                        updates: Vec::new(),
+                        agents: Vec::new(),
+                    })
+                    .collect(),
+            },
+        );
+        view.area_filter = crate::board::AreaFilter::Area(Area::Harness);
+        app.board_view = Some(view);
+        let screen = rendered(&app, 120, 30);
+        assert!(screen.contains("harness goal"));
+        assert!(screen.contains("harness card"));
+        assert!(!screen.contains("personal goal"));
+        assert!(!screen.contains("personal card"));
+        assert!(screen.contains("Area: harness"));
+    }
+
+    #[test]
+    fn shortcut_overlay_and_zen_render_only_their_expected_content() {
+        let date = time::Date::from_calendar_date(2026, time::Month::September, 28).expect("date");
+        let note = WeekNote::for_date(std::path::Path::new("/vault"), date).expect("note");
+        let mut app = AppState::test_new();
+        app.board_view = Some(BoardView::test_new(note, Board::default()));
+        app.board_view.as_mut().expect("view").shortcuts_open = true;
+        let help = rendered(&app, 100, 24);
+        assert!(help.contains("Board shortcuts"));
+        assert!(help.contains("f  Cycle area filter"));
+        assert!(help.contains("Ctrl+S"));
+        app.board_view.as_mut().expect("view").shortcuts_open = false;
+        app.board_view.as_mut().expect("view").zen_editor = Some(crate::board::ZenEditor {
+            card_id: None,
+            title: "Zen title".into(),
+            text: "Human body".into(),
+            area: Area::Harness,
+            title_active: false,
+        });
+        let zen = rendered(&app, 100, 24);
+        assert!(zen.contains("Zen title"));
+        assert!(zen.contains("Human body"));
+        assert!(zen.contains("Ctrl+S save"));
+        assert!(!zen.contains("No goals yet"));
+        assert!(!zen.contains("Draft"));
+    }
 
     #[test]
     fn wide_board_renders_goal_strip_columns_and_working_lane() {

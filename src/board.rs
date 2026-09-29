@@ -78,6 +78,35 @@ impl Area {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AreaFilter {
+    #[default]
+    All,
+    Area(Area),
+}
+
+impl AreaFilter {
+    pub(crate) const fn area(self) -> Option<Area> {
+        match self {
+            Self::All => None,
+            Self::Area(area) => Some(area),
+        }
+    }
+
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::All => Self::Area(Area::Scalable),
+            Self::Area(Area::Scalable) => Self::Area(Area::Harness),
+            Self::Area(Area::Harness) => Self::Area(Area::Personal),
+            Self::Area(Area::Personal) => Self::All,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        self.area().map(Area::label).unwrap_or("all")
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum GoalScope {
@@ -158,6 +187,9 @@ pub(crate) struct BoardView {
     pub(crate) column: Column,
     pub(crate) row: usize,
     pub(crate) goal_offset: usize,
+    pub(crate) area_filter: AreaFilter,
+    pub(crate) shortcuts_open: bool,
+    pub(crate) zen_editor: Option<ZenEditor>,
     pub(crate) dialog: Option<Dialog>,
     pub(crate) detail: Option<Detail>,
     pub(crate) editor: Option<Editor>,
@@ -197,6 +229,9 @@ impl BoardView {
             column: Column::Draft,
             row: 0,
             goal_offset: 0,
+            area_filter: AreaFilter::All,
+            shortcuts_open: false,
+            zen_editor: None,
             dialog: None,
             detail: None,
             editor: None,
@@ -222,6 +257,9 @@ impl BoardView {
             column: Column::Draft,
             row: 0,
             goal_offset: 0,
+            area_filter: AreaFilter::All,
+            shortcuts_open: false,
+            zen_editor: None,
             dialog: None,
             detail: None,
             editor: None,
@@ -245,11 +283,26 @@ impl BoardView {
             .cards
             .iter()
             .filter(|card| card.column == self.column)
+            .filter(|card| self.area_filter.area().is_none_or(|area| card.area == area))
             .collect();
         if self.column == Column::InProgress {
             cards.sort_by_key(|card| app.board_lane(card));
         }
         cards
+    }
+
+    pub(crate) fn visible_goals(&self) -> Vec<&Goal> {
+        self.board
+            .goals
+            .iter()
+            .filter(|goal| {
+                self.area_filter.area().is_none_or(|area| {
+                    self.board.cards.iter().any(|card| {
+                        card.goal_id.as_deref() == Some(goal.id.as_str()) && card.area == area
+                    })
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn selected_id(&self, app: &crate::app::state::AppState) -> Option<String> {
@@ -361,6 +414,15 @@ pub(crate) enum EditField {
 pub(crate) struct Editor {
     pub(crate) field: EditField,
     pub(crate) text: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ZenEditor {
+    pub(crate) card_id: Option<String>,
+    pub(crate) title: String,
+    pub(crate) text: String,
+    pub(crate) area: Area,
+    pub(crate) title_active: bool,
 }
 
 impl Board {

@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 
 use crate::board::{
     Area, BoardView, Card, Column, Detail, Dialog, EditField, Editor, Goal, GoalScope, Update,
+    ZenEditor,
 };
 
 use super::super::App;
@@ -309,7 +310,7 @@ impl App {
                     view.dialog = Some(Dialog::Card {
                         title: String::new(),
                         description: String::new(),
-                        area: Area::Harness,
+                        area: view.area_filter.area().unwrap_or(Area::Harness),
                         goal: None,
                         new_goal: String::new(),
                         field: 0,
@@ -322,6 +323,7 @@ impl App {
                     view.row = 0;
                 }
             }
+            Some(BoardHit::Filter) => self.cycle_board_filter(),
             Some(BoardHit::Card { id, spawn, agent }) => {
                 self.select_board_card(&id);
                 if spawn {
@@ -394,6 +396,7 @@ impl App {
             Some(BoardHit::EditorCancel) => {
                 if let Some(view) = self.state.board_view.as_mut() {
                     view.editor = None;
+                    view.shortcuts_open = false;
                 }
             }
             Some(BoardHit::DetailTab(agent_tab)) => {
@@ -454,6 +457,7 @@ impl App {
             .cards
             .iter()
             .filter(|card| card.column == column)
+            .filter(|card| view.area_filter.area().is_none_or(|area| card.area == area))
             .collect();
         if column == Column::InProgress {
             cards.sort_by_key(|card| self.state.board_lane(card));
@@ -468,7 +472,7 @@ impl App {
     fn page_board_goals(&mut self, delta: i8) {
         let page_size = crate::ui::board::goal_page_size(self.state.view.terminal_area.width);
         if let Some(view) = self.state.board_view.as_mut() {
-            let max_offset = view.board.goals.len().saturating_sub(page_size);
+            let max_offset = view.visible_goals().len().saturating_sub(page_size);
             view.goal_offset = if delta < 0 {
                 view.goal_offset.saturating_sub(page_size)
             } else {
@@ -506,6 +510,17 @@ impl App {
         let Some(view) = self.state.board_view.as_ref() else {
             return false;
         };
+        if view.zen_editor.is_some() {
+            return self.handle_board_zen_key(key);
+        }
+        if view.shortcuts_open {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
+                if let Some(view) = self.state.board_view.as_mut() {
+                    view.shortcuts_open = false;
+                }
+            }
+            return true;
+        }
         if view.editor.is_some() {
             return self.handle_board_editor_key(key);
         }
@@ -517,6 +532,7 @@ impl App {
         }
 
         let selected_id = view.selected_id(&self.state);
+        let default_area = view.area_filter.area().unwrap_or(Area::Harness);
         if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if let Some(view) = self.state.board_view.as_mut() {
                 view.persist();
@@ -527,6 +543,27 @@ impl App {
             KeyCode::Esc => {
                 self.state.board_view = None;
             }
+            KeyCode::Char('?') => {
+                if let Some(view) = self.state.board_view.as_mut() {
+                    view.shortcuts_open = true;
+                }
+            }
+            KeyCode::Char('f') => self.cycle_board_filter(),
+            KeyCode::Char('1'..='4') => {
+                let index = match key.code {
+                    KeyCode::Char('1') => 0,
+                    KeyCode::Char('2') => 1,
+                    KeyCode::Char('3') => 2,
+                    _ => 3,
+                };
+                let column = Column::ALL[index];
+                if let Some(view) = self.state.board_view.as_mut() {
+                    view.column = column;
+                    view.row = 0;
+                }
+            }
+            KeyCode::Char('z') => self.open_board_zen(selected_id.as_deref()),
+            KeyCode::Char('e') => self.open_board_zen(selected_id.as_deref()),
             KeyCode::Left | KeyCode::Right => {
                 let delta = if key.code == KeyCode::Left { -1 } else { 1 };
                 if self
@@ -585,11 +622,11 @@ impl App {
                     view.move_mode = true;
                 }
             }
-            KeyCode::Char('n') if view.column == Column::Draft => {
+            KeyCode::Char('n') => {
                 self.state.board_view.as_mut().expect("board open").dialog = Some(Dialog::Card {
                     title: String::new(),
                     description: String::new(),
-                    area: Area::Harness,
+                    area: default_area,
                     goal: None,
                     new_goal: String::new(),
                     field: 0,
@@ -613,6 +650,170 @@ impl App {
             _ => {}
         }
         true
+    }
+
+    fn cycle_board_filter(&mut self) {
+        if let Some(view) = self.state.board_view.as_mut() {
+            view.area_filter = view.area_filter.next();
+            let count = view
+                .board
+                .cards
+                .iter()
+                .filter(|card| {
+                    card.column == view.column
+                        && view.area_filter.area().is_none_or(|area| card.area == area)
+                })
+                .count();
+            view.row = view.row.min(count.saturating_sub(1));
+            let filtered_goals = view.visible_goals().len();
+            let page_size = crate::ui::board::goal_page_size(self.state.view.terminal_area.width);
+            view.goal_offset = view
+                .goal_offset
+                .min(filtered_goals.saturating_sub(page_size));
+        }
+    }
+
+    fn open_board_zen(&mut self, selected_id: Option<&str>) {
+        let Some(view) = self.state.board_view.as_mut() else {
+            return;
+        };
+        let editor = selected_id
+            .and_then(|id| view.board.card(id))
+            .map(|card| ZenEditor {
+                card_id: Some(card.id.clone()),
+                title: card.title.clone(),
+                text: card.description.clone(),
+                area: card.area,
+                title_active: false,
+            })
+            .unwrap_or_else(|| ZenEditor {
+                card_id: None,
+                title: String::new(),
+                text: String::new(),
+                area: view.area_filter.area().unwrap_or(Area::Harness),
+                title_active: true,
+            });
+        view.zen_editor = Some(editor);
+    }
+
+    fn handle_board_zen_key(&mut self, key: KeyEvent) -> bool {
+        if key.code == KeyCode::Char('n') && !key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.save_board_zen(false);
+            if self
+                .state
+                .board_view
+                .as_ref()
+                .is_some_and(|view| view.error.is_some())
+            {
+                return true;
+            }
+            self.open_board_zen(None);
+            return true;
+        }
+        let save_only =
+            key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL);
+        if key.code == KeyCode::Esc || save_only {
+            self.save_board_zen(!save_only);
+            return true;
+        }
+        let Some(editor) = self
+            .state
+            .board_view
+            .as_mut()
+            .and_then(|view| view.zen_editor.as_mut())
+        else {
+            return true;
+        };
+        match key.code {
+            KeyCode::Tab => editor.title_active = !editor.title_active,
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if editor.title_active {
+                    editor.title.push(c);
+                } else {
+                    editor.text.push(c);
+                }
+            }
+            KeyCode::Backspace => {
+                if editor.title_active {
+                    editor.title.pop();
+                } else {
+                    editor.text.pop();
+                }
+            }
+            KeyCode::Enter => {
+                if editor.title_active {
+                    editor.title_active = false;
+                } else {
+                    editor.text.push('\n');
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn save_board_zen(&mut self, leave: bool) {
+        let Some(view) = self.state.board_view.as_mut() else {
+            return;
+        };
+        let Some(editor) = view.zen_editor.clone() else {
+            return;
+        };
+        if editor.title.trim().is_empty() || editor.title.contains('\n') {
+            view.error = Some("title must be one non-empty line".into());
+            return;
+        }
+        let before = view.board.clone();
+        let mut created_id = None;
+        if let Some(id) = editor.card_id.as_deref() {
+            if let Some(card) = view.board.card_mut(id) {
+                card.title = editor.title.trim().to_owned();
+                card.description = editor.text.clone();
+            }
+        } else {
+            let id = match crate::board::new_id("card") {
+                Ok(id) => id,
+                Err(error) => {
+                    view.error = Some(error);
+                    return;
+                }
+            };
+            created_id = Some(id.clone());
+            view.board.cards.push(Card {
+                id: id.clone(),
+                title: editor.title.trim().to_owned(),
+                description: editor.text,
+                area: editor.area,
+                column: Column::Draft,
+                goal_id: None,
+                agent_summary: String::new(),
+                updates: Vec::new(),
+                agents: Vec::new(),
+            });
+            view.column = Column::Draft;
+            view.row = view
+                .board
+                .cards
+                .iter()
+                .filter(|card| {
+                    card.column == Column::Draft
+                        && view.area_filter.area().is_none_or(|area| card.area == area)
+                })
+                .count()
+                .saturating_sub(1);
+        }
+        if !view.persist() {
+            view.board = before;
+            return;
+        }
+        view.error = None;
+        if let (Some(id), Some(editor)) = (created_id, view.zen_editor.as_mut()) {
+            editor.card_id = Some(id);
+            editor.title_active = false;
+        }
+        if leave {
+            view.zen_editor = None;
+        }
     }
 
     fn handle_board_dialog_key(&mut self, key: KeyEvent) -> bool {
@@ -826,12 +1027,13 @@ impl App {
                     title: title.into(),
                     scope,
                 });
+                let area = view.area_filter.area().unwrap_or(Area::Harness);
                 for (todo, card_id) in todos.into_iter().zip(card_ids) {
                     view.board.cards.push(Card {
                         id: card_id,
                         title: todo.into(),
                         description: String::new(),
-                        area: Area::Harness,
+                        area,
                         column: Column::Draft,
                         goal_id: Some(id.clone()),
                         agent_summary: String::new(),
@@ -1076,6 +1278,49 @@ impl App {
 mod tests {
     use super::*;
 
+    fn board_app() -> (App, std::path::PathBuf) {
+        let root =
+            std::env::temp_dir().join(crate::board::new_id("herdr-board-input-test").expect("id"));
+        std::fs::create_dir_all(&root).expect("temp vault");
+        let date = time::Date::from_calendar_date(2026, time::Month::September, 28).expect("date");
+        let note = crate::board::WeekNote::for_date(&root, date).expect("weekly note");
+        let card = |id: &str, area| Card {
+            id: id.into(),
+            title: id.into(),
+            description: format!("{id} text"),
+            area,
+            column: Column::Draft,
+            goal_id: Some(format!("goal-{id}")),
+            agent_summary: String::new(),
+            updates: Vec::new(),
+            agents: Vec::new(),
+        };
+        let board = crate::board::Board {
+            goals: ["scalable", "harness", "personal"]
+                .into_iter()
+                .map(|id| crate::board::Goal {
+                    id: format!("goal-{id}"),
+                    title: format!("{id} goal"),
+                    scope: crate::board::GoalScope::Week,
+                })
+                .collect(),
+            cards: vec![
+                card("scalable", Area::Scalable),
+                card("harness", Area::Harness),
+                card("personal", Area::Personal),
+            ],
+        };
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.state.board_view = Some(BoardView::test_new(note, board));
+        (app, root)
+    }
+
     #[test]
     fn remote_line_batch_remains_bounded_across_board_reopens() {
         let first = RemoteLineBatchPermit::try_acquire().expect("first board fetch");
@@ -1151,5 +1396,135 @@ mod tests {
                 .expect("board")
                 .remote_line_fetch_in_flight
         );
+    }
+
+    #[test]
+    fn board_area_filter_cycles_in_order_and_filters_cards() {
+        let (mut app, root) = board_app();
+        for (expected, visible) in [
+            ("scalable", "scalable"),
+            ("harness", "harness"),
+            ("personal", "personal"),
+            ("all", "scalable"),
+        ] {
+            app.handle_board_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::empty()));
+            let view = app.state.board_view.as_ref().expect("board");
+            assert_eq!(view.area_filter.label(), expected);
+            assert!(view
+                .visible_cards(&app.state)
+                .iter()
+                .any(|card| card.id == visible));
+            if expected != "all" {
+                assert_eq!(view.visible_cards(&app.state).len(), 1);
+                assert_eq!(view.visible_goals().len(), 1);
+            } else {
+                assert_eq!(view.visible_cards(&app.state).len(), 3);
+                assert_eq!(view.visible_goals().len(), 3);
+            }
+        }
+        std::fs::remove_dir_all(root).expect("remove temp vault");
+    }
+
+    #[test]
+    fn board_key_map_and_zen_editor_save_and_return_to_selection() {
+        let (mut app, root) = board_app();
+        for (key, column) in [
+            ('1', Column::Draft),
+            ('2', Column::Todo),
+            ('3', Column::InProgress),
+            ('4', Column::Done),
+        ] {
+            app.handle_board_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::empty()));
+            assert_eq!(app.state.board_view.as_ref().expect("board").column, column);
+        }
+        app.handle_board_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::empty()));
+        assert!(app.state.board_view.as_ref().expect("board").shortcuts_open);
+        app.handle_board_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        app.handle_board_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::empty()));
+        assert_eq!(
+            app.state
+                .board_view
+                .as_ref()
+                .expect("board")
+                .selected_id(&app.state)
+                .as_deref(),
+            Some("scalable")
+        );
+        app.handle_board_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::empty()));
+        app.handle_board_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::empty()));
+        app.handle_board_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        {
+            let view = app.state.board_view.as_ref().expect("board");
+            assert!(
+                view.zen_editor.is_some(),
+                "Ctrl+S saves without leaving zen mode"
+            );
+            assert_eq!(
+                view.board.card("scalable").expect("card").description,
+                "scalable text!"
+            );
+        }
+        app.handle_board_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        let view = app.state.board_view.as_ref().expect("board");
+        assert!(view.zen_editor.is_none());
+        assert_eq!(view.selected_id(&app.state).as_deref(), Some("scalable"));
+        std::fs::remove_dir_all(root).expect("remove temp vault");
+    }
+
+    #[test]
+    fn zen_new_card_uses_active_filter_and_saves_to_draft() {
+        let (mut app, root) = board_app();
+        app.handle_board_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::empty()));
+        app.handle_board_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::empty()));
+        app.handle_board_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty()));
+        assert!(app
+            .state
+            .board_view
+            .as_ref()
+            .expect("board")
+            .zen_editor
+            .as_ref()
+            .is_some_and(|editor| editor.card_id.is_none()));
+        for ch in "filtered draft".chars() {
+            app.handle_board_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+        }
+        app.handle_board_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        for ch in "human text".chars() {
+            app.handle_board_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+        }
+        app.handle_board_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(
+            app.state
+                .board_view
+                .as_ref()
+                .expect("board")
+                .zen_editor
+                .is_some(),
+            "Ctrl+S keeps the new-card editor open"
+        );
+        app.handle_board_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()));
+        for ch in "second draft".chars() {
+            app.handle_board_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+        }
+        app.handle_board_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        let view = app.state.board_view.as_ref().expect("board");
+        let new_card = view
+            .board
+            .cards
+            .iter()
+            .find(|card| card.title == "filtered draft")
+            .expect("saved draft");
+        assert_eq!(new_card.area, Area::Scalable);
+        assert_eq!(new_card.column, Column::Draft);
+        assert_eq!(new_card.description, "human text");
+        let second = view
+            .board
+            .cards
+            .iter()
+            .find(|card| card.title == "second draft")
+            .expect("second saved draft");
+        assert_eq!(second.area, Area::Scalable);
+        assert_eq!(view.selected_id(&app.state), Some(second.id.clone()));
+        std::fs::remove_dir_all(root).expect("remove temp vault");
     }
 }
