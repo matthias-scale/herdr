@@ -204,6 +204,7 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
     super::ensure_api_success(&pane_list)?;
     let panes = parse_pane_entries(&pane_list)?;
     let parents = parent_panes(&panes);
+    let mut parent_checks = std::collections::HashMap::new();
     for worker in &mut observations {
         let host_is_local = worker.parent_host.as_deref().is_none_or(|host| {
             local_host_aliases(&options.local_hosts)
@@ -215,6 +216,7 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
         } else {
             remote_parent_present(worker, options).unwrap_or(None)
         };
+        parent_checks.insert(worker.key(), found);
         worker.parent_scope_local = host_is_local;
         worker.parent_state = match found {
             Some(true) => ParentState::Present,
@@ -252,11 +254,8 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
             } else {
                 remote_parent_present(worker, options).unwrap_or(None)
             };
-            worker.parent_state = match found {
-                Some(true) => ParentState::Present,
-                Some(false) => ParentState::Absent,
-                None => ParentState::Unknown,
-            };
+            worker.parent_state =
+                confirmed_parent_state(parent_checks.get(&worker.key()).copied().flatten(), found);
         }
     }
     let now = unix_seconds()?;
@@ -451,6 +450,14 @@ fn parent_matches(worker: &WorkerObservation, panes: &[PaneEntry]) -> Option<boo
         );
     }
     Some(false)
+}
+
+fn confirmed_parent_state(first: Option<bool>, second: Option<bool>) -> ParentState {
+    match (first, second) {
+        (Some(true), _) | (_, Some(true)) => ParentState::Present,
+        (Some(false), Some(false)) => ParentState::Absent,
+        _ => ParentState::Unknown,
+    }
 }
 
 fn local_host_aliases(extra: &[String]) -> std::collections::HashSet<String> {
@@ -1164,6 +1171,81 @@ mod tests {
     }
 
     #[test]
+    fn parent_absence_requires_two_authoritative_checks() {
+        assert_eq!(
+            confirmed_parent_state(Some(false), None),
+            ParentState::Unknown
+        );
+        assert_eq!(
+            confirmed_parent_state(Some(false), Some(false)),
+            ParentState::Absent
+        );
+        assert_eq!(
+            confirmed_parent_state(Some(false), Some(true)),
+            ParentState::Present
+        );
+        assert_eq!(
+            confirmed_parent_state(None, Some(false)),
+            ParentState::Unknown
+        );
+    }
+
+    #[test]
+    fn local_parent_matches_legacy_pane_id_only_for_agent_panes() {
+        let worker = WorkerObservation {
+            source: "codex".into(),
+            worker_id: "w".into(),
+            parent_session: "p1".into(),
+            parent_host: None,
+            parent_terminal: None,
+            parent_pane: None,
+            last_activity: 1,
+            finished: false,
+            parent_scope_local: true,
+            parent_state: ParentState::Unknown,
+            turn_id: None,
+            semantic_hash: 0,
+            trace_mtime: 1,
+            trace: String::new(),
+            out: String::new(),
+            pid: None,
+            pid_alive: false,
+            pid_identity_ok: false,
+            tool_alive: false,
+            outstanding_op: None,
+            progress_at: None,
+            state: String::new(),
+            blocked_reason: None,
+            receipt_status: None,
+            gate_verdict: None,
+        };
+        assert_eq!(
+            parent_matches(
+                &worker,
+                &[PaneEntry {
+                    pane_id: "p1".into(),
+                    agent: Some("codex".into()),
+                    agent_session: None,
+                    terminal_id: None
+                }]
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            parent_matches(
+                &worker,
+                &[PaneEntry {
+                    pane_id: "p1".into(),
+                    agent: None,
+                    agent_session: None,
+                    terminal_id: None
+                }]
+            ),
+            Some(false)
+        );
+    }
+
+    #[test]
     fn claude_discovery_ignores_finished_subagent_transcripts() {
         let dir = TestDir::new();
         let transcript = dir.path().join("project/session-1/subagents/agent-1.jsonl");
@@ -1193,5 +1275,24 @@ mod tests {
         assert!(options.dry_run);
         assert_eq!(options.interval_secs, 30);
         assert_eq!(options.stall_secs, 420);
+        assert_eq!(options.confirm_secs, 20);
+        assert_eq!(options.op_deadline_secs, 3600);
+        let options = parse_worker_options(&[
+            "--confirm-secs".into(),
+            "5".into(),
+            "--op-deadline-minutes".into(),
+            "9".into(),
+            "--local-host".into(),
+            "ub1".into(),
+            "--local-host".into(),
+            "air".into(),
+            "--parent-probe".into(),
+            "ssh -F cfg".into(),
+        ])
+        .expect("parse worker controls");
+        assert_eq!(options.confirm_secs, 5);
+        assert_eq!(options.op_deadline_secs, 540);
+        assert_eq!(options.local_hosts, ["ub1", "air"]);
+        assert_eq!(options.parent_probe, "ssh -F cfg");
     }
 }
