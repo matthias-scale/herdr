@@ -253,6 +253,7 @@ pub struct PaneStateUpdate {
     pub previous_wait: Option<String>,
     pub previous_eta_s: Option<u64>,
     pub previous_reported_at: Option<String>,
+    pub previous_last_turn_at: Option<String>,
     pub previous_stale: bool,
     pub previous_waiting_on_agents: bool,
     pub previous_presentation: crate::terminal::EffectivePresentation,
@@ -263,6 +264,7 @@ pub struct PaneStateUpdate {
     pub wait: Option<String>,
     pub eta_s: Option<u64>,
     pub reported_at: Option<String>,
+    pub last_turn_at: Option<String>,
     pub stale: bool,
     pub waiting_on_agents: bool,
     pub presentation: crate::terminal::EffectivePresentation,
@@ -3357,6 +3359,8 @@ impl AppState {
                         closing_block.session_id,
                         closing_turn_seq,
                     );
+                    mutation.sidebar_projection_changed |=
+                        terminal.set_last_turn_at(closing_block.last_turn_at);
                     let task_changed = terminal.apply_closing_task_report(
                         closing_block.completion,
                         closing_block.external_wait,
@@ -3967,17 +3971,21 @@ impl AppState {
             report,
             previous_waiting_on_agents,
             waiting_on_agents,
+            previous_last_turn_at,
+            last_turn_at,
         ) = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
             let previous_agent_name = terminal.agent_name.clone();
             let previous_report = terminal.status_report_snapshot();
             let previous_waiting_on_agents = terminal.waiting_on_agents();
+            let previous_last_turn_at = terminal.last_turn_at().map(str::to_string);
             let managed_launch_pending = terminal.managed_agent_launch_pending();
             let mutation = update(terminal)?;
             let managed_changed = terminal.reconcile_managed_agent_at(now, false);
             let suppress_acquisition_completion = terminal.finish_agent_process_acquisition();
             let agent_name_changed = terminal.agent_name != previous_agent_name;
             let report = terminal.status_report_snapshot();
+            let last_turn_at = terminal.last_turn_at().map(str::to_string);
             let waiting_on_agents = terminal.waiting_on_agents();
             let report_changed = previous_report != report;
             let unchanged_change = (mutation.agent_released
@@ -3999,6 +4007,8 @@ impl AppState {
                 report,
                 previous_waiting_on_agents,
                 waiting_on_agents,
+                previous_last_turn_at,
+                last_turn_at,
             )
         };
         if mutation.session_ref_changed
@@ -4074,6 +4084,7 @@ impl AppState {
             previous_wait: previous_report.0,
             previous_eta_s: previous_report.1,
             previous_reported_at: previous_report.2,
+            previous_last_turn_at,
             previous_stale: previous_report.3,
             previous_waiting_on_agents,
             previous_presentation: change.previous_presentation.clone(),
@@ -4092,6 +4103,7 @@ impl AppState {
             wait: report.0,
             eta_s: report.1,
             reported_at: report.2,
+            last_turn_at,
             stale: report.3,
             waiting_on_agents,
             presentation: change.presentation.clone(),

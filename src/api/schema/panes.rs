@@ -450,6 +450,8 @@ pub struct PaneReportAgentParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session_path: Option<String>,
@@ -498,6 +500,8 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             eta_s: Option<serde_json::Value>,
             #[serde(default)]
             reported_at: Option<serde_json::Value>,
+            #[serde(default)]
+            last_turn_at: Option<serde_json::Value>,
             #[serde(default)]
             agent_session_id: Option<String>,
             #[serde(default)]
@@ -553,6 +557,7 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
                 wait: None,
                 eta_s: None,
                 reported_at: None,
+                last_turn_at: None,
                 agent_session_id: None,
                 agent_session_path: None,
                 gates: None,
@@ -580,6 +585,7 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             wait: typed(raw.wait, version_compatible)?,
             eta_s: typed(raw.eta_s, version_compatible)?,
             reported_at: typed(raw.reported_at, version_compatible)?,
+            last_turn_at: typed(raw.last_turn_at, version_compatible)?,
             agent_session_id: raw.agent_session_id,
             agent_session_path: raw.agent_session_path,
             gates: typed(raw.gates, strict)?,
@@ -876,6 +882,8 @@ pub struct PaneInfo {
     pub eta_s: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_at: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_labels: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

@@ -71,6 +71,7 @@ struct PanePresentationSnapshot {
     wait: Option<String>,
     eta_s: Option<u64>,
     reported_at: Option<String>,
+    last_turn_at: Option<String>,
     waiting_on_agents: bool,
 }
 
@@ -83,6 +84,7 @@ impl PanePresentationSnapshot {
             wait: pane.wait.clone(),
             eta_s: pane.eta_s,
             reported_at: pane.reported_at.clone(),
+            last_turn_at: pane.last_turn_at.clone(),
             waiting_on_agents: pane.waiting_on_agents,
         }
     }
@@ -94,6 +96,7 @@ impl PanePresentationSnapshot {
         wait: &Option<String>,
         eta_s: Option<u64>,
         reported_at: &Option<String>,
+        last_turn_at: &Option<String>,
         waiting_on_agents: bool,
     ) -> Self {
         Self {
@@ -103,6 +106,7 @@ impl PanePresentationSnapshot {
             wait: wait.clone(),
             eta_s,
             reported_at: reported_at.clone(),
+            last_turn_at: last_turn_at.clone(),
             waiting_on_agents,
         }
     }
@@ -261,6 +265,7 @@ impl ActiveSubscription {
                         wait: probe.wait,
                         eta_s: probe.eta_s,
                         reported_at: probe.reported_at,
+                        last_turn_at: probe.last_turn_at,
                         agent: probe.agent,
                         title: probe.title,
                         display_agent: probe.display_agent,
@@ -572,6 +577,7 @@ impl ActiveAgentStatusChangedSubscription {
             wait,
             eta_s,
             reported_at,
+            last_turn_at,
             agent,
             title,
             display_agent,
@@ -592,6 +598,7 @@ impl ActiveAgentStatusChangedSubscription {
             &wait,
             eta_s,
             &reported_at,
+            &last_turn_at,
             waiting_on_agents,
         ));
         self.initial_event = None;
@@ -612,6 +619,7 @@ impl ActiveAgentStatusChangedSubscription {
                 wait,
                 eta_s,
                 reported_at,
+                last_turn_at,
                 agent,
                 title,
                 display_agent,
@@ -685,6 +693,7 @@ impl ActiveAgentStatusChangedSubscription {
                 wait: pane.wait,
                 eta_s: pane.eta_s,
                 reported_at: pane.reported_at,
+                last_turn_at: pane.last_turn_at,
                 agent: pane.agent,
                 title: pane.title,
                 display_agent: pane.display_agent,
