@@ -884,6 +884,7 @@ fn render_shortcuts(app: &AppState, area: Rect, frame: &mut Frame) {
         "z       Zen editor; no selection starts a new card",
         "?       Toggle this help       Esc  Close / save and exit",
         "Ctrl+S  Save board / zen editor",
+        "Zen: Ctrl+N save current and start another Draft card",
         "Details: Tab Human/Agent · ↑/↓ terminal · Enter jump",
         "Details: e edit · a append / update · s edit Agent summary",
         "Forms: Tab/Shift+Tab field · ←/→ or Space cycle choices",

@@ -697,7 +697,7 @@ impl App {
     }
 
     fn handle_board_zen_key(&mut self, key: KeyEvent) -> bool {
-        if key.code == KeyCode::Char('n') && !key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.code == KeyCode::Char('n') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.save_board_zen(false);
             if self
                 .state
@@ -1502,7 +1502,7 @@ mod tests {
                 .is_some(),
             "Ctrl+S keeps the new-card editor open"
         );
-        app.handle_board_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::empty()));
+        app.handle_board_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
         for ch in "second draft".chars() {
             app.handle_board_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
         }
