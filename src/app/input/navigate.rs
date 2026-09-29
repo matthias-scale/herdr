@@ -1164,6 +1164,22 @@ impl App {
         let Some((ws_idx, pane_id)) = self.focused_pane_target() else {
             return false;
         };
+        let remote_agent = self.fleet_attach_agents.get(&pane_id).cloned().or_else(|| {
+            self.remote_focus_operations
+                .agent_ref_for_proxy_pane(pane_id)
+                .cloned()
+        });
+        if let Some(agent_ref) = remote_agent {
+            if self.state.confirm_close {
+                self.state.confirm_close_workspace_id = None;
+                self.state.confirm_close_remote_agent_ref = Some(agent_ref);
+                self.state
+                    .open_client_overlay(crate::app::state::ClientOverlay::ConfirmClose);
+            } else if let Err(error) = self.remote_pane_close(agent_ref.clone()) {
+                self.show_remote_pane_lifecycle_error(&agent_ref, error);
+            }
+            return true;
+        }
         let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) else {
             return false;
         };
@@ -3942,6 +3958,39 @@ mod tests {
         );
         assert_eq!(app.state.confirm_close_remote_agent_ref, Some(agent_ref));
         assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
+    }
+
+    #[test]
+    fn close_fleet_attach_pane_uses_owner_confirmation() {
+        let (mut app, agent_ref) = app_with_remote_agent();
+        let pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        app.fleet_attach_agents.insert(pane_id, agent_ref.clone());
+        app.state.confirm_close = true;
+
+        app.execute_tui_navigate_action(NavigateAction::ClosePane, ActionContext::Prefix);
+
+        assert_eq!(
+            app.state.client_overlay,
+            crate::app::state::ClientOverlay::ConfirmClose
+        );
+        assert_eq!(app.state.confirm_close_remote_agent_ref, Some(agent_ref));
+        assert!(app.state.workspaces[0].pane_state(pane_id).is_some());
+    }
+
+    #[test]
+    fn close_plain_local_pane_stays_local_when_remote_selection_was_cleared() {
+        let (mut app, _) = app_with_remote_agent();
+        let pane_id = app.state.workspaces[0]
+            .focused_pane_id()
+            .expect("focused pane");
+        app.state.confirm_close = false;
+        app.state.sidebar_selected_remote_agent = None;
+
+        app.execute_tui_navigate_action(NavigateAction::ClosePane, ActionContext::Prefix);
+
+        assert!(app.state.workspaces[0].pane_state(pane_id).is_none());
     }
 
     #[test]
