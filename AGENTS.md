@@ -40,6 +40,7 @@ monitoring.
 - **UI patterns should be reused.** Herdr is a mouse-first TUI. New dialogs, onboarding, settings, and post-update flows should follow the existing UI/UX language and interaction patterns instead of inventing one-off screens. Prefer reusing existing modal/screen structure, affordances, and close actions so the app feels consistent.
 - **Icons over words.** Where an icon can say it, use the icon instead of a text label (shelf and section headers, filters, status). Every icon-only control or header has a tooltip naming it, and a plain-text fallback when Nerd Font glyphs are off.
 - **UI work needs prototype sign-off first.** Before any Herdr UI change, publish an HTML prototype with `/tsd` and give the owner its tailnet dashboard link. Wait until the owner is fully happy with it before implementation, a worker brief, or a PR. PRs #409 (sidebar folders) and #417 (compact sections sidebar) were closed unmerged after running-build QA rejected their layouts.
+- **UI QA needs captured build evidence.** Before asking the owner to confirm a built UI change, publish a `/tsd` with captured before/after screens of the actual builds (for example `herdr pane read` of each build running in a throwaway pane) and mark exactly where the change sits on screen. A pointer to a live pane is not enough. PR #443 (top-bar host label) needed a second round because the QA ask named a pane instead of showing the change.
 
 ### Multiplicative performance paths
 
@@ -423,6 +424,42 @@ checkout, so the error is not evidence of a bad change.
 Do not run the upgrade from a pane owned by the server being restarted: `herdr server
 stop` kills that pane, so the run dies partway with the old server already down.
 Drive it over SSH, from a different multiplexer, or accept losing the session.
+
+### Test builds in WezTerm
+
+When you hand Matthias a test build, open it in its own WezTerm window with two tabs so he
+can tell it apart from other windows:
+
+1. The first tab runs the build under test. Rename it to name the test case, the PR, and
+   the exact head, e.g. `QA #435 sidebar focus (deed9f2e)`.
+2. The second tab shows the QA card or the steps to test, and its title says so, e.g.
+   `QA card #435`.
+
+```sh
+P=$(wezterm cli spawn --new-window -- <command that runs the test build>)
+wezterm cli set-tab-title --pane-id "$P" "QA #<pr> <test case> (<short head>)"
+W=$(wezterm cli list --format json | jq -r ".[] | select(.pane_id == $P) | .window_id")
+P2=$(wezterm cli spawn --window-id "$W" -- less -R <qa-card file>)
+wezterm cli set-tab-title --pane-id "$P2" "QA card #<pr>"
+wezterm cli activate-pane --pane-id "$P"
+```
+
+### Verify test builds visually before handing them over
+
+Before you hand Matthias any test build, run it yourself and look at it. A green CI run
+and passing tests do not show that the change is visible on his machine.
+
+1. Run the exact build on the host he will test on, or in an isolated session with the
+   same config. Set every precondition the change depends on (for example
+   `[ui.sidebar] layout = "sections"`) and name each one on the QA card.
+2. Drive the UI to every surface the QA card lists.
+3. Capture each one with Peekaboo, e.g.
+   `peekaboo image --app WezTerm --window-id <id> --path /tmp/qa-<pr>-<step>.png`,
+   or another screenshot tool, and check the image against the card yourself. Get
+   `<id>` from `peekaboo list windows --app WezTerm`: the window title is the active
+   pane's title, not the tab title, so `--window-title "<tab title>"` finds nothing.
+4. Attach the screenshots to the QA card comment. If a surface does not match, fix it
+   before you ask him to test.
 
 ### Closing-block blocker detection
 

@@ -218,6 +218,43 @@ impl AppState {
             owner,
             InputOwner::Dock(_) | InputOwner::Sidebar | InputOwner::Pane | InputOwner::None
         );
+        // The fleet dots sit on the status row, above every other click target.
+        let status_kind = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            .then(|| self.status_segment_kind_at(mouse.column, mouse.row))
+            .flatten();
+        if let Some(kind) = status_kind {
+            match kind {
+                crate::app::state::StatusSegmentKind::FleetLabel => {
+                    // Persist like the dock strip toggle, so the choice
+                    // survives restarts and a config reload.
+                    self.fleet_status = !self.fleet_status;
+                    return Some(MouseAction::Settings(SettingsAction::SaveConfigEdit(
+                        crate::app::settings_general::ConfigEdit::Bool {
+                            section: "ui",
+                            key: "fleet_status",
+                            value: self.fleet_status,
+                        },
+                    )));
+                }
+                crate::app::state::StatusSegmentKind::FleetDevice(idx) => {
+                    let target = self
+                        .fleet_snapshot
+                        .devices_needing_attention()
+                        .into_iter()
+                        .nth(idx)
+                        .and_then(|device| device.first_blocked);
+                    if let Some(agent_ref) = target {
+                        return Some(MouseAction::OpenFleetHost {
+                            name: agent_ref.host,
+                            focus_agent: Some(agent_ref.agent),
+                        });
+                    }
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
         // The read-only agent tab deliberately does not take editor focus, but
         // its visible rows still own pointer input over the notepad panel.
         if (owner == InputOwner::Notepad
@@ -4246,6 +4283,9 @@ mod tests {
     #[test]
     fn clicking_a_status_row_work_link_opens_it_in_the_dock() {
         let mut app = app_for_mouse_test();
+        // Keep the chrome segment deterministic and leave room for the
+        // clickable pull-request link in this narrow status row.
+        app.state.chrome_host_label = "UB1".into();
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
         app.state.selected = 0;
@@ -4849,7 +4889,7 @@ mod tests {
             })
             .collect();
         app.state.collapsed_sidebar_groups.remove("repo:Fleet");
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
         let rows =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect);
         assert_eq!(rows.len(), 2);
@@ -10524,17 +10564,16 @@ mod tests {
 
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
 
-        app.handle_mouse(mouse(
-            MouseEventKind::ScrollDown,
-            viewport.x + 2,
-            viewport.y,
-        ));
-        app.handle_mouse(mouse(
-            MouseEventKind::ScrollDown,
-            viewport.x + 2,
-            viewport.y,
-        ));
-        assert_eq!(app.state.mobile_switcher_scroll, 4);
+        // The tabs list sits below the section shelves, which always render
+        // (Snoozed and Settled show `(0)` when empty).
+        for _ in 0..4 {
+            app.handle_mouse(mouse(
+                MouseEventKind::ScrollDown,
+                viewport.x + 2,
+                viewport.y,
+            ));
+        }
+        assert_eq!(app.state.mobile_switcher_scroll, 8);
         let tab_row = (viewport.y..viewport.y + viewport.height)
             .find(|row| {
                 matches!(
@@ -10685,6 +10724,59 @@ mod tests {
                 .expect("valid config");
         assert_eq!(saved.ui.toast.delivery, crate::config::ToastDelivery::Off);
         assert!(!saved.ui.sound.enabled);
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn clicking_sidebar_ask_subtitle_toggle_persists_the_sidebar_setting() {
+        use crate::app::state::{ControlId, SidebarFooterItem};
+
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-sidebar-ask-subtitles-{}",
+            crate::config::test_unique_suffix()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp config directory");
+        let path = directory.join("config.toml");
+        std::fs::write(&path, "# per-machine config\n").expect("seed config");
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+
+        let mut app = app_for_mouse_test();
+        app.state.sidebar_show_ask_subtitles = true;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 24));
+        let toggle = app.state.view.sidebar_footer_ask_subtitles_hit_area;
+        assert_eq!(toggle.width, 1);
+        assert_eq!(toggle.height, 1);
+        assert!(app.state.sidebar_show_ask_subtitles);
+
+        app.handle_mouse(mouse(MouseEventKind::Moved, toggle.x, toggle.y));
+        assert_eq!(
+            app.state.hovered_control,
+            Some(ControlId::SidebarFooter(SidebarFooterItem::AskSubtitles))
+        );
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+        assert!(!app.state.sidebar_show_ask_subtitles);
+        let saved: crate::config::Config =
+            toml::from_str(&std::fs::read_to_string(&path).expect("saved config"))
+                .expect("valid config");
+        assert!(!saved.ui.sidebar.show_ask_subtitles);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            toggle.x,
+            toggle.y,
+        ));
+        assert!(app.state.sidebar_show_ask_subtitles);
+        let saved: crate::config::Config =
+            toml::from_str(&std::fs::read_to_string(&path).expect("saved config"))
+                .expect("valid config");
+        assert!(saved.ui.sidebar.show_ask_subtitles);
 
         env.remove(crate::config::CONFIG_PATH_ENV_VAR);
         std::fs::remove_dir_all(&directory).ok();
@@ -11523,5 +11615,101 @@ mod tests {
                 crate::app::state::ClientOverlay::RenameWorkspace
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod fleet_status_click_tests {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    use super::MouseAction;
+    use crate::app::state::StatusSegmentKind;
+    use crate::app::App;
+    use crate::config::Config;
+    use crate::workspace::Workspace;
+
+    fn app_with_blocked_device() -> App {
+        let config = Config::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let mut row =
+            crate::fleet::FleetRow::test_agent_row_with_state("ub1", "w3K:p11", "blocked");
+        row.blocked = true;
+        app.state.fleet_snapshot.hosts = vec![crate::fleet::HostSnapshot {
+            name: "ub1".into(),
+            target: "ub1".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            remote_identity: None,
+            entries: vec![row],
+        }];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 160, 24));
+        app
+    }
+
+    fn click_segment(app: &mut App, kind: StatusSegmentKind) -> Option<MouseAction> {
+        let rect = app
+            .state
+            .view
+            .status_segment_hit_areas
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("{kind:?} not rendered"));
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        )
+    }
+
+    #[test]
+    fn clicking_a_blocked_device_opens_its_first_blocked_agent() {
+        let mut app = app_with_blocked_device();
+        let expected = app.state.fleet_snapshot.hosts[0].entries[0]
+            .agent_ref
+            .clone();
+        let action = click_segment(&mut app, StatusSegmentKind::FleetDevice(0));
+        assert!(matches!(
+            action,
+            Some(MouseAction::OpenFleetHost { name, focus_agent })
+                if name == expected.host && focus_agent == Some(expected.agent.clone())
+        ));
+    }
+
+    #[test]
+    fn clicking_fleet_label_hides_every_device_dot() {
+        let mut app = app_with_blocked_device();
+        assert!(matches!(
+            click_segment(&mut app, StatusSegmentKind::FleetLabel),
+            Some(MouseAction::Settings(_))
+        ));
+        assert!(!app.state.fleet_status);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 160, 24));
+        let kinds: Vec<_> = app
+            .state
+            .view
+            .status_segment_hit_areas
+            .iter()
+            .map(|(k, _)| *k)
+            .collect();
+        assert!(kinds.contains(&StatusSegmentKind::FleetLabel));
+        assert!(!kinds
+            .iter()
+            .any(|k| matches!(k, StatusSegmentKind::FleetDevice(_))));
     }
 }

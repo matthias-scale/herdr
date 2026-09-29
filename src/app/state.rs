@@ -2646,6 +2646,8 @@ pub struct ViewState {
     pub sidebar_rect: Rect,
     /// Sidebar-footer entry for the settings screen.
     pub(crate) sidebar_footer_settings_hit_area: Rect,
+    /// Sidebar-footer toggle for pending ask subtitles.
+    pub(crate) sidebar_footer_ask_subtitles_hit_area: Rect,
     /// Sidebar-footer entry for the full-screen pull-request view.
     pub(crate) sidebar_footer_work_hit_area: Rect,
     /// Sidebar-footer entry for the client-local historical usage view.
@@ -2658,6 +2660,8 @@ pub struct ViewState {
     pub(crate) sidebar_footer_missive_hit_area: Rect,
     /// The notepad panel at the bottom of the sidebar. Empty when it is off.
     pub(crate) notepad_rect: Rect,
+    /// Clickable fold control in the active Usage-tab header.
+    pub(crate) notepad_usage_toggle_hit_area: Rect,
     /// Clickable tabs in the notepad header: note names, the Context tab and
     /// the agent tab.
     pub(crate) notepad_tab_hit_areas: Vec<(crate::notepad::NotepadTabTarget, Rect)>,
@@ -2668,6 +2672,8 @@ pub struct ViewState {
     pub(crate) notepad_agent_max_scroll: usize,
     /// Visible Usage-tab rows, materialized with their click actions.
     pub(crate) notepad_usage_rows: Vec<crate::ui::notepad_usage::NotepadUsageRow>,
+    /// Per-row hover targets derived from the same visible rows as rendering.
+    pub(crate) notepad_usage_hit_areas: Vec<Rect>,
     /// Maximum attach-local Usage-tab offset for the last computed geometry.
     pub(crate) notepad_usage_max_scroll: usize,
     /// The break-timer countdown in the sidebar footer row.
@@ -3192,6 +3198,7 @@ pub enum AgentPanelSort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
     General,
+    Sidebar,
     Theme,
     Indicators,
     Sound,
@@ -3209,6 +3216,7 @@ pub enum SettingsSection {
 impl SettingsSection {
     pub const ALL: &[Self] = &[
         Self::General,
+        Self::Sidebar,
         Self::Theme,
         Self::Indicators,
         Self::Sound,
@@ -3226,6 +3234,7 @@ impl SettingsSection {
     pub fn label(self) -> &'static str {
         match self {
             Self::General => "general",
+            Self::Sidebar => "sidebar",
             Self::Theme => "theme",
             Self::Indicators => "indicators",
             Self::Sound => "sound",
@@ -3245,6 +3254,7 @@ impl SettingsSection {
     pub fn glyph(self) -> &'static str {
         match self {
             Self::General => "⚙",
+            Self::Sidebar => "▤",
             Self::Theme => "◐",
             Self::Indicators => "●",
             Self::Sound => "♪",
@@ -4326,6 +4336,8 @@ pub struct AppState {
     pub(crate) local_group_snapshot: Option<crate::groups::GroupAuthoritySnapshot>,
     /// This server's configured component in cross-host agent references.
     pub(crate) agent_host_name: String,
+    /// Uppercase local host label cached for TUI chrome presentation.
+    pub(crate) chrome_host_label: String,
     /// Server-owned day items. Columns and stale flags are derived from this
     /// durable membership plus current pane facts and are never stored here.
     pub(crate) day_board: crate::day::DayBoard,
@@ -4432,6 +4444,8 @@ pub struct AppState {
     pub(crate) connectivity: crate::connectivity::Connectivity,
     /// Expanded status bar: percentages and reset times instead of bars alone.
     pub(crate) status_bar_expanded: bool,
+    /// Show per-device fleet dots after `fleet:` in the status row.
+    pub(crate) fleet_status: bool,
     /// Whether the disk segment was visible last frame, which is what gives the
     /// show/hide threshold its hysteresis.
     pub(crate) status_disk_visible: bool,
@@ -4849,6 +4863,8 @@ pub struct AppState {
     pub sidebar_areas: crate::config::SidebarAreasConfig,
     /// Config-selected sidebar presentation. It is view state, never session data.
     pub sidebar_sections_layout: bool,
+    /// Whether the sections Spaces tree shows one-line blocked-agent asks.
+    pub sidebar_show_ask_subtitles: bool,
     pub sidebar_header_plain: bool,
     pub next_agent_state_change_seq: u64,
     /// Capture mouse input for Herdr's own mouse UI. When false, Herdr only
@@ -5349,6 +5365,7 @@ impl From<crate::config::LinearLayoutConfig> for LinearViewLayout {
 pub(crate) enum SidebarFooterItem {
     Board,
     Settings,
+    AskSubtitles,
     PullRequests,
     Usage,
     Linear,
@@ -5368,6 +5385,8 @@ pub(crate) enum ControlId {
     SidebarFooter(SidebarFooterItem),
     SidebarHover(usize),
     SidebarRowHover(u16),
+    NotepadUsageRow(usize),
+    NotepadUsageToggle,
     SidebarAnimationPause,
     DockTab(usize),
     DockClose,
@@ -5391,6 +5410,10 @@ pub(crate) enum StatusSegmentKind {
     Provider(crate::provider_usage::QuotaProvider),
     Link,
     Agents,
+    /// The `fleet:` label; clicking it toggles the device dots.
+    FleetLabel,
+    /// One other device that needs attention, by fleet host name.
+    FleetDevice(usize),
     RemoteHost,
     Hostname,
     Cpu,
@@ -5399,6 +5422,20 @@ pub(crate) enum StatusSegmentKind {
 }
 
 impl AppState {
+    /// Status-row segment under a cell, from the last computed layout.
+    pub(crate) fn status_segment_kind_at(&self, col: u16, row: u16) -> Option<StatusSegmentKind> {
+        self.view
+            .status_segment_hit_areas
+            .iter()
+            .find(|(_, rect)| {
+                col >= rect.x
+                    && col < rect.x.saturating_add(rect.width)
+                    && row >= rect.y
+                    && row < rect.y.saturating_add(rect.height)
+            })
+            .map(|(kind, _)| *kind)
+    }
+
     pub(crate) fn set_hovered_control_at(&mut self, control: Option<ControlId>, now: Instant) {
         if self.hovered_control == control {
             return;
@@ -7590,6 +7627,7 @@ impl AppState {
             fleet_snapshot: crate::fleet::Snapshot::default(),
             local_group_snapshot: None,
             agent_host_name: "localhost".to_string(),
+            chrome_host_label: "TESTHOST".to_string(),
             day_board: crate::day::DayBoard::default(),
             day_stale_after: Duration::from_secs(600),
             board_view: None,
@@ -7638,6 +7676,7 @@ impl AppState {
             provider_usage: crate::provider_usage::ProviderUsageSnapshot::default(),
             connectivity: crate::connectivity::Connectivity::default(),
             status_bar_expanded: false,
+            fleet_status: true,
             status_disk_visible: false,
             full_lifecycle_hook_authority_timeout: std::time::Duration::from_secs(
                 crate::config::Config::default()
@@ -7765,16 +7804,19 @@ impl AppState {
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
                 sidebar_footer_settings_hit_area: Rect::default(),
+                sidebar_footer_ask_subtitles_hit_area: Rect::default(),
                 sidebar_footer_work_hit_area: Rect::default(),
                 sidebar_footer_usage_hit_area: Rect::default(),
                 usage_hit_areas: Vec::new(),
                 sidebar_footer_ticket_hit_area: Rect::default(),
                 sidebar_footer_missive_hit_area: Rect::default(),
                 notepad_rect: Rect::default(),
+                notepad_usage_toggle_hit_area: Rect::default(),
                 notepad_tab_hit_areas: Vec::new(),
                 notepad_agent_rows: Vec::new(),
                 notepad_agent_max_scroll: 0,
                 notepad_usage_rows: Vec::new(),
+                notepad_usage_hit_areas: Vec::new(),
                 notepad_usage_max_scroll: 0,
                 pomodoro_hit_area: Rect::default(),
                 notification_hit_area: Rect::default(),
@@ -7994,6 +8036,7 @@ impl AppState {
             sidebar_spaces: crate::config::SpacesSidebarConfig::default(),
             sidebar_areas: crate::config::SidebarAreasConfig::default(),
             sidebar_sections_layout: false,
+            sidebar_show_ask_subtitles: false,
             sidebar_header_plain: false,
             next_agent_state_change_seq: 0,
             mouse_capture: true,

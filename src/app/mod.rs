@@ -195,6 +195,8 @@ pub struct App {
     /// Server-owned remote focus operations. This state is touched only by
     /// API requests and transport events, never by render or pane loops.
     pub(crate) remote_focus_operations: remote_focus::RemoteFocusOperations,
+    pub(crate) fleet_attach_agents:
+        std::collections::HashMap<crate::layout::PaneId, crate::api::schema::AgentRef>,
     pub(crate) remote_focus_transport: Box<dyn remote_focus::RemoteFocusTransport>,
     pub(crate) fleet_poller_config: crate::fleet::FleetPollerHandle,
     /// Server-owned group authority. Persistence is separate from client presentation state.
@@ -388,6 +390,7 @@ pub struct App {
     pub(crate) detached_custom_command_children: Vec<std::process::Child>,
     pub(crate) detached_process_children: Vec<std::process::Child>,
     tab_bar_status_generation: u64,
+    tab_bar_hostname_segment: Option<usize>,
     tab_bar_datetimes: Vec<tab_bar_status::TabBarDatetimeRuntime>,
     tab_bar_commands: Vec<tab_bar_status::TabBarCommandRuntime>,
     next_tab_bar_datetime_refresh: Option<Instant>,
@@ -839,6 +842,10 @@ impl App {
 
         let agent_panel_sort = agent_panel_sort_from_config(config.ui.agent_panel_sort);
         let agent_host_name = config.remote.fleet.resolved_self_name();
+        let chrome_host_label = config
+            .remote
+            .fleet
+            .chrome_host_label_for_resolved_name(&agent_host_name);
         let local_agent_panel_identities =
             crate::ui::local_agent_panel_identities(&workspaces, &agent_host_name);
         let dock_default_surfaces = dock_surfaces_from_config(&config.panel);
@@ -970,6 +977,7 @@ impl App {
             fleet_snapshot: crate::fleet::Snapshot::unpolled(&config.remote.fleet.hosts),
             local_group_snapshot: None,
             agent_host_name,
+            chrome_host_label,
             day_board: if cfg!(test) {
                 crate::day::DayBoard::default()
             } else {
@@ -1131,16 +1139,19 @@ impl App {
                 status_bar_rect: Rect::default(),
                 sidebar_rect: Rect::default(),
                 sidebar_footer_settings_hit_area: Rect::default(),
+                sidebar_footer_ask_subtitles_hit_area: Rect::default(),
                 sidebar_footer_work_hit_area: Rect::default(),
                 sidebar_footer_usage_hit_area: Rect::default(),
                 usage_hit_areas: Vec::new(),
                 sidebar_footer_ticket_hit_area: Rect::default(),
                 sidebar_footer_missive_hit_area: Rect::default(),
                 notepad_rect: Rect::default(),
+                notepad_usage_toggle_hit_area: Rect::default(),
                 notepad_tab_hit_areas: Vec::new(),
                 notepad_agent_rows: Vec::new(),
                 notepad_agent_max_scroll: 0,
                 notepad_usage_rows: Vec::new(),
+                notepad_usage_hit_areas: Vec::new(),
                 notepad_usage_max_scroll: 0,
                 pomodoro_hit_area: Rect::default(),
                 notification_hit_area: Rect::default(),
@@ -1356,6 +1367,7 @@ impl App {
             sidebar_areas: config.ui.sidebar.areas.clone(),
             sidebar_sections_layout: config.ui.sidebar.layout
                 == crate::config::SidebarLayoutConfig::Sections,
+            sidebar_show_ask_subtitles: config.ui.sidebar.show_ask_subtitles,
             sidebar_header_plain: config.ui.sidebar.header
                 == crate::config::SidebarHeaderConfig::Plain,
             next_agent_state_change_seq: 0,
@@ -1401,6 +1413,7 @@ impl App {
             show_agent_labels_on_pane_borders: config.ui.show_agent_labels_on_pane_borders,
             hide_tab_bar_when_single_tab: config.ui.hide_tab_bar_when_single_tab,
             status_bar_expanded: config.ui.status_bar_expanded,
+            fleet_status: config.ui.fleet_status,
             status_now_unix: crate::provider_usage::now_unix(),
             provider_usage: crate::provider_usage::ProviderUsageSnapshot::default(),
             connectivity: crate::connectivity::Connectivity::default(),
@@ -1581,6 +1594,7 @@ impl App {
             terminal_runtimes: restored_terminal_runtimes,
             status_log: crate::status_log::StatusLog::for_server(),
             remote_focus_operations: remote_focus::RemoteFocusOperations::default(),
+            fleet_attach_agents: std::collections::HashMap::new(),
             remote_focus_transport: Box::new(crate::remote::SshRemoteFocusTransport::new(
                 &config.remote.fleet,
             )),
@@ -1727,6 +1741,7 @@ impl App {
             detached_custom_command_children: Vec::new(),
             detached_process_children: Vec::new(),
             tab_bar_status_generation: 0,
+            tab_bar_hostname_segment: None,
             tab_bar_datetimes: Vec::new(),
             tab_bar_commands: Vec::new(),
             next_tab_bar_datetime_refresh: None,
@@ -2771,6 +2786,24 @@ impl App {
                 );
             }
             let agent_host_name = config.remote.fleet.resolved_self_name();
+            self.state.chrome_host_label = config
+                .remote
+                .fleet
+                .chrome_host_label_for_resolved_name(&agent_host_name);
+            let tab_bar_host_label =
+                crate::app::tab_bar_status::sanitize_status_text(&self.state.chrome_host_label);
+            if let Some(index) = self.tab_bar_hostname_segment {
+                if let Some(state::TabBarStatusSegment::Text(value)) =
+                    self.state.tab_bar_right.get_mut(index)
+                {
+                    *value = tab_bar_host_label;
+                }
+            }
+            if let Some((template, hostname)) = self.window_title_template.as_mut() {
+                if template.uses(crate::config::WindowTitleToken::Hostname) {
+                    hostname.clone_from(&self.state.chrome_host_label);
+                }
+            }
             if self.state.agent_host_name != agent_host_name {
                 self.state.agent_host_name = agent_host_name;
                 self.refresh_remote_agent_panel_entries();
@@ -2864,6 +2897,7 @@ impl App {
                     config.ui.show_agent_labels_on_pane_borders;
                 self.state.hide_tab_bar_when_single_tab = config.ui.hide_tab_bar_when_single_tab;
                 self.state.status_bar_expanded = config.ui.status_bar_expanded;
+                self.state.fleet_status = config.ui.fleet_status;
                 let status_bar_was_enabled = self.state.status_bar_enabled;
                 self.state.status_bar_enabled = config.ui.status_bar.enabled;
                 if self.state.status_bar_enabled && !status_bar_was_enabled {
@@ -2884,6 +2918,7 @@ impl App {
                     || self.state.sidebar_sections_layout
                         != (config.ui.sidebar.layout
                             == crate::config::SidebarLayoutConfig::Sections)
+                    || self.state.sidebar_show_ask_subtitles != config.ui.sidebar.show_ask_subtitles
                 {
                     sidebar_projection_changed = true;
                 }
@@ -2897,6 +2932,7 @@ impl App {
                 self.state.sidebar_areas = config.ui.sidebar.areas.clone();
                 self.state.sidebar_sections_layout =
                     config.ui.sidebar.layout == crate::config::SidebarLayoutConfig::Sections;
+                self.state.sidebar_show_ask_subtitles = config.ui.sidebar.show_ask_subtitles;
                 if self.state.sidebar_sections_layout && !self.state.sidebar_areas.notes {
                     self.state.set_notepad_focus(false);
                 }

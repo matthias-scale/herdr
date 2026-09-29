@@ -680,6 +680,22 @@ pub(crate) fn provider_style(
 
 use crate::ui::icons::Metric;
 
+/// Hollow red for one or two blocked agents, filled red from three; a device
+/// that stopped answering shows `?name` dimmed instead of any dot.
+pub(crate) fn fleet_device_text(
+    device: &crate::fleet::DeviceAttention,
+    p: &Palette,
+) -> (String, Style) {
+    if device.stale {
+        return (
+            format!(" ?{}", device.name),
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+        );
+    }
+    let dot = if device.blocked >= 3 { DOT } else { '\u{25cb}' };
+    (format!(" {dot}{}", device.name), Style::default().fg(p.red))
+}
+
 fn status_segments(
     app: &AppState,
     metrics: &crate::platform::status_metrics::StatusMetrics,
@@ -715,6 +731,36 @@ fn status_segments(
                 elide_rank: Some(rank),
                 kind: StatusSegmentKind::Provider(provider),
             });
+        }
+    }
+
+    // `fleet:` then one dot per other device that needs the human. Devices
+    // whose agents are working or done are omitted; clicking `fleet:` hides
+    // the dots entirely. Without remote hosts configured nothing is shown.
+    if app.fleet_snapshot.hosts.iter().any(|host| !host.local) {
+        out.push(Segment {
+            text: " fleet:".into(),
+            style: Style::default().fg(p.overlay1),
+            preserve_bg: false,
+            elide_rank: Some(5),
+            kind: StatusSegmentKind::FleetLabel,
+        });
+        if app.fleet_status {
+            for (idx, device) in app
+                .fleet_snapshot
+                .devices_needing_attention()
+                .iter()
+                .enumerate()
+            {
+                let (text, style) = fleet_device_text(device, p);
+                out.push(Segment {
+                    text,
+                    style,
+                    preserve_bg: false,
+                    elide_rank: Some(5),
+                    kind: StatusSegmentKind::FleetDevice(idx),
+                });
+            }
         }
     }
 
@@ -764,7 +810,7 @@ fn status_segments(
     }
 
     out.push(Segment {
-        text: format!(" {} ", metrics.hostname),
+        text: format!(" {} ", app.chrome_host_label),
         style: Style::default().fg(p.green),
         preserve_bg: false,
         elide_rank: Some(4),
@@ -1459,7 +1505,7 @@ mod tests {
                 mem_used_gib: Some(17_179_869_184.0),
                 mem_total_gib: Some(17_179_869_184.0),
                 disk_percent: None,
-                hostname: "host-with-a-long-device-name".into(),
+                hostname: "metric-host".into(),
             },
             sampled_at: std::time::Instant::now(),
         });
@@ -1490,7 +1536,7 @@ mod tests {
                 mem_used_gib: Some(9_999.9),
                 mem_total_gib: Some(9_999.9),
                 disk_percent: None,
-                hostname: "wide-metrics".into(),
+                hostname: "metric-host".into(),
             },
             sampled_at: std::time::Instant::now(),
         });
@@ -1692,7 +1738,7 @@ mod tests {
                 mem_used_gib: Some(8.0),
                 mem_total_gib: Some(16.0),
                 disk_percent: None,
-                hostname: "testhost".into(),
+                hostname: "metric-host".into(),
             },
             &app.palette,
         );
@@ -1701,7 +1747,7 @@ mod tests {
             mem_used_gib: Some(10_000.0),
             mem_total_gib: Some(10_000.0),
             disk_percent: None,
-            hostname: "testhost".into(),
+            hostname: "metric-host".into(),
         };
         let rendered = status_segments(&app, &metrics, &app.palette)
             .iter()
@@ -1768,7 +1814,7 @@ mod tests {
             .collect::<String>();
         assert!(!rendered.contains("KI"), "{rendered}");
         assert!(rendered.contains("CC"), "{rendered}");
-        assert!(rendered.contains("testhost"), "{rendered}");
+        assert!(rendered.contains("TESTHOST"), "{rendered}");
 
         let optional_width = full
             .iter()
@@ -1784,7 +1830,7 @@ mod tests {
             .map(|segment| segment.text.as_str())
             .collect::<String>();
         assert!(!rendered.contains("CC"), "{rendered}");
-        assert!(!rendered.contains("testhost"), "{rendered}");
+        assert!(!rendered.contains("TESTHOST"), "{rendered}");
         assert!(rendered.contains("CPU \u{2581}"), "{rendered}");
         assert!(rendered.contains("MEM \u{2584}"), "{rendered}");
     }
@@ -1902,10 +1948,10 @@ mod tests {
         let remote = rendered
             .find("\u{2192} workbox")
             .expect("remote segment renders");
-        let local = rendered.find("testhost").expect("local hostname renders");
+        let local = rendered.find("TESTHOST").expect("local host label renders");
         assert!(
             remote < local,
-            "remote segment precedes the local hostname: {rendered}"
+            "remote segment precedes the local host label: {rendered}"
         );
         assert!(rendered.contains("CPU"), "{rendered}");
     }
@@ -1929,7 +1975,7 @@ mod tests {
         let rendered = render_status_row(&app, 120);
 
         assert_eq!(app.view.focused_remote_host, None);
-        assert!(rendered.contains("testhost"), "{rendered}");
+        assert!(rendered.contains("TESTHOST"), "{rendered}");
         assert!(!rendered.contains('\u{2192}'), "{rendered}");
     }
 
@@ -2005,8 +2051,8 @@ mod tests {
             full.iter()
                 .filter_map(|segment| segment.elide_rank)
                 .collect::<Vec<_>>(),
-            vec![3, 2, 1, 4, 4],
-            "providers elide first; the remote segment shares the device's rank"
+            vec![3, 2, 1, 5, 4, 4],
+            "providers elide first; `fleet:` outlives the device name; the remote segment shares the device's rank"
         );
 
         // Once the providers are gone the remote segment still fits; one more
@@ -2038,7 +2084,7 @@ mod tests {
             .map(|segment| segment.text.as_str())
             .collect::<String>();
         assert!(!rendered.contains("workbox"), "{rendered}");
-        assert!(rendered.contains("testhost"), "{rendered}");
+        assert!(rendered.contains("TESTHOST"), "{rendered}");
         assert!(rendered.contains("CPU \u{2581}"), "{rendered}");
         assert!(rendered.contains("MEM \u{2584}"), "{rendered}");
 
@@ -2121,7 +2167,7 @@ mod tests {
             "CX SHQ \u{2582}",
             "KI \u{2582}",
             "\u{25cf}",
-            "testhost",
+            "TESTHOST",
             "CPU \u{2581}",
             "MEM \u{2584}",
         ];
@@ -2171,7 +2217,7 @@ mod tests {
         assert_eq!(
             segments
                 .iter()
-                .find(|segment| segment.text.contains("testhost"))
+                .find(|segment| segment.text.contains("TESTHOST"))
                 .unwrap()
                 .style
                 .fg,
@@ -2868,5 +2914,29 @@ mod metric_icons {
             texts(false, true),
             [" CPU ▄ 50 ", " MEM ▄ 50 ", " DSK ▄ 50 "]
         );
+    }
+}
+
+#[cfg(test)]
+mod fleet_device_tests {
+    use super::*;
+
+    fn device(blocked: usize, stale: bool) -> crate::fleet::DeviceAttention {
+        crate::fleet::DeviceAttention {
+            name: "ub1".into(),
+            blocked,
+            working: 0,
+            stale,
+            first_blocked: None,
+        }
+    }
+
+    #[test]
+    fn dot_is_hollow_below_three_blocked_and_filled_from_three() {
+        let p = Palette::catppuccin();
+        assert_eq!(fleet_device_text(&device(1, false), &p).0, " \u{25cb}ub1");
+        assert_eq!(fleet_device_text(&device(2, false), &p).0, " \u{25cb}ub1");
+        assert_eq!(fleet_device_text(&device(3, false), &p).0, " \u{25cf}ub1");
+        assert_eq!(fleet_device_text(&device(0, true), &p).0, " ?ub1");
     }
 }
