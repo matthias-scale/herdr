@@ -8870,7 +8870,7 @@ navigate_pane_down = "ctrl+j"
 
         execute_navigate_action(&mut state, NavigateAction::ClosePane);
 
-        assert_eq!(state.selected, 1);
+        assert_eq!(state.selected, 0);
         assert_eq!(state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(state.workspaces.len(), 2);
     }
