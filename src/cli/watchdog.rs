@@ -442,6 +442,7 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
                 }
             }
         }
+        mark_dry_run_decision(d, options.dry_run);
         let _ = i;
     }
     save_memory(&options.state_file, &memory)?;
@@ -451,6 +452,12 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
     } else {
         0
     })
+}
+
+fn mark_dry_run_decision(decision: &mut PaneV3Decision, dry_run: bool) {
+    if dry_run && decision.status == "corrected" {
+        decision.status = "would_correct".into();
+    }
 }
 
 fn read_tail(pane_id: &str, lines: u32) -> Result<String, String> {
@@ -770,7 +777,7 @@ fn print_v3_scan(
     model_calls: usize,
     latency: u128,
 ) -> io::Result<()> {
-    let output = serde_json::json!({"decisions":decisions,"summary":{"panes":decisions.len(),"corrected":decisions.iter().filter(|d|d.status=="corrected").count(),"consistent":decisions.iter().filter(|d|d.status=="consistent").count(),"unverified":decisions.iter().filter(|d|d.status=="unverified").count(),"superseded":decisions.iter().filter(|d|d.status=="superseded").count(),"model_calls":model_calls,"model_latency_ms":latency},"dry_run":options.dry_run});
+    let output = serde_json::json!({"decisions":decisions,"summary":{"panes":decisions.len(),"corrected":decisions.iter().filter(|d|d.status=="corrected").count(),"would_correct":decisions.iter().filter(|d|d.status=="would_correct").count(),"consistent":decisions.iter().filter(|d|d.status=="consistent").count(),"unverified":decisions.iter().filter(|d|d.status=="unverified").count(),"superseded":decisions.iter().filter(|d|d.status=="superseded").count(),"model_calls":model_calls,"model_latency_ms":latency},"dry_run":options.dry_run});
     if options.json {
         println!(
             "{}",
@@ -828,4 +835,31 @@ fn redact_model_diagnostics(stderr: &str) -> String {
         }
     }
     safe
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dry_run_reports_would_correct_without_a_write() {
+        let mut decision = PaneV3Decision {
+            pane_id: "p".into(),
+            agent: "claude".into(),
+            class: watchdog::PaneClass::WaitingHuman,
+            old_state: AgentStatus::Working,
+            new_state: Some(AgentStatus::Blocked),
+            status: "corrected".into(),
+            evidence: "waiting".into(),
+            samples: vec![],
+            write_error: None,
+            observed_terminal_id: None,
+            observed_agent_session: None,
+            observed_hash: 0,
+        };
+        mark_dry_run_decision(&mut decision, true);
+        assert_eq!(decision.status, "would_correct");
+        mark_dry_run_decision(&mut decision, false);
+        assert_eq!(decision.status, "would_correct");
+    }
 }

@@ -874,6 +874,9 @@ pub(crate) fn classify_pane_v3(
     let mut class = PaneClass::Unknown;
     if let Some(error) = &o.read_error {
         ev = format!("pane read failed: {error}");
+    } else if !evidence::composer_is_empty(&o.tail) && evidence::reply_text(&o.tail) != o.tail {
+        class = PaneClass::Working;
+        ev = "human is typing".into();
     } else {
         let low = o.wait.as_deref().unwrap_or("").to_ascii_lowercase();
         let hook_retry = ["retry", "rate", "backoff", "limit"]
@@ -926,23 +929,33 @@ pub(crate) fn classify_pane_v3(
             } else if o.status == AgentStatus::Blocked {
                 class = PaneClass::WaitingHuman;
                 ev = "agent hook reports input required".into();
+            } else if matches!(o.status, AgentStatus::Idle | AgentStatus::Done) {
+                class = PaneClass::FinishedIdle;
+                ev = "agent reports idle or done".into();
             } else if evidence::composer_is_empty(&o.tail)
-                && evidence::background_shell_count(&o.tail) > 0
+                && (evidence::background_shell_count(&o.tail) > 0
+                    || evidence::background_agent_count(&o.tail) > 0)
             {
                 let shells = evidence::background_shell_count(&o.tail);
+                let agents = evidence::background_agent_count(&o.tail);
                 class = if age >= opt.op_deadline_secs {
                     PaneClass::Stalled
                 } else {
                     PaneClass::Working
                 };
-                ev = if class == PaneClass::Stalled {
-                    format!("waiting on event with {shells} background shells; operation deadline exceeded")
+                let activity = if agents > 0 {
+                    format!("{agents} background agents")
                 } else {
-                    format!("waiting on event with {shells} background shells")
+                    format!("{shells} background shells")
                 };
-            } else if matches!(o.status, AgentStatus::Idle | AgentStatus::Done) {
-                class = PaneClass::FinishedIdle;
-                ev = "agent reports idle or done".into();
+                ev = if agents > 0 {
+                    format!("waiting on {activity}")
+                } else {
+                    format!("waiting on event with {activity}")
+                };
+                if class == PaneClass::Stalled {
+                    ev.push_str("; operation deadline exceeded");
+                }
             } else if let Some(q) = evidence::prose_question(&o.tail) {
                 if age >= 60 {
                     ev = format!("model candidate: {q}");
@@ -980,8 +993,11 @@ pub(crate) fn classify_pane_v3(
             .find(|p: &&ProcSample| p.pid == p.pgid);
         samples.push(serde_json::json!({"hash":format!("{hash:016x}"),"tail":evidence::semantic_lines(&o.tail),"processes":o.process_group,"leader_cpu_ms":leader.map(|p|p.cpu_ms),"leader_state":leader.map(|p|p.state)}));
     }
-    let new_state = pane_status(class);
-    let status = if class == PaneClass::Unknown {
+    let typing = ev == "human is typing";
+    let new_state = if typing { None } else { pane_status(class) };
+    let status = if typing {
+        "consistent"
+    } else if class == PaneClass::Unknown {
         "unverified"
     } else if new_state == Some(o.status)
         || (matches!(o.status, AgentStatus::Idle | AgentStatus::Done)
@@ -1662,7 +1678,7 @@ mod tests {
         memory = old_pane_memory(&o, 1);
         assert_eq!(
             classify_pane_v3(&o, &mut memory, 1000, v3opt()).class,
-            PaneClass::Working
+            PaneClass::FinishedIdle
         );
         o.status = AgentStatus::Working;
         memory = old_pane_memory(&o, 1);
@@ -1692,6 +1708,55 @@ mod tests {
             classify_pane_v3(&o, &mut memory, 1000, v3opt()).class,
             PaneClass::Unknown
         );
+    }
+
+    #[test]
+    fn pane_v3_typing_and_done_with_background_work_do_not_stall() {
+        for status in [AgentStatus::Idle, AgentStatus::Done] {
+            let tail = claude_pane("Waiting", "", "2 shells\n● main\n◯ fork  Running tests");
+            let o = pane_v3(status, &tail);
+            let mut memory = old_pane_memory(&o, 1);
+            let decision = classify_pane_v3(&o, &mut memory, 4000, v3opt());
+            assert_eq!(decision.class, PaneClass::FinishedIdle);
+            assert_eq!(decision.status, "consistent");
+        }
+        let tail = claude_pane("Waiting", "draft reply", "0 shells");
+        let o = pane_v3(AgentStatus::Working, &tail);
+        let mut memory = old_pane_memory(&o, 1);
+        let decision = classify_pane_v3(&o, &mut memory, 4000, v3opt());
+        assert_eq!(decision.class, PaneClass::Working);
+        assert_eq!(decision.evidence, "human is typing");
+        assert_eq!(decision.status, "consistent");
+        let o = pane_v3(AgentStatus::Done, &tail);
+        let mut memory = old_pane_memory(&o, 1);
+        let decision = classify_pane_v3(&o, &mut memory, 4000, v3opt());
+        assert_eq!(decision.class, PaneClass::Working);
+        assert_eq!(decision.new_state, None);
+        assert_eq!(decision.status, "consistent");
+    }
+
+    #[test]
+    fn pane_v3_running_agents_and_insert_footer_extend_operation_deadline() {
+        for footer in [
+            "-- INSERT -- ⏵⏵ bypass permissions on · 1 shell · ← for agents",
+            "-- INSERT -- ⏵⏵ bypass permissions on · 2 shells\n● main\n◯ fork  Watching CI  5m 19s · ↓ 142.4k tokens",
+        ] {
+            let tail = claude_pane("Waiting for test results.", "", footer);
+            let o = pane_v3(AgentStatus::Working, &tail);
+            let mut memory = old_pane_memory(&o, 1);
+            let decision = classify_pane_v3(&o, &mut memory, 1000, v3opt());
+            assert_eq!(decision.class, PaneClass::Working, "{footer}");
+        }
+        let tail = claude_pane(
+            "Waiting",
+            "",
+            "● main\n◯ fork  Watching CI  5m 19s · ↓ 142.4k tokens",
+        );
+        let o = pane_v3(AgentStatus::Working, &tail);
+        let mut memory = old_pane_memory(&o, 1);
+        let decision = classify_pane_v3(&o, &mut memory, 1000, v3opt());
+        assert_eq!(decision.class, PaneClass::Working);
+        assert_eq!(decision.evidence, "waiting on 1 background agents");
     }
 
     #[test]

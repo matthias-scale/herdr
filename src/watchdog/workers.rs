@@ -272,6 +272,8 @@ pub(crate) fn classify_worker(
             0,
             if evidence.trace.starts_with("inactive: ") {
                 evidence.trace.clone()
+            } else if evidence.trace.starts_with("interrupted by user:") {
+                "interrupted by user".into()
             } else {
                 format!(
                     "finished; receipt={:?}; gate_verdict={:?}",

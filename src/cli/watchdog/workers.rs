@@ -58,6 +58,8 @@ struct WorkerSummary {
     scan_ms: u128,
     by_source: SourceClassCounts,
     dry_run: bool,
+    notified: usize,
+    logged: usize,
 }
 
 type SourceClassCounts =
@@ -681,6 +683,14 @@ fn print_worker_scan(
         scan_ms,
         by_source,
         dry_run: options.dry_run,
+        notified: semantic_decisions
+            .iter()
+            .filter(|d| d.incident.delivery == worker_watchdog::IncidentDelivery::Delivered)
+            .count(),
+        logged: semantic_decisions
+            .iter()
+            .filter(|d| d.incident.action == worker_watchdog::IncidentAction::Logged)
+            .count(),
     };
     if options.json {
         let output = serde_json::json!({
@@ -1015,7 +1025,8 @@ fn discover_claude_subagents(
                     continue;
                 };
                 let trace = read_tail(&subagent.path(), 16 * 1024)?;
-                let final_turn = claude_subagent_finished(&subagent.path())?;
+                let finish_reason = claude_subagent_finished(&subagent.path())?;
+                let final_turn = finish_reason.is_some();
                 let pending_tool = evidence::claude_pending_tool(&trace);
                 let now = unix_seconds()?;
                 let own_recent = last_activity >= now.saturating_sub(op_deadline_secs);
@@ -1042,6 +1053,8 @@ fn discover_claude_subagents(
                             "inactive: transcript idle {}d, parent session not live",
                             idle_secs / 86_400
                         )
+                    } else if finish_reason == Some("interrupted by user") {
+                        format!("interrupted by user: {trace}")
                     } else {
                         trace
                     },
@@ -1206,26 +1219,62 @@ fn worker_class_name(class: worker_watchdog::WorkerClass) -> &'static str {
     }
 }
 
-fn claude_subagent_finished(path: &Path) -> io::Result<bool> {
+fn claude_subagent_finished(path: &Path) -> io::Result<Option<&'static str>> {
     let mut file = fs::File::open(path)?;
     let length = file.metadata()?.len();
     file.seek_read_tail(length)?;
     let mut tail = Vec::new();
     file.read_to_end(&mut tail)?;
     let tail = String::from_utf8_lossy(&tail);
-    let Some(line) = tail.lines().rev().find(|line| !line.trim().is_empty()) else {
-        return Ok(false);
+    let Some(record) = tail
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|record| match record.get("type").and_then(Value::as_str) {
+            Some("assistant" | "user") => record.get("message").is_some(),
+            _ => false,
+        })
+    else {
+        return Ok(None);
     };
-    let Ok(record) = serde_json::from_str::<Value>(line) else {
-        return Ok(false);
-    };
+    if record.get("type").and_then(Value::as_str) == Some("user") {
+        let content = record
+            .get("message")
+            .and_then(|message| message.get("content"));
+        let interrupted = content.and_then(Value::as_str).is_some_and(|s| {
+            matches!(
+                s,
+                "[Request interrupted by user]" | "[Request interrupted by user for tool use]"
+            )
+        }) || content.and_then(Value::as_array).is_some_and(|parts| {
+            parts.iter().any(|part| {
+                part.get("text").and_then(Value::as_str).is_some_and(|s| {
+                    matches!(
+                        s,
+                        "[Request interrupted by user]"
+                            | "[Request interrupted by user for tool use]"
+                    )
+                })
+            })
+        });
+        return Ok(interrupted.then_some("interrupted by user"));
+    }
     let stop_reason = record
         .get("message")
         .and_then(|message| message.get("stop_reason"))
         .and_then(Value::as_str);
-    let final_record = stop_reason == Some("end_turn")
-        || json_string(&record, &["type"]).as_deref() == Some("result");
-    Ok(final_record && evidence::claude_pending_tool(&tail).is_none())
+    let content = record
+        .get("message")
+        .and_then(|message| message.get("content"));
+    let text_only = content.and_then(Value::as_array).is_some_and(|parts| {
+        !parts.is_empty()
+            && parts
+                .iter()
+                .all(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+    });
+    let finished = text_only
+        || (stop_reason == Some("end_turn") && evidence::claude_pending_tool(&tail).is_none());
+    Ok(finished.then_some("assistant reply complete"))
 }
 
 trait ReadTail {
@@ -1526,6 +1575,61 @@ mod tests {
         assert_eq!(workers.len(), 1);
         assert_eq!(workers[0].parent_session, "session-1");
         assert!(workers[0].finished);
+    }
+
+    #[test]
+    fn interrupted_subagent_transcripts_are_finished() {
+        for message in [
+            "[Request interrupted by user]",
+            "[Request interrupted by user for tool use]",
+        ] {
+            let dir = TestDir::new();
+            let path = dir.path().join("agent.jsonl");
+            fs::write(
+                &path,
+                format!("{{\"type\":\"user\",\"message\":{{\"content\":\"{message}\"}}}}\n"),
+            )
+            .expect("write transcript");
+            assert_eq!(
+                claude_subagent_finished(&path).expect("read transcript"),
+                Some("interrupted by user")
+            );
+        }
+    }
+
+    #[test]
+    fn assistant_text_before_attachment_is_finished_without_stop_reason() {
+        let dir = TestDir::new();
+        let path = dir.path().join("agent.jsonl");
+        fs::write(&path, concat!(
+            "{\"type\":\"assistant\",\"message\":{\"stop_reason\":null,\"content\":[{\"type\":\"text\",\"text\":\"{\\\"ok\\\":true}\"}]}}\n",
+            "{\"type\":\"attachment\",\"data\":{\"type\":\"total_tokens_reminder\"}}\n",
+            "{\"type\":\"system\",\"message\":{\"content\":\"metadata\"}}\n",
+            "{\"type\":\"summary\",\"summary\":\"brief\"}\n",
+            "{\"type\":\"progress\",\"data\":{}}\n",
+            "{\"type\":\"result\"}\n"
+        )).expect("write transcript");
+        assert_eq!(
+            claude_subagent_finished(&path).expect("read transcript"),
+            Some("assistant reply complete")
+        );
+    }
+
+    #[test]
+    fn worker_summary_keeps_notification_and_logging_counts() {
+        let summary = WorkerSummary {
+            scanned: 1,
+            skipped_old: 0,
+            scan_ms: 1,
+            by_source: SourceClassCounts::new(),
+            dry_run: true,
+            notified: 0,
+            logged: 0,
+        };
+        let value = serde_json::to_value(summary).expect("serialize summary");
+        assert_eq!(value["notified"], 0);
+        assert_eq!(value["logged"], 0);
+        assert_eq!(value["dry_run"], true);
     }
 
     #[test]

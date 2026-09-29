@@ -58,11 +58,16 @@ static NUMBERED_DECISION: LazyLock<Regex> =
 static NEEDS_YOU: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^\s*\*{0,2}needs you\s*\((\d+)\)\*{0,2}\s*$").expect("static regex")
 });
+static CLOSING_MARKER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*\*{0,2}(?:needs you\b|now:)\*{0,2}").expect("static regex")
+});
 static WAITING_ON_YOU: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^\s*\*{0,2}now:\*{0,2}\s*waiting on you\b").expect("static regex")
 });
 static COMPOSER_PROMPT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*[❯›>]\s*(.*)$").expect("static regex"));
+static USER_PROMPT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*❯\s+\S").expect("static regex"));
 static DONE_HERE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^done here\.?$").expect("static regex"));
 
@@ -103,12 +108,39 @@ pub(crate) fn background_shell_count(text: &str) -> usize {
         .unwrap_or(0)
 }
 
+pub(crate) fn background_agent_count(text: &str) -> usize {
+    let lines = text.lines().collect::<Vec<_>>();
+    let Some(i) = composer_index(&lines) else {
+        return 0;
+    };
+    let mut in_agents_panel = false;
+    let mut count = 0;
+    for line in &lines[i + 2..] {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("● main") {
+            in_agents_panel = true;
+        } else if in_agents_panel && trimmed.starts_with("◯ ") {
+            count += 1;
+        }
+    }
+    count
+}
+
 pub(crate) fn closing_block_waiting(text: &str) -> bool {
     let reply = reply_text(text);
     if !composer_is_empty(text) {
         return false;
     }
-    let lines = reply.lines().rev().take(16).collect::<Vec<_>>();
+    let all = reply.lines().collect::<Vec<_>>();
+    let start = all
+        .iter()
+        .rposition(|line| CLOSING_MARKER.is_match(line) || USER_PROMPT.is_match(line));
+    let lines = match start {
+        Some(i) if USER_PROMPT.is_match(all[i]) => return false,
+        Some(i) => &all[i..],
+        None => &all[..],
+    };
+    let lines = lines.iter().rev().take(16).copied().collect::<Vec<_>>();
     if lines.iter().any(|line| WAITING_ON_YOU.is_match(line))
         || lines.iter().any(|line| {
             line.trim()
@@ -561,6 +593,30 @@ mod tests {
         assert!(waiting("**Review notes**\nReply 1a / 1b. Silence holds."));
         assert!(!waiting("**Needs you: nothing.**"));
         assert!(!closing_block_waiting("Now: waiting on you"));
+    }
+
+    #[test]
+    fn latest_closing_block_supersedes_old_approval_and_user_turn() {
+        let old = "**Needs you (1)**\n1. Approve — deploy\nReply 1a / 1b. Silence holds.\nNow: waiting on you";
+        assert!(!closing_block_waiting(&claude_screen(
+            &format!("{old}\n**Needs you: nothing.**\n**Now:** Opus sub-agent — reviewing"),
+            "",
+            "0 shells"
+        )));
+        assert!(!closing_block_waiting(&claude_screen(
+            &format!("{old}\n❯ continue\nI am working on the fix"),
+            "",
+            "0 shells"
+        )));
+    }
+
+    #[test]
+    fn footer_counts_shells_and_running_agents_without_hash_churn() {
+        let a = claude_screen("Waiting", "", "-- INSERT -- ⏵⏵ bypass permissions on · 1 shell · ← for agents\n● main\n◯ fork  Watching CI  5m 19s · ↓ 142.4k tokens\n◯ general-purpose  Running check");
+        let b = claude_screen("Waiting", "", "-- INSERT -- ⏵⏵ bypass permissions on · 1 shell · ← for agents\n● main\n◯ fork  Watching CI  6m 20s · ↓ 150k tokens\n◯ general-purpose  Running check");
+        assert_eq!(background_shell_count(&a), 1);
+        assert_eq!(background_agent_count(&a), 2);
+        assert_eq!(semantic_hash(&a), semantic_hash(&b));
     }
 
     #[test]
