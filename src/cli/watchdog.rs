@@ -499,8 +499,18 @@ fn claude_transcript_waiting(session: &str) -> Option<bool> {
         return None;
     }
     let root = std::env::var_os("HOME").map(PathBuf::from)?;
-    let root = root.join(".claude/projects");
-    let transcript = find_claude_transcript(&root, &format!("{session}.jsonl"))?;
+    claude_transcript_waiting_from_root(session, &root.join(".claude/projects"))
+}
+
+fn claude_transcript_waiting_from_root(session: &str, root: &Path) -> Option<bool> {
+    if session.is_empty()
+        || !session
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    let transcript = find_claude_transcript(root, &format!("{session}.jsonl"))?;
     let bytes = read_bounded_file_tail(&transcript, CLAUDE_TRANSCRIPT_TAIL_BYTES).ok()?;
     let content = String::from_utf8_lossy(&bytes);
     let rows = content
@@ -508,7 +518,7 @@ fn claude_transcript_waiting(session: &str) -> Option<bool> {
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .collect::<Vec<_>>();
     let assistant_text = assistant_text_after_last_user(&rows)?;
-    (!assistant_text.is_empty()).then(|| watchdog::evidence::closing_block_waiting(&assistant_text))
+    (!assistant_text.is_empty()).then(|| watchdog::evidence::closing_block_open(&assistant_text))
 }
 
 fn assistant_text_after_last_user(rows: &[Value]) -> Option<String> {
@@ -601,6 +611,71 @@ fn append_assistant_text(row: &Value, output: &mut String) {
 #[cfg(test)]
 mod transcript_tests {
     use super::*;
+
+    fn write_transcript(root: &Path, session: &str, rows: &[Value]) {
+        let directory = root.join(".claude/projects/x");
+        fs::create_dir_all(&directory).expect("create transcript directory");
+        let content = rows
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(directory.join(format!("{session}.jsonl")), content).expect("write transcript");
+    }
+
+    fn unique_root() -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        std::env::temp_dir().join(format!(
+            "herdr-watchdog-transcript-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn transcript_fallback_tracks_latest_block_and_real_user_turn() {
+        let root = unique_root();
+        let session = "transcript-session";
+        let waiting_block = "**Needs you (1)**\n1. Approve deploy\n**Now:** Codex — waiting";
+        write_transcript(
+            &root,
+            session,
+            &[
+                serde_json::json!({"message":{"role":"user","content":"request"}}),
+                serde_json::json!({"message":{"role":"assistant","content":[{"type":"text","text":waiting_block}]}}),
+            ],
+        );
+        assert_eq!(
+            claude_transcript_waiting_from_root(session, &root),
+            Some(true)
+        );
+
+        write_transcript(
+            &root,
+            session,
+            &[
+                serde_json::json!({"message":{"role":"user","content":"request"}}),
+                serde_json::json!({"message":{"role":"assistant","content":[{"type":"text","text":waiting_block}]}}),
+                serde_json::json!({"message":{"role":"assistant","content":[{"type":"text","text":"**Needs you: nothing.**\n**Now:** Codex — done"}]}}),
+            ],
+        );
+        assert_eq!(
+            claude_transcript_waiting_from_root(session, &root),
+            Some(false)
+        );
+
+        write_transcript(
+            &root,
+            session,
+            &[
+                serde_json::json!({"message":{"role":"user","content":"request"}}),
+                serde_json::json!({"message":{"role":"assistant","content":[{"type":"text","text":waiting_block}]}}),
+                serde_json::json!({"message":{"role":"user","content":"follow up"}}),
+            ],
+        );
+        assert_eq!(claude_transcript_waiting_from_root(session, &root), None);
+        fs::remove_dir_all(root).expect("remove test transcript");
+    }
 
     #[test]
     fn transcript_fallback_uses_assistant_text_after_latest_real_user_turn() {

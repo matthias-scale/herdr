@@ -53,8 +53,9 @@ static QUOTA_CYCLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"↻\S+").exp
 static QUOTA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d+h:\d+%").expect("static regex"));
 static BACKGROUND_SHELLS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(\d+) shells?\b").expect("static regex"));
-static NUMBERED_DECISION: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^\s*\d+[.)]\s+(?:approve|decide)\b").expect("static regex"));
+static NUMBERED_DECISION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*\d+[.)]\s+\*{0,2}(?:approve|decide)\b").expect("static regex")
+});
 static NEEDS_YOU: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^\s*\*{0,2}needs you\s*\((\d+)\)\*{0,2}\s*$").expect("static regex")
 });
@@ -135,6 +136,10 @@ pub(crate) fn closing_block_waiting(text: &str) -> bool {
         return false;
     }
     closing_block_state(&reply)
+}
+
+pub(crate) fn closing_block_open(text: &str) -> bool {
+    closing_block_state(text)
 }
 
 fn closing_block_state(text: &str) -> bool {
@@ -663,6 +668,13 @@ mod tests {
             "",
             "0 shells"
         )));
+    }
+
+    #[test]
+    fn canonical_numbered_approval_with_now_marker_is_waiting() {
+        assert!(closing_block_open(
+            "**Needs you (1)**\n1. **Approve** — X?\n**Now:** Codex — Y"
+        ));
     }
 
     #[test]
