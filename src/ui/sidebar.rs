@@ -4937,10 +4937,10 @@ fn needs_you_space_icon(
 }
 
 fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[AgentPanelEntry]) {
-    if entries.is_empty() {
-        return;
-    }
     let mut hosts = Vec::<(String, Vec<AgentPanelEntry>)>::new();
+    let mut local_entries = all_agent_panel_entries(app);
+    local_entries.retain(|entry| entry.has_agent);
+    hosts.push((app.agent_host_name.clone(), local_entries));
     for entry in entries.iter().cloned() {
         let Some(host) = entry
             .remote_entry
@@ -4954,9 +4954,6 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
             None => hosts.push((host, vec![entry])),
         }
     }
-    if hosts.is_empty() {
-        return;
-    }
     let host_tokens = hosts
         .iter()
         .map(|(host, entries)| {
@@ -4964,10 +4961,21 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
                 .first()
                 .and_then(|entry| entry.remote_entry.as_ref())
                 .and_then(|remote| remote.narrow_host_suffix.strip_prefix(" · "))
-                .expect("host token for Fleet row");
-            (host.clone(), token.to_string())
+                .map(str::to_string)
+                .unwrap_or_else(|| middle_elide(host, SIDEBAR_HOST_TOKEN_NARROW_WIDTH));
+            (host.clone(), token)
         })
         .collect::<std::collections::HashMap<_, _>>();
+    for host in app
+        .fleet_snapshot
+        .hosts
+        .iter()
+        .filter(|host| !host.local && host.state == crate::fleet::HostState::Reachable)
+    {
+        if !hosts.iter().any(|(name, _)| name == &host.name) {
+            hosts.push((host.name.clone(), Vec::new()));
+        }
+    }
     let host_counts = hosts
         .iter()
         .filter_map(|(host, entries)| {
@@ -4980,7 +4988,7 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
                         .is_some_and(|remote| !remote.settled && remote.snoozed_until.is_none())
                 })
                 .count();
-            (count > 0).then(|| SidebarHostCount {
+            Some(SidebarHostCount {
                 host: host_tokens
                     .get(host)
                     .cloned()
@@ -4992,7 +5000,7 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
     let collapsed = section_is_collapsed(app, FLEET_SECTION_TITLE);
     rows.push(SidebarRow::SectionHeader {
         title: FLEET_SECTION_TITLE,
-        count: entries.len(),
+        count: hosts.iter().map(|(_, entries)| entries.len()).sum(),
         host_counts,
         collapsed,
     });
@@ -5007,18 +5015,79 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
             action_key: None,
             sort_key: None,
             sort_mode: SidebarSortMode::Default,
-            title: host_tokens
-                .get(&host)
-                .cloned()
-                .expect("host token for Fleet host"),
+            title: if host == app.agent_host_name {
+                format!(
+                    "{} · this device",
+                    host_tokens.get(&host).map(String::as_str).unwrap_or(&host)
+                )
+            } else {
+                host_tokens
+                    .get(&host)
+                    .cloned()
+                    .unwrap_or_else(|| middle_elide(&host, SIDEBAR_HOST_TOKEN_NARROW_WIDTH))
+            },
             count: host_entries.len(),
+            collapsed,
+            dim: host_entries.is_empty(),
+            status: None,
+            spawn: false,
+        });
+        if !collapsed {
+            append_fleet_repo_rows(app, rows, host, host_entries);
+        }
+    }
+}
+
+fn append_fleet_repo_rows(
+    app: &AppState,
+    rows: &mut Vec<SidebarRow>,
+    host: String,
+    entries: Vec<AgentPanelEntry>,
+) {
+    let mut groups = std::collections::BTreeMap::<String, (String, Vec<AgentPanelEntry>)>::new();
+    for entry in entries {
+        let (key, title) = entry_repo_group(app, &entry)
+            .unwrap_or_else(|| ("no-repo".to_string(), "no repo".to_string()));
+        groups
+            .entry(key)
+            .or_insert_with(|| (title, Vec::new()))
+            .1
+            .push(entry);
+    }
+    let mut groups = groups.into_iter().collect::<Vec<_>>();
+    groups.sort_by(|left, right| {
+        (left.1 .0 == "no repo")
+            .cmp(&(right.1 .0 == "no repo"))
+            .then_with(|| cmp_sidebar_entry_names(&left.1 .0, &right.1 .0))
+    });
+    for (key, (title, mut members)) in groups {
+        members.sort_by(|left, right| {
+            cmp_sidebar_entry_names(
+                left.primary_tab_label
+                    .as_deref()
+                    .unwrap_or(&left.primary_label),
+                right
+                    .primary_tab_label
+                    .as_deref()
+                    .unwrap_or(&right.primary_label),
+            )
+        });
+        let key = format!("fleet:repo:{host}:{key}");
+        let collapsed = section_is_collapsed(app, &key);
+        rows.push(SidebarRow::NestedHeader {
+            key,
+            action_key: None,
+            sort_key: None,
+            sort_mode: SidebarSortMode::Default,
+            title,
+            count: members.len(),
             collapsed,
             dim: false,
             status: None,
             spawn: false,
         });
         if !collapsed {
-            append_tab_rows(rows, host_entries, 1);
+            append_tab_rows(rows, members, 2);
         }
     }
 }
@@ -5029,9 +5098,6 @@ fn append_snoozed_rows(
     entries: Vec<AgentPanelEntry>,
     pod_tokens: &std::collections::HashMap<String, PodToken>,
 ) {
-    if entries.is_empty() {
-        return;
-    }
     let collapsed = section_is_collapsed(app, SNOOZED_SECTION_TITLE);
     rows.push(SidebarRow::SectionHeader {
         title: SNOOZED_SECTION_TITLE,
@@ -5061,9 +5127,6 @@ fn append_settled_rows(
     entries: Vec<AgentPanelEntry>,
     _expand_worktrees: bool,
 ) {
-    if entries.is_empty() {
-        return;
-    }
     rows.push(SidebarRow::SectionHeader {
         title: SETTLED_SECTION_TITLE,
         count: entries.len(),
