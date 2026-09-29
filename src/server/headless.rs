@@ -4872,15 +4872,9 @@ impl HeadlessServer {
                 );
                 connection.direct_graphics = direct_graphics;
                 connection.pixel_mouse = direct_graphics;
-                connection.active_workspace = self.app.state.active;
-                connection.active_workspace_id = self
-                    .app
-                    .state
-                    .active
-                    .and_then(|index| self.app.state.workspaces.get(index))
-                    .map(|workspace| workspace.id.clone());
-                connection.selected_pane = self.app.state.selected;
-                connection.focus_initialized = true;
+                // Resolve focus from the shared default when the first frame
+                // or input is handled. The active workspace may change after
+                // the socket connects but before this client is initialized.
                 self.clients.insert(client_id, connection);
                 if first_app_client {
                     self.app.tick_pomodoro(attach_now, false);

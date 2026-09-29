@@ -1247,12 +1247,13 @@ fn multi_client_broadcasts_frame_updates_to_all_clients() {
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_file(&client_socket, Duration::from_secs(10));
 
-    let mut client_a = connect_raw_client(&client_socket, 100, 30);
-    let mut client_b = connect_raw_client(&client_socket, 100, 30);
-
-    // Ensure we have an active pane that can reflect input changes.
+    // Establish the shared default before clients attach. Existing clients
+    // keep their own focus when an API request opts into focus.
     let (_workspace_id, pane_id) =
         create_workspace_and_root_pane(&api_socket, "broadcast-client-a-to-b");
+
+    let mut client_a = connect_raw_client(&client_socket, 100, 30);
+    let mut client_b = connect_raw_client(&client_socket, 100, 30);
 
     // Drain initial frames so we measure the frame caused by new input.
     drain_server_messages(&mut client_a, Duration::from_millis(300));
@@ -1286,6 +1287,59 @@ fn multi_client_broadcasts_frame_updates_to_all_clients() {
         pane_read_recent(&api_socket, &pane_id, 200),
         client_b_frames.join("\n--- frame ---\n"),
         log_tail(&server_log_path(&config_home), 80)
+    );
+
+    cleanup_spawned_herdr(server, base);
+}
+
+#[test]
+fn multi_client_attach_starts_on_shared_active_workspace() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let client_socket = runtime_dir.join("herdr-client.sock");
+
+    let server = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    wait_for_file(&client_socket, Duration::from_secs(10));
+
+    let (_workspace_a, pane_a) =
+        create_workspace_and_root_pane(&api_socket, "attach-existing-client");
+    let mut client_a = connect_raw_client(&client_socket, 100, 30);
+    drain_server_messages(&mut client_a, Duration::from_millis(300));
+
+    let (workspace_b, pane_b) = create_workspace_and_root_pane(&api_socket, "attach-shared-active");
+    let mut client_b = connect_raw_client(&client_socket, 100, 30);
+    drain_server_messages(&mut client_b, Duration::from_millis(300));
+
+    let marker_a = format!(
+        "AA{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    send_client_input(&mut client_a, format!("echo {marker_a}\n").as_bytes());
+    assert!(
+        pane_read_recent_contains(&api_socket, &pane_a, &marker_a, Duration::from_secs(5)),
+        "API workspace.create focus must not move an attached client; pane output:\n{}",
+        pane_read_recent(&api_socket, &pane_a, 200)
+    );
+
+    let marker_b = format!(
+        "BB{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    send_client_input(&mut client_b, format!("echo {marker_b}\n").as_bytes());
+    assert!(
+        pane_read_recent_contains(&api_socket, &pane_b, &marker_b, Duration::from_secs(5)),
+        "newly attached client should start on shared active workspace {workspace_b}; pane output:\n{}",
+        pane_read_recent(&api_socket, &pane_b, 200)
     );
 
     cleanup_spawned_herdr(server, base);
