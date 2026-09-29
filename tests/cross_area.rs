@@ -824,12 +824,6 @@ fn cross_area_agent_process_survives_detach_and_reattach() {
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_socket(&client_socket, Duration::from_secs(10));
 
-    let initial_workspace = workspace_create(&api_socket, "initial-focus");
-    let focused_pane_id = initial_workspace["result"]["root_pane"]["pane_id"]
-        .as_str()
-        .expect("initial workspace root pane id")
-        .to_string();
-
     let mut client_a = UnixStream::connect(&client_socket).expect("client A should connect");
     client_handshake(&mut client_a, CURRENT_PROTOCOL, 100, 30);
     assert!(wait_for_frame(&mut client_a, Duration::from_secs(2)));
@@ -995,6 +989,12 @@ fn cross_area_workspace_create_preserves_client_focus_and_detach_stability() {
     let server = spawn_server(&config_home, &runtime_dir, &api_socket);
     wait_for_socket(&api_socket, Duration::from_secs(10));
     wait_for_socket(&client_socket, Duration::from_secs(10));
+
+    let initial_workspace = workspace_create(&api_socket, "initial-focus");
+    let focused_pane_id = initial_workspace["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .expect("initial workspace root pane id")
+        .to_string();
 
     let mut client_a = UnixStream::connect(&client_socket).expect("client A should connect");
     client_handshake(&mut client_a, CURRENT_PROTOCOL, 110, 30);
