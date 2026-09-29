@@ -158,22 +158,41 @@ class Harness:
     def cleanup_peer(self) -> None:
         if not self.peer_root or not self.args.peer or not self.args.peer_binary:
             return
-        app = "herdr-dev" if "debug" in str(self.args.peer_binary) else "herdr"
-        cfg = f"{self.peer_root}/cfg"
-        state = f"{self.peer_root}/state"
         sock = f"{self.peer_root}/s.sock"
-        env = (f"env -i PATH=/usr/bin:/bin XDG_CONFIG_HOME={shlex.quote(cfg)} "
-               f"XDG_STATE_HOME={shlex.quote(state)} HERDR_SOCKET_PATH={shlex.quote(sock)} ")
-        binary = shlex.quote(str(self.args.peer_binary))
-        pidfile = shlex.quote(f"{self.peer_root}/server.pid")
-        cmd = (f"if [ -r {pidfile} ]; then p=$(cat {pidfile}); "
-               "kill -TERM -- -$p 2>/dev/null || kill -TERM $p 2>/dev/null || true; "
-               "sleep .2; kill -KILL -- -$p 2>/dev/null || true; fi; "
-               + env + binary + " server stop >/dev/null 2>&1 || true; "
+        inspect_and_stop = "\n".join((
+            "import os, signal, sys, time",
+            "sock = os.fsencode('HERDR_SOCKET_PATH=' + sys.argv[1])",
+            "binary = os.fsencode(sys.argv[2])",
+            "def match(pid):",
+            "    try:",
+            "        env = open(f'/proc/{pid}/environ', 'rb').read().split(b'\\0')",
+            "        argv = open(f'/proc/{pid}/cmdline', 'rb').read().split(b'\\0')",
+            "        return sock in env and binary in argv and b'server' in argv",
+            "    except OSError:",
+            "        return False",
+            "pids = [int(p) for p in os.listdir('/proc') if p.isdigit() and match(p)]",
+            "print('peer cleanup matched exact server pids:', pids)",
+            "for pid in pids:",
+            "    os.kill(pid, signal.SIGTERM)",
+            "time.sleep(0.5)",
+            "left = [int(p) for p in os.listdir('/proc') if p.isdigit() and match(p)]",
+            "for pid in left:",
+            "    os.kill(pid, signal.SIGKILL)",
+            "time.sleep(0.1)",
+            "left = [int(p) for p in os.listdir('/proc') if p.isdigit() and match(p)]",
+            "print('remaining exact peer servers:', left)",
+            "raise SystemExit(bool(left))",
+        ))
+        cmd = (f"python3 -c {shlex.quote(inspect_and_stop)} {shlex.quote(sock)} "
+               f"{shlex.quote(str(self.args.peer_binary))} && "
                f"rm -rf {shlex.quote(self.peer_root)}")
-        subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-                        self.args.peer, "sh", "-lc", cmd], stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=20, check=False)
+        result = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+                                 self.args.peer, cmd], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, timeout=20, check=False)
+        if result.stdout.strip():
+            print(result.stdout.strip())
+        if result.returncode:
+            raise RuntimeError(f"peer server cleanup failed ({result.returncode}): {result.stderr[-500:]}")
 
     def cli(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         result = subprocess.run([str(self.args.binary), *args], cwd=self.root, env=self.env,
@@ -292,10 +311,13 @@ class Harness:
         path.write_text(json.dumps(memory) + "\n", encoding="utf-8")
 
     def cleanup(self) -> None:
+        cleanup_handlers = {sig: signal.signal(sig, signal.SIG_IGN)
+                            for sig in (signal.SIGINT, signal.SIGTERM)}
+        peer_error: Exception | None = None
         try:
             self.cleanup_peer()
-        except (OSError, subprocess.SubprocessError):
-            pass
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            peer_error = exc
         try:
             for proc in reversed(self.started):
                 if proc.poll() is None:
@@ -334,8 +356,27 @@ class Harness:
                 except ProcessLookupError:
                     pass
                 self.server.wait()
+            leaked = []
+            for entry in Path("/proc").iterdir():
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    env = (entry / "environ").read_bytes().split(b"\0")
+                    argv = (entry / "cmdline").read_bytes().split(b"\0")
+                except OSError:
+                    continue
+                if (f"HERDR_SOCKET_PATH={self.sock}".encode() in env
+                        and os.fsencode(str(self.args.binary)) in argv
+                        and b"server" in argv):
+                    leaked.append(entry.name)
+            if leaked:
+                raise RuntimeError(f"local harness server still running for {self.sock}: {leaked}")
         finally:
             shutil.rmtree(self.root, ignore_errors=True)
+            for sig, handler in cleanup_handlers.items():
+                signal.signal(sig, handler)
+        if peer_error:
+            raise RuntimeError(f"harness teardown failed: {peer_error}") from peer_error
 
     def incident_rearm_check(self) -> dict[str, Any]:
         parent_pane = self.workspace("incident-parent", _script("Parent remains available"),
@@ -715,6 +756,11 @@ def self_test(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    def interrupt(signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt(f"received signal {signum}; cleaning up harness")
+
+    previous_handlers = {sig: signal.signal(sig, interrupt)
+                         for sig in (signal.SIGINT, signal.SIGTERM)}
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, help="herdr executable to test")
     parser.add_argument("--host-label", default=platform.node().split(".")[0])
@@ -735,7 +781,11 @@ def main() -> int:
         parser.error("--confirm-secs must be nonnegative")
     args.out.mkdir(parents=True, exist_ok=True)
     if args.self_test:
-        return self_test(args)
+        try:
+            return self_test(args)
+        finally:
+            for sig, handler in previous_handlers.items():
+                signal.signal(sig, handler)
     # Filter is validated before touching the server. CASES is the audited
     # source of ids and expected classes for every matrix entry.
     selected = ({part.strip() for value in args.only for part in value.split(",")}
@@ -919,6 +969,8 @@ def main() -> int:
         return 0 if rows and all(r["match"] for r in rows) and incident["match"] else 1
     finally:
         harness.cleanup()
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
 
 
 if __name__ == "__main__":
