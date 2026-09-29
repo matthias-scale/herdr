@@ -4937,22 +4937,53 @@ fn needs_you_space_icon(
 }
 
 fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[AgentPanelEntry]) {
+    if app.fleet_snapshot.configured_hosts.is_empty()
+        && !app.fleet_snapshot.hosts.iter().any(|host| !host.local)
+        && entries.is_empty()
+    {
+        return;
+    }
     let mut hosts = Vec::<(String, Vec<AgentPanelEntry>)>::new();
     let mut local_entries = all_agent_panel_entries(app);
-    local_entries.retain(|entry| entry.has_agent);
+    local_entries.retain(|entry| {
+        entry.has_agent
+            && entry
+                .local_target()
+                .is_some_and(|target| !app.remote_focus_proxy_panes.contains(&target.pane_id))
+    });
     hosts.push((app.agent_host_name.clone(), local_entries));
-    for entry in entries.iter().cloned() {
-        let Some(host) = entry
+    // Snapshot order follows fleet configuration, including hosts with no
+    // agent rows. Populate each host without reordering its original entries.
+    let mut remote_host_names = app
+        .fleet_snapshot
+        .hosts
+        .iter()
+        .filter(|host| !host.local && host.state == crate::fleet::HostState::Reachable)
+        .map(|host| host.name.clone())
+        .collect::<Vec<_>>();
+    for entry in entries {
+        if let Some(host) = entry
             .remote_entry
             .as_ref()
             .map(|remote| remote.agent_ref.host.clone())
-        else {
-            continue;
-        };
-        match hosts.iter_mut().find(|(name, _)| name == &host) {
-            Some((_, host_entries)) => host_entries.push(entry),
-            None => hosts.push((host, vec![entry])),
+        {
+            if !remote_host_names.contains(&host) {
+                remote_host_names.push(host);
+            }
         }
+    }
+    for host in remote_host_names {
+        let host_entries = entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .remote_entry
+                    .as_ref()
+                    .is_some_and(|remote| remote.agent_ref.host == host)
+            })
+            .cloned()
+            .collect();
+        hosts.push((host, host_entries));
     }
     let host_tokens = hosts
         .iter()
@@ -4966,19 +4997,10 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
             (host.clone(), token)
         })
         .collect::<std::collections::HashMap<_, _>>();
-    for host in app
-        .fleet_snapshot
-        .hosts
-        .iter()
-        .filter(|host| !host.local && host.state == crate::fleet::HostState::Reachable)
-    {
-        if !hosts.iter().any(|(name, _)| name == &host.name) {
-            hosts.push((host.name.clone(), Vec::new()));
-        }
-    }
     let host_counts = hosts
         .iter()
-        .filter_map(|(host, entries)| {
+        .filter(|(host, _)| host != &app.agent_host_name)
+        .map(|(host, entries)| {
             let count = entries
                 .iter()
                 .filter(|entry| {
@@ -4988,14 +5010,15 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
                         .is_some_and(|remote| !remote.settled && remote.snoozed_until.is_none())
                 })
                 .count();
-            Some(SidebarHostCount {
+            SidebarHostCount {
                 host: host_tokens
                     .get(host)
                     .cloned()
-                    .expect("host token for Fleet host"),
+                    .unwrap_or_else(|| middle_elide(host, SIDEBAR_HOST_TOKEN_NARROW_WIDTH)),
                 count,
-            })
+            }
         })
+        .filter(|count| count.count > 0)
         .collect::<Vec<_>>();
     let collapsed = section_is_collapsed(app, FLEET_SECTION_TITLE);
     rows.push(SidebarRow::SectionHeader {
@@ -5061,17 +5084,8 @@ fn append_fleet_repo_rows(
             .then_with(|| cmp_sidebar_entry_names(&left.1 .0, &right.1 .0))
     });
     for (key, (title, mut members)) in groups {
-        members.sort_by(|left, right| {
-            cmp_sidebar_entry_names(
-                left.primary_tab_label
-                    .as_deref()
-                    .unwrap_or(&left.primary_label),
-                right
-                    .primary_tab_label
-                    .as_deref()
-                    .unwrap_or(&right.primary_label),
-            )
-        });
+        // `sort_by` on the outer groups is stable; keep members in their
+        // original snapshot/pane order, especially in the no-repo group.
         let key = format!("fleet:repo:{host}:{key}");
         let collapsed = section_is_collapsed(app, &key);
         rows.push(SidebarRow::NestedHeader {
@@ -9896,6 +9910,14 @@ pub(super) fn render_sidebar(
     }
     render_sidebar_areas_menu(app, frame);
     render_window_cycle_mode_menu(app, frame);
+    // The list scrollbar shares the sidebar's outer column; restore the
+    // persistent border after all list overlays have rendered.
+    if let Some(separator) = sidebar_separator_col(area) {
+        for y in area.y..area.bottom() {
+            frame.buffer_mut()[(separator, y)].set_symbol("│");
+            frame.buffer_mut()[(separator, y)].set_style(sep_style);
+        }
+    }
 }
 
 fn sidebar_footer_style(
@@ -10435,7 +10457,11 @@ fn render_section_header(
                     Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!(" {count}"),
+                    if count == 0 {
+                        " (0)".to_string()
+                    } else {
+                        format!(" {count}")
+                    },
                     Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
                 ),
             ])),
@@ -13116,7 +13142,7 @@ pub(crate) mod tests {
                 rows.iter()
                     .filter(|row| matches!(row, SidebarRow::NestedHeader { key, .. } if key.starts_with("fleet:host:")))
                     .count(),
-                2,
+                3,
                 "{surface}"
             );
             assert_eq!(
@@ -13126,6 +13152,58 @@ pub(crate) mod tests {
                 3,
                 "{surface}"
             );
+        }
+    }
+
+    #[test]
+    fn fleet_starts_with_local_device_and_preserves_remote_config_order() {
+        let app = app_with_two_remote_hosts();
+        let rows = sidebar_rows(&app);
+        let hosts = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::NestedHeader { key, title, .. } if key.starts_with("fleet:host:") => {
+                    Some((key.as_str(), title.as_str()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(hosts[0].1, format!("{} · this device", app.agent_host_name));
+        assert_eq!(hosts[1].0, "fleet:host:remote-b");
+        assert_eq!(hosts[2].0, "fleet:host:remote-a");
+    }
+
+    #[test]
+    fn fleet_has_empty_remote_hosts_but_is_absent_without_fleet_configuration() {
+        let mut app = app_with_agents(&["local"]);
+        app.fleet_snapshot.hosts = vec![fleet_host_snapshot("empty", false, Vec::new())];
+        app.fleet_snapshot.configured_hosts = vec!["empty".into()];
+        expand_fleet(&mut app);
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(row,
+            SidebarRow::NestedHeader { title, count: 0, dim: true, .. } if title == "empty")));
+
+        app.fleet_snapshot.hosts.clear();
+        app.fleet_snapshot.configured_hosts.clear();
+        assert!(!sidebar_rows(&app).iter().any(|row| matches!(row,
+            SidebarRow::SectionHeader { title, .. } if *title == FLEET_SECTION_TITLE)));
+    }
+
+    #[test]
+    fn fleet_repo_groups_report_member_counts() {
+        let app = app_with_two_remote_hosts();
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(row,
+            SidebarRow::NestedHeader { title, count: 2, .. } if title == "no repo")));
+    }
+
+    #[test]
+    fn empty_lifecycle_shelves_keep_zero_counts() {
+        let app = AppState::test_new();
+        let rows = sidebar_rows(&app);
+        for title in [SNOOZED_SECTION_TITLE, SETTLED_SECTION_TITLE] {
+            assert!(rows.iter().any(|row| matches!(row,
+                SidebarRow::SectionHeader { title: row_title, count: 0, .. } if *row_title == title)));
         }
     }
 
