@@ -971,6 +971,16 @@ pub(crate) fn classify_pane_v3(
                         PaneClass::Unknown
                     };
                 }
+            } else if o.status == AgentStatus::Working {
+                class = PaneClass::Working;
+                ev = "agent hook reports working".into();
+            } else if rebound {
+                if evidence::has_visible_progress(&o.tail) {
+                    class = PaneClass::Working;
+                    ev = "visible progress in fresh pane".into();
+                } else {
+                    ev = "fresh pane lacks positive work evidence".into();
+                }
             } else if age < opt.stall_secs {
                 class = PaneClass::Working;
                 ev = "semantic progress is within stall window".into();
@@ -1851,6 +1861,36 @@ mod tests {
         assert_eq!(m.since, 900);
         assert_eq!(m.retry_since, None);
         assert!(d.evidence.contains("rebound identity"));
+    }
+
+    #[test]
+    fn pane_v3_fresh_screens_need_positive_work_evidence() {
+        let codex_idle = "Next: Complete GitHub device authorization.\n────────────────────\n› Ask Codex to do anything\n────────────────────\nGPT-6-Luna medium";
+        let codex_finished = "• No active subagents: all four completed. Nothing is stalled.\nWorked for 8s\n────────────────────\n› Ask Codex to do anything\n────────────────────\nGPT-6-Sol medium";
+        let hook_dialog = "Hooks need review\n2 hooks are new or changed.\n› 1. Review hooks\n  2. Trust all and continue\n  3. Continue without trusting\nenter confirm · esc skip";
+        let claude_idle = "● A hook blocked the turn from ending 9 consecutive times — overriding and ending turn.\n────────────────────\n❯\n────────────────────\n-- INSERT --";
+        for (tail, expected) in [
+            (codex_idle, PaneClass::FinishedIdle),
+            (codex_finished, PaneClass::FinishedIdle),
+            (hook_dialog, PaneClass::WaitingHuman),
+            (claude_idle, PaneClass::FinishedIdle),
+        ] {
+            for status in [AgentStatus::Stale, AgentStatus::Unknown] {
+                let decision = classify_pane_v3(
+                    &pane_v3(status, tail),
+                    &mut PaneV3Memory::default(),
+                    100,
+                    v3opt(),
+                );
+                assert_eq!(decision.class, expected, "{tail}");
+            }
+        }
+        let working = pane_v3(AgentStatus::Stale, "✻ Working (12s)\nRunning tests");
+        assert_eq!(
+            classify_pane_v3(&working, &mut PaneV3Memory::default(), 100, v3opt()).class,
+            PaneClass::Working
+        );
+        assert!(evidence::active_prompt("Plan:\n1. Check logs\n2. Restart service").is_none());
     }
 
     #[test]

@@ -30,7 +30,7 @@ static DIALOG: LazyLock<Regex> = LazyLock::new(|| {
 });
 static HINT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)^(?:esc to cancel|enter to (?:confirm|select)|press enter|tab to amend|\(esc\)|↑/↓)",
+        r"(?i)^(?:esc to (?:cancel|skip)|enter(?: to)? (?:confirm|select)|press enter|tab to amend|\(esc\)|↑/↓)(?:\s*[·•].*)?$",
     )
     .expect("static regex")
 });
@@ -69,6 +69,8 @@ static WAITING_ON_YOU: LazyLock<Regex> = LazyLock::new(|| {
 });
 static COMPOSER_PROMPT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*[❯›>]\s*(.*)$").expect("static regex"));
+static EMPTY_COMPOSER_PLACEHOLDER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^ask codex to do anything\s*$").expect("static regex"));
 static USER_PROMPT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*❯\s+\S").expect("static regex"));
 static DONE_HERE: LazyLock<Regex> =
@@ -95,7 +97,9 @@ pub(crate) fn composer_is_empty(text: &str) -> bool {
     composer_index(&lines)
         .and_then(|i| COMPOSER_PROMPT.captures(lines[i]))
         .and_then(|c| c.get(1))
-        .is_some_and(|s| s.as_str().trim().is_empty())
+        .is_some_and(|s| {
+            s.as_str().trim().is_empty() || EMPTY_COMPOSER_PLACEHOLDER.is_match(s.as_str().trim())
+        })
 }
 
 pub(crate) fn background_shell_count(text: &str) -> usize {
@@ -203,12 +207,32 @@ pub(crate) fn finished_reply(text: &str) -> bool {
     }
     let reply = reply_text(text);
     let last = reply.lines().rev().find(|line| !line.trim().is_empty());
-    last.is_some_and(|line| DONE_HERE.is_match(line.trim()))
+    let composer_line = text
+        .lines()
+        .filter_map(|line| COMPOSER_PROMPT.captures(line))
+        .last();
+    let explicit_empty = composer_line.and_then(|c| c.get(1)).is_some_and(|s| {
+        s.as_str().trim().is_empty() || EMPTY_COMPOSER_PLACEHOLDER.is_match(s.as_str().trim())
+    });
+    (explicit_empty || last.is_some_and(|line| DONE_HERE.is_match(line.trim())))
         && !reply.lines().rev().skip(1).take(2).any(spinner_line)
+        && !reply
+            .lines()
+            .rev()
+            .take(3)
+            .any(|line| PROGRESS.is_match(line.trim()))
 }
 
 fn spinner_line(line: &str) -> bool {
-    line.chars().any(spinner) || PROGRESS.is_match(line.trim())
+    line.chars().any(spinner)
+        || PROGRESS.is_match(line.trim())
+        || line.to_ascii_lowercase().contains("esc to interrupt")
+        || line.to_ascii_lowercase().contains("working (")
+}
+pub(crate) fn has_visible_progress(text: &str) -> bool {
+    bottom(&reply_text(text), 6)
+        .iter()
+        .any(|line| spinner_line(line))
 }
 
 pub(crate) fn stable_hash(text: &str) -> u64 {
@@ -337,6 +361,33 @@ pub(crate) fn active_prompt(text: &str) -> Option<ActivePrompt> {
             return Some(ActivePrompt {
                 kind: PromptKind::Dialog,
                 line: l.clone(),
+            });
+        }
+    }
+    if HINT.is_match(&w[last]) {
+        let start = (0..last)
+            .rev()
+            .take_while(|&i| OPTION.is_match(&w[i]) && !quoted(&w[i]))
+            .last()
+            .unwrap_or(last);
+        let options: Vec<_> = w[start..last]
+            .iter()
+            .enumerate()
+            .map(|(i, line)| (start + i, line))
+            .collect();
+        let selected = options
+            .iter()
+            .filter(|(_, line)| {
+                line.trim_start()
+                    .chars()
+                    .next()
+                    .is_some_and(|c| matches!(c, '›' | '❯'))
+            })
+            .count();
+        if options.len() >= 2 && selected == 1 {
+            return Some(ActivePrompt {
+                kind: PromptKind::Dialog,
+                line: options[0].1.clone(),
             });
         }
     }
