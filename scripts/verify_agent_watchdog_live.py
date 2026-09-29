@@ -766,13 +766,15 @@ def main() -> int:
             if family == "A":
                 pane_id = harness.panes[ident]
                 session_id = "session-" + ident
+                session_source = ("watchdog-harness" if ident == "a-finished-idle"
+                                  else "herdr:codex")
                 harness.call("pane.report_agent_session", {"pane_id": pane_id,
-                    "source": "herdr:codex", "agent": "codex",
+                    "source": session_source, "agent": "codex",
                     "agent_session_id": session_id})
                 status = "idle" if ident in ("a-finished-idle", "stale_draft_promised_work_stalled") else (
                     "blocked" if ident == "a-approval-hook" else "working")
-                report: dict[str, Any] = {"pane_id": pane_id, "source": "watchdog-harness",
-                    "agent": "codex", "state": status}
+                report: dict[str, Any] = {"pane_id": pane_id, "source": session_source,
+                    "agent": "codex", "agent_session_id": session_id, "state": status}
                 if ident.startswith("a-retry"):
                     report.update(wait="retry", eta_s=120,
                                   reported_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
@@ -811,7 +813,7 @@ def main() -> int:
                     data = json.loads(state.read_text())
                     data[pane_id]["nudge_count"] = 3
                     state.write_text(json.dumps(data))
-                    harness.age_memory(state, pane_id, 5)
+                    harness.age_memory(state, pane_id, 1800)
                 payload = harness.run_watchdog("A", cmd_options,
                                                dry=ident != "stale_draft_promised_work_stalled")
                 decisions = payload.get("decisions", [])
