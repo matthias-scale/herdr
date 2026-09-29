@@ -288,7 +288,7 @@ def pane_check(binary: Path, gemini: str) -> bool:
 
 def worker_command(binary: Path, scratch: Path, socket_path: Path, runs: Path, state: Path, log: Path) -> list[str]:
     return [
-        str(binary), "watchdog", "workers", "--once", "--stall-minutes", "1", "--json",
+        str(binary), "watchdog", "workers", "--once", "--stall-minutes", "1", "--confirm-secs", "0", "--json",
         "--runs-dir", str(runs), "--claude-projects-dir", str(scratch / "claude-projects"),
         "--state-file", str(state), "--log-file", str(log),
     ]
@@ -318,7 +318,9 @@ def worker_check(binary: Path) -> bool:
             payload = parse_json_output(result) or {}
             passed = (
                 result.returncode == 0
-                and payload.get("summary", {}).get("notified") == 1
+                and payload.get("summary", {}).get("notified") == 0
+                and payload.get("decisions", [{}])[0].get("class") == "suspected_stall"
+                and payload.get("decisions", [{}])[0].get("incident", {}).get("action") == "already_logged"
                 and len(notifications) == 1
                 and "parent-pane" in notifications[0].get("params", {}).get("body", "")
                 and "stalled-codex-worker" in notifications[0].get("params", {}).get("body", "")
@@ -426,7 +428,7 @@ def worker_parent_gone_check(binary: Path, fixture: dict[str, Any]) -> bool:
             notifications = [item for item in api.requests if item.get("method") == "notification.show"]
             records = [json.loads(line) for line in log_file.read_text().splitlines()] if log_file.exists() else []
             decisions = payload.get("decisions", [])
-            action = decisions[0].get("action") if decisions else None
+            action = decisions[0].get("parent") if decisions else None
             print("ORPHAN_WORKER_EVIDENCE " + json.dumps({
                 "worker_files_read": ["state.json", "trace.log"],
                 "parent_panes_returned": 0,

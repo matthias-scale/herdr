@@ -286,6 +286,13 @@ fn worker_watchdog_command() -> Command {
         .about("Notify parent agents about stalled Codex and Claude workers")
         .arg(flag("once").help("Scan once, then exit"))
         .arg(flag("dry-run").help("Print stalled workers without notifying or logging"))
+        .arg(flag("all").help("Include finished workers in output"))
+        .arg(
+            option("history-days", "N")
+                .default_value("7")
+                .value_parser(clap::value_parser!(u64))
+                .help("Skip source directories with no relevant files newer than this many days"),
+        )
         .arg(
             option("interval-secs", "N")
                 .default_value("30")
@@ -298,12 +305,35 @@ fn worker_watchdog_command() -> Command {
                 .value_parser(clap::value_parser!(u64))
                 .help("No heartbeat or trace progress for this many minutes"),
         )
+        .arg(
+            option("confirm-secs", "N")
+                .default_value("20")
+                .value_parser(clap::value_parser!(u64))
+                .help("Seconds between confirmation samples"),
+        )
+        .arg(
+            option("op-deadline-minutes", "N")
+                .default_value("60")
+                .value_parser(clap::value_parser!(u64))
+                .help("Maximum age for one outstanding operation"),
+        )
         .arg(path_option("runs-dir", "PATH").help("Codex ra-launch run directory"))
         .arg(
             path_option("claude-projects-dir", "PATH").help("Claude project transcripts directory"),
         )
         .arg(path_option("state-file", "PATH").help("Worker notification dedupe state"))
         .arg(path_option("log-file", "PATH").help("Append worker stall notification events"))
+        .arg(
+            Arg::new("local-host")
+                .long("local-host")
+                .value_name("NAME")
+                .action(ArgAction::Append)
+                .help("Additional alias for this host (repeatable)"),
+        )
+        .arg(
+            option("parent-probe", "CMD")
+                .help("Command prefix used to inspect remote parent hosts"),
+        )
         .arg(json_flag())
 }
 
