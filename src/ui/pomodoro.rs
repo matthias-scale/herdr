@@ -1223,13 +1223,15 @@ mod tests {
         app.sidebar_sections_layout = true;
         for width in 18..=60 {
             let sidebar = Rect::new(0, 0, width, 20);
-            let mut areas = [
+            let areas: Vec<Rect> = [
                 sidebar_areas_hit_area(&app, sidebar),
                 window_cycle_mode_hit_area(&app, sidebar),
                 notification_hit_area(&app, sidebar),
                 pomodoro_hit_area(&app, sidebar),
-            ];
-            areas.retain(|area| area.width > 0);
+            ]
+            .into_iter()
+            .filter(|area| area.width > 0)
+            .collect();
             for (index, left) in areas.iter().enumerate() {
                 assert!(left.right() <= width - 2, "width {width}: {left:?}");
                 for right in &areas[index + 1..] {
