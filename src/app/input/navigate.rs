@@ -4046,7 +4046,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn close_plain_local_pane_stays_local_when_remote_selection_was_cleared() {
+    async fn close_plain_local_final_pane_closes_workspace_when_remote_selection_was_cleared() {
         let (mut app, _) = app_with_remote_agent();
         app.state.confirm_close = false;
         app.state.sidebar_selected_remote_agent = None;
