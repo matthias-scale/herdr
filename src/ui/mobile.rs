@@ -1335,6 +1335,8 @@ fn render_mobile_switcher_content(
                 space_icon,
                 host,
                 dot,
+                blocked,
+                dot_color,
                 subtitle,
                 ..
             } => {
@@ -1346,6 +1348,8 @@ fn render_mobile_switcher_content(
                         space_icon,
                         host,
                         dot,
+                        *blocked,
+                        *dot_color,
                         subtitle.as_deref(),
                         Rect::new(
                             content.x,
