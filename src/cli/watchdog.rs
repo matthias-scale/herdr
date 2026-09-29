@@ -24,6 +24,31 @@ use crate::{
 
 mod workers;
 
+#[cfg(test)]
+mod nudge_delivery_tests {
+    use super::nudge_retry_text;
+
+    #[test]
+    fn a_still_composed_nudge_retries_enter_without_retyping() {
+        let pane =
+            "submitted context\n────────────────\n❯ cont — resume: continue work\n────────────────";
+        assert_eq!(
+            nudge_retry_text(pane, "cont — resume: continue work"),
+            Some("\r")
+        );
+        assert_eq!(
+            nudge_retry_text(pane, "cont — resume: continue work")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            nudge_retry_text("❯ \n", "cont — resume: continue work"),
+            None
+        );
+    }
+}
+
 const DEFAULT_INTERVAL_SECS: u64 = 30;
 const DEFAULT_STALL_SECS: u64 = 600;
 const DEFAULT_LINES: u32 = 40;
@@ -478,6 +503,7 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
                 d.action = Some("nudge".into());
                 d.action_text = Some(text.trim_end_matches('\r').to_owned());
                 d.delivered = Some(false);
+                d.reason = Some("nudge left in composer".into());
                 if options.dry_run {
                     d.status = "would_nudge".into();
                 } else if let Ok(current) = current_pane(&d.pane_id) {
@@ -515,15 +541,29 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
                                     method: Method::PaneSendTextIf(params),
                                 }) {
                                     if response["result"]["outcome"] == "sent" {
-                                        d.delivered = Some(true);
-                                        mem.nudged_stall = true;
-                                        d.status = "nudged".into();
+                                        let sent = wait_for_nudge_submission(
+                                            &d.pane_id,
+                                            &d.action_text.clone().unwrap_or_default(),
+                                        );
+                                        if sent {
+                                            d.delivered = Some(true);
+                                            d.reason = None;
+                                            mem.nudged_stall = true;
+                                            d.status = "nudged".into();
+                                        } else {
+                                            d.status = "unverified".into();
+                                            d.evidence.push_str("; nudge left in composer");
+                                        }
                                         append_nudge_event(&options.status_log, d)?;
                                     }
                                 }
                             }
                         }
                     }
+                }
+                if d.delivered != Some(true) && !options.dry_run {
+                    d.status = "unverified".into();
+                    d.reason = Some("nudge left in composer".into());
                 }
             }
         }
@@ -537,6 +577,59 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
     } else {
         0
     })
+}
+
+fn wait_for_nudge_submission(pane_id: &str, nudge: &str) -> bool {
+    for attempt in 0..3 {
+        if attempt > 0 {
+            thread::sleep(Duration::from_millis(500));
+        }
+        let Ok(read) = read_detection_observation(pane_id) else {
+            continue;
+        };
+        if nudge_retry_text(&read.text, nudge).is_none() {
+            return true;
+        }
+        if attempt == 2 {
+            // Submit the already-present text; never resend its body.
+            if let (Some(observation), Some(agent_ref), Some(agent_session)) = (
+                read.observation.clone(),
+                read.agent_ref.clone(),
+                read.agent_session.clone(),
+            ) {
+                let params = PaneSendTextIfParams {
+                    pane_id: pane_id.to_owned(),
+                    text: "\r".into(),
+                    workspace_id: read.workspace_id,
+                    terminal_id: read.terminal_id,
+                    agent_ref,
+                    agent_session,
+                    condition: PaneSendTextCondition::DetectionSnapshotUnchanged,
+                    observation_token: observation,
+                };
+                let _ = super::send_request(&Request {
+                    id: next_request_id("watchdog-nudge-enter"),
+                    method: Method::PaneSendTextIf(params),
+                });
+                // Bounded final confirmation; total wait remains under five seconds.
+                for _ in 0..2 {
+                    thread::sleep(Duration::from_millis(500));
+                    if let Ok(after) = read_detection_observation(pane_id) {
+                        if nudge_retry_text(&after.text, nudge).is_none() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn nudge_retry_text(pane_text: &str, nudge: &str) -> Option<&'static str> {
+    watchdog::evidence::composer_text(pane_text)
+        .is_some_and(|text| text.contains(nudge))
+        .then_some("\r")
 }
 
 fn append_nudge_event(path: &Path, decision: &PaneV3Decision) -> io::Result<()> {
@@ -553,6 +646,7 @@ fn append_nudge_event(path: &Path, decision: &PaneV3Decision) -> io::Result<()> 
             "timestamp": unix_seconds()?, "source": WATCHDOG_SOURCE,
             "pane_id": decision.pane_id, "action": decision.action,
             "text": decision.action_text, "delivered": decision.delivered,
+            "reason": decision.reason,
             "evidence": decision.evidence,
         }),
     )
@@ -1220,6 +1314,7 @@ mod tests {
             action: None,
             action_text: None,
             delivered: None,
+            reason: None,
             observed_terminal_id: None,
             observed_agent_session: None,
             observed_hash: 0,

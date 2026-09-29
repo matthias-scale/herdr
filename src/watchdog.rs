@@ -824,6 +824,8 @@ pub(crate) struct PaneV3Decision {
     pub action_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delivered: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     #[serde(skip)]
     pub observed_terminal_id: Option<String>,
     #[serde(skip)]
@@ -956,12 +958,19 @@ pub(crate) fn classify_pane_v3(
                 let leader = processes.iter().find(|p| p.pid == p.pgid).map(|p| p.pid);
                 let active_tool =
                     !evidence::current_tool_processes(processes, leader, age).is_empty();
-                if !active_tool && (dead_marker || age >= opt.stall_secs) {
+                let idle_or_done = matches!(o.status, AgentStatus::Idle | AgentStatus::Done);
+                let promise_already_satisfied = evidence::finished_reply(&o.tail);
+                if promise_already_satisfied {
+                    class = PaneClass::FinishedIdle;
+                    ev = "reply finished; promised work already satisfied".into();
+                } else if !active_tool && idle_or_done && (dead_marker || age >= opt.stall_secs) {
                     class = PaneClass::Stalled;
                     ev = format!("promised work stopped: {work}");
-                } else {
+                } else if active_tool || age < opt.stall_secs {
                     class = PaneClass::Working;
                     ev = "semantic progress is within stall window".into();
+                } else {
+                    ev = "promised work without idle/done confirmation".into();
                 }
             } else if let Some(p) = evidence::active_prompt(&o.tail) {
                 let tools = o.process_group.as_deref().unwrap_or(&[]);
@@ -1082,6 +1091,7 @@ pub(crate) fn classify_pane_v3(
         action: None,
         action_text: None,
         delivered: None,
+        reason: None,
         observed_terminal_id: o.terminal_id.clone(),
         observed_agent_session: o.agent_session.clone(),
         observed_hash: hash,
@@ -1823,21 +1833,12 @@ mod tests {
             "1 feedback draft",
         );
         let mut memory = PaneV3Memory::default();
-        let fresh = classify_pane_v3(
-            &pane_v3(AgentStatus::Working, &tail),
-            &mut memory,
-            1000,
-            v3opt(),
-        );
+        let observation = pane_v3(AgentStatus::Idle, &tail);
+        let fresh = classify_pane_v3(&observation, &mut memory, 1000, v3opt());
         assert_eq!(fresh.class, PaneClass::Working);
-        assert_eq!(fresh.evidence, "human is typing");
+        assert!(fresh.evidence.ends_with("human is typing"));
         memory.draft_since = Some(1000 - STALE_DRAFT_SECS);
-        let stale = classify_pane_v3(
-            &pane_v3(AgentStatus::Working, &tail),
-            &mut memory,
-            1000,
-            v3opt(),
-        );
+        let stale = classify_pane_v3(&observation, &mut memory, 1000, v3opt());
         assert_eq!(stale.class, PaneClass::Stalled);
         assert!(stale
             .evidence
