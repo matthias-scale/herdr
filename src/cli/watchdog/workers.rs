@@ -60,7 +60,8 @@ struct WorkerSummary {
     dry_run: bool,
 }
 
-type SourceClassCounts = std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>>;
+type SourceClassCounts =
+    std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>>;
 
 #[derive(Debug, Serialize)]
 struct SemanticDecision {
@@ -236,6 +237,8 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
         });
         let found = if host_is_local {
             parent_matches(worker, &panes)
+        } else if options.dry_run {
+            None
         } else {
             remote_parent_present(worker, options).unwrap_or(None)
         };
@@ -273,6 +276,8 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
                 local_second
                     .as_deref()
                     .and_then(|panes| parent_matches(worker, panes))
+            } else if options.dry_run {
+                None
             } else {
                 remote_parent_present(worker, options).unwrap_or(None)
             };
@@ -745,10 +750,17 @@ fn discover_workers(
         &process_args,
         &mut skipped_old,
     )?);
-    Ok(WorkerDiscovery { workers, skipped_old })
+    Ok(WorkerDiscovery {
+        workers,
+        skipped_old,
+    })
 }
 
-fn discover_codex_runs(runs_dir: &Path, cutoff: u64, skipped_old: &mut usize) -> io::Result<Vec<WorkerObservation>> {
+fn discover_codex_runs(
+    runs_dir: &Path,
+    cutoff: u64,
+    skipped_old: &mut usize,
+) -> io::Result<Vec<WorkerObservation>> {
     let mut workers = Vec::new();
     let process_samples = process_table()?;
     let now = unix_seconds()?;
@@ -763,7 +775,7 @@ fn discover_codex_runs(runs_dir: &Path, cutoff: u64, skipped_old: &mut usize) ->
             continue;
         }
         let run_dir = entry.path();
-        let newest = newest_mtime(&run_dir)?;
+        let newest = newest_mtime(&run_dir, MtimeScope::Run)?;
         if newest.is_some_and(|mtime| mtime < cutoff) {
             *skipped_old += 1;
             continue;
@@ -959,7 +971,7 @@ fn discover_claude_subagents(
         if !project.file_type()?.is_dir() {
             continue;
         }
-        if newest_mtime(&project.path())?.is_some_and(|mtime| mtime < cutoff) {
+        if newest_mtime(&project.path(), MtimeScope::Project)?.is_some_and(|mtime| mtime < cutoff) {
             *skipped_old += 1;
             continue;
         }
@@ -973,7 +985,7 @@ fn discover_claude_subagents(
             };
             let parent_transcript = project.path().join(format!("{parent_session}.jsonl"));
             let parent_mtime = modified_unix_seconds(&parent_transcript)?.unwrap_or_default();
-            let session_mtime = newest_mtime(&session.path())?
+            let session_mtime = newest_mtime(&session.path(), MtimeScope::Session)?
                 .unwrap_or_default()
                 .max(parent_mtime);
             if session_mtime < cutoff {
@@ -1008,7 +1020,7 @@ fn discover_claude_subagents(
                 let now = unix_seconds()?;
                 let own_recent = last_activity >= now.saturating_sub(op_deadline_secs);
                 let parent_live = parent_mtime >= now.saturating_sub(stall_secs)
-                    || process_args.iter().any(|(_, args)| args.contains(&parent_session));
+                    || claude_parent_process_live(process_args, &parent_session);
                 let idle_secs = unix_seconds()?.saturating_sub(last_activity);
                 let inactive = claude_subagent_inactive(final_turn, own_recent, parent_live);
                 workers.push(WorkerObservation {
@@ -1025,7 +1037,14 @@ fn discover_claude_subagents(
                     turn_id: None,
                     semantic_hash: evidence::semantic_hash(&trace),
                     trace_mtime: last_activity,
-                    trace: if inactive { format!("inactive: transcript idle {}d, parent session not live", idle_secs / 86_400) } else { trace },
+                    trace: if inactive {
+                        format!(
+                            "inactive: transcript idle {}d, parent session not live",
+                            idle_secs / 86_400
+                        )
+                    } else {
+                        trace
+                    },
                     out: String::new(),
                     pid: None,
                     pid_alive: true,
@@ -1033,7 +1052,11 @@ fn discover_claude_subagents(
                     tool_alive: false,
                     outstanding_op: pending_tool,
                     progress_at: Some(last_activity),
-                    state: if inactive { String::from("finished") } else { String::from("active") },
+                    state: if inactive {
+                        String::from("finished")
+                    } else {
+                        String::from("active")
+                    },
                     blocked_reason: None,
                     receipt_status: None,
                     gate_verdict: None,
@@ -1048,6 +1071,16 @@ fn claude_subagent_inactive(final_turn: bool, own_recent: bool, parent_live: boo
     !final_turn && !own_recent && !parent_live
 }
 
+fn claude_parent_process_live(process_args: &[(u32, String)], session: &str) -> bool {
+    process_args.iter().any(|(_, args)| {
+        args.split_whitespace().any(|arg| {
+            arg == session
+                || arg.strip_prefix("--session-id=") == Some(session)
+                || arg.strip_prefix("--resume=") == Some(session)
+        })
+    })
+}
+
 fn process_args_table() -> io::Result<Vec<(u32, String)>> {
     #[cfg(unix)]
     {
@@ -1057,7 +1090,9 @@ fn process_args_table() -> io::Result<Vec<(u32, String)>> {
         if !output.status.success() {
             return Err(io::Error::other("ps -A -o pid=,args= failed"));
         }
-        Ok(evidence::parse_process_args(&String::from_utf8_lossy(&output.stdout)))
+        Ok(evidence::parse_process_args(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
     }
     #[cfg(not(unix))]
     {
@@ -1065,24 +1100,65 @@ fn process_args_table() -> io::Result<Vec<(u32, String)>> {
     }
 }
 
-fn newest_mtime(path: &Path) -> io::Result<Option<u64>> {
+#[derive(Clone, Copy)]
+enum MtimeScope {
+    Run,
+    Turns,
+    Turn,
+    Project,
+    Session,
+    Subagents,
+}
+
+fn newest_mtime(path: &Path, scope: MtimeScope) -> io::Result<Option<u64>> {
     let mut newest = None;
     let entries = match fs::read_dir(path) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Ok(None),
         Err(error) => return Err(error),
     };
     for entry in entries {
         let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
         if entry.file_type()?.is_dir() {
-            newest = newest_mtime(&entry.path())?.into_iter().chain(newest).max();
+            let child_scope = match scope {
+                MtimeScope::Run if name == "turns" => Some(MtimeScope::Turns),
+                MtimeScope::Turns => Some(MtimeScope::Turn),
+                MtimeScope::Project => Some(MtimeScope::Session),
+                MtimeScope::Session if name == "subagents" => Some(MtimeScope::Subagents),
+                _ => None,
+            };
+            if let Some(child_scope) = child_scope {
+                newest = newest_mtime(&entry.path(), child_scope)?
+                    .into_iter()
+                    .chain(newest)
+                    .max();
+            }
         } else {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            let relevant = matches!(name.as_ref(), "state.json" | "out.log" | "trace.log" | "launch-metadata" | "start.json" | "receipt.json")
-                || entry.path().extension().is_some_and(|extension| extension == "jsonl");
+            let relevant = match scope {
+                MtimeScope::Run => matches!(
+                    name.as_ref(),
+                    "state.json" | "out.log" | "trace.log" | "launch-metadata"
+                ),
+                MtimeScope::Turn => matches!(
+                    name.as_ref(),
+                    "start.json" | "receipt.json" | "trace.log" | "out.log"
+                ),
+                MtimeScope::Project | MtimeScope::Subagents => entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "jsonl"),
+                MtimeScope::Turns | MtimeScope::Session => false,
+            };
             if relevant {
-                newest = modified_unix_seconds(&entry.path())?.into_iter().chain(newest).max();
+                let modified = match modified_unix_seconds(&entry.path()) {
+                    Ok(modified) => modified,
+                    Err(error) if error.kind() == io::ErrorKind::PermissionDenied => None,
+                    Err(error) => return Err(error),
+                };
+                newest = modified.into_iter().chain(newest).max();
             }
         }
     }
@@ -1469,12 +1545,8 @@ mod tests {
         assert_eq!(options.op_deadline_secs, 3600);
         assert_eq!(options.history_days, 7);
         assert!(!options.all);
-        let options = parse_worker_options(&[
-            "--history-days".into(),
-            "14".into(),
-            "--all".into(),
-        ])
-        .expect("parse output controls");
+        let options = parse_worker_options(&["--history-days".into(), "14".into(), "--all".into()])
+            .expect("parse output controls");
         assert_eq!(options.history_days, 14);
         assert!(options.all);
         let options = parse_worker_options(&[
@@ -1524,6 +1596,28 @@ mod tests {
     }
 
     #[test]
+    fn run_history_ignores_unrelated_nested_files() {
+        let dir = TestDir::new();
+        let run = dir.path().join("ra-run-old");
+        fs::create_dir_all(run.join("skill-state/tmp")).expect("nested unrelated directory");
+        let state = run.join("state.json");
+        fs::write(&state, "{}").expect("run state");
+        fs::File::open(&state)
+            .expect("open state")
+            .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(100)))
+            .expect("age state");
+        fs::write(
+            run.join("skill-state/tmp/recent.jsonl"),
+            "not a worker transcript",
+        )
+        .expect("unrelated file");
+        assert_eq!(
+            newest_mtime(&run, MtimeScope::Run).expect("mtime"),
+            Some(100)
+        );
+    }
+
+    #[test]
     fn claude_subagent_liveness_requires_parent_or_recent_own_transcript() {
         assert!(claude_subagent_inactive(false, false, false));
         assert!(!claude_subagent_inactive(false, false, true));
@@ -1532,16 +1626,108 @@ mod tests {
     }
 
     #[test]
+    fn claude_discovery_classifies_old_and_live_parent_transcripts() {
+        let dir = TestDir::new();
+        let transcript = dir.path().join("project/session-1/subagents/agent-1.jsonl");
+        fs::create_dir_all(transcript.parent().expect("transcript parent"))
+            .expect("create subagent directory");
+        fs::write(
+            &transcript,
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"Bash\"}]}}\n",
+        )
+        .expect("write pending tool");
+        let old = SystemTime::now() - Duration::from_secs(2 * 3600);
+        fs::File::open(&transcript)
+            .expect("open transcript")
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .expect("age transcript");
+
+        let discover = |processes: &[(u32, String)]| {
+            let mut skipped = 0;
+            discover_claude_subagents(dir.path(), 0, 3600, 1800, processes, &mut skipped)
+                .expect("discover subagent")
+                .remove(0)
+        };
+        let inactive = discover(&[]);
+        assert!(inactive.finished);
+        assert!(inactive
+            .trace
+            .starts_with("inactive: transcript idle 0d, parent session not live"));
+
+        let live = discover(&[(123, "claude --session-id session-1".into())]);
+        assert!(!live.finished);
+        assert_eq!(live.outstanding_op.as_deref(), Some("Bash"));
+        let evidence = worker_watchdog::WorkerEvidence {
+            turn_id: None,
+            hash: live.semantic_hash,
+            trace_mtime: live.trace_mtime,
+            progress_at: live.progress_at,
+            trace: live.trace,
+            out: live.out,
+            pid: None,
+            pid_alive: true,
+            pid_identity_ok: true,
+            tool_alive: false,
+            outstanding_op: live.outstanding_op,
+            finished: live.finished,
+            exit_code: None,
+            receipt_status: None,
+            gate_verdict: None,
+            blocked_reason: None,
+            state: live.state,
+            parent_host: None,
+            parent_session: Some("session-1".into()),
+            parent_terminal: None,
+            parent_pane: None,
+        };
+        assert_eq!(
+            worker_watchdog::classify_worker(
+                &evidence,
+                &mut worker_watchdog::SemanticWorkerEntry::default(),
+                unix_seconds().expect("clock"),
+                1800,
+                1800,
+                3600,
+                None,
+            )
+            .0,
+            worker_watchdog::WorkerClass::SuspectedStall
+        );
+    }
+
+    #[test]
+    fn claude_process_session_match_requires_a_whole_argument() {
+        let processes = [(123, "claude --session-id other-session-1".into())];
+        assert!(!claude_parent_process_live(&processes, "session-1"));
+        assert!(claude_parent_process_live(
+            &[(123, "claude --session-id=session-1".into())],
+            "session-1"
+        ));
+    }
+
+    #[test]
     fn default_output_filters_finished_and_all_restores_it() {
         let make = |class| SemanticDecision {
-            worker_id: "agent".into(), source: "claude".into(), turn_id: None, class,
-            parent: "parent_unknown", parent_detail: String::new(), age_secs: 0,
-            evidence: String::new(), samples: Vec::new(), incident: worker_watchdog::WorkerIncidentDecision {
-                key: None, action: worker_watchdog::IncidentAction::None,
-                delivery: worker_watchdog::IncidentDelivery::None, error: None,
+            worker_id: "agent".into(),
+            source: "claude".into(),
+            turn_id: None,
+            class,
+            parent: "parent_unknown",
+            parent_detail: String::new(),
+            age_secs: 0,
+            evidence: String::new(),
+            samples: Vec::new(),
+            incident: worker_watchdog::WorkerIncidentDecision {
+                key: None,
+                action: worker_watchdog::IncidentAction::None,
+                delivery: worker_watchdog::IncidentDelivery::None,
+                error: None,
             },
         };
-        let decisions = [make(worker_watchdog::WorkerClass::Finished), make(worker_watchdog::WorkerClass::Dead)];
+        let decisions = [
+            make(worker_watchdog::WorkerClass::Finished),
+            make(worker_watchdog::WorkerClass::Dead),
+        ];
         assert_eq!(visible_decisions(&decisions, false).len(), 1);
         assert_eq!(visible_decisions(&decisions, true).len(), 2);
     }
@@ -1549,23 +1735,63 @@ mod tests {
     #[test]
     fn dead_run_retains_present_parent_in_its_decision() {
         let worker = WorkerObservation {
-            source: "codex".into(), worker_id: "ra-run".into(), parent_session: "parent".into(),
-            parent_host: None, parent_terminal: None, parent_pane: None, last_activity: 1,
-            finished: false, parent_scope_local: true, parent_state: ParentState::Present,
-            turn_id: None, semantic_hash: 0, trace_mtime: 1, trace: String::new(), out: String::new(),
-            pid: Some(123), pid_alive: false, pid_identity_ok: false, tool_alive: false,
-            outstanding_op: None, progress_at: None, state: "active".into(), blocked_reason: None,
-            receipt_status: None, gate_verdict: None,
+            source: "codex".into(),
+            worker_id: "ra-run".into(),
+            parent_session: "parent".into(),
+            parent_host: None,
+            parent_terminal: None,
+            parent_pane: None,
+            last_activity: 1,
+            finished: false,
+            parent_scope_local: true,
+            parent_state: ParentState::Present,
+            turn_id: None,
+            semantic_hash: 0,
+            trace_mtime: 1,
+            trace: String::new(),
+            out: String::new(),
+            pid: Some(123),
+            pid_alive: false,
+            pid_identity_ok: false,
+            tool_alive: false,
+            outstanding_op: None,
+            progress_at: None,
+            state: "active".into(),
+            blocked_reason: None,
+            receipt_status: None,
+            gate_verdict: None,
         };
         let evidence = worker_watchdog::WorkerEvidence {
-            turn_id: None, hash: 0, trace_mtime: 1, progress_at: None, trace: String::new(), out: String::new(),
-            pid: worker.pid, pid_alive: false, pid_identity_ok: false, tool_alive: false,
-            outstanding_op: None, finished: false, exit_code: None, receipt_status: None,
-            gate_verdict: None, blocked_reason: None, state: "active".into(), parent_host: None,
-            parent_session: Some("parent".into()), parent_terminal: None, parent_pane: None,
+            turn_id: None,
+            hash: 0,
+            trace_mtime: 1,
+            progress_at: None,
+            trace: String::new(),
+            out: String::new(),
+            pid: worker.pid,
+            pid_alive: false,
+            pid_identity_ok: false,
+            tool_alive: false,
+            outstanding_op: None,
+            finished: false,
+            exit_code: None,
+            receipt_status: None,
+            gate_verdict: None,
+            blocked_reason: None,
+            state: "active".into(),
+            parent_host: None,
+            parent_session: Some("parent".into()),
+            parent_terminal: None,
+            parent_pane: None,
         };
         let (class, _, _) = worker_watchdog::classify_worker(
-            &evidence, &mut worker_watchdog::SemanticWorkerEntry::default(), 100, 10, 10, 10, None,
+            &evidence,
+            &mut worker_watchdog::SemanticWorkerEntry::default(),
+            100,
+            10,
+            10,
+            10,
+            None,
         );
         assert_eq!(class, worker_watchdog::WorkerClass::Dead);
         assert_eq!(parent_state_label(worker.parent_state), "present");
@@ -1575,7 +1801,13 @@ mod tests {
     fn parent_decision_distinguishes_unconfirmed_absence() {
         assert_eq!(decision_parent_state(ParentState::Present, None), "present");
         assert_eq!(decision_parent_state(ParentState::Absent, None), "orphaned");
-        assert_eq!(decision_parent_state(ParentState::Unknown, None), "parent_unknown");
-        assert_eq!(decision_parent_state(ParentState::Unknown, Some(false)), "absent_unconfirmed");
+        assert_eq!(
+            decision_parent_state(ParentState::Unknown, None),
+            "parent_unknown"
+        );
+        assert_eq!(
+            decision_parent_state(ParentState::Unknown, Some(false)),
+            "absent_unconfirmed"
+        );
     }
 }

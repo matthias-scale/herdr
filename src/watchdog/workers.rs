@@ -272,10 +272,12 @@ pub(crate) fn classify_worker(
             0,
             if evidence.trace.starts_with("inactive: ") {
                 evidence.trace.clone()
-            } else { format!(
-                "finished; receipt={:?}; gate_verdict={:?}",
-                evidence.receipt_status, evidence.gate_verdict
-            ) },
+            } else {
+                format!(
+                    "finished; receipt={:?}; gate_verdict={:?}",
+                    evidence.receipt_status, evidence.gate_verdict
+                )
+            },
         );
     }
     if evidence.pid.is_some() && (!evidence.pid_alive || !evidence.pid_identity_ok) {
@@ -886,7 +888,10 @@ mod tests {
             600,
             None,
         );
-        assert_eq!(reason, "inactive: transcript idle 20d, parent session not live");
+        assert_eq!(
+            reason,
+            "inactive: transcript idle 20d, parent session not live"
+        );
     }
 
     #[test]
