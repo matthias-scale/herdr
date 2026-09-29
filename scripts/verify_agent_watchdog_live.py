@@ -200,6 +200,9 @@ class Harness:
         if payload is None:
             payload = {"exit_code": result.returncode, "stdout": result.stdout[-1500:],
                        "stderr": result.stderr[-1000:]}
+        payload["_exit_code"] = result.returncode
+        payload["_stdout_tail"] = result.stdout[-1500:]
+        payload["_stderr_tail"] = result.stderr[-1000:]
         payload["_wall_time_ms"] = elapsed
         payload["_model_latency_ms"] = (payload.get("summary") or {}).get("model_latency_ms")
         with self.timeline.open("a", encoding="utf-8") as output:
@@ -357,13 +360,13 @@ def _script(text: str, repeat: bool = False) -> str:
                 f"print({literal} + ' ' + str(i), flush=True)\n")
     else:
         code = f"print({literal}, flush=True)\nimport time; time.sleep(3600)\n"
-    return "python3 -u -c " + repr(code)
+    return "python3 -u -c " + shlex.quote(code)
 
 
 def setup_quiet(h: Harness, ident: str) -> str:
     code = "import subprocess,time; print('Running cargo test', flush=True); " \
            "subprocess.Popen(['sleep','3600']); time.sleep(3600)"
-    return h.workspace(ident, "python3 -u -c " + repr(code))
+    return h.workspace(ident, "python3 -u -c " + shlex.quote(code))
 
 
 def setup_stall(h: Harness, ident: str) -> str:
@@ -373,7 +376,7 @@ def setup_stall(h: Harness, ident: str) -> str:
 def setup_prompt(h: Harness, ident: str) -> str:
     code = "import subprocess,time; print('Overwrite generated snapshot? [y/n]', flush=True); " \
            "subprocess.Popen(['bash','-c','read -r answer']); time.sleep(3600)"
-    return h.workspace(ident, "python3 -u -c " + repr(code))
+    return h.workspace(ident, "python3 -u -c " + shlex.quote(code))
 
 
 def setup_progress(h: Harness, ident: str) -> str:
@@ -395,7 +398,7 @@ def setup_account(h: Harness, ident: str) -> str:
 def setup_spinner(h: Harness, ident: str) -> str:
     code = "import itertools,time; glyphs=itertools.cycle('◐◓◑◒'); " \
            "exec(\"while True:\\n print(next(glyphs), flush=True)\\n time.sleep(2)\")"
-    return h.workspace(ident, "python3 -u -c " + repr(code))
+    return h.workspace(ident, "python3 -u -c " + shlex.quote(code))
 
 
 def setup_quote(h: Harness, ident: str) -> str:
@@ -531,7 +534,18 @@ def self_test(args: argparse.Namespace) -> int:
     h = Harness(args)
     try:
         h.start()
-        h.workspace("self-test", _script("harness fixture ready"))
+        pane_id = h.workspace("self-test", _script("harness fixture ready"))
+        deadline = time.monotonic() + 5
+        pane_text = ""
+        while time.monotonic() < deadline:
+            response = h.call("pane.read", {"pane_id": pane_id, "source": "detection",
+                "lines": 20, "format": "text"})
+            pane_text = (response.get("read") or {}).get("text", "")
+            if "harness fixture ready" in pane_text:
+                break
+            time.sleep(.1)
+        if "harness fixture ready" not in pane_text:
+            raise RuntimeError("fixture command did not produce the expected pane output")
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"],
                                 cwd=h.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         h.started.append(proc)
@@ -545,6 +559,7 @@ def self_test(args: argparse.Namespace) -> int:
         (run_dir / "turns" / "turn-1" / "trace.log").write_text("codex\nself-test fixture\n")
         (h.root / "timeline.jsonl").write_text(json.dumps({"self_test": True}) + "\n")
         print("SELF_TEST server_started=true workspace_created=true pane_created=true "
+              "pane_output_verified=true "
               f"worker_pid={proc.pid} timeline_written=true")
         return 0
     except Exception as exc:
@@ -634,7 +649,7 @@ def main() -> int:
                 decisions = payload.get("decisions", [])
                 decision = next((d for d in decisions if d.get("pane_id") == pane_id), {})
                 actual = decision.get("class", "missing")
-                evidence = decision.get("evidence")
+                evidence = decision.get("evidence", payload.get("_stderr_tail"))
             elif family in ("B", "P"):
                 opts = ["--dry-run", "--stall-minutes", "1", "--runs-dir",
                         str(Path(result["runs"]).parent), "--state-file", str(harness.root / f"worker-{ident}.json"),
@@ -655,7 +670,7 @@ def main() -> int:
                 payload = harness.run_watchdog("B", opts)
                 decision = next((d for d in payload.get("decisions", []) if d.get("worker_id") == ident), {})
                 actual = decision.get("parent", "missing") if family == "P" else decision.get("class", "missing")
-                evidence = decision.get("evidence")
+                evidence = decision.get("evidence", payload.get("_stderr_tail"))
             else:
                 actual, evidence = "not_checked", "parent check included in worker result"
                 payload = {"_wall_time_ms": 0, "_model_latency_ms": None}
