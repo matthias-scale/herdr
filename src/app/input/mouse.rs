@@ -4232,6 +4232,37 @@ mod tests {
         workspace::Workspace,
     };
 
+    fn app_with_remote_proxy() -> (
+        App,
+        crate::layout::PaneInfo,
+        tokio::sync::mpsc::Receiver<crate::pane::ProxyOutbound>,
+    ) {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("remote proxy");
+        let pane_id = ws.tabs[0].root_pane;
+        let infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = infos[0].clone();
+        let (runtime, channels) = crate::terminal::TerminalRuntime::spawn_remote_proxy(
+            pane_id,
+            info.inner_rect.height,
+            info.inner_rect.width,
+            0,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+            crate::remote::RemoteFocusOperationState::new(),
+        )
+        .expect("proxy runtime");
+        assert!(runtime.set_remote_proxy_input_enabled(true));
+        assert!(runtime.process_remote_frame(b"\x1b[?1000h\x1b[?1006h\x1b[1;1Hproxy frame text"));
+        ws.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.view.pane_infos = infos;
+        (app, info, channels.outbound_rx)
+    }
+
     #[cfg(unix)]
     fn context_tab_ids(app: &App, ws_idx: usize, tab_idx: usize) -> (String, String) {
         let workspace_id = app.state.workspaces[ws_idx].id.clone();
@@ -11608,6 +11639,74 @@ mod tests {
         assert!(proxy_mouse_selection_is_local(true, down));
         assert!(proxy_mouse_selection_is_local(true, drag));
         assert!(!proxy_mouse_selection_is_local(false, down));
+    }
+
+    #[test]
+    fn remote_proxy_mouse_drag_selects_locally_without_forwarding() {
+        let (mut app, info, mut outbound) = app_with_remote_proxy();
+        let row = info.inner_rect.y;
+        let start = info.inner_rect.x;
+        let end = start + 5;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), start, row));
+        assert!(app.state.selection.is_some(), "down starts Herdr selection");
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), end, row));
+
+        let selection = app.state.selection.as_ref().expect("drag selection");
+        assert_eq!(selection.pane_id, info.id);
+        assert!(selection.is_visible(), "drag extends the selection");
+        assert!(
+            outbound.try_recv().is_err(),
+            "local selection sends no bytes"
+        );
+    }
+
+    #[test]
+    fn remote_proxy_shift_mouse_override_forwards_without_selection() {
+        let (mut app, info, mut outbound) = app_with_remote_proxy();
+        let row = info.inner_rect.y;
+        let col = info.inner_rect.x;
+        let mut down = mouse(MouseEventKind::Down(MouseButton::Left), col, row);
+        down.modifiers = crossterm::event::KeyModifiers::SHIFT;
+
+        app.handle_mouse(down);
+
+        assert!(app.state.selection.is_none());
+        assert!(matches!(
+            outbound.try_recv(),
+            Ok(crate::pane::ProxyOutbound::Input(bytes)) if !bytes.is_empty()
+        ));
+    }
+
+    #[test]
+    fn remote_proxy_selection_copy_reads_displayed_frame_text() {
+        let (mut app, info, _outbound) = app_with_remote_proxy();
+        app.state.copy_on_select = false;
+        let row = info.inner_rect.y;
+        let start = info.inner_rect.x;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), start, row));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            start + 10,
+            row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            start + 10,
+            row,
+        ));
+        app.state.copy_selection(&app.terminal_runtimes);
+
+        let copied = app
+            .state
+            .request_clipboard_write
+            .take()
+            .expect("copy result");
+        assert_eq!(
+            String::from_utf8(copied).expect("UTF-8 frame text"),
+            "proxy frame"
+        );
     }
 
     #[test]
