@@ -772,6 +772,14 @@ pub(crate) struct PaneV3Memory {
     pub draft_since: Option<u64>,
     #[serde(default)]
     pub nudged_stall: bool,
+    #[serde(default)]
+    pub quiet_since: Option<u64>,
+    #[serde(default)]
+    pub nudge_count: u8,
+    #[serde(default)]
+    pub last_nudge_at: Option<u64>,
+    #[serde(default)]
+    pub last_reported_at: Option<String>,
 }
 pub(crate) type PaneV3MemoryMap = HashMap<String, PaneV3Memory>;
 
@@ -826,6 +834,12 @@ pub(crate) struct PaneV3Decision {
     pub delivered: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_to_continue: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quiet_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nudge_count: Option<u8>,
     #[serde(skip)]
     pub observed_terminal_id: Option<String>,
     #[serde(skip)]
@@ -1092,6 +1106,9 @@ pub(crate) fn classify_pane_v3(
         action_text: None,
         delivered: None,
         reason: None,
+        expected_to_continue: None,
+        quiet_secs: None,
+        nudge_count: None,
         observed_terminal_id: o.terminal_id.clone(),
         observed_agent_session: o.agent_session.clone(),
         observed_hash: hash,
@@ -1699,6 +1716,23 @@ mod tests {
         format!(
             "{reply}\n────────────────────────\n❯ {composer}\n────────────────────────\n{footer}"
         )
+    }
+
+    #[test]
+    fn expected_to_continue_requires_active_now_work_without_human_or_background_wait() {
+        assert!(evidence::expected_to_continue(
+            "Now: continuing implementation\n────────────────\n❯ cont\n────────────────\n0 shells"
+        ));
+        assert!(!evidence::expected_to_continue(
+            "Done here.\n────────────────\n❯ \n────────────────\n0 shells"
+        ));
+        assert!(!evidence::expected_to_continue(
+            "Now: waiting on you\n────────────────\n❯ \n────────────────\n0 shells"
+        ));
+        assert!(!evidence::expected_to_continue(
+            "Now: stopped — waiting\n────────────────\n❯ \n────────────────\n0 shells"
+        ));
+        assert!(!evidence::expected_to_continue("**Needs you (1)**\n1. **Approve** release\nNow: continuing work\n────────────────\n❯ \n────────────────\n0 shells"));
     }
 
     #[test]
