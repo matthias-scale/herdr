@@ -978,7 +978,7 @@ fn cross_area_client_and_api_workspace_views_are_consistent() {
 }
 
 #[test]
-fn cross_area_two_clients_shared_view_and_single_detach_stability() {
+fn cross_area_workspace_create_preserves_client_focus_and_detach_stability() {
     let _lock = test_lock();
     let base = unique_test_dir();
     let config_home = base.join("config");
@@ -1000,13 +1000,23 @@ fn cross_area_two_clients_shared_view_and_single_detach_stability() {
     drain_server_messages(&mut client_a, Duration::from_millis(250));
     drain_server_messages(&mut client_b, Duration::from_millis(250));
 
+    let before_create = workspace_list(&api_socket);
+    let initial_workspace_id = before_create["result"]["workspaces"]
+        .as_array()
+        .and_then(|workspaces| workspaces.first())
+        .and_then(|workspace| workspace["workspace_id"].as_str())
+        .expect("attached clients should have an initial workspace")
+        .to_string();
+    let focused_pane_id = format!("{initial_workspace_id}:p1");
+
     let created = workspace_create(&api_socket, "shared-view");
-    let pane_id = created["result"]["root_pane"]["pane_id"]
+    let created_pane_id = created["result"]["root_pane"]["pane_id"]
         .as_str()
         .expect("root pane id")
         .to_string();
+    assert_ne!(created_pane_id, focused_pane_id);
 
-    // Input from client A should update shared state visible to client B.
+    // API workspace creation must not move either attached client's focus.
     send_client_input(&mut client_a, b"echo SHARED_VIEW\n");
     assert!(
         wait_for_frame(&mut client_b, Duration::from_secs(2)),
@@ -1014,8 +1024,22 @@ fn cross_area_two_clients_shared_view_and_single_detach_stability() {
     );
     assert!(pane_read_recent_contains(
         &api_socket,
-        &pane_id,
+        &focused_pane_id,
         "SHARED_VIEW",
+        Duration::from_secs(5)
+    ));
+    assert!(!pane_read_recent_contains(
+        &api_socket,
+        &created_pane_id,
+        "SHARED_VIEW",
+        Duration::from_millis(250)
+    ));
+
+    send_client_input(&mut client_b, b"echo CLIENT_B_FOCUS\n");
+    assert!(pane_read_recent_contains(
+        &api_socket,
+        &focused_pane_id,
+        "CLIENT_B_FOCUS",
         Duration::from_secs(5)
     ));
 
@@ -1030,7 +1054,7 @@ fn cross_area_two_clients_shared_view_and_single_detach_stability() {
     );
     assert!(pane_read_recent_contains(
         &api_socket,
-        &pane_id,
+        &focused_pane_id,
         "AFTER_A_DETACH",
         Duration::from_secs(5)
     ));

@@ -488,7 +488,7 @@ impl ClientInputPresentation {
                         .iter()
                         .position(|workspace| &workspace.id == workspace_id)
                         .or(state.active),
-                    None => client.active_workspace.or(state.active),
+                    None => client.active_workspace,
                 }
             } else {
                 state.active
@@ -6597,7 +6597,7 @@ impl HeadlessServer {
                                 .iter()
                                 .position(|workspace| &workspace.id == workspace_id)
                                 .or(self.app.state.active),
-                            None => client.active_workspace.or(self.app.state.active),
+                            None => client.active_workspace,
                         }
                     } else {
                         self.app.state.active
