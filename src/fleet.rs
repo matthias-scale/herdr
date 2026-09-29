@@ -303,6 +303,7 @@ pub(crate) struct DeviceAttention {
     pub(crate) blocked: usize,
     pub(crate) working: usize,
     /// The host did not answer its last poll, so its counts are unknown.
+    /// A version-skewed host still answers and is judged by its agents.
     pub(crate) stale: bool,
     /// First blocked agent in row order; a click on the dot opens it.
     pub(crate) first_blocked: Option<crate::api::schema::AgentRef>,
@@ -317,7 +318,9 @@ impl Snapshot {
             .iter()
             .filter(|host| !host.local)
             .filter_map(|host| {
-                let stale = host.state != HostState::Reachable;
+                // A version skew still answers with its agents; only a host
+                // that did not answer at all has unknown state.
+                let stale = host.state == HostState::Unreachable;
                 let blocked = host.entries.iter().filter(|row| row.blocked).count();
                 let working = host
                     .entries
