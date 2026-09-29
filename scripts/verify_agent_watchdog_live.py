@@ -766,15 +766,16 @@ def main() -> int:
             if family == "A":
                 pane_id = harness.panes[ident]
                 session_id = "session-" + ident
-                session_source = ("watchdog-harness" if ident == "a-finished-idle"
-                                  else "herdr:codex")
+                session_source = "watchdog-harness"
                 harness.call("pane.report_agent_session", {"pane_id": pane_id,
                     "source": session_source, "agent": "codex",
                     "agent_session_id": session_id})
-                status = "idle" if ident in ("a-finished-idle", "stale_draft_promised_work_stalled") else (
+                status = "idle" if (ident == "a-finished-idle"
+                                     or ident == "stale_draft_promised_work_stalled"
+                                     or ident.startswith("promised_")) else (
                     "blocked" if ident == "a-approval-hook" else "working")
                 report: dict[str, Any] = {"pane_id": pane_id, "source": session_source,
-                    "agent": "codex", "agent_session_id": session_id, "state": status}
+                    "agent": "codex", "state": status}
                 if ident.startswith("a-retry"):
                     report.update(wait="retry", eta_s=120,
                                   reported_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
