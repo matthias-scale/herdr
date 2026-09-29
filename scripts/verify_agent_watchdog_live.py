@@ -195,11 +195,13 @@ class Harness:
     def wait_for_pane_stable(self, pane_id: str, ready_lines: tuple[str, ...]) -> None:
         deadline = time.monotonic() + 5
         previous: str | None = None
+        last_screen = ""
         stable_samples = 0
         while time.monotonic() < deadline:
             response = self.call("pane.read", {"pane_id": pane_id, "source": "detection",
                 "lines": 40, "format": "text"})
             current = (response.get("read") or {}).get("text", "")
+            last_screen = current
             if not any(line.strip() in ready_lines for line in current.splitlines()):
                 previous = None
                 stable_samples = 0
@@ -213,7 +215,9 @@ class Harness:
                 previous = current
                 stable_samples = 0
             time.sleep(.1)
-        raise RuntimeError(f"pane {pane_id} did not reach a stable fixture screen")
+        screen_tail = "\n".join(last_screen.splitlines()[-20:])
+        raise RuntimeError(f"pane {pane_id} did not reach a stable fixture screen; "
+                           f"last 20 screen lines:\n{screen_tail}")
 
     def run_watchdog(self, family: str, options: list[str], dry: bool = True) -> dict[str, Any]:
         command = [str(self.args.binary), "watchdog"]
@@ -390,23 +394,29 @@ def _find_value(value: Any, key: str) -> Any:
     return None
 
 
+def _fixture_command(code: str) -> str:
+    if sys.platform == "darwin":
+        launcher = "import os,sys; os.execv(sys.executable, ['codex','-u','-c', " + repr(code) + "])"
+        return "python3 -u -c " + shlex.quote(launcher)
+    linux_code = "import ctypes; ctypes.CDLL(None).prctl(15,b'codex',0,0,0)\n" + code
+    return "python3 -u -c " + shlex.quote(linux_code)
+
+
 def _script(text: str, repeat: bool = False) -> str:
     literal = json.dumps(text)
-    name_agent = "import ctypes; ctypes.CDLL(None).prctl(15,b'codex',0,0,0)\n"
     if repeat:
-        code = (name_agent + "import time\n" + f"print({literal}, flush=True)\n" +
+        code = ("import time\n" + f"print({literal}, flush=True)\n" +
                 "i=0\nwhile True:\n time.sleep(2)\n i+=1\n " +
                 f"print({literal} + ' ' + str(i), flush=True)\n")
     else:
-        code = name_agent + f"print({literal}, flush=True)\nimport time; time.sleep(3600)\n"
-    return "python3 -u -c " + shlex.quote(code)
+        code = f"print({literal}, flush=True)\nimport time; time.sleep(3600)\n"
+    return _fixture_command(code)
 
 
 def setup_quiet(h: Harness, ident: str) -> str:
-    code = "import ctypes,subprocess,time; ctypes.CDLL(None).prctl(15,b'codex',0,0,0); " \
-           "print('Running cargo test', flush=True); " \
+    code = "import subprocess,time; print('Running cargo test', flush=True); " \
            "subprocess.Popen(['sleep','3600']); time.sleep(3600)"
-    return h.workspace(ident, "python3 -u -c " + shlex.quote(code), ("Running cargo test",))
+    return h.workspace(ident, _fixture_command(code), ("Running cargo test",))
 
 
 def setup_stall(h: Harness, ident: str) -> str:
@@ -414,10 +424,9 @@ def setup_stall(h: Harness, ident: str) -> str:
 
 
 def setup_prompt(h: Harness, ident: str) -> str:
-    code = "import ctypes,subprocess,time; ctypes.CDLL(None).prctl(15,b'codex',0,0,0); " \
-           "print('Overwrite generated snapshot? [y/n]', flush=True); " \
+    code = "import subprocess,time; print('Overwrite generated snapshot? [y/n]', flush=True); " \
            "subprocess.Popen(['sleep','3600']); time.sleep(3600)"
-    return h.workspace(ident, "python3 -u -c " + shlex.quote(code),
+    return h.workspace(ident, _fixture_command(code),
                        ("Overwrite generated snapshot? [y/n]",))
 
 
@@ -669,7 +678,14 @@ def main() -> int:
         for ident, family, setup, expected in CASES:
             if selected is not None and ident not in selected:
                 continue
-            result = setup(harness, ident)
+            try:
+                result = setup(harness, ident)
+            except Exception as exc:
+                rows.append({"id": ident, "watchdog": family, "expected": expected,
+                             "actual": "setup_error", "setup_error": str(exc),
+                             "model_calls": 0, "match": False, "evidence": str(exc),
+                             "wall_time_ms": None, "model_latency_ms": None})
+                continue
             if family == "A":
                 pane_id = harness.panes[ident]
                 session_id = "session-" + ident
