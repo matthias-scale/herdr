@@ -1475,6 +1475,14 @@ impl App {
             host_mouse_pixels: None,
             session_dirty: false,
             session_dirty_revision: 0,
+            session_epoch: format!(
+                "{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
+            session_event_revision: 0,
             terminal_runtime_shutdowns: Vec::new(),
             confirm_close_workspace_id: None,
             confirm_close_remote_agent_ref: None,

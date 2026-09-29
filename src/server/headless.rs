@@ -480,13 +480,13 @@ impl ClientInputPresentation {
             shared_active_workspace_id: state
                 .active
                 .and_then(|index| state.workspaces.get(index))
-                .map(|workspace| workspace.workspace_id.clone()),
+                .map(|workspace| workspace.id.clone()),
             active_workspace: if client.focus_initialized {
                 match client.active_workspace_id.as_ref() {
                     Some(workspace_id) => state
                         .workspaces
                         .iter()
-                        .position(|workspace| &workspace.workspace_id == workspace_id)
+                        .position(|workspace| &workspace.id == workspace_id)
                         .or(state.active),
                     None => client.active_workspace,
                 }
@@ -531,7 +531,7 @@ impl ClientInputPresentation {
             state.active = state
                 .workspaces
                 .iter()
-                .position(|workspace| &workspace.workspace_id == workspace_id)
+                .position(|workspace| &workspace.id == workspace_id)
                 .or(state.active.filter(|index| *index < state.workspaces.len()));
         }
         state.swap_usage_view(&mut self.usage_view);
@@ -549,7 +549,7 @@ impl ClientInputPresentation {
         client.active_workspace_id = self
             .active_workspace
             .and_then(|index| state.workspaces.get(index))
-            .map(|workspace| workspace.workspace_id.clone());
+            .map(|workspace| workspace.id.clone());
         client.selected_pane = self.selected_pane;
         client.focus_initialized = true;
         client.sidebar_presentation = self.sidebar;
@@ -4878,7 +4878,7 @@ impl HeadlessServer {
                     .state
                     .active
                     .and_then(|index| self.app.state.workspaces.get(index))
-                    .map(|workspace| workspace.workspace_id.clone());
+                    .map(|workspace| workspace.id.clone());
                 connection.selected_pane = self.app.state.selected;
                 connection.focus_initialized = true;
                 self.clients.insert(client_id, connection);
@@ -6595,7 +6595,7 @@ impl HeadlessServer {
                                 .state
                                 .workspaces
                                 .iter()
-                                .position(|workspace| &workspace.workspace_id == workspace_id)
+                                .position(|workspace| &workspace.id == workspace_id)
                                 .or(self.app.state.active),
                             None => client.active_workspace,
                         }
@@ -6776,7 +6776,7 @@ impl HeadlessServer {
                         client.active_workspace = active_workspace;
                         client.active_workspace_id = active_workspace
                             .and_then(|index| self.app.state.workspaces.get(index))
-                            .map(|workspace| workspace.workspace_id.clone());
+                            .map(|workspace| workspace.id.clone());
                         client.selected_pane = selected_pane;
                         client.focus_initialized = true;
                         client.dock_presentation = dock_presentation;
@@ -8952,9 +8952,9 @@ esac
             crate::workspace::Workspace::test_new("client-b"),
             crate::workspace::Workspace::test_new("other"),
         ];
-        let workspace_a = server.app.state.workspaces[0].workspace_id.clone();
-        let workspace_b = server.app.state.workspaces[1].workspace_id.clone();
-        let workspace_c = server.app.state.workspaces[2].workspace_id.clone();
+        let workspace_a = server.app.state.workspaces[0].id.clone();
+        let workspace_b = server.app.state.workspaces[1].id.clone();
+        let workspace_c = server.app.state.workspaces[2].id.clone();
         server.app.state.active = Some(1);
         server.app.state.selected = 0;
 
@@ -9014,7 +9014,7 @@ esac
             Some(workspace_a.as_str())
         );
         assert_eq!(
-            server.app.state.workspaces[server.app.state.active.unwrap()].workspace_id,
+            server.app.state.workspaces[server.app.state.active.unwrap()].id,
             workspace_b
         );
     }
