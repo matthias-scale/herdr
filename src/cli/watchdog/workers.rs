@@ -344,6 +344,7 @@ fn discover_codex_runs(runs_dir: &Path) -> io::Result<Vec<WorkerObservation>> {
             Err(error) => return Err(error),
         };
         let parent_session = json_string(&state, &["parent_session"])
+            .or_else(|| json_string(&state, &["parent", "session"]))
             .or_else(|| json_string(&state, &["parent"]))
             .or_else(|| launch_parent_session(&run_dir));
         let Some(parent_session) = parent_session else {
@@ -394,45 +395,21 @@ fn launch_parent_session(run_dir: &Path) -> Option<String> {
 }
 
 fn codex_last_activity(run_dir: &Path, state: &Value) -> io::Result<u64> {
-    let mut last_activity = state
-        .get("last_heartbeat")
-        .and_then(Value::as_u64)
-        .unwrap_or_default()
-        .max(
-            state
-                .get("progress_at")
-                .and_then(Value::as_u64)
-                .unwrap_or_default(),
-        );
-    for name in [
-        "state.json",
-        "heartbeat",
-        "heartbeat.json",
-        "trace.log",
-        "out.log",
-        ".session-log",
-        "wrap.log",
-    ] {
+    // Heartbeat and atomic state rewrites prove liveness, not semantic progress.
+    let mut last_activity = state.get("progress_at").and_then(json_timestamp).unwrap_or_default();
+    for name in ["trace.log", "out.log", ".session-log"] {
         if let Some(modified) = modified_unix_seconds(&run_dir.join(name))? {
             last_activity = last_activity.max(modified);
-        }
-    }
-    for entry in fs::read_dir(run_dir)? {
-        let entry = entry?;
-        if entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".progress.")
-        {
-            if let Some(modified) = modified_unix_seconds(&entry.path())? {
-                last_activity = last_activity.max(modified);
-            }
         }
     }
     let turns_dir = run_dir.join("turns");
     if let Ok(turns) = fs::read_dir(turns_dir) {
         for turn in turns {
-            let trace = turn?.path().join("trace.log");
+            let turn = turn?;
+            if !turn.file_type()?.is_dir() {
+                continue;
+            }
+            let trace = turn.path().join("trace.log");
             if let Some(modified) = modified_unix_seconds(&trace)? {
                 last_activity = last_activity.max(modified);
             }
@@ -530,10 +507,28 @@ impl ReadTail for fs::File {
 }
 
 fn json_string(value: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(Value::as_str))
+    let mut nested = value;
+    for key in keys {
+        nested = nested.get(*key)?;
+    }
+    nested
+        .as_str()
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn json_timestamp(value: &Value) -> Option<u64> {
+    if let Some(timestamp) = value.as_u64() {
+        return Some(timestamp);
+    }
+    let raw = value.as_str()?;
+    let timestamp = time::OffsetDateTime::parse(
+        raw,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .ok()?
+    .unix_timestamp();
+    u64::try_from(timestamp).ok()
 }
 
 fn modified_unix_seconds(path: &Path) -> io::Result<Option<u64>> {
@@ -622,6 +617,38 @@ mod tests {
         assert_eq!(workers[0].source, "codex");
         assert!(!workers[0].finished);
         assert!(workers[0].last_activity > 0);
+    }
+
+    #[test]
+    fn codex_discovery_reads_nested_parent_and_rfc3339_progress() {
+        let dir = TestDir::new();
+        let run_dir = dir.path().join("ra-run-nested");
+        fs::create_dir_all(&run_dir).expect("create run directory");
+        fs::write(
+            run_dir.join("state.json"),
+            r#"{"parent":{"session":"parent-nested"},"state":"active","last_heartbeat":"2026-09-29T07:00:00Z","progress_at":"2026-09-29T06:45:00Z"}"#,
+        )
+        .expect("write run state");
+        let workers = discover_codex_runs(dir.path()).expect("discover workers");
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].parent_session, "parent-nested");
+        assert_eq!(workers[0].last_activity, 1_790_664_300);
+    }
+
+    #[test]
+    fn codex_discovery_ignores_non_directory_turn_entries() {
+        let dir = TestDir::new();
+        let run_dir = dir.path().join("ra-run-file-turn");
+        fs::create_dir_all(run_dir.join("turns")).expect("create turns directory");
+        fs::write(
+            run_dir.join("state.json"),
+            r#"{"parent_session":"parent-1","state":"active","exit_code":null}"#,
+        )
+        .expect("write run state");
+        fs::write(run_dir.join("turns/receipt.json"), "{}").expect("write receipt");
+        let workers = discover_codex_runs(dir.path()).expect("discover workers");
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].parent_session, "parent-1");
     }
 
     #[test]
