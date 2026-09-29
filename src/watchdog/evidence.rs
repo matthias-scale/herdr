@@ -40,6 +40,10 @@ static ACCOUNT: LazyLock<Regex> = LazyLock::new(|| {
 static PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:new turn|continuing|i am continuing|i'm continuing|working on|running |reading |writing |editing |compil|step \d|resum)").expect("static regex")
 });
+static ACTIVE_SPINNER_STATUS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\s*(?:[✻✶✳✢✽·●⏺○◐◓◑◒◌•]\s*)?[A-Z][a-zA-Z]*(?:…|\.\.\.)(?:\s*\([^()]*\))?\s*$")
+        .expect("static regex")
+});
 static RETRY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:retry(?:ing)?|reconnecting|backing off|backoff)\b[^\n]*?\bin\s+(\d+(?:\.\d+)?)\s*(ms|s|sec|secs|seconds?|m|min|minutes?)\b").expect("static regex")
 });
@@ -221,9 +225,10 @@ fn spinner_line(line: &str) -> bool {
 }
 pub(crate) fn has_visible_progress(text: &str) -> bool {
     bottom(&reply_text(text), 6).iter().any(|line| {
-        spinner_line(line)
-            || line.to_ascii_lowercase().contains("esc to interrupt")
-            || line.to_ascii_lowercase().contains("working (")
+        let line = line.trim();
+        line.to_ascii_lowercase().contains("esc to interrupt")
+            || PROGRESS.is_match(line)
+            || ACTIVE_SPINNER_STATUS.is_match(line)
     })
 }
 
@@ -749,6 +754,24 @@ mod tests {
             background_shell_count(&claude_screen("Waiting", "", "1 shell · 2 shells")),
             2
         );
+    }
+
+    #[test]
+    fn visible_progress_requires_live_spinner_evidence() {
+        for line in [
+            "✻ Tempering… (12s · esc to interrupt)",
+            "● Tempering…",
+            "• Working (12s • esc to interrupt)",
+        ] {
+            assert!(has_visible_progress(line), "{line}");
+        }
+        for line in [
+            "● A hook blocked the turn from ending 9 consecutive times — overriding and ending turn.",
+            "✻ Worked for 8s",
+            "Worked for 8s • 4:53 PM",
+        ] {
+            assert!(!has_visible_progress(line), "{line}");
+        }
     }
 
     #[test]
