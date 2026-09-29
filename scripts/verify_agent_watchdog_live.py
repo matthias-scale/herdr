@@ -94,7 +94,7 @@ class Harness:
             return
         if not self.args.peer or not self.args.peer_binary:
             raise RuntimeError("p-cross-host requires --peer and --peer-binary")
-        self.peer_root = f"/tmp/wdl.{os.getpid()}"
+        self.peer_root = f"/tmp/{self.root.name}"
         peer = self.args.peer
         binary = str(self.args.peer_binary)
         xdg_cfg = f"{self.peer_root}/cfg"
@@ -104,11 +104,12 @@ class Harness:
         root_q, cfg_q, state_q, sock_q = map(shlex.quote,
             (self.peer_root, xdg_cfg, xdg_state, sock))
         binary_q = shlex.quote(binary)
+        pidfile_q = shlex.quote(f"{self.peer_root}/server.pid")
         script = (f"mkdir -p {cfg_q}/{app} {state_q}; "
                   f"printf '%s\\n' 'allow_nested = true' > {cfg_q}/{app}/config.toml; "
-                  f"nohup env -i PATH=/usr/bin:/bin XDG_CONFIG_HOME={cfg_q} "
+                  f"setsid nohup env -i PATH=/usr/bin:/bin XDG_CONFIG_HOME={cfg_q} "
                   f"XDG_STATE_HOME={state_q} HERDR_SOCKET_PATH={sock_q} {binary_q} server "
-                  f"</dev/null >/dev/null 2>&1 & "
+                  f"</dev/null >/dev/null 2>&1 & echo $! > {pidfile_q}; "
                   f"i=0; while [ $i -lt 100 ] && [ ! -S {sock_q} ]; do sleep .1; i=$((i+1)); done; "
                   f"[ -S {sock_q} ] || exit 3; "
                   f"env -i PATH=/usr/bin:/bin XDG_CONFIG_HOME={cfg_q} XDG_STATE_HOME={state_q} "
@@ -164,7 +165,11 @@ class Harness:
         env = (f"env -i PATH=/usr/bin:/bin XDG_CONFIG_HOME={shlex.quote(cfg)} "
                f"XDG_STATE_HOME={shlex.quote(state)} HERDR_SOCKET_PATH={shlex.quote(sock)} ")
         binary = shlex.quote(str(self.args.peer_binary))
-        cmd = (env + binary + " server stop >/dev/null 2>&1 || true; "
+        pidfile = shlex.quote(f"{self.peer_root}/server.pid")
+        cmd = (f"if [ -r {pidfile} ]; then p=$(cat {pidfile}); "
+               "kill -TERM -- -$p 2>/dev/null || kill -TERM $p 2>/dev/null || true; "
+               "sleep .2; kill -KILL -- -$p 2>/dev/null || true; fi; "
+               + env + binary + " server stop >/dev/null 2>&1 || true; "
                f"rm -rf {shlex.quote(self.peer_root)}")
         subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
                         self.args.peer, "sh", "-lc", cmd], stdout=subprocess.DEVNULL,
@@ -287,35 +292,50 @@ class Harness:
         path.write_text(json.dumps(memory) + "\n", encoding="utf-8")
 
     def cleanup(self) -> None:
-        self.cleanup_peer()
-        for proc in reversed(self.started):
-            if proc.poll() is None:
-                if os.name == "posix" and proc.pid != os.getpid():
+        try:
+            self.cleanup_peer()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        try:
+            for proc in reversed(self.started):
+                if proc.poll() is None:
+                    if os.name == "posix" and proc.pid != os.getpid():
+                        try:
+                            os.killpg(proc.pid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        proc.terminate()
                     try:
-                        os.killpg(proc.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-                else:
-                    proc.terminate()
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+            if self.server and self.server.poll() is None:
+                # Ask the isolated server to shut down its own pane runtimes first.
                 try:
-                    proc.wait(timeout=3)
+                    self.cli("server", "stop", check=False)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                try:
+                    self.server.wait(timeout=8)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-        if self.server and self.server.poll() is None:
-            # Ask the isolated server to shut down its own pane runtimes first.
-            self.cli("server", "stop", check=False)
-            try:
-                self.server.wait(timeout=8)
-            except subprocess.TimeoutExpired:
-                # The dedicated process group contains only this harness server
-                # and its descendants (never a user's existing Herdr session).
+                    pass
+            if self.server:
+                # This process group belongs to the harness; the parent can exit
+                # before a detached child does.
                 try:
                     os.killpg(self.server.pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
+                time.sleep(.2)
+                try:
+                    os.killpg(self.server.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 self.server.wait()
-        shutil.rmtree(self.root, ignore_errors=True)
+        finally:
+            shutil.rmtree(self.root, ignore_errors=True)
 
     def incident_rearm_check(self) -> dict[str, Any]:
         parent_pane = self.workspace("incident-parent", _script("Parent remains available"),
@@ -415,6 +435,41 @@ def _script(text: str, repeat: bool = False) -> str:
     return _fixture_command(code)
 
 
+def _promised_draft_agent() -> str:
+    code = '''import sys, termios, tty
+header = ["Now: Codex reviewers — reviewing PR 1656; the config-folder worker starts after it merges",
+          "⎿ Stop says: /review completed — invoke /retro to capture lessons.",
+          "● Background shell command didn't finish before the previous session ended"]
+rule = "────────────────────────"
+footer = ["────────────────────────", "░░░░░░ 92% 78k tokens │ 2h 24m ago │ -- INSERT -- · 1 feedback draft"]
+draft = "cont"
+turns = []
+def draw():
+    sys.stdout.write("\\x1b[2J\\x1b[H" + "\\n".join(header + turns + [rule, "❯ " + draft] + footer) + "\\n")
+    sys.stdout.flush()
+fd = sys.stdin.fileno()
+old = termios.tcgetattr(fd)
+try:
+    tty.setcbreak(fd)
+    draw()
+    while True:
+        char = sys.stdin.read(1)
+        if not char or char == "\\x03":
+            break
+        if char in ("\\r", "\\n"):
+            turns.extend(["❯ " + draft, "Working on the open task"])
+            draft = ""
+        elif char in ("\\x7f", "\\b"):
+            draft = draft[:-1]
+        elif char.isprintable():
+            draft += char
+        draw()
+finally:
+    termios.tcsetattr(fd, termios.TCSADRAIN, old)
+'''
+    return _fixture_command(code)
+
+
 def setup_quiet(h: Harness, ident: str) -> str:
     code = "import subprocess,time; print('Running cargo test', flush=True); " \
            "subprocess.Popen(['sleep','3600']); time.sleep(3600)"
@@ -447,7 +502,8 @@ def setup_promised_draft(h: Harness, ident: str) -> str:
               "● Background shell command didn't finish before the previous session ended\n"
               "────────────────────────\n❯ cont\n────────────────────────\n"
               "░░░░░░ 92% 78k tokens │ 2h 24m ago │ -- INSERT -- · 1 feedback draft")
-    return h.workspace(ident, _script(screen), tuple(screen.splitlines()))
+    ready = tuple(screen.splitlines())
+    return h.workspace(ident, _promised_draft_agent(), ready)
 
 
 def setup_done_here(h: Harness, ident: str) -> str:
