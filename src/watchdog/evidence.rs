@@ -43,28 +43,23 @@ static PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
 static RETRY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:retry(?:ing)?|reconnecting|backing off|backoff)\b[^\n]*?\bin\s+(\d+(?:\.\d+)?)\s*(ms|s|sec|secs|seconds?|m|min|minutes?)\b").expect("static regex")
 });
-static RELATIVE_AGE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b\d+[dhms](?: \d+[hms])* ago\b").expect("static regex")
-});
+static RELATIVE_AGE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b\d+[dhms](?: \d+[hms])* ago\b").expect("static regex"));
 static LOAD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"🖥\d+(?:\.\d+)?").expect("static regex"));
 static TOKEN_COUNT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b\d+(?:\.\d+)?k\b").expect("static regex"));
-static QUOTA_CYCLE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"↻\S+").expect("static regex"));
-static QUOTA: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b\d+h:\d+%").expect("static regex"));
+static QUOTA_CYCLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"↻\S+").expect("static regex"));
+static QUOTA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d+h:\d+%").expect("static regex"));
 static BACKGROUND_SHELLS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(\d+) shells?\b").expect("static regex"));
-static NUMBERED_DECISION: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^\s*\d+[.)]\s+(?:approve|decide)\b").expect("static regex")
-});
+static NUMBERED_DECISION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^\s*\d+[.)]\s+(?:approve|decide)\b").expect("static regex"));
 static NEEDS_YOU: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^\s*\*{0,2}needs you\s*\((\d+)\)\*{0,2}\s*$")
-        .expect("static regex")
+    Regex::new(r"(?i)^\s*\*{0,2}needs you\s*\((\d+)\)\*{0,2}\s*$").expect("static regex")
 });
 static WAITING_ON_YOU: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^\s*\*{0,2}now:\s*waiting on you\b").expect("static regex")
+    Regex::new(r"(?i)^\s*\*{0,2}now:\*{0,2}\s*waiting on you\b").expect("static regex")
 });
 static COMPOSER_PROMPT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*[❯›>]\s*(.*)$").expect("static regex"));
@@ -102,7 +97,7 @@ pub(crate) fn background_shell_count(text: &str) -> usize {
     };
     lines[i + 2..]
         .iter()
-        .filter_map(|line| BACKGROUND_SHELLS.captures(line))
+        .flat_map(|line| BACKGROUND_SHELLS.captures_iter(line))
         .filter_map(|c| c[1].parse::<usize>().ok())
         .max()
         .unwrap_or(0)
@@ -113,18 +108,21 @@ pub(crate) fn closing_block_waiting(text: &str) -> bool {
     if !composer_is_empty(text) {
         return false;
     }
-    let lines = reply.lines().collect::<Vec<_>>();
+    let lines = reply.lines().rev().take(16).collect::<Vec<_>>();
     if lines.iter().any(|line| WAITING_ON_YOU.is_match(line))
-        || lines
-            .iter()
-            .any(|line| line.trim().eq_ignore_ascii_case("Reply 1a / 1b. Silence holds."))
+        || lines.iter().any(|line| {
+            line.trim()
+                .eq_ignore_ascii_case("Reply 1a / 1b. Silence holds.")
+        })
     {
         return true;
     }
     lines.iter().enumerate().any(|(i, line)| {
         NEEDS_YOU.captures(line).is_some_and(|c| {
             c[1].parse::<u32>().is_ok_and(|n| n >= 1)
-                && lines[i + 1..].iter().any(|item| NUMBERED_DECISION.is_match(item))
+                && lines[..i]
+                    .iter()
+                    .any(|item| NUMBERED_DECISION.is_match(item))
         })
     })
 }
@@ -136,7 +134,7 @@ pub(crate) fn finished_reply(text: &str) -> bool {
     let reply = reply_text(text);
     let last = reply.lines().rev().find(|line| !line.trim().is_empty());
     last.is_some_and(|line| DONE_HERE.is_match(line.trim()))
-        && !reply.lines().any(|line| spinner_line(line))
+        && !reply.lines().rev().skip(1).take(2).any(spinner_line)
 }
 
 fn spinner_line(line: &str) -> bool {
@@ -171,7 +169,13 @@ fn spinner(c: char) -> bool {
 }
 pub(crate) fn normalize_line(line: &str) -> String {
     let mut s: String = line.chars().filter(|c| !spinner(*c)).collect();
-    for p in [&*RELATIVE_AGE, &*LOAD, &*TOKEN_COUNT, &*QUOTA_CYCLE, &*QUOTA] {
+    for p in [
+        &*RELATIVE_AGE,
+        &*LOAD,
+        &*TOKEN_COUNT,
+        &*QUOTA_CYCLE,
+        &*QUOTA,
+    ] {
         s = p.replace_all(&s, "").into_owned();
     }
     for p in TIMERS.iter() {
@@ -505,7 +509,9 @@ mod tests {
     }
 
     fn claude_screen(reply: &str, composer: &str, footer: &str) -> String {
-        format!("{reply}\n────────────────────────\n❯ {composer}\n────────────────────────\n{footer}")
+        format!(
+            "{reply}\n────────────────────────\n❯ {composer}\n────────────────────────\n{footer}"
+        )
     }
 
     #[test]
@@ -525,11 +531,16 @@ mod tests {
 
     #[test]
     fn closing_block_detection_uses_structure_not_heading_copy() {
-        let waiting = |reply: &str| {
-            closing_block_waiting(&claude_screen(reply, "", "0 shells"))
-        };
-        assert!(waiting("Now: waiting on you — about 10 dashboard spot-checks"));
-        assert!(waiting("**Needs you (2)**\n1. Approve release\n2. Decide on rollout"));
+        let waiting = |reply: &str| closing_block_waiting(&claude_screen(reply, "", "0 shells"));
+        assert!(waiting(
+            "Now: waiting on you — about 10 dashboard spot-checks"
+        ));
+        assert!(waiting(
+            "**Now:** waiting on you — about 10 dashboard spot-checks"
+        ));
+        assert!(waiting(
+            "**Needs you (2)**\n1. Approve release\n2. Decide on rollout"
+        ));
         assert!(waiting("**Review notes**\nReply 1a / 1b. Silence holds."));
         assert!(!waiting("**Needs you: nothing.**"));
         assert!(!closing_block_waiting("Now: waiting on you"));
@@ -538,8 +549,16 @@ mod tests {
     #[test]
     fn finished_reply_requires_an_empty_composer_and_no_progress_spinner() {
         assert!(finished_reply(&claude_screen("Done here.", "", "0 shells")));
-        assert!(!finished_reply(&claude_screen("Done here.", "follow-up", "0 shells")));
-        assert!(!finished_reply(&claude_screen("Now: wait — event", "", "0 shells")));
+        assert!(!finished_reply(&claude_screen(
+            "Done here.",
+            "follow-up",
+            "0 shells"
+        )));
+        assert!(!finished_reply(&claude_screen(
+            "Now: wait — event",
+            "",
+            "0 shells"
+        )));
         assert_eq!(
             background_shell_count(&claude_screen("Waiting", "", "1 shell · 2 shells")),
             2

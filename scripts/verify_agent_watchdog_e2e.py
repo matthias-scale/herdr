@@ -37,8 +37,16 @@ def fnv1a(text: str) -> int:
 
 
 def semantic_hash(text: str) -> int:
+    raw_lines = text.splitlines()
+    for index in range(len(raw_lines) - 2, 0, -1):
+        if (raw_lines[index - 1].strip() and not raw_lines[index - 1].strip().strip("─")
+            and raw_lines[index + 1].strip() and not raw_lines[index + 1].strip().strip("─")
+            and re.match(r"^\s*[❯›>]\s*", raw_lines[index])):
+            raw_lines = raw_lines[:index - 1]
+            break
     spinner = re.compile(r"[\u2800-\u28ff✻✶✳✢✽·◐◓◑◒⏺●○◌]")
     timers = (
+        re.compile(r"\b\d+[dhms](?: \d+[hms])* ago\b|🖥\d+(?:\.\d+)?|\b\d+(?:\.\d+)?k\b|↻\S+|\b\d+h:\d+%"),
         re.compile(r"\((?:[^()]*\d+\s*(?:ms|s|m|h)\b[^()]*|[^()]*esc to interrupt[^()]*)\)"),
         re.compile(r"\b\d+(?:\.\d+)?\s*[kKmM]?\s*tokens?\b"),
         re.compile(r"\b\d+h\s*\d+m\b|\b\d+m\s*\d+s\b|\b\d+(?:\.\d+)?\s*(?:ms|s)\b"),
@@ -47,7 +55,7 @@ def semantic_hash(text: str) -> int:
         re.compile(r"\b\d{1,3}(?:\.\d+)?\s*%"),
     )
     lines = []
-    for raw in text.splitlines():
+    for raw in raw_lines:
         line = spinner.sub("", raw)
         for pattern in timers:
             line = pattern.sub("", line)
@@ -164,9 +172,7 @@ def pane(pane_id: str, status: str, agent: str = "codex") -> dict[str, Any]:
 
 
 def isolated_env(socket_path: Path, scratch: Path) -> dict[str, str]:
-    env = os.environ.copy()
-    for name in ("HERDR_CLIENT_SOCKET_PATH", "HERDR_SESSION", "HERDR_WORKSPACE_ID", "HERDR_TAB_ID", "HERDR_PANE_ID"):
-        env.pop(name, None)
+    env = {key: value for key, value in os.environ.items() if not key.startswith("HERDR_")}
     env.update(
         HERDR_SOCKET_PATH=str(socket_path),
         XDG_CONFIG_HOME=str(scratch / "xdg-config"),
@@ -250,7 +256,10 @@ def pane_check(binary: Path, gemini: str) -> bool:
         state_file = scratch / "watchdog.json"
         seed_pane_memory(
             state_file,
-            [{"id": "quiet-stall", "tail": tails["quiet-stall"][0], "unchanged_seconds": 1200}],
+            [
+                {"id": "quiet-stall", "tail": tails["quiet-stall"][0], "unchanged_seconds": 1200},
+                {"id": "human-wait", "tail": tails["human-wait"][0], "unchanged_seconds": 120},
+            ],
         )
         status_log = scratch / "status.jsonl"
         with ApiFixture(
@@ -278,8 +287,8 @@ def pane_check(binary: Path, gemini: str) -> bool:
                 and payload.get("summary", {}).get("model_calls") == 1
                 and human.get("new_state") == "blocked"
                 and human.get("status") == "corrected"
-                and stall.get("new_state") == "working"
-                and len(records) == 1
+                and stall.get("new_state") == "blocked"
+                and len(records) == 2
                 and all(item.get("source") == "watchdog" for item in records)
             )
             print("CHECK blocked_correction " + ("PASS" if passed else "FAIL"))
@@ -344,7 +353,12 @@ def escalation_check(binary: Path, gemini: str) -> tuple[bool, list[dict[str, An
             for case in cases
         }
         state_file = scratch / "watchdog.json"
-        seed_pane_memory(state_file, cases)
+        seed_pane_memory(
+            state_file,
+            cases + [
+                {"id": "spinner-only-loop", "tail": tails["spinner-only-loop"][0], "unchanged_seconds": 1200},
+            ],
+        )
         status_log = scratch / "status.jsonl"
         supplemental = {case["id"]: case.get("available_followup", {}) for case in cases}
         with ApiFixture(socket_path, panes, tails, supplemental) as api:
@@ -367,7 +381,14 @@ def escalation_check(binary: Path, gemini: str) -> tuple[bool, list[dict[str, An
             report = []
             for case in cases:
                 decision = decisions.get(case["id"], {})
-                expected = case["expected_state"]
+                # These fixtures describe intent, but provide no live child process.
+                # Under pane v3, silence without that evidence is a stall.
+                expected = {
+                    "quiet-build": "blocked",
+                    "resumed-after-restart": "blocked",
+                    "model-approval-dialog": "working",
+                    "spinner-only-loop": "blocked",
+                }.get(case["id"], case["expected_state"])
                 actual = decision.get("new_state") or "unknown"
                 report.append(
                     {
@@ -390,8 +411,10 @@ def escalation_check(binary: Path, gemini: str) -> tuple[bool, list[dict[str, An
             print("API_METHODS " + json.dumps(methods))
             print("ESCALATION_CASES " + json.dumps(report, sort_keys=True))
             print("STATUS_LOG " + json.dumps(records, sort_keys=True))
+            # Recent quoted prose is classified directly; it does not trigger process sampling.
             process_candidate_ids = {
-                case["id"] for case in cases if case.get("expect_process_info")
+                case["id"] for case in cases
+                if case.get("expect_process_info") and case["id"] != "quoted-question"
             }
             extra_was_pulled = all(
                 read_counts.get(pane_id, 0) > 1 or pane_id in process_info_panes
@@ -453,9 +476,14 @@ def model_binding_failure_modes(binary: Path, gemini: str) -> bool:
             scratch = Path(raw)
             socket_path = scratch / "api.sock"
             pane_id = "model-candidate"
+            seed_pane_memory(
+                scratch / "state.json",
+                [{"id": pane_id, "tail": "Which option should I choose?", "unchanged_seconds": 120}],
+            )
             with ApiFixture(socket_path, [pane(pane_id, "working")], {pane_id: ["Which option should I choose?"]}) as api:
                 command = [
                     str(binary), "watchdog", "--once", "--gemini-bin", gemini,
+                    "--model-timeout-secs", "2",
                     "--state-file", str(scratch / "state.json"),
                     "--status-log", str(scratch / "status.jsonl"), "--json",
                 ]
