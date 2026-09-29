@@ -10705,6 +10705,7 @@ mod tests {
         env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
 
         let mut app = app_for_mouse_test();
+        app.state.sidebar_show_ask_subtitles = true;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 80, 24));
         let toggle = app.state.view.sidebar_footer_ask_subtitles_hit_area;
         assert_eq!(toggle.width, 1);
