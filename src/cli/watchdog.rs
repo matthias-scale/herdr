@@ -13,8 +13,9 @@ use serde_json::Value;
 
 use crate::{
     api::schema::{
-        AgentStatus, Method, PaneAgentState, PaneListParams, PaneProcessInfoParams, PaneReadParams,
-        PaneReportAgentParams, ReadFormat, ReadSource, Request,
+        AgentSessionInfo, AgentStatus, Method, PaneAgentState, PaneListParams,
+        PaneProcessInfoParams, PaneReadParams, PaneReportAgentParams, PaneSendTextCondition,
+        PaneSendTextIfParams, ReadFormat, ReadSource, Request,
     },
     watchdog::{
         self, PaneV3Decision, PaneV3MemoryMap, PaneV3Observation, PaneV3Options, WATCHDOG_SOURCE,
@@ -41,6 +42,7 @@ struct WatchdogOptions {
     confirm_secs: u64,
     retry_window_secs: Option<u64>,
     op_deadline_secs: Option<u64>,
+    stale_draft_secs: u64,
     model_timeout_secs: u64,
     lines: u32,
     no_model: bool,
@@ -112,6 +114,7 @@ fn parse_options(args: &[String]) -> Result<WatchdogOptions, String> {
         confirm_secs: 20,
         retry_window_secs: None,
         op_deadline_secs: None,
+        stale_draft_secs: watchdog::STALE_DRAFT_SECS,
         model_timeout_secs: 45,
         lines: DEFAULT_LINES,
         no_model: false,
@@ -146,6 +149,9 @@ fn parse_options(args: &[String]) -> Result<WatchdogOptions, String> {
             "--op-deadline-secs" => {
                 options.op_deadline_secs =
                     Some(parse_value(args, &mut index, "--op-deadline-secs")?)
+            }
+            "--stale-draft-secs" => {
+                options.stale_draft_secs = parse_value(args, &mut index, "--stale-draft-secs")?
             }
             "--model-timeout-secs" => {
                 options.model_timeout_secs = parse_value(args, &mut index, "--model-timeout-secs")?
@@ -255,6 +261,7 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
         op_deadline_secs: options
             .op_deadline_secs
             .unwrap_or(options.stall_secs.saturating_mul(3)),
+        stale_draft_secs: options.stale_draft_secs,
     };
     let mut decisions = observations
         .iter()
@@ -408,7 +415,11 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
             .into();
         }
         if let Some(new) = d.new_state {
-            if d.status == "corrected" && !options.dry_run {
+            if d.status == "corrected"
+                && !options.dry_run
+                && !(d.class == watchdog::PaneClass::Stalled
+                    && d.evidence.starts_with("promised work stopped:"))
+            {
                 // Revalidate identity, state and semantic tail immediately before writing.
                 if let Ok(current) = current_pane(&d.pane_id) {
                     let tail = read_tail(&d.pane_id, options.lines).ok();
@@ -452,6 +463,70 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
                 }
             }
         }
+        if d.class == watchdog::PaneClass::Stalled
+            && d.evidence.starts_with("promised work stopped:")
+        {
+            let mem = memory.entry(d.pane_id.clone()).or_default();
+            if !mem.nudged_stall {
+                let draft = watchdog::evidence::composer_text(&observations[i].tail);
+                let text = format!(
+                    "{}resume: continue your open work to its done criterion\r",
+                    draft
+                        .as_deref()
+                        .map_or(String::new(), |draft| format!("{draft} — "))
+                );
+                d.action = Some("nudge".into());
+                d.action_text = Some(text.trim_end_matches('\r').to_owned());
+                d.delivered = Some(false);
+                if options.dry_run {
+                    d.status = "would_nudge".into();
+                } else if let Ok(current) = current_pane(&d.pane_id) {
+                    if let Ok(read) = read_detection_observation(&d.pane_id) {
+                        let observed = PaneV3Observation {
+                            pane_id: d.pane_id.clone(),
+                            agent: d.agent.clone(),
+                            terminal_id: current.terminal_id.clone(),
+                            agent_session: current.agent_session.as_ref().map(|s| s.value.clone()),
+                            status: current.agent_status,
+                            wait: current.wait.clone(),
+                            eta_s: current.eta_s,
+                            reported_at: current.reported_at.clone(),
+                            tail: read.text.clone(),
+                            transcript_waiting: false,
+                            process_group: None,
+                            read_error: None,
+                        };
+                        if let (Some(observation), Some(agent_ref), Some(agent_session)) =
+                            (read.observation, read.agent_ref, read.agent_session)
+                        {
+                            if watchdog::pane_v3_observation_is_current(d, &observed) {
+                                let params = PaneSendTextIfParams {
+                                    pane_id: d.pane_id.clone(),
+                                    text: text.clone(),
+                                    workspace_id: read.workspace_id,
+                                    terminal_id: read.terminal_id,
+                                    agent_ref,
+                                    agent_session,
+                                    condition: PaneSendTextCondition::DetectionSnapshotUnchanged,
+                                    observation_token: observation,
+                                };
+                                if let Ok(response) = super::send_request(&Request {
+                                    id: next_request_id("watchdog-nudge"),
+                                    method: Method::PaneSendTextIf(params),
+                                }) {
+                                    if response["result"]["outcome"] == "sent" {
+                                        d.delivered = Some(true);
+                                        mem.nudged_stall = true;
+                                        d.status = "nudged".into();
+                                        append_nudge_event(&options.status_log, d)?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         mark_dry_run_decision(d, options.dry_run);
         let _ = i;
     }
@@ -462,6 +537,27 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
     } else {
         0
     })
+}
+
+fn append_nudge_event(path: &Path, decision: &PaneV3Decision) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    serde_json::to_writer(
+        &mut file,
+        &serde_json::json!({
+            "timestamp": unix_seconds()?, "source": WATCHDOG_SOURCE,
+            "pane_id": decision.pane_id, "action": decision.action,
+            "text": decision.action_text, "delivered": decision.delivered,
+            "evidence": decision.evidence,
+        }),
+    )
+    .map_err(io::Error::other)?;
+    file.write_all(b"\n")
 }
 
 fn mark_dry_run_decision(decision: &mut PaneV3Decision, dry_run: bool) {
@@ -488,6 +584,52 @@ fn read_tail(pane_id: &str, lines: u32) -> Result<String, String> {
         .as_str()
         .map(str::to_string)
         .ok_or_else(|| "pane.read response did not contain result.read.text".into())
+}
+
+#[derive(Deserialize)]
+struct DetectionRead {
+    text: String,
+    workspace_id: String,
+    terminal_id: String,
+    agent_ref: Option<crate::api::schema::AgentRef>,
+    agent_session: Option<AgentSessionInfo>,
+    input_observation: Option<crate::api::schema::PaneInputObservation>,
+}
+
+struct DetectionObservation {
+    text: String,
+    workspace_id: String,
+    terminal_id: String,
+    agent_ref: Option<crate::api::schema::AgentRef>,
+    agent_session: Option<AgentSessionInfo>,
+    observation: Option<String>,
+}
+
+fn read_detection_observation(pane_id: &str) -> Result<DetectionObservation, String> {
+    let response = super::send_request(&Request {
+        id: next_request_id("pane-read-nudge"),
+        method: Method::PaneRead(PaneReadParams {
+            pane_id: pane_id.to_string(),
+            source: ReadSource::Detection,
+            lines: None,
+            format: ReadFormat::Text,
+            strip_ansi: true,
+            intent: Default::default(),
+        }),
+    })
+    .map_err(|e| e.to_string())?;
+    ensure_api_success(&response).map_err(|e| e.to_string())?;
+    let read: DetectionRead = serde_json::from_value(response["result"]["read"].clone())
+        .map_err(io::Error::other)
+        .map_err(|e| e.to_string())?;
+    Ok(DetectionObservation {
+        text: read.text,
+        workspace_id: read.workspace_id,
+        terminal_id: read.terminal_id,
+        agent_ref: read.agent_ref,
+        agent_session: read.agent_session,
+        observation: read.input_observation.map(|o| o.token),
+    })
 }
 
 fn claude_transcript_waiting(session: &str) -> Option<bool> {
@@ -1075,6 +1217,9 @@ mod tests {
             evidence: "waiting".into(),
             samples: vec![],
             write_error: None,
+            action: None,
+            action_text: None,
+            delivered: None,
             observed_terminal_id: None,
             observed_agent_session: None,
             observed_hash: 0,

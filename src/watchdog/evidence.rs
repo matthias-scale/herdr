@@ -99,6 +99,46 @@ pub(crate) fn composer_is_empty(text: &str) -> bool {
         .is_some_and(|s| s.as_str().trim().is_empty())
 }
 
+pub(crate) fn composer_text(text: &str) -> Option<String> {
+    let lines = text.lines().collect::<Vec<_>>();
+    composer_index(&lines)
+        .and_then(|i| COMPOSER_PROMPT.captures(lines[i]))
+        .and_then(|c| c.get(1))
+        .map(|s| s.as_str().trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+pub(crate) fn promised_work(text: &str) -> Option<String> {
+    let reply = reply_text(text);
+    let mut now = None;
+    for line in reply.lines() {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed
+            .strip_prefix("Now:")
+            .or_else(|| trimmed.strip_prefix("**Now:**"))
+        {
+            let value = value.trim().trim_matches('*').trim();
+            if value.is_empty()
+                || value.eq_ignore_ascii_case("waiting on you")
+                || value.eq_ignore_ascii_case("done here.")
+                || value.to_ascii_lowercase().starts_with("needs you")
+            {
+                now = None;
+            } else {
+                now = Some(value.to_owned());
+            }
+        }
+        if NEEDS_YOU_NOTHING.is_match(trimmed) || DONE_HERE.is_match(trimmed) {
+            now = None;
+        }
+    }
+    let work = now?;
+    let lower = reply.to_ascii_lowercase();
+    let dead_background = lower.contains("background shell command didn't finish")
+        || lower.contains("background shell command did not finish");
+    (dead_background || !work.is_empty()).then_some(work)
+}
+
 pub(crate) fn background_shell_count(text: &str) -> usize {
     let lines = text.lines().collect::<Vec<_>>();
     let Some(i) = composer_index(&lines) else {
