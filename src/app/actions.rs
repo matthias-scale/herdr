@@ -8347,7 +8347,7 @@ mod tests {
     }
 
     #[test]
-    fn close_tab_in_linked_worktree_keeps_worktree_workspace() {
+    fn close_tab_in_linked_worktree_closes_workspace_without_removing_worktree() {
         let mut state = app_with_workspaces(&["selected", "active"]);
         mark_linked_worktree(&mut state, 1);
         state.active = Some(1);
@@ -8356,9 +8356,8 @@ mod tests {
         state.close_tab();
 
         assert_eq!(state.request_remove_linked_worktree, None);
-        assert_eq!(state.workspaces.len(), 2);
+        assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "selected");
-        assert_eq!(state.workspaces[1].display_name(), "active");
     }
 
     #[test]
