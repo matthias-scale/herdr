@@ -608,7 +608,8 @@ mod tests {
                 label: "primary".into(),
                 usage: crate::provider_usage::AccountUsage::default(),
             });
-        app.notepad.usage_tab = true;
+        app.notepad.set_visible_tabs(vec!["usage".to_string()]);
+        assert!(app.notepad.usage_tab || app.notepad.select_usage_tab());
         crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
 
         let header = app.view.notepad_usage_hit_areas[0];

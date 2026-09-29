@@ -498,6 +498,8 @@ mod tests {
     #[test]
     fn usage_fold_glyph_uses_a_separate_header_hit_area() {
         let mut app = state();
+        show_all_tabs(&mut app);
+        assert!(app.notepad.select_usage_tab());
         let panel = Rect::new(0, 10, 26, 8);
         let toggle = usage_toggle_hit_area(&app, panel);
         let tabs = notepad_tab_hit_areas(&app, panel);
