@@ -11,6 +11,251 @@ pub(crate) struct WorkerObservation {
     pub finished: bool,
     pub parent_scope_local: bool,
     pub parent_state: ParentState,
+    pub turn_id: Option<String>,
+    pub semantic_hash: u64,
+    pub trace_mtime: u64,
+    pub trace: String,
+    pub out: String,
+    pub pid: Option<u32>,
+    pub pid_alive: bool,
+    pub pid_identity_ok: bool,
+    pub tool_alive: bool,
+    pub outstanding_op: Option<String>,
+    pub progress_at: Option<u64>,
+    pub state: String,
+    pub blocked_reason: Option<String>,
+    pub receipt_status: Option<String>,
+    pub gate_verdict: Option<String>,
+}
+
+/// Semantic evidence gathered for one Codex turn or Claude subagent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerEvidence {
+    pub turn_id: Option<String>,
+    pub hash: u64,
+    pub trace_mtime: u64,
+    pub progress_at: Option<u64>,
+    pub trace: String,
+    pub out: String,
+    pub pid: Option<u32>,
+    pub pid_alive: bool,
+    pub pid_identity_ok: bool,
+    pub tool_alive: bool,
+    pub outstanding_op: Option<String>,
+    pub finished: bool,
+    pub exit_code: Option<i64>,
+    pub receipt_status: Option<String>,
+    pub gate_verdict: Option<String>,
+    pub blocked_reason: Option<String>,
+    pub state: String,
+    pub parent_host: Option<String>,
+    pub parent_session: Option<String>,
+    pub parent_terminal: Option<String>,
+    pub parent_pane: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WorkerClass {
+    Working,
+    ToolWait,
+    WaitingToolInput,
+    WaitingApproval,
+    WaitingRetry,
+    SuspectedStall,
+    Finished,
+    Dead,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct SemanticWorkerMemory {
+    #[serde(default)]
+    pub(crate) workers: HashMap<String, SemanticWorkerEntry>,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct SemanticWorkerEntry {
+    #[serde(default)]
+    pub(crate) turn_id: Option<String>,
+    #[serde(default)]
+    pub(crate) hash: u64,
+    #[serde(default)]
+    pub(crate) since: u64,
+    #[serde(default)]
+    pub(crate) op_signature: Option<String>,
+    #[serde(default)]
+    pub(crate) op_since: u64,
+    #[serde(default)]
+    pub(crate) retry_since: Option<u64>,
+    #[serde(default)]
+    pub(crate) episode: u64,
+    #[serde(default)]
+    pub(crate) open_incident: Option<String>,
+    #[serde(default)]
+    pub(crate) logged: HashSet<String>,
+    #[serde(default)]
+    pub(crate) delivered: HashSet<String>,
+    #[serde(default)]
+    pub(crate) parent_absent_samples: u8,
+}
+
+pub(crate) fn classify_worker(
+    evidence: &WorkerEvidence,
+    memory: &mut SemanticWorkerEntry,
+    now: u64,
+    stall_secs: u64,
+    retry_window_secs: u64,
+    op_deadline_secs: u64,
+    retry_secs: Option<u64>,
+) -> (WorkerClass, u64, String) {
+    if evidence.finished {
+        return (
+            WorkerClass::Finished,
+            0,
+            format!(
+                "finished; receipt={:?}; gate_verdict={:?}",
+                evidence.receipt_status, evidence.gate_verdict
+            ),
+        );
+    }
+    if evidence.pid.is_some() && (!evidence.pid_alive || !evidence.pid_identity_ok) {
+        return (
+            WorkerClass::Dead,
+            0,
+            "pid absent or process identity does not match started_at".into(),
+        );
+    }
+    if let Some(turn) = &evidence.turn_id {
+        if memory.turn_id.as_ref() != Some(turn) {
+            memory.turn_id = Some(turn.clone());
+            memory.since = now;
+            if memory.op_signature.as_deref() != evidence.outstanding_op.as_deref() {
+                memory.op_since = now;
+            }
+        }
+    }
+    if evidence.hash != memory.hash {
+        memory.hash = evidence.hash;
+        memory.since = now;
+    }
+    if evidence.progress_at.is_some_and(|p| p > memory.since) {
+        memory.since = evidence.progress_at.unwrap_or(memory.since);
+    }
+    if evidence.trace_mtime > 0 && memory.since == 0 {
+        memory.since = evidence.trace_mtime;
+    }
+    let age = now.saturating_sub(memory.since);
+    if memory.op_signature != evidence.outstanding_op {
+        memory.op_signature = evidence.outstanding_op.clone();
+        memory.op_since = now;
+    }
+    if evidence.blocked_reason.is_some()
+        || evidence.state.eq_ignore_ascii_case("blocked")
+        || crate::watchdog::evidence::active_prompt(&evidence.trace)
+            .is_some_and(|p| p.kind == crate::watchdog::evidence::PromptKind::Dialog)
+    {
+        return (
+            WorkerClass::WaitingApproval,
+            age,
+            "worker reports blocked or has an active approval dialog".into(),
+        );
+    }
+    let prompt =
+        crate::watchdog::evidence::active_prompt(&format!("{}\n{}", evidence.trace, evidence.out));
+    if prompt.is_some_and(|p| p.kind == crate::watchdog::evidence::PromptKind::YesNo)
+        && evidence.tool_alive
+    {
+        return (
+            WorkerClass::WaitingToolInput,
+            age,
+            "active yes/no prompt with a live tool descendant".into(),
+        );
+    }
+    if let Some(secs) = retry_secs {
+        let since = *memory.retry_since.get_or_insert(now);
+        if now.saturating_sub(since) > retry_window_secs {
+            return (
+                WorkerClass::SuspectedStall,
+                age,
+                format!(
+                    "retries renewed for {}s without progress",
+                    now.saturating_sub(since)
+                ),
+            );
+        }
+        if now <= evidence.trace_mtime.saturating_add(secs).saturating_add(60) {
+            return (
+                WorkerClass::WaitingRetry,
+                age,
+                format!("scheduled retry in {secs}s"),
+            );
+        }
+    } else {
+        memory.retry_since = None;
+    }
+    if let Some(op) = &evidence.outstanding_op {
+        if now.saturating_sub(memory.op_since) > op_deadline_secs {
+            return (
+                WorkerClass::SuspectedStall,
+                age,
+                format!(
+                    "operation {op} outstanding {}s across resumes",
+                    now.saturating_sub(memory.op_since)
+                ),
+            );
+        }
+    }
+    if age < stall_secs {
+        return (
+            WorkerClass::Working,
+            age,
+            "semantic progress is within stall window".into(),
+        );
+    }
+    if evidence.tool_alive {
+        (
+            WorkerClass::ToolWait,
+            age,
+            "live tool descendant; worker trace is quiet".into(),
+        )
+    } else {
+        (
+            WorkerClass::SuspectedStall,
+            age,
+            format!("no semantic progress for {age}s"),
+        )
+    }
+}
+
+/// Return the command from the last Codex `exec` block that has no completion marker.
+pub(crate) fn outstanding_codex_operation(trace: &str) -> Option<String> {
+    let mut last_exec: Option<String> = None;
+    let mut in_exec = false;
+    for line in trace.lines() {
+        let trimmed = line.trim();
+        if matches!(trimmed, "codex" | "exec") {
+            in_exec = trimmed == "exec";
+            if !in_exec {
+                last_exec = None;
+            }
+            continue;
+        }
+        if in_exec {
+            if trimmed.starts_with("succeeded in ")
+                || trimmed.starts_with("exited ") && trimmed.contains(" in ")
+            {
+                last_exec = None;
+                in_exec = false;
+            } else if !trimmed.is_empty() {
+                last_exec = Some(trimmed.to_owned());
+                in_exec = false;
+            }
+        } else if trimmed.starts_with("succeeded in ")
+            || trimmed.starts_with("exited ") && trimmed.contains(" in ")
+        {
+            last_exec = None;
+        }
+    }
+    last_exec
 }
 
 impl WorkerObservation {
@@ -30,6 +275,8 @@ pub(crate) enum ParentState {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct WorkerMemory {
+    #[serde(default)]
+    pub(crate) semantic: SemanticWorkerMemory,
     #[serde(default)]
     recorded_activity: HashMap<String, u64>,
     #[serde(default)]
@@ -327,7 +574,130 @@ mod tests {
             finished,
             parent_scope_local: true,
             parent_state: ParentState::Present,
+            turn_id: None,
+            semantic_hash: last_activity,
+            trace_mtime: last_activity,
+            trace: String::new(),
+            out: String::new(),
+            pid: None,
+            pid_alive: false,
+            pid_identity_ok: false,
+            tool_alive: false,
+            outstanding_op: None,
+            progress_at: Some(last_activity),
+            state: String::new(),
+            blocked_reason: None,
+            receipt_status: None,
+            gate_verdict: None,
         }
+    }
+
+    fn semantic() -> WorkerEvidence {
+        WorkerEvidence {
+            turn_id: Some("turn-1".into()),
+            hash: 10,
+            trace_mtime: 900,
+            progress_at: None,
+            trace: "Compiling target".into(),
+            out: String::new(),
+            pid: Some(10),
+            pid_alive: true,
+            pid_identity_ok: true,
+            tool_alive: false,
+            outstanding_op: None,
+            finished: false,
+            exit_code: None,
+            receipt_status: None,
+            gate_verdict: None,
+            blocked_reason: None,
+            state: "active".into(),
+            parent_host: None,
+            parent_session: None,
+            parent_terminal: None,
+            parent_pane: None,
+        }
+    }
+
+    #[test]
+    fn semantic_worker_classification_covers_terminal_dead_prompt_retry_tool_and_stall() {
+        let mut memory = SemanticWorkerEntry::default();
+        let mut evidence = semantic();
+        assert_eq!(
+            classify_worker(&evidence, &mut memory, 1_000, 300, 300, 600, None).0,
+            WorkerClass::Working
+        );
+        evidence.finished = true;
+        assert_eq!(
+            classify_worker(&evidence, &mut memory, 1_000, 300, 300, 600, None).0,
+            WorkerClass::Finished
+        );
+        evidence.finished = false;
+        evidence.pid_alive = false;
+        assert_eq!(
+            classify_worker(&evidence, &mut memory, 1_000, 300, 300, 600, None).0,
+            WorkerClass::Dead
+        );
+        evidence.pid_alive = true;
+        evidence.blocked_reason = Some("approval".into());
+        assert_eq!(
+            classify_worker(&evidence, &mut memory, 1_000, 300, 300, 600, None).0,
+            WorkerClass::WaitingApproval
+        );
+        evidence.blocked_reason = None;
+        evidence.trace = "Overwrite? [y/n]".into();
+        evidence.tool_alive = true;
+        assert_eq!(
+            classify_worker(&evidence, &mut memory, 1_000, 300, 300, 600, None).0,
+            WorkerClass::WaitingToolInput
+        );
+        evidence.trace.clear();
+        evidence.tool_alive = false;
+        assert_eq!(
+            classify_worker(&evidence, &mut memory, 1_000, 300, 300, 600, Some(120)).0,
+            WorkerClass::WaitingRetry
+        );
+        memory.since = 1;
+        evidence.hash = memory.hash;
+        evidence.trace_mtime = 1;
+        evidence.outstanding_op = Some("cargo test".into());
+        let _ = classify_worker(&evidence, &mut memory, 1_000, 300, 300, 600, None);
+        memory.op_since = 1;
+        assert_eq!(
+            classify_worker(&evidence, &mut memory, 2_000, 300, 300, 600, None).0,
+            WorkerClass::SuspectedStall
+        );
+    }
+
+    #[test]
+    fn codex_trace_selects_only_an_uncompleted_exec_operation() {
+        assert_eq!(
+            outstanding_codex_operation("codex\nexec\ncargo test\n"),
+            Some("cargo test".into())
+        );
+        assert_eq!(
+            outstanding_codex_operation("codex\nexec\ncargo test\n succeeded in 10ms:\n"),
+            None
+        );
+        assert_eq!(
+            outstanding_codex_operation("exec\nfirst\n succeeded in 1ms:\nexec\nsecond\n"),
+            Some("second".into())
+        );
+    }
+
+    #[test]
+    fn resumed_turn_preserves_age_for_same_operation() {
+        let mut memory = SemanticWorkerEntry::default();
+        let mut evidence = semantic();
+        evidence.outstanding_op = Some("cargo test".into());
+        let _ = classify_worker(&evidence, &mut memory, 100, 300, 300, 600, None);
+        memory.op_since = 5;
+        evidence.turn_id = Some("turn-2".into());
+        let _ = classify_worker(&evidence, &mut memory, 200, 300, 300, 600, None);
+        assert_eq!(memory.op_since, 5);
+        assert_eq!(memory.since, 200);
+        evidence.outstanding_op = Some("cargo check".into());
+        let _ = classify_worker(&evidence, &mut memory, 210, 300, 300, 600, None);
+        assert_eq!(memory.op_since, 210);
     }
 
     #[test]

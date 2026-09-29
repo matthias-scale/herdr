@@ -276,12 +276,35 @@ fn worker_watchdog_command() -> Command {
                 .value_parser(clap::value_parser!(u64))
                 .help("No heartbeat or trace progress for this many minutes"),
         )
+        .arg(
+            option("confirm-secs", "N")
+                .default_value("20")
+                .value_parser(clap::value_parser!(u64))
+                .help("Seconds between confirmation samples"),
+        )
+        .arg(
+            option("op-deadline-minutes", "N")
+                .default_value("60")
+                .value_parser(clap::value_parser!(u64))
+                .help("Maximum age for one outstanding operation"),
+        )
         .arg(path_option("runs-dir", "PATH").help("Codex ra-launch run directory"))
         .arg(
             path_option("claude-projects-dir", "PATH").help("Claude project transcripts directory"),
         )
         .arg(path_option("state-file", "PATH").help("Worker notification dedupe state"))
         .arg(path_option("log-file", "PATH").help("Append worker stall notification events"))
+        .arg(
+            Arg::new("local-host")
+                .long("local-host")
+                .value_name("NAME")
+                .action(ArgAction::Append)
+                .help("Additional alias for this host (repeatable)"),
+        )
+        .arg(
+            option("parent-probe", "CMD")
+                .help("Command prefix used to inspect remote parent hosts"),
+        )
         .arg(json_flag())
 }
 
