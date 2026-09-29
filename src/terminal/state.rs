@@ -474,6 +474,10 @@ struct ClosingReportHandoffState {
     external_wait: Option<String>,
     parse_status: Option<crate::api::schema::ClosingParseStatus>,
     workers_unknown: Option<bool>,
+    #[serde(default)]
+    auto_settle_armed: bool,
+    #[serde(default)]
+    user_replied: bool,
 }
 
 #[cfg(unix)]
@@ -502,6 +506,8 @@ impl ClosingReportHandoffState {
             external_wait: report.external_wait.clone(),
             parse_status: report.parse_status,
             workers_unknown: report.workers_unknown,
+            auto_settle_armed: report.auto_settle_armed,
+            user_replied: report.user_replied,
         }
     }
 
@@ -531,6 +537,8 @@ impl ClosingReportHandoffState {
             external_wait: self.external_wait,
             parse_status: self.parse_status,
             workers_unknown: self.workers_unknown,
+            auto_settle_armed: self.auto_settle_armed,
+            user_replied: self.user_replied,
         }
     }
 }
