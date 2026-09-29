@@ -462,6 +462,7 @@ struct ScheduledTaskRender {
 /// cannot be computed from another client's sidebar, dock, or detail state.
 struct ClientInputPresentation {
     active_workspace: Option<usize>,
+    shared_active_workspace_id: Option<String>,
     selected_pane: usize,
     sidebar: crate::app::state::SidebarPresentationState,
     dock: crate::app::state::DockPresentationState,
@@ -476,6 +477,10 @@ struct ClientInputPresentation {
 impl ClientInputPresentation {
     fn take(client: &mut ClientConnection, state: &crate::app::state::AppState) -> Self {
         Self {
+            shared_active_workspace_id: state
+                .active
+                .and_then(|index| state.workspaces.get(index))
+                .map(|workspace| workspace.workspace_id.clone()),
             active_workspace: if client.focus_initialized {
                 match client.active_workspace_id.as_ref() {
                     Some(workspace_id) => state
@@ -522,6 +527,13 @@ impl ClientInputPresentation {
     fn uninstall(&mut self, state: &mut crate::app::state::AppState) {
         std::mem::swap(&mut state.selected, &mut self.selected_pane);
         std::mem::swap(&mut state.active, &mut self.active_workspace);
+        if let Some(workspace_id) = self.shared_active_workspace_id.as_ref() {
+            state.active = state
+                .workspaces
+                .iter()
+                .position(|workspace| &workspace.workspace_id == workspace_id)
+                .or(state.active.filter(|index| *index < state.workspaces.len()));
+        }
         state.swap_usage_view(&mut self.usage_view);
         state.swap_work_view(&mut self.work_view);
         state.swap_symphony_detail(&mut self.symphony_detail);
@@ -8930,6 +8942,81 @@ esac
         assert!(!server.clients[&3].notepad_presentation.agent_tab);
         assert_eq!(server.clients[&1].notepad_presentation.agent_scroll, 1);
         assert_eq!(server.clients[&2].notepad_presentation.usage_scroll, 1);
+    }
+
+    #[test]
+    fn closing_one_clients_focused_workspace_preserves_other_client_focus() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("client-a"),
+            crate::workspace::Workspace::test_new("client-b"),
+            crate::workspace::Workspace::test_new("other"),
+        ];
+        let workspace_a = server.app.state.workspaces[0].workspace_id.clone();
+        let workspace_b = server.app.state.workspaces[1].workspace_id.clone();
+        let workspace_c = server.app.state.workspaces[2].workspace_id.clone();
+        server.app.state.active = Some(1);
+        server.app.state.selected = 0;
+
+        let mut client_a = test_app_client(Some(true), 1);
+        client_a.focus_initialized = true;
+        client_a.active_workspace = Some(0);
+        client_a.active_workspace_id = Some(workspace_a);
+        client_a.selected_pane = 0;
+        let mut client_b = test_app_client(Some(true), 2);
+        client_b.focus_initialized = true;
+        client_b.active_workspace = Some(0);
+        client_b.active_workspace_id = Some(workspace_a.clone());
+        client_b.selected_pane = 0;
+        server.clients.insert(1, client_a);
+        server.clients.insert(2, client_b);
+
+        let mut presentation = ClientInputPresentation::take(
+            server.clients.get_mut(&1).expect("client A"),
+            &server.app.state,
+        );
+        presentation.install(&mut server.app.state);
+        server.app.state.switch_workspace(2);
+        presentation.uninstall(&mut server.app.state);
+        presentation.store(
+            server.clients.get_mut(&1).expect("client A"),
+            &server.app.state,
+        );
+        assert_eq!(
+            server.clients[&1].active_workspace_id.as_deref(),
+            Some(workspace_c.as_str())
+        );
+        assert_eq!(
+            server.clients[&2].active_workspace_id.as_deref(),
+            Some(workspace_a.as_str())
+        );
+        assert_eq!(server.app.state.active, Some(1));
+
+        let mut presentation = ClientInputPresentation::take(
+            server.clients.get_mut(&1).expect("client A"),
+            &server.app.state,
+        );
+        presentation.install(&mut server.app.state);
+        assert_eq!(server.app.state.active, Some(2));
+        server.app.state.close_workspace_exact(2);
+        presentation.uninstall(&mut server.app.state);
+        presentation.store(
+            server.clients.get_mut(&1).expect("client A"),
+            &server.app.state,
+        );
+
+        assert_eq!(
+            server.clients[&1].active_workspace_id.as_deref(),
+            Some(workspace_b.as_str())
+        );
+        assert_eq!(
+            server.clients[&2].active_workspace_id.as_deref(),
+            Some(workspace_a.as_str())
+        );
+        assert_eq!(
+            server.app.state.workspaces[server.app.state.active.unwrap()].workspace_id,
+            workspace_b
+        );
     }
 
     fn read_server_shutdown_reason(bytes: Vec<u8>) -> Option<String> {

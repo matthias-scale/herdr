@@ -336,6 +336,40 @@ fn run_session_save_job(
 mod tests {
     use super::*;
 
+    fn test_app() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = crate::config::Config::default();
+        config.work_index.enabled = false;
+        App::new(&config, true, None, api_rx, crate::api::EventHub::default())
+    }
+
+    #[test]
+    fn dirty_session_publishes_one_revisioned_snapshot_event_per_sync() {
+        let mut app = test_app();
+        app.state.mark_session_dirty();
+        let revision = app.state.session_dirty_revision;
+
+        app.sync_session_save_schedule();
+        app.sync_session_save_schedule();
+
+        let events = app.event_hub.events_after(0);
+        assert_eq!(events.len(), 1);
+        let event = &events[0].1;
+        let crate::api::schema::EventData::SessionChanged {
+            epoch,
+            revision: event_revision,
+            snapshot,
+        } = &event.data
+        else {
+            panic!("expected session change event");
+        };
+        assert_eq!(*event_revision, revision);
+        assert_eq!(snapshot.epoch.as_deref(), Some(epoch.as_str()));
+        assert_eq!(snapshot.revision, Some(revision));
+        assert_eq!(snapshot.as_ref(), &app.session_snapshot());
+        assert_eq!(app.state.session_event_revision, revision);
+    }
+
     #[test]
     fn ac1_retry_backoff_is_bounded() {
         assert_eq!(session_save_retry_delay(1), Duration::from_millis(250));
