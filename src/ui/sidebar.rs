@@ -29584,7 +29584,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .find(|x| top_ask.backend().buffer()[(*x, 0)].symbol() == "○")
             .expect("aligned ask dot");
         let marker = &top_ask.backend().buffer()[(marker_x, 0)];
-        assert_eq!(marker.style().fg, Some(app.palette.peach));
+        assert_eq!(marker.style().fg, Some(app.palette.red));
         let ask_snapshot = row_text(top_ask.backend().buffer(), 1, 42);
         assert!(ask_snapshot.contains("↳ Choose a layout"), "{ask_snapshot}");
         let arrow_x = (0..42)
@@ -29617,6 +29617,37 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             SidebarRow::NeedsYou { subtitle: None, .. }
         ));
         assert!(!render(&app).contains("↳ Choose a layout"));
+    }
+
+    #[test]
+    fn top_ask_dot_is_red_only_when_blocked() {
+        let app = AppState::test_new();
+        for (blocked, expected) in [(false, app.palette.peach), (true, app.palette.red)] {
+            let mut terminal = Terminal::new(TestBackend::new(42, 1)).expect("top ask terminal");
+            terminal
+                .draw(|frame| {
+                    render_needs_you_row(
+                        &app,
+                        frame,
+                        "task",
+                        "",
+                        "host",
+                        "○",
+                        blocked,
+                        app.palette.peach,
+                        None,
+                        Rect::new(0, 0, 42, 1),
+                    )
+                })
+                .expect("render top ask row");
+            let marker_x = (0..42)
+                .find(|x| terminal.backend().buffer()[(*x, 0)].symbol() == "○")
+                .expect("aligned ask dot");
+            assert_eq!(
+                terminal.backend().buffer()[(marker_x, 0)].style().fg,
+                Some(expected)
+            );
+        }
     }
 
     #[test]
