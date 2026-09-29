@@ -360,6 +360,7 @@ pub(crate) struct ProcSample {
     pub cpu_ms: u64,
     pub name: String,
 }
+#[cfg(unix)]
 fn duration(s: &str) -> Option<u64> {
     let (d, c) = match s.split_once('-') {
         Some((days, clock)) => (days.parse::<u64>().ok()?, clock),
@@ -373,6 +374,7 @@ fn duration(s: &str) -> Option<u64> {
     };
     Some(((d * 24 + h) * 3600 + m * 60) * 1000 + (t.parse::<f64>().ok()? * 1000.).round() as u64)
 }
+#[cfg(unix)]
 pub(crate) fn parse_ps_rows(text: &str) -> Vec<ProcSample> {
     text.lines()
         .filter_map(|l| {
@@ -398,6 +400,7 @@ pub(crate) fn parse_ps_rows(text: &str) -> Vec<ProcSample> {
 }
 
 /// Parse one `ps -A -o pid=,args=` snapshot for Claude parent-session liveness.
+#[cfg(unix)]
 pub(crate) fn parse_process_args(text: &str) -> Vec<(u32, String)> {
     text.lines()
         .filter_map(|line| {
@@ -526,6 +529,7 @@ mod tests {
             PromptKind::AccountAction
         );
     }
+    #[cfg(unix)]
     #[test]
     fn retries_and_ps_formats() {
         assert_eq!(scheduled_retry_secs("retry in 1500ms"), Some(2));
@@ -548,6 +552,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn tool_process_selection_excludes_agents_shells_and_old_helpers() {
         let samples = parse_ps_rows(
@@ -650,6 +655,7 @@ mod tests {
         assert_eq!(claude_pending_tool(&completed), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn process_args_snapshot_matches_claude_session_ids() {
         let rows = parse_process_args(
