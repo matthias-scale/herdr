@@ -130,7 +130,7 @@ class Harness:
             raise RuntimeError(f"peer workspace response omitted pane_id: {result.stdout[-500:]}")
         self.peer_session = f"watchdog-peer-{os.getpid()}"
         report = [binary, "pane", "report-agent-session", str(pane_id), "--source",
-                  "watchdog-harness", "--agent", "codex", "--agent-session-id", self.peer_session]
+                  "herdr:codex", "--agent", "codex", "--agent-session-id", self.peer_session]
         command = (f"env -i PATH=/usr/bin:/bin XDG_CONFIG_HOME={cfg_q} XDG_STATE_HOME={state_q} "
                    f"HERDR_SOCKET_PATH={sock_q} " + " ".join(map(shlex.quote, report)))
         reported = subprocess.run(["ssh", "-o", "BatchMode=yes", peer, command], text=True,
@@ -141,11 +141,18 @@ class Harness:
         self.probe_wrapper.write_text("#!/usr/bin/env python3\nimport os, subprocess, sys\n"
             f"cfg={cfg_q!r}; state={state_q!r}; sock={sock_q!r}; binary={binary!r}\n"
             "host=sys.argv[1]\n"
-            "p=subprocess.run(['ssh','-o','BatchMode=yes','-o','ConnectTimeout=5',host,'env',"
+            "p=subprocess.run(['ssh','-o','BatchMode=yes','-o','ConnectTimeout=5',host,'env','-i',"
+            "'PATH=/usr/bin:/bin',"
             "'XDG_CONFIG_HOME='+cfg,'XDG_STATE_HOME='+state,'HERDR_SOCKET_PATH='+sock,"
             "binary,'pane','list'],text=True)\n"
             "sys.exit(p.returncode)\n", encoding="utf-8")
         self.probe_wrapper.chmod(0o755)
+        probe = subprocess.run([str(self.probe_wrapper), peer, "herdr", "pane", "list"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        if probe.returncode or self.peer_session not in probe.stdout:
+            raise RuntimeError("isolated peer parent session was not visible through the parent probe: "
+                               f"exit={probe.returncode} stdout={probe.stdout[-500:]} "
+                               f"stderr={probe.stderr[-500:]}")
 
     def cleanup_peer(self) -> None:
         if not self.peer_root or not self.args.peer or not self.args.peer_binary:
@@ -172,7 +179,7 @@ class Harness:
                                f"{result.stdout[-800:]} {result.stderr[-800:]}")
         return result
 
-    def workspace(self, label: str, command: str) -> str:
+    def workspace(self, label: str, command: str, ready_lines: tuple[str, ...]) -> str:
         result = self.cli("workspace", "create", "--cwd", str(self.root), "--label", label)
         payload = _last_json(result.stdout)
         pane = _find_value(payload, "pane_id")
@@ -180,9 +187,33 @@ class Harness:
             raise RuntimeError(f"workspace create omitted pane_id: {result.stdout[-500:]}")
         self.panes[label] = str(pane)
         self.cli("pane", "run", str(pane), command)
+        self.wait_for_pane_stable(str(pane), ready_lines)
         self.call("pane.report_agent", {"pane_id": str(pane), "source": "watchdog-harness",
                                         "agent": "codex", "state": "working"})
         return str(pane)
+
+    def wait_for_pane_stable(self, pane_id: str, ready_lines: tuple[str, ...]) -> None:
+        deadline = time.monotonic() + 5
+        previous: str | None = None
+        stable_samples = 0
+        while time.monotonic() < deadline:
+            response = self.call("pane.read", {"pane_id": pane_id, "source": "detection",
+                "lines": 40, "format": "text"})
+            current = (response.get("read") or {}).get("text", "")
+            if not any(line.strip() in ready_lines for line in current.splitlines()):
+                previous = None
+                stable_samples = 0
+                time.sleep(.1)
+                continue
+            if current == previous:
+                stable_samples += 1
+                if stable_samples >= 2:
+                    return
+            else:
+                previous = current
+                stable_samples = 0
+            time.sleep(.1)
+        raise RuntimeError(f"pane {pane_id} did not reach a stable fixture screen")
 
     def run_watchdog(self, family: str, options: list[str], dry: bool = True) -> dict[str, Any]:
         command = [str(self.args.binary), "watchdog"]
@@ -234,8 +265,10 @@ class Harness:
             memory = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             memory = {}
-        key = next((k for k in memory if k == worker_id or k.endswith(":" + worker_id)), worker_id)
-        entry = memory.setdefault(key, {})
+        workers = memory.setdefault("semantic", {}).setdefault("workers", {})
+        key = next((k for k in workers if k == "codex:" + worker_id
+                    or k.endswith(":" + worker_id)), "codex:" + worker_id)
+        entry = workers.setdefault(key, {})
         aged = int(time.time()) - seconds
         for field in ("since", "retry_since", "op_since"):
             if field in entry:
@@ -279,10 +312,11 @@ class Harness:
         shutil.rmtree(self.root, ignore_errors=True)
 
     def incident_rearm_check(self) -> dict[str, Any]:
-        parent_pane = self.workspace("incident-parent", _script("Parent remains available"))
+        parent_pane = self.workspace("incident-parent", _script("Parent remains available"),
+                                     ("Parent remains available",))
         parent_session = "incident-parent-session"
         self.call("pane.report_agent_session", {"pane_id": parent_pane,
-            "source": "watchdog-harness", "agent": "codex", "agent_session_id": parent_session})
+            "source": "herdr:codex", "agent": "codex", "agent_session_id": parent_session})
         runs = self.root / "incident-runs" / "incident-worker"
         turn = runs / "turns" / "turn-1"
         turn.mkdir(parents=True)
@@ -304,16 +338,19 @@ class Harness:
         state = self.root / "incident-state.json"
         log = self.root / "incident-log.jsonl"
         options = ["--stall-minutes", "1", "--runs-dir", str(runs.parent),
-                   "--claude-projects-dir", str(self.root / "claude-projects"),
+                   "--history-days", "3650", "--all",
+                   "--claude-projects-dir", str(self.root / "incident-claude-projects"),
                    "--state-file", str(state), "--log-file", str(log),
                    "--local-host", self.args.host_label]
         first = self.run_watchdog("B", options, dry=False)
         second = self.run_watchdog("B", options, dry=False)
-        records_after_second = len(log.read_text().splitlines()) if log.exists() else 0
+        records = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+        records_after_second = len(records)
         with trace.open("a", encoding="utf-8") as output:
             output.write("new semantic progress\n")
         recovered = self.run_watchdog("B", options, dry=False)
         self.age_worker_memory(state, "incident-worker", 3600)
+        os.utime(trace, (old, old))
         rearmed = self.run_watchdog("B", options, dry=False)
         records_after_rearm = len(log.read_text().splitlines()) if log.exists() else 0
         def incident_action(payload: dict[str, Any]) -> str | None:
@@ -322,6 +359,7 @@ class Harness:
             return (item.get("incident") or {}).get("action")
         return {"first_action": incident_action(first), "second_action": incident_action(second),
                 "records_after_second": records_after_second,
+                "records": [json.loads(record) for record in records],
                 "recovery_class": next((d.get("class") for d in recovered.get("decisions", [])
                     if d.get("worker_id") == "incident-worker"), None),
                 "rearmed_action": incident_action(rearmed), "records_after_rearm": records_after_rearm}
@@ -354,76 +392,93 @@ def _find_value(value: Any, key: str) -> Any:
 
 def _script(text: str, repeat: bool = False) -> str:
     literal = json.dumps(text)
+    name_agent = "import ctypes; ctypes.CDLL(None).prctl(15,b'codex',0,0,0)\n"
     if repeat:
-        code = ("import time\n" + f"print({literal}, flush=True)\n" +
+        code = (name_agent + "import time\n" + f"print({literal}, flush=True)\n" +
                 "i=0\nwhile True:\n time.sleep(2)\n i+=1\n " +
                 f"print({literal} + ' ' + str(i), flush=True)\n")
     else:
-        code = f"print({literal}, flush=True)\nimport time; time.sleep(3600)\n"
+        code = name_agent + f"print({literal}, flush=True)\nimport time; time.sleep(3600)\n"
     return "python3 -u -c " + shlex.quote(code)
 
 
 def setup_quiet(h: Harness, ident: str) -> str:
-    code = "import subprocess,time; print('Running cargo test', flush=True); " \
+    code = "import ctypes,subprocess,time; ctypes.CDLL(None).prctl(15,b'codex',0,0,0); " \
+           "print('Running cargo test', flush=True); " \
            "subprocess.Popen(['sleep','3600']); time.sleep(3600)"
-    return h.workspace(ident, "python3 -u -c " + shlex.quote(code))
+    return h.workspace(ident, "python3 -u -c " + shlex.quote(code), ("Running cargo test",))
 
 
 def setup_stall(h: Harness, ident: str) -> str:
-    return h.workspace(ident, _script("static build output"))
+    return h.workspace(ident, _script("static build output"), ("static build output",))
 
 
 def setup_prompt(h: Harness, ident: str) -> str:
-    code = "import subprocess,time; print('Overwrite generated snapshot? [y/n]', flush=True); " \
-           "subprocess.Popen(['bash','-c','read -r answer']); time.sleep(3600)"
-    return h.workspace(ident, "python3 -u -c " + shlex.quote(code))
+    code = "import ctypes,subprocess,time; ctypes.CDLL(None).prctl(15,b'codex',0,0,0); " \
+           "print('Overwrite generated snapshot? [y/n]', flush=True); " \
+           "subprocess.Popen(['sleep','3600']); time.sleep(3600)"
+    return h.workspace(ident, "python3 -u -c " + shlex.quote(code),
+                       ("Overwrite generated snapshot? [y/n]",))
 
 
 def setup_progress(h: Harness, ident: str) -> str:
-    return h.workspace(ident, _script("Compiling crate", repeat=True))
+    return h.workspace(ident, _script("Compiling crate", repeat=True), ("Compiling crate",))
 
 
 def setup_summary(h: Harness, ident: str) -> str:
-    return h.workspace(ident, _script("Build completed successfully"))
+    return h.workspace(ident, _script("Build completed successfully"),
+                       ("Build completed successfully",))
 
 
 def setup_retry(h: Harness, ident: str) -> str:
-    return h.workspace(ident, _script("API 429; retry in 120 seconds"))
+    return h.workspace(ident, _script("API 429; retry in 120 seconds"),
+                       ("API 429; retry in 120 seconds",))
 
 
 def setup_account(h: Harness, ident: str) -> str:
-    return h.workspace(ident, _script("You hit your usage limit; change account"))
+    return h.workspace(ident, _script("You hit your usage limit; change account"),
+                       ("You hit your usage limit; change account",))
 
 
 def setup_spinner(h: Harness, ident: str) -> str:
     code = "import itertools,time; glyphs=itertools.cycle('◐◓◑◒'); " \
            "exec(\"while True:\\n print(next(glyphs), flush=True)\\n time.sleep(2)\")"
-    return h.workspace(ident, "python3 -u -c " + shlex.quote(code))
+    return h.workspace(ident, "python3 -u -c " + shlex.quote(code), ("◐", "◓", "◑", "◒"))
 
 
 def setup_quote(h: Harness, ident: str) -> str:
-    return h.workspace(ident, _script('> "Should I continue?"\nNew turn started\nWorking on files'))
+    return h.workspace(ident, _script('> "Should I continue?"\nNew turn started\nWorking on files'),
+                       ("Working on files",))
 
 
 def setup_dialog(h: Harness, ident: str) -> str:
-    return h.workspace(ident, _script("Do you want to allow this command?\n❯ 1. Yes\n  2. No\nEsc to cancel"))
+    return h.workspace(ident, _script("Do you want to allow this command?\n❯ 1. Yes\n  2. No\nEsc to cancel"),
+                       ("Esc to cancel",))
 
 
 def setup_prose_question(h: Harness, ident: str) -> str:
-    return h.workspace(ident, _script("Which deployment option should I choose?"))
+    return h.workspace(ident, _script("Which deployment option should I choose?"),
+                       ("Which deployment option should I choose?",))
 
 
 def setup_worker(h: Harness, ident: str) -> dict[str, str]:
     # Each run directory has its own live fixture process and aged trace.
     if ident == "b-claude-subagent":
-        parent_pane = h.workspace("parent-" + ident, _script("Parent Claude fixture"))
         session = "claude-parent-" + ident
+        parent_pane = h.workspace("parent-" + ident,
+                                  _script(f"Parent Claude fixture {session}"),
+                                  (f"Parent Claude fixture {session}",))
         h.call("pane.report_agent_session", {"pane_id": parent_pane,
             "source": "watchdog-harness", "agent": "claude", "agent_session_id": session})
+        parent_transcript = h.root / "claude-projects" / "project" / f"{session}.jsonl"
+        parent_transcript.parent.mkdir(parents=True, exist_ok=True)
+        parent_transcript.write_text(json.dumps({"type": "assistant", "message": {
+            "content": [{"type": "text", "text": "Parent session active"}]}}) + "\n")
         transcript = h.root / "claude-projects" / "project" / session / "subagents" / f"{ident}.jsonl"
         transcript.parent.mkdir(parents=True, exist_ok=True)
         transcript.write_text(json.dumps({"type": "assistant", "message": {
-            "content": [{"type": "text", "text": "Working through the task"}]}}) + "\n")
+            "content": [{"type": "tool_use", "id": "toolu-live", "name": "Bash",
+                         "input": {"command": "sleep 3600"}}]}}) + "\n")
         return {"runs": str(h.root / "runs")}
     runs = h.root / "runs" / ident
     runs.mkdir(parents=True, exist_ok=True)
@@ -431,7 +486,7 @@ def setup_worker(h: Harness, ident: str) -> dict[str, str]:
     if current_turn == "turn-2":
         prior = runs / "turns" / "turn-1"
         prior.mkdir(parents=True, exist_ok=True)
-        (prior / "start.json").write_text(json.dumps({"started_at": time.time() - 60}))
+        (prior / "start.json").write_text(json.dumps({"started_at": int(time.time()) - 60}))
         (prior / "trace.log").write_text("older turn output\n")
     turn = runs / "turns" / current_turn
     turn.mkdir(parents=True, exist_ok=True)
@@ -442,7 +497,8 @@ def setup_worker(h: Harness, ident: str) -> dict[str, str]:
     approval = ident == "b-approval"
     trace = turn / "trace.log"
     quote = '> "Should I continue?"\nprogress made\n' if ident == "b-quoted-question" else ""
-    trace.write_text(retry + prompt + quote + "codex\nexec\necho build\n")
+    operation = "codex\nexec\necho build\n" if ident == "b-resumed-same-op" else "codex\n"
+    trace.write_text(quote + operation + retry + prompt)
     if ident == "b-spinner-progress":
         code = ("import time; p=" + repr(str(trace)) + "; i=0\nwhile True:\n "
                 "i+=1; open(p,'a').write(f'progress {i}\\n'); time.sleep(1)\n")
@@ -466,7 +522,8 @@ def setup_worker(h: Harness, ident: str) -> dict[str, str]:
     if ident == "p-unreachable":
         parent["host"] = "wd-unreachable.invalid"
     elif ident == "p-present-local":
-        parent_pane = h.workspace("parent-" + ident, _script("Parent agent fixture"))
+        parent_pane = h.workspace("parent-" + ident, _script("Parent agent fixture"),
+                                  ("Parent agent fixture",))
         parent_session = "parent-session-" + ident
         h.call("pane.report_agent_session", {"pane_id": parent_pane,
             "source": "watchdog-harness", "agent": "codex", "agent_session_id": parent_session})
@@ -482,7 +539,7 @@ def setup_worker(h: Harness, ident: str) -> dict[str, str]:
         "blocked_reason": "approval required" if approval else None,
         "progress_at": None, "parent": parent}))
     os.utime(runs / "state.json", (old, old))
-    (turn / "start.json").write_text(json.dumps({"started_at": time.time()}))
+    (turn / "start.json").write_text(json.dumps({"started_at": int(time.time())}))
     if ident in ("b-quiet-build", "b-silent-stall", "b-retry-renewed",
                  "b-spinner-only", "b-resumed-same-op"):
         os.utime(trace, (old, old))
@@ -534,7 +591,8 @@ def self_test(args: argparse.Namespace) -> int:
     h = Harness(args)
     try:
         h.start()
-        pane_id = h.workspace("self-test", _script("harness fixture ready"))
+        pane_id = h.workspace("self-test", _script("harness fixture ready"),
+                              ("harness fixture ready",))
         deadline = time.monotonic() + 5
         pane_text = ""
         while time.monotonic() < deadline:
@@ -651,8 +709,9 @@ def main() -> int:
                 actual = decision.get("class", "missing")
                 evidence = decision.get("evidence", payload.get("_stderr_tail"))
             elif family in ("B", "P"):
-                opts = ["--dry-run", "--stall-minutes", "1", "--runs-dir",
-                        str(Path(result["runs"]).parent), "--state-file", str(harness.root / f"worker-{ident}.json"),
+                opts = ["--stall-minutes", "1", "--runs-dir",
+                        str(result["runs"]), "--history-days", "3650", "--all",
+                        "--state-file", str(harness.root / f"worker-{ident}.json"),
                         "--claude-projects-dir", str(harness.root / "claude-projects"),
                         "--local-host", args.host_label,
                         "--log-file", str(harness.root / f"worker-{ident}.jsonl")]
@@ -660,14 +719,15 @@ def main() -> int:
                 if ident == "p-cross-host" and harness.probe_wrapper:
                     opts += ["--parent-probe", str(harness.probe_wrapper)]
                 memory_path = harness.root / f"worker-{ident}.json"
-                harness.run_watchdog("B", opts)
-                memory_age = (7200 if ident == "b-resumed-same-op" else
+                dry_run = ident != "p-cross-host"
+                harness.run_watchdog("B", opts, dry=dry_run)
+                memory_age = (0 if family == "P" else 7200 if ident == "b-resumed-same-op" else
                     0 if ident in ("b-retry-backoff", "b-quoted-question", "b-claude-subagent") else 3600)
                 harness.age_worker_memory(memory_path, ident, memory_age,
                     previous_turn=ident in ("b-resumed", "b-resumed-same-op"))
                 if ident == "b-spinner-progress":
                     time.sleep(2.1)
-                payload = harness.run_watchdog("B", opts)
+                payload = harness.run_watchdog("B", opts, dry=dry_run)
                 decision = next((d for d in payload.get("decisions", []) if d.get("worker_id") == ident), {})
                 actual = decision.get("parent", "missing") if family == "P" else decision.get("class", "missing")
                 evidence = decision.get("evidence", payload.get("_stderr_tail"))
