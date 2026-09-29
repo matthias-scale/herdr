@@ -264,6 +264,13 @@ fn worker_watchdog_command() -> Command {
         .about("Notify parent agents about stalled Codex and Claude workers")
         .arg(flag("once").help("Scan once, then exit"))
         .arg(flag("dry-run").help("Print stalled workers without notifying or logging"))
+        .arg(flag("all").help("Include finished workers in output"))
+        .arg(
+            option("history-days", "N")
+                .default_value("7")
+                .value_parser(clap::value_parser!(u64))
+                .help("Skip source directories with no relevant files newer than this many days"),
+        )
         .arg(
             option("interval-secs", "N")
                 .default_value("30")

@@ -270,10 +270,12 @@ pub(crate) fn classify_worker(
         return (
             WorkerClass::Finished,
             0,
-            format!(
+            if evidence.trace.starts_with("inactive: ") {
+                evidence.trace.clone()
+            } else { format!(
                 "finished; receipt={:?}; gate_verdict={:?}",
                 evidence.receipt_status, evidence.gate_verdict
-            ),
+            ) },
         );
     }
     if evidence.pid.is_some() && (!evidence.pid_alive || !evidence.pid_identity_ok) {
@@ -838,6 +840,53 @@ mod tests {
             classify_worker(&evidence, &mut memory, 2_000, 300, 300, 600, None).0,
             WorkerClass::SuspectedStall
         );
+    }
+
+    #[test]
+    fn claude_live_worker_is_working_and_live_parent_pending_tool_can_stall() {
+        let mut evidence = semantic();
+        evidence.pid = None;
+        evidence.progress_at = Some(998);
+        evidence.trace_mtime = 998;
+        evidence.outstanding_op = None;
+        let mut memory = SemanticWorkerEntry::default();
+        assert_eq!(
+            classify_worker(&evidence, &mut memory, 1_000, 300, 300, 600, None).0,
+            WorkerClass::Working
+        );
+
+        evidence.progress_at = None;
+        evidence.trace_mtime = 100;
+        evidence.hash = 1;
+        evidence.outstanding_op = Some("Bash".into());
+        let mut memory = SemanticWorkerEntry {
+            hash: 1,
+            since: 100,
+            op_signature: Some("Bash".into()),
+            op_since: 100,
+            ..SemanticWorkerEntry::default()
+        };
+        assert_eq!(
+            classify_worker(&evidence, &mut memory, 5_000, 300, 300, 600, None).0,
+            WorkerClass::SuspectedStall
+        );
+    }
+
+    #[test]
+    fn inactive_claude_subagent_evidence_classifies_finished() {
+        let mut evidence = semantic();
+        evidence.finished = true;
+        evidence.trace = "inactive: transcript idle 20d, parent session not live".into();
+        let (_, _, reason) = classify_worker(
+            &evidence,
+            &mut SemanticWorkerEntry::default(),
+            5_000,
+            300,
+            300,
+            600,
+            None,
+        );
+        assert_eq!(reason, "inactive: transcript idle 20d, parent session not live");
     }
 
     #[test]

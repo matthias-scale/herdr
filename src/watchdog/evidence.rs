@@ -253,6 +253,46 @@ pub(crate) fn parse_ps_rows(text: &str) -> Vec<ProcSample> {
         })
         .collect()
 }
+
+/// Parse one `ps -A -o pid=,args=` snapshot for Claude parent-session liveness.
+pub(crate) fn parse_process_args(text: &str) -> Vec<(u32, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let (pid, args) = line.trim().split_once(char::is_whitespace)?;
+            Some((pid.trim().parse().ok()?, args.trim().to_owned()))
+        })
+        .filter(|(_, args)| {
+            let executable = args.split_whitespace().next().unwrap_or_default();
+            executable.rsplit('/').next().unwrap_or(executable).trim_start_matches('-') == "claude"
+        })
+        .collect()
+}
+
+/// Return the latest unresolved Claude tool use, if any.
+pub(crate) fn claude_pending_tool(transcript_tail: &str) -> Option<String> {
+    let mut pending = std::collections::BTreeMap::<String, String>::new();
+    for line in transcript_tail.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if let Some(blocks) = record.pointer("/message/content").and_then(serde_json::Value::as_array) {
+            for block in blocks {
+                if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_use") {
+                    if let (Some(id), Some(name)) = (
+                        block.get("id").and_then(serde_json::Value::as_str),
+                        block.get("name").and_then(serde_json::Value::as_str),
+                    ) { pending.insert(id.to_owned(), name.to_owned()); }
+                }
+            }
+        }
+        if let Some(blocks) = record.pointer("/message/content").and_then(serde_json::Value::as_array) {
+            for block in blocks {
+                if block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result") {
+                    if let Some(id) = block.get("tool_use_id").and_then(serde_json::Value::as_str) { pending.remove(id); }
+                }
+            }
+        }
+    }
+    pending.into_values().next_back()
+}
 pub(crate) fn descendants(table: &[ProcSample], root: u32) -> Vec<ProcSample> {
     let mut out = Vec::new();
     let mut todo = vec![root];
@@ -355,5 +395,26 @@ mod tests {
         );
         let tools = current_tool_processes(&samples, Some(1), 10);
         assert_eq!(tools.iter().map(|p| p.pid).collect::<Vec<_>>(), [3]);
+    }
+
+    #[test]
+    fn claude_pending_tool_requires_matching_result() {
+        let pending = r#"{"message":{"content":[{"type":"tool_use","id":"tool-1","name":"Bash"}]}}"#;
+        assert_eq!(claude_pending_tool(pending).as_deref(), Some("Bash"));
+        let completed = format!(
+            "{pending}\n{}",
+            r#"{"message":{"content":[{"type":"tool_result","tool_use_id":"tool-1"}]}}"#
+        );
+        assert_eq!(claude_pending_tool(&completed), None);
+    }
+
+    #[test]
+    fn process_args_snapshot_matches_claude_session_ids() {
+        let rows = parse_process_args(
+            "120 claude --session-id session-live\n121 cargo test\n122 /usr/bin/claude --resume session-old",
+        );
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].1.contains("session-live"));
+        assert!(rows[1].1.contains("session-old"));
     }
 }

@@ -34,6 +34,8 @@ struct WorkerOptions {
     log_file: PathBuf,
     confirm_secs: u64,
     op_deadline_secs: u64,
+    history_days: u64,
+    all: bool,
     local_hosts: Vec<String>,
     parent_probe: String,
 }
@@ -51,11 +53,14 @@ struct PaneEntry {
 
 #[derive(Debug, Serialize)]
 struct WorkerSummary {
-    workers: usize,
-    stalled: usize,
-    notified: usize,
+    scanned: usize,
+    skipped_old: usize,
+    scan_ms: u128,
+    by_source: SourceClassCounts,
     dry_run: bool,
 }
+
+type SourceClassCounts = std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>>;
 
 #[derive(Debug, Serialize)]
 struct SemanticDecision {
@@ -77,7 +82,7 @@ pub(super) fn run_worker_watchdog_command(args: &[String]) -> io::Result<i32> {
         .is_some_and(|arg| matches!(arg.as_str(), "--help" | "-h" | "help"))
     {
         println!(
-            "usage: herdr watchdog workers [--once] [--dry-run] [--json] [--stall-minutes N] [--confirm-secs N] [--op-deadline-minutes N] [--runs-dir PATH] [--claude-projects-dir PATH] [--state-file PATH] [--log-file PATH] [--local-host NAME]... [--parent-probe CMD] [--interval-secs N]"
+            "usage: herdr watchdog workers [--once] [--dry-run] [--json] [--all] [--history-days N] [--stall-minutes N] [--confirm-secs N] [--op-deadline-minutes N] [--runs-dir PATH] [--claude-projects-dir PATH] [--state-file PATH] [--log-file PATH] [--local-host NAME]... [--parent-probe CMD] [--interval-secs N]"
         );
         return Ok(0);
     }
@@ -116,6 +121,8 @@ fn parse_worker_options(args: &[String]) -> Result<WorkerOptions, String> {
         op_deadline_secs: 60 * 60,
         local_hosts: Vec::new(),
         parent_probe: "ssh -o BatchMode=yes -o ConnectTimeout=5".into(),
+        history_days: 7,
+        all: false,
     };
     let mut index = 0;
     while index < args.len() {
@@ -123,6 +130,13 @@ fn parse_worker_options(args: &[String]) -> Result<WorkerOptions, String> {
             "--once" => options.once = true,
             "--dry-run" => options.dry_run = true,
             "--json" => options.json = true,
+            "--all" => options.all = true,
+            "--history-days" => {
+                options.history_days = super::parse_value(args, &mut index, "--history-days")?;
+                if options.history_days == 0 {
+                    return Err("--history-days must be greater than zero".into());
+                }
+            }
             "--interval-secs" => {
                 options.interval_secs = super::parse_value(args, &mut index, "--interval-secs")?;
                 if options.interval_secs == 0 {
@@ -189,6 +203,7 @@ fn home_dir() -> PathBuf {
 }
 
 fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
+    let scan_started = std::time::Instant::now();
     let _scan_controls = (
         options.confirm_secs,
         options.op_deadline_secs,
@@ -196,7 +211,15 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
         &options.parent_probe,
     );
     let mut memory = load_memory(&options.state_file)?;
-    let mut observations = discover_workers(&options.runs_dir, &options.claude_projects_dir)?;
+    let discovery = discover_workers(
+        &options.runs_dir,
+        &options.claude_projects_dir,
+        options.history_days,
+        options.op_deadline_secs,
+        options.stall_secs,
+    )?;
+    let skipped_old = discovery.skipped_old;
+    let mut observations = discovery.workers;
     let pane_list = super::super::send_request(&Request {
         id: super::next_request_id("worker-watchdog-pane-list"),
         method: Method::PaneList(PaneListParams { workspace_id: None }),
@@ -301,11 +324,10 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
                 source: worker.source.clone(),
                 turn_id: worker.turn_id.clone(),
                 class,
-                parent: match worker.parent_state {
-                    ParentState::Present => "present",
-                    ParentState::Absent => "orphaned",
-                    ParentState::Unknown => "parent_unknown",
-                },
+                parent: decision_parent_state(
+                    worker.parent_state,
+                    parent_checks.get(&worker.key()).copied().flatten(),
+                ),
                 parent_detail: format!("host={:?} session={} terminal={:?} pane={:?}", worker.parent_host, worker.parent_session, worker.parent_terminal, worker.parent_pane),
                 age_secs,
                 evidence,
@@ -325,8 +347,15 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
         .collect::<Vec<_>>();
     if !confirm.is_empty() {
         thread::sleep(Duration::from_secs(options.confirm_secs));
-        let second = discover_workers(&options.runs_dir, &options.claude_projects_dir)?;
+        let second = discover_workers(
+            &options.runs_dir,
+            &options.claude_projects_dir,
+            options.history_days,
+            options.op_deadline_secs,
+            options.stall_secs,
+        )?;
         let second_by_key = second
+            .workers
             .iter()
             .map(|worker| (worker.key(), worker))
             .collect::<std::collections::HashMap<_, _>>();
@@ -371,7 +400,13 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
         decision.incident = incident;
     }
     save_memory(&options.state_file, &memory)?;
-    print_worker_scan(observations.len(), &semantic_decisions, options)?;
+    print_worker_scan(
+        observations.len(),
+        skipped_old,
+        scan_started.elapsed().as_millis(),
+        &semantic_decisions,
+        options,
+    )?;
     Ok(
         if semantic_decisions
             .iter()
@@ -621,18 +656,31 @@ fn append_incident_log(
 
 fn print_worker_scan(
     workers: usize,
+    skipped_old: usize,
+    scan_ms: u128,
     semantic_decisions: &[SemanticDecision],
     options: &WorkerOptions,
 ) -> io::Result<()> {
+    let visible = visible_decisions(semantic_decisions, options.all);
+    let mut by_source = SourceClassCounts::new();
+    for decision in semantic_decisions {
+        *by_source
+            .entry(decision.source.clone())
+            .or_default()
+            .entry(worker_class_name(decision.class).into())
+            .or_default() += 1;
+    }
+    let summary = WorkerSummary {
+        scanned: workers,
+        skipped_old,
+        scan_ms,
+        by_source,
+        dry_run: options.dry_run,
+    };
     if options.json {
         let output = serde_json::json!({
-            "decisions": semantic_decisions,
-            "summary": WorkerSummary {
-                workers,
-                stalled: semantic_decisions.iter().filter(|decision| decision.class == worker_watchdog::WorkerClass::SuspectedStall).count(),
-                notified: semantic_decisions.iter().filter(|decision| decision.incident.delivery == worker_watchdog::IncidentDelivery::Delivered).count(),
-                dry_run: options.dry_run,
-            },
+            "decisions": visible,
+            "summary": summary,
         });
         println!(
             "{}",
@@ -641,13 +689,14 @@ fn print_worker_scan(
         return Ok(());
     }
 
-    for decision in semantic_decisions {
+    for decision in visible {
         println!(
-            "worker {} class {:?} parent {} age {}s: {}{}",
+            "worker {} class {:?} parent {} age {}s evidence={}: {}{}",
             decision.worker_id,
             decision.class,
             decision.parent,
             decision.age_secs,
+            decision.evidence,
             serde_json::to_string(&decision.incident).unwrap_or_default(),
             decision
                 .incident
@@ -658,32 +707,48 @@ fn print_worker_scan(
         );
     }
     println!(
-        "worker watchdog summary: workers={} stalled={} notified={}{}",
+        "worker watchdog summary: scanned={} skipped_old={} scan_ms={} non_finished={} stalled={}{}",
         workers,
+        skipped_old,
+        scan_ms,
+        semantic_decisions.iter().filter(|decision| decision.class != worker_watchdog::WorkerClass::Finished).count(),
         semantic_decisions
             .iter()
             .filter(|decision| decision.class == worker_watchdog::WorkerClass::SuspectedStall)
-            .count(),
-        semantic_decisions
-            .iter()
-            .filter(|decision| decision.incident.delivery
-                == worker_watchdog::IncidentDelivery::Delivered)
             .count(),
         if options.dry_run { " dry-run" } else { "" }
     );
     Ok(())
 }
 
+struct WorkerDiscovery {
+    workers: Vec<WorkerObservation>,
+    skipped_old: usize,
+}
+
 fn discover_workers(
     runs_dir: &Path,
     claude_projects_dir: &Path,
-) -> io::Result<Vec<WorkerObservation>> {
-    let mut workers = discover_codex_runs(runs_dir)?;
-    workers.extend(discover_claude_subagents(claude_projects_dir)?);
-    Ok(workers)
+    history_days: u64,
+    op_deadline_secs: u64,
+    stall_secs: u64,
+) -> io::Result<WorkerDiscovery> {
+    let cutoff = unix_seconds()?.saturating_sub(history_days.saturating_mul(86_400));
+    let mut skipped_old = 0;
+    let mut workers = discover_codex_runs(runs_dir, cutoff, &mut skipped_old)?;
+    let process_args = process_args_table()?;
+    workers.extend(discover_claude_subagents(
+        claude_projects_dir,
+        cutoff,
+        op_deadline_secs,
+        stall_secs,
+        &process_args,
+        &mut skipped_old,
+    )?);
+    Ok(WorkerDiscovery { workers, skipped_old })
 }
 
-fn discover_codex_runs(runs_dir: &Path) -> io::Result<Vec<WorkerObservation>> {
+fn discover_codex_runs(runs_dir: &Path, cutoff: u64, skipped_old: &mut usize) -> io::Result<Vec<WorkerObservation>> {
     let mut workers = Vec::new();
     let process_samples = process_table()?;
     let now = unix_seconds()?;
@@ -698,6 +763,11 @@ fn discover_codex_runs(runs_dir: &Path) -> io::Result<Vec<WorkerObservation>> {
             continue;
         }
         let run_dir = entry.path();
+        let newest = newest_mtime(&run_dir)?;
+        if newest.is_some_and(|mtime| mtime < cutoff) {
+            *skipped_old += 1;
+            continue;
+        }
         let state_path = run_dir.join("state.json");
         let state: Value = match fs::read(&state_path) {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
@@ -870,7 +940,14 @@ fn current_turn(run_dir: &Path) -> io::Result<Option<(String, PathBuf)>> {
     Ok(newest.map(|(_, id, path)| (id, path)))
 }
 
-fn discover_claude_subagents(projects_dir: &Path) -> io::Result<Vec<WorkerObservation>> {
+fn discover_claude_subagents(
+    projects_dir: &Path,
+    cutoff: u64,
+    op_deadline_secs: u64,
+    stall_secs: u64,
+    process_args: &[(u32, String)],
+    skipped_old: &mut usize,
+) -> io::Result<Vec<WorkerObservation>> {
     let mut workers = Vec::new();
     let projects = match fs::read_dir(projects_dir) {
         Ok(projects) => projects,
@@ -882,6 +959,10 @@ fn discover_claude_subagents(projects_dir: &Path) -> io::Result<Vec<WorkerObserv
         if !project.file_type()?.is_dir() {
             continue;
         }
+        if newest_mtime(&project.path())?.is_some_and(|mtime| mtime < cutoff) {
+            *skipped_old += 1;
+            continue;
+        }
         for session in fs::read_dir(project.path())? {
             let session = session?;
             if !session.file_type()?.is_dir() {
@@ -890,6 +971,15 @@ fn discover_claude_subagents(projects_dir: &Path) -> io::Result<Vec<WorkerObserv
             let Some(parent_session) = session.file_name().to_str().map(str::to_string) else {
                 continue;
             };
+            let parent_transcript = project.path().join(format!("{parent_session}.jsonl"));
+            let parent_mtime = modified_unix_seconds(&parent_transcript)?.unwrap_or_default();
+            let session_mtime = newest_mtime(&session.path())?
+                .unwrap_or_default()
+                .max(parent_mtime);
+            if session_mtime < cutoff {
+                *skipped_old += 1;
+                continue;
+            }
             let subagents_dir = session.path().join("subagents");
             let subagents = match fs::read_dir(subagents_dir) {
                 Ok(subagents) => subagents,
@@ -912,6 +1002,15 @@ fn discover_claude_subagents(projects_dir: &Path) -> io::Result<Vec<WorkerObserv
                 let Some(last_activity) = modified_unix_seconds(&subagent.path())? else {
                     continue;
                 };
+                let trace = read_tail(&subagent.path(), 16 * 1024)?;
+                let final_turn = claude_subagent_finished(&subagent.path())?;
+                let pending_tool = evidence::claude_pending_tool(&trace);
+                let now = unix_seconds()?;
+                let own_recent = last_activity >= now.saturating_sub(op_deadline_secs);
+                let parent_live = parent_mtime >= now.saturating_sub(stall_secs)
+                    || process_args.iter().any(|(_, args)| args.contains(&parent_session));
+                let idle_secs = unix_seconds()?.saturating_sub(last_activity);
+                let inactive = claude_subagent_inactive(final_turn, own_recent, parent_live);
                 workers.push(WorkerObservation {
                     source: "claude".into(),
                     worker_id,
@@ -920,24 +1019,21 @@ fn discover_claude_subagents(projects_dir: &Path) -> io::Result<Vec<WorkerObserv
                     parent_terminal: None,
                     parent_pane: None,
                     last_activity,
-                    finished: claude_subagent_finished(&subagent.path())?,
+                    finished: final_turn || inactive,
                     parent_scope_local: true,
                     parent_state: ParentState::Unknown,
                     turn_id: None,
-                    semantic_hash: evidence::semantic_hash(&read_tail(
-                        &subagent.path(),
-                        16 * 1024,
-                    )?),
+                    semantic_hash: evidence::semantic_hash(&trace),
                     trace_mtime: last_activity,
-                    trace: read_tail(&subagent.path(), 16 * 1024)?,
+                    trace: if inactive { format!("inactive: transcript idle {}d, parent session not live", idle_secs / 86_400) } else { trace },
                     out: String::new(),
                     pid: None,
                     pid_alive: true,
                     pid_identity_ok: true,
                     tool_alive: false,
-                    outstanding_op: None,
+                    outstanding_op: pending_tool,
                     progress_at: Some(last_activity),
-                    state: String::from("active"),
+                    state: if inactive { String::from("finished") } else { String::from("active") },
                     blocked_reason: None,
                     receipt_status: None,
                     gate_verdict: None,
@@ -946,6 +1042,92 @@ fn discover_claude_subagents(projects_dir: &Path) -> io::Result<Vec<WorkerObserv
         }
     }
     Ok(workers)
+}
+
+fn claude_subagent_inactive(final_turn: bool, own_recent: bool, parent_live: bool) -> bool {
+    !final_turn && !own_recent && !parent_live
+}
+
+fn process_args_table() -> io::Result<Vec<(u32, String)>> {
+    #[cfg(unix)]
+    {
+        let output = std::process::Command::new("ps")
+            .args(["-A", "-o", "pid=,args="])
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other("ps -A -o pid=,args= failed"));
+        }
+        Ok(evidence::parse_process_args(&String::from_utf8_lossy(&output.stdout)))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Vec::new())
+    }
+}
+
+fn newest_mtime(path: &Path) -> io::Result<Option<u64>> {
+    let mut newest = None;
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            newest = newest_mtime(&entry.path())?.into_iter().chain(newest).max();
+        } else {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let relevant = matches!(name.as_ref(), "state.json" | "out.log" | "trace.log" | "launch-metadata" | "start.json" | "receipt.json")
+                || entry.path().extension().is_some_and(|extension| extension == "jsonl");
+            if relevant {
+                newest = modified_unix_seconds(&entry.path())?.into_iter().chain(newest).max();
+            }
+        }
+    }
+    Ok(newest)
+}
+
+fn parent_state_label(state: ParentState) -> &'static str {
+    match state {
+        ParentState::Present => "present",
+        ParentState::Absent => "orphaned",
+        ParentState::Unknown => "parent_unknown",
+    }
+}
+
+fn decision_parent_state(state: ParentState, first_check: Option<bool>) -> &'static str {
+    if state == ParentState::Unknown && first_check == Some(false) {
+        "absent_unconfirmed"
+    } else {
+        parent_state_label(state)
+    }
+}
+
+fn visible_decisions(
+    decisions: &[SemanticDecision],
+    include_finished: bool,
+) -> Vec<&SemanticDecision> {
+    decisions
+        .iter()
+        .filter(|decision| {
+            include_finished || decision.class != worker_watchdog::WorkerClass::Finished
+        })
+        .collect()
+}
+
+fn worker_class_name(class: worker_watchdog::WorkerClass) -> &'static str {
+    match class {
+        worker_watchdog::WorkerClass::Working => "working",
+        worker_watchdog::WorkerClass::ToolWait => "tool_wait",
+        worker_watchdog::WorkerClass::WaitingToolInput => "waiting_tool_input",
+        worker_watchdog::WorkerClass::WaitingApproval => "waiting_approval",
+        worker_watchdog::WorkerClass::WaitingRetry => "waiting_retry",
+        worker_watchdog::WorkerClass::SuspectedStall => "suspected_stall",
+        worker_watchdog::WorkerClass::Finished => "finished",
+        worker_watchdog::WorkerClass::Dead => "dead",
+    }
 }
 
 fn claude_subagent_finished(path: &Path) -> io::Result<bool> {
@@ -965,8 +1147,9 @@ fn claude_subagent_finished(path: &Path) -> io::Result<bool> {
         .get("message")
         .and_then(|message| message.get("stop_reason"))
         .and_then(Value::as_str);
-    Ok(stop_reason == Some("end_turn")
-        || json_string(&record, &["type"]).as_deref() == Some("result"))
+    let final_record = stop_reason == Some("end_turn")
+        || json_string(&record, &["type"]).as_deref() == Some("result");
+    Ok(final_record && evidence::claude_pending_tool(&tail).is_none())
 }
 
 trait ReadTail {
@@ -1097,7 +1280,8 @@ mod tests {
         )
         .expect("write run state");
         fs::write(run_dir.join("turns/turn-1/trace.log"), "tool call").expect("write trace");
-        let workers = discover_codex_runs(dir.path()).expect("discover workers");
+        let mut skipped = 0;
+        let workers = discover_codex_runs(dir.path(), 0, &mut skipped).expect("discover workers");
         assert_eq!(workers.len(), 1);
         assert_eq!(workers[0].parent_session, "parent-1");
         assert_eq!(workers[0].source, "codex");
@@ -1115,7 +1299,8 @@ mod tests {
             r#"{"parent":{"session":"parent-nested"},"state":"active","last_heartbeat":"2026-09-29T07:00:00Z","progress_at":"2026-09-29T06:45:00Z"}"#,
         )
         .expect("write run state");
-        let workers = discover_codex_runs(dir.path()).expect("discover workers");
+        let mut skipped = 0;
+        let workers = discover_codex_runs(dir.path(), 0, &mut skipped).expect("discover workers");
         assert_eq!(workers.len(), 1);
         assert_eq!(workers[0].parent_session, "parent-nested");
         assert_eq!(workers[0].last_activity, 1_790_664_300);
@@ -1132,7 +1317,8 @@ mod tests {
         )
         .expect("write run state");
         fs::write(run_dir.join("turns/receipt.json"), "{}").expect("write receipt");
-        let workers = discover_codex_runs(dir.path()).expect("discover workers");
+        let mut skipped = 0;
+        let workers = discover_codex_runs(dir.path(), 0, &mut skipped).expect("discover workers");
         assert_eq!(workers.len(), 1);
         assert_eq!(workers[0].parent_session, "parent-1");
     }
@@ -1258,7 +1444,9 @@ mod tests {
             "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}\n",
         )
         .expect("write transcript");
-        let workers = discover_claude_subagents(dir.path()).expect("discover Claude workers");
+        let mut skipped = 0;
+        let workers = discover_claude_subagents(dir.path(), 0, 3600, 1800, &[], &mut skipped)
+            .expect("discover Claude workers");
         assert_eq!(workers.len(), 1);
         assert_eq!(workers[0].parent_session, "session-1");
         assert!(workers[0].finished);
@@ -1279,6 +1467,16 @@ mod tests {
         assert_eq!(options.stall_secs, 420);
         assert_eq!(options.confirm_secs, 20);
         assert_eq!(options.op_deadline_secs, 3600);
+        assert_eq!(options.history_days, 7);
+        assert!(!options.all);
+        let options = parse_worker_options(&[
+            "--history-days".into(),
+            "14".into(),
+            "--all".into(),
+        ])
+        .expect("parse output controls");
+        assert_eq!(options.history_days, 14);
+        assert!(options.all);
         let options = parse_worker_options(&[
             "--confirm-secs".into(),
             "5".into(),
@@ -1296,5 +1494,88 @@ mod tests {
         assert_eq!(options.op_deadline_secs, 540);
         assert_eq!(options.local_hosts, ["ub1", "air"]);
         assert_eq!(options.parent_probe, "ssh -F cfg");
+    }
+
+    #[test]
+    fn history_cutoff_skips_old_sessions_before_reading_subagents() {
+        let dir = TestDir::new();
+        let session = dir.path().join("project/session-old");
+        fs::create_dir_all(session.join("subagents")).expect("session directory");
+        fs::write(session.join("session.jsonl"), "parent").expect("parent transcript");
+        fs::write(session.join("subagents/agent-old.jsonl"), "not json").expect("subagent");
+        let mut skipped = 0;
+        let result = discover_claude_subagents(dir.path(), u64::MAX, 3600, 1800, &[], &mut skipped)
+            .expect("discover Claude workers");
+        assert!(result.is_empty());
+        assert_eq!(skipped, 1);
+    }
+
+    #[test]
+    fn history_cutoff_skips_old_ra_runs_before_reading_state() {
+        let dir = TestDir::new();
+        let run = dir.path().join("ra-run-old");
+        fs::create_dir_all(&run).expect("run directory");
+        fs::write(run.join("state.json"), "malformed on purpose").expect("state file");
+        let mut skipped = 0;
+        let workers = discover_codex_runs(dir.path(), u64::MAX, &mut skipped)
+            .expect("skip old run before parsing");
+        assert!(workers.is_empty());
+        assert_eq!(skipped, 1);
+    }
+
+    #[test]
+    fn claude_subagent_liveness_requires_parent_or_recent_own_transcript() {
+        assert!(claude_subagent_inactive(false, false, false));
+        assert!(!claude_subagent_inactive(false, false, true));
+        assert!(!claude_subagent_inactive(false, true, false));
+        assert!(!claude_subagent_inactive(true, false, false));
+    }
+
+    #[test]
+    fn default_output_filters_finished_and_all_restores_it() {
+        let make = |class| SemanticDecision {
+            worker_id: "agent".into(), source: "claude".into(), turn_id: None, class,
+            parent: "parent_unknown", parent_detail: String::new(), age_secs: 0,
+            evidence: String::new(), samples: Vec::new(), incident: worker_watchdog::WorkerIncidentDecision {
+                key: None, action: worker_watchdog::IncidentAction::None,
+                delivery: worker_watchdog::IncidentDelivery::None, error: None,
+            },
+        };
+        let decisions = [make(worker_watchdog::WorkerClass::Finished), make(worker_watchdog::WorkerClass::Dead)];
+        assert_eq!(visible_decisions(&decisions, false).len(), 1);
+        assert_eq!(visible_decisions(&decisions, true).len(), 2);
+    }
+
+    #[test]
+    fn dead_run_retains_present_parent_in_its_decision() {
+        let worker = WorkerObservation {
+            source: "codex".into(), worker_id: "ra-run".into(), parent_session: "parent".into(),
+            parent_host: None, parent_terminal: None, parent_pane: None, last_activity: 1,
+            finished: false, parent_scope_local: true, parent_state: ParentState::Present,
+            turn_id: None, semantic_hash: 0, trace_mtime: 1, trace: String::new(), out: String::new(),
+            pid: Some(123), pid_alive: false, pid_identity_ok: false, tool_alive: false,
+            outstanding_op: None, progress_at: None, state: "active".into(), blocked_reason: None,
+            receipt_status: None, gate_verdict: None,
+        };
+        let evidence = worker_watchdog::WorkerEvidence {
+            turn_id: None, hash: 0, trace_mtime: 1, progress_at: None, trace: String::new(), out: String::new(),
+            pid: worker.pid, pid_alive: false, pid_identity_ok: false, tool_alive: false,
+            outstanding_op: None, finished: false, exit_code: None, receipt_status: None,
+            gate_verdict: None, blocked_reason: None, state: "active".into(), parent_host: None,
+            parent_session: Some("parent".into()), parent_terminal: None, parent_pane: None,
+        };
+        let (class, _, _) = worker_watchdog::classify_worker(
+            &evidence, &mut worker_watchdog::SemanticWorkerEntry::default(), 100, 10, 10, 10, None,
+        );
+        assert_eq!(class, worker_watchdog::WorkerClass::Dead);
+        assert_eq!(parent_state_label(worker.parent_state), "present");
+    }
+
+    #[test]
+    fn parent_decision_distinguishes_unconfirmed_absence() {
+        assert_eq!(decision_parent_state(ParentState::Present, None), "present");
+        assert_eq!(decision_parent_state(ParentState::Absent, None), "orphaned");
+        assert_eq!(decision_parent_state(ParentState::Unknown, None), "parent_unknown");
+        assert_eq!(decision_parent_state(ParentState::Unknown, Some(false)), "absent_unconfirmed");
     }
 }
