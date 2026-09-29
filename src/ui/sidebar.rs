@@ -3558,17 +3558,28 @@ fn compact_sidebar_rows_inner(
             rows.extend(needs_you);
             rows.push(SidebarRow::Divider);
         }
-        active_entries.extend(remote_active);
-        append_space_tree_rows(
-            app,
-            &mut rows,
-            active_entries,
-            false,
-            terminal_runtimes,
-            SidebarGroupMode::Spaces,
-            false,
-            sidebar_rows_are_filtered(app),
-        );
+        if fleet_shows_hosts(app, &remote_entries) {
+            append_device_space_rows(
+                app,
+                &mut rows,
+                active_entries,
+                remote_active,
+                &remote_entries,
+                terminal_runtimes,
+            );
+        } else {
+            active_entries.extend(remote_active);
+            append_space_tree_rows(
+                app,
+                &mut rows,
+                active_entries,
+                false,
+                terminal_runtimes,
+                SidebarGroupMode::Spaces,
+                false,
+                sidebar_rows_are_filtered(app),
+            );
+        }
         snoozed_entries.extend(remote_snoozed);
         rows.push(SidebarRow::ShelfDivider);
         append_shelf_space_rows(
@@ -4801,9 +4812,11 @@ fn append_ordered_sidebar_blocks(
                     expand_worktrees,
                 );
             }
-            SidebarBlock::Fleet => {
+            // The sections layout already splits its active tree by device.
+            SidebarBlock::Fleet if !app.sidebar_sections_layout => {
                 append_fleet_rows(app, &mut block_rows, local_fleet_entries, remote_entries)
             }
+            SidebarBlock::Fleet => {}
             SidebarBlock::Ambient => {
                 if sidebar_area_is_visible(app, crate::config::SidebarArea::Runs) {
                     runs::append_rows(app, &mut block_rows);
@@ -4947,11 +4960,7 @@ fn append_fleet_rows(
     local_entries: &[AgentPanelEntry],
     entries: &[AgentPanelEntry],
 ) {
-    if app.sidebar_work_filter.machine_scope != crate::app::state::SidebarMachineScope::AllMachines
-        || (app.fleet_snapshot.configured_hosts.is_empty()
-            && !app.fleet_snapshot.hosts.iter().any(|host| !host.local)
-            && entries.is_empty())
-    {
+    if !fleet_shows_hosts(app, entries) {
         return;
     }
     let mut hosts = Vec::<(String, Vec<AgentPanelEntry>)>::new();
@@ -4963,37 +4972,8 @@ fn append_fleet_rows(
                 .is_some_and(|target| !app.remote_focus_proxy_panes.contains(&target.pane_id))
     });
     hosts.push((app.agent_host_name.clone(), local_entries));
-    // Snapshot order follows fleet configuration, including hosts with no
-    // agent rows. Populate each host without reordering its original entries.
-    let mut remote_host_names = app
-        .fleet_snapshot
-        .hosts
-        .iter()
-        .filter(|host| !host.local && host.state == crate::fleet::HostState::Reachable)
-        .map(|host| host.name.clone())
-        .collect::<Vec<_>>();
-    for entry in entries {
-        if let Some(host) = entry
-            .remote_entry
-            .as_ref()
-            .map(|remote| remote.agent_ref.host.clone())
-        {
-            if !remote_host_names.contains(&host) {
-                remote_host_names.push(host);
-            }
-        }
-    }
-    for host in remote_host_names {
-        let host_entries = entries
-            .iter()
-            .filter(|entry| {
-                entry
-                    .remote_entry
-                    .as_ref()
-                    .is_some_and(|remote| remote.agent_ref.host == host)
-            })
-            .cloned()
-            .collect();
+    for host in fleet_remote_host_names(app, entries) {
+        let host_entries = remote_entries_on_host(entries, &host);
         hosts.push((host, host_entries));
     }
     let host_tokens = hosts
@@ -5066,6 +5046,99 @@ fn append_fleet_rows(
         });
         if !collapsed {
             append_fleet_repo_rows(app, rows, host, host_entries);
+        }
+    }
+}
+
+/// Whether the sidebar should list the fleet's devices: the whole fleet is in
+/// scope and at least one remote host is configured, reachable, or reporting.
+fn fleet_shows_hosts(app: &AppState, remote_entries: &[AgentPanelEntry]) -> bool {
+    app.sidebar_work_filter.machine_scope == crate::app::state::SidebarMachineScope::AllMachines
+        && (!app.fleet_snapshot.configured_hosts.is_empty()
+            || app.fleet_snapshot.hosts.iter().any(|host| !host.local)
+            || !remote_entries.is_empty())
+}
+
+/// Remote hosts in fleet configuration order, including reachable hosts with
+/// no agent rows, then any host only known from its entries.
+fn fleet_remote_host_names(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<String> {
+    let mut names = app
+        .fleet_snapshot
+        .hosts
+        .iter()
+        .filter(|host| !host.local && host.state == crate::fleet::HostState::Reachable)
+        .map(|host| host.name.clone())
+        .collect::<Vec<_>>();
+    for entry in entries {
+        if let Some(remote) = entry.remote_entry.as_ref() {
+            if !names.contains(&remote.agent_ref.host) {
+                names.push(remote.agent_ref.host.clone());
+            }
+        }
+    }
+    names
+}
+
+fn remote_entries_on_host(entries: &[AgentPanelEntry], host: &str) -> Vec<AgentPanelEntry> {
+    entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .remote_entry
+                .as_ref()
+                .is_some_and(|remote| remote.agent_ref.host == host)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Sections layout with the whole fleet in scope: one device header per host,
+/// this device first, each over its own active space tree.
+fn append_device_space_rows(
+    app: &AppState,
+    rows: &mut Vec<SidebarRow>,
+    local_entries: Vec<AgentPanelEntry>,
+    remote_active: Vec<AgentPanelEntry>,
+    remote_entries: &[AgentPanelEntry],
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
+) {
+    let mut hosts = vec![(app.agent_host_name.clone(), local_entries)];
+    for host in fleet_remote_host_names(app, remote_entries) {
+        let host_entries = remote_entries_on_host(&remote_active, &host);
+        hosts.push((host, host_entries));
+    }
+    for (host, entries) in hosts {
+        let local = host == app.agent_host_name;
+        let key = format!("fleet:host:{host}");
+        let collapsed = section_is_collapsed(app, &key);
+        let count = entries.iter().filter(|entry| entry.has_agent).count();
+        rows.push(SidebarRow::NestedHeader {
+            key,
+            action_key: None,
+            sort_key: None,
+            sort_mode: SidebarSortMode::Default,
+            title: if local {
+                format!("{host} · this device")
+            } else {
+                host
+            },
+            count,
+            collapsed,
+            dim: !local && count == 0,
+            status: None,
+            spawn: false,
+        });
+        if !collapsed {
+            append_space_tree_rows(
+                app,
+                rows,
+                entries,
+                false,
+                terminal_runtimes,
+                SidebarGroupMode::Spaces,
+                false,
+                sidebar_rows_are_filtered(app),
+            );
         }
     }
 }
@@ -13173,6 +13246,43 @@ pub(crate) mod tests {
         assert_eq!(hosts[0].1, format!("{} · this device", app.agent_host_name));
         assert_eq!(hosts[1].0, "fleet:host:remote-b");
         assert_eq!(hosts[2].0, "fleet:host:remote-a");
+    }
+
+    #[test]
+    fn sections_layout_groups_active_spaces_by_device() {
+        let mut app = app_with_two_remote_hosts();
+        app.sidebar_sections_layout = true;
+        app.sidebar_width = 60;
+        let rows = sidebar_rows(&app);
+        let hosts = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::NestedHeader {
+                    key, title, count, ..
+                } if key.starts_with("fleet:host:") => Some((key.as_str(), title.clone(), *count)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(hosts.len(), 3, "{hosts:?}");
+        assert_eq!(hosts[0].1, format!("{} · this device", app.agent_host_name));
+        assert_eq!(hosts[1].0, "fleet:host:remote-b");
+        assert_eq!(hosts[2].0, "fleet:host:remote-a");
+        assert!(
+            !rows.iter().any(|row| matches!(
+                row,
+                SidebarRow::SectionHeader {
+                    title: FLEET_SECTION_TITLE,
+                    ..
+                }
+            )),
+            "the device headers replace the separate Fleet block"
+        );
+
+        app.sidebar_work_filter.machine_scope = crate::app::state::SidebarMachineScope::ThisMachine;
+        assert!(!sidebar_rows(&app).iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader { key, .. } if key.starts_with("fleet:host:")
+        )));
     }
 
     #[test]
