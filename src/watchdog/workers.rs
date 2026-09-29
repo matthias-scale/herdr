@@ -101,6 +101,161 @@ pub(crate) struct SemanticWorkerEntry {
     pub(crate) parent_absent_samples: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IncidentAction {
+    Logged,
+    AlreadyLogged,
+    None,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IncidentDelivery {
+    Delivered,
+    Failed,
+    DeferredRemote,
+    None,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct WorkerIncidentDecision {
+    pub key: Option<String>,
+    pub action: IncidentAction,
+    pub delivery: IncidentDelivery,
+    pub error: Option<String>,
+}
+
+pub(crate) fn process_semantic_incidents<L, D>(
+    observations: &[WorkerObservation],
+    classes: &[WorkerClass],
+    memory: &mut SemanticWorkerMemory,
+    now: u64,
+    dry_run: bool,
+    mut log: L,
+    mut deliver: D,
+) -> Vec<WorkerIncidentDecision>
+where
+    L: FnMut(&WorkerObservation, &str, u64) -> std::io::Result<()>,
+    D: FnMut(&WorkerObservation, bool, u64) -> std::io::Result<()>,
+{
+    let mut output = Vec::with_capacity(observations.len());
+    for (worker, class) in observations.iter().zip(classes) {
+        let entry = memory.workers.entry(worker.key()).or_default();
+        let orphaned = worker.parent_state == ParentState::Absent && !worker.finished;
+        let worthy = orphaned
+            || matches!(
+                class,
+                WorkerClass::SuspectedStall
+                    | WorkerClass::WaitingToolInput
+                    | WorkerClass::WaitingApproval
+                    | WorkerClass::Dead
+            );
+        if !worthy {
+            entry.open_incident = None;
+            output.push(WorkerIncidentDecision {
+                key: None,
+                action: IncidentAction::None,
+                delivery: IncidentDelivery::None,
+                error: None,
+            });
+            continue;
+        }
+        let name = if orphaned {
+            "orphaned"
+        } else {
+            class_name(*class)
+        };
+        let turn = worker.turn_id.as_deref().unwrap_or("unknown-turn");
+        let key = format!(
+            "{}:{}:{turn}:{name}:{}",
+            worker.source, worker.worker_id, entry.episode
+        );
+        if entry.open_incident.as_deref() != Some(&key) {
+            entry.episode = entry.episode.saturating_add(1);
+            entry.open_incident = Some(format!(
+                "{}:{}:{turn}:{name}:{}",
+                worker.source, worker.worker_id, entry.episode
+            ));
+        }
+        let key = entry.open_incident.clone().unwrap_or(key);
+        let age_secs = now.saturating_sub(entry.since);
+        if dry_run {
+            output.push(WorkerIncidentDecision {
+                key: Some(key),
+                action: IncidentAction::None,
+                delivery: IncidentDelivery::None,
+                error: None,
+            });
+            continue;
+        }
+        let action = if entry.logged.contains(&key) {
+            IncidentAction::AlreadyLogged
+        } else {
+            match log(worker, name, age_secs) {
+                Ok(()) => {
+                    entry.logged.insert(key.clone());
+                    IncidentAction::Logged
+                }
+                Err(error) => {
+                    output.push(WorkerIncidentDecision {
+                        key: Some(key),
+                        action: IncidentAction::None,
+                        delivery: IncidentDelivery::Failed,
+                        error: Some(format!("incident persistence failed: {error}")),
+                    });
+                    continue;
+                }
+            }
+        };
+        if entry.delivered.contains(&key) {
+            output.push(WorkerIncidentDecision {
+                key: Some(key),
+                action,
+                delivery: IncidentDelivery::None,
+                error: None,
+            });
+        } else if !orphaned && !worker.parent_scope_local {
+            output.push(WorkerIncidentDecision {
+                key: Some(key),
+                action,
+                delivery: IncidentDelivery::DeferredRemote,
+                error: None,
+            });
+        } else {
+            match deliver(worker, orphaned, age_secs) {
+                Ok(()) => {
+                    entry.delivered.insert(key.clone());
+                    output.push(WorkerIncidentDecision {
+                        key: Some(key),
+                        action,
+                        delivery: IncidentDelivery::Delivered,
+                        error: None,
+                    });
+                }
+                Err(error) => output.push(WorkerIncidentDecision {
+                    key: Some(key),
+                    action,
+                    delivery: IncidentDelivery::Failed,
+                    error: Some(error.to_string()),
+                }),
+            }
+        }
+    }
+    output
+}
+
+fn class_name(class: WorkerClass) -> &'static str {
+    match class {
+        WorkerClass::Working => "working",
+        WorkerClass::ToolWait => "tool_wait",
+        WorkerClass::WaitingToolInput => "waiting_tool_input",
+        WorkerClass::WaitingApproval => "waiting_approval",
+        WorkerClass::WaitingRetry => "waiting_retry",
+        WorkerClass::SuspectedStall => "suspected_stall",
+        WorkerClass::Finished => "finished",
+        WorkerClass::Dead => "dead",
+    }
+}
+
 pub(crate) fn classify_worker(
     evidence: &WorkerEvidence,
     memory: &mut SemanticWorkerEntry,
@@ -110,6 +265,7 @@ pub(crate) fn classify_worker(
     op_deadline_secs: u64,
     retry_secs: Option<u64>,
 ) -> (WorkerClass, u64, String) {
+    let first_sight = memory.since == 0 && memory.turn_id.is_none();
     if evidence.finished {
         return (
             WorkerClass::Finished,
@@ -130,7 +286,9 @@ pub(crate) fn classify_worker(
     if let Some(turn) = &evidence.turn_id {
         if memory.turn_id.as_ref() != Some(turn) {
             memory.turn_id = Some(turn.clone());
-            memory.since = now;
+            if !first_sight {
+                memory.since = now;
+            }
             if memory.op_signature.as_deref() != evidence.outstanding_op.as_deref() {
                 memory.op_since = now;
             }
@@ -138,7 +296,11 @@ pub(crate) fn classify_worker(
     }
     if evidence.hash != memory.hash {
         memory.hash = evidence.hash;
-        memory.since = now;
+        memory.since = if first_sight && evidence.trace_mtime > 0 {
+            evidence.trace_mtime
+        } else {
+            now
+        };
     }
     if evidence.progress_at.is_some_and(|p| p > memory.since) {
         memory.since = evidence.progress_at.unwrap_or(memory.since);
@@ -311,6 +473,7 @@ struct StaleCandidate {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg(test)]
 pub(crate) enum StallAction {
     ParentChecking,
     ParentUnknown,
@@ -323,6 +486,7 @@ pub(crate) enum StallAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg(test)]
 pub(crate) struct WorkerStallDecision {
     pub worker_id: String,
     pub parent_session: String,
@@ -334,6 +498,7 @@ pub(crate) struct WorkerStallDecision {
 
 /// Persist one incident per stale progress episode, then retry delivery until it succeeds.
 /// This path only notifies; it never types into, resumes, or terminates a worker.
+#[cfg(test)]
 pub(crate) fn process_stalls<N, L>(
     observations: &[WorkerObservation],
     memory: &mut WorkerMemory,
@@ -549,6 +714,7 @@ where
     decisions
 }
 
+#[cfg(test)]
 fn parent_decision(
     worker: &WorkerObservation,
     age_secs: u64,
@@ -704,6 +870,81 @@ mod tests {
         evidence.outstanding_op = Some("cargo check".into());
         let _ = classify_worker(&evidence, &mut memory, 210, 300, 300, 600, None);
         assert_eq!(memory.op_since, 210);
+    }
+
+    #[test]
+    fn semantic_incidents_persist_before_delivery_retry_and_rearm_after_recovery() {
+        let worker = worker(100, false);
+        let mut memory = SemanticWorkerMemory::default();
+        let events = std::cell::RefCell::new(Vec::new());
+        let first = process_semantic_incidents(
+            std::slice::from_ref(&worker),
+            &[WorkerClass::SuspectedStall],
+            &mut memory,
+            500,
+            false,
+            |_, _, _| {
+                events.borrow_mut().push("log");
+                Ok(())
+            },
+            |_, _, _| {
+                events.borrow_mut().push("deliver");
+                Err(std::io::Error::other("offline"))
+            },
+        );
+        assert_eq!(first[0].action, IncidentAction::Logged);
+        assert_eq!(*events.borrow(), ["log", "deliver"]);
+        let second = process_semantic_incidents(
+            std::slice::from_ref(&worker),
+            &[WorkerClass::SuspectedStall],
+            &mut memory,
+            530,
+            false,
+            |_, _, _| panic!("an incident is logged only once"),
+            |_, _, _| Ok(()),
+        );
+        assert_eq!(second[0].action, IncidentAction::AlreadyLogged);
+        assert_eq!(second[0].delivery, IncidentDelivery::Delivered);
+        let healthy = process_semantic_incidents(
+            std::slice::from_ref(&worker),
+            &[WorkerClass::Working],
+            &mut memory,
+            600,
+            false,
+            |_, _, _| Ok(()),
+            |_, _, _| Ok(()),
+        );
+        assert_eq!(healthy[0].action, IncidentAction::None);
+        let reopened = process_semantic_incidents(
+            &[worker],
+            &[WorkerClass::SuspectedStall],
+            &mut memory,
+            700,
+            false,
+            |_, _, _| Ok(()),
+            |_, _, _| Ok(()),
+        );
+        assert_ne!(first[0].key, reopened[0].key);
+    }
+
+    #[test]
+    fn dry_run_saves_episode_state_without_logging_or_delivery() {
+        let worker = worker(100, false);
+        let mut memory = SemanticWorkerMemory::default();
+        let result = process_semantic_incidents(
+            &[worker],
+            &[WorkerClass::Dead],
+            &mut memory,
+            500,
+            true,
+            |_, _, _| panic!("dry-run must not append"),
+            |_, _, _| panic!("dry-run must not deliver"),
+        );
+        assert_eq!(result[0].action, IncidentAction::None);
+        assert!(memory
+            .workers
+            .values()
+            .any(|entry| entry.open_incident.is_some()));
     }
 
     #[test]

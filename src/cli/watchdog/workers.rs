@@ -15,10 +15,7 @@ use crate::{
         Request,
     },
     watchdog::evidence::{self, ProcSample},
-    watchdog::workers::{
-        self as worker_watchdog, ParentState, StallAction, WorkerMemory, WorkerObservation,
-        WorkerStallDecision,
-    },
+    watchdog::workers::{self as worker_watchdog, ParentState, WorkerMemory, WorkerObservation},
 };
 
 const DEFAULT_INTERVAL_SECS: u64 = 30;
@@ -61,25 +58,17 @@ struct WorkerSummary {
 }
 
 #[derive(Debug, Serialize)]
-struct WorkerStallLog {
-    timestamp: u64,
-    source: String,
-    worker_id: String,
-    parent_session: String,
-    last_activity: u64,
-    age_secs: u64,
-    parent_state: ParentState,
-}
-
-#[derive(Debug, Serialize)]
 struct SemanticDecision {
     worker_id: String,
     source: String,
     turn_id: Option<String>,
     class: worker_watchdog::WorkerClass,
     parent: &'static str,
+    parent_detail: String,
     age_secs: u64,
     evidence: String,
+    samples: Vec<Value>,
+    incident: worker_watchdog::WorkerIncidentDecision,
 }
 
 pub(super) fn run_worker_watchdog_command(args: &[String]) -> io::Result<i32> {
@@ -272,7 +261,7 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
     }
     let now = unix_seconds()?;
 
-    let semantic_decisions = observations
+    let mut semantic_decisions = observations
         .iter()
         .map(|worker| {
             let evidence = worker_watchdog::WorkerEvidence {
@@ -319,27 +308,77 @@ fn run_worker_scan(options: &WorkerOptions) -> io::Result<i32> {
                     ParentState::Absent => "orphaned",
                     ParentState::Unknown => "parent_unknown",
                 },
+                parent_detail: format!("host={:?} session={} terminal={:?} pane={:?}", worker.parent_host, worker.parent_session, worker.parent_terminal, worker.parent_pane),
                 age_secs,
                 evidence,
+                samples: vec![serde_json::json!({"trace_mtime": worker.trace_mtime, "semantic_hash": worker.semantic_hash, "pid_alive": worker.pid_alive, "pid_identity_ok": worker.pid_identity_ok, "tool_alive": worker.tool_alive})],
+                incident: worker_watchdog::WorkerIncidentDecision { key: None, action: worker_watchdog::IncidentAction::None, delivery: worker_watchdog::IncidentDelivery::None, error: None },
             }
         })
         .collect::<Vec<_>>();
-
-    let decisions = worker_watchdog::process_stalls(
+    let confirm = semantic_decisions
+        .iter()
+        .enumerate()
+        .filter(|(_, decision)| {
+            decision.class == worker_watchdog::WorkerClass::SuspectedStall
+                && decision.evidence.starts_with("no semantic progress")
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if !confirm.is_empty() {
+        thread::sleep(Duration::from_secs(options.confirm_secs));
+        let second = discover_workers(&options.runs_dir, &options.claude_projects_dir)?;
+        let second_by_key = second
+            .iter()
+            .map(|worker| (worker.key(), worker))
+            .collect::<std::collections::HashMap<_, _>>();
+        for index in confirm {
+            let old = &observations[index];
+            let Some(new) = second_by_key.get(&old.key()) else {
+                continue;
+            };
+            if new.semantic_hash != old.semantic_hash {
+                if let Some(entry) = memory.semantic.workers.get_mut(&old.key()) {
+                    entry.hash = new.semantic_hash;
+                    entry.since = now;
+                }
+                semantic_decisions[index].class = worker_watchdog::WorkerClass::Working;
+                semantic_decisions[index].age_secs = 0;
+                semantic_decisions[index].evidence =
+                    "semantic progress changed during confirmation sample".into();
+            }
+            semantic_decisions[index].samples.push(serde_json::json!({"semantic_hash": new.semantic_hash, "trace_mtime": new.trace_mtime, "pid_alive": new.pid_alive, "pid_identity_ok": new.pid_identity_ok, "tool_alive": new.tool_alive}));
+        }
+    }
+    let classes = semantic_decisions
+        .iter()
+        .map(|decision| decision.class)
+        .collect::<Vec<_>>();
+    let incidents = worker_watchdog::process_semantic_incidents(
         &observations,
-        &mut memory,
+        &classes,
+        &mut memory.semantic,
         now,
-        options.stall_secs,
         options.dry_run,
-        |worker, age_secs| notify_parent(worker, age_secs, &parents),
-        |worker, age_secs| append_stall_log(&options.log_file, worker, age_secs),
+        |worker, class, age| append_incident_log(&options.log_file, worker, class, age),
+        |worker, orphaned, age| {
+            if orphaned {
+                notify_operator(worker, age)
+            } else {
+                notify_parent(worker, age, &parents)
+            }
+        },
     );
+    for (decision, incident) in semantic_decisions.iter_mut().zip(incidents) {
+        decision.incident = incident;
+    }
     save_memory(&options.state_file, &memory)?;
-    print_worker_scan(observations.len(), &decisions, &semantic_decisions, options)?;
+    print_worker_scan(observations.len(), &semantic_decisions, options)?;
     Ok(
-        if decisions.iter().any(|decision| {
-            decision.action == StallAction::NotifyFailed || decision.error.is_some()
-        }) {
+        if semantic_decisions
+            .iter()
+            .any(|decision| decision.incident.error.is_some())
+        {
             1
         } else {
             0
@@ -386,6 +425,14 @@ fn parent_matches(worker: &WorkerObservation, panes: &[PaneEntry]) -> Option<boo
             .as_ref()
             .is_some_and(|s| &s.value == session)
     }) {
+        return Some(true);
+    }
+    if worker.parent_terminal.is_none()
+        && worker.parent_pane.is_none()
+        && panes
+            .iter()
+            .any(|pane| &pane.pane_id == session && pane.agent.is_some())
+    {
         return Some(true);
     }
     if let Some(terminal) = &worker.parent_terminal {
@@ -522,22 +569,45 @@ fn notify_parent(
     super::ensure_api_success(&response)
 }
 
-fn append_stall_log(path: &Path, worker: &WorkerObservation, age_secs: u64) -> io::Result<()> {
+fn notify_operator(worker: &WorkerObservation, age_secs: u64) -> io::Result<()> {
+    let response = super::super::send_request(&Request {
+        id: super::next_request_id("worker-watchdog-orphan-notification"),
+        method: Method::NotificationShow(NotificationShowParams {
+            title: "Orphaned worker".into(),
+            body: Some(format!(
+                "Worker {} on {} has no parent and no semantic progress for {} minutes.",
+                worker.worker_id,
+                worker.source,
+                age_secs / 60
+            )),
+            position: None,
+            sound: NotificationShowSound::None,
+        }),
+    })?;
+    super::ensure_api_success(&response)
+}
+
+fn append_incident_log(
+    path: &Path,
+    worker: &WorkerObservation,
+    class: &str,
+    age_secs: u64,
+) -> io::Result<()> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
         fs::create_dir_all(parent)?;
     }
-    let record = WorkerStallLog {
-        timestamp: unix_seconds()?,
-        source: worker.source.clone(),
-        worker_id: worker.worker_id.clone(),
-        parent_session: worker.parent_session.clone(),
-        last_activity: worker.last_activity,
-        age_secs,
-        parent_state: worker.parent_state,
-    };
+    let record = serde_json::json!({
+        "timestamp": unix_seconds()?,
+        "source": worker.source,
+        "worker_id": worker.worker_id,
+        "turn_id": worker.turn_id,
+        "class": class,
+        "parent": worker.parent_state,
+        "age_secs": age_secs,
+    });
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     serde_json::to_writer(&mut file, &record).map_err(io::Error::other)?;
     file.write_all(b"\n")
@@ -545,20 +615,16 @@ fn append_stall_log(path: &Path, worker: &WorkerObservation, age_secs: u64) -> i
 
 fn print_worker_scan(
     workers: usize,
-    decisions: &[WorkerStallDecision],
     semantic_decisions: &[SemanticDecision],
     options: &WorkerOptions,
 ) -> io::Result<()> {
     if options.json {
         let output = serde_json::json!({
-            "decisions": decisions,
-            "worker_decisions": semantic_decisions,
+            "decisions": semantic_decisions,
             "summary": WorkerSummary {
                 workers,
-                stalled: decisions.len(),
-                notified: decisions.iter().filter(|decision| {
-                    decision.action == StallAction::Notified
-                }).count(),
+                stalled: semantic_decisions.iter().filter(|decision| decision.class == worker_watchdog::WorkerClass::SuspectedStall).count(),
+                notified: semantic_decisions.iter().filter(|decision| decision.incident.delivery == worker_watchdog::IncidentDelivery::Delivered).count(),
                 dry_run: options.dry_run,
             },
         });
@@ -569,24 +635,16 @@ fn print_worker_scan(
         return Ok(());
     }
 
-    for decision in decisions {
-        let status = match decision.action {
-            StallAction::ParentChecking => "checking parent",
-            StallAction::ParentUnknown => "parent unknown",
-            StallAction::Orphaned => "orphaned",
-            StallAction::Confirming => "confirming stall",
-            StallAction::WouldNotify => "would notify",
-            StallAction::Notified => "notified",
-            StallAction::AlreadyNotified => "already notified",
-            StallAction::NotifyFailed => "notify failed",
-        };
+    for decision in semantic_decisions {
         println!(
-            "worker {} parent {} stalled {}m: {}{}",
+            "worker {} class {:?} parent {} age {}s: {}{}",
             decision.worker_id,
-            decision.parent_session,
-            decision.age_secs / 60,
-            status,
+            decision.class,
+            decision.parent,
+            decision.age_secs,
+            serde_json::to_string(&decision.incident).unwrap_or_default(),
             decision
+                .incident
                 .error
                 .as_ref()
                 .map(|error| format!(" ({error})"))
@@ -596,10 +654,14 @@ fn print_worker_scan(
     println!(
         "worker watchdog summary: workers={} stalled={} notified={}{}",
         workers,
-        decisions.len(),
-        decisions
+        semantic_decisions
             .iter()
-            .filter(|decision| decision.action == StallAction::Notified)
+            .filter(|decision| decision.class == worker_watchdog::WorkerClass::SuspectedStall)
+            .count(),
+        semantic_decisions
+            .iter()
+            .filter(|decision| decision.incident.delivery
+                == worker_watchdog::IncidentDelivery::Delivered)
             .count(),
         if options.dry_run { " dry-run" } else { "" }
     );
@@ -735,7 +797,10 @@ fn discover_codex_runs(runs_dir: &Path) -> io::Result<Vec<WorkerObservation>> {
 fn launch_parent_session(run_dir: &Path) -> Option<String> {
     let metadata = fs::read_to_string(run_dir.join("launch-metadata")).ok()?;
     if let Ok(value) = serde_json::from_str::<Value>(&metadata) {
-        if let Some(parent) = json_string(&value, &["parent_session"]) {
+        if let Some(parent) = json_string(&value, &["parent_session"])
+            .or_else(|| json_string(&value, &["parent", "session"]))
+            .or_else(|| json_string(&value, &["parent", "pane"]))
+        {
             return Some(parent);
         }
     }
@@ -850,9 +915,12 @@ fn discover_claude_subagents(projects_dir: &Path) -> io::Result<Vec<WorkerObserv
                     parent_scope_local: true,
                     parent_state: ParentState::Unknown,
                     turn_id: None,
-                    semantic_hash: 0,
+                    semantic_hash: evidence::semantic_hash(&read_tail(
+                        &subagent.path(),
+                        16 * 1024,
+                    )?),
                     trace_mtime: last_activity,
-                    trace: fs::read_to_string(subagent.path()).unwrap_or_default(),
+                    trace: read_tail(&subagent.path(), 16 * 1024)?,
                     out: String::new(),
                     pid: None,
                     pid_alive: true,
