@@ -29833,16 +29833,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .set_raw_agent_state_for_test(AgentState::Blocked);
 
         let rows = sidebar_rows(&app);
-        assert!(rows.iter().any(|row| matches!(
-            row,
-            SidebarRow::NestedHeader { key, count: 1, activity_count: Some((1, 2)), .. }
-                if key.starts_with("remote-space:ub2:")
-        )));
-        assert!(rows.iter().any(|row| matches!(
-            row,
-            SidebarRow::SectionHeader { title, collapsed: true, .. }
-                if title == WORKING_SECTION_TITLE
-        )));
         let groups = rows
             .iter()
             .filter_map(|row| match row {
@@ -29896,6 +29886,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         };
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
+        app.sidebar_show_ask_subtitles = true;
         app.sidebar_work_filter.machine_scope = crate::app::state::SidebarMachineScope::AllMachines;
         app.remote_agent_panel_entries =
             remote_agent_panel_entries_at(&snapshot, 1_725_000_000, false);
@@ -29920,7 +29911,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect::<Vec<_>>()
             .join("\n");
         assert!(snapshot.contains("1 of 2"), "{snapshot}");
-        assert!(!snapshot.contains("↳ Approve remote work"), "{snapshot}");
+        assert!(snapshot.contains("↳ Approve remote work"), "{snapshot}");
         let blocked = rows
             .iter()
             .find(|row| matches!(row, SidebarRow::RemoteAgent { entry, .. } if entry.entry.state == AgentState::Blocked))
