@@ -3593,6 +3593,7 @@ fn compact_sidebar_rows_inner(
             &visible_entries,
             &[],
             &[],
+            &visible_entries,
             &[],
             expand_worktrees,
             &pods,
@@ -3655,6 +3656,7 @@ fn compact_sidebar_rows_inner(
         &visible_entries,
         &snoozed_entries,
         &settled_entries,
+        &visible_entries,
         &remote_entries,
         expand_worktrees,
         &pods,
@@ -4769,6 +4771,7 @@ fn append_ordered_sidebar_blocks(
     active_entries: &[AgentPanelEntry],
     snoozed_entries: &[AgentPanelEntry],
     settled_entries: &[AgentPanelEntry],
+    local_fleet_entries: &[AgentPanelEntry],
     remote_entries: &[AgentPanelEntry],
     expand_worktrees: bool,
     pods: &PodProjection,
@@ -4798,7 +4801,9 @@ fn append_ordered_sidebar_blocks(
                     expand_worktrees,
                 );
             }
-            SidebarBlock::Fleet => append_fleet_rows(app, &mut block_rows, remote_entries),
+            SidebarBlock::Fleet => {
+                append_fleet_rows(app, &mut block_rows, local_fleet_entries, remote_entries)
+            }
             SidebarBlock::Ambient => {
                 if sidebar_area_is_visible(app, crate::config::SidebarArea::Runs) {
                     runs::append_rows(app, &mut block_rows);
@@ -4936,7 +4941,12 @@ fn needs_you_space_icon(
     }
 }
 
-fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[AgentPanelEntry]) {
+fn append_fleet_rows(
+    app: &AppState,
+    rows: &mut Vec<SidebarRow>,
+    local_entries: &[AgentPanelEntry],
+    entries: &[AgentPanelEntry],
+) {
     if app.fleet_snapshot.configured_hosts.is_empty()
         && !app.fleet_snapshot.hosts.iter().any(|host| !host.local)
         && entries.is_empty()
@@ -4944,7 +4954,7 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
         return;
     }
     let mut hosts = Vec::<(String, Vec<AgentPanelEntry>)>::new();
-    let mut local_entries = all_agent_panel_entries(app);
+    let mut local_entries = local_entries.to_vec();
     local_entries.retain(|entry| {
         entry.has_agent
             && entry
@@ -5083,7 +5093,7 @@ fn append_fleet_repo_rows(
             .cmp(&(right.1 .0 == "no repo"))
             .then_with(|| cmp_sidebar_entry_names(&left.1 .0, &right.1 .0))
     });
-    for (key, (title, mut members)) in groups {
+    for (key, (title, members)) in groups {
         // `sort_by` on the outer groups is stable; keep members in their
         // original snapshot/pane order, especially in the no-repo group.
         let key = format!("fleet:repo:{host}:{key}");
@@ -13157,7 +13167,8 @@ pub(crate) mod tests {
 
     #[test]
     fn fleet_starts_with_local_device_and_preserves_remote_config_order() {
-        let app = app_with_two_remote_hosts();
+        let mut app = app_with_two_remote_hosts();
+        app.sidebar_width = 60;
         let rows = sidebar_rows(&app);
         let hosts = rows
             .iter()
