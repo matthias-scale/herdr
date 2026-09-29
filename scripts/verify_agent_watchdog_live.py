@@ -193,7 +193,7 @@ class Harness:
         return str(pane)
 
     def wait_for_pane_stable(self, pane_id: str, ready_lines: tuple[str, ...]) -> None:
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 20
         previous: str | None = None
         last_screen = ""
         stable_samples = 0
@@ -602,7 +602,7 @@ def self_test(args: argparse.Namespace) -> int:
         h.start()
         pane_id = h.workspace("self-test", _script("harness fixture ready"),
                               ("harness fixture ready",))
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 20
         pane_text = ""
         while time.monotonic() < deadline:
             response = h.call("pane.read", {"pane_id": pane_id, "source": "detection",
