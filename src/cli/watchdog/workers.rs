@@ -579,9 +579,35 @@ fn unix_seconds() -> io::Result<u64> {
 mod tests {
     use super::*;
 
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(1);
+            let path = std::env::temp_dir().join(format!(
+                "herdr-worker-watchdog-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).expect("create temporary directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn codex_discovery_uses_parent_and_trace_activity() {
-        let dir = tempfile::tempdir().expect("temporary directory");
+        let dir = TestDir::new();
         let run_dir = dir.path().join("ra-run-1");
         fs::create_dir_all(run_dir.join("turns/turn-1")).expect("create run files");
         fs::write(
@@ -600,7 +626,7 @@ mod tests {
 
     #[test]
     fn claude_discovery_ignores_finished_subagent_transcripts() {
-        let dir = tempfile::tempdir().expect("temporary directory");
+        let dir = TestDir::new();
         let transcript = dir.path().join("project/session-1/subagents/agent-1.jsonl");
         fs::create_dir_all(transcript.parent().expect("transcript parent"))
             .expect("create subagent directory");

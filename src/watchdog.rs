@@ -520,6 +520,32 @@ pub(crate) fn append_status_correction(
 mod tests {
     use super::*;
 
+    struct TestDir(std::path::PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(1);
+            let path = std::env::temp_dir().join(format!(
+                "herdr-watchdog-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).expect("create temporary directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     fn sample(pane_id: &str, status: AgentStatus, tail: &str) -> PaneSample {
         PaneSample {
             pane_id: pane_id.into(),
@@ -844,7 +870,7 @@ mod tests {
 
     #[test]
     fn watchdog_status_log_records_source_old_new_and_evidence() {
-        let dir = tempfile::tempdir().expect("temporary directory");
+        let dir = TestDir::new();
         let path = dir.path().join("status.jsonl");
         append_status_correction(
             &path,
