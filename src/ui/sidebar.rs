@@ -5137,7 +5137,8 @@ fn append_device_space_rows(
                 terminal_runtimes,
                 SidebarGroupMode::Spaces,
                 false,
-                sidebar_rows_are_filtered(app),
+                // Local workspaces never hold a remote host's rows.
+                !local || sidebar_rows_are_filtered(app),
             );
         }
     }
@@ -13267,6 +13268,15 @@ pub(crate) mod tests {
         assert_eq!(hosts[0].1, format!("{} · this device", app.agent_host_name));
         assert_eq!(hosts[1].0, "fleet:host:remote-b");
         assert_eq!(hosts[2].0, "fleet:host:remote-a");
+        let local_workspaces = rows
+            .iter()
+            .filter(|row| matches!(row, SidebarRow::Workspace { .. }))
+            .count();
+        assert_eq!(
+            local_workspaces,
+            app.workspaces.len(),
+            "remote devices must not repeat local workspaces"
+        );
         assert!(
             !rows.iter().any(|row| matches!(
                 row,
