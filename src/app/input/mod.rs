@@ -39,6 +39,7 @@ fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
     assert_eq!(modified_url_click_modifier(), KeyModifiers::CONTROL);
 }
 
+mod board;
 mod clipboard;
 mod copy_mode;
 mod dock;
@@ -218,6 +219,14 @@ impl App {
         owner: InputOwner,
     ) -> Option<super::TerminalInputTarget> {
         let key_event = key.as_key_event();
+        if self.state.board_return.is_some()
+            && key_event.code == KeyCode::Esc
+            && key_event.modifiers.is_empty()
+            && matches!(owner, InputOwner::Pane | InputOwner::Popup)
+        {
+            self.state.board_view = self.state.board_return.take();
+            return None;
+        }
         if self.handle_window_cycle_menu_key(key_event, owner) {
             return None;
         }
@@ -322,6 +331,9 @@ impl App {
             }
             InputOwner::Surface(SurfaceInputOwner::Work) => {
                 self.handle_work_view_key(key_event);
+            }
+            InputOwner::Surface(SurfaceInputOwner::Board) => {
+                self.handle_board_key(key_event);
             }
             InputOwner::Surface(SurfaceInputOwner::DockObjectPreview) => {
                 if key_event.code == KeyCode::Esc && key_event.modifiers.is_empty() {
@@ -1339,6 +1351,7 @@ impl App {
 
     fn toggle_work_projection(&mut self, projection: crate::app::state::WorkProjection) {
         self.state.clear_usage_view();
+        self.state.board_view = None;
         if self
             .state
             .work_view
@@ -1446,9 +1459,23 @@ impl App {
                 }
                 self.start_usage_scan();
             }
-            _ => {}
+            _ => self.dispatch_usage_passthrough_key(key),
         }
         true
+    }
+
+    /// Keys the usage screen does not own still reach the global direct
+    /// keybindings and the prefix key, so tab switching keeps working while
+    /// the screen is open.
+    fn dispatch_usage_passthrough_key(&mut self, key: KeyEvent) {
+        let key = TerminalKey::from(key);
+        let action = terminal_direct_non_indexed_navigation_action(&self.state, &key)
+            .or_else(|| terminal_direct_indexed_navigation_action(&self.state, &key));
+        if let Some(action) = action {
+            self.execute_tui_navigate_action(action, navigate::ActionContext::Direct);
+        } else if self.state.is_prefix_key(&key) {
+            self.state.set_server_mode(Mode::Prefix);
+        }
     }
 
     fn activate_usage_hit_target(&mut self, target: crate::app::state::UsageHitTarget) {
@@ -4783,6 +4810,7 @@ impl App {
                 self.handle_home_text_commit(text);
                 true
             }
+            InputOwner::Surface(SurfaceInputOwner::Board) => self.board_insert_text(text),
             InputOwner::Server(ServerInputOwner::Navigator) => {
                 if !self.state.navigator.search_focused {
                     return false;
@@ -5031,9 +5059,17 @@ impl App {
                     .map(|hit| hit.target);
                 if let Some(target) = target {
                     self.activate_usage_hit_target(target);
+                    return;
                 }
             }
-            return;
+            // Clicks outside the usage surface (tab bar, sidebar) keep their
+            // normal handling so tabs stay clickable while the screen is open.
+            if self
+                .state
+                .point_in_rect(self.state.view.terminal_area, mouse.column, mouse.row)
+            {
+                return;
+            }
         }
         if owner == InputOwner::Surface(SurfaceInputOwner::Work) {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
@@ -5127,6 +5163,15 @@ impl App {
                 return;
             }
             let refresh = self.state.view.sidebar_footer_refresh_hit_area;
+            let board = self.state.view.sidebar_footer_board_hit_area;
+            if mouse.column >= board.x
+                && mouse.column < board.right()
+                && mouse.row >= board.y
+                && mouse.row < board.bottom()
+            {
+                self.toggle_board_view();
+                return;
+            }
             if mouse.column >= refresh.x
                 && mouse.column < refresh.right()
                 && mouse.row >= refresh.y
@@ -5224,6 +5269,21 @@ impl App {
             }
         }
 
+        if self.state.board_view.is_some()
+            && matches!(
+                owner,
+                InputOwner::Surface(SurfaceInputOwner::Board)
+                    | InputOwner::Sidebar
+                    | InputOwner::Pane
+            )
+            && self
+                .state
+                .point_in_rect(self.state.view.terminal_area, mouse.column, mouse.row)
+        {
+            self.handle_board_mouse(mouse);
+            return;
+        }
+
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self.state.on_sidebar_divider(mouse.column, mouse.row)
         {
@@ -5294,16 +5354,10 @@ impl App {
             );
             self.start_home_ref_refresh_if_requested();
             self.start_home_github_refresh_if_requested();
-            if let Some(pane_id) = self.state.take_forwarded_pane_input() {
-                // Wheel and motion reports are not deliberate answers to a blocker.
-                if matches!(
-                    mouse.kind,
-                    MouseEventKind::Down(_) | MouseEventKind::Drag(_) | MouseEventKind::Up(_)
-                ) && !self.state.pane_is_settled_anywhere(pane_id)
-                {
-                    self.retire_blocked_hook_authority_for_pane(pane_id, std::time::Instant::now());
-                }
-            }
+            // Mouse reports can be forwarded to the terminal, but they do not
+            // answer a blocked closing gate. Only explicit human text/key input
+            // retires its authority.
+            let _ = self.state.take_forwarded_pane_input();
             if let Some(action) = action {
                 match action {
                     MouseAction::SidebarObjectMenu { index } => {
@@ -8162,6 +8216,31 @@ sidebar_visible = true
     }
 
     #[test]
+    fn usage_view_passes_tab_switch_keybinds_through_and_closes() {
+        let mut app = test_app();
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("test")];
+        app.state.workspaces[0].test_add_tab(None);
+        app.state.workspaces[0].active_tab = 0;
+        app.state.active = Some(0);
+        app.state.keybinds.next_tab = crate::config::ActionKeybinds::direct("alt+n");
+        app.toggle_usage_view();
+
+        assert!(app.handle_usage_view_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT)));
+
+        assert_eq!(app.state.workspaces[0].active_tab, 1);
+        assert!(app.state.usage_view.is_none());
+    }
+
+    #[test]
+    fn usage_view_prefix_key_enters_prefix_mode() {
+        let mut app = test_app();
+        app.toggle_usage_view();
+        let (code, modifiers) = (app.state.prefix_code, app.state.prefix_mods);
+        app.handle_usage_view_key(KeyEvent::new(code, modifiers));
+        assert_eq!(app.state.server_mode(), Mode::Prefix);
+    }
+
+    #[test]
     fn usage_view_keys_change_metric_range_breakdown_and_close() {
         use crate::app::state::{UsageBreakdown, UsageMetric, UsageRange};
 
@@ -10035,7 +10114,7 @@ navigate_workspace_down = "ctrl+j"
     }
 
     #[tokio::test]
-    async fn local_forwarded_mouse_motion_keeps_hold_and_button_press_releases_it() {
+    async fn local_forwarded_mouse_motion_and_button_press_keep_hold_until_key_input() {
         let (mut app, terminal_id, mut rx) =
             terminal_app_with_mouse_reporting_blocked_hook(b"\x1b[?1003h\x1b[?1006h");
         crate::ui::compute_view(&mut app.state, ratatui::layout::Rect::new(0, 0, 106, 26));
@@ -10051,6 +10130,12 @@ navigate_workspace_down = "ctrl+j"
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), column, row));
 
         assert!(rx.try_recv().is_ok(), "button press reaches the pane");
+        assert_blocked_hook_held(&app, &terminal_id);
+
+        app.handle_key(TerminalKey::new(KeyCode::Char('x'), KeyModifiers::empty()))
+            .await;
+
+        assert!(rx.try_recv().is_ok(), "key press reaches the pane");
         assert_blocked_hook_retired(&app, &terminal_id);
     }
 

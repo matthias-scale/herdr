@@ -5100,6 +5100,39 @@ mod tests {
     }
 
     #[test]
+    fn tab_click_switches_tab_and_leaves_open_usage_screen() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        ws.test_add_tab(None);
+        ws.active_tab = 1;
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.toggle_usage_view();
+        let area = Rect::new(0, 0, 106, 20);
+        crate::ui::compute_view(&mut app.state, area);
+        assert_eq!(
+            app.state.input_owner(),
+            crate::app::state::InputOwner::Surface(crate::app::state::SurfaceInputOwner::Usage)
+        );
+
+        let first_tab = app.state.view.tab_hit_areas[0];
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            first_tab.x + 1,
+            first_tab.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            first_tab.x + 1,
+            first_tab.y,
+        ));
+
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+        assert!(app.state.usage_view.is_none());
+    }
+
+    #[test]
     fn workspace_click_survives_stray_drag_report_off_the_workspace_list() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("first"), Workspace::test_new("second")];
@@ -6404,13 +6437,21 @@ mod tests {
                 Some(ControlId::SidebarFooter(item))
             );
         }
+        let board = app.state.view.sidebar_footer_board_hit_area;
+        assert_eq!(board.width, 1);
+        assert_eq!(
+            board.x,
+            app.state.view.sidebar_footer_refresh_hit_area.right()
+        );
+        app.handle_mouse(mouse(MouseEventKind::Moved, board.x, board.y));
+        assert_eq!(
+            app.state.hovered_control,
+            Some(ControlId::SidebarFooter(SidebarFooterItem::Board))
+        );
         let bell = app.state.view.notification_hit_area;
         let cycle = app.state.view.window_cycle_mode_hit_area;
         assert_eq!(cycle.width, 1);
-        assert_eq!(
-            cycle.x,
-            app.state.view.sidebar_footer_refresh_hit_area.right()
-        );
+        assert_eq!(cycle.x, board.right());
         app.handle_mouse(mouse(MouseEventKind::Moved, cycle.x, cycle.y));
         assert_eq!(
             app.state.hovered_control,
@@ -10117,8 +10158,8 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn clicking_pane_context_menu_close_last_parent_group_pane_keeps_confirmation_mode() {
+    #[tokio::test]
+    async fn clicking_pane_context_menu_close_last_parent_group_pane_keeps_group() {
         let mut app = app_for_mouse_test();
         let mut parent = Workspace::test_new("main");
         let pane_id = parent.tabs[0].root_pane;
@@ -10163,10 +10204,15 @@ mod tests {
             menu.y + 1 + close_idx as u16,
         ));
 
-        assert_eq!(app.state.selected, 0);
-        assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
+        assert_eq!(app.state.selected, 1);
+        assert_ne!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_ne!(app.state.workspaces[0].tabs[0].root_pane, pane_id);
         assert!(app.state.context_menu.is_none());
+        for (_terminal_id, runtime) in app.terminal_runtimes.drain() {
+            runtime.shutdown();
+        }
     }
 
     #[test]

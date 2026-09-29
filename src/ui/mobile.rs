@@ -1277,7 +1277,9 @@ fn render_mobile_switcher_content(
                 title,
                 space_icon,
                 host,
-                blocked,
+                dot,
+                dot_color,
+                provider,
                 ..
             } => {
                 if let Some(y) = visible_y(viewport, app.mobile_switcher_scroll, doc_y) {
@@ -1287,7 +1289,9 @@ fn render_mobile_switcher_content(
                         title,
                         space_icon,
                         host,
-                        *blocked,
+                        dot,
+                        *dot_color,
+                        provider,
                         Rect::new(content.x, y, content.width, 1),
                     );
                 }

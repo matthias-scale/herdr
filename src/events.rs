@@ -79,6 +79,14 @@ pub enum AppEvent {
         config_generation: u64,
         agents: Vec<crate::api::schema::AgentInfo>,
     },
+    /// Latest lines for only the remote terminals linked on the open board.
+    BoardRemoteLinesFetched {
+        note_path: std::path::PathBuf,
+        fleet_generation: u64,
+        request_id: u64,
+        complete: bool,
+        lines: Vec<(crate::board::AgentLink, String)>,
+    },
     /// A one-shot request to the host owning a remote pane completed. Fleet
     /// polling remains the only source of rendered remote lifecycle state.
     RemoteApiRequestFinished {
@@ -267,6 +275,7 @@ pub enum AppEvent {
         pane_id: PaneId,
         observed_at: Instant,
         suppress_completion: bool,
+        answers_human_gate: bool,
     },
     /// The current detected agent gracefully released this pane back to the shell.
     HookAgentReleased {

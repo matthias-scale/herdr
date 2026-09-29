@@ -365,7 +365,24 @@ impl App {
 
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
-            AppEvent::FleetRefreshed { snapshot } => self.install_fleet_snapshot(snapshot),
+            AppEvent::FleetRefreshed { snapshot } => {
+                let changed = self.install_fleet_snapshot(snapshot);
+                self.refresh_board_remote_lines();
+                changed
+            }
+            AppEvent::BoardRemoteLinesFetched {
+                note_path,
+                fleet_generation,
+                request_id,
+                complete,
+                lines,
+            } => self.apply_board_remote_lines(
+                &note_path,
+                fleet_generation,
+                request_id,
+                complete,
+                lines,
+            ),
             AppEvent::FleetAgentInventoryChanged {
                 host,
                 config_generation,
@@ -646,7 +663,26 @@ impl App {
         }
 
         if let AppEvent::FleetRefreshed { snapshot } = ev {
-            return Some(self.install_fleet_snapshot(snapshot));
+            let changed = self.install_fleet_snapshot(snapshot);
+            self.refresh_board_remote_lines();
+            return Some(changed);
+        }
+
+        if let AppEvent::BoardRemoteLinesFetched {
+            note_path,
+            fleet_generation,
+            request_id,
+            complete,
+            lines,
+        } = ev
+        {
+            return Some(self.apply_board_remote_lines(
+                &note_path,
+                fleet_generation,
+                request_id,
+                complete,
+                lines,
+            ));
         }
 
         if let AppEvent::FleetAgentInventoryChanged {
@@ -1264,6 +1300,23 @@ impl App {
         pane_id: crate::layout::PaneId,
         observed_at: Instant,
     ) {
+        self.retire_blocked_hook_authority_for_pane_with_gate_answer(pane_id, observed_at, true);
+    }
+
+    pub(crate) fn retire_blocked_hook_authority_for_automated_input(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        observed_at: Instant,
+    ) {
+        self.retire_blocked_hook_authority_for_pane_with_gate_answer(pane_id, observed_at, false);
+    }
+
+    fn retire_blocked_hook_authority_for_pane_with_gate_answer(
+        &mut self,
+        pane_id: crate::layout::PaneId,
+        observed_at: Instant,
+        answers_human_gate: bool,
+    ) {
         self.cancel_pending_stall_nudge_for_pane(pane_id);
         self.state.note_pane_activity_at(pane_id, observed_at);
         self.record_contract_false_positive_for_pane(pane_id, observed_at);
@@ -1271,6 +1324,7 @@ impl App {
             pane_id,
             observed_at,
             suppress_completion: true,
+            answers_human_gate,
         });
     }
 
@@ -2059,6 +2113,9 @@ impl App {
                 return self.handle_agent_send_keys(request.id, params)
             }
             Method::PaneSplit(params) => return self.handle_pane_split(request.id, params),
+            Method::PaneSplitCompanion(params) => {
+                return self.handle_pane_split_companion(request.id, params)
+            }
             Method::PaneSwap(params) => return self.handle_pane_swap(request.id, params),
             Method::PaneMove(params) => return self.handle_pane_move(request.id, params),
             Method::PaneZoom(params) => return self.handle_pane_zoom(request.id, params),
