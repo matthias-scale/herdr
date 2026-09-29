@@ -8919,36 +8919,24 @@ navigate_pane_down = "ctrl+j"
     }
 
     #[tokio::test]
-    async fn tui_close_pane_last_parent_group_pane_keeps_group_via_api() {
+    async fn tui_close_pane_last_parent_group_pane_confirms_group_close() {
         let mut app = app_with_test_workspaces(&["main", "issue"]);
         mark_worktree_space_member(&mut app.state, 0, "repo-key");
         mark_worktree_space_member(&mut app.state, 1, "repo-key");
-        let workspace_id = app.state.workspaces[0].id.clone();
-        let workspace_cwd = app.state.workspaces[0].identity_cwd.clone();
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         app.state.active = Some(0);
         app.state.selected = 1;
+        app.state.confirm_close = true;
         app.state.set_server_mode(Mode::Navigate);
 
         app.execute_tui_navigate_action(NavigateAction::ClosePane, ActionContext::Navigate);
 
         assert_eq!(app.state.workspaces.len(), 2);
-        assert_eq!(app.state.workspaces[0].id, workspace_id);
-        assert_eq!(app.state.workspaces[0].identity_cwd, workspace_cwd);
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
-        assert_ne!(app.state.workspaces[0].tabs[0].root_pane, pane_id);
-        assert_eq!(app.state.selected, 1);
-        assert!(app.state.workspaces[0].pane_state(pane_id).is_none());
-        let replacement_terminal = app
-            .state
-            .terminal_id_for_pane(0, app.state.workspaces[0].tabs[0].root_pane)
-            .unwrap();
-        assert_eq!(
-            app.state.terminals[&replacement_terminal].cwd,
-            workspace_cwd
-        );
+        assert_eq!(app.state.selected, 0);
+        assert!(app.state.workspaces[0].pane_state(pane_id).is_some());
         assert_eq!(app.state.active, Some(0));
-        assert_eq!(app.state.effective_interaction_mode(), Mode::Terminal);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
         assert!(!app.event_hub.events_after(0).iter().any(|(_, event)| {
             matches!(event.event, crate::api::schema::EventKind::WorkspaceClosed)
         }));
