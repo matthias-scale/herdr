@@ -758,6 +758,7 @@ impl App {
     }
 
     pub(crate) fn focus_workspace_idx_via_api(&mut self, ws_idx: usize) {
+        self.state.sidebar_selected_remote_agent = None;
         let workspace_id = self.public_workspace_id(ws_idx);
         self.runtime_workspace_focus("tui.workspace.focus", workspace_id);
     }
@@ -941,6 +942,7 @@ impl App {
     }
 
     pub(crate) fn focus_tab_idx_via_api(&mut self, tab_idx: usize) {
+        self.state.sidebar_selected_remote_agent = None;
         let Some(ws_idx) = self.state.active else {
             return;
         };
@@ -1034,6 +1036,7 @@ impl App {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
     ) {
+        self.state.sidebar_selected_remote_agent = None;
         let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) else {
             return;
         };
@@ -3939,6 +3942,17 @@ mod tests {
         );
         assert_eq!(app.state.confirm_close_remote_agent_ref, Some(agent_ref));
         assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
+    }
+
+    #[test]
+    fn focusing_a_local_pane_clears_remote_close_selection() {
+        let (mut app, agent_ref) = app_with_remote_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.sidebar_selected_remote_agent = Some(agent_ref);
+
+        app.focus_pane_internal_via_api(0, pane_id);
+
+        assert!(app.state.sidebar_selected_remote_agent.is_none());
     }
 
     #[test]
