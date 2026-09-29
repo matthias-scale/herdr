@@ -58,6 +58,9 @@ static NUMBERED_DECISION: LazyLock<Regex> =
 static NEEDS_YOU: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^\s*\*{0,2}needs you\s*\((\d+)\)\*{0,2}\s*$").expect("static regex")
 });
+static NEEDS_YOU_NOTHING: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*\*{0,2}needs you\s*:\s*nothing\.?\s*\*{0,2}\s*$").expect("static regex")
+});
 static CLOSING_MARKER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^\s*\*{0,2}(?:needs you\b|now:)\*{0,2}").expect("static regex")
 });
@@ -131,16 +134,51 @@ pub(crate) fn closing_block_waiting(text: &str) -> bool {
     if !composer_is_empty(text) {
         return false;
     }
-    let all = reply.lines().collect::<Vec<_>>();
-    let start = all
-        .iter()
-        .rposition(|line| CLOSING_MARKER.is_match(line) || USER_PROMPT.is_match(line));
-    let lines = match start {
-        Some(i) if USER_PROMPT.is_match(all[i]) => return false,
-        Some(i) => &all[i..],
-        None => &all[..],
-    };
-    let lines = lines.iter().rev().take(16).copied().collect::<Vec<_>>();
+    closing_block_state(&reply)
+}
+
+fn closing_block_state(text: &str) -> bool {
+    let mut latest = false;
+    let mut block: Option<Vec<&str>> = None;
+    for line in text.lines() {
+        if USER_PROMPT.is_match(line) {
+            if latest || block.is_some() {
+                latest = false;
+                block = None;
+            }
+            continue;
+        }
+        if NEEDS_YOU.is_match(line) || NEEDS_YOU_NOTHING.is_match(line) {
+            block = Some(vec![line]);
+            continue;
+        }
+        if WAITING_ON_YOU.is_match(line) && block.is_none() {
+            latest = true;
+            continue;
+        }
+        if line
+            .trim()
+            .eq_ignore_ascii_case("Reply 1a / 1b. Silence holds.")
+            && block.is_none()
+        {
+            latest = true;
+            continue;
+        }
+        if let Some(lines) = block.as_mut() {
+            lines.push(line);
+            if CLOSING_MARKER.is_match(line) || DONE_HERE.is_match(line.trim()) {
+                latest = closing_block_lines_waiting(lines);
+                block = None;
+            }
+        }
+    }
+    if let Some(lines) = block {
+        latest = closing_block_lines_waiting(&lines);
+    }
+    latest
+}
+
+fn closing_block_lines_waiting(lines: &[&str]) -> bool {
     if lines.iter().any(|line| WAITING_ON_YOU.is_match(line))
         || lines.iter().any(|line| {
             line.trim()
@@ -152,7 +190,7 @@ pub(crate) fn closing_block_waiting(text: &str) -> bool {
     lines.iter().enumerate().any(|(i, line)| {
         NEEDS_YOU.captures(line).is_some_and(|c| {
             c[1].parse::<u32>().is_ok_and(|n| n >= 1)
-                && lines[..i]
+                && lines[i + 1..]
                     .iter()
                     .any(|item| NUMBERED_DECISION.is_match(item))
         })
@@ -598,6 +636,33 @@ mod tests {
         assert!(waiting("**Review notes**\nReply 1a / 1b. Silence holds."));
         assert!(!waiting("**Needs you: nothing.**"));
         assert!(!closing_block_waiting("Now: waiting on you"));
+    }
+
+    #[test]
+    fn closing_block_stays_open_while_later_activity_continues() {
+        let block = "**Needs you (1)**\n1. **Approve** — Merge X?\nReply 1a / 1b. Silence holds.\n**Now:** Codex — fixing Y";
+        assert!(closing_block_waiting(&claude_screen(block, "", "0 shells")));
+
+        let activity = (0..40)
+            .map(|i| format!("tool output / notification {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(closing_block_waiting(&claude_screen(
+            &format!("{block}\n{activity}"),
+            "",
+            "0 shells"
+        )));
+
+        assert!(!closing_block_waiting(&claude_screen(
+            &format!("{block}\n❯ 1a"),
+            "",
+            "0 shells"
+        )));
+        assert!(!closing_block_waiting(&claude_screen(
+            &format!("{block}\n**Needs you: nothing.**\n**Now:** Codex — reviewing"),
+            "",
+            "0 shells"
+        )));
     }
 
     #[test]

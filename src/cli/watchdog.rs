@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
@@ -29,6 +29,8 @@ const DEFAULT_LINES: u32 = 40;
 const STAGE2_MODEL_ID: &str = "gemini-3.1-flash-lite";
 const MODEL_STDOUT_MAX_BYTES: usize = 8 * 1024;
 const MODEL_STDERR_MAX_BYTES: usize = 4 * 1024;
+const CLAUDE_TRANSCRIPT_TAIL_BYTES: u64 = 256 * 1024;
+const CLAUDE_TRANSCRIPT_DIR_LIMIT: usize = 4096;
 
 #[derive(Debug, Clone)]
 struct WatchdogOptions {
@@ -226,16 +228,23 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
         } else {
             None
         };
+        let agent = pane.agent.unwrap_or_default();
+        let agent_session = pane.agent_session.map(|s| s.value);
+        let transcript_waiting = agent_session.as_deref().is_some_and(|session| {
+            agent.to_ascii_lowercase().contains("claude")
+                && claude_transcript_waiting(session).unwrap_or(false)
+        });
         observations.push(PaneV3Observation {
             pane_id: pane.pane_id,
-            agent: pane.agent.unwrap_or_default(),
+            agent,
             terminal_id: pane.terminal_id,
-            agent_session: pane.agent_session.map(|s| s.value),
+            agent_session,
             status: pane.agent_status,
             wait: pane.wait,
             eta_s: pane.eta_s,
             reported_at: pane.reported_at,
             tail,
+            transcript_waiting,
             process_group,
             read_error,
         });
@@ -413,6 +422,7 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
                         eta_s: current.eta_s,
                         reported_at: current.reported_at,
                         tail,
+                        transcript_waiting: false,
                         process_group: None,
                         read_error: None,
                     });
@@ -478,6 +488,143 @@ fn read_tail(pane_id: &str, lines: u32) -> Result<String, String> {
         .as_str()
         .map(str::to_string)
         .ok_or_else(|| "pane.read response did not contain result.read.text".into())
+}
+
+fn claude_transcript_waiting(session: &str) -> Option<bool> {
+    if session.is_empty()
+        || !session
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    let root = std::env::var_os("HOME").map(PathBuf::from)?;
+    let root = root.join(".claude/projects");
+    let transcript = find_claude_transcript(&root, &format!("{session}.jsonl"))?;
+    let bytes = read_bounded_file_tail(&transcript, CLAUDE_TRANSCRIPT_TAIL_BYTES).ok()?;
+    let content = String::from_utf8_lossy(&bytes);
+    let rows = content
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect::<Vec<_>>();
+    let assistant_text = assistant_text_after_last_user(&rows)?;
+    (!assistant_text.is_empty()).then(|| watchdog::evidence::closing_block_waiting(&assistant_text))
+}
+
+fn assistant_text_after_last_user(rows: &[Value]) -> Option<String> {
+    let last_user = rows.iter().rposition(is_real_user_turn)?;
+    let mut assistant_text = String::new();
+    for row in &rows[last_user + 1..] {
+        if row.pointer("/message/role").and_then(Value::as_str) == Some("assistant") {
+            append_assistant_text(row, &mut assistant_text);
+        }
+    }
+    Some(assistant_text)
+}
+
+fn find_claude_transcript(root: &Path, filename: &str) -> Option<PathBuf> {
+    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    let mut visited = 0usize;
+    while let Some((dir, depth)) = pending.pop() {
+        if visited >= CLAUDE_TRANSCRIPT_DIR_LIMIT {
+            return None;
+        }
+        visited += 1;
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_file() && entry.file_name() == filename {
+                return Some(entry.path());
+            }
+            if depth < 8 && file_type.is_dir() {
+                pending.push((entry.path(), depth + 1));
+            }
+        }
+    }
+    None
+}
+
+fn read_bounded_file_tail(path: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
+    let mut file = fs::File::open(path)?;
+    let len = file.seek(SeekFrom::End(0))?;
+    let start = len.saturating_sub(max_bytes);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::with_capacity((len - start) as usize);
+    file.take(max_bytes).read_to_end(&mut bytes)?;
+    if start > 0 {
+        if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
+            bytes.drain(..=newline);
+        } else {
+            bytes.clear();
+        }
+    }
+    Ok(bytes)
+}
+
+fn is_real_user_turn(row: &Value) -> bool {
+    if row.pointer("/message/role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    match row.pointer("/message/content") {
+        Some(Value::Array(content)) => content
+            .iter()
+            .any(|block| block.get("type").and_then(Value::as_str) != Some("tool_result")),
+        Some(Value::String(text)) => !text.is_empty(),
+        _ => false,
+    }
+}
+
+fn append_assistant_text(row: &Value, output: &mut String) {
+    match row.pointer("/message/content") {
+        Some(Value::Array(content)) => {
+            for block in content {
+                if block.get("type").and_then(Value::as_str) == Some("text") {
+                    if let Some(text) = block.get("text").and_then(Value::as_str) {
+                        output.push_str(text);
+                        output.push('\n');
+                    }
+                }
+            }
+        }
+        Some(Value::String(text)) => {
+            output.push_str(text);
+            output.push('\n');
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod transcript_tests {
+    use super::*;
+
+    #[test]
+    fn transcript_fallback_uses_assistant_text_after_latest_real_user_turn() {
+        let rows = [
+            serde_json::json!({"message":{"role":"user","content":"first request"}}),
+            serde_json::json!({"message":{"role":"assistant","content":[{"type":"text","text":"**Needs you (1)**\n1. Approve deploy\n**Now:** continuing"}]}}),
+            serde_json::json!({"message":{"role":"user","content":[{"type":"tool_result","content":"done"}]}}),
+            serde_json::json!({"message":{"role":"assistant","content":[{"type":"text","text":"still waiting"}]}}),
+        ];
+        assert!(assistant_text_after_last_user(&rows)
+            .as_deref()
+            .is_some_and(|text| text.contains("Needs you (1)")));
+
+        let answered = [
+            rows[0].clone(),
+            rows[1].clone(),
+            serde_json::json!({"message":{"role":"user","content":"1a"}}),
+            serde_json::json!({"message":{"role":"assistant","content":[{"type":"text","text":"Thanks, proceeding."}]}}),
+        ];
+        assert_eq!(
+            assistant_text_after_last_user(&answered).as_deref(),
+            Some("Thanks, proceeding.\n")
+        );
+    }
 }
 
 fn read_process_evidence(pane_id: &str) -> io::Result<Vec<watchdog::evidence::ProcSample>> {

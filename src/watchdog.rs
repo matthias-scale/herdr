@@ -785,6 +785,7 @@ pub(crate) struct PaneV3Observation {
     pub eta_s: Option<u64>,
     pub reported_at: Option<String>,
     pub tail: String,
+    pub transcript_waiting: bool,
     pub process_group: Option<Vec<evidence::ProcSample>>,
     pub read_error: Option<String>,
 }
@@ -877,6 +878,13 @@ pub(crate) fn classify_pane_v3(
     } else if !evidence::composer_is_empty(&o.tail) && evidence::reply_text(&o.tail) != o.tail {
         class = PaneClass::Working;
         ev = "human is typing".into();
+    } else if evidence::closing_block_waiting(&o.tail) || o.transcript_waiting {
+        class = PaneClass::WaitingHuman;
+        ev = if o.status == AgentStatus::Working {
+            "open blocker while working".into()
+        } else {
+            "closing block is waiting on human input".into()
+        };
     } else {
         let low = o.wait.as_deref().unwrap_or("").to_ascii_lowercase();
         let hook_retry = ["retry", "rate", "backoff", "limit"]
@@ -906,10 +914,7 @@ pub(crate) fn classify_pane_v3(
             m.retry_since = None;
         }
         if class == PaneClass::Unknown {
-            if evidence::closing_block_waiting(&o.tail) {
-                class = PaneClass::WaitingHuman;
-                ev = "closing block is waiting on human input".into();
-            } else if evidence::finished_reply(&o.tail) {
+            if evidence::finished_reply(&o.tail) {
                 class = PaneClass::FinishedIdle;
                 ev = "reply finished; idle composer".into();
             } else if let Some(p) = evidence::active_prompt(&o.tail) {
@@ -1603,6 +1608,7 @@ mod tests {
             eta_s: None,
             reported_at: None,
             tail: tail.into(),
+            transcript_waiting: false,
             process_group: None,
             read_error: None,
         }
@@ -1708,6 +1714,27 @@ mod tests {
             classify_pane_v3(&o, &mut memory, 1000, v3opt()).class,
             PaneClass::Unknown
         );
+    }
+
+    #[test]
+    fn pane_v3_keeps_open_blocker_visible_while_working_and_from_transcript() {
+        let blocker = "**Needs you (1)**\n1. **Approve** — Merge X?\nReply 1a / 1b. Silence holds.\n**Now:** Codex — fixing Y";
+        let o = pane_v3(
+            AgentStatus::Working,
+            &claude_pane(&format!("{blocker}\nRunning tests"), "", "0 shells"),
+        );
+        let decision = classify_pane_v3(&o, &mut PaneV3Memory::default(), 100, v3opt());
+        assert_eq!(decision.class, PaneClass::WaitingHuman);
+        assert!(decision.evidence.contains("open blocker while working"));
+
+        let mut o = pane_v3(
+            AgentStatus::Working,
+            &claude_pane("Running tests", "", "0 shells"),
+        );
+        o.transcript_waiting = true;
+        let decision = classify_pane_v3(&o, &mut PaneV3Memory::default(), 100, v3opt());
+        assert_eq!(decision.class, PaneClass::WaitingHuman);
+        assert!(decision.evidence.contains("open blocker while working"));
     }
 
     #[test]
