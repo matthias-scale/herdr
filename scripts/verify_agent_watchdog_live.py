@@ -608,7 +608,8 @@ def main() -> int:
                 report: dict[str, Any] = {"pane_id": pane_id, "source": "watchdog-harness",
                     "agent": "codex", "state": status}
                 if ident.startswith("a-retry"):
-                    report.update(wait="retry", eta_s=120, reported_at=int(time.time()))
+                    report.update(wait="retry", eta_s=120,
+                                  reported_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
                 harness.call("pane.report_agent", report)
                 state = harness.root / f"pane-{ident}.json"
                 log = harness.root / f"pane-{ident}.jsonl"
