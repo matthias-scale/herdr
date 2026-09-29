@@ -1193,7 +1193,7 @@ mod tests {
         let cycle = window_cycle_mode_hit_area(&app, sidebar);
         assert!(areas.x < bell.x);
         assert!(bell.right() <= sidebar.x + sidebar.width - 3);
-        assert!(areas.x >= cycle.right() + 1);
+        assert!(areas.x > cycle.right());
         assert!(bell.right() <= pomodoro_hit_area(&app, sidebar).x);
 
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 20))

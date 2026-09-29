@@ -427,7 +427,7 @@ impl Default for SpacesSidebarConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SidebarConfig {
     /// Sidebar row layout. `current` preserves the existing layout; `sections`
@@ -444,19 +444,6 @@ pub struct SidebarConfig {
     /// Show the pending human question under blocked rows in the sections
     /// layout. Settings: Sidebar → Show ask subtitles. Default: false.
     pub show_ask_subtitles: bool,
-}
-
-impl Default for SidebarConfig {
-    fn default() -> Self {
-        Self {
-            layout: SidebarLayoutConfig::default(),
-            header: SidebarHeaderConfig::default(),
-            areas: SidebarAreasConfig::default(),
-            agents: AgentsSidebarConfig::default(),
-            spaces: SpacesSidebarConfig::default(),
-            show_ask_subtitles: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
