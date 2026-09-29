@@ -259,7 +259,7 @@ class Harness:
             memory = {}
         entry = memory.setdefault(key, {})
         aged = int(time.time()) - seconds
-        for field in ("since", "retry_since", "op_since"):
+        for field in ("since", "retry_since", "op_since", "quiet_since", "last_nudge_at"):
             if field in entry:
                 entry[field] = aged
         if "since" not in entry:
@@ -489,7 +489,11 @@ def setup_summary(h: Harness, ident: str) -> str:
 
 
 def setup_promised_draft(h: Harness, ident: str) -> str:
+    account = ("You hit your usage limit" if "usage_limit" in ident else
+               "Please sign in" if "logged_out" in ident else
+               "Now: Codex reviewers — reviewing PR 1656; the config-folder worker starts after it merges")
     screen = ("Now: Codex reviewers — reviewing PR 1656; the config-folder worker starts after it merges\n"
+              f"{account}\n"
               "⎿ Stop says: /review completed — invoke /retro to capture lessons.\n"
               "● Background shell command didn't finish before the previous session ended\n"
               "────────────────────────\n❯ cont\n────────────────────────\n"
@@ -630,7 +634,11 @@ CASES: list[tuple[str, str, Callable[[Harness, str], Any], str]] = [
     ("a-quoted-question", "A", setup_quote, "working"),
     ("a-subprocess-yn", "A", setup_prompt, "waiting_tool_input"),
     ("a-finished-idle", "A", setup_summary, "finished_idle"),
-    ("stale_draft_promised_work_stalled", "A", setup_promised_draft, "stalled"),
+    ("stale_draft_promised_work_stalled", "A", setup_promised_draft, "finished_idle"),
+    ("promised_quiet_nudged", "A", setup_promised_draft, "finished_idle"),
+    ("promised_quiet_repeats_then_blocked", "A", setup_promised_draft, "stalled"),
+    ("promised_usage_limit_not_nudged", "A", setup_promised_draft, "stalled"),
+    ("promised_logged_out_not_nudged", "A", setup_promised_draft, "stalled"),
     ("fresh_draft_typing", "A", setup_promised_draft, "working"),
     ("done_here_negative_control", "A", setup_done_here, "finished_idle"),
     ("a-retry-backoff", "A", setup_retry, "waiting_retry"),
@@ -776,15 +784,20 @@ def main() -> int:
                                "--status-log", str(log)]
                 if ident == "stale_draft_promised_work_stalled":
                     cmd_options.remove("--dry-run")
-                    cmd_options += ["--stale-draft-secs", "2"]
+                    cmd_options += ["--stale-draft-secs", "2", "--quiet-secs", "2"]
+                if ident.startswith("promised_"):
+                    cmd_options.remove("--dry-run")
+                    cmd_options += ["--quiet-secs", "2"]
                 if args.gemini_bin:
                     cmd_options += ["--gemini-bin", args.gemini_bin]
                 else:
                     cmd_options.append("--no-model")
                 harness.run_watchdog("A", cmd_options,
                                      dry=ident != "stale_draft_promised_work_stalled")
-                age = 900 if ident in ("stale_draft_promised_work_stalled", "a-quiet-build", "a-silent-stall", "a-spinner-only",
+                age = 1800 if ident == "stale_draft_promised_work_stalled" else 900 if ident in ("a-quiet-build", "a-silent-stall", "a-spinner-only",
                                        "a-spinner-progress", "a-resumed") else 0
+                if ident.startswith("promised_"):
+                    age = 3
                 if ident == "a-retry-renewed":
                     age = 1200
                 elif ident == "a-prose-question":
@@ -792,6 +805,11 @@ def main() -> int:
                 if age:
                     harness.age_memory(state, pane_id, age,
                                        session="old-session" if ident == "a-resumed" else None)
+                if ident == "promised_quiet_repeats_then_blocked":
+                    data = json.loads(state.read_text())
+                    data[pane_id]["nudge_count"] = 3
+                    state.write_text(json.dumps(data))
+                    harness.age_memory(state, pane_id, 5)
                 payload = harness.run_watchdog("A", cmd_options,
                                                dry=ident != "stale_draft_promised_work_stalled")
                 decisions = payload.get("decisions", [])
@@ -843,6 +861,17 @@ def main() -> int:
                               in str(decision.get("action_text", "")))
             elif ident in ("fresh_draft_typing", "done_here_negative_control"):
                 case_match = (actual == expected and decision.get("action") is None)
+            elif ident == "promised_quiet_nudged":
+                case_match = (actual == expected and decision.get("action") == "nudge"
+                              and decision.get("delivered") is True
+                              and decision.get("nudge_count") == 1)
+            elif ident == "promised_quiet_repeats_then_blocked":
+                case_match = (actual == expected and decision.get("action") is None
+                              and "did not resume after 3 nudges" in str(decision.get("evidence")))
+            elif ident in ("promised_usage_limit_not_nudged", "promised_logged_out_not_nudged"):
+                reason = "usage limit" if ident.endswith("usage_limit_not_nudged") else "logged out"
+                case_match = (actual == expected and decision.get("action") is None
+                              and f"blocked: {reason}" in str(decision.get("evidence")))
             rows.append({"id": ident, "watchdog": family, "expected": expected,
                          "actual": actual, "model_calls": calls,
                          "match": case_match,
