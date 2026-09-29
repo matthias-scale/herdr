@@ -2327,6 +2327,9 @@ fn run_remote_agent_stream(
     };
     let _ = child.kill();
     let _ = child.wait();
+    // Drop the receiver first: a reader blocked on the full bounded channel
+    // only exits once its send fails.
+    drop(lines);
     let _ = reader.join();
     stream_result?;
     if stop.load(Ordering::Acquire) || event_tx.is_closed() {
