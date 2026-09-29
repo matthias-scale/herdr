@@ -17210,7 +17210,9 @@ next_tab = ""
             data: b"2".to_vec(),
         }));
 
-        assert_eq!(server.app.state.active, Some(1));
+        // Per-client focus: the input moves this client's workspace, not the
+        // shared default used by newly attaching clients.
+        assert_eq!(server.clients[&1].active_workspace, Some(1));
         let presentation = &server.clients[&1].dock_presentation;
         assert_eq!(
             presentation
