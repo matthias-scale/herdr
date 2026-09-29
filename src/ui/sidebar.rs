@@ -2036,6 +2036,19 @@ pub(crate) fn sidebar_footer_refresh_hit_area(area: Rect) -> Rect {
     sidebar_footer_slot(area, 5)
 }
 
+pub(crate) fn sidebar_footer_board_hit_area(area: Rect) -> Rect {
+    let content_width = area.width.saturating_sub(1);
+    if content_width < 14 || area.height == 0 {
+        return Rect::default();
+    }
+    Rect::new(
+        area.x.saturating_add(13),
+        area.bottom().saturating_sub(1),
+        1,
+        1,
+    )
+}
+
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     agent_panel_entries_with_runtimes(app, None)
 }
@@ -2854,10 +2867,12 @@ pub(crate) enum SidebarRow {
         space_icon: String,
         /// Short host token, e.g. `ub1`; local rows name the current host.
         host: String,
-        /// Retained for urgency ordering; ask-strip dots stay red.
+        /// Retained for urgency ordering; blocked rows use the urgent dot color.
         blocked: bool,
         /// Dot glyph aligned with the matching task row.
         dot: String,
+        /// Per-state color retained for attention rows that are not blocked.
+        dot_color: Color,
         /// Human ask shown beneath the row when the shared subtitle setting is on.
         subtitle: Option<String>,
         target: NeedsYouTarget,
@@ -5084,6 +5099,7 @@ fn needs_you_strip_rows(
             host: sidebar_machine_host(app, entry).to_string(),
             blocked: entry_is_blocked(entry),
             dot: compact_row_dot_text(entry),
+            dot_color: compact_row_color(entry, &app.palette),
             subtitle: visible_pending_ask(app, entry).map(str::to_owned),
             target: NeedsYouTarget::Local(target),
         });
@@ -5111,6 +5127,7 @@ fn needs_you_strip_rows(
             host: remote.agent_ref.host.clone(),
             blocked: entry_is_blocked(entry),
             dot: compact_row_dot_text(entry),
+            dot_color: compact_row_color(entry, &app.palette),
             subtitle: visible_pending_ask(app, entry).map(str::to_owned),
             target: NeedsYouTarget::Remote(remote.agent_ref.clone()),
         });
@@ -8098,6 +8115,8 @@ pub(super) fn render_needs_you_row(
     space_icon: &str,
     host: &str,
     dot: &str,
+    blocked: bool,
+    dot_color: Color,
     subtitle: Option<&str>,
     rect: Rect,
 ) {
@@ -8129,7 +8148,7 @@ pub(super) fn render_needs_you_row(
             Span::raw(" ".repeat(prefix)),
             Span::styled(
                 pad_right(dot, SIDEBAR_DOT_FIELD_WIDTH),
-                Style::default().fg(p.red),
+                Style::default().fg(if blocked { p.red } else { dot_color }),
             ),
             Span::styled(space_icon.to_string(), Style::default().fg(p.subtext0)),
             Span::raw(" "),
@@ -10115,6 +10134,19 @@ pub(super) fn render_sidebar(
         crate::ui::pomodoro::sidebar_areas_hit_area(app, area),
     );
     let refresh = sidebar_footer_refresh_hit_area(area);
+    let board = sidebar_footer_board_hit_area(area);
+    if board.width > 0 {
+        let style = sidebar_footer_style(
+            app,
+            crate::app::state::SidebarFooterItem::Board,
+            app.board_view.is_some(),
+            p,
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(if app.nerd_font { "▦" } else { "B" }, style)),
+            board,
+        );
+    }
     if refresh.width > 0 {
         let style = sidebar_footer_style(
             app,
@@ -11325,6 +11357,8 @@ fn render_workspace_list(
                     space_icon,
                     host,
                     dot,
+                    blocked,
+                    dot_color,
                     subtitle,
                     ..
                 }) => {
@@ -11335,6 +11369,8 @@ fn render_workspace_list(
                         space_icon,
                         host,
                         dot,
+                        *blocked,
+                        *dot_color,
                         subtitle.as_deref(),
                         rect,
                     );
@@ -29517,6 +29553,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             space_icon,
             host,
             dot,
+            blocked,
+            dot_color,
             subtitle,
             ..
         } = &needs_you_row
@@ -29535,6 +29573,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     space_icon,
                     host,
                     dot,
+                    *blocked,
+                    *dot_color,
                     subtitle.as_deref(),
                     Rect::new(0, 0, 42, 2),
                 )
@@ -29544,7 +29584,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .find(|x| top_ask.backend().buffer()[(*x, 0)].symbol() == "○")
             .expect("aligned ask dot");
         let marker = &top_ask.backend().buffer()[(marker_x, 0)];
-        assert_eq!(marker.style().fg, Some(app.palette.red));
+        assert_eq!(marker.style().fg, Some(app.palette.peach));
         let ask_snapshot = row_text(top_ask.backend().buffer(), 1, 42);
         assert!(ask_snapshot.contains("↳ Choose a layout"), "{ask_snapshot}");
         let arrow_x = (0..42)
@@ -30176,6 +30216,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                         space_icon,
                         host,
                         dot,
+                        blocked,
+                        dot_color,
                         ..
                     } = &rows[0]
                     {
@@ -30186,6 +30228,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                             space_icon,
                             host,
                             dot,
+                            *blocked,
+                            *dot_color,
                             None,
                             Rect::new(0, 0, 36, 1),
                         );
@@ -30255,12 +30299,16 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                             "▯",
                             "ub1",
                             "○",
+                            true,
+                            app.palette.red,
                             None,
                             Rect::new(0, 1, width, 1),
                         );
                     })
                     .expect("render rows");
                 let buffer = terminal.backend().buffer();
+                let blocked_dot_x = find_symbol_x(buffer, 1, width, "○");
+                assert_eq!(buffer[(blocked_dot_x, 1)].style().fg, Some(app.palette.red));
                 let tab_x = find_symbol_x(buffer, 0, width, "1");
                 let blocker_x = find_symbol_x(buffer, 1, width, "1");
                 assert_eq!(tab_x, blocker_x);
@@ -30707,7 +30755,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             }
         }
     }
-
     #[test]
     fn sidebar_sections_ascii_fallback_contains_no_nerd_font_glyphs() {
         let mut app = AppState::test_new();
@@ -30721,6 +30768,19 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             SETTLED_SECTION_TITLE,
         ] {
             assert!(section_header_glyph_for_app(&app, title).is_ascii());
+        }
+    }
+    #[test]
+    fn focus_board_and_window_cycle_footer_targets_do_not_overlap() {
+        let app = AppState::test_new();
+        for width in [18, 26] {
+            let sidebar = Rect::new(0, 0, width, 20);
+            let board = sidebar_footer_board_hit_area(sidebar);
+            let cycle = crate::ui::pomodoro::window_cycle_mode_hit_area(&app, sidebar);
+            let notification = crate::ui::pomodoro::notification_hit_area(&app, sidebar);
+            assert_eq!(board.width, 1);
+            assert_eq!(board.right(), cycle.x);
+            assert!(cycle.right() <= notification.x);
         }
     }
 }

@@ -191,6 +191,7 @@ pub struct App {
     pub(crate) connectivity_probed_at: Option<Instant>,
     pub(crate) connectivity_probe_in_flight: bool,
     pub(crate) terminal_runtimes: crate::terminal::TerminalRuntimeRegistry,
+    pub(crate) status_log: Option<crate::status_log::StatusLog>,
     /// Server-owned remote focus operations. This state is touched only by
     /// API requests and transport events, never by render or pane loops.
     pub(crate) remote_focus_operations: remote_focus::RemoteFocusOperations,
@@ -957,6 +958,7 @@ impl App {
             sidebar_settled_menu_selected: 0,
             sidebar_settled_menu_delete_armed: false,
             pending_pane_settlement_changes: Vec::new(),
+            pending_status_transitions: Vec::new(),
             pending_pane_snooze_changes: Vec::new(),
             view_observed_at: Instant::now(),
             view_observed_unix_s: settled::unix_seconds(std::time::SystemTime::now()),
@@ -974,6 +976,8 @@ impl App {
                 crate::day::load(&crate::day::default_root())
             },
             day_stale_after: Duration::from_secs(config.day_board.stale_after),
+            board_view: None,
+            board_return: None,
             local_agent_panel_identities,
             remote_agent_panel_entries: Vec::new(),
             aloop_projection: None,
@@ -1146,6 +1150,7 @@ impl App {
                 hyperspace_rect: Rect::default(),
                 hyperspace_pause_hit_area: Rect::default(),
                 sidebar_footer_refresh_hit_area: Rect::default(),
+                sidebar_footer_board_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 sidebar_hover_targets: Vec::new(),
@@ -1575,6 +1580,7 @@ impl App {
             connectivity_probed_at: cfg!(test).then(Instant::now),
             connectivity_probe_in_flight: false,
             terminal_runtimes: restored_terminal_runtimes,
+            status_log: crate::status_log::StatusLog::for_server(),
             remote_focus_operations: remote_focus::RemoteFocusOperations::default(),
             remote_focus_transport: Box::new(crate::remote::SshRemoteFocusTransport::new(
                 &config.remote.fleet,
@@ -3769,6 +3775,9 @@ impl App {
             }
             state::InputOwner::Surface(state::SurfaceInputOwner::Work) => {
                 self.handle_work_view_key(key_event);
+            }
+            state::InputOwner::Surface(state::SurfaceInputOwner::Board) => {
+                self.handle_board_key(key_event);
             }
             state::InputOwner::Surface(state::SurfaceInputOwner::DockObjectPreview) => {
                 if key_event.code == crossterm::event::KeyCode::Esc
