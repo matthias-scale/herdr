@@ -5340,7 +5340,8 @@ fn append_fleet_rows(
             count: host_entries.len(),
             activity_count: None,
             collapsed,
-            dim: host_entries.is_empty(),
+            // Empty hosts keep their `(0)`: a dim header hides its count.
+            dim: false,
             status: None,
             spawn: false,
         });
@@ -8132,7 +8133,7 @@ fn nested_header_areas_from_rows(
                 dim: *dim,
                 status: *status,
                 spawn: *spawn,
-                rect: Rect::new(body.x, y, body.width, height),
+                rect: nested_header_rect(key, body, y, height),
             });
         }
         y = y
@@ -8140,6 +8141,14 @@ fn nested_header_areas_from_rows(
             .saturating_add(sidebar_row_gap(app, rows, idx));
     }
     out
+}
+
+/// Fleet repo groups sit one level under their host header, the only nested
+/// header with a nested header as its parent.
+fn nested_header_rect(key: &str, body: Rect, y: u16, height: u16) -> Rect {
+    let indent = if key.starts_with("fleet:repo:") { 2 } else { 0 };
+    let indent = indent.min(body.width);
+    Rect::new(body.x + indent, y, body.width - indent, height)
 }
 
 /// Hit area for a remote agent row. A fleet agent owns no local pane, so it is
@@ -13712,7 +13721,7 @@ pub(crate) mod tests {
         expand_fleet(&mut app);
         let rows = sidebar_rows(&app);
         assert!(rows.iter().any(|row| matches!(row,
-            SidebarRow::NestedHeader { title, count: 0, dim: true, .. } if title == "empty")));
+            SidebarRow::NestedHeader { title, count: 0, dim: false, .. } if title == "empty")));
 
         app.fleet_snapshot.hosts.clear();
         app.fleet_snapshot.configured_hosts.clear();
