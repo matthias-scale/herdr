@@ -3704,6 +3704,7 @@ fn compact_sidebar_rows_inner(
             true,
             workspace_activity.as_ref(),
             Some(&remote_activity),
+            None,
         );
         let working_collapsed = section_is_collapsed(app, WORKING_SECTION_TITLE);
         rows.push(SidebarRow::SectionHeader {
@@ -3724,6 +3725,7 @@ fn compact_sidebar_rows_inner(
                 true,
                 workspace_activity.as_ref(),
                 Some(&remote_activity),
+                Some("working"),
             );
         }
         snoozed_entries.extend(remote_snoozed);
@@ -4075,6 +4077,7 @@ fn append_legacy_space_rows(
         only_populated || sidebar_rows_are_filtered(app),
         activity,
         None,
+        None,
     );
 }
 
@@ -4104,6 +4107,7 @@ fn append_shelf_space_rows(
             true,
             None,
             None,
+            None,
         );
     }
 }
@@ -4119,6 +4123,7 @@ fn append_space_tree_rows(
     populated_only: bool,
     activity: Option<&std::collections::HashMap<usize, SidebarActivityCount>>,
     remote_activity: Option<&std::collections::HashMap<(String, String), SidebarActivityCount>>,
+    group_namespace: Option<&str>,
 ) {
     let empty_runtimes;
     let terminal_runtimes = match terminal_runtimes {
@@ -4246,7 +4251,13 @@ fn append_space_tree_rows(
         }
         if mode == SidebarGroupMode::RepoWorktree {
             for mut group in sidebar_tab_groups(app, &member_entries, mode) {
-                let key = format!("{ws_idx}:{}", group.key);
+                let key = format!(
+                    "{}{ws_idx}:{}",
+                    group_namespace
+                        .map(|ns| format!("{ns}:"))
+                        .unwrap_or_default(),
+                    group.key
+                );
                 let collapsed = section_is_collapsed(app, &key);
                 mark_redundant_space_labels(&mut group.entries, &group.title);
                 // The collapse key is index-based; the sort key is not, so a
@@ -4297,7 +4308,12 @@ fn append_space_tree_rows(
         *remote_title_counts.entry(title.clone()).or_default() += 1;
     }
     for (host, group_key, title, entries) in remote_spaces {
-        let key = format!("remote-space:{host}:{group_key}");
+        let key = format!(
+            "{}{host}:{group_key}",
+            group_namespace
+                .map(|ns| format!("{ns}:remote-space:"))
+                .unwrap_or_else(|| "remote-space:".to_string())
+        );
         let collapsed = section_is_collapsed(app, &key);
         let sort = effective_sidebar_group_sort(app, &key, SidebarSortMode::Default);
         let activity_count = remote_activity

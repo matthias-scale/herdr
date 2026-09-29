@@ -371,9 +371,9 @@ pub(crate) fn pomodoro_hit_area(app: &AppState, sidebar: Rect) -> Rect {
     } else {
         0
     };
-    if content_width
-        < FOOTER_ICON_COLUMNS + CYCLE_MODE_WIDTH + NOTIFICATION_WIDTH + area_width + INDICATOR_WIDTH
-    {
+    let left_controls =
+        FOOTER_ICON_COLUMNS + CYCLE_MODE_WIDTH + area_width + NOTIFICATION_WIDTH + 3;
+    if content_width < left_controls + INDICATOR_WIDTH {
         return Rect::default();
     }
     Rect::new(
@@ -395,7 +395,7 @@ pub(crate) fn notification_hit_area(app: &AppState, sidebar: Rect) -> Rect {
     if app.sidebar_sections_layout {
         let x = sidebar
             .x
-            .saturating_add(FOOTER_ICON_COLUMNS + CYCLE_MODE_WIDTH + SIDEBAR_AREAS_WIDTH + 1);
+            .saturating_add(FOOTER_ICON_COLUMNS + CYCLE_MODE_WIDTH + SIDEBAR_AREAS_WIDTH + 2);
         let timer = pomodoro_hit_area(app, sidebar);
         let right_limit = sidebar.x.saturating_add(content_width).saturating_sub(2);
         if x.saturating_add(NOTIFICATION_WIDTH) > right_limit
@@ -423,7 +423,7 @@ pub(crate) fn window_cycle_mode_hit_area(app: &AppState, sidebar: Rect) -> Rect 
             return Rect::default();
         }
         return Rect::new(
-            sidebar.x.saturating_add(14),
+            sidebar.x.saturating_add(FOOTER_ICON_COLUMNS),
             sidebar.bottom().saturating_sub(1),
             CYCLE_MODE_WIDTH,
             1,
@@ -447,10 +447,13 @@ pub(crate) fn sidebar_areas_hit_area(app: &AppState, sidebar: Rect) -> Rect {
         return Rect::default();
     }
     let content_width = sidebar.width.saturating_sub(1);
-    let x = sidebar.x.saturating_add(16);
+    let x = sidebar
+        .x
+        .saturating_add(FOOTER_ICON_COLUMNS + CYCLE_MODE_WIDTH + 1);
     let right_limit = sidebar.x.saturating_add(content_width).saturating_sub(2);
-    let bell = notification_hit_area(app, sidebar);
-    if content_width < 22 || x.saturating_add(SIDEBAR_AREAS_WIDTH) > right_limit {
+    if content_width < FOOTER_ICON_COLUMNS + CYCLE_MODE_WIDTH + SIDEBAR_AREAS_WIDTH + 3
+        || x.saturating_add(SIDEBAR_AREAS_WIDTH) > right_limit
+    {
         return Rect::default();
     }
     Rect::new(
@@ -1212,6 +1215,31 @@ mod tests {
         let narrow = Rect::new(0, 0, 18, 20);
         assert_eq!(sidebar_areas_hit_area(&app, narrow).width, 0);
         assert_eq!(notification_hit_area(&app, narrow).width, 0);
+    }
+
+    #[test]
+    fn sections_footer_hit_areas_never_overlap_at_supported_widths() {
+        let mut app = state();
+        app.sidebar_sections_layout = true;
+        for width in 18..=60 {
+            let sidebar = Rect::new(0, 0, width, 20);
+            let mut areas = [
+                sidebar_areas_hit_area(&app, sidebar),
+                window_cycle_mode_hit_area(&app, sidebar),
+                notification_hit_area(&app, sidebar),
+                pomodoro_hit_area(&app, sidebar),
+            ];
+            areas.retain(|area| area.width > 0);
+            for (index, left) in areas.iter().enumerate() {
+                assert!(left.right() <= width - 2, "width {width}: {left:?}");
+                for right in &areas[index + 1..] {
+                    assert!(
+                        left.right() <= right.x || right.right() <= left.x,
+                        "width {width}: overlapping {left:?} and {right:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
