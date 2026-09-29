@@ -8339,6 +8339,7 @@ mod tests {
         mark_linked_worktree(&mut state, 1);
         state.active = Some(0);
         state.selected = 1;
+        state.confirm_close = false;
 
         state.close_pane();
 
@@ -8367,6 +8368,7 @@ mod tests {
         mark_linked_worktree(&mut state, 1);
         state.active = Some(0);
         state.selected = 1;
+        state.confirm_close = false;
 
         state.close_tab();
 
@@ -8387,7 +8389,7 @@ mod tests {
     }
 
     #[test]
-    fn close_pane_last_pane_in_parent_worktree_group_is_kept_when_confirmation_disabled() {
+    fn close_pane_last_pane_in_parent_worktree_group_closes_when_confirmation_disabled() {
         let mut state = app_with_workspaces(&["parent", "child", "notes"]);
         mark_parent_worktree(&mut state, 0);
         mark_linked_worktree(&mut state, 1);
@@ -8398,9 +8400,7 @@ mod tests {
         let deferred = state.close_pane();
 
         assert!(!deferred);
-        assert_eq!(state.workspaces.len(), 3);
-        assert_eq!(state.workspaces[0].display_name(), "parent");
-        assert_eq!(state.workspaces[1].display_name(), "child");
-        assert_eq!(state.workspaces[2].display_name(), "notes");
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces[0].display_name(), "notes");
     }
 }
