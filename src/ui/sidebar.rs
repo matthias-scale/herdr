@@ -13891,7 +13891,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn sections_layout_lists_devices_in_the_fleet_section() {
+    fn sections_layout_lists_devices_in_the_fleet_section_without_machine_filter() {
         let mut app = app_with_two_remote_hosts();
         app.sidebar_sections_layout = true;
         app.sidebar_width = 60;
@@ -13925,7 +13925,7 @@ pub(crate) mod tests {
         assert_eq!(hosts[1].0, "fleet:host:remote-b");
         assert_eq!(hosts[2].0, "fleet:host:remote-a");
 
-        assert!(!sidebar_rows(&app).iter().any(|row| matches!(
+        assert!(sidebar_rows(&app).iter().any(|row| matches!(
             row,
             SidebarRow::SectionHeader {
                 title: FLEET_SECTION_TITLE,
