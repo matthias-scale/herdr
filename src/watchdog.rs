@@ -912,6 +912,10 @@ pub(crate) fn classify_pane_v3(
         }
         now.saturating_sub(m.draft_since.unwrap_or(now))
     });
+    if composer.is_none() {
+        m.draft_hash = None;
+        m.draft_since = None;
+    }
     let mut class = PaneClass::Unknown;
     if let Some(error) = &o.read_error {
         ev = format!("pane read failed: {error}");
@@ -1877,6 +1881,38 @@ mod tests {
         assert!(stale
             .evidence
             .starts_with("promised work stopped: Codex reviewers"));
+    }
+
+    #[test]
+    fn clearing_composer_resets_stale_draft_age_before_same_draft_is_retyped() {
+        let mut memory = PaneV3Memory::default();
+        let draft = claude_pane("Waiting", "draft X", "0 shells");
+        let first = classify_pane_v3(
+            &pane_v3(AgentStatus::Working, &draft),
+            &mut memory,
+            1000,
+            v3opt(),
+        );
+        assert_eq!(first.class, PaneClass::Working);
+
+        let empty = claude_pane("Waiting", "", "0 shells");
+        classify_pane_v3(
+            &pane_v3(AgentStatus::Working, &empty),
+            &mut memory,
+            1000 + 60,
+            v3opt(),
+        );
+        assert_eq!(memory.draft_hash, None);
+        assert_eq!(memory.draft_since, None);
+
+        let retyped = classify_pane_v3(
+            &pane_v3(AgentStatus::Working, &draft),
+            &mut memory,
+            1000 + STALE_DRAFT_SECS + 10,
+            v3opt(),
+        );
+        assert_eq!(retyped.class, PaneClass::Working);
+        assert_eq!(retyped.evidence, "human is typing");
     }
 
     #[test]
