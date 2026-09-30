@@ -147,6 +147,7 @@ pub(crate) fn promised_work(text: &str) -> Option<String> {
             if value.is_empty()
                 || DONE_HERE.is_match(value)
                 || NOW_TERMINAL.is_match(value)
+                || is_done_now_status(value)
                 || value.to_ascii_lowercase().starts_with("needs you")
             {
                 now = None;
@@ -163,6 +164,15 @@ pub(crate) fn promised_work(text: &str) -> Option<String> {
     let dead_background = lower.contains("background shell command didn't finish")
         || lower.contains("background shell command did not finish");
     (dead_background || !work.is_empty()).then_some(work)
+}
+
+fn is_done_now_status(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value == "done"
+        || value == "done here"
+        || value == "done here."
+        || value.ends_with(" — done")
+        || value.ends_with(" - done")
 }
 
 pub(crate) fn expected_to_continue(text: &str) -> bool {
@@ -184,6 +194,7 @@ pub(crate) fn expected_to_continue(text: &str) -> bool {
             Some(
                 !work.is_empty()
                     && !DONE_HERE.is_match(work)
+                    && !is_done_now_status(work)
                     && !work.to_ascii_lowercase().starts_with("waiting on you")
                     && !work.to_ascii_lowercase().starts_with("stopped —")
                     && !work.to_ascii_lowercase().starts_with("stopped -"),
@@ -924,6 +935,19 @@ mod tests {
             background_shell_count(&claude_screen("Waiting", "", "1 shell · 2 shells")),
             2
         );
+    }
+
+    #[test]
+    fn completed_now_status_is_not_promised_work() {
+        for reply in [
+            "**Needs you: nothing.**\n**Now:** Codex — done",
+            "**Now:** Codex - Done",
+            "**Now:** Done here.",
+        ] {
+            assert!(!expected_to_continue(reply), "{reply}");
+            assert_eq!(promised_work(reply), None, "{reply}");
+        }
+        assert!(expected_to_continue("**Now:** Codex — running tests"));
     }
 
     #[test]

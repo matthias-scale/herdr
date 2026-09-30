@@ -274,6 +274,7 @@ fn compact_row_dot(entry: &AgentPanelEntry) -> &'static str {
         entry.has_agent,
         entry.state == AgentState::Working && entry_has_gate(entry),
         entry.usage_limited,
+        entry.working_while_blocked,
     )
 }
 
@@ -291,12 +292,14 @@ pub(crate) fn compact_dot_for_state(
     has_agent: bool,
     _gate: bool,
     _usage_limited: bool,
+    working_while_blocked: bool,
 ) -> &'static str {
     if !has_agent {
         return "·";
     }
     match state {
         AgentState::Working => "●",
+        AgentState::Blocked if working_while_blocked => "●",
         AgentState::Blocked => "○",
         AgentState::Idle if has_agent => "○",
         // Unknown agent state: a solid grey dot, not an empty one.
@@ -1538,6 +1541,7 @@ pub(crate) enum AgentPanelIdentity {
 pub(crate) struct AgentPanelEntry {
     pub(crate) identity: AgentPanelIdentity,
     pub(crate) last_turn_at: Option<AgentReplyTimestamp>,
+    pub(crate) settle_hint: Option<crate::app::settled::SettleHint>,
     data: std::sync::Arc<AgentPanelEntryData>,
     pub(crate) pinned: bool,
     /// Projection-only overlay. Keeping it outside shared row data lets group
@@ -1614,6 +1618,7 @@ pub(crate) struct AgentPanelEntryData {
     /// after the agent icon. Local panes only; remote rows carry `None`.
     pub model_letter: Option<&'static str>,
     pub waiting_on_agents: bool,
+    pub working_while_blocked: bool,
     pub holds_shell: bool,
     pub gate_count: usize,
     pub seen: bool,
@@ -1637,6 +1642,7 @@ impl AgentPanelEntry {
         Self {
             identity,
             last_turn_at: None,
+            settle_hint: None,
             data: std::sync::Arc::new(data),
             pinned: false,
             space_label_redundant: false,
@@ -2327,6 +2333,7 @@ fn collect_agent_panel_entries_with_runtimes(
                             active_subagents,
                             model_letter,
                             waiting_on_agents: detail.waiting_on_agents,
+                            working_while_blocked: detail.working_while_blocked,
                             seen: detail.seen,
                             done_since: detail.done_since,
                             stale: detail.stale,
@@ -2348,6 +2355,34 @@ fn collect_agent_panel_entries_with_runtimes(
                         )
                     });
                     entry.pinned = pinned;
+                    let pane = ws
+                        .tabs
+                        .get(detail.tab_idx)
+                        .and_then(|tab| tab.panes.get(&detail.pane_id));
+                    entry.settle_hint = pane.and_then(|pane| {
+                        let tab = ws.tabs.get(detail.tab_idx)?;
+                        let terminal = app.terminals.get(&pane.attached_terminal_id)?;
+                        let quiet = crate::app::pane_is_quiet(pane, terminal);
+                        let now = std::time::Instant::now();
+                        let hint = crate::app::settled::settle_countdown(
+                            app.auto_settle_done,
+                            pane.seen,
+                            app.is_active_pane(ws_idx, detail.tab_idx, detail.pane_id),
+                            tab.pinned,
+                            quiet,
+                            pane.settled_at.is_some() || pane.snoozed_until().is_some(),
+                            pane.activity.quiet_for(now),
+                            app.settle_done_after,
+                        );
+                        match hint {
+                            Some(crate::app::settled::SettleHint::Countdown(remaining))
+                                if remaining.is_zero() =>
+                            {
+                                None
+                            }
+                            other => other,
+                        }
+                    });
                     entry
                 })
         })
@@ -2483,6 +2518,7 @@ pub(crate) fn remote_agent_panel_entries_at(
                     active_subagents: None,
                     model_letter: None,
                     waiting_on_agents: lifecycle.waiting_on_agents,
+                    working_while_blocked: lifecycle.working_while_blocked,
                     holds_shell: false,
                     gate_count,
                     seen: lifecycle.seen,
@@ -2690,6 +2726,7 @@ fn aggregate_tab_entries(
                         (current, candidate) => current.or(candidate),
                     };
                     tab_entry.holds_shell |= entry.holds_shell;
+                    tab_entry.working_while_blocked |= entry.working_while_blocked;
                     // Like a mixed provider, a machine name only labels a tab
                     // whose panes all sit on that machine.
                     if tab_entry.remote_host != entry.remote_host {
@@ -2725,6 +2762,7 @@ fn aggregate_tab_entries(
                         Some(entry_attention_tier(tab_entry).max(entry_attention_tier(entry)));
                     tab_entry.usage_limited |= entry.usage_limited;
                     tab_entry.waiting_on_agents |= entry.waiting_on_agents;
+                    tab_entry.working_while_blocked |= entry.working_while_blocked;
                 },
             )
             .or_insert_with(|| {
@@ -5328,7 +5366,11 @@ fn needs_you_space_icon(
         &app.space_icons,
     );
     if app.nerd_font {
-        icon.map(|icon| crate::ui::icons::themed(icon, &app.palette).to_string())
+        if let Some(icon) = crate::ui::icons::leading_label_icon(name) {
+            return icon.to_string();
+        }
+        icon.and_then(|icon| crate::ui::icons::badge_icon_for_label(name, icon))
+            .map(|icon| crate::ui::icons::themed(icon, &app.palette).to_string())
             .unwrap_or_else(|| space_abbreviation(name))
     } else {
         space_abbreviation(name)
@@ -8631,19 +8673,42 @@ fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
     } else {
         agent_panel_status_key(entry.state, entry.seen)
     };
-    if let Some(label) = entry.state_labels.get(key) {
-        return label.clone();
+    let label = entry.state_labels.get(key).cloned().unwrap_or_else(|| {
+        match key {
+            "usage" => "Usage limit",
+            "blocked" if entry.working_while_blocked => "Blocked, waiting on you · still working",
+            "blocked" => "Blocked, waiting on you",
+            "working" => "Working",
+            "waiting_on_agents" => "Waiting on agents",
+            "done" => "Done, unread",
+            "idle" => "Idle",
+            _ => "?",
+        }
+        .to_string()
+    });
+    if key != "idle" {
+        return label;
     }
-    match key {
-        "usage" => "Usage limit",
-        "blocked" => "Blocked, waiting on you",
-        "working" => "Working",
-        "waiting_on_agents" => "Waiting on agents",
-        "done" => "Done, unread",
-        "idle" => "Idle",
-        _ => "?",
+    match entry.settle_hint {
+        Some(crate::app::settled::SettleHint::Countdown(remaining)) => {
+            let minutes = remaining.as_secs().div_ceil(60);
+            if remaining < std::time::Duration::from_secs(60) {
+                format!("{label} · settles in <1 min")
+            } else {
+                format!("{label} · settles in {minutes} min")
+            }
+        }
+        Some(crate::app::settled::SettleHint::Focused(after)) => {
+            format!(
+                "{label} · settles {} min after you leave",
+                after.as_secs().div_ceil(60)
+            )
+        }
+        Some(crate::app::settled::SettleHint::Pinned) => {
+            format!("{label} · pinned, won’t settle")
+        }
+        None => label,
     }
-    .to_string()
 }
 
 fn snooze_deadline_tooltip(
@@ -9378,7 +9443,7 @@ fn render_symphony_job(
     let title_width = width.saturating_sub(fixed_width);
     let title = pad_right(&truncate_end(&job.name, title_width), title_width);
     let dot = pad_right(
-        compact_dot_for_state(state, true, true, false, false),
+        compact_dot_for_state(state, true, true, false, false, false),
         SIDEBAR_DOT_FIELD_WIDTH,
     );
     let status = pad_left(&status, widths.provider);
@@ -9909,7 +9974,8 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                             .is_some_and(|terminal| terminal.agent_lifecycle_context().is_some())
                     })
                 });
-                let icon = compact_dot_for_state(agg_state, agg_seen, has_agent, false, false);
+                let icon =
+                    compact_dot_for_state(agg_state, agg_seen, has_agent, false, false, false);
                 let icon_color = if has_agent {
                     match attention_tier {
                         AttentionTier::Blocked => p.red,
@@ -11350,6 +11416,8 @@ fn render_workspace_list(
             );
             crate::ui::icons::themed(icon, &app.palette)
         });
+        let space_icon =
+            space_icon.filter(|_| crate::ui::icons::leading_label_icon(&display_label).is_none());
         let space_icon_width = space_icon.map_or(0, |icon| display_width(icon) + 1);
 
         let window_count = match header {
@@ -17848,6 +17916,67 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn blocked_working_dot_is_filled_red_and_names_both_facts() {
+        let palette = Palette::one_dark();
+        let mut entry = aggregation_entry(AgentState::Blocked, true, None, "blocked");
+        entry.state_labels.remove("blocked");
+
+        assert_eq!(compact_row_dot(&entry), "○");
+        assert_eq!(compact_row_color(&entry, &palette), palette.red);
+        assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
+
+        entry.working_while_blocked = true;
+        assert_eq!(compact_row_dot(&entry), "●");
+        assert_eq!(compact_row_color(&entry, &palette), palette.red);
+        assert_eq!(
+            agent_dot_tooltip(&entry),
+            "Blocked, waiting on you · still working"
+        );
+
+        let working = aggregation_entry(AgentState::Working, true, None, "working");
+        assert_eq!(compact_row_dot(&working), "●");
+        let waiting = {
+            let mut entry = working;
+            entry.waiting_on_agents = true;
+            entry
+        };
+        assert_eq!(compact_row_dot(&waiting), "◌");
+    }
+
+    #[test]
+    fn blocked_working_projection_requires_a_fresh_blocked_agent() {
+        use crate::api::schema::AgentStatus;
+
+        let blocked = remote_agent_info("blocked", "blocked", AgentStatus::Blocked, false, false);
+        let mut blocked = blocked;
+        blocked.working_while_blocked = true;
+        assert!(blocked.agent_projection().working_while_blocked);
+
+        let stale = remote_agent_info("stale", "stale", AgentStatus::Stale, false, false);
+        let mut stale = stale;
+        stale.working_while_blocked = true;
+        assert!(!stale.agent_projection().working_while_blocked);
+
+        let mut idle = remote_agent_info("idle", "idle", AgentStatus::Idle, false, false);
+        idle.working_while_blocked = true;
+        assert!(!idle.agent_projection().working_while_blocked);
+    }
+
+    #[test]
+    fn blocked_working_evidence_aggregates_across_tab_panes() {
+        let blocked_idle = aggregation_entry(AgentState::Blocked, true, None, "blocked");
+        let mut blocked_working = blocked_idle.clone();
+        blocked_working.working_while_blocked = true;
+
+        let aggregated = aggregate_tab_entries(&[blocked_idle.clone(), blocked_working])
+            .remove(&SidebarEntryKey::Local(0, 0))
+            .expect("aggregated tab entry");
+
+        assert!(aggregated.working_while_blocked);
+        assert_eq!(compact_row_dot(&aggregated), "●");
+    }
+
+    #[test]
     fn waiting_on_agents_has_a_distinct_glyph_and_blocked_still_outranks_it() {
         let palette = Palette::one_dark();
         let mut entry = aggregation_entry(AgentState::Working, true, None, "working");
@@ -17920,6 +18049,7 @@ pub(crate) mod tests {
                 active_subagents: None,
                 model_letter: None,
                 waiting_on_agents: false,
+                working_while_blocked: false,
                 holds_shell: false,
                 gate_count: 0,
                 seen,
@@ -20275,6 +20405,7 @@ row_gap = 1
                 active_subagents: None,
                 model_letter: None,
                 waiting_on_agents: false,
+                working_while_blocked: false,
                 holds_shell: false,
                 gate_count: 0,
                 seen: true,
@@ -28426,7 +28557,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn agent_dot_unknown_state_is_a_solid_grey_dot_with_question_tooltip() {
         assert_eq!(
-            compact_dot_for_state(AgentState::Unknown, false, true, false, false),
+            compact_dot_for_state(AgentState::Unknown, false, true, false, false, false),
             "●"
         );
         assert_eq!(
@@ -28434,7 +28565,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             Palette::catppuccin().overlay0
         );
         assert_eq!(
-            compact_dot_for_state(AgentState::Unknown, false, false, false, false),
+            compact_dot_for_state(AgentState::Unknown, false, false, false, false, false),
             "·"
         );
     }
@@ -28473,6 +28604,37 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let shell = compact_test_entry("terminal", None);
         assert_eq!(agent_dot_tooltip(&shell), "No agent");
+    }
+
+    #[test]
+    fn idle_tooltip_appends_settlement_hint_and_keeps_custom_label() {
+        let mut entry = compact_test_entry("task", Some(Agent::Claude));
+        entry.state = AgentState::Idle;
+        entry.settle_hint = Some(crate::app::settled::SettleHint::Countdown(
+            std::time::Duration::from_secs(3 * 60 + 59),
+        ));
+        assert_eq!(agent_dot_tooltip(&entry), "Idle · settles in 4 min");
+        entry.settle_hint = Some(crate::app::settled::SettleHint::Countdown(
+            std::time::Duration::from_secs(59),
+        ));
+        assert_eq!(agent_dot_tooltip(&entry), "Idle · settles in <1 min");
+        entry.settle_hint = Some(crate::app::settled::SettleHint::Focused(
+            std::time::Duration::from_secs(7 * 60),
+        ));
+        assert_eq!(
+            agent_dot_tooltip(&entry),
+            "Idle · settles 7 min after you leave"
+        );
+        entry.settle_hint = Some(crate::app::settled::SettleHint::Pinned);
+        assert_eq!(agent_dot_tooltip(&entry), "Idle · pinned, won’t settle");
+        entry.state_labels.insert("idle".into(), "Quiet".into());
+        assert_eq!(agent_dot_tooltip(&entry), "Quiet · pinned, won’t settle");
+        entry.state = AgentState::Idle;
+        entry.seen = false;
+        assert_eq!(agent_dot_tooltip(&entry), "Done, unread");
+        entry.seen = true;
+        entry.settle_hint = None;
+        assert_eq!(agent_dot_tooltip(&entry), "Quiet");
     }
 
     #[test]
