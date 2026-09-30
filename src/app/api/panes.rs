@@ -2339,6 +2339,18 @@ impl App {
         if !terminal.metadata_report_sequence_is_fresh(&source, params.seq) {
             return encode_success(id, ResponseResult::Ok {});
         }
+        let authoritative_closing_report = closing_block_metadata
+            && tokens
+                .as_ref()
+                .and_then(|tokens| tokens.get("closing_parse"))
+                .and_then(Option::as_deref)
+                == Some("ok");
+        let authoritative_closing_clear = authoritative_closing_report
+            && tokens
+                .as_ref()
+                .and_then(|tokens| tokens.get("closing_blocking"))
+                .and_then(Option::as_deref)
+                == Some("0");
         let metadata_agent = crate::terminal::TerminalState::metadata_report_agent(
             &source,
             agent_label.as_deref(),
@@ -2371,6 +2383,17 @@ impl App {
                     ),
                 );
             }
+        }
+        let closing_legacy_tokens_cleared =
+            authoritative_closing_report && terminal.metadata_tokens.remove_prefixed("closing_");
+        if closing_legacy_tokens_cleared {
+            terminal.revision = terminal.revision.saturating_add(1);
+        }
+        let mut closing_latch_cleared = false;
+        if authoritative_closing_clear {
+            closing_latch_cleared =
+                terminal.clear_unanswered_blockers_for_newer_closing_report(&source, params.seq);
+            terminal.recompute_effective_state_from_current_at(std::time::Instant::now());
         }
         let work_title = match (
             work_title_request,
@@ -2485,7 +2508,12 @@ impl App {
         if hook_context_changed || session_name_changed {
             self.schedule_session_save();
         }
-        if token_changed || closing_contract_changed || hook_context_changed || session_name_changed
+        if token_changed
+            || closing_contract_changed
+            || closing_legacy_tokens_cleared
+            || closing_latch_cleared
+            || hook_context_changed
+            || session_name_changed
         {
             self.emit_pane_updated(ws_idx, pane_id);
         }
@@ -7299,6 +7327,106 @@ mod tests {
             Some("Choose the release path")
         );
         assert_eq!(
+            app.pane_info(0, internal_pane_id).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Blocked
+        );
+    }
+
+    #[test]
+    fn newer_authoritative_empty_report_clears_latched_block_with_unknown_workers() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Codex), AgentState::Idle);
+
+        let mut blocked = closing_block_report(&pane_id, 10, vec![test_gate()]);
+        blocked.state = crate::api::schema::PaneAgentState::Blocked;
+        blocked.completion = Some(crate::api::schema::ClosingCompletion::Incomplete);
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent("blocked".into(), blocked)).unwrap();
+        let mut blocked_metadata = metadata_params(pane_id.clone());
+        blocked_metadata.title = None;
+        blocked_metadata.source = "herdr:codex-closing-block".into();
+        blocked_metadata.applies_to_source = Some("herdr:codex-closing-block".into());
+        blocked_metadata.seq = Some(10);
+        blocked_metadata.tokens = std::collections::HashMap::from([
+            ("closing_blocking".into(), Some("1".into())),
+            (
+                "closing_gates".into(),
+                Some("Choose the release path".into()),
+            ),
+            ("closing_completion".into(), Some("incomplete".into())),
+            ("closing_parse".into(), Some("ok".into())),
+        ]);
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_metadata("blocked-metadata".into(), blocked_metadata),
+        )
+        .unwrap();
+        assert_eq!(
+            app.pane_info(0, internal_pane_id).unwrap().agent_status,
+            crate::api::schema::AgentStatus::Blocked
+        );
+
+        let mut clear = closing_block_report(&pane_id, 11, Vec::new());
+        clear.completion = Some(crate::api::schema::ClosingCompletion::Incomplete);
+        clear.workers_unknown = Some(true);
+        clear.agents = None;
+        let _: SuccessResponse =
+            serde_json::from_str(&app.handle_pane_report_agent("clear".into(), clear)).unwrap();
+        let mut stale_clear_metadata = metadata_params(pane_id.clone());
+        stale_clear_metadata.title = None;
+        stale_clear_metadata.source = "herdr:codex-closing-block".into();
+        stale_clear_metadata.applies_to_source = Some("herdr:codex-closing-block".into());
+        stale_clear_metadata.seq = Some(10);
+        stale_clear_metadata.tokens = std::collections::HashMap::from([
+            ("closing_blocking".into(), Some("0".into())),
+            ("closing_gates".into(), None),
+            ("closing_parse".into(), Some("ok".into())),
+        ]);
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_metadata("stale-clear-metadata".into(), stale_clear_metadata),
+        )
+        .unwrap();
+        assert_eq!(
+            app.state.terminals[&terminal_id].closing_gates(),
+            &[test_gate()],
+            "a stale zero-block token cannot release a newer latched gate"
+        );
+        let mut clear_metadata = metadata_params(pane_id);
+        clear_metadata.title = None;
+        clear_metadata.source = "herdr:codex-closing-block".into();
+        clear_metadata.applies_to_source = Some("herdr:codex-closing-block".into());
+        clear_metadata.seq = Some(11);
+        clear_metadata.tokens = std::collections::HashMap::from([
+            ("closing_blocking".into(), Some("0".into())),
+            ("closing_gates".into(), None),
+            ("closing_completion".into(), Some("incomplete".into())),
+            ("closing_parse".into(), Some("ok".into())),
+            ("closing_workers_unknown".into(), Some("1".into())),
+        ]);
+        let _: SuccessResponse = serde_json::from_str(
+            &app.handle_pane_report_metadata("clear-metadata".into(), clear_metadata),
+        )
+        .unwrap();
+
+        let terminal = &app.state.terminals[&terminal_id];
+        assert!(terminal.closing_gates().is_empty());
+        assert_eq!(
+            terminal
+                .metadata_tokens_for_api()
+                .get("closing_blocking")
+                .map(String::as_str),
+            None
+        );
+        assert_ne!(
             app.pane_info(0, internal_pane_id).unwrap().agent_status,
             crate::api::schema::AgentStatus::Blocked
         );

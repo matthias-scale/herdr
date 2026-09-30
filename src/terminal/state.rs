@@ -321,6 +321,8 @@ struct LegacyClosingReportGuard {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct UnansweredClosingBlockers {
     agent_label: Option<String>,
+    #[serde(default)]
+    turn_seq: Option<u64>,
     gates: Vec<crate::api::schema::ClosingBlockItem>,
     items: Vec<crate::api::schema::ClosingBlockItem>,
 }
@@ -1042,6 +1044,7 @@ impl TerminalState {
                 .map(|authority| authority.agent_label.clone());
             report.unanswered = Some(UnansweredClosingBlockers {
                 agent_label,
+                turn_seq: report.scope.turn_seq,
                 ..UnansweredClosingBlockers::default()
             });
         }
@@ -1233,6 +1236,34 @@ impl TerminalState {
         if report.unanswered.take().is_none() {
             return false;
         }
+        self.revision = self.revision.saturating_add(1);
+        true
+    }
+
+    pub(crate) fn clear_unanswered_blockers_for_newer_closing_report(
+        &mut self,
+        source: &str,
+        seq: Option<u64>,
+    ) -> bool {
+        let Some(report) = self.closing_report.as_mut() else {
+            return false;
+        };
+        let matches_newer_report = report.scope.source.as_deref() == Some(source)
+            && report.scope.turn_seq == seq
+            && report.unanswered.as_ref().is_some_and(|unanswered| {
+                seq.zip(unanswered.turn_seq)
+                    .is_some_and(|(current, latched)| current > latched)
+            });
+        if !matches_newer_report {
+            return false;
+        }
+        report.unanswered = None;
+        report
+            .closing_gates
+            .retain(|item| !item.requires_human_input());
+        report
+            .closing_items
+            .retain(|item| !item.requires_human_input());
         self.revision = self.revision.saturating_add(1);
         true
     }
@@ -2989,6 +3020,7 @@ impl TerminalState {
                 .unanswered
                 .get_or_insert_with(|| UnansweredClosingBlockers {
                     agent_label: Some(agent_label.clone()),
+                    turn_seq: seq,
                     ..UnansweredClosingBlockers::default()
                 });
             let label_changed = unanswered.agent_label.as_deref() != Some(agent_label.as_str());
