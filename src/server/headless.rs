@@ -1898,6 +1898,11 @@ impl HeadlessServer {
     }
 
     #[cfg(unix)]
+    fn should_skip_closed_handoff_pane(err: &io::Error) -> bool {
+        err.kind() == io::ErrorKind::BrokenPipe
+    }
+
+    #[cfg(unix)]
     fn perform_live_handoff(
         &mut self,
         params: crate::api::schema::ServerLiveHandoffParams,
@@ -1921,7 +1926,7 @@ impl HeadlessServer {
             }
         };
 
-        let pane_by_terminal = self.collect_handoff_panes();
+        let mut pane_by_terminal = self.collect_handoff_panes();
         let editor_terminals = self.app.dock_editor_handoff_terminals();
         if pane_by_terminal.len() + editor_terminals.len()
             > crate::server::handoff::MAX_FDS_PER_HANDOFF
@@ -1941,17 +1946,34 @@ impl HeadlessServer {
         let _ = reject_pending_client_connections(&self.client_listener);
 
         let mut paused_terminal_ids = Vec::new();
-        for terminal_id in pane_by_terminal.keys().chain(
-            editor_terminals
-                .iter()
-                .map(|(terminal_id, _, _)| terminal_id),
-        ) {
-            if let Some(runtime) = self.app.terminal_runtimes.get(terminal_id) {
+        let pause_targets = pane_by_terminal
+            .keys()
+            .map(|terminal_id| {
+                (
+                    terminal_id.clone(),
+                    pane_by_terminal.get(terminal_id).map(|pane| pane.0),
+                )
+            })
+            .chain(
+                editor_terminals
+                    .iter()
+                    .map(|(terminal_id, _, _)| (terminal_id.clone(), None)),
+            )
+            .collect::<Vec<_>>();
+        for (terminal_id, pane_id) in pause_targets {
+            if let Some(runtime) = self.app.terminal_runtimes.get(&terminal_id) {
                 if let Err(err) = runtime.pause_handoff_reader(Duration::from_secs(2)) {
+                    if Self::should_skip_closed_handoff_pane(&err) {
+                        if let Some(pane_id) = pane_id {
+                            warn!(pane = pane_id, terminal = %terminal_id, err = %err, "skipping pane with closed PTY actor during live handoff");
+                            pane_by_terminal.remove(&terminal_id);
+                            continue;
+                        }
+                    }
                     self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
                     return Err(err);
                 }
-                paused_terminal_ids.push(terminal_id.clone());
+                paused_terminal_ids.push(terminal_id);
             }
         }
 
@@ -10830,6 +10852,20 @@ next_tab = ""
             .remove(&proxy_terminal)
             .expect("proxy runtime")
             .shutdown();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_handoff_skips_only_closed_pty_actors() {
+        assert!(HeadlessServer::should_skip_closed_handoff_pane(
+            &io::Error::new(io::ErrorKind::BrokenPipe, "pty actor closed",)
+        ));
+        assert!(!HeadlessServer::should_skip_closed_handoff_pane(
+            &io::Error::new(
+                io::ErrorKind::TimedOut,
+                "timed out waiting for PTY actor to quiesce",
+            )
+        ));
     }
 
     #[cfg(unix)]
