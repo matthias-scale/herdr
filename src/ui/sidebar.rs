@@ -1179,6 +1179,9 @@ fn render_compact_agent_row_with_prefix(
         title_width,
         rect.width,
     );
+    let visible_control_pane = (controls_width > 0)
+        .then_some(control_pane.as_ref())
+        .flatten();
     let snoozed = control_pane.as_ref().is_some_and(|control| control.snoozed);
     // The star sits inside the title field, right after the name, so it reads as
     // part of the session's label rather than as another right-hand column.
@@ -1237,10 +1240,7 @@ fn render_compact_agent_row_with_prefix(
     spans.extend([
         Span::styled(title_pad, row_style(title_style)),
         Span::styled(
-            if control_pane
-                .as_ref()
-                .is_some_and(|control| control.show_snooze)
-            {
+            if visible_control_pane.is_some_and(|control| control.show_snooze) {
                 " ◷ "
             } else {
                 ""
@@ -1248,7 +1248,7 @@ fn render_compact_agent_row_with_prefix(
             row_style(Style::default().fg(p.mauve)),
         ),
         Span::styled(
-            match control_pane.as_ref() {
+            match visible_control_pane {
                 Some(control) if control.show_unsettle => " ↶",
                 Some(control) if control.show_settle && !snoozed => " ✓",
                 _ => "",
