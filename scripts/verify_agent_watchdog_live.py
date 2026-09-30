@@ -242,26 +242,30 @@ class Harness:
         if result.returncode:
             raise RuntimeError(f"peer server cleanup failed ({result.returncode}): {result.stderr[-500:]}")
 
-    def cli(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def cli(self, *args: str, check: bool = True,
+            timeout: int = 45) -> subprocess.CompletedProcess[str]:
         result = subprocess.run([str(self.args.binary), *args], cwd=self.root, env=self.env,
                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                timeout=45, check=False)
+                                timeout=timeout, check=False)
         if check and result.returncode:
             raise RuntimeError(f"herdr {' '.join(args)} exited {result.returncode}: "
                                f"{result.stdout[-800:]} {result.stderr[-800:]}")
         return result
 
-    def workspace(self, label: str, command: str, ready_lines: tuple[str, ...]) -> str:
+    def workspace(self, label: str, command: str, ready_lines: tuple[str, ...],
+                  report_fixture_agent: bool = True) -> str:
         result = self.cli("workspace", "create", "--cwd", str(self.root), "--label", label)
         payload = _last_json(result.stdout)
         pane = _find_value(payload, "pane_id")
         if not pane:
             raise RuntimeError(f"workspace create omitted pane_id: {result.stdout[-500:]}")
         self.panes[label] = str(pane)
-        self.cli("pane", "run", str(pane), command)
-        self.wait_for_pane_stable(str(pane), ready_lines)
-        self.call("pane.report_agent", {"pane_id": str(pane), "source": "watchdog-harness",
-                                        "agent": "codex", "state": "working"})
+        if command:
+            self.cli("pane", "run", str(pane), command)
+            self.wait_for_pane_stable(str(pane), ready_lines)
+        if report_fixture_agent:
+            self.call("pane.report_agent", {"pane_id": str(pane), "source": "watchdog-harness",
+                                            "agent": "codex", "state": "working"})
         return str(pane)
 
     def wait_for_pane_stable(self, pane_id: str, ready_lines: tuple[str, ...]) -> None:
@@ -318,6 +322,128 @@ class Harness:
                                      "model_latency_ms": payload["_model_latency_ms"],
                                      "result": payload}, sort_keys=True) + "\n")
         return payload
+
+    def run_real_agent_case(self, agent: str, ident: str, footer: str) -> dict[str, Any]:
+        """Exercise watchdog behavior in a real interactive agent pane."""
+        executable = shutil.which(agent)
+        if not executable:
+            return {"id": ident, "watchdog": "real-agents", "expected": "pass",
+                    "actual": "skipped", "match": None,
+                    "evidence": f"skipped: {agent} executable is unavailable"}
+        pane = self.workspace("real-" + ident, "", (), report_fixture_agent=False)
+        agent_name = "wd-" + hashlib.sha256(ident.encode()).hexdigest()[:12]
+        start_args = ["agent", "start", agent_name, "--kind", agent,
+                      "--timeout", "30000",
+                      "--pane", pane]
+        if agent == "claude":
+            start_args += ["--", "--model", "haiku"]
+        else:
+            start_args += ["--", "--model", "gpt-6.1-sol", "-c",
+                           "model_reasoning_effort=low"]
+        interactive_env = self.env.copy()
+        interactive_env["HERDR_INTERACTIVE"] = "1"
+        startup_deadline = time.monotonic() + 15
+        started: subprocess.CompletedProcess[str]
+        while True:
+            started = subprocess.run([str(self.args.binary), *start_args], cwd=self.root,
+                                     env=interactive_env, text=True, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, timeout=40, check=False)
+            if started.returncode == 0 or "agent_pane_busy" not in (started.stdout + started.stderr):
+                break
+            if time.monotonic() >= startup_deadline:
+                break
+            time.sleep(.5)
+        if started.returncode:
+            detail = (started.stdout + started.stderr)[-1200:]
+            process = self.cli("pane", "process-info", "--pane", pane, check=False)
+            detail += "\nprocess-info=" + (process.stdout + process.stderr)[-1000:]
+            pane_state = self.call("pane.read", {"pane_id": pane, "source": "detection",
+                "lines": 40, "format": "text"})
+            screen = (pane_state.get("read") or {}).get("text", "")
+            detail += "\npane-screen=" + screen[-1400:]
+            if "prompt-bar.sh" in detail:
+                return {"id": ident, "watchdog": "real-agents", "expected": "pass",
+                        "actual": "skipped", "match": None,
+                        "evidence": "skipped: host shell startup hook kept the isolated pane "
+                                   "from reaching an available prompt"}
+            if "readonly database" in detail.lower() or "read-only database" in detail.lower():
+                return {"id": ident, "watchdog": "real-agents", "expected": "pass",
+                        "actual": "skipped", "match": None,
+                        "evidence": "skipped: Codex subscription profile state database is "
+                                   "read-only in this execution environment"}
+            if any(token in detail.lower() for token in ("not logged", "not authenticated",
+                                                         "login required", "log in to",
+                                                         "authentication failed", "sign in")):
+                return {"id": ident, "watchdog": "real-agents", "expected": "pass",
+                        "actual": "skipped", "match": None,
+                        "evidence": f"skipped: {agent} subscription auth unavailable: {detail}"}
+            raise RuntimeError(f"agent start failed: {detail}")
+        interim_footer = "Now: probe worker — preparing the probe"
+        prompt = ("Reply with exactly two short lines and do no tool work. First line: "
+                  "a progress sentence. Second line must be exactly `" + interim_footer + "`. "
+                  "Do not add any other text.")
+        response = self.cli("agent", "prompt", pane, prompt, "--wait", "--until", "idle",
+                            "--timeout", "180000", timeout=200)
+        if response.returncode:
+            raise RuntimeError("initial real-agent prompt failed: " + response.stderr[-900:])
+        time.sleep(1)
+        final_prompt = ("Update your progress and end this turn with exactly two short lines. "
+                        "The second line must be exactly `" + footer + "`. "
+                        "Do no tool work and add no other text.")
+        response = self.cli("agent", "prompt", pane, final_prompt, "--wait", "--until", "idle",
+                            "--timeout", "180000", timeout=200)
+        if response.returncode:
+            raise RuntimeError("closing-block real-agent prompt failed: " + response.stderr[-900:])
+        screen_result = self.call("pane.read", {"pane_id": pane, "source": "detection",
+            "lines": 40, "format": "text"})
+        screen_text = (screen_result.get("read") or {}).get("text", "")
+        if footer not in screen_text or interim_footer not in screen_text:
+            raise RuntimeError(f"real agent did not change from {interim_footer!r} to "
+                               f"{footer!r}: {screen_text[-1200:]}")
+        state = self.root / f"{ident}.json"
+        log = self.root / f"{ident}.jsonl"
+        options = ["--stall-secs", str(self.args.real_stall_secs),
+            "--quiet-secs", str(self.args.real_quiet_secs), "--state-file", str(state),
+            "--status-log", str(log), "--confirm-secs", "0"]
+        self.run_watchdog("A", options, dry=False)
+        time.sleep(self.args.real_stall_secs + self.args.real_quiet_secs + 1)
+        payload = self.run_watchdog("A", options, dry=False)
+        logged_rows = ([json.loads(line) for line in log.read_text().splitlines() if line.strip()]
+                       if log.exists() else [])
+        resumed_after_nudge = False
+        if any(row.get("action") == "nudge" and row.get("delivered") is True
+               for row in logged_rows):
+            working = self.cli("agent", "wait", pane, "--until", "working", "--timeout", "30000",
+                                timeout=40, check=False)
+            if working.returncode:
+                raise RuntimeError("agent did not resume after the delivered nudge: "
+                                   + working.stderr[-900:])
+            resumed = self.cli("agent", "wait", pane, "--until", "idle", "--timeout", "90000",
+                               timeout=100, check=False)
+            if resumed.returncode:
+                raise RuntimeError("agent did not finish a reply after the delivered nudge: "
+                                   + resumed.stderr[-900:])
+            resumed_after_nudge = True
+        pane_result = self.call("pane.read", {"pane_id": pane, "source": "detection",
+            "lines": 50, "format": "text"})
+        pane_text = (pane_result.get("read") or {}).get("text", "")
+        decision = next((d for d in payload.get("decisions", []) if d.get("pane_id") == pane), {})
+        attempts = [row for row in logged_rows if row.get("action") == "nudge"]
+        expected_nudge = ident.endswith("promised_idle_nudged")
+        evidence = {"class": decision.get("class"), "evidence": decision.get("evidence"),
+                    "action": decision.get("action"), "delivered": decision.get("delivered"),
+                    "delivery_reason": decision.get("reason"), "attempts": attempts,
+                    "resumed_after_nudge": resumed_after_nudge,
+                    "pane_contains_footer": footer in pane_text,
+                    "pane_tail": pane_text[-1800:]}
+        submitted_text = attempts[0].get("text", "") if len(attempts) == 1 else ""
+        matched = (len(attempts) == 1 and attempts[0].get("delivered") is True
+                   and submitted_text in pane_text and resumed_after_nudge
+                   and len(pane_text) > len(screen_text)) if expected_nudge else not attempts
+        return {"id": ident, "watchdog": "real-agents", "expected":
+                "one delivered nudge and resumed reply" if expected_nudge else "zero attempts",
+                "actual": decision.get("class", "missing"), "match": matched,
+                "evidence": json.dumps(evidence, sort_keys=True)}
 
     def age_memory(self, path: Path, key: str, seconds: int, *, session: str | None = None,
                    last_nudge_age: int | None = None) -> None:
@@ -839,6 +965,17 @@ CASES: list[tuple[str, str, Callable[[Harness, str], Any], str]] = [
     ("p-unreachable", "P", setup_worker, "parent_unknown"),
 ]
 
+REAL_AGENT_CASES = [
+    (f"real_{agent}_{suffix}", agent, footer)
+    for agent in ("claude", "codex")
+    for suffix, footer in (
+        ("promised_idle_nudged", "Now: probe worker — building the probe"),
+        ("waiting_on_you_not_nudged", "Now: waiting on you"),
+        ("done_here_not_nudged", "Now: Done here — probe finished."),
+        ("unidentifiable_wait_not_nudged", "Now: wait — the vendor's callback"),
+    )
+]
+
 
 def self_test(args: argparse.Namespace) -> int:
     h = Harness(args)
@@ -894,6 +1031,10 @@ def main() -> int:
     parser.add_argument("--peer")
     parser.add_argument("--peer-binary", type=Path)
     parser.add_argument("--confirm-secs", type=int, default=5)
+    parser.add_argument("--real-agents", action="store_true",
+                        help="run the real Claude/Codex acceptance group")
+    parser.add_argument("--real-stall-secs", type=int, default=2)
+    parser.add_argument("--real-quiet-secs", type=int, default=2)
     parser.add_argument("--only", action="append", help="case id to run (repeatable; comma-separated also accepted)")
     parser.add_argument("--gemini-bin", help="pass through to the pane watchdog")
     parser.add_argument("--self-test", action="store_true", help="exercise fixture setup/teardown only")
@@ -905,6 +1046,8 @@ def main() -> int:
         parser.error(f"binary not found: {args.binary}")
     if args.confirm_secs < 0:
         parser.error("--confirm-secs must be nonnegative")
+    if args.real_stall_secs < 1 or args.real_quiet_secs < 1:
+        parser.error("--real-stall-secs and --real-quiet-secs must be positive")
     args.out.mkdir(parents=True, exist_ok=True)
     if args.self_test:
         try:
@@ -917,8 +1060,12 @@ def main() -> int:
     selected = ({part.strip() for value in args.only for part in value.split(",")}
                 if args.only else None)
     known = {case[0] for case in CASES}
+    known.update(case[0] for case in REAL_AGENT_CASES)
     if selected and selected - known:
         parser.error("unknown --only case(s): " + ", ".join(sorted(selected - known)))
+    real_selected = selected.intersection(case[0] for case in REAL_AGENT_CASES) if selected else set()
+    if real_selected and not args.real_agents:
+        parser.error("real-agent --only cases require --real-agents")
     if args.gemini_bin:
         located = shutil.which(args.gemini_bin)
         gemini_path = Path(located or args.gemini_bin).resolve()
@@ -927,8 +1074,36 @@ def main() -> int:
         args.gemini_bin = str(gemini_path)
     harness = Harness(args)
     rows: list[dict[str, Any]] = []
+    run_fixtures = selected is None or bool(selected.intersection(case[0] for case in CASES))
     try:
-        harness.start()
+        if run_fixtures:
+            harness.start()
+        if args.real_agents:
+            agent_skips: dict[str, str] = {}
+            for ident, agent, footer in REAL_AGENT_CASES:
+                if selected is not None and ident not in selected:
+                    continue
+                if agent in agent_skips:
+                    rows.append({"id": ident, "watchdog": "real-agents", "expected": "pass",
+                                 "actual": "skipped", "match": None,
+                                 "evidence": "skipped: " + agent_skips[agent]})
+                    continue
+                real_harness = Harness(args)
+                try:
+                    real_harness.start()
+                    row = real_harness.run_real_agent_case(agent, ident, footer)
+                    rows.append(row)
+                    if row["actual"] == "skipped":
+                        agent_skips[agent] = str(row.get("evidence", "agent unavailable")).removeprefix(
+                            "skipped: ")
+                except Exception as exc:
+                    rows.append({"id": ident, "watchdog": "real-agents",
+                                 "expected": "real-agent acceptance", "actual": "setup_error",
+                                 "setup_error": str(exc), "model_calls": 0, "match": False,
+                                 "evidence": str(exc), "wall_time_ms": None,
+                                 "model_latency_ms": None})
+                finally:
+                    real_harness.cleanup()
         for ident, family, setup, expected in CASES:
             if selected is not None and ident not in selected:
                 continue
@@ -1154,7 +1329,7 @@ def main() -> int:
                          "match": case_match,
                          "evidence": evidence, "wall_time_ms": payload.get("_wall_time_ms"),
                          "model_latency_ms": payload.get("_model_latency_ms")})
-        incident = (harness.incident_rearm_check() if selected is None else
+        incident = (harness.incident_rearm_check() if selected is None and run_fixtures else
                     {"skipped": True, "match": True})
         # The raw incident result has no match field; evaluate its observations.
         incident["match"] = incident.get("match", True) and (incident.get("skipped", False) or (
@@ -1176,9 +1351,12 @@ def main() -> int:
                  "| Case | Watchdog | Expected | Actual | Match |", "|---|---|---|---|---|"]
         lines.extend(f"| {r['id']} | {r['watchdog']} | {r['expected']} | {r['actual']} | {'yes' if r['match'] else 'no'} |" for r in rows)
         (args.out / "matrix.md").write_text("\n".join(lines) + "\n")
-        print(f"MATRIX {args.out / 'matrix.md'} matched={sum(r['match'] for r in rows)}/{len(rows)} "
+        matched = sum(r["match"] is True for r in rows)
+        skipped = sum(r["actual"] == "skipped" for r in rows)
+        print(f"MATRIX {args.out / 'matrix.md'} matched={matched}/{len(rows)} skipped={skipped} "
               f"incident_rearm={'pass' if incident['match'] else 'fail'}")
-        return 0 if rows and all(r["match"] for r in rows) and incident["match"] else 1
+        return 0 if rows and all(r["match"] is True or r["actual"] == "skipped"
+                                 for r in rows) and incident["match"] else 1
     finally:
         harness.cleanup()
         for sig, handler in previous_handlers.items():
