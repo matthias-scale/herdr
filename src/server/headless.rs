@@ -2341,7 +2341,7 @@ impl HeadlessServer {
     fn perform_live_handoff(
         &mut self,
         _params: crate::api::schema::ServerLiveHandoffParams,
-    ) -> io::Result<()> {
+    ) -> io::Result<Vec<api::schema::LiveHandoffSkippedPane>> {
         Err(io::Error::other("live handoff is only supported on Unix"))
     }
 
