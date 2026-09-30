@@ -27,21 +27,48 @@ mod workers;
 #[cfg(test)]
 mod nudge_delivery_tests {
     use super::{
-        nudge_due, nudge_retry_text, nudge_text, promised_nudges_stalled, record_nudge_attempt,
-        replay_observations, update_promised_memory, ReplayObservation, NUDGE_REPEAT_SECS,
+        composer_allows_nudge, is_worker_notice, nudge_due, nudge_retry_text, nudge_text,
+        promised_nudges_stalled, record_nudge_attempt, replay_observations, update_promised_memory,
+        ReplayObservation, NUDGE_REPEAT_SECS,
     };
     use crate::{api::schema::AgentStatus, watchdog::PaneV3Memory};
 
     #[test]
-    fn nudge_appends_only_the_suffix_to_an_existing_draft() {
+    fn nudge_text_only_submits_worker_notices_from_a_nonempty_composer() {
         assert_eq!(
-            nudge_text(Some("cont"), "resume work"),
-            (" — resume work\r".into(), "cont — resume work".into())
+            nudge_text(Some("[ra] ra-x failed · failed (exit 78)"), "resume work"),
+            ("\r".into(), "[ra] ra-x failed · failed (exit 78)".into())
         );
         assert_eq!(
             nudge_text(None, "resume work"),
             ("resume work\r".into(), "resume work".into())
         );
+    }
+
+    #[test]
+    fn worker_notice_match_is_narrow() {
+        assert!(is_worker_notice("[ra] ra-x finished · completed"));
+        assert!(is_worker_notice("[ra] ra-x failed · failed (exit 78)"));
+        assert!(!is_worker_notice("ra-x failed"));
+        assert!(!is_worker_notice("[ra] ra-x running"));
+        assert!(!is_worker_notice("[ra] please complete this"));
+    }
+
+    #[test]
+    fn occupied_composer_blocks_due_nudges_without_spending_attempts() {
+        for draft in ["/", "1a"] {
+            assert!(!composer_allows_nudge(Some(draft)));
+            let mut memory = PaneV3Memory::default();
+            if composer_allows_nudge(Some(draft))
+                && nudge_due(true, 1800, memory.nudge_count, None, &[], 1800, 1800)
+            {
+                record_nudge_attempt(&mut memory, 1800);
+            }
+            assert_eq!(memory.nudge_count, 0);
+            assert!(memory.nudge_attempts_at.is_empty());
+        }
+        assert!(composer_allows_nudge(None));
+        assert!(nudge_due(true, 1800, 0, None, &[], 1800, 1800));
     }
 
     #[test]
@@ -345,10 +372,20 @@ mod nudge_delivery_tests {
     }
 }
 
+fn is_worker_notice(draft: &str) -> bool {
+    draft.starts_with("[ra] ") && (draft.contains("finished") || draft.contains("failed"))
+}
+
+fn composer_allows_nudge(draft: Option<&str>) -> bool {
+    draft.is_none_or(is_worker_notice)
+}
+
 fn nudge_text(draft: Option<&str>, action: &str) -> (String, String) {
-    let expected = draft.map_or_else(|| action.to_owned(), |s| format!("{s} — {action}"));
-    let sent = draft.map_or_else(|| action.to_owned(), |_| format!(" — {action}"));
-    (format!("{sent}\r"), expected)
+    match draft {
+        Some(notice) if is_worker_notice(notice) => ("\r".into(), notice.to_owned()),
+        Some(_) => (String::new(), String::new()),
+        None => (format!("{action}\r"), action.to_owned()),
+    }
 }
 
 // Repeats wait five minutes; six attempts per pane per day is a backstop across
@@ -576,7 +613,10 @@ fn replay_observations(inputs: &[ReplayObservation]) -> Vec<ReplayDecision> {
                     .evidence
                     .starts_with("promised work stopped (hook status "));
         let eligible = expected || promised_stalled;
+        let composer = watchdog::evidence::composer_text(&input.tail);
+        let composer_allows_nudge = composer_allows_nudge(composer.as_deref());
         let due = input.background == "none"
+            && composer_allows_nudge
             && nudge_due(
                 eligible,
                 quiet,
@@ -1144,19 +1184,26 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
                 || d.evidence
                     .starts_with("promised work stopped (hook status "));
         let should_nudge = promised[i].0 || promised_stalled;
-        let due = nudge_due(
-            should_nudge,
-            quiet,
-            mem.nudge_count,
-            mem.last_nudge_at,
-            &mem.nudge_attempts_at,
-            options.quiet_secs,
-            now,
-        );
+        let draft = watchdog::evidence::composer_text(&observations[i].tail);
+        let composer_allows_nudge = composer_allows_nudge(draft.as_deref());
+        let due = composer_allows_nudge
+            && nudge_due(
+                should_nudge,
+                quiet,
+                mem.nudge_count,
+                mem.last_nudge_at,
+                &mem.nudge_attempts_at,
+                options.quiet_secs,
+                now,
+            );
         if should_nudge {
             d.expected_to_continue = Some(true);
             d.quiet_secs = Some(quiet);
             d.nudge_count = Some(mem.nudge_count);
+        }
+        if should_nudge && !composer_allows_nudge {
+            let age = mem.draft_since.map_or(0, |since| now.saturating_sub(since));
+            d.evidence = format!("draft in composer ({age}s); not nudging");
         }
         if due {
             let flash = flash_check(

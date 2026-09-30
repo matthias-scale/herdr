@@ -522,10 +522,11 @@ def _script(text: str, repeat: bool = False) -> str:
     return _fixture_command(code)
 
 
-def _promised_draft_agent(root: Path, account: str, active_tool: bool = False) -> str:
+def _promised_draft_agent(root: Path, account: str, active_tool: bool = False,
+                          draft: str = "cont") -> str:
     script = root / "fake_agent.sh"
     script.write_text('''#!/bin/sh
-draft=cont
+draft=''' + shlex.quote(draft) + '''
 draw() {
   printf '\\033[2J\\033[H'
   printf '\\033]0;Codex\\007'
@@ -588,11 +589,17 @@ def setup_promised_draft(h: Harness, ident: str) -> str:
     screen = ("Now: Codex reviewers — reviewing PR 1656; the config-folder worker starts after it merges\n"
               "⎿ Stop says: /review completed — invoke /retro to capture lessons.\n"
               f"{account}\n"
-              "────────────────────────\n❯ cont\n────────────────────────\n"
+              f"────────────────────────\n❯ {'/' if ident == 'stale_draft_not_nudged' else '' if ident in ('stale_draft_promised_work_stalled', 'promised_quiet_nudged', 'promised_stale_working_nudged', 'promised_stale_working_dead_marker_nudged') else 'cont'}\n────────────────────────\n"
               "░░░░░░ 92% 78k tokens │ 2h 24m ago │ -- INSERT -- · 1 feedback draft")
     ready = tuple(screen.splitlines())
+    composer_draft = ("/" if ident == "stale_draft_not_nudged" else
+                      "[ra] ra-x failed · failed (exit 78)" if ident == "stale_draft_promised_work_stalled" else
+                      "" if ident in ("promised_quiet_nudged",
+                                     "promised_stale_working_nudged",
+                                     "promised_stale_working_dead_marker_nudged") else "cont")
     pane_id = h.workspace(ident, _promised_draft_agent(
-        h.root, account, ident == "promised_stale_working_active_tool_not_nudged"), ready)
+        h.root, account, ident == "promised_stale_working_active_tool_not_nudged",
+        composer_draft), ready)
     return pane_id
 
 
@@ -658,7 +665,7 @@ def setup_done_here_suffix(h: Harness, ident: str) -> str:
 def setup_undelivered_promise(h: Harness, ident: str) -> str:
     screen = ("Now: I will update the checklist after the next render is ready\n"
               "⎿ The next deliverable is the refreshed checklist and data format.\n"
-              "────────────────────────\n❯ cont\n────────────────────────\n"
+              "────────────────────────\n❯ \n────────────────────────\n"
               "░░░░░░ 92% 78k tokens │ 2h 24m ago │ -- INSERT -- · 0 shells")
     code = f"import time; print({json.dumps(screen)}, flush=True); time.sleep(3600)"
     command = "clear; exec python3 -u -c " + shlex.quote(code)
@@ -794,6 +801,7 @@ CASES: list[tuple[str, str, Callable[[Harness, str], Any], str]] = [
     ("a-subprocess-yn", "A", setup_prompt, "waiting_tool_input"),
     ("a-finished-idle", "A", setup_summary, "finished_idle"),
     ("stale_draft_promised_work_stalled", "A", setup_promised_draft, "finished_idle"),
+    ("stale_draft_not_nudged", "A", setup_promised_draft, "finished_idle"),
     ("promised_quiet_nudged", "A", setup_promised_draft, "finished_idle"),
     ("promised_stale_working_nudged", "A", setup_promised_draft, "finished_idle"),
     ("promised_stale_working_active_tool_not_nudged", "A", setup_promised_draft, "working"),
@@ -951,7 +959,7 @@ def main() -> int:
                     else "watchdog-harness")
                 status_source = "watchdog-harness"
                 status = "idle" if (ident == "a-finished-idle"
-                                     or ident == "stale_draft_promised_work_stalled"
+                    or ident in ("stale_draft_promised_work_stalled", "stale_draft_not_nudged")
                                      or ident == "done_here_with_suffix_not_nudged"
                                      or ident == "undelivered_nudge_backs_off"
                                      or (ident.startswith("promised_")
@@ -973,9 +981,11 @@ def main() -> int:
                 cmd_options = ["--dry-run", "--stall-secs", "600", "--confirm-secs",
                                str(args.confirm_secs), "--state-file", str(state),
                                "--status-log", str(log)]
-                if ident == "stale_draft_promised_work_stalled":
+                if ident in ("stale_draft_promised_work_stalled", "stale_draft_not_nudged"):
                     cmd_options.remove("--dry-run")
-                    cmd_options += ["--stale-draft-secs", "2", "--quiet-secs", "2"]
+                    cmd_options += ["--stale-draft-secs",
+                                    "300" if ident == "stale_draft_not_nudged" else "2",
+                                    "--quiet-secs", "2"]
                 if ident.startswith("promised_"):
                     cmd_options.remove("--dry-run")
                     cmd_options += ["--quiet-secs", "2"]
@@ -989,11 +999,11 @@ def main() -> int:
                 else:
                     cmd_options.append("--no-model")
                 harness.run_watchdog("A", cmd_options,
-                                     dry=ident not in ("stale_draft_promised_work_stalled",
+                                     dry=ident not in ("stale_draft_promised_work_stalled", "stale_draft_not_nudged",
                                                        "promised_quiet_nudged",
                                                        "promised_stale_working_nudged",
                                                        "promised_stale_working_dead_marker_nudged"))
-                age = 1800 if ident == "stale_draft_promised_work_stalled" else 900 if ident in ("a-quiet-build", "a-silent-stall", "a-spinner-only",
+                age = 1800 if ident in ("stale_draft_promised_work_stalled", "stale_draft_not_nudged") else 900 if ident in ("a-quiet-build", "a-silent-stall", "a-spinner-only",
                                        "a-spinner-progress", "a-resumed") else 0
                 if ident.startswith("promised_"):
                     # These cases exercise promised-work policy. Keep the
@@ -1014,7 +1024,7 @@ def main() -> int:
                     state.write_text(json.dumps(data))
                     harness.age_memory(state, pane_id, 1800)
                 payload = harness.run_watchdog("A", cmd_options,
-                                               dry=ident not in ("stale_draft_promised_work_stalled",
+                                               dry=ident not in ("stale_draft_promised_work_stalled", "stale_draft_not_nudged",
                                                                  "promised_quiet_nudged",
                                                                  "promised_stale_working_nudged",
                                                                  "promised_stale_working_dead_marker_nudged",
@@ -1082,17 +1092,23 @@ def main() -> int:
             calls = (payload.get("summary") or {}).get("model_calls", 0)
             calls_expected = 1 if ident == "a-prose-question" and args.gemini_bin else 0
             case_match = actual == expected and calls == calls_expected
-            if ident == "stale_draft_promised_work_stalled":
+            if ident in ("stale_draft_promised_work_stalled", "stale_draft_not_nudged"):
                 pane_text = (harness.call("pane.read", {"pane_id": pane_id,
                     "source": "detection", "lines": 40, "format": "text"})
                     .get("read", {}).get("text", ""))
-                case_match = (actual == expected and decision.get("action") == "nudge"
+                if ident == "stale_draft_promised_work_stalled":
+                    case_match = (actual == expected and decision.get("action") == "nudge"
                               and decision.get("delivered") is True
                               and decision.get("status") == "nudged"
                               and ("❯ \n" in pane_text or "❯\n" in pane_text)
-                              and pane_text.count("cont — resume: continue your open work to its done criterion") == 1
-                              and "cont — resume: continue your open work to its done criterion"
-                              in str(decision.get("action_text", "")))
+                              and decision.get("action_text") == "[ra] ra-x failed · failed (exit 78)"
+                              and "[ra] ra-x failed · failed (exit 78)" in pane_text)
+                else:
+                    case_match = (actual == expected and decision.get("action") is None
+                                  and decision.get("nudge_count") == 0
+                                  and "draft in composer (" in str(decision.get("evidence", ""))
+                                  and "not nudging" in str(decision.get("evidence", ""))
+                                  and "❯ /" in pane_text)
                 if not case_match:
                     evidence = f"{evidence}; decision={decision}; pane={pane_text!r}"
             elif ident in ("fresh_draft_typing", "done_here_negative_control"):
