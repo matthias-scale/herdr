@@ -2385,6 +2385,26 @@ fn run_remote_agent_stream(
                     if agent_events {
                         poller.set_agent_stream_live(&host.name, config_generation, true);
                     }
+                    if session_events {
+                        let seed = fetch_remote_session_inventory(host, timeout)
+                            .map_err(|error| {
+                                format!("cannot fetch initial session inventory: {error}")
+                            })
+                            .and_then(|(snapshot, _)| {
+                                send_remote_session_inventory_update(
+                                    host,
+                                    config_generation,
+                                    event_tx,
+                                    snapshot,
+                                )
+                            });
+                        if let Err(error) = seed {
+                            if error == "remote fleet event receiver closed" {
+                                break 'stream Ok(());
+                            }
+                            break 'stream Err(error);
+                        }
+                    }
                 }
                 Ok(RemoteAgentStreamMessage::AgentsChanged(agents)) if started => {
                     let event = crate::events::AppEvent::FleetAgentInventoryChanged {
@@ -2407,20 +2427,16 @@ fn run_remote_agent_stream(
                     break Err("remote fleet stream sent inventory before its handshake".into());
                 }
                 Ok(RemoteAgentStreamMessage::SessionChanged(snapshot)) if started => {
-                    let event = crate::events::AppEvent::FleetSessionInventoryChanged {
-                        host: host.clone(),
+                    if let Err(error) = send_remote_session_inventory_update(
+                        host,
                         config_generation,
-                        snapshot,
-                    };
-                    match event_tx.try_send(event) {
-                        Ok(()) => {}
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                            break 'stream Ok(())
+                        event_tx,
+                        *snapshot,
+                    ) {
+                        if error == "remote fleet event receiver closed" {
+                            break 'stream Ok(());
                         }
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            tracing::warn!(host = %host.name, "dropped remote session update because the event queue is full");
-                            break 'stream Err("remote fleet event queue is full".into());
-                        }
+                        break 'stream Err(error);
                     }
                 }
                 Ok(RemoteAgentStreamMessage::SessionChanged(_)) => {
@@ -2448,6 +2464,28 @@ fn run_remote_agent_stream(
         Ok(())
     } else {
         Err("remote fleet event stream closed".into())
+    }
+}
+
+fn send_remote_session_inventory_update(
+    host: &FleetHostConfig,
+    config_generation: u64,
+    event_tx: &tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    snapshot: crate::api::schema::SessionSnapshot,
+) -> Result<(), String> {
+    match event_tx.try_send(crate::events::AppEvent::FleetSessionInventoryChanged {
+        host: host.clone(),
+        config_generation,
+        snapshot: Box::new(snapshot),
+    }) {
+        Ok(()) => Ok(()),
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            Err("remote fleet event receiver closed".into())
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!(host = %host.name, "dropped remote session update because the event queue is full");
+            Err("remote fleet event queue is full".into())
+        }
     }
 }
 
@@ -7914,6 +7952,55 @@ printf '%s\n' '{"id":"mutation","result":{"type":"ok"}}'
             panic!("expected session inventory event");
         };
         assert_eq!(snapshot.revision, Some(9));
+    }
+
+    #[test]
+    fn event_capable_host_seeds_inventory_before_session_changed_events() {
+        let host = FleetHostConfig {
+            name: "remote".into(),
+            target: "remote".into(),
+            ..FleetHostConfig::default()
+        };
+        let snapshot: crate::api::schema::SessionSnapshot =
+            serde_json::from_value(serde_json::json!({
+                "epoch": "epoch-a",
+                "revision": 4,
+                "version": "0.9.1",
+                "protocol": 1,
+                "workspaces": [{
+                    "workspace_id": "workspace-a",
+                    "number": 1,
+                    "label": "initial workspace",
+                    "focused": true,
+                    "pane_count": 1,
+                    "tab_count": 1,
+                    "active_tab_id": "tab-a",
+                    "agent_status": "idle"
+                }],
+                "tabs": [],
+                "panes": [],
+                "layouts": [],
+                "agents": []
+            }))
+            .expect("valid initial session inventory");
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
+
+        send_remote_session_inventory_update(&host, 7, &event_tx, snapshot)
+            .expect("enqueue initial inventory");
+        let crate::events::AppEvent::FleetSessionInventoryChanged {
+            host: event_host,
+            config_generation,
+            snapshot,
+        } = event_rx.try_recv().expect("initial inventory event")
+        else {
+            panic!("expected initial session inventory");
+        };
+
+        assert_eq!(event_host.name, "remote");
+        assert_eq!(config_generation, 7);
+        assert_eq!(snapshot.revision, Some(4));
+        assert_eq!(snapshot.workspaces[0].workspace_id, "workspace-a");
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]
