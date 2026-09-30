@@ -76,13 +76,26 @@ def _local_server_pids(sock: Path, binary: Path, pgid: int | None = None) -> lis
 
 
 class Harness:
-    def __init__(self, args: argparse.Namespace):
+    def __init__(self, args: argparse.Namespace, real_agent: bool = False):
         self.args = args
         self.root = Path(tempfile.mkdtemp(prefix="wdl.", dir="/tmp"))
         self.cfg = self.root / "cfg"
         self.state = self.root / "state"
         self.sock = self.root / "s.sock"
-        self.env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
+        self.real_agent = real_agent
+        if real_agent:
+            # Integration hooks use HERDR_SOCKET_PATH directly. Keep the server's
+            # Herdr data isolated via XDG roots while giving agent shells the
+            # user's subscription credentials, hook config, and login PATH.
+            login_path = subprocess.run([os.environ.get("SHELL", "/bin/bash"), "-lc",
+                                         "printf %s \"$PATH\""], text=True,
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                        check=False).stdout
+            self.env = {key: os.environ[key] for key in ("HOME", "USER", "LANG")
+                        if key in os.environ}
+            self.env["PATH"] = login_path or os.environ.get("PATH", "")
+        else:
+            self.env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
         self.env.update(XDG_CONFIG_HOME=str(self.cfg), XDG_STATE_HOME=str(self.state))
         self.server: subprocess.Popen[str] | None = None
         self.started: list[subprocess.Popen[Any]] = []
@@ -379,21 +392,25 @@ class Harness:
                         "evidence": f"skipped: {agent} subscription auth unavailable: {detail}"}
             raise RuntimeError(f"agent start failed: {detail}")
         interim_footer = "Now: probe worker — preparing the probe"
-        prompt = ("Reply with exactly two short lines and do no tool work. First line: "
-                  "a progress sentence. Second line must be exactly `" + interim_footer + "`. "
-                  "Do not add any other text.")
+        prompt = ("Complete this small acceptance probe without tools. Your final response "
+                  "must end with exactly this closing block on its own final line: `"
+                  + interim_footer + "`. Do not add text after it.")
         response = self.cli("agent", "prompt", pane, prompt, "--wait", "--until", "idle",
                             "--timeout", "180000", timeout=200)
         if response.returncode:
             raise RuntimeError("initial real-agent prompt failed: " + response.stderr[-900:])
         time.sleep(1)
-        final_prompt = ("Update your progress and end this turn with exactly two short lines. "
-                        "The second line must be exactly `" + footer + "`. "
-                        "Do no tool work and add no other text.")
+        final_prompt = ("Complete the probe and end this turn with exactly this closing block "
+                        "on its own final line: `" + footer + "`. Do not add text after it.")
         response = self.cli("agent", "prompt", pane, final_prompt, "--wait", "--until", "idle",
                             "--timeout", "180000", timeout=200)
         if response.returncode:
             raise RuntimeError("closing-block real-agent prompt failed: " + response.stderr[-900:])
+        idle = self.cli("agent", "wait", pane, "--until", "idle", "--timeout", "30000",
+                        timeout=40, check=False)
+        if idle.returncode:
+            raise RuntimeError("real agent hook did not report idle before stall clock: "
+                               + idle.stderr[-900:])
         screen_result = self.call("pane.read", {"pane_id": pane, "source": "detection",
             "lines": 40, "format": "text"})
         screen_text = (screen_result.get("read") or {}).get("text", "")
@@ -978,22 +995,33 @@ REAL_AGENT_CASES = [
 
 
 def self_test(args: argparse.Namespace) -> int:
-    h = Harness(args)
+    h = Harness(args, real_agent=True)
     try:
+        if h.env.get("HOME") != os.environ.get("HOME"):
+            raise RuntimeError("real-agent HOME was not inherited")
         h.start()
-        pane_id = h.workspace("self-test", _script("harness fixture ready"),
-                              ("harness fixture ready",))
+        if h.env.get("HERDR_SOCKET_PATH") != str(h.sock):
+            raise RuntimeError("real-agent pane socket does not target the disposable server")
+        env_check = ("import os; print('real pane env HOME=' + "
+                     "('ok' if os.environ.get('HOME') == " + repr(os.environ.get("HOME", ""))
+                     + " else 'bad') + ' HERDR_SOCKET_PATH=' + "
+                     "('ok' if os.environ.get('HERDR_SOCKET_PATH') == " + repr(str(h.sock))
+                     + " else 'bad'), flush=True); import time; time.sleep(3600)")
+        command = "python3 -u -c " + shlex.quote(env_check)
+        pane_id = h.workspace("self-test", command,
+                              ("real pane env HOME=ok HERDR_SOCKET_PATH=ok",),
+                              report_fixture_agent=False)
         deadline = time.monotonic() + 20
         pane_text = ""
         while time.monotonic() < deadline:
             response = h.call("pane.read", {"pane_id": pane_id, "source": "detection",
                 "lines": 20, "format": "text"})
             pane_text = (response.get("read") or {}).get("text", "")
-            if "harness fixture ready" in pane_text:
+            if "real pane env HOME=ok HERDR_SOCKET_PATH=ok" in pane_text:
                 break
             time.sleep(.1)
-        if "harness fixture ready" not in pane_text:
-            raise RuntimeError("fixture command did not produce the expected pane output")
+        if "real pane env HOME=ok HERDR_SOCKET_PATH=ok" not in pane_text:
+            raise RuntimeError("real-agent pane did not inherit HOME and test socket")
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"],
                                 cwd=h.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         h.started.append(proc)
@@ -1008,6 +1036,7 @@ def self_test(args: argparse.Namespace) -> int:
         (h.root / "timeline.jsonl").write_text(json.dumps({"self_test": True}) + "\n")
         print("SELF_TEST server_started=true workspace_created=true pane_created=true "
               "pane_output_verified=true "
+              "real_pane_environment_keys=HOME,HERDR_SOCKET_PATH "
               f"worker_pid={proc.pid} timeline_written=true")
         return 0
     except Exception as exc:
@@ -1033,6 +1062,8 @@ def main() -> int:
     parser.add_argument("--confirm-secs", type=int, default=5)
     parser.add_argument("--real-agents", action="store_true",
                         help="run the real Claude/Codex acceptance group")
+    parser.add_argument("--allow-skip", action="store_true",
+                        help="allow skipped fixture cases (cannot be used with real agents)")
     parser.add_argument("--real-stall-secs", type=int, default=2)
     parser.add_argument("--real-quiet-secs", type=int, default=2)
     parser.add_argument("--only", action="append", help="case id to run (repeatable; comma-separated also accepted)")
@@ -1048,6 +1079,8 @@ def main() -> int:
         parser.error("--confirm-secs must be nonnegative")
     if args.real_stall_secs < 1 or args.real_quiet_secs < 1:
         parser.error("--real-stall-secs and --real-quiet-secs must be positive")
+    if args.allow_skip and args.real_agents:
+        parser.error("--allow-skip is only for the fixture group")
     args.out.mkdir(parents=True, exist_ok=True)
     if args.self_test:
         try:
@@ -1088,7 +1121,7 @@ def main() -> int:
                                  "actual": "skipped", "match": None,
                                  "evidence": "skipped: " + agent_skips[agent]})
                     continue
-                real_harness = Harness(args)
+                real_harness = Harness(args, real_agent=True)
                 try:
                     real_harness.start()
                     row = real_harness.run_real_agent_case(agent, ident, footer)
@@ -1353,10 +1386,16 @@ def main() -> int:
         (args.out / "matrix.md").write_text("\n".join(lines) + "\n")
         matched = sum(r["match"] is True for r in rows)
         skipped = sum(r["actual"] == "skipped" for r in rows)
-        print(f"MATRIX {args.out / 'matrix.md'} matched={matched}/{len(rows)} skipped={skipped} "
+        setup_errors = sum(r["actual"] == "setup_error" for r in rows)
+        print(f"MATRIX {args.out / 'matrix.md'} matched={matched}/{len(rows)} "
+              f"skipped={skipped} setup_error={setup_errors}")
+        print(f"MATRIX {args.out / 'matrix.md'} "
               f"incident_rearm={'pass' if incident['match'] else 'fail'}")
-        return 0 if rows and all(r["match"] is True or r["actual"] == "skipped"
-                                 for r in rows) and incident["match"] else 1
+        fixture_rows = [r for r in rows if r["watchdog"] != "real-agents"]
+        valid_rows = all(r["match"] is True or (args.allow_skip and r["actual"] == "skipped")
+                         for r in fixture_rows) and all(
+                             r["match"] is True for r in rows if r["watchdog"] == "real-agents")
+        return 0 if rows and valid_rows and incident["match"] else 1
     finally:
         harness.cleanup()
         for sig, handler in previous_handlers.items():
