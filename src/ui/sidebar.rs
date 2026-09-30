@@ -3753,8 +3753,6 @@ fn compact_sidebar_rows_inner(
             &visible_entries,
             &[],
             &[],
-            &visible_entries,
-            &remote_entries,
             expand_worktrees,
             &pods,
             false,
@@ -3764,12 +3762,24 @@ fn compact_sidebar_rows_inner(
         return rows;
     }
 
+    // Remote tabs share the ordinary space/repo groups in compact layout.
+    // They used to appear only in the removed Fleet block.
+    let mut projected_active = visible_entries.clone();
+    let mut projected_snoozed = snoozed_entries.clone();
+    let mut projected_settled = settled_entries.clone();
+    for entry in remote_entries.iter().cloned() {
+        match sidebar_entry_lifecycle(app, &entry) {
+            SidebarEntryLifecycle::Active => projected_active.push(entry),
+            SidebarEntryLifecycle::Snoozed => projected_snoozed.push(entry),
+            SidebarEntryLifecycle::Settled => projected_settled.push(entry),
+        }
+    }
+
     let mut rows = Vec::new();
     if sidebar_rows_are_filtered(app)
-        && visible_entries.is_empty()
-        && snoozed_entries.is_empty()
-        && settled_entries.is_empty()
-        && remote_entries.is_empty()
+        && projected_active.is_empty()
+        && projected_snoozed.is_empty()
+        && projected_settled.is_empty()
     {
         append_pod_rows(app, &mut rows, &pods);
         let mut ambient = Vec::new();
@@ -3785,17 +3795,17 @@ fn compact_sidebar_rows_inner(
     let legacy_space_tree = app.sidebar_group_mode == SidebarGroupMode::Spaces
         || app.sidebar_group_mode == SidebarGroupMode::RepoWorktree
         || (app.sidebar_group_mode == SidebarGroupMode::Repo
-            && !visible_entries
+            && !projected_active
                 .iter()
                 .any(|entry| entry_repo_label(app, entry).is_some())
-            && !visible_entries.iter().any(|entry| {
+            && !projected_active.iter().any(|entry| {
                 entry_work_context(app, entry).is_some_and(pane_context_has_sidebar_metadata)
             }));
     if legacy_space_tree {
         append_legacy_space_rows(
             app,
             &mut rows,
-            visible_entries.clone(),
+            projected_active.clone(),
             expand_worktrees,
             terminal_runtimes,
             None,
@@ -3804,22 +3814,20 @@ fn compact_sidebar_rows_inner(
     } else {
         match app.sidebar_group_mode {
             SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {
-                append_repo_group_rows(app, &mut rows, &visible_entries, false);
+                append_repo_group_rows(app, &mut rows, &projected_active, false);
             }
             SidebarGroupMode::Spaces => {}
             SidebarGroupMode::RepoPr | SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive => {
-                append_object_group_rows(app, &mut rows, &visible_entries, false);
+                append_object_group_rows(app, &mut rows, &projected_active, false);
             }
         }
     }
     append_ordered_sidebar_blocks(
         app,
         &mut rows,
-        &visible_entries,
-        &snoozed_entries,
-        &settled_entries,
-        &visible_entries,
-        &remote_entries,
+        &projected_active,
+        &projected_snoozed,
+        &projected_settled,
         expand_worktrees,
         &pods,
         true,
@@ -5072,15 +5080,13 @@ enum SidebarBlock {
     Pods,
     Unassigned,
     Deferred,
-    Fleet,
     Ambient,
 }
 
-const SIDEBAR_BLOCK_ORDER: [SidebarBlock; 5] = [
+const SIDEBAR_BLOCK_ORDER: [SidebarBlock; 4] = [
     SidebarBlock::Pods,
     SidebarBlock::Unassigned,
     SidebarBlock::Deferred,
-    SidebarBlock::Fleet,
     SidebarBlock::Ambient,
 ];
 
@@ -5090,8 +5096,6 @@ fn append_ordered_sidebar_blocks(
     active_entries: &[AgentPanelEntry],
     snoozed_entries: &[AgentPanelEntry],
     settled_entries: &[AgentPanelEntry],
-    local_fleet_entries: &[AgentPanelEntry],
-    remote_entries: &[AgentPanelEntry],
     expand_worktrees: bool,
     pods: &PodProjection,
     include_deferred: bool,
@@ -5119,9 +5123,6 @@ fn append_ordered_sidebar_blocks(
                     settled_entries.to_vec(),
                     expand_worktrees,
                 );
-            }
-            SidebarBlock::Fleet => {
-                append_fleet_rows(app, &mut block_rows, local_fleet_entries, remote_entries)
             }
             SidebarBlock::Ambient => {
                 if sidebar_area_is_visible(app, crate::config::SidebarArea::Runs) {
@@ -7586,14 +7587,7 @@ pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
 /// Everything above the animation - the workspace list and the notepad - is
 /// laid out inside this, so both shrink with it.
 fn expanded_sidebar_body(app: &AppState, area: Rect) -> Rect {
-    let content = expanded_sidebar_content_for_app(app, area);
-    let animation = crate::ui::hyperspace::animation_height(app, content);
-    Rect::new(
-        content.x,
-        content.y,
-        content.width,
-        content.height.saturating_sub(animation),
-    )
+    expanded_sidebar_content_for_app(app, area)
 }
 
 /// The workspace list gets the sidebar's content area minus whatever the
@@ -7613,10 +7607,8 @@ fn sidebar_goals_rect(app: &AppState, area: Rect) -> Rect {
     crate::ui::goals::split_sidebar_panels(app, expanded_sidebar_body(app, area)).goals
 }
 
-/// The idle animation's box, in the bottom-left corner of the sidebar's content
-/// area and below the notepad.
-pub(crate) fn sidebar_animation_rect(app: &AppState, area: Rect) -> Rect {
-    crate::ui::hyperspace::animation_box_rect(app, expanded_sidebar_content_for_app(app, area))
+pub(crate) fn sidebar_animation_rect(_app: &AppState, _area: Rect) -> Rect {
+    Rect::default()
 }
 
 pub(crate) fn workspace_list_body_rect(app: &AppState, area: Rect, has_scrollbar: bool) -> Rect {
@@ -8789,6 +8781,32 @@ pub(crate) fn compute_sidebar_hover_targets(
                     });
                 }
                 let title_width = usize::from(body.width).saturating_sub(fixed_width);
+                if widths.provider > 0 {
+                    if let Some(rect) = clamp_row_cells(
+                        body,
+                        row_y,
+                        prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width,
+                        widths.provider,
+                    ) {
+                        let model = app
+                            .workspaces
+                            .get(target.ws_idx)
+                            .and_then(|workspace| workspace.tabs.get(target.tab_idx))
+                            .and_then(|tab| tab.panes.get(&target.pane_id))
+                            .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
+                            .and_then(|terminal| terminal.agent_model.as_deref())
+                            .unwrap_or("?");
+                        targets.push(crate::app::state::SidebarHoverTarget {
+                            rect,
+                            label: format!(
+                                "{} · {model} · effort ?",
+                                entry.agent_label.as_deref().unwrap_or("agent")
+                            ),
+                            action: None,
+                            row_hover: false,
+                        });
+                    }
+                }
                 let control_pane = row_control_pane(app, entry, tab);
                 let available_width =
                     selected_row_controls_width(control_pane.as_ref(), title_width, body.width);
@@ -8904,6 +8922,24 @@ pub(crate) fn compute_sidebar_hover_targets(
                     });
                 }
                 let title_width = row_width.saturating_sub(fixed_width);
+                if widths.provider > 0 {
+                    if let Some(rect) = clamp_row_cells(
+                        body,
+                        row_y,
+                        widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width,
+                        widths.provider,
+                    ) {
+                        targets.push(crate::app::state::SidebarHoverTarget {
+                            rect,
+                            label: format!(
+                                "{} · model ? · effort ?",
+                                entry.entry.agent_label.as_deref().unwrap_or("agent")
+                            ),
+                            action: None,
+                            row_hover: false,
+                        });
+                    }
+                }
                 let control = remote_row_control(entry);
                 let available_width =
                     selected_row_controls_width(control.as_ref(), title_width, body.width);
@@ -10227,7 +10263,6 @@ pub(super) fn render_sidebar(
     render_workspace_list(app, terminal_runtimes, frame, area, is_navigating);
     crate::ui::notepad::render_notepad(app, frame, sidebar_notepad_rect(app, area));
     crate::ui::goals::render_goals(app, frame, sidebar_goals_rect(app, area));
-    crate::ui::hyperspace::render_animation(app, frame, sidebar_animation_rect(app, area));
     render_sidebar_header(app, frame, area, p);
     render_sidebar_hosts(app, frame, area);
     let settings = sidebar_footer_settings_hit_area(area);

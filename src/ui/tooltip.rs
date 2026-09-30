@@ -201,6 +201,14 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
         .into_iter()
         .find_map(|(control, rect)| rect_contains(rect, col, row).then_some(control))
         .or_else(|| {
+            view.status_buttons
+                .iter()
+                .enumerate()
+                .find_map(|(index, button)| {
+                    rect_contains(button.rect, col, row).then_some(ControlId::StatusButton(index))
+                })
+        })
+        .or_else(|| {
             view.status_segment_hit_areas
                 .iter()
                 .find_map(|(kind, rect)| {
@@ -382,51 +390,43 @@ fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> 
                 .find_map(|(candidate, rect)| (*candidate == kind).then_some(*rect))?,
             status_segment_tooltip(app, kind),
         ),
+        ControlId::StatusButton(index) => {
+            let button = view.status_buttons.get(index)?;
+            (
+                button.rect,
+                match button.action {
+                    crate::app::state::StatusButtonAction::Home => {
+                        "Home: overview of all workspaces"
+                    }
+                    crate::app::state::StatusButtonAction::Work => {
+                        "Work view: branches and pull requests"
+                    }
+                    crate::app::state::StatusButtonAction::BlockedFilter => {
+                        "Filter to blocked agents"
+                    }
+                    crate::app::state::StatusButtonAction::Attention => "Agents needing you",
+                    crate::app::state::StatusButtonAction::Dock => "Toggle dock panel",
+                }
+                .into(),
+            )
+        }
     };
     Some(target)
 }
 
 /// Names a status-row segment and where its value comes from.
 pub(crate) fn status_segment_tooltip(app: &AppState, kind: StatusSegmentKind) -> String {
-    use crate::provider_usage::QuotaProvider;
     let metrics = app
         .status_metrics
         .as_ref()
         .map(|snapshot| &snapshot.metrics);
     match kind {
-        StatusSegmentKind::Provider(provider) => {
-            let name = match provider {
-                QuotaProvider::Claude => "Claude",
-                QuotaProvider::Codex => "Codex",
-                QuotaProvider::Kimi => "Kimi",
-                QuotaProvider::Agy => "Antigravity",
-            };
-            let usage = app.provider_usage.primary_usage(provider);
-            let peak = [usage.five_hour, usage.seven_day]
-                .into_iter()
-                .flatten()
-                .max_by_key(|window| window.used_percent);
-            let mut text = match peak {
-                Some(window) => format!("{name} quota: {}% of window used", window.used_percent),
-                None => format!("{name} quota: no usage reported"),
-            };
-            if let Some(email) = usage.email.as_deref() {
-                text.push_str(" \u{b7} ");
-                text.push_str(email);
-            }
-            if let Some(local) = peak
-                .and_then(|window| window.resets_at)
-                .and_then(|resets_at| u64::try_from(resets_at).ok())
-                .and_then(crate::platform::local_datetime_at)
-            {
-                text.push_str(&format!(
-                    " \u{b7} resets {:02}:{:02}",
-                    local.hour(),
-                    local.minute()
-                ));
-            }
-            text
+        StatusSegmentKind::StatusDetail => if app.status_bar_expanded {
+            "Extended status details"
+        } else {
+            "Simple status details"
         }
+        .into(),
         StatusSegmentKind::Link => if app.connectivity.is_online() {
             "Link: internet reachable"
         } else {
@@ -438,21 +438,24 @@ pub(crate) fn status_segment_tooltip(app: &AppState, kind: StatusSegmentKind) ->
             format!("Agents on this machine: {agents} active, {blocked} waiting on you")
         }
         StatusSegmentKind::FleetLabel => if app.fleet_status {
-            "Fleet: devices that need you. Click to hide"
+            "Fleet hosts"
         } else {
-            "Fleet: hidden. Click to show devices that need you"
+            "Fleet hosts are hidden. Click to show them"
         }
         .into(),
         StatusSegmentKind::FleetDevice(idx) => {
-            match app.fleet_snapshot.devices_needing_attention().get(idx) {
-                Some(device) if device.stale => {
-                    format!("{}: not answering, agent state unknown", device.name)
+            match app
+                .fleet_snapshot
+                .hosts
+                .iter()
+                .filter(|host| !host.local)
+                .nth(idx)
+            {
+                Some(host) if host.state == crate::fleet::HostState::Unreachable => {
+                    format!("{} · offline", host.name)
                 }
-                Some(device) => format!(
-                    "{}: {} blocked, {} working. Click to open the first blocked agent",
-                    device.name, device.blocked, device.working
-                ),
-                None => "Fleet device".into(),
+                Some(host) => format!("{} · online · {} agents", host.name, host.entries.len()),
+                None => "Fleet host".into(),
             }
         }
         StatusSegmentKind::RemoteHost => match app.view.focused_remote_host.as_deref() {
@@ -709,14 +712,10 @@ mod tests {
 mod status_segments {
     use super::*;
     use crate::app::state::StatusSegmentKind;
-    use crate::provider_usage::QuotaProvider;
     use ratatui::layout::Rect;
 
-    const ALL: [StatusSegmentKind; 11] = [
-        StatusSegmentKind::Provider(QuotaProvider::Claude),
-        StatusSegmentKind::Provider(QuotaProvider::Codex),
-        StatusSegmentKind::Provider(QuotaProvider::Kimi),
-        StatusSegmentKind::Provider(QuotaProvider::Agy),
+    const ALL: [StatusSegmentKind; 8] = [
+        StatusSegmentKind::StatusDetail,
         StatusSegmentKind::Link,
         StatusSegmentKind::Agents,
         StatusSegmentKind::RemoteHost,
@@ -745,36 +744,6 @@ mod status_segments {
             assert_eq!(anchor, Rect::new(index as u16 * 4, 0, 3, 1));
             assert!(!label.trim().is_empty(), "{kind:?} tooltip empty");
         }
-    }
-
-    #[test]
-    fn provider_quota_names_the_account_email_and_local_reset_time() {
-        let mut app = AppState::test_new();
-        let resets_at = 1_790_000_000;
-        {
-            let usage = app.provider_usage.primary_usage_mut(QuotaProvider::Claude);
-            usage.email = Some("team@x.so".into());
-            usage.five_hour = Some(crate::provider_usage::QuotaWindow {
-                used_percent: 42,
-                resets_at: Some(resets_at),
-            });
-        }
-        let local = crate::platform::local_datetime_at(resets_at as u64).expect("local time");
-        let expected_reset = format!("resets {:02}:{:02}", local.hour(), local.minute());
-        let label =
-            status_segment_tooltip(&app, StatusSegmentKind::Provider(QuotaProvider::Claude));
-        assert!(label.contains("42%"), "{label}");
-        assert!(label.contains("team@x.so"), "{label}");
-        assert!(label.contains(&expected_reset), "{label}");
-
-        // Unknown email is omitted, not rendered as a placeholder.
-        app.provider_usage
-            .primary_usage_mut(QuotaProvider::Claude)
-            .email = None;
-        let label =
-            status_segment_tooltip(&app, StatusSegmentKind::Provider(QuotaProvider::Claude));
-        assert!(!label.contains('@'), "{label}");
-        assert!(label.contains(&expected_reset), "{label}");
     }
 
     #[test]

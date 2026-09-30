@@ -2784,8 +2784,6 @@ pub(crate) enum StatusButtonAction {
     BlockedFilter,
     Attention,
     Dock,
-    /// Expand or collapse the usage detail in the status row.
-    StatusDetail,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5401,13 +5399,15 @@ pub(crate) enum ControlId {
     TopBarGitMenu,
     TopBarPaneBelow,
     TopBarPaneRight,
+    StatusButton(usize),
     StatusSegment(StatusSegmentKind),
 }
 
 /// One right-aligned status-row segment, named for its hover explanation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusSegmentKind {
-    Provider(crate::provider_usage::QuotaProvider),
+    /// Simple/extended status detail toggle at the start of the right group.
+    StatusDetail,
     Link,
     Agents,
     /// The `fleet:` label; clicking it toggles the device dots.
