@@ -241,12 +241,16 @@ impl AppState {
                     )));
                 }
                 crate::app::state::StatusSegmentKind::FleetDevice(idx) => {
+                    let machine = self
+                        .machines
+                        .iter()
+                        .filter(|machine| !machine.is_local())
+                        .nth(idx)?;
                     let host = self
                         .fleet_snapshot
                         .hosts
                         .iter()
-                        .filter(|host| !host.local)
-                        .nth(idx)?;
+                        .find(|host| host.name == machine.name)?;
                     let focus_agent = host
                         .entries
                         .iter()
@@ -256,6 +260,17 @@ impl AppState {
                         name: host.name.clone(),
                         focus_agent,
                     });
+                }
+                crate::app::state::StatusSegmentKind::FleetUseMachine(idx) => {
+                    let machine = self
+                        .machines
+                        .iter()
+                        .filter(|machine| !machine.is_local())
+                        .nth(idx)?
+                        .name
+                        .clone();
+                    self.set_next_home_target(&machine);
+                    return None;
                 }
                 _ => {}
             }
@@ -11772,6 +11787,12 @@ mod fleet_status_click_tests {
         let config = Config::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.state.machines = vec![crate::app::machines::Machine {
+            name: "ub1".into(),
+            icon: None,
+            target: Some("ub1".into()),
+            socket: None,
+        }];
         app.state.workspaces = vec![Workspace::test_new("one")];
         app.state.active = Some(0);
         app.state.ensure_test_terminals();
@@ -11850,5 +11871,34 @@ mod fleet_status_click_tests {
         assert!(!kinds
             .iter()
             .any(|k| matches!(k, StatusSegmentKind::FleetDevice(_))));
+    }
+
+    #[test]
+    fn clicking_machine_action_sets_only_the_next_home_target() {
+        let mut app = app_with_blocked_device();
+        let profile = crate::app::launch_profiles::resolve(&[crate::config::LaunchProfileConfig {
+            id: "codex".into(),
+            label: "Codex best".into(),
+            agent: "codex".into(),
+            command: vec![],
+            env: Default::default(),
+            usage: Some("codex".into()),
+        }]);
+        app.state.launch_profiles = profile;
+        app.state
+            .provider_usage
+            .primary_usage_mut(crate::provider_usage::QuotaProvider::Codex)
+            .five_hour = Some(crate::provider_usage::QuotaWindow {
+            used_percent: 32,
+            resets_at: None,
+        });
+
+        assert!(click_segment(&mut app, StatusSegmentKind::FleetUseMachine(0)).is_none());
+        assert_eq!(app.state.next_home_machine.as_deref(), Some("ub1"));
+        assert_eq!(app.state.next_home_profile.as_deref(), Some("codex"));
+        assert!(
+            app.state.home.is_none(),
+            "the action does not switch agents"
+        );
     }
 }

@@ -385,7 +385,7 @@ fn account_row(
     if is_out_of_usage(account) {
         text = truncate_end(&format!("{text} ⊘"), usize::from(width));
     }
-    let inactive = !is_primary(app, account) || account.usage.stale;
+    let inactive = !is_primary(app, account) || account.usage.stale || is_out_of_usage(account);
     let style = if inactive {
         Style::default()
             .fg(app.palette.overlay0)
@@ -468,7 +468,7 @@ fn provider_summary_row(
             .saturating_add(display_width(&summary))
             .saturating_add(2)
             <= usize::from(width);
-    let inactive = !is_primary(app, account) || account.usage.stale;
+    let inactive = !is_primary(app, account) || account.usage.stale || is_out_of_usage(account);
     let mut spans = vec![Span::styled(
         prefix,
         Style::default()

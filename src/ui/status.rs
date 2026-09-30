@@ -121,10 +121,15 @@ fn render_focused_pane_title(app: &AppState, frame: &mut Frame, area: Rect, segm
     let style = Style::default()
         .fg(app.palette.subtext0)
         .bg(app.palette.panel_bg);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(layout.text, style))),
-        layout.rect,
-    );
+    let mut spans = Vec::with_capacity(2);
+    if let Some(color) = layout.agent_dot_color {
+        spans.push(Span::styled(
+            "● ",
+            Style::default().fg(color).bg(app.palette.panel_bg),
+        ));
+    }
+    spans.push(Span::styled(layout.text, style));
+    frame.render_widget(Paragraph::new(Line::from(spans)), layout.rect);
 }
 
 /// Blank columns between the title and the first link, and between links.
@@ -134,6 +139,7 @@ struct TitleLayout {
     text: String,
     rect: Rect,
     links: Vec<StatusWorkLink>,
+    agent_dot_color: Option<Color>,
 }
 
 /// Whether a lowercased title already names this link, as a whole word rather
@@ -211,6 +217,9 @@ fn focused_pane_title_layout(
     let width = usize::from(
         raw_width.saturating_sub(u16::from(usize::from(raw_width) > display_width(&repo))),
     );
+    let agent_dot_color = focused_agent_dot_color(app);
+    let dot_width = if agent_dot_color.is_some() { 2usize } else { 0 };
+    let width = width.saturating_sub(dot_width);
     let mut links_width = 0usize;
     let mut kept: Vec<(crate::app::state::DockObjectRef, String)> = Vec::new();
     let title_of_record = fit_focused_pane_title(&repo, &thread, usize::MAX)
@@ -236,7 +245,8 @@ fn focused_pane_title_layout(
     }
     let title_width = width.saturating_sub(links_width);
     let text = fit_focused_pane_title(&repo, &thread, title_width)?;
-    let mut cursor = start.saturating_add(display_width_u16(&text));
+    let title_start = start.saturating_add(u16::try_from(dot_width).unwrap_or(u16::MAX));
+    let mut cursor = title_start.saturating_add(display_width_u16(&text));
     let links = kept
         .into_iter()
         .map(|(object, label)| {
@@ -260,11 +270,22 @@ fn focused_pane_title_layout(
         rect: Rect::new(
             start,
             area.y,
-            u16::try_from(title_width).unwrap_or(u16::MAX),
+            u16::try_from(title_width.saturating_add(dot_width)).unwrap_or(u16::MAX),
             1,
         ),
         links,
+        agent_dot_color,
     })
+}
+
+fn focused_agent_dot_color(app: &AppState) -> Option<Color> {
+    let workspace = app.workspaces.get(app.active?)?;
+    let pane_id = workspace.focused_pane_id()?;
+    let pane = workspace.active_tab()?.panes.get(&pane_id)?;
+    let terminal = app.terminals.get(workspace.terminal_id(pane_id)?)?;
+    terminal.effective_known_agent()?;
+    let (state, seen) = terminal.sidebar_projection(pane.seen);
+    Some(state_label_color(state, seen, &app.palette))
 }
 
 /// The right-aligned segments, fitted to whatever the title left them.
@@ -277,10 +298,12 @@ fn status_row_segments(
 ) -> Vec<Segment> {
     let title_segment_budget = focused_pane_title_parts(app).and_then(|(repo, _)| {
         let start = focused_pane_title_start(app, area);
+        let dot_width = u16::from(focused_agent_dot_color(app).is_some()) * 2;
         let budget = area
             .x
             .saturating_add(content_width)
             .saturating_sub(start)
+            .saturating_sub(dot_width)
             .saturating_sub(display_width_u16(&repo));
         (usize::from(budget) >= minimum_title_companion_width()).then_some(usize::from(budget))
     });
@@ -426,7 +449,8 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
     // than overlapping, and drop whole rather than truncating to an unreadable stub.
     let title_reserve = focused_pane_title_parts(app)
         .map(|(repo, _)| display_width(&repo))
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .saturating_add(usize::from(focused_agent_dot_color(app).is_some()) * 2);
     let content_width = area
         .width
         .saturating_sub(super::tabs::tab_action_status_bar_reserved_width(app, area));
@@ -590,10 +614,6 @@ pub(crate) fn minimum_required_status_width(_app: &AppState) -> usize {
 const FILL_LEVELS: [char; 8] = [
     '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}',
 ];
-/// A window at or above this fill reports its number and reset time even in
-/// compact mode. The one moment the exact figure matters is the moment the
-/// human should not have to press a key to see it.
-const ESCALATION_PERCENT: u8 = 88;
 const WARN_PERCENT: u8 = 80;
 const CRITICAL_PERCENT: u8 = 90;
 const DOT: char = '\u{25cf}';
@@ -613,44 +633,6 @@ fn load_color(percent: u8, p: &Palette) -> Color {
     }
 }
 
-/// One provider block: label, account code when it can be named, then one
-/// column per window in the order 5h, 7d.
-pub(crate) fn provider_segment_text(
-    label: &str,
-    usage: &crate::provider_usage::AccountUsage,
-    expanded: bool,
-    now_unix: Option<i64>,
-) -> Option<String> {
-    if usage.is_empty() {
-        return None;
-    }
-    let mut text = format!(" {label}");
-    if let Some(account) = &usage.account {
-        text.push(' ');
-        text.push_str(account);
-    }
-    for window in [usage.five_hour, usage.seven_day].into_iter().flatten() {
-        text.push(' ');
-        text.push(fill_glyph(window.used_percent));
-        // A number and a reset time are only actionable when the window is
-        // nearly spent, or when the human asked for detail. Otherwise they are
-        // noise in every frame of the day.
-        if expanded || window.used_percent >= ESCALATION_PERCENT {
-            text.push_str(&window.used_percent.to_string());
-            if let Some(reset) = window
-                .resets_at
-                .zip(now_unix)
-                .and_then(|(resets_at, now)| crate::provider_usage::reset_label(resets_at, now))
-            {
-                text.push(' ');
-                text.push_str(&reset);
-            }
-        }
-    }
-    text.push(' ');
-    Some(text)
-}
-
 pub(crate) fn provider_style(
     usage: &crate::provider_usage::AccountUsage,
     color: Color,
@@ -668,22 +650,6 @@ pub(crate) fn provider_style(
 
 use crate::ui::icons::Metric;
 
-/// Hollow red for one or two blocked agents, filled red from three; a device
-/// that stopped answering shows `?name` dimmed instead of any dot.
-pub(crate) fn fleet_device_text(
-    device: &crate::fleet::DeviceAttention,
-    p: &Palette,
-) -> (String, Style) {
-    if device.stale {
-        return (
-            format!(" ?{}", device.name),
-            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
-        );
-    }
-    let dot = if device.blocked >= 3 { DOT } else { '\u{25cb}' };
-    (format!(" {dot}{}", device.name), Style::default().fg(p.red))
-}
-
 fn status_segments(
     app: &AppState,
     metrics: &crate::platform::status_metrics::StatusMetrics,
@@ -700,8 +666,9 @@ fn status_segments(
         kind: StatusSegmentKind::StatusDetail,
     });
 
-    // Fleet availability is a compact, explorable host list.
-    if app.fleet_snapshot.hosts.iter().any(|host| !host.local) {
+    // Fleet availability is a compact, explorable host list. The local config
+    // is the inventory, so configured machines remain visible without a poll.
+    if app.machines.iter().any(|machine| !machine.is_local()) {
         out.push(Segment {
             text: format!(" {}", if app.nerd_font { "\u{F013B}" } else { "⧉" }),
             style: Style::default().fg(p.overlay1),
@@ -711,24 +678,37 @@ fn status_segments(
         });
         if app.fleet_status {
             for (idx, host) in app
-                .fleet_snapshot
-                .hosts
+                .machines
                 .iter()
-                .filter(|host| !host.local)
+                .filter(|machine| !machine.is_local())
                 .enumerate()
             {
-                let short = host.name.chars().take(3).collect::<String>();
-                let color = if host.state == crate::fleet::HostState::Unreachable {
-                    p.red
-                } else {
-                    p.green
+                let short = format!("{:<3}", host.name.chars().take(3).collect::<String>());
+                let state = app
+                    .fleet_snapshot
+                    .hosts
+                    .iter()
+                    .find(|snapshot| snapshot.name == host.name)
+                    .map(|snapshot| snapshot.state);
+                let (dot, color) = match state {
+                    Some(crate::fleet::HostState::Reachable) => (DOT, p.green),
+                    Some(crate::fleet::HostState::Unreachable) => (DOT, p.red),
+                    Some(crate::fleet::HostState::VersionSkew) => (DOT, p.peach),
+                    None => ('·', p.overlay0),
                 };
                 out.push(Segment {
-                    text: format!("  {DOT}{short}"),
+                    text: format!("  {dot}{short}  "),
                     style: Style::default().fg(color),
                     preserve_bg: false,
                     elide_rank: Some(5),
                     kind: StatusSegmentKind::FleetDevice(idx),
+                });
+                out.push(Segment {
+                    text: (if app.nerd_font { "\u{F0A9}" } else { ">" }).to_string(),
+                    style: Style::default().fg(p.overlay1),
+                    preserve_bg: false,
+                    elide_rank: Some(5),
+                    kind: StatusSegmentKind::FleetUseMachine(idx),
                 });
             }
         }
@@ -1793,6 +1773,32 @@ mod tests {
     }
 
     #[test]
+    fn configured_fleet_machine_stays_visible_without_live_inventory() {
+        let mut app = AppState::test_new();
+        app.nerd_font = false;
+        app.machines.push(crate::app::machines::Machine {
+            name: "workbox".into(),
+            icon: None,
+            target: Some("workbox".into()),
+            socket: None,
+        });
+        let segments = status_segments(
+            &app,
+            &crate::platform::status_metrics::status_metrics_fixture(),
+            &app.palette,
+        );
+        let host = segments
+            .iter()
+            .find(|segment| segment.kind == StatusSegmentKind::FleetDevice(0))
+            .expect("configured host segment");
+        assert_eq!(host.text, "  ·wor  ");
+        assert_eq!(host.style.fg, Some(app.palette.overlay0));
+        assert!(segments
+            .iter()
+            .any(|segment| segment.kind == StatusSegmentKind::FleetUseMachine(0)));
+    }
+
+    #[test]
     fn antigravity_quota_is_not_rendered_in_the_status_bar() {
         let mut app = AppState::test_new();
         app.nerd_font = false;
@@ -1932,6 +1938,23 @@ mod tests {
     }
 
     #[test]
+    fn focused_agent_dot_uses_the_sidebar_lifecycle_color() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        let workspace = &app.workspaces[0];
+        let pane_id = workspace.focused_pane_id().expect("focused pane");
+        let terminal_id = workspace.terminal_id(pane_id).expect("terminal").clone();
+        let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
+        terminal
+            .set_detected_agent_process_at(crate::detect::Agent::Codex, std::time::Instant::now());
+        terminal.set_raw_agent_state_for_test(AgentState::Working);
+
+        assert_eq!(focused_agent_dot_color(&app), Some(app.palette.blue));
+    }
+
+    #[test]
     fn focused_remote_proxy_names_its_cached_host() {
         let mut app = AppState::test_new();
         app.workspaces = vec![crate::workspace::Workspace::test_new("status")];
@@ -2003,8 +2026,8 @@ mod tests {
             full.iter()
                 .filter_map(|segment| segment.elide_rank)
                 .collect::<Vec<_>>(),
-            vec![5, 5, 4, 4],
-            "host labels elide before required metrics"
+            vec![4, 4],
+            "nonessential segments elide before required metrics"
         );
 
         let remote_width = display_width(" \u{2192} workbox ");
@@ -2805,29 +2828,5 @@ mod metric_icons {
             texts(false, true),
             [" CPU ▄ 50 ", " MEM ▄ 50 ", " DSK ▄ 50 "]
         );
-    }
-}
-
-#[cfg(test)]
-mod fleet_device_tests {
-    use super::*;
-
-    fn device(blocked: usize, stale: bool) -> crate::fleet::DeviceAttention {
-        crate::fleet::DeviceAttention {
-            name: "ub1".into(),
-            blocked,
-            working: 0,
-            stale,
-            first_blocked: None,
-        }
-    }
-
-    #[test]
-    fn dot_is_hollow_below_three_blocked_and_filled_from_three() {
-        let p = Palette::catppuccin();
-        assert_eq!(fleet_device_text(&device(1, false), &p).0, " \u{25cb}ub1");
-        assert_eq!(fleet_device_text(&device(2, false), &p).0, " \u{25cb}ub1");
-        assert_eq!(fleet_device_text(&device(3, false), &p).0, " \u{25cf}ub1");
-        assert_eq!(fleet_device_text(&device(0, true), &p).0, " ?ub1");
     }
 }
