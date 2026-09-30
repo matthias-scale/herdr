@@ -3873,7 +3873,6 @@ impl AppState {
             .position(|workspace| workspace.pane_state(pane_id).is_some())?;
         let pane = self.workspaces[ws_idx].pane_state(pane_id)?;
         let terminal_id = pane.attached_terminal_id.clone();
-        let seen = pane.seen;
         let clears_stale = self.terminals.get(&terminal_id).is_some_and(|terminal| {
             terminal.supervisor_stale
                 && stale_resolution.is_some_and(|(state, _)| state != AgentState::Working)
@@ -3885,44 +3884,16 @@ impl AppState {
                     .1
             });
         }
-        let (previous_state, state, changed) =
-            self.terminals.get_mut(&terminal_id).map(|terminal| {
-                let previous_state = terminal.sidebar_projection(seen).0;
-                let (changed, mutation) =
-                    terminal.set_process_state(holds_shell, stale_resolution, observed_at);
-                debug_assert!(mutation.is_none());
-                (previous_state, terminal.sidebar_projection(seen).0, changed)
-            })?;
+        let changed = self.terminals.get_mut(&terminal_id).map(|terminal| {
+            let (changed, mutation) =
+                terminal.set_process_state(holds_shell, stale_resolution, observed_at);
+            debug_assert!(mutation.is_none());
+            changed
+        })?;
         if !changed {
             return None;
         }
         self.mark_sidebar_projection_changed();
-
-        let projected_state_changed = previous_state != state;
-        if !projected_state_changed {
-            return None;
-        }
-        let pane = self.workspaces[ws_idx].pane_state_mut(pane_id)?;
-        let entered_active_state =
-            projected_state_changed && matches!(state, AgentState::Working | AgentState::Blocked);
-        let unsettled =
-            entered_active_state && !pane.settle_resume_guard && pane.settled_at.take().is_some();
-        if unsettled {
-            pane.settled_locked = false;
-        }
-
-        if unsettled {
-            pane.settled_locked = false;
-            let workspace_id = self.workspaces[ws_idx].id.clone();
-            self.pending_pane_settlement_changes
-                .push(crate::app::state::PaneSettlementChange {
-                    workspace_id,
-                    pane_id,
-                    settled_at: None,
-                    lock_only: false,
-                });
-            self.mark_session_dirty();
-        }
         None
     }
 
@@ -4302,14 +4273,9 @@ impl AppState {
         let agent_state_changed = change.previous_state != change.state;
         let foreground_agent_changed = change.previous_known_agent != change.known_agent;
         let should_note_activity = agent_state_changed || foreground_agent_changed;
-        let entered_active_agent_state = agent_state_changed
-            && matches!(change.state, AgentState::Working | AgentState::Blocked);
-        let should_unsettle = entered_active_agent_state || foreground_agent_changed;
         if should_note_activity {
             pane.activity.note(now);
         }
-        let unsettled =
-            should_unsettle && !pane.settle_resume_guard && pane.settled_at.take().is_some();
 
         let previous_status = crate::app::api_helpers::pane_agent_status_with_stale(
             change.previous_state,
@@ -4346,19 +4312,6 @@ impl AppState {
                     from_state: change.previous_state,
                     to_state: change.state,
                 });
-        }
-
-        if unsettled {
-            let workspace_id = self.workspaces[ws_idx].id.clone();
-            self.pending_pane_settlement_changes
-                .push(crate::app::state::PaneSettlementChange {
-                    workspace_id,
-                    pane_id,
-                    settled_at: None,
-                    lock_only: false,
-                });
-            self.mark_session_dirty();
-            self.mark_sidebar_projection_changed();
         }
 
         if !suppress_completion {
