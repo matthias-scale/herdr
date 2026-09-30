@@ -469,6 +469,7 @@ fn render_settled_view(
                 &transcript.turns,
                 &view.search,
                 area.width,
+                &app.palette,
             ));
         } else {
             lines.push(Line::from(Span::styled(
@@ -505,7 +506,12 @@ fn render_settled_view(
     }
 }
 
-fn transcript_lines(turns: &[(String, String)], search: &str, width: u16) -> Vec<Line<'static>> {
+fn transcript_lines(
+    turns: &[(String, String)],
+    search: &str,
+    width: u16,
+    palette: &crate::app::state::Palette,
+) -> Vec<Line<'static>> {
     let needle = search.to_lowercase();
     let mut lines = Vec::new();
     for (speaker, body) in turns {
@@ -530,7 +536,8 @@ fn transcript_lines(turns: &[(String, String)], search: &str, width: u16) -> Vec
                     let padding = width.saturating_sub(2 + fragment.width() as u16) as usize;
                     row.extend(std::iter::repeat_n(' ', padding));
                     lines.push(
-                        Line::from(row).style(Style::default().bg(Color::Rgb(237, 237, 237))),
+                        Line::from(row)
+                            .style(Style::default().fg(palette.text).bg(palette.surface0)),
                     );
                 } else {
                     lines.push(Line::from(row));
@@ -1233,6 +1240,7 @@ mod tests {
 
     #[test]
     fn settled_transcript_wraps_with_conversation_markers_and_turn_spacing() {
+        let palette = crate::app::state::Palette::catppuccin();
         let turns = vec![
             ("you".into(), "Explain the billing API migration.".into()),
             (
@@ -1240,7 +1248,7 @@ mod tests {
                 "A billing API migration needs versioned requests and a clear transition plan.\nKeep old clients working.".into(),
             ),
         ];
-        let lines = transcript_lines(&turns, "", 60);
+        let lines = transcript_lines(&turns, "", 60, &palette);
         let rows: Vec<_> = lines.iter().map(ToString::to_string).collect();
         assert_eq!(
             rows.iter().map(|row| row.trim_end()).collect::<Vec<_>>(),
@@ -1253,32 +1261,32 @@ mod tests {
             ]
         );
         assert_eq!(UnicodeWidthStr::width(rows[0].as_str()), 60);
-        assert_eq!(lines[0].style.bg, Some(Color::Rgb(237, 237, 237)));
+        assert_eq!(lines[0].style.bg, Some(palette.surface0));
+        assert_eq!(lines[0].style.fg, Some(palette.text));
         assert!(lines[2].style.bg.is_none());
-        for (index, row) in rows.iter().enumerate() {
-            println!("{index}: {row}");
-        }
     }
 
     #[test]
     fn settled_transcript_filters_turns_and_preserves_body_blank_lines() {
+        let palette = crate::app::state::Palette::catppuccin();
         let turns = vec![
             ("you".into(), "First".into()),
             ("codex".into(), "Alpha\n\nBeta".into()),
             ("claude".into(), "Hidden".into()),
         ];
-        let lines = transcript_lines(&turns, "CoDeX", 20);
+        let lines = transcript_lines(&turns, "CoDeX", 20, &palette);
         assert_eq!(
             lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
             ["● Alpha", "  ", "  Beta"]
         );
-        assert_eq!(transcript_lines(&turns, "absent", 20).len(), 0);
+        assert_eq!(transcript_lines(&turns, "absent", 20, &palette).len(), 0);
     }
 
     #[test]
     fn settled_transcript_wraps_wide_characters_by_display_width() {
+        let palette = crate::app::state::Palette::catppuccin();
         let turns = vec![("you".into(), "你好世界好".into())];
-        let lines = transcript_lines(&turns, "", 8);
+        let lines = transcript_lines(&turns, "", 8, &palette);
         let rows: Vec<_> = lines.iter().map(ToString::to_string).collect();
         assert_eq!(rows, ["› 你好世", "  界好  "]);
         assert!(rows
