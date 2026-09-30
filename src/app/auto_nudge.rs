@@ -1636,7 +1636,7 @@ mod tests {
             .set_active_subagents(Some(1));
 
         let input_at = now + Duration::from_secs(10 * 60);
-        app.state.note_pane_activity_at(pane_id, input_at);
+        app.state.note_human_pane_activity_at(pane_id, input_at);
         assert_eq!(
             app.state.next_agent_watchdog_deadline(),
             now.checked_add(app.state.agent_subagent_stale_after),
