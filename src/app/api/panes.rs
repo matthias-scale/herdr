@@ -3186,7 +3186,7 @@ mod tests {
             eta_s: None,
             reported_at: None,
             last_turn_at: None,
-            agent_session_id: Some("quiet-settle-test".into()),
+            agent_session_id: None,
             agent_session_path: None,
             gates: Some(gates),
             items: Some(Vec::new()),
@@ -3251,6 +3251,7 @@ mod tests {
             .unwrap()
             .note_user_reply();
         let mut report = closing_block_report(&public_pane_id, 1, Vec::new());
+        report.agent_session_id = Some("quiet-settle-test".into());
         report.settle_ready = Some(true);
         let response = app.handle_pane_report_agent("closing-ready".into(), report);
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -3308,6 +3309,7 @@ mod tests {
             .unwrap()
             .note_user_reply();
         let mut report = closing_block_report(&public_pane_id, 1, Vec::new());
+        report.agent_session_id = Some("quiet-settle-test".into());
         report.settle_ready = Some(true);
         let response = focused.handle_pane_report_agent("closing-ready".into(), report);
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -3339,6 +3341,7 @@ mod tests {
             .unwrap()
             .note_user_reply();
         let mut report = closing_block_report(&public_pane_id, 1, Vec::new());
+        report.agent_session_id = Some("quiet-settle-test".into());
         report.settle_ready = Some(true);
         let response = pinned.handle_pane_report_agent("closing-ready".into(), report);
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -3372,6 +3375,7 @@ mod tests {
             .unwrap()
             .note_user_reply();
         let mut report = closing_block_report(&public_pane_id, 1, Vec::new());
+        report.agent_session_id = Some("quiet-settle-test".into());
         report.settle_ready = Some(true);
         let response = active.handle_pane_report_agent("closing-ready".into(), report);
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
