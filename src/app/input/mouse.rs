@@ -6866,7 +6866,11 @@ mod tests {
             ),
         );
 
-        let menu = app.state.context_menu.as_ref().expect("settled session menu");
+        let menu = app
+            .state
+            .context_menu
+            .as_ref()
+            .expect("settled session menu");
         let items = app.state.context_menu_items(menu);
         assert!(
             !items.contains(&crate::app::state::SETTLE_ITEM),
