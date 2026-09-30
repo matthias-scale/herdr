@@ -24035,13 +24035,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn the_linear_header_names_the_team_and_the_filter() {
+    fn the_linear_header_names_the_team_and_filter_without_machine_scope() {
         let mut app = sidebar_work_item_fixture();
         app.sidebar_group_mode = SidebarGroupMode::LinearTeam;
         app.sidebar_work_filter = crate::app::state::SidebarWorkFilter::default();
         assert_eq!(
             sidebar_header_mode_label(&app),
-            "Linear ▾ · SCA · me · active ▾ · all (localhost) ▾"
+            "Linear ▾ · SCA · me · active ▾"
         );
         app.sidebar_work_filter = crate::app::state::SidebarWorkFilter {
             team: Some("SCA".into()),
@@ -24050,7 +24050,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         };
         assert_eq!(
             sidebar_header_mode_label(&app),
-            "Linear ▾ · SCA · matthias · active ▾ · all (localhost) ▾"
+            "Linear ▾ · SCA · matthias · active ▾"
         );
     }
 
