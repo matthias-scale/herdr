@@ -450,6 +450,8 @@ pub struct PaneReportAgentParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session_path: Option<String>,
@@ -471,6 +473,9 @@ pub struct PaneReportAgentParams {
     /// A previously reported worker disappeared without terminal evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers_unknown: Option<bool>,
+    /// Both closing-block settlement markers were present in the final-message tail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_ready: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<u32>,
 }
@@ -499,6 +504,8 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             #[serde(default)]
             reported_at: Option<serde_json::Value>,
             #[serde(default)]
+            last_turn_at: Option<serde_json::Value>,
+            #[serde(default)]
             agent_session_id: Option<String>,
             #[serde(default)]
             agent_session_path: Option<String>,
@@ -520,6 +527,8 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             parse_status: Option<ClosingParseStatus>,
             #[serde(default)]
             workers_unknown: Option<bool>,
+            #[serde(default)]
+            settle_ready: Option<bool>,
             agents: Option<u32>,
         }
 
@@ -553,6 +562,7 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
                 wait: None,
                 eta_s: None,
                 reported_at: None,
+                last_turn_at: None,
                 agent_session_id: None,
                 agent_session_path: None,
                 gates: None,
@@ -562,6 +572,7 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
                 external_wait: None,
                 parse_status: None,
                 workers_unknown: None,
+                settle_ready: None,
                 agents: None,
             });
         }
@@ -580,6 +591,7 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             wait: typed(raw.wait, version_compatible)?,
             eta_s: typed(raw.eta_s, version_compatible)?,
             reported_at: typed(raw.reported_at, version_compatible)?,
+            last_turn_at: typed(raw.last_turn_at, version_compatible)?,
             agent_session_id: raw.agent_session_id,
             agent_session_path: raw.agent_session_path,
             gates: typed(raw.gates, strict)?,
@@ -589,6 +601,7 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             external_wait: raw.external_wait,
             parse_status: raw.parse_status,
             workers_unknown: raw.workers_unknown,
+            settle_ready: raw.settle_ready,
             agents: raw.agents,
         })
     }
@@ -876,6 +889,8 @@ pub struct PaneInfo {
     pub eta_s: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_at: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_labels: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

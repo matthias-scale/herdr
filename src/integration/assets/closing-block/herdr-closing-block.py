@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# HERDR_INTEGRATION_VERSION=3
+# HERDR_INTEGRATION_VERSION=4
 """Claude Code `Stop` hook -> herdr turn-end status.
 
 Installed *beside* herdr's managed `herdr-agent-state.sh`, which herdr overwrites
@@ -21,9 +21,10 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from closing_block import parse  # noqa: E402
+from closing_block import parse, settle_ready  # noqa: E402
 from herdr_status import report, reserve_sequence  # noqa: E402
 
 # Claude Code fires Stop hooks concurrently with flushing the final assistant
@@ -52,8 +53,8 @@ def _read_rows(transcript_path: str) -> list[dict]:
     return rows
 
 
-def _scan(rows: list[dict]) -> tuple[str | None, bool]:
-    """Newest main-chain assistant text, and whether it postdates user input."""
+def _scan_turn(rows: list[dict]) -> tuple[str | None, bool, str | None]:
+    """Newest main-chain assistant text, freshness, and transcript timestamp."""
     last_user_idx = -1
     for idx, row in enumerate(rows):
         if row.get("type") == "user" and not row.get("isSidechain"):
@@ -68,20 +69,30 @@ def _scan(rows: list[dict]) -> tuple[str | None, bool]:
             if c.get("type") == "text"
         )
         if text.strip():
-            return text, idx > last_user_idx
-    return None, False
+            timestamp = row.get("timestamp")
+            return text, idx > last_user_idx, timestamp if isinstance(timestamp, str) else None
+    return None, False, None
+
+
+def _scan(rows: list[dict]) -> tuple[str | None, bool]:
+    text, fresh, _timestamp = _scan_turn(rows)
+    return text, fresh
 
 
 def last_assistant_text(transcript_path: str) -> str | None:
+    return last_assistant_turn(transcript_path)[0]
+
+
+def last_assistant_turn(transcript_path: str) -> tuple[str | None, str | None]:
     deadline = time.monotonic() + FLUSH_WAIT_SECONDS
     while True:
-        text, fresh = _scan(_read_rows(transcript_path))
+        text, fresh, timestamp = _scan_turn(_read_rows(transcript_path))
         if text is not None and fresh:
-            return text
+            return text, timestamp
         if time.monotonic() >= deadline:
             # Fall back to whatever is readable: stale text still beats a
             # silently dropped report, and None keeps the old skip behavior.
-            return text
+            return text, timestamp
         time.sleep(FLUSH_POLL_INTERVAL)
 
 
@@ -100,9 +111,10 @@ def main() -> int:
     # and reports; allocating its sequence after that stall would revive the
     # old turn.
     seq = reserve_sequence()
-    text = last_assistant_text(payload.get("transcript_path") or "")
+    text, last_turn_at = last_assistant_turn(payload.get("transcript_path") or "")
     if text is None:
         return 0
+    last_turn_at = last_turn_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     # A short reply without task evidence still emits a sequenced report, but
     # marks that evidence missing so the runtime can preserve unresolved state.
     block = parse(text)
@@ -121,9 +133,11 @@ def main() -> int:
         external_wait=block.external_wait,
         parse_status=block.parse_status,
         workers_unknown=block.workers_unknown,
+        settle_ready=settle_ready(text),
         session_id=payload.get("session_id"),
         session_path=payload.get("transcript_path"),
         seq=seq,
+        last_turn_at=last_turn_at,
     )
     if os.environ.get("HERDR_CLOSING_BLOCK_DEBUG"):
         print(json.dumps(outcome["payload"]), file=sys.stderr)
