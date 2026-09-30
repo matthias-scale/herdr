@@ -388,6 +388,31 @@ impl App {
         }
         if view.editing {
             match key.code {
+                KeyCode::Enter => {
+                    let pane_id = view.pane_id;
+                    let command = view.command.clone();
+                    self.state.settled_view = None;
+                    let terminal_id = self.state.workspaces.iter().find_map(|workspace| {
+                        workspace
+                            .pane_state(pane_id)
+                            .map(|pane| pane.attached_terminal_id.clone())
+                    });
+                    if let Some(plan) = terminal_id
+                        .as_ref()
+                        .and_then(|terminal_id| self.state.terminals.get_mut(terminal_id))
+                        .and_then(|terminal| terminal.pending_agent_resume_plan.as_mut())
+                    {
+                        #[cfg(windows)]
+                        {
+                            plan.argv = vec!["cmd".into(), "/C".into(), command];
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            plan.argv = vec!["/bin/sh".into(), "-lc".into(), command];
+                        }
+                    }
+                    self.resume_settled_pane_before_input(pane_id);
+                }
                 KeyCode::Esc => {
                     let pane_id = view.pane_id;
                     self.state.sidebar_focused = true;
@@ -744,10 +769,24 @@ mod tests {
         assert!(app.handle_settled_view_key(&escape));
         assert!(app.state.pane_is_settled(0, pane_id));
         assert!(app.state.settled_view.is_some());
+        let view = app.state.settled_view.as_mut().unwrap();
+        view.editing = true;
+        view.command = "codex resume changed-session".into();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
         assert!(app.handle_settled_view_key(&enter));
         assert!(!app.state.pane_is_settled(0, pane_id));
         assert!(app.state.settled_view.is_none());
+        let plan = app.state.terminals[&terminal_id]
+            .pending_agent_resume_plan
+            .as_ref()
+            .unwrap();
+        #[cfg(not(windows))]
+        assert_eq!(
+            plan.argv,
+            ["/bin/sh", "-lc", "codex resume changed-session"]
+        );
+        #[cfg(windows)]
+        assert_eq!(plan.argv, ["cmd", "/C", "codex resume changed-session"]);
     }
 
     #[cfg(unix)]

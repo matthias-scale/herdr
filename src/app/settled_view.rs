@@ -75,7 +75,7 @@ fn session_path(
         if direct.is_file() {
             return Some(direct);
         }
-        return find_named_file(&root.join("projects"), &format!("{id}.jsonl"));
+        return find_named_file(&root.join("projects"), &format!("{id}.jsonl"), 2);
     }
     let root = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
@@ -84,14 +84,17 @@ fn session_path(
     find_codex_file(&root, id)
 }
 
-fn find_named_file(root: &Path, name: &str) -> Option<PathBuf> {
+fn find_named_file(root: &Path, name: &str, max_depth: usize) -> Option<PathBuf> {
     for entry in std::fs::read_dir(root).ok()?.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = find_named_file(&path, name) {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() && max_depth > 0 {
+            if let Some(found) = find_named_file(&path, name, max_depth - 1) {
                 return Some(found);
             }
-        } else if path.file_name().is_some_and(|file| file == name) {
+        } else if file_type.is_file() && path.file_name().is_some_and(|file| file == name) {
             return Some(path);
         }
     }
@@ -220,5 +223,25 @@ mod tests {
         assert_eq!(parse_claude(claude), vec![("you".into(), "hello".into())]);
         let codex = r#"{"response_item":{"payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}}"#;
         assert_eq!(parse_codex(codex), vec![("codex".into(), "done".into())]);
+    }
+
+    #[test]
+    fn claude_lookup_stops_after_two_project_directory_levels() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-claude-lookup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let shallow = root.join("one/two/session.jsonl");
+        let deep = root.join("one/two/three/session.jsonl");
+        std::fs::create_dir_all(shallow.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
+        std::fs::write(&shallow, "").unwrap();
+        std::fs::write(&deep, "").unwrap();
+        assert_eq!(find_named_file(&root, "session.jsonl", 2), Some(shallow));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

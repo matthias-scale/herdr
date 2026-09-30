@@ -425,15 +425,20 @@ fn render_settled_view(
         return;
     }
     frame.render_widget(Clear, area);
-    let title = app
-        .workspaces
-        .get(ws_idx)
-        .and_then(|ws| ws.terminal_id(pane_id))
-        .and_then(|id| app.terminals.get(id))
-        .and_then(|terminal| terminal.manual_label.as_deref())
-        .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .unwrap_or("Settled session");
+    let title = app.workspaces.get(ws_idx).and_then(|ws| {
+        let terminal = ws.terminal_id(pane_id).and_then(|id| app.terminals.get(id));
+        let derived = ws
+            .tabs
+            .iter()
+            .position(|tab| tab.panes.contains_key(&pane_id))
+            .and_then(|tab_idx| ws.tab_display_projection(&app.terminals, tab_idx))
+            .and_then(|projection| crate::workspace::session_title(Some(&projection), None));
+        Some(settled_title(
+            terminal.and_then(|terminal| terminal.manual_label.as_deref()),
+            derived,
+        ))
+    });
+    let title = title.as_deref().unwrap_or("Settled session");
     let header = Line::from(vec![
         Span::styled(
             title.to_string(),
@@ -506,6 +511,15 @@ fn render_settled_view(
             Rect::new(area.x, area.y + area.height - 1, area.width, 1),
         );
     }
+}
+
+fn settled_title(manual: Option<&str>, derived: Option<String>) -> String {
+    manual
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
+        .or_else(|| derived.filter(|title| !title.trim().is_empty()))
+        .unwrap_or_else(|| "Settled session".into())
 }
 
 pub(crate) fn popup_pane_rects(app: &AppState, area: Rect) -> Option<(Rect, Rect)> {
@@ -1147,6 +1161,16 @@ mod tests {
             Ok(crate::pane::ProxyOutbound::SyncResize),
             "a changed proxy geometry must wake the writer"
         );
+    }
+
+    #[test]
+    fn settled_title_prefers_manual_then_derived_then_fallback() {
+        assert_eq!(
+            settled_title(Some(" manual "), Some("derived".into())),
+            "manual"
+        );
+        assert_eq!(settled_title(None, Some("derived".into())), "derived");
+        assert_eq!(settled_title(Some("  "), None), "Settled session");
     }
 
     #[test]
