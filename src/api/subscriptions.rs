@@ -323,7 +323,9 @@ impl ActiveSubscription {
                 .into_iter()
                 .next(),
             Self::SessionChanged(subscription) => {
-                subscription.poll(event_hub).ok()?.into_iter().next()
+                // Each event carries a full snapshot, so the newest supersedes older events
+                // drained in the same poll.
+                subscription.poll(event_hub).ok()?.into_iter().last()
             }
         }
     }
@@ -1047,6 +1049,52 @@ mod tests {
         assert_eq!(event["data"]["revision"], 7);
         assert_eq!(event["data"]["epoch"], "epoch-1");
         assert_eq!(event["data"]["snapshot"]["revision"], 7);
+    }
+
+    #[test]
+    fn session_changed_poll_returns_newest_of_queued_snapshots() {
+        let event_hub = EventHub::default();
+        let (api_tx, _api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut subscription = ActiveSubscription::new(
+            Subscription::SessionChanged {},
+            "test",
+            0,
+            &api_tx,
+            &event_hub,
+            event_hub.current_sequence(),
+        )
+        .expect("session changed subscription");
+
+        for revision in [3, 4, 5] {
+            event_hub.push(crate::api::schema::EventEnvelope {
+                event: EventKind::SessionChanged,
+                data: crate::api::schema::EventData::SessionChanged {
+                    epoch: "epoch-1".into(),
+                    revision,
+                    snapshot: Box::new(crate::api::schema::SessionSnapshot {
+                        epoch: Some("epoch-1".into()),
+                        revision: Some(revision),
+                        version: "0.9.1".into(),
+                        protocol: 16,
+                        focused_workspace_id: None,
+                        focused_tab_id: None,
+                        focused_pane_id: None,
+                        workspaces: Vec::new(),
+                        tabs: Vec::new(),
+                        panes: Vec::new(),
+                        layouts: Vec::new(),
+                        agents: Vec::new(),
+                    }),
+                },
+            });
+        }
+
+        let event = subscription
+            .poll(&api_tx, &event_hub)
+            .expect("newest session change event");
+        assert_eq!(event["data"]["revision"], 5);
+        assert_eq!(event["data"]["snapshot"]["revision"], 5);
+        assert!(subscription.poll(&api_tx, &event_hub).is_none());
     }
 
     #[test]
