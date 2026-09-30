@@ -71,7 +71,7 @@ static CLOSING_MARKER: LazyLock<Regex> = LazyLock::new(|| {
 // override promised-work classification. CI/build waits remain work in progress.
 static NOW_HUMAN_WAIT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)^\s*\*{0,2}now:\*{0,2}\s*(?:waiting on you\b|waiting at .{1,120}\bgate\b|waiting for (?:your|human|matthias's) (?:review|approval|sign[ -]?off|reply|decision)\b|awaiting (?:your |human )?(?:approval|review)\b)",
+        r"(?i)^\s*\*{0,2}now:\*{0,2}\s*(?:waiting on you\b|waiting on qa and github access\b|waiting for the pending (?:approve or hold )?decision\b|waiting at .{1,120}\bgate\b|waiting for (?:your|human|matthias's) (?:review|approval|sign[ -]?off|reply|decision)\b|awaiting (?:your |human )?(?:approval|review)\b)",
     )
     .expect("static regex")
 });
@@ -749,6 +749,10 @@ mod tests {
         assert!(waiting(
             "**Needs you (2)**\n1. Approve release\n2. Decide on rollout"
         ));
+        assert!(waiting(
+            "Now: waiting for the pending approve or hold decision."
+        ));
+        assert!(waiting("Now: Waiting on QA and GitHub access."));
         assert!(waiting("**Review notes**\nReply 1a / 1b. Silence holds."));
         assert!(!waiting("**Needs you: nothing.**"));
         assert!(!closing_block_waiting("Now: waiting on you"));

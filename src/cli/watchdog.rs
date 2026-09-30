@@ -28,7 +28,7 @@ mod workers;
 mod nudge_delivery_tests {
     use super::{
         nudge_due, nudge_retry_text, nudge_text, promised_nudges_stalled, record_nudge_attempt,
-        update_promised_memory,
+        replay_observations, update_promised_memory, ReplayObservation, NUDGE_REPEAT_SECS,
     };
     use crate::{api::schema::AgentStatus, watchdog::PaneV3Memory};
 
@@ -257,6 +257,53 @@ mod nudge_delivery_tests {
     }
 
     #[test]
+    fn replay_does_not_nudge_done_here_suffix_and_caps_failed_stall_attempts() {
+        let incident = ReplayObservation {
+            timestamp: 1_800_000_000,
+            pane_id: "w18:p5".into(),
+            session_id: "incident-session".into(),
+            agent: "claude".into(),
+            status: AgentStatus::Idle,
+            reported_at: Some("1799990000".into()),
+            hook_age_secs: Some(10000),
+            tail: "Needs you: nothing.\nNow: Done here — round 2 arrives in the Translation Text Editing tab.\n❯ \n".into(),
+            background: "none".into(),
+        };
+        let incident_decisions = replay_observations(&[incident]);
+        assert_eq!(incident_decisions.len(), 1);
+        assert_eq!(
+            incident_decisions[0].class,
+            crate::watchdog::PaneClass::FinishedIdle
+        );
+        assert!(!incident_decisions[0].would_nudge);
+
+        let stall = (0..=40)
+            .map(|minute| ReplayObservation {
+                timestamp: 1_800_000_000 + minute * 60,
+                pane_id: "w18:p6".into(),
+                session_id: "stall-session".into(),
+                agent: "claude".into(),
+                status: AgentStatus::Idle,
+                reported_at: Some("1799990000".into()),
+                hook_age_secs: Some(10000),
+                tail: "Now: Update the checklist after the next render is ready.\n❯ \n".into(),
+                background: "none".into(),
+            })
+            .collect::<Vec<_>>();
+        let attempts = replay_observations(&stall)
+            .into_iter()
+            .filter(|decision| decision.would_nudge)
+            .collect::<Vec<_>>();
+        assert_eq!(attempts.len(), 3);
+        assert_eq!(attempts[0].attempt, Some(1));
+        assert_eq!(attempts[1].attempt, Some(2));
+        assert_eq!(attempts[2].attempt, Some(3));
+        assert!(attempts.windows(2).all(|pair| {
+            pair[1].timestamp.saturating_sub(pair[0].timestamp) >= NUDGE_REPEAT_SECS
+        }));
+    }
+
+    #[test]
     fn status_or_report_change_with_same_screen_preserves_attempt_count() {
         for (status, reported_at) in [
             (AgentStatus::Working, Some("reported")),
@@ -432,7 +479,193 @@ struct PaneEntry {
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Debug, Clone, Deserialize)]
+struct ReplayObservation {
+    timestamp: u64,
+    pane_id: String,
+    session_id: String,
+    agent: String,
+    status: AgentStatus,
+    reported_at: Option<String>,
+    hook_age_secs: Option<u64>,
+    tail: String,
+    // A conservative replay never nudges when transcript history cannot prove
+    // that background tools and agents have completed.
+    background: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ReplayDecision {
+    timestamp: u64,
+    pane_id: String,
+    session_id: String,
+    class: watchdog::PaneClass,
+    evidence: String,
+    idle_secs: u64,
+    hook_age_secs: Option<u64>,
+    tail_hash: u64,
+    background: String,
+    would_nudge: bool,
+    attempt: Option<u8>,
+    delivered: bool,
+    tail: Vec<String>,
+}
+
+fn replay_observations(inputs: &[ReplayObservation]) -> Vec<ReplayDecision> {
+    let mut memory = PaneV3MemoryMap::new();
+    let mut decisions = Vec::with_capacity(inputs.len());
+    let options = PaneV3Options {
+        stall_secs: DEFAULT_STALL_SECS,
+        quiet_secs: 1800,
+        retry_window_secs: DEFAULT_STALL_SECS,
+        op_deadline_secs: DEFAULT_STALL_SECS * 3,
+        stale_draft_secs: watchdog::STALE_DRAFT_SECS,
+    };
+    for input in inputs {
+        let mem = memory.entry(input.pane_id.clone()).or_default();
+        let expected = watchdog::evidence::expected_to_continue(&input.tail)
+            && matches!(input.status, AgentStatus::Idle | AgentStatus::Done);
+        let quiet_track = expected
+            || (watchdog::evidence::promised_work(&input.tail).is_some()
+                && matches!(input.status, AgentStatus::Working | AgentStatus::Unknown)
+                && !watchdog::evidence::closing_block_open(&input.tail)
+                && watchdog::evidence::background_shell_count(&input.tail) == 0
+                && watchdog::evidence::background_agent_count(&input.tail) == 0
+                && watchdog::evidence::background_task_count(&input.tail) == 0);
+        let hash = watchdog::evidence::semantic_hash(&input.tail);
+        let rebound = (mem.terminal_id.is_some()
+            && mem.terminal_id.as_deref() != Some(input.pane_id.as_str()))
+            || (mem.agent_session.is_some()
+                && mem.agent_session.as_deref() != Some(input.session_id.as_str()));
+        let nudge_echo = mem.nudge_count > 0
+            && watchdog::evidence::composer_text(&input.tail)
+                .is_some_and(|draft| draft.contains("resume: continue your open work"));
+        let quiet = update_promised_memory(
+            mem,
+            input.status,
+            input.reported_at.as_deref(),
+            hash,
+            expected,
+            quiet_track,
+            rebound,
+            nudge_echo,
+            input.timestamp,
+        );
+        let mut classified = watchdog::classify_pane_v3(
+            &PaneV3Observation {
+                pane_id: input.pane_id.clone(),
+                agent: input.agent.clone(),
+                terminal_id: Some(input.pane_id.clone()),
+                agent_session: Some(input.session_id.clone()),
+                status: input.status,
+                wait: None,
+                eta_s: None,
+                reported_at: input.reported_at.clone(),
+                tail: input.tail.clone(),
+                transcript_waiting: false,
+                process_group: None,
+                read_error: None,
+            },
+            mem,
+            input.timestamp,
+            options,
+        );
+        let promised_stalled = classified.class == watchdog::PaneClass::Stalled
+            && (classified.evidence.starts_with("promised work stopped:")
+                || classified
+                    .evidence
+                    .starts_with("promised work stopped (hook status "));
+        let eligible = expected || promised_stalled;
+        let due = input.background == "none"
+            && nudge_due(
+                eligible,
+                quiet,
+                mem.nudge_count,
+                mem.last_nudge_at,
+                &mem.nudge_attempts_at,
+                options.quiet_secs,
+                input.timestamp,
+            );
+        let attempt = if due {
+            record_nudge_attempt(mem, input.timestamp);
+            Some(mem.nudge_count)
+        } else {
+            None
+        };
+        if promised_nudges_stalled(eligible, quiet, mem.nudge_count, options.quiet_secs) {
+            classified.class = watchdog::PaneClass::Stalled;
+            classified.evidence = "did not resume after 3 nudge attempts".into();
+        }
+        let tail = if due {
+            input
+                .tail
+                .lines()
+                .rev()
+                .take(12)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(str::to_owned)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        decisions.push(ReplayDecision {
+            timestamp: input.timestamp,
+            pane_id: input.pane_id.clone(),
+            session_id: input.session_id.clone(),
+            class: classified.class,
+            evidence: classified.evidence,
+            idle_secs: quiet,
+            hook_age_secs: input.hook_age_secs,
+            tail_hash: hash,
+            background: input.background.clone(),
+            would_nudge: due,
+            attempt,
+            // Replay never delivers input; false models a failed delivery for
+            // repeat scheduling while remaining strictly read-only.
+            delivered: false,
+            tail,
+        });
+    }
+    decisions
+}
+
+fn run_replay(path: &Path) -> io::Result<i32> {
+    let source = fs::read_to_string(path)?;
+    let mut inputs = Vec::new();
+    for (line_number, line) in source.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        inputs.push(
+            serde_json::from_str::<ReplayObservation>(line).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid replay JSONL line {}: {error}", line_number + 1),
+                )
+            })?,
+        );
+    }
+    let stdout = io::stdout();
+    let mut lock = stdout.lock();
+    for decision in replay_observations(&inputs) {
+        serde_json::to_writer(&mut lock, &decision)?;
+        writeln!(lock)?;
+    }
+    Ok(0)
+}
+
 pub(super) fn run_watchdog_command(args: &[String]) -> io::Result<i32> {
+    if args.first().is_some_and(|arg| arg == "--replay") {
+        let path = args.get(1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--replay requires a JSONL path",
+            )
+        })?;
+        return run_replay(Path::new(path));
+    }
     if args.first().is_some_and(|arg| arg == "workers") {
         return workers::run_worker_watchdog_command(&args[1..]);
     }
