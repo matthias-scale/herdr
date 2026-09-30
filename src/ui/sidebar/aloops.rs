@@ -537,6 +537,11 @@ mod tests {
     fn app_with_producer(producer: ProducerSnapshot) -> AppState {
         let mut app = AppState::test_new();
         app.collapsed_sidebar_groups.remove("repo:Aloops");
+        if producer.host != app.agent_host_name {
+            let key = super::super::devices::group_key("loops", &producer.host);
+            app.collapsed_sidebar_groups
+                .insert(format!("expanded:{key}"));
+        }
         app.fleet_snapshot = crate::fleet::Snapshot {
             polled: true,
             aloop: Some(producer),
