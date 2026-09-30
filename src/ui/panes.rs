@@ -425,7 +425,7 @@ fn render_settled_view(
         return;
     }
     frame.render_widget(Clear, area);
-    let title = app.workspaces.get(ws_idx).and_then(|ws| {
+    let title = app.workspaces.get(ws_idx).map(|ws| {
         let terminal = ws.terminal_id(pane_id).and_then(|id| app.terminals.get(id));
         let derived = ws
             .tabs
@@ -433,10 +433,10 @@ fn render_settled_view(
             .position(|tab| tab.panes.contains_key(&pane_id))
             .and_then(|tab_idx| ws.tab_display_projection(&app.terminals, tab_idx))
             .and_then(|projection| crate::workspace::session_title(Some(&projection), None));
-        Some(settled_title(
+        settled_title(
             terminal.and_then(|terminal| terminal.manual_label.as_deref()),
             derived,
-        ))
+        )
     });
     let title = title.as_deref().unwrap_or("Settled session");
     let header = Line::from(vec![
