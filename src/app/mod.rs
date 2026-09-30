@@ -961,6 +961,7 @@ impl App {
             sidebar_group_sorts,
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
+            settled_view: None,
             sidebar_snooze: None,
             sidebar_settled_menu_target: None,
             sidebar_settled_menu_selected: 0,
@@ -3606,6 +3607,25 @@ impl App {
                         continue;
                     }
                     self.state.clear_hovered_control();
+                    if owner.forwards_unhandled_input_to_pane()
+                        && self
+                            .state
+                            .active
+                            .and_then(|ws_idx| {
+                                self.state
+                                    .workspaces
+                                    .get(ws_idx)
+                                    .and_then(|ws| ws.focused_pane_id())
+                            })
+                            .is_some_and(|pane_id| {
+                                self.state
+                                    .settled_view
+                                    .as_ref()
+                                    .is_some_and(|view| view.pane_id == pane_id)
+                            })
+                    {
+                        continue;
+                    }
                     if owner == state::InputOwner::Popup {
                         self.try_route_paste_to_popup(&text);
                     } else if owner == state::InputOwner::Dock(state::DockInputOwner::Editor) {
