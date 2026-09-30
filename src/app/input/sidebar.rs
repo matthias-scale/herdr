@@ -2597,18 +2597,39 @@ impl super::super::App {
             }
             return true;
         }
+        let rows = crate::ui::compute_sidebar_row_areas(&self.state, self.state.view.sidebar_rect)
+            .0.into_iter().filter_map(|card| {
+                let pane_id = card.settled_pane_id?;
+                let ws = self.state.workspaces.get(card.ws_idx)?;
+                Some(crate::app::state::PaneFocusTarget { workspace_id: ws.id.clone(), pane_id })
+            }).collect::<Vec<_>>();
         let Some(target) = self.state.sidebar_selected_settled.clone() else {
-            return false;
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => self.state.sidebar_selected_settled = rows.last().cloned(),
+                KeyCode::Down | KeyCode::Char('j') => self.state.sidebar_selected_settled = rows.first().cloned(),
+                _ => return false,
+            }
+            return self.state.sidebar_selected_settled.is_some();
         };
         match key.code {
             KeyCode::Enter => {
-                if !self.state.settled_target_has_resume_plan(&target) {
-                    self.focus_settled_pane(target);
-                    return true;
-                }
+                self.focus_settled_pane(target);
+                true
+            }
+            KeyCode::Char('m') => {
                 self.state.sidebar_settled_menu_target = Some(target);
                 self.state.sidebar_settled_menu_selected = 0;
                 self.state.sidebar_settled_menu_delete_armed = false;
+                true
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
+                let index = rows.iter().position(|row| row == &target);
+                let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                    index.unwrap_or(0).saturating_sub(1)
+                } else {
+                    index.unwrap_or(0).saturating_add(1).min(rows.len().saturating_sub(1))
+                };
+                self.state.sidebar_selected_settled = rows.get(next).cloned();
                 true
             }
             KeyCode::Esc => {

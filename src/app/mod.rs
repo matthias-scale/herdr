@@ -54,6 +54,7 @@ pub(crate) mod settings_general;
 pub(crate) mod settings_keybindings;
 pub(crate) mod settings_providers;
 pub(crate) mod settled;
+pub(crate) mod settled_view;
 pub mod state;
 pub(crate) mod status_log;
 mod tab_bar_status;
