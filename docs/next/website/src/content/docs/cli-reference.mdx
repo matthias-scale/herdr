@@ -39,17 +39,6 @@ herdr status-log record --pane ID --to STATE [--from STATE] [--source watchdog|u
 
 `status-log read` prints matching records as a JSON array. `--since` accepts an RFC 3339 timestamp, Unix seconds, or a relative age such as `90s`, `30m`, `2h`, or `7d`; `--limit` keeps the newest matching records. `status-log record` appends one record and prints it as JSON. Its source defaults to `watchdog`; `--tail-file -` reads the tail from standard input. Both commands use daily JSONL files under the Herdr state directory, retain up to 30 daily files, and accept `--dir` to use another directory.
 
-## Running the watchdog as a service
-
-Install the per-user systemd service on Linux or LaunchAgent on macOS with `scripts/watchdog_service.sh install`.
-The default runs every 60 seconds with model calls disabled; pass `--with-model` only when Gemini nudges are wanted.
-Use `--dry-run-nudges` to log nudges without sending them.
-On Linux, service output is appended to `~/.local/state/herdr/watchdog.log`.
-On macOS, service output is appended to `~/Library/Logs/herdr-watchdog.log`.
-The watchdog status log is `~/.local/state/herdr/watchdog-status.log` on both platforms.
-Run `scripts/watchdog_service.sh status` to inspect service state and recent output.
-Run `scripts/watchdog_service.sh uninstall` to stop, disable, and remove the service; logs are kept.
-
 API schema commands:
 
 ```bash

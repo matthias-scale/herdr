@@ -47,7 +47,9 @@ class WatchdogServiceTests(unittest.TestCase):
         self.assertIn("RestartSec=10", default)
         self.assertIn("StartLimitIntervalSec=600", default)
         self.assertIn("StartLimitBurst=5", default)
-        self.assertIn("StandardOutput=append:", default)
+        # systemd rejects a quoted append: target as a relative path.
+        self.assertRegex(default, r"(?m)^StandardOutput=append:/\S+/watchdog\.log$")
+        self.assertRegex(default, r"(?m)^StandardError=append:/\S+/watchdog\.log$")
         self.assertIn("watchdog.log", default)
         self.assertIn("watchdog-status.log", default)
         selected = self.render("linux", "--with-model", "--dry-run-nudges")

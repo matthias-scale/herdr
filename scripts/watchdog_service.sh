@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Run `herdr watchdog` as a per-user service: a systemd --user unit on Linux, a LaunchAgent on macOS.
+# Defaults: every 60 s, model calls off (--with-model opts in to Gemini). --dry-run-nudges logs without sending.
+# Logs: ~/.local/state/herdr/watchdog.log (Linux) or ~/Library/Logs/herdr-watchdog.log (macOS);
+# status records: ~/.local/state/herdr/watchdog-status.log. Stop and remove: scripts/watchdog_service.sh uninstall.
 set -euo pipefail
 
 usage() {
@@ -45,6 +49,8 @@ render() {
   args+=" --status-log $(systemd_quote "$status_log")"
   if [[ $os == linux ]]; then
     service_log="$state/watchdog.log"
+    # systemd takes append: paths verbatim; quotes would make them relative.
+    [[ $service_log != *[[:space:]]* ]] || fail "log path must not contain whitespace: $service_log"
     path="$bindir:/usr/local/bin:/usr/bin:/bin"
     cat <<EOF
 [Unit]
@@ -58,8 +64,8 @@ ExecStart=$args
 Restart=on-failure
 RestartSec=10
 Environment=PATH=$(systemd_quote "$path")
-StandardOutput=append:$(systemd_quote "$service_log")
-StandardError=append:$(systemd_quote "$service_log")
+StandardOutput=append:$service_log
+StandardError=append:$service_log
 
 [Install]
 WantedBy=default.target
