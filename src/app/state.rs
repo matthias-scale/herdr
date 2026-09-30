@@ -4353,18 +4353,15 @@ pub struct AppState {
     pub(crate) remote_agent_panel_entries: Vec<std::sync::Arc<crate::ui::RemoteAgentPanelEntry>>,
     /// Device grouping is built when the fleet snapshot installs, so sidebar
     /// projection only filters cached host buckets.
-    pub(crate) remote_agent_device_groups: Option<
-        Vec<
-            crate::ui::sidebar::devices::DeviceGroup<
-                std::sync::Arc<crate::ui::RemoteAgentPanelEntry>,
-            >,
-        >,
-    >,
+    pub(crate) remote_agent_device_groups: Option<crate::ui::sidebar::RemoteAgentDeviceGroups>,
     pub(crate) remote_device_activity: Option<
         std::collections::HashMap<(String, String), crate::ui::sidebar::SidebarActivityCount>,
     >,
-    pub(crate) agent_run_device_groups:
-        Option<Vec<crate::ui::sidebar::devices::DeviceGroup<crate::agent_runs::HostProjection>>>,
+    pub(crate) agent_run_device_groups: Option<
+        std::sync::Arc<
+            [crate::ui::sidebar::devices::DeviceGroup<crate::agent_runs::HostProjection>],
+        >,
+    >,
     pub(crate) remote_loop_device_groups:
         Option<Vec<crate::ui::sidebar::devices::DeviceGroup<crate::api::schema::LoopInfo>>>,
     pub(crate) agent_runs_active_count: Option<usize>,

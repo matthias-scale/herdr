@@ -2193,6 +2193,46 @@ pub(crate) fn remote_agent_as_panel_entry(
     entry
 }
 
+pub(crate) type RemoteAgentDeviceGroups = std::collections::HashMap<
+    &'static str,
+    Vec<devices::DeviceGroup<std::sync::Arc<AgentPanelEntry>>>,
+>;
+
+#[cfg(test)]
+thread_local! {
+    static REMOTE_AGENT_DEVICE_GROUP_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Build remote rows for the device sections once when their fleet snapshot
+/// changes. Query and blocker visibility remain projection-time filters.
+pub(crate) fn remote_agent_device_groups(app: &AppState) -> RemoteAgentDeviceGroups {
+    #[cfg(test)]
+    REMOTE_AGENT_DEVICE_GROUP_BUILDS.with(|count| count.set(count.get() + 1));
+
+    let mut sections = std::collections::HashMap::<
+        &'static str,
+        Vec<(String, bool, bool, std::sync::Arc<AgentPanelEntry>)>,
+    >::new();
+    for remote in &app.remote_agent_panel_entries {
+        let entry = std::sync::Arc::new(remote_agent_as_panel_entry(remote));
+        let section = match sidebar_entry_lifecycle(app, &entry) {
+            SidebarEntryLifecycle::Active if !sidebar_entry_is_working(&entry) => "main",
+            SidebarEntryLifecycle::Active => continue,
+            SidebarEntryLifecycle::Snoozed => "snoozed",
+            SidebarEntryLifecycle::Settled => "settled",
+        };
+        let host = remote.agent_ref.host.clone();
+        sections
+            .entry(section)
+            .or_default()
+            .push((host, false, remote.host_fresh, entry));
+    }
+    sections
+        .into_iter()
+        .map(|(section, items)| (section, devices::group_items(&app.agent_host_name, items)))
+        .collect()
+}
+
 fn all_agent_navigation_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     let mut entries = all_agent_panel_entries(app);
     entries.extend(
@@ -4365,6 +4405,34 @@ fn append_space_tree_rows(
     app: &AppState,
     rows: &mut Vec<SidebarRow>,
     entries: Vec<AgentPanelEntry>,
+    expand_worktrees: bool,
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
+    mode: SidebarGroupMode,
+    show_header: bool,
+    populated_only: bool,
+    activity: Option<&std::collections::HashMap<usize, SidebarActivityCount>>,
+    remote_activity: Option<&std::collections::HashMap<(String, String), SidebarActivityCount>>,
+    group_namespace: Option<&str>,
+) {
+    append_space_tree_rows_from_iter(
+        app,
+        rows,
+        entries,
+        expand_worktrees,
+        terminal_runtimes,
+        mode,
+        show_header,
+        populated_only,
+        activity,
+        remote_activity,
+        group_namespace,
+    );
+}
+
+fn append_space_tree_rows_from_iter(
+    app: &AppState,
+    rows: &mut Vec<SidebarRow>,
+    entries: impl IntoIterator<Item = AgentPanelEntry>,
     expand_worktrees: bool,
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
     mode: SidebarGroupMode,
@@ -14020,6 +14088,39 @@ pub(crate) mod tests {
         app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
         expand_fleet(&mut app);
         app
+    }
+
+    #[test]
+    fn repeated_sidebar_projections_reuse_remote_device_groups() {
+        let mut app = app_with_two_remote_hosts();
+        let builds_before = REMOTE_AGENT_DEVICE_GROUP_BUILDS.with(std::cell::Cell::get);
+        app.remote_agent_device_groups = Some(remote_agent_device_groups(&app));
+        let builds_after_snapshot = REMOTE_AGENT_DEVICE_GROUP_BUILDS.with(std::cell::Cell::get);
+        assert_eq!(builds_after_snapshot, builds_before + 1);
+
+        let mut first = Vec::new();
+        devices::append_remote_entry_groups(&app, &mut first, "main", Vec::new());
+        let mut second = Vec::new();
+        devices::append_remote_entry_groups(&app, &mut second, "main", Vec::new());
+
+        assert!(first.iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader { key, .. } if key.starts_with("device:main/")
+        )));
+        assert_eq!(
+            first
+                .iter()
+                .filter(|row| matches!(row, SidebarRow::NestedHeader { key, .. } if key.starts_with("device:main/")))
+                .count(),
+            second
+                .iter()
+                .filter(|row| matches!(row, SidebarRow::NestedHeader { key, .. } if key.starts_with("device:main/")))
+                .count()
+        );
+        assert_eq!(
+            REMOTE_AGENT_DEVICE_GROUP_BUILDS.with(std::cell::Cell::get),
+            builds_after_snapshot
+        );
     }
 
     #[test]

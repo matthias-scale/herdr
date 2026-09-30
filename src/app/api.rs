@@ -40,18 +40,8 @@ impl App {
     pub(crate) fn refresh_remote_agent_panel_entries(&mut self) {
         self.state.remote_agent_panel_entries =
             crate::ui::remote_agent_panel_entries(&self.state.fleet_snapshot, self.state.nerd_font);
-        self.state.remote_agent_device_groups = Some(crate::ui::sidebar::devices::group_items(
-            &self.state.agent_host_name,
-            self.state
-                .remote_agent_panel_entries
-                .iter()
-                .cloned()
-                .map(|entry| {
-                    let host = entry.agent_ref.host.clone();
-                    let reachable = entry.host_fresh;
-                    (host, false, reachable, entry)
-                }),
-        ));
+        self.state.remote_agent_device_groups =
+            Some(crate::ui::sidebar::remote_agent_device_groups(&self.state));
         let activity_entries = self
             .state
             .remote_agent_panel_entries
@@ -64,15 +54,18 @@ impl App {
         ));
         let run_projection = crate::agent_runs::project(&self.state.fleet_snapshot);
         self.state.agent_runs_active_count = Some(run_projection.active_count);
-        self.state.agent_run_device_groups = Some(crate::ui::sidebar::devices::group_items(
-            &self.state.agent_host_name,
-            run_projection.hosts.into_iter().map(|host| {
-                let local = host.name == self.state.agent_host_name;
-                let reachable =
-                    crate::ui::sidebar::devices::host_reachable(&self.state, &host.name);
-                (host.name.clone(), local, reachable, host)
-            }),
-        ));
+        self.state.agent_run_device_groups = Some(
+            crate::ui::sidebar::devices::group_items(
+                &self.state.agent_host_name,
+                run_projection.hosts.into_iter().map(|host| {
+                    let local = host.name == self.state.agent_host_name;
+                    let reachable =
+                        crate::ui::sidebar::devices::host_reachable(&self.state, &host.name);
+                    (host.name.clone(), local, reachable, host)
+                }),
+            )
+            .into(),
+        );
         self.state.remote_loop_device_groups = Some(crate::ui::sidebar::devices::group_items(
             &self.state.agent_host_name,
             self.state

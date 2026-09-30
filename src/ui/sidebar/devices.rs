@@ -112,32 +112,45 @@ pub(super) fn append_remote_entry_groups(
         .as_ref()
         .or(fallback_activity.as_ref())
         .expect("remote activity fallback is present when no snapshot cache exists");
-    let mut included =
-        std::collections::HashMap::<String, std::collections::HashSet<String>>::new();
-    for entry in &entries {
-        if let Some(remote) = entry.remote_entry.as_ref() {
-            included
-                .entry(remote.agent_ref.host.clone())
-                .or_default()
-                .insert(remote.agent_ref.agent.clone());
-        }
-    }
-    let cached_groups = app.remote_agent_device_groups.as_ref().filter(|groups| {
-        groups.iter().map(|group| group.items.len()).sum::<usize>()
-            == app.remote_agent_panel_entries.len()
-    });
-    if let Some(groups) = cached_groups {
+    if let Some(groups_by_section) = app.remote_agent_device_groups.as_ref() {
+        let Some(groups) = groups_by_section.get(section) else {
+            return;
+        };
+        let remote_terms = super::sidebar_query_parts(&app.sidebar_work_filter.query).0;
         for group in groups {
-            let Some(agent_ids) = included.get(&group.host) else {
-                continue;
-            };
-            let group_entries = group
-                .items
-                .iter()
-                .filter(|remote| agent_ids.contains(&remote.agent_ref.agent))
-                .map(super::remote_agent_as_panel_entry)
-                .collect::<Vec<_>>();
-            append_device_group(app, rows, section, group, group_entries, remote_activity);
+            if remote_terms.is_empty() && !app.blocked_filter {
+                append_device_group(
+                    app,
+                    rows,
+                    section,
+                    group,
+                    group.items.len(),
+                    group.items.iter().map(|entry| (**entry).clone()),
+                    remote_activity,
+                );
+            } else {
+                let is_visible = |entry: &&std::sync::Arc<super::AgentPanelEntry>| {
+                    let Some(remote) = entry.remote_entry.as_ref() else {
+                        return false;
+                    };
+                    super::remote_sidebar_entry_matches_query(remote, &remote_terms)
+                        && (!app.blocked_filter || super::entry_has_red_dot(entry.as_ref()))
+                };
+                let entry_count = group.items.iter().filter(is_visible).count();
+                append_device_group(
+                    app,
+                    rows,
+                    section,
+                    group,
+                    entry_count,
+                    group
+                        .items
+                        .iter()
+                        .filter(is_visible)
+                        .map(|entry| (**entry).clone()),
+                    remote_activity,
+                );
+            }
         }
         return;
     }
@@ -162,7 +175,8 @@ pub(super) fn append_remote_entry_groups(
             rows,
             section,
             group,
-            group.items.clone(),
+            group.items.len(),
+            group.items.iter().cloned(),
             remote_activity,
         );
     }
@@ -173,10 +187,11 @@ fn append_device_group<T>(
     rows: &mut Vec<super::SidebarRow>,
     section: &str,
     group: &DeviceGroup<T>,
-    entries: Vec<super::AgentPanelEntry>,
+    entry_count: usize,
+    entries: impl IntoIterator<Item = super::AgentPanelEntry>,
     remote_activity: &std::collections::HashMap<(String, String), super::SidebarActivityCount>,
 ) {
-    if entries.is_empty() {
+    if entry_count == 0 {
         return;
     }
     let key = group_key(section, &group.host);
@@ -187,7 +202,7 @@ fn append_device_group<T>(
         sort_key: None,
         sort_mode: crate::app::state::SidebarSortMode::Default,
         title: device_title(app, &group.host, group.local),
-        count: entries.len(),
+        count: entry_count,
         activity_count: None,
         collapsed,
         dim: !group.reachable,
@@ -195,7 +210,7 @@ fn append_device_group<T>(
         spawn: false,
     });
     if !collapsed {
-        super::append_space_tree_rows(
+        super::append_space_tree_rows_from_iter(
             app,
             rows,
             entries,
