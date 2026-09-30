@@ -338,7 +338,7 @@ fn split_wide_words(words: Vec<Word>, width: usize) -> Vec<Word> {
     out
 }
 
-/// Greedily pack words into rows no wider than `width`.
+/// Greedily pack glued word units into rows no wider than `width`.
 fn wrap_words(words: &[Word], width: usize) -> Vec<Vec<&Word>> {
     if width == 0 || words.is_empty() {
         return Vec::new();
@@ -346,14 +346,32 @@ fn wrap_words(words: &[Word], width: usize) -> Vec<Vec<&Word>> {
     let mut rows: Vec<Vec<&Word>> = Vec::new();
     let mut row: Vec<&Word> = Vec::new();
     let mut row_width = 0usize;
-    for word in words {
-        let separator = usize::from(word.space_before && !row.is_empty());
-        if !row.is_empty() && word.space_before && row_width + separator + word.width > width {
+    let mut unit_start = 0;
+    while unit_start < words.len() {
+        let mut unit_end = unit_start + 1;
+        while unit_end < words.len() && !words[unit_end].space_before {
+            unit_end += 1;
+        }
+        let unit = &words[unit_start..unit_end];
+        let unit_width: usize = unit.iter().map(|word| word.width).sum::<usize>()
+            + unit.iter().skip(1).filter(|word| word.space_before).count();
+        let separator = usize::from(words[unit_start].space_before && !row.is_empty());
+        // Keep a glued unit together when it fits; oversized units can break between words.
+        if !row.is_empty() && row_width + separator + unit_width > width {
             rows.push(std::mem::take(&mut row));
             row_width = 0;
         }
-        row_width += separator + word.width;
-        row.push(word);
+        for word in unit {
+            let separator = usize::from(word.space_before && !row.is_empty());
+            if !row.is_empty() && row_width + separator + word.width > width {
+                rows.push(std::mem::take(&mut row));
+                row_width = 0;
+            }
+            let separator = usize::from(word.space_before && !row.is_empty());
+            row_width += separator + word.width;
+            row.push(word);
+        }
+        unit_start = unit_end;
     }
     if !row.is_empty() {
         rows.push(row);
