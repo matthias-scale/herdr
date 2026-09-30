@@ -632,9 +632,6 @@ impl AppState {
         let mut filter = self.sidebar_work_filter.clone();
         let mut keep_open = false;
         match option {
-            crate::ui::SidebarFilterOption::MachineScope(scope) => {
-                filter.machine_scope = scope;
-            }
             crate::ui::SidebarFilterOption::LinearTeam(team) => filter.team = team,
             crate::ui::SidebarFilterOption::LinearOwnership(ownership) => {
                 filter.linear_ownership = ownership;
@@ -1077,6 +1074,34 @@ impl AppState {
     /// round trip -- but it does change the row count, so the sidebar's own
     /// scroll clamp has to run afterwards.
     pub(crate) fn toggle_sidebar_group(&mut self, title: &str) {
+        if let Some(key_tail) = title.strip_prefix("device:") {
+            let Some((section, host)) = key_tail.split_once('/') else {
+                return;
+            };
+            let key = crate::ui::sidebar::devices::group_key(section, host);
+            let local = host == self.agent_host_name;
+            let reachable = crate::ui::sidebar::devices::host_reachable(self, host);
+            let collapsed = crate::ui::sidebar::devices::group_is_collapsed(
+                self, section, host, local, reachable,
+            );
+            self.collapsed_sidebar_groups.remove(&key);
+            self.collapsed_sidebar_groups
+                .remove(&format!("expanded:{key}"));
+            let next_collapsed = !collapsed;
+            if next_collapsed {
+                self.collapsed_sidebar_groups.insert(key.clone());
+            } else {
+                self.collapsed_sidebar_groups
+                    .insert(format!("expanded:{key}"));
+            }
+            self.sidebar_group_collapsed_persistence_request = Some((key, next_collapsed));
+            self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+                self,
+                self.view.sidebar_rect,
+                self.workspace_scroll,
+            );
+            return;
+        }
         if self.sidebar_sections_layout {
             let key = format!("sections:{title}");
             if title == crate::ui::sidebar::SETTLED_SECTION_TITLE
@@ -1207,6 +1232,7 @@ impl AppState {
                 | crate::ui::SidebarRow::Divider
                 | crate::ui::SidebarRow::ShelfDivider
                 | crate::ui::SidebarRow::AloopLoop { .. }
+                | crate::ui::SidebarRow::AloopRemoteLoop { .. }
                 | crate::ui::SidebarRow::AloopRunLine { .. }
                 | crate::ui::SidebarRow::AloopFinding { .. }
                 | crate::ui::SidebarRow::AloopCleanRuns { .. }
@@ -1250,6 +1276,7 @@ impl AppState {
                 | crate::ui::SidebarRow::Divider
                 | crate::ui::SidebarRow::ShelfDivider
                 | crate::ui::SidebarRow::AloopLoop { .. }
+                | crate::ui::SidebarRow::AloopRemoteLoop { .. }
                 | crate::ui::SidebarRow::AloopRunLine { .. }
                 | crate::ui::SidebarRow::AloopFinding { .. }
                 | crate::ui::SidebarRow::AloopCleanRuns { .. }
@@ -3277,6 +3304,9 @@ mod tests {
                     |summary| format!("run:{host}:{}", summary.run_id),
                 ),
                 crate::ui::SidebarRow::AloopLoop { name, .. } => format!("aloop:{name}"),
+                crate::ui::SidebarRow::AloopRemoteLoop { key, .. } => {
+                    format!("aloop:remote:{key}")
+                }
                 crate::ui::SidebarRow::AloopRunLine { key, .. }
                 | crate::ui::SidebarRow::AloopFinding { key, .. }
                 | crate::ui::SidebarRow::AloopCleanRuns { key, .. }

@@ -980,10 +980,15 @@ impl App {
                 self.focus_pane_internal_via_api(ws_idx, pane_id);
             }
             BlockedPaneTarget::Remote(agent_ref) => {
-                self.open_fleet_host_focused(&agent_ref.host, Some(&agent_ref.agent));
-                // Focusing the attached tab clears remote row selection. Keep
-                // this anchor so the next shortcut advances to the next remote
-                // blocker rather than restarting the cycle.
+                let host_reachable = self
+                    .state
+                    .fleet_snapshot
+                    .hosts
+                    .iter()
+                    .any(|host| host.name == agent_ref.host && host.reachable);
+                if host_reachable {
+                    self.open_fleet_host_focused(&agent_ref.host, Some(&agent_ref.agent));
+                }
                 self.state.select_remote_agent_row(agent_ref);
             }
         }
@@ -5871,7 +5876,6 @@ mod tests {
                 .agent,
             "blocked-one"
         );
-        assert_eq!(app.state.workspaces[1].active_tab_index(), 0);
         app.focus_next_blocked_window();
         assert_eq!(
             app.state
@@ -5881,7 +5885,6 @@ mod tests {
                 .agent,
             "blocked-two"
         );
-        assert_eq!(app.state.workspaces[1].active_tab_index(), 1);
     }
 
     #[test]
@@ -6017,8 +6020,6 @@ mod tests {
             app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
                 crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), remote),
             )];
-            app.state.sidebar_work_filter.machine_scope =
-                crate::app::state::SidebarMachineScope::ThisMachine;
             let reaches_fleet = |state: &AppState| {
                 blocked_pane_cycle(state).iter().any(|(target, _)| {
                     matches!(target, BlockedPaneTarget::Remote(found) if *found == agent_ref)
@@ -7260,7 +7261,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_picker_cycles_attach_remote_agents_through_the_click_path() {
+    fn agent_picker_opens_remote_agents_on_this_client() {
         for action in [NavigateAction::NextAgent, NavigateAction::PreviousAgent] {
             let (mut app, agent_ref) = app_with_remote_agent();
             app.state.begin_workspace_picker_presentation();
@@ -7271,16 +7272,13 @@ mod tests {
                 app.state.sidebar_selected_remote_agent,
                 Some(agent_ref.clone())
             );
-            assert_eq!(
-                app.state.toast.as_ref().map(|toast| toast.title.as_str()),
-                Some("host launch failed"),
-                "remote navigation must use the same host activation path as a click"
-            );
+            assert_eq!(app.remote_focus_operations.len(), 1);
+            assert!(app.state.toast.is_none());
         }
     }
 
     #[test]
-    fn pane_cycle_attaches_remote_agent_at_local_cycle_boundary() {
+    fn pane_cycle_opens_remote_agent_on_this_client_at_local_boundary() {
         for action in [
             NavigateAction::CyclePaneNext,
             NavigateAction::CyclePanePrevious,
@@ -7293,11 +7291,8 @@ mod tests {
                 app.state.sidebar_selected_remote_agent,
                 Some(agent_ref.clone())
             );
-            assert_eq!(
-                app.state.toast.as_ref().map(|toast| toast.title.as_str()),
-                Some("host launch failed"),
-                "pane cycling must use the same host activation path as a click"
-            );
+            assert_eq!(app.remote_focus_operations.len(), 1);
+            assert!(app.state.toast.is_none());
         }
     }
 
