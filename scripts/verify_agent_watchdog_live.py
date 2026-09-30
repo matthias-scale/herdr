@@ -599,14 +599,14 @@ def setup_gate_inline_reply(h: Harness, ident: str) -> str:
               "────────────────────────\n› Ask Codex to do anything\n"
               "────────────────────────\n0 shells")
     return h.workspace(ident, _script(screen),
-                       ("Reply 1a / 1b. Silence holds.", "waiting at the /hcode review gate."))
+                       ("0 shells",))
 
 
 def setup_gate_now_waiting_review(h: Harness, ident: str) -> str:
     screen = ("Now: waiting at the /hcode review gate.\n"
               "────────────────────────\n› Ask Codex to do anything\n"
               "────────────────────────\n0 shells")
-    return h.workspace(ident, _script(screen), ("Now: waiting at the /hcode review gate.",))
+    return h.workspace(ident, _script(screen), ("0 shells",))
 
 
 def setup_promised_background(h: Harness, ident: str) -> str:
@@ -922,7 +922,8 @@ def main() -> int:
                 status = "idle" if (ident == "a-finished-idle"
                                      or ident == "stale_draft_promised_work_stalled"
                                      or (ident.startswith("promised_")
-                                         and not ident.startswith("promised_stale_working_"))) else (
+                                         and not ident.startswith("promised_stale_working_")
+                                         and not ident.startswith("promised_background_"))) else (
                     "blocked" if ident == "a-approval-hook" else "working")
                 report: dict[str, Any] = {"pane_id": pane_id, "source": status_source,
                     "agent": "codex", "state": status}
@@ -1036,6 +1037,15 @@ def main() -> int:
                     evidence = f"{evidence}; decision={decision}"
             elif ident == "promised_stale_working_active_tool_not_nudged":
                 case_match = (actual == expected and decision.get("action") is None)
+            elif ident in ("gate_inline_reply_not_nudged",
+                           "gate_now_waiting_review_not_nudged",
+                           "promised_background_shell_past_deadline_not_nudged",
+                           "promised_background_agent_past_deadline_not_nudged"):
+                case_match = (actual == expected
+                              and (decision.get("action") is None
+                                   or decision.get("delivered") is False))
+                if not case_match:
+                    evidence = f"{evidence}; decision={decision}"
             elif ident == "promised_quiet_repeats_then_blocked":
                 case_match = (actual == expected and decision.get("action") is None
                               and "did not resume after 3 nudges" in str(decision.get("evidence")))

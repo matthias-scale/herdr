@@ -1869,25 +1869,21 @@ mod tests {
         ] {
             let tail = claude_pane(line, "", "0 shells");
             let observation = pane_v3(AgentStatus::Working, &tail);
-            let decision = classify_pane_v3(
-                &observation,
-                &mut PaneV3Memory::default(),
-                1000,
-                v3opt(),
+            let decision =
+                classify_pane_v3(&observation, &mut PaneV3Memory::default(), 1000, v3opt());
+            assert_eq!(
+                decision.class,
+                PaneClass::WaitingHuman,
+                "{line}: {decision:?}"
             );
-            assert_eq!(decision.class, PaneClass::WaitingHuman, "{line}: {decision:?}");
         }
 
         for line in ["Now: waiting on CI", "Now: waiting for the build"] {
             let tail = claude_pane(line, "", "0 shells");
             let observation = pane_v3(AgentStatus::Working, &tail);
             assert!(evidence::promised_work(&tail).is_some(), "{line}");
-            let decision = classify_pane_v3(
-                &observation,
-                &mut PaneV3Memory::default(),
-                1000,
-                v3opt(),
-            );
+            let decision =
+                classify_pane_v3(&observation, &mut PaneV3Memory::default(), 1000, v3opt());
             assert_eq!(decision.class, PaneClass::Working, "{line}: {decision:?}");
         }
     }
@@ -2047,7 +2043,7 @@ mod tests {
             let active = claude_pane("Now: wait — CI on #463", "", "2 shells");
             let mut observation = pane_v3(AgentStatus::Working, &active);
             observation.process_group = Some(evidence::parse_ps_rows(
-                "100 1 100 S 00:05 0:00.01 claude\\n102 100 100 R 00:40 0:00.52 cargo test",
+                "100 1 100 S 00:05 0:00.01 claude\n102 100 100 R 00:40 0:00.52 cargo test",
             ));
             let mut memory = old_pane_memory(&observation, now - v3opt().op_deadline_secs);
             let decision = classify_pane_v3(&observation, &mut memory, now, v3opt());

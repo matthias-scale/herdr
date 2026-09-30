@@ -107,7 +107,10 @@ pub(crate) fn composer_is_empty(text: &str) -> bool {
     composer_index(&lines)
         .and_then(|i| COMPOSER_PROMPT.captures(lines[i]))
         .and_then(|c| c.get(1))
-        .is_some_and(|s| s.as_str().trim().is_empty())
+        .is_some_and(|s| {
+            let contents = s.as_str().trim();
+            contents.is_empty() || contents.eq_ignore_ascii_case("Ask Codex to do anything")
+        })
 }
 
 pub(crate) fn composer_text(text: &str) -> Option<String> {
@@ -116,7 +119,7 @@ pub(crate) fn composer_text(text: &str) -> Option<String> {
         .and_then(|i| COMPOSER_PROMPT.captures(lines[i]))
         .and_then(|c| c.get(1))
         .map(|s| s.as_str().trim().to_owned())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("Ask Codex to do anything"))
 }
 
 pub(crate) fn promised_work(text: &str) -> Option<String> {
@@ -774,7 +777,10 @@ mod tests {
             let block = format!(
                 "**Needs you (1)**\n1. **Approve** — review this change\n{line}\nNow: waiting at the /hcode review gate.\nMore status from later turns"
             );
-            assert!(closing_block_waiting(&claude_screen(&block, "", "0 shells")), "{line}");
+            assert!(
+                closing_block_waiting(&claude_screen(&block, "", "0 shells")),
+                "{line}"
+            );
         }
 
         let old_gate = "**Needs you (1)**\n1. Approve release\nReply a / b. Silence holds.";
@@ -783,6 +789,17 @@ mod tests {
             "",
             "0 shells"
         )));
+    }
+
+    #[test]
+    fn codex_composer_placeholder_is_empty_input() {
+        let screen = claude_screen(
+            "Now: waiting at the /hcode review gate.",
+            "Ask Codex to do anything",
+            "0 shells",
+        );
+        assert!(composer_is_empty(&screen));
+        assert!(composer_text(&screen).is_none());
     }
 
     #[test]
