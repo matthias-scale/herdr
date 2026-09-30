@@ -817,7 +817,8 @@ pub(crate) fn pane_v3_observation_is_current(
     observed.observed_terminal_id == current.terminal_id
         && observed.observed_agent_session == current.agent_session
         && observed.old_state == current.status
-        && observed.observed_hash == evidence::semantic_hash(&current.tail)
+        && observed.observed_currency_hash
+            == evidence::stable_hash(&evidence::currency_text(&current.tail))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -845,12 +846,18 @@ pub(crate) struct PaneV3Decision {
     pub quiet_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nudge_count: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_diff: Option<String>,
     #[serde(skip)]
     pub observed_terminal_id: Option<String>,
     #[serde(skip)]
     pub observed_agent_session: Option<String>,
     #[serde(skip)]
     pub observed_hash: u64,
+    #[serde(skip)]
+    pub observed_currency_hash: u64,
+    #[serde(skip)]
+    pub observed_tail: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1158,9 +1165,12 @@ pub(crate) fn classify_pane_v3(
         expected_to_continue: None,
         quiet_secs: None,
         nudge_count: None,
+        delivery_diff: None,
         observed_terminal_id: o.terminal_id.clone(),
         observed_agent_session: o.agent_session.clone(),
         observed_hash: hash,
+        observed_currency_hash: evidence::stable_hash(&evidence::currency_text(&o.tail)),
+        observed_tail: o.tail.clone(),
     }
 }
 
@@ -1179,6 +1189,8 @@ pub(crate) fn confirm_pane_v3(
         );
         return decision;
     }
+    decision.observed_currency_hash = evidence::stable_hash(&evidence::currency_text(&second.tail));
+    decision.observed_tail = second.tail.clone();
     let hash = evidence::semantic_hash(&second.tail);
     if hash != decision.observed_hash {
         decision.class = PaneClass::Working;
@@ -2406,8 +2418,44 @@ mod tests {
         let mut changed = original.clone();
         changed.status = AgentStatus::Blocked;
         assert!(!pane_v3_observation_is_current(&decision, &changed));
-        let mut changed = original;
+        let mut changed = original.clone();
         changed.tail.push_str("\nFresh output");
+        assert!(!pane_v3_observation_is_current(&decision, &changed));
+    }
+
+    #[test]
+    fn pane_v3_currency_ignores_only_agent_footer_churn() {
+        let screen = |transcript: &str, composer: &str, footer: &str| {
+            format!("{transcript}\n❯ {composer}\n────────────\n{footer}")
+        };
+        let original = pane_v3(
+            AgentStatus::Idle,
+            &screen("Now: finish the report", "", "45m ago │ 🖥43.27 ↻1d18h"),
+        );
+        let decision = classify_pane_v3(&original, &mut PaneV3Memory::default(), 100, v3opt());
+
+        let mut changed = original.clone();
+        changed.tail = screen("Now: finish the report", "", "46m ago │ 🖥42.91 ↻1d19h");
+        assert!(pane_v3_observation_is_current(&decision, &changed));
+
+        let mut changed = original.clone();
+        changed.tail = screen("Now: publish the report", "", "45m ago │ 🖥43.27 ↻1d18h");
+        assert!(!pane_v3_observation_is_current(&decision, &changed));
+
+        let mut changed = original.clone();
+        changed.tail = screen(
+            "Now: finish the report",
+            "send this instead",
+            "45m ago │ 🖥43.27 ↻1d18h",
+        );
+        assert!(!pane_v3_observation_is_current(&decision, &changed));
+
+        let mut changed = original;
+        changed.tail = screen(
+            "Now: finish the report",
+            "",
+            "46m ago │ 🖥42.91 ↻1d19h · 1 agent",
+        );
         assert!(!pane_v3_observation_is_current(&decision, &changed));
     }
 }

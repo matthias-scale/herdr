@@ -107,14 +107,108 @@ fn divider(line: &str) -> bool {
 }
 
 fn composer_index(lines: &[&str]) -> Option<usize> {
-    (1..lines.len().saturating_sub(1)).rev().find(|&i| {
-        divider(lines[i - 1]) && COMPOSER_PROMPT.is_match(lines[i]) && divider(lines[i + 1])
-    })
+    (1..lines.len().saturating_sub(1))
+        .rev()
+        .find(|&i| {
+            divider(lines[i - 1]) && COMPOSER_PROMPT.is_match(lines[i]) && divider(lines[i + 1])
+        })
+        .or_else(|| {
+            (0..lines.len().saturating_sub(1))
+                .rev()
+                .find(|&i| COMPOSER_PROMPT.is_match(lines[i]) && divider(lines[i + 1]))
+        })
+}
+
+fn composer_footer_start(lines: &[&str]) -> Option<usize> {
+    (0..lines.len().saturating_sub(1))
+        .rev()
+        .find(|&i| COMPOSER_PROMPT.is_match(lines[i]) && divider(lines[i + 1]))
+}
+
+/// Preserve transcript and composer text while normalizing only volatile
+/// fields below the composer divider. Keep nonvolatile footer signals such as
+/// background-agent counts in the currency check.
+pub(crate) fn currency_text(text: &str) -> String {
+    let lines = text.lines().collect::<Vec<_>>();
+    let Some(index) = composer_footer_start(&lines) else {
+        return text.to_owned();
+    };
+    let mut currency = lines[..=index]
+        .iter()
+        .map(|line| (*line).to_owned())
+        .collect::<Vec<_>>();
+    currency.extend(
+        lines[index + 2..]
+            .iter()
+            .map(|line| normalize_footer_line(line)),
+    );
+    currency.join("\n")
+}
+
+fn normalize_footer_line(line: &str) -> String {
+    let stable: String = line
+        .chars()
+        .filter(|ch| !matches!(*ch, '⏵' | '░' | '▒'))
+        .collect();
+    normalize_line(&stable)
+}
+
+pub(crate) fn short_diff(before: &str, after: &str) -> String {
+    fn short(line: Option<&&str>) -> String {
+        let Some(line) = line else {
+            return "<none>".into();
+        };
+        let compact = line.trim();
+        let clipped = compact.chars().take(96).collect::<String>();
+        if compact.chars().count() > 96 {
+            format!("{clipped}…")
+        } else if clipped.is_empty() {
+            "<blank>".into()
+        } else {
+            clipped
+        }
+    }
+
+    let before_lines = before.lines().collect::<Vec<_>>();
+    let after_lines = after.lines().collect::<Vec<_>>();
+    let changed = (0..before_lines.len().max(after_lines.len()))
+        .find(|&i| before_lines.get(i) != after_lines.get(i));
+    let Some(index) = changed else {
+        return "no visible text change".into();
+    };
+    let composer = |line: Option<&&str>| {
+        line.and_then(|line| COMPOSER_PROMPT.captures(line))
+            .map(|captures| captures[1].trim().to_owned())
+    };
+    if let (Some(old), Some(new)) = (
+        composer(before_lines.get(index)),
+        composer(after_lines.get(index)),
+    ) {
+        let old_state = if old.is_empty() { "empty" } else { "nonempty" };
+        let new_state = if new.is_empty() { "empty" } else { "nonempty" };
+        return format!("line {}: composer {old_state} → {new_state}", index + 1);
+    }
+    format!(
+        "line {}: -{} +{}",
+        index + 1,
+        short(before_lines.get(index)),
+        short(after_lines.get(index))
+    )
 }
 
 pub(crate) fn reply_text(text: &str) -> String {
     let lines = text.lines().collect::<Vec<_>>();
-    composer_index(&lines).map_or_else(|| text.to_owned(), |i| lines[..i - 1].join("\n"))
+    composer_index(&lines).map_or_else(
+        || text.to_owned(),
+        |i| {
+            let end = if i > 0 && divider(lines[i - 1]) {
+                i - 1
+            } else {
+                i
+            };
+            lines[..end].join("\n")
+        },
+    )
 }
 
 pub(crate) fn composer_is_empty(text: &str) -> bool {
@@ -379,7 +473,17 @@ pub(crate) fn normalize_line(line: &str) -> String {
 }
 pub(crate) fn semantic_lines(text: &str) -> Vec<String> {
     let lines = text.lines().collect::<Vec<_>>();
-    let content = composer_index(&lines).map_or(text.to_owned(), |i| lines[..i - 1].join("\n"));
+    let content = composer_footer_start(&lines).map_or_else(
+        || text.to_owned(),
+        |i| {
+            let end = if i > 0 && divider(lines[i - 1]) {
+                i - 1
+            } else {
+                i
+            };
+            lines[..end].join("\n")
+        },
+    );
     let v: Vec<_> = content
         .lines()
         .map(normalize_line)
@@ -746,6 +850,53 @@ mod tests {
             "3m ago │ 🖥8.1 │ 141.2k ↻5d09h@20:00 │ 6h:91%",
         );
         assert_eq!(semantic_hash(&a), semantic_hash(&b));
+    }
+
+    #[test]
+    fn currency_text_keeps_transcript_and_composer_but_ignores_footer() {
+        let screen = |transcript: &str, composer: &str, footer: &str| {
+            format!("{transcript}\n❯ {composer}\n────────────\n{footer}")
+        };
+        let a = screen("completed analysis", "", "45m ago │ 🖥43.27 ↻1d18h");
+        let footer_changed = screen("completed analysis", "", "46m ago │ 🖥42.91 ↻1d19h");
+        let transcript_changed = screen("different analysis", "", "45m ago │ 🖥43.27 ↻1d18h");
+        let composer_changed = screen(
+            "completed analysis",
+            "submitted text",
+            "45m ago │ 🖥43.27 ↻1d18h",
+        );
+        let background_count_changed = screen(
+            "completed analysis",
+            "",
+            "46m ago │ 🖥42.91 ↻1d19h · 1 agent",
+        );
+        let spinner_changed = screen(
+            "completed analysis",
+            "",
+            "░░░ 85% │ 45m ago │ 🖥43.27 │ 5h:83% ↻1d18h -- INSERT -- ⏵⏵ · 1 agent",
+        );
+        let spinner_changed_again = screen(
+            "completed analysis",
+            "",
+            "░░░░ 86% │ 46m ago │ 🖥42.91 │ 5h:82% ↻1d19h -- INSERT -- ⏵ · 1 agent",
+        );
+
+        assert_eq!(currency_text(&a), currency_text(&footer_changed));
+        assert_ne!(currency_text(&a), currency_text(&transcript_changed));
+        assert_ne!(currency_text(&a), currency_text(&composer_changed));
+        assert_eq!(semantic_hash(&a), semantic_hash(&footer_changed));
+        assert_ne!(
+            currency_text(&footer_changed),
+            currency_text(&background_count_changed)
+        );
+        assert_eq!(
+            currency_text(&spinner_changed),
+            currency_text(&spinner_changed_again)
+        );
+        assert_eq!(
+            short_diff(&a, &composer_changed),
+            "line 2: composer empty → nonempty"
+        );
     }
 
     #[test]

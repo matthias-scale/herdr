@@ -1396,19 +1396,14 @@ pub(crate) enum ConditionalInputResult {
     Failed,
 }
 
-fn input_observation_token(
-    generation: u64,
-    input_revision: u64,
-    content_sequence: u64,
-    content_revision: u64,
-    text: &str,
-) -> String {
+fn input_observation_token(generation: u64, input_revision: u64, text: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(generation.to_le_bytes());
     digest.update(input_revision.to_le_bytes());
-    digest.update(content_sequence.to_le_bytes());
-    digest.update(content_revision.to_le_bytes());
-    digest.update(text.as_bytes());
+    // The text snapshot still binds the transcript and composer exactly. Only
+    // volatile agent chrome below the composer divider is excluded so footer
+    // timers and spinners cannot invalidate a safe conditional send.
+    digest.update(crate::watchdog::evidence::currency_text(text).as_bytes());
     digest
         .finalize()
         .iter()
@@ -4185,16 +4180,9 @@ impl PaneRuntime {
         }
         self.terminal
             .with_detection_text(|text| {
-                let content_revision = self.content_revision();
                 let after = self.content_seq();
                 (before == after).then(|| InputObservation {
-                    token: input_observation_token(
-                        admission.generation,
-                        admission.revision,
-                        after,
-                        content_revision,
-                        text,
-                    ),
+                    token: input_observation_token(admission.generation, admission.revision, text),
                     text: text.to_string(),
                 })
             })
@@ -4225,16 +4213,10 @@ impl PaneRuntime {
         }
         self.terminal
             .with_detection_text(|text| {
-                let content_revision = self.content_revision();
                 let after = self.content_seq();
                 if before != after
-                    || input_observation_token(
-                        admission.generation,
-                        admission.revision,
-                        after,
-                        content_revision,
-                        text,
-                    ) != observation_token
+                    || input_observation_token(admission.generation, admission.revision, text)
+                        != observation_token
                 {
                     return ConditionalInputResult::ConditionMismatch;
                 }
@@ -5266,6 +5248,89 @@ mod tests {
         assert_eq!(
             runtime
                 .try_send_bytes_if_observation(&observation.token, Bytes::from_static(b"replay")),
+            ConditionalInputResult::ConditionMismatch
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn conditional_input_token_ignores_only_volatile_agent_footer() {
+        let screen = |transcript: &str, composer: &str, footer: &str| {
+            format!("{transcript}\r\n❯ {composer}\r\n────────────\r\n{footer}")
+        };
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(100, 24);
+        runtime.test_process_pty_bytes(
+            format!(
+                "\x1b[2J\x1b[H{}",
+                screen("report complete", "", "45m ago │ 🖥1.2")
+            )
+            .as_bytes(),
+        );
+        let footer_token = runtime
+            .input_observation()
+            .expect("coherent input observation");
+        runtime.test_process_pty_bytes(
+            format!(
+                "\x1b[2J\x1b[H{}",
+                screen("report complete", "", "46m ago │ 🖥1.3")
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            runtime
+                .try_send_bytes_if_observation(&footer_token.token, Bytes::from_static(b"nudge")),
+            ConditionalInputResult::Sent
+        );
+        assert_eq!(rx.recv().await, Some(Bytes::from_static(b"nudge")));
+
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(100, 24);
+        runtime.test_process_pty_bytes(
+            format!(
+                "\x1b[2J\x1b[H{}",
+                screen("report complete", "", "45m ago │ 🖥1.2")
+            )
+            .as_bytes(),
+        );
+        let transcript_token = runtime
+            .input_observation()
+            .expect("coherent input observation");
+        runtime.test_process_pty_bytes(
+            format!(
+                "\x1b[2J\x1b[H{}",
+                screen("report changed", "", "45m ago │ 🖥1.2")
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            runtime.try_send_bytes_if_observation(
+                &transcript_token.token,
+                Bytes::from_static(b"nudge")
+            ),
+            ConditionalInputResult::ConditionMismatch
+        );
+        assert!(rx.try_recv().is_err());
+
+        let (runtime, mut rx) = PaneRuntime::test_with_channel(100, 24);
+        runtime.test_process_pty_bytes(
+            format!(
+                "\x1b[2J\x1b[H{}",
+                screen("report complete", "", "45m ago │ 🖥1.2")
+            )
+            .as_bytes(),
+        );
+        let composer_token = runtime
+            .input_observation()
+            .expect("coherent input observation");
+        runtime.test_process_pty_bytes(
+            format!(
+                "\x1b[2J\x1b[H{}",
+                screen("report complete", "typed text", "45m ago │ 🖥1.2")
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            runtime
+                .try_send_bytes_if_observation(&composer_token.token, Bytes::from_static(b"nudge")),
             ConditionalInputResult::ConditionMismatch
         );
         assert!(rx.try_recv().is_err());

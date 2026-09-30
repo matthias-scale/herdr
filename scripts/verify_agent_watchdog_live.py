@@ -785,6 +785,129 @@ def setup_worker(h: Harness, ident: str) -> dict[str, str]:
     return {"runs": str(h.root / "runs")}
 
 
+def _real_claude_footer(text: str) -> str:
+    lines = text.splitlines()
+    for index, line in enumerate(lines[:-1]):
+        if line.lstrip().startswith(("❯", "›", ">")) and lines[index + 1].strip() \
+                and set(lines[index + 1].strip()) == {"─"}:
+            return "\n".join(lines[index + 2:]).strip()
+    return ""
+
+
+def _short_screen_diff(before: str, after: str) -> str:
+    old_lines, new_lines = before.splitlines(), after.splitlines()
+    for index in range(max(len(old_lines), len(new_lines))):
+        old = old_lines[index] if index < len(old_lines) else "<none>"
+        new = new_lines[index] if index < len(new_lines) else "<none>"
+        if old != new:
+            return f"line {index + 1}: -{old[:96]} +{new[:96]}"
+    return "no visible text change"
+
+
+def setup_real_claude_footer(h: Harness, ident: str) -> dict[str, Any]:
+    claude = shutil.which("claude")
+    if not claude:
+        return {"skipped": "claude binary is unavailable on this host"}
+    auth = subprocess.run([claude, "auth", "status"], env=h.env, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          timeout=15, check=False)
+    try:
+        auth_status = json.loads(auth.stdout)
+    except json.JSONDecodeError:
+        auth_status = {}
+    if auth.returncode or not auth_status.get("loggedIn"):
+        return {"skipped": "Claude Code subscription auth is unavailable"}
+
+    readme = h.root / "README.md"
+    readme.write_text("# Isolated watchdog live proof\n\nRead-only fixture.\n", encoding="utf-8")
+    workspace = h.cli("workspace", "create", "--cwd", str(h.root), "--label", ident)
+    pane_id = _find_value(_last_json(workspace.stdout), "pane_id")
+    if not pane_id:
+        raise RuntimeError(f"workspace create omitted pane_id: {workspace.stdout[-500:]}")
+    pane_id = str(pane_id)
+    h.panes[ident] = pane_id
+    env = dict(h.env)
+    env["HERDR_INTERACTIVE"] = "1"
+    started = subprocess.run(
+        [str(h.args.binary), "agent", "start", "watchdog-live-claude", "--kind", "claude",
+         "--pane", pane_id, "--", "--safe-mode", "--permission-mode", "default",
+         "--allowedTools", "Read"],
+        cwd=h.root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=60, check=False,
+    )
+    if started.returncode:
+        raise RuntimeError(f"real Claude Code did not start: {started.stderr[-500:]}")
+    startup = (h.call("pane.read", {"pane_id": pane_id, "source": "detection",
+                "lines": 40, "format": "text"}).get("read") or {}).get("text", "")
+    if any(marker in startup.lower() for marker in ("select login method", "run /login")):
+        return {"skipped": "Claude pane opened at its login screen; host auth is not usable in this isolated PTY"}
+
+    prompt = ("Read README.md only; do not edit. Reply with Needs you: nothing. "
+              "Now: check Cargo.toml next. Do not open Cargo.toml.")
+    submitted = subprocess.run(
+        [str(h.args.binary), "agent", "prompt", pane_id, prompt,
+         "--wait", "--until", "idle", "--timeout", "180000"],
+        cwd=h.root, env=h.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=190, check=False,
+    )
+    if submitted.returncode:
+        failed = (h.call("pane.read", {"pane_id": pane_id, "source": "detection",
+                  "lines": 40, "format": "text"}).get("read") or {}).get("text", "")
+        if any(marker in failed.lower() for marker in (
+                "claude.ai login was rejected", "select login method", "run /login")):
+            return {"skipped": "Claude pane opened at its login screen; host auth is not usable in this isolated PTY"}
+        tail = " | ".join(line.strip()[:120] for line in failed.splitlines()[-8:] if line.strip())
+        raise RuntimeError(f"real Claude Code did not return to idle: {submitted.stderr[-300:]}; tail={tail}")
+
+    first = (h.call("pane.read", {"pane_id": pane_id, "source": "detection",
+              "lines": 40, "format": "text"}).get("read") or {}).get("text", "")
+    if "Now:** check Cargo.toml next." not in first:
+        tail = "\n".join(first.splitlines()[-10:])
+        raise RuntimeError(f"Claude Code did not leave promised work in its pane; tail={tail!r}")
+    footer_before = _real_claude_footer(first)
+    if not footer_before:
+        raise RuntimeError("Claude Code pane did not expose a footer below the composer divider")
+    deadline = time.monotonic() + 120
+    footer_changed = False
+    footer_after = footer_before
+    while time.monotonic() < deadline:
+        time.sleep(2)
+        current = (h.call("pane.read", {"pane_id": pane_id, "source": "detection",
+                  "lines": 40, "format": "text"}).get("read") or {}).get("text", "")
+        footer_now = _real_claude_footer(current)
+        if footer_now and footer_now != footer_before:
+            footer_changed = True
+            footer_after = footer_now
+            break
+    if not footer_changed:
+        raise RuntimeError("real Claude Code footer did not change during the 120s observation window")
+
+    state = h.root / f"pane-{ident}.json"
+    log = h.root / f"pane-{ident}.jsonl"
+    options = ["--no-model", "--stall-secs", "600", "--quiet-secs", "2",
+               "--confirm-secs", str(h.args.confirm_secs), "--state-file", str(state),
+               "--status-log", str(log)]
+    h.run_watchdog("A", options, dry=True)
+    h.age_memory(state, pane_id, 1800)
+    payload = h.run_watchdog("A", options, dry=False)
+    decision = next((row for row in payload.get("decisions", [])
+                     if row.get("pane_id") == pane_id), {})
+    action_text = str(decision.get("action_text", ""))
+    visible = (h.call("pane.read", {"pane_id": pane_id, "source": "detection",
+               "lines": 40, "format": "text"}).get("read") or {}).get("text", "")
+    delivered_prompt_visible = bool(action_text and action_text in visible)
+    match = (decision.get("action") == "nudge" and decision.get("delivered") is True
+             and decision.get("status") == "nudged" and delivered_prompt_visible)
+    return {"actual": "delivered" if match else "undelivered",
+            "match": match,
+            "evidence": (f"Claude Code {auth_status.get('version', 'version unknown')}; "
+                         f"footer_changed=true; delivered={decision.get('delivered')}; "
+                         f"footer_diff={_short_screen_diff(footer_before, footer_after)}; "
+                         f"submitted_prompt_visible={delivered_prompt_visible}; "
+                         f"reason={decision.get('reason')}; diff={decision.get('delivery_diff')}"),
+            "decision": decision}
+
+
 # Each row is deliberately self-contained: id, watchdog family, fixture setup,
 # expected class. B and P records are created by their setup functions above.
 CASES: list[tuple[str, str, Callable[[Harness, str], Any], str]] = [
@@ -837,6 +960,7 @@ CASES: list[tuple[str, str, Callable[[Harness, str], Any], str]] = [
     ("p-missing-local", "P", setup_worker, "orphaned"),
     ("p-cross-host", "P", setup_worker, "present"),
     ("p-unreachable", "P", setup_worker, "parent_unknown"),
+    ("real_claude_footer_changes_delivered", "R", setup_real_claude_footer, "delivered"),
 ]
 
 
@@ -939,6 +1063,20 @@ def main() -> int:
                              "actual": "setup_error", "setup_error": str(exc),
                              "model_calls": 0, "match": False, "evidence": str(exc),
                              "wall_time_ms": None, "model_latency_ms": None})
+                continue
+            if family == "R":
+                if result.get("skipped"):
+                    rows.append({"id": ident, "watchdog": family, "expected": expected,
+                                 "actual": "skipped", "skipped": result["skipped"],
+                                 "model_calls": 0, "match": True,
+                                 "evidence": result["skipped"], "wall_time_ms": None,
+                                 "model_latency_ms": None})
+                else:
+                    rows.append({"id": ident, "watchdog": family, "expected": expected,
+                                 "actual": result["actual"], "match": result["match"],
+                                 "model_calls": 0, "evidence": result["evidence"],
+                                 "decision": result.get("decision"), "wall_time_ms": None,
+                                 "model_latency_ms": None})
                 continue
             if family == "A":
                 pane_id = harness.panes[ident]

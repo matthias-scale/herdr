@@ -1313,14 +1313,33 @@ fn wait_for_nudge_submission(pane_id: &str, nudge: &str) -> bool {
     false
 }
 
-fn deliver_nudge(d: &PaneV3Decision, text: &str) -> String {
+fn nudge_delivery_failure(
+    d: &mut PaneV3Decision,
+    reason: &str,
+    current_text: Option<&str>,
+) -> String {
+    d.delivery_diff = Some(current_text.map_or_else(
+        || format!("unavailable: {reason}"),
+        |current| watchdog::evidence::short_diff(&d.observed_tail, current),
+    ));
+    reason.to_owned()
+}
+
+fn deliver_nudge(d: &mut PaneV3Decision, text: &str) -> String {
+    let mut read = match read_detection_observation(&d.pane_id) {
+        Ok(r) => r,
+        Err(_) => return nudge_delivery_failure(d, "read_failed", None),
+    };
+    if read.observation.is_none() {
+        thread::sleep(Duration::from_millis(100));
+        read = match read_detection_observation(&d.pane_id) {
+            Ok(r) => r,
+            Err(_) => return nudge_delivery_failure(d, "read_failed", Some(&read.text)),
+        };
+    }
     let current = match current_pane(&d.pane_id) {
         Ok(p) => p,
-        Err(_) => return "pane_lookup_failed".into(),
-    };
-    let read = match read_detection_observation(&d.pane_id) {
-        Ok(r) => r,
-        Err(_) => return "read_failed".into(),
+        Err(_) => return nudge_delivery_failure(d, "pane_lookup_failed", Some(&read.text)),
     };
     let observed = PaneV3Observation {
         pane_id: d.pane_id.clone(),
@@ -1337,16 +1356,16 @@ fn deliver_nudge(d: &PaneV3Decision, text: &str) -> String {
         read_error: None,
     };
     let Some(observation) = read.observation else {
-        return "no_observation".into();
+        return nudge_delivery_failure(d, "no_observation", Some(&read.text));
     };
     let Some(agent_ref) = read.agent_ref else {
-        return "no_agent_ref".into();
+        return nudge_delivery_failure(d, "no_agent_ref", Some(&read.text));
     };
     let Some(agent_session) = read.agent_session else {
-        return "no_agent_session".into();
+        return nudge_delivery_failure(d, "no_agent_session", Some(&read.text));
     };
     if !watchdog::pane_v3_observation_is_current(d, &observed) {
-        return "observation_changed".into();
+        return nudge_delivery_failure(d, "observation_changed", Some(&read.text));
     }
     let params = PaneSendTextIfParams {
         pane_id: d.pane_id.clone(),
@@ -1363,16 +1382,16 @@ fn deliver_nudge(d: &PaneV3Decision, text: &str) -> String {
         method: Method::PaneSendTextIf(params),
     }) {
         Ok(r) => r,
-        Err(_) => return "send_failed".into(),
+        Err(_) => return nudge_delivery_failure(d, "send_failed", Some(&read.text)),
     };
     let outcome = response["result"]["outcome"].as_str().unwrap_or("unknown");
     if outcome != "sent" {
-        return format!("send_outcome:{outcome}");
+        return nudge_delivery_failure(d, &format!("send_outcome:{outcome}"), Some(&read.text));
     }
     if wait_for_nudge_submission(&d.pane_id, d.action_text.as_deref().unwrap_or_default()) {
         "sent".into()
     } else {
-        "nudge left in composer".into()
+        nudge_delivery_failure(d, "nudge left in composer", Some(&read.text))
     }
 }
 
@@ -1499,6 +1518,7 @@ fn append_nudge_event(path: &Path, decision: &PaneV3Decision) -> io::Result<()> 
             "pane_id": decision.pane_id, "action": decision.action,
             "text": decision.action_text, "delivered": decision.delivered,
             "reason": decision.reason,
+            "diff": decision.delivery_diff,
             "evidence": decision.evidence,
         }),
     )
@@ -2172,9 +2192,12 @@ mod tests {
             expected_to_continue: None,
             quiet_secs: None,
             nudge_count: None,
+            delivery_diff: None,
             observed_terminal_id: None,
             observed_agent_session: None,
             observed_hash: 0,
+            observed_currency_hash: 0,
+            observed_tail: String::new(),
         };
         mark_dry_run_decision(&mut decision, true);
         assert_eq!(decision.status, "would_correct");
