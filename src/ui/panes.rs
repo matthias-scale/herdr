@@ -5,6 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
 #[cfg(test)]
@@ -464,20 +465,11 @@ fn render_settled_view(
                 ),
                 Style::default().fg(Color::DarkGray),
             )));
-            for (speaker, body) in &transcript.turns {
-                if !view.search.is_empty()
-                    && !body.to_lowercase().contains(&view.search.to_lowercase())
-                    && !speaker.to_lowercase().contains(&view.search.to_lowercase())
-                {
-                    continue;
-                }
-                lines.push(Line::from(Span::styled(
-                    format!("{speaker} ›"),
-                    Style::default().fg(Color::Gray),
-                )));
-                lines.extend(body.lines().map(|line| Line::from(line.to_string())));
-                lines.push(Line::from(""));
-            }
+            lines.extend(transcript_lines(
+                &transcript.turns,
+                &view.search,
+                area.width,
+            ));
         } else {
             lines.push(Line::from(Span::styled(
                 "Transcript unavailable · Enter resumes the session",
@@ -510,6 +502,72 @@ fn render_settled_view(
             Paragraph::new(command).style(Style::default().bg(Color::Rgb(25, 28, 35))),
             Rect::new(area.x, area.y + area.height - 1, area.width, 1),
         );
+    }
+}
+
+fn transcript_lines(turns: &[(String, String)], search: &str, width: u16) -> Vec<Line<'static>> {
+    let needle = search.to_lowercase();
+    let mut lines = Vec::new();
+    for (speaker, body) in turns {
+        if !needle.is_empty()
+            && !body.to_lowercase().contains(&needle)
+            && !speaker.to_lowercase().contains(&needle)
+        {
+            continue;
+        }
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        let user = speaker == "you";
+        let marker = if user { "› " } else { "● " };
+        let mut first = true;
+        for physical in body.split('\n') {
+            for_each_wrapped_line(physical, width.saturating_sub(2) as usize, |fragment| {
+                let prefix = if first { marker } else { "  " };
+                first = false;
+                let mut row = format!("{prefix}{fragment}");
+                if user {
+                    let padding = width.saturating_sub(2 + fragment.width() as u16) as usize;
+                    row.extend(std::iter::repeat_n(' ', padding));
+                    lines.push(
+                        Line::from(row).style(Style::default().bg(Color::Rgb(237, 237, 237))),
+                    );
+                } else {
+                    lines.push(Line::from(row));
+                }
+            });
+        }
+    }
+    lines
+}
+
+fn for_each_wrapped_line(mut text: &str, width: usize, mut emit: impl FnMut(&str)) {
+    if text.is_empty() {
+        emit("");
+        return;
+    }
+    while !text.is_empty() {
+        let mut used = 0;
+        let mut end = 0;
+        let mut last_space = None;
+        for (index, ch) in text.char_indices() {
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + char_width > width && end > 0 {
+                break;
+            }
+            used += char_width;
+            end = index + ch.len_utf8();
+            if ch == ' ' && index > 0 {
+                last_space = Some(index);
+            }
+        }
+        if end == text.len() {
+            emit(text);
+            break;
+        }
+        let split = last_space.unwrap_or(end);
+        emit(&text[..split]);
+        text = text[split..].trim_start_matches(' ');
     }
 }
 
@@ -1171,6 +1229,61 @@ mod tests {
         );
         assert_eq!(settled_title(None, Some("derived".into())), "derived");
         assert_eq!(settled_title(Some("  "), None), "Settled session");
+    }
+
+    #[test]
+    fn settled_transcript_wraps_with_conversation_markers_and_turn_spacing() {
+        let turns = vec![
+            ("you".into(), "Explain the billing API migration.".into()),
+            (
+                "claude".into(),
+                "A billing API migration needs versioned requests and a clear transition plan.\nKeep old clients working.".into(),
+            ),
+        ];
+        let lines = transcript_lines(&turns, "", 60);
+        let rows: Vec<_> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            rows.iter().map(|row| row.trim_end()).collect::<Vec<_>>(),
+            [
+                "› Explain the billing API migration.",
+                "",
+                "● A billing API migration needs versioned requests and a",
+                "  clear transition plan.",
+                "  Keep old clients working.",
+            ]
+        );
+        assert_eq!(UnicodeWidthStr::width(rows[0].as_str()), 60);
+        assert_eq!(lines[0].style.bg, Some(Color::Rgb(237, 237, 237)));
+        assert!(lines[2].style.bg.is_none());
+        for (index, row) in rows.iter().enumerate() {
+            println!("{index}: {row}");
+        }
+    }
+
+    #[test]
+    fn settled_transcript_filters_turns_and_preserves_body_blank_lines() {
+        let turns = vec![
+            ("you".into(), "First".into()),
+            ("codex".into(), "Alpha\n\nBeta".into()),
+            ("claude".into(), "Hidden".into()),
+        ];
+        let lines = transcript_lines(&turns, "CoDeX", 20);
+        assert_eq!(
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["● Alpha", "  ", "  Beta"]
+        );
+        assert_eq!(transcript_lines(&turns, "absent", 20).len(), 0);
+    }
+
+    #[test]
+    fn settled_transcript_wraps_wide_characters_by_display_width() {
+        let turns = vec![("you".into(), "你好世界好".into())];
+        let lines = transcript_lines(&turns, "", 8);
+        let rows: Vec<_> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(rows, ["› 你好世", "  界好  "]);
+        assert!(rows
+            .iter()
+            .all(|row| UnicodeWidthStr::width(row.as_str()) == 8));
     }
 
     #[test]
