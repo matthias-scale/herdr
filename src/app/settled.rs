@@ -348,6 +348,7 @@ impl AppState {
             return false;
         };
         pane.activity.note(now);
+        pane.settle_resume_guard = false;
         let changed = pane.settled_at.take().is_some();
         self.mark_session_dirty();
         if changed {
@@ -712,6 +713,14 @@ impl App {
                                 terminal.set_manual_label(label.clone());
                                 terminal.settled_auto_label = Some(label);
                             }
+                        }
+                        if let Some(pane) = self
+                            .state
+                            .workspaces
+                            .get_mut(ws_idx)
+                            .and_then(|workspace| workspace.pane_state_mut(change.pane_id))
+                        {
+                            pane.settle_resume_guard = true;
                         }
                         if let Some(runtime) = self.terminal_runtimes.get_mut(&terminal_id) {
                             runtime.suspend_processes();
@@ -2438,6 +2447,35 @@ mod tests {
                 .expect("active agent transition");
 
             assert!(!state.pane_is_settled(0, pane_id), "{next_state:?}");
+        }
+    }
+
+    #[test]
+    fn resume_startup_transition_does_not_unsettle_suspended_pane() {
+        for next_state in [AgentState::Working, AgentState::Blocked] {
+            let (mut state, pane_id) = state_with_context(Default::default());
+            assert!(state.settle_pane_at(0, pane_id, 1_725_000_002));
+            state.workspaces[0]
+                .pane_state_mut(pane_id)
+                .unwrap()
+                .settle_resume_guard = true;
+
+            state
+                .update_terminal_state(pane_id, |terminal| {
+                    Some(terminal.set_detected_state_with_screen_signals_at(
+                        Some(crate::detect::Agent::Claude),
+                        next_state,
+                        next_state == AgentState::Blocked,
+                        false,
+                        next_state == AgentState::Working,
+                        false,
+                        false,
+                        Instant::now(),
+                    ))
+                })
+                .expect("active agent transition");
+
+            assert!(state.pane_is_settled(0, pane_id), "{next_state:?}");
         }
     }
 
