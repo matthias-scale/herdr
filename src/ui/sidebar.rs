@@ -31195,7 +31195,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn sidebar_header_bolds_only_the_current_machine() {
+    fn sidebar_header_omits_machine_scope_picker() {
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
         app.sidebar_header_plain = true;
@@ -31209,17 +31209,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("render header");
         let buffer = terminal.backend().buffer();
         let row = row_text(buffer, anchor.y, 60);
-        assert!(row.contains("Spaces ▾ · all (mbair) ▾"), "{row:?}");
-        let machine = find_symbol_x(buffer, anchor.y, 60, "m");
-        let close = find_symbol_x(buffer, anchor.y, 60, ")");
-        assert!(buffer[(machine, anchor.y)]
-            .style()
-            .add_modifier
-            .contains(Modifier::BOLD));
-        assert!(!buffer[(close, anchor.y)]
-            .style()
-            .add_modifier
-            .contains(Modifier::BOLD));
+        assert!(row.contains("Spaces ▾"), "{row:?}");
+        assert!(!row.contains("all") && !row.contains("mbair"), "{row:?}");
     }
 
     #[test]
