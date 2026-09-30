@@ -615,10 +615,13 @@ fn restore_tab(
             })
             .unwrap_or_default();
         let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
-        if imported_runtime
+        #[cfg(unix)]
+        let actor_closed = imported_runtime
             .as_ref()
-            .is_some_and(|imported| imported.master_fd.is_none())
-        {
+            .is_some_and(|imported| imported.master_fd.is_none());
+        #[cfg(not(unix))]
+        let actor_closed = false;
+        if actor_closed {
             let mut terminal = unavailable_restored_terminal(
                 saved_pane,
                 cwd,
