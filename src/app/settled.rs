@@ -446,7 +446,8 @@ impl AppState {
             self.mark_session_dirty();
         }
         // Detection snapshots can change because settling stopped the agent and
-        // its resume stub repainted the pane. Only human input should unsettle it.
+        // its resume stub repainted the pane. Only input or an agent state
+        // transition should unsettle it.
         false
     }
 
@@ -1596,7 +1597,7 @@ mod tests {
     }
 
     #[test]
-    fn linked_done_ticket_settles_and_agent_state_change_preserves_settlement() {
+    fn linked_done_ticket_settles_and_agent_state_change_unsettles() {
         let (mut state, pane_id) = state_with_context(crate::work_context::PaneWorkContext {
             ticket_ids: vec!["SCA-42".into()],
             ..Default::default()
@@ -1633,7 +1634,7 @@ mod tests {
                 ))
             })
             .expect("agent state transition");
-        assert!(state.pane_is_settled(0, pane_id));
+        assert!(!state.pane_is_settled(0, pane_id));
     }
 
     #[test]
@@ -1661,61 +1662,15 @@ mod tests {
     }
 
     #[test]
-    fn settled_pane_stays_settled_when_agent_enters_working_or_blocked() {
+    fn settled_pane_unsettles_when_agent_enters_working() {
         let now = Instant::now();
         let transition_at = now + Duration::from_secs(60);
-        for next_state in [AgentState::Working, AgentState::Blocked] {
-            let (mut state, pane_id) = settled_state_with_agent_state(AgentState::Idle, now);
-
-            transition_agent_state(&mut state, pane_id, next_state, transition_at);
-
-            assert!(state.pane_is_settled(0, pane_id), "{next_state:?}");
-            assert_quiet_clock_restarted(&state, pane_id, transition_at);
-        }
-    }
-
-    #[test]
-    fn settled_pane_stays_settled_when_foreground_agent_changes() {
-        let now = Instant::now();
         let (mut state, pane_id) = settled_state_with_agent_state(AgentState::Idle, now);
 
-        state
-            .update_terminal_state_at(pane_id, now + Duration::from_secs(60), |terminal| {
-                Some(terminal.set_detected_state_with_screen_signals_at(
-                    Some(crate::detect::Agent::Claude),
-                    AgentState::Idle,
-                    false,
-                    false,
-                    false,
-                    false,
-                    false,
-                    now + Duration::from_secs(60),
-                ))
-            })
-            .expect("foreground-agent change");
+        transition_agent_state(&mut state, pane_id, AgentState::Working, transition_at);
 
-        assert!(state.pane_is_settled(0, pane_id));
-    }
-
-    #[test]
-    fn locked_settled_pane_stays_settled_when_agent_becomes_active() {
-        for next_state in [AgentState::Working, AgentState::Blocked] {
-            let now = Instant::now();
-            let (mut state, pane_id) = settled_state_with_agent_state(AgentState::Idle, now);
-            state.workspaces[0]
-                .pane_state_mut(pane_id)
-                .expect("test pane")
-                .settled_locked = true;
-
-            transition_agent_state(
-                &mut state,
-                pane_id,
-                next_state,
-                now + Duration::from_secs(60),
-            );
-
-            assert!(state.pane_is_settled(0, pane_id), "{next_state:?}");
-        }
+        assert!(!state.pane_is_settled(0, pane_id));
+        assert_quiet_clock_restarted(&state, pane_id, transition_at);
     }
 
     #[test]
@@ -2125,7 +2080,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_blocked_resolution_event_preserves_settlement() {
+    fn stale_blocked_resolution_event_unsettles_an_active_projection() {
         let now = Instant::now();
         let (mut state, pane_id) = stale_state(None, now);
         state.workspaces[0].tabs[0]
@@ -2142,8 +2097,8 @@ mod tests {
         });
 
         assert!(
-            state.pane_is_settled(0, pane_id),
-            "stale Blocked projection unexpectedly unsettled a human-settled pane"
+            !state.pane_is_settled(0, pane_id),
+            "stale Blocked projection stayed settled"
         );
     }
 
@@ -2709,7 +2664,7 @@ mod tests {
     }
 
     #[test]
-    fn transition_to_working_or_blocked_during_grace_preserves_settlement() {
+    fn transition_to_working_or_blocked_clears_settled_pane() {
         for next_state in [AgentState::Working, AgentState::Blocked] {
             let (mut state, pane_id) = state_with_context(Default::default());
             assert!(state.settle_pane_at(0, pane_id, 1_725_000_002));
@@ -2729,7 +2684,7 @@ mod tests {
                 })
                 .expect("active agent transition");
 
-            assert!(state.pane_is_settled(0, pane_id), "{next_state:?}");
+            assert!(!state.pane_is_settled(0, pane_id), "{next_state:?}");
         }
     }
 
