@@ -680,6 +680,10 @@ fn restore_tab(
                 terminal.set_persisted_agent_session(session);
                 restore_auto_settle_state(&mut terminal, saved_agent_session);
             }
+            if let Some(report) = saved_pane.and_then(|pane| pane.closing_report.clone()) {
+                terminal
+                    .restore_closing_report_persistence_state(report, std::time::Instant::now());
+            }
             match (saved_agent_name, saved_managed_agent) {
                 (Some(agent_name), Some(agent)) => {
                     terminal.restore_managed_agent(agent_name, agent)
@@ -797,6 +801,12 @@ fn restore_tab(
                 if let Some(session) = restored_agent_session {
                     terminal.set_persisted_agent_session(session);
                     restore_auto_settle_state(&mut terminal, saved_agent_session);
+                }
+                if let Some(report) = saved_pane.and_then(|pane| pane.closing_report.clone()) {
+                    terminal.restore_closing_report_persistence_state(
+                        report,
+                        std::time::Instant::now(),
+                    );
                 }
                 match (saved_agent_name, saved_managed_agent) {
                     (Some(agent_name), Some(agent)) if was_imported => {
@@ -1250,6 +1260,7 @@ mod tests {
             label: None,
             agent_name: None,
             managed_agent_kind: None,
+            closing_report: None,
             agent_session: None,
             group_membership: Default::default(),
             launch_argv: None,
@@ -1950,6 +1961,7 @@ mod tests {
                             label: Some("reviewer".into()),
                             agent_name: Some("reviewer".into()),
                             managed_agent_kind: Some("opencode".into()),
+                            closing_report: None,
                             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                                 source: "herdr:opencode".into(),
                                 agent: "opencode".into(),
@@ -2091,6 +2103,7 @@ mod tests {
                                 label: None,
                                 agent_name: None,
                                 managed_agent_kind: None,
+                                closing_report: None,
                                 agent_session: None,
                                 group_membership: Default::default(),
                                 launch_argv: None,
@@ -2113,6 +2126,7 @@ mod tests {
                                 label: None,
                                 agent_name: None,
                                 managed_agent_kind: None,
+                                closing_report: None,
                                 agent_session: None,
                                 group_membership: Default::default(),
                                 launch_argv: None,
@@ -2184,6 +2198,7 @@ mod tests {
                     label: None,
                     agent_name: None,
                     managed_agent_kind: None,
+                    closing_report: None,
                     agent_session: None,
                     group_membership: Default::default(),
                     launch_argv: None,
@@ -2205,6 +2220,7 @@ mod tests {
             label: Some("planner".into()),
             agent_name: Some("planner".into()),
             managed_agent_kind: None,
+            closing_report: None,
             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                 source: "herdr:codex".into(),
                 agent: "codex".into(),
@@ -2413,6 +2429,7 @@ mod tests {
                             label: None,
                             agent_name: None,
                             managed_agent_kind: None,
+                            closing_report: None,
                             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                                 source: "herdr:codex".into(),
                                 agent: "codex".into(),
@@ -2799,6 +2816,7 @@ mod tests {
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,
+                closing_report: None,
                 agent_session: None,
                 group_membership: Default::default(),
                 launch_argv: None,
