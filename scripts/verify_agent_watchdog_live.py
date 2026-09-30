@@ -27,6 +27,54 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _local_server_pids(sock: Path, binary: Path, pgid: int | None = None) -> list[str]:
+    """Find only this harness's server process, including on systems without /proc."""
+    socket_marker = f"HERDR_SOCKET_PATH={sock}"
+    binary_path = str(binary)
+    if sys.platform.startswith("linux"):
+        leaked = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                env = (entry / "environ").read_bytes().split(b"\0")
+                argv = (entry / "cmdline").read_bytes().split(b"\0")
+            except OSError:
+                continue
+            if (os.fsencode(socket_marker) in env
+                    and os.fsencode(binary_path) in argv and b"server" in argv):
+                leaked.append(entry.name)
+        return leaked
+
+    if sys.platform == "darwin":
+        result = subprocess.run(["ps", "-E", "-ww", "-o", "pid=,command="],
+                                text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, check=False)
+        if result.returncode:
+            raise RuntimeError(f"could not inspect local processes with ps: {result.stderr[-500:]}")
+        leaked = []
+        for line in result.stdout.splitlines():
+            fields = line.strip().split(None, 1)
+            if len(fields) != 2:
+                continue
+            pid, details = fields
+            if (socket_marker in details and binary_path in details
+                    and re.search(r"(?:^|\s)server(?:\s|$)", details)):
+                leaked.append(pid)
+        return leaked
+
+    # The server runs in its own session, making its process group harness-specific.
+    if pgid is None:
+        return []
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return []
+    except PermissionError:
+        pass
+    return [f"process group {pgid}"]
+
+
 class Harness:
     def __init__(self, args: argparse.Namespace):
         self.args = args
@@ -356,19 +404,8 @@ class Harness:
                 except ProcessLookupError:
                     pass
                 self.server.wait()
-            leaked = []
-            for entry in Path("/proc").iterdir():
-                if not entry.name.isdigit():
-                    continue
-                try:
-                    env = (entry / "environ").read_bytes().split(b"\0")
-                    argv = (entry / "cmdline").read_bytes().split(b"\0")
-                except OSError:
-                    continue
-                if (f"HERDR_SOCKET_PATH={self.sock}".encode() in env
-                        and os.fsencode(str(self.args.binary)) in argv
-                        and b"server" in argv):
-                    leaked.append(entry.name)
+            leaked = _local_server_pids(self.sock, self.args.binary,
+                                        self.server.pid if self.server else None)
             if leaked:
                 raise RuntimeError(f"local harness server still running for {self.sock}: {leaked}")
         finally:
@@ -624,8 +661,9 @@ def setup_worker(h: Harness, ident: str) -> dict[str, str]:
                 "i+=1; open(p,'a').write(f'progress {i}\\n'); time.sleep(1)\n")
         process_code = code
     elif ident == "b-spinner-only":
-        code = ("import time; p=" + repr(str(trace)) + "; glyph='◐◓◑◒'; i=0\nwhile True:\n "
-                "open(p,'a').write(glyph[i%4]+' (12s)\\n'); i+=1; time.sleep(1)\n")
+        # Keep the worker alive, but don't refresh trace mtime after setup ages it.
+        code = ("import time; p=" + repr(str(trace)) + "; open(p,'a').write('◐ (12s)\\n'); "
+                "time.sleep(3600)\n")
         process_code = code
     elif ident in ("b-quiet-build", "b-subprocess-yn"):
         process_code = "import subprocess,time; subprocess.Popen(['sleep','3600']); time.sleep(3600)"
