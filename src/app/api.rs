@@ -300,6 +300,69 @@ impl App {
         self.commit_fleet_snapshot(snapshot)
     }
 
+    fn install_fleet_session_inventory(
+        &mut self,
+        host: crate::config::FleetHostConfig,
+        config_generation: u64,
+        session_snapshot: crate::api::schema::SessionSnapshot,
+    ) -> bool {
+        if config_generation != self.fleet_poller_config.generation() {
+            return false;
+        }
+        let mut snapshot = self.state.fleet_snapshot.clone();
+        let sections = crate::fleet::host_session_sections(&session_snapshot);
+        let session_snapshot = match serde_json::to_value(session_snapshot) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(%error, "cannot encode remote session event");
+                return false;
+            }
+        };
+        let Some(host_snapshot) = snapshot
+            .hosts
+            .iter_mut()
+            .find(|current| current.name == host.name && current.matches_config(&host))
+        else {
+            return false;
+        };
+        let runs = host_snapshot
+            .entries
+            .iter()
+            .filter(|entry| entry.source == crate::fleet::EvidenceSource::RunState)
+            .cloned()
+            .collect();
+        let loops = host_snapshot
+            .sessions
+            .as_ref()
+            .map(|sessions| sessions.loops.clone())
+            .unwrap_or_default();
+        host_snapshot.sessions = Some(crate::fleet::HostSessionInventory {
+            snapshot: Some(session_snapshot),
+            sections,
+            runs,
+            loops,
+        });
+        host_snapshot.reachable = true;
+        host_snapshot.error = None;
+        host_snapshot.state = if host_snapshot
+            .version
+            .as_deref()
+            .is_some_and(|version| version != crate::build_info::version())
+            || host_snapshot
+                .protocol
+                .is_some_and(|protocol| protocol != crate::protocol::PROTOCOL_VERSION)
+        {
+            crate::fleet::HostState::VersionSkew
+        } else {
+            crate::fleet::HostState::Reachable
+        };
+        host_snapshot.last_seen_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+        self.commit_fleet_snapshot(snapshot)
+    }
+
     pub(crate) fn pane_runtime_is_suspended(&self, pane_id: crate::layout::PaneId) -> bool {
         self.find_pane(pane_id)
             .and_then(|(_, pane)| self.terminal_runtimes.get(&pane.attached_terminal_id))
@@ -388,6 +451,11 @@ impl App {
                 config_generation,
                 agents,
             } => self.install_fleet_agent_inventory(host, config_generation, agents),
+            AppEvent::FleetSessionInventoryChanged {
+                host,
+                config_generation,
+                snapshot,
+            } => self.install_fleet_session_inventory(host, config_generation, *snapshot),
             AppEvent::RemoteApiRequestFinished {
                 agent_ref,
                 response,
@@ -692,6 +760,15 @@ impl App {
         } = ev
         {
             return Some(self.install_fleet_agent_inventory(host, config_generation, agents));
+        }
+
+        if let AppEvent::FleetSessionInventoryChanged {
+            host,
+            config_generation,
+            snapshot,
+        } = ev
+        {
+            return Some(self.install_fleet_session_inventory(host, config_generation, *snapshot));
         }
 
         if let AppEvent::RemoteApiRequestFinished {
@@ -2451,6 +2528,9 @@ mod tests {
             protocol: None,
             error: None,
             remote_identity: None,
+            sessions: None,
+            reachable: true,
+            last_seen_unix_ms: None,
             entries: Vec::new(),
         }
     }
