@@ -1042,6 +1042,7 @@ pub struct SidebarHoverTarget {
 pub enum SidebarHoverAction {
     Snooze { target: SidebarPaneLifecycleTarget },
     Settle { target: SidebarPaneLifecycleTarget },
+    Unsettle { target: SidebarPaneLifecycleTarget },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3633,6 +3634,9 @@ pub enum ContextMenuKind {
         /// offers a picker that would have something to pick.
         has_agent_targets: bool,
     },
+    RemoteAgent {
+        agent_ref: crate::api::schema::AgentRef,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3737,6 +3741,7 @@ pub const UNSTAR_ITEM: &str = "Unstar";
 pub const MOVE_TO_SUBGROUP_ITEM: &str = "Move to subgroup…";
 pub const REMOVE_FROM_SUBGROUP_ITEM: &str = "Remove from subgroup";
 pub const SETTLE_ITEM: &str = "Settle";
+pub const UNSETTLE_ITEM: &str = "Unsettle";
 pub const SNOOZE_ITEM: &str = "Snooze ▸";
 pub const SET_TIME_ITEM: &str = "Set time…";
 pub const CHANGE_TIME_ITEM: &str = "Change time…";
@@ -3939,6 +3944,7 @@ pub enum ContextMenuAction {
     SetTime,
     ChangeTime,
     Settle,
+    Unsettle,
     CloseTab,
     RenamePane,
     WorkLink,
@@ -3978,6 +3984,7 @@ impl ContextMenuAction {
             Self::SetTime => SET_TIME_ITEM,
             Self::ChangeTime => CHANGE_TIME_ITEM,
             Self::Settle => SETTLE_ITEM,
+            Self::Unsettle => UNSETTLE_ITEM,
             Self::RenamePane => "Rename pane",
             Self::WorkLink => "work link",
             Self::OpenLink => OPEN_LINK_ITEM,
@@ -4036,6 +4043,7 @@ impl ContextMenuState {
                 ContextMenuAction::RenameWorkspace,
                 ContextMenuAction::CloseWorkspace,
             ],
+            ContextMenuKind::RemoteAgent { .. } => vec![ContextMenuAction::Unsettle],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
@@ -8487,6 +8495,7 @@ impl AppState {
                         assert_live_pane(source_pane_id, "context menu source pane");
                     }
                 }
+                ContextMenuKind::RemoteAgent { .. } => {}
             }
         }
     }
