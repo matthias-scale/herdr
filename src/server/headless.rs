@@ -1903,6 +1903,87 @@ impl HeadlessServer {
     }
 
     #[cfg(unix)]
+    fn handoff_snapshot_workspaces(
+        snapshot: &mut crate::persist::SessionSnapshot,
+        skipped_panes: impl IntoIterator<Item = u32>,
+    ) {
+        for pane_id in skipped_panes {
+            for workspace in &mut snapshot.workspaces {
+                for tab in &mut workspace.tabs {
+                    if tab.panes.contains_key(&pane_id) {
+                        let placeholder = crate::persist::LayoutSnapshot::Pane(u32::MAX);
+                        let layout = std::mem::replace(&mut tab.layout, placeholder);
+                        if let Some(layout) = Self::remove_handoff_snapshot_pane(layout, pane_id) {
+                            tab.layout = layout;
+                        }
+                        tab.panes.remove(&pane_id);
+                        if tab.focused == Some(pane_id) {
+                            tab.focused = tab.panes.keys().next().copied();
+                        }
+                        if tab.root_pane == Some(pane_id) {
+                            tab.root_pane = tab.panes.keys().next().copied();
+                        }
+                    }
+                }
+                workspace.tabs.retain(|tab| !tab.panes.is_empty());
+            }
+            let active = snapshot.active;
+            let mut removed_before_active = 0;
+            let mut workspaces = Vec::with_capacity(snapshot.workspaces.len());
+            for (index, workspace) in snapshot.workspaces.drain(..).enumerate() {
+                if workspace.tabs.is_empty() {
+                    if active.is_some_and(|active| index < active) {
+                        removed_before_active += 1;
+                    }
+                } else {
+                    workspaces.push(workspace);
+                }
+            }
+            snapshot.workspaces = workspaces;
+            snapshot.active = active.and_then(|active| {
+                snapshot
+                    .workspaces
+                    .len()
+                    .checked_sub(1)
+                    .map(|last| active.saturating_sub(removed_before_active).min(last))
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    fn remove_handoff_snapshot_pane(
+        layout: crate::persist::LayoutSnapshot,
+        pane_id: u32,
+    ) -> Option<crate::persist::LayoutSnapshot> {
+        use crate::persist::LayoutSnapshot;
+        match layout {
+            LayoutSnapshot::Pane(id) => (id != pane_id).then_some(LayoutSnapshot::Pane(id)),
+            LayoutSnapshot::Split {
+                direction,
+                leading,
+                ratio,
+                first,
+                second,
+            } => {
+                match (
+                    Self::remove_handoff_snapshot_pane(*first, pane_id),
+                    Self::remove_handoff_snapshot_pane(*second, pane_id),
+                ) {
+                    (Some(first), Some(second)) => Some(LayoutSnapshot::Split {
+                        direction,
+                        leading,
+                        ratio,
+                        first: Box::new(first),
+                        second: Box::new(second),
+                    }),
+                    (Some(remaining), None) | (None, Some(remaining)) => Some(remaining),
+                    (None, None) => None,
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
     fn perform_live_handoff(
         &mut self,
         params: crate::api::schema::ServerLiveHandoffParams,
@@ -1946,6 +2027,7 @@ impl HeadlessServer {
         let _ = reject_pending_client_connections(&self.client_listener);
 
         let mut paused_terminal_ids = Vec::new();
+        let mut skipped_pane_ids = Vec::new();
         let pause_targets = pane_by_terminal
             .keys()
             .map(|terminal_id| {
@@ -1967,6 +2049,7 @@ impl HeadlessServer {
                         if let Some(pane_id) = pane_id {
                             warn!(pane = pane_id, terminal = %terminal_id, err = %err, "skipping pane with closed PTY actor during live handoff");
                             pane_by_terminal.remove(&terminal_id);
+                            skipped_pane_ids.push(pane_id);
                             continue;
                         }
                     }
@@ -1977,7 +2060,7 @@ impl HeadlessServer {
             }
         }
 
-        let snapshot = crate::persist::capture(
+        let mut snapshot = crate::persist::capture(
             &self.app.state.workspaces,
             &self.app.state.terminals,
             &self.app.terminal_runtimes,
@@ -1990,6 +2073,7 @@ impl HeadlessServer {
             self.app.state.window_cycle_mode,
             self.app.state.skip_collapsed_cycle,
         );
+        Self::handoff_snapshot_workspaces(&mut snapshot, skipped_pane_ids);
 
         let mut handoff_entries = Vec::new();
         let handoff_captured_at = Instant::now();
@@ -8007,6 +8091,42 @@ mod tests {
 
     fn test_headless_server() -> HeadlessServer {
         test_headless_server_with_event_hub(api::EventHub::default())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closed_actor_pane_is_absent_from_handoff_restore() {
+        let workspace = crate::workspace::Workspace::test_new("closed-actor");
+        let pane_id = workspace.tabs[0].root_pane;
+        let mut snapshot = crate::persist::capture(
+            &[workspace],
+            &HashMap::new(),
+            &crate::terminal::TerminalRuntimeRegistry::default(),
+            Some(0),
+            0,
+            0,
+            0.5,
+            std::collections::HashSet::new(),
+            false,
+            crate::config::WindowCycleModeConfig::default(),
+            false,
+        );
+        HeadlessServer::handoff_snapshot_workspaces(&mut snapshot, [pane_id.raw()]);
+        assert!(snapshot.workspaces.is_empty());
+        assert_eq!(snapshot.active, None);
+        let mut imports = HashMap::new();
+        let restored = crate::persist::restore_handoff(
+            &snapshot,
+            0,
+            "herdr-test-missing-shell",
+            crate::config::ShellModeConfig::NonLogin,
+            &mut imports,
+            mpsc::channel(4).0,
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(crate::render_signal::RenderSignal::new()),
+        )
+        .expect("handoff snapshot without the closed pane restores");
+        assert!(restored.2.is_empty(), "no shell runtime should be spawned");
     }
 
     fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServer {

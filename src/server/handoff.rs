@@ -109,6 +109,10 @@ fn resolve_deleted_executable_path(path: PathBuf) -> PathBuf {
 
 #[cfg(unix)]
 fn spawn_handoff_import_with_exe(exe: &Path, socket_path: &Path, token: &str) -> io::Result<Child> {
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(crate::session::data_dir().join("herdr-handoff-import.log"))?;
     let mut command = Command::new(exe);
     command
         .arg("server")
@@ -117,9 +121,8 @@ fn spawn_handoff_import_with_exe(exe: &Path, socket_path: &Path, token: &str) ->
         .arg(token)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        // The importing server initializes file logging; inherit stderr too so
-        // startup failures remain visible in the parent's server log stream.
-        .stderr(std::process::Stdio::inherit());
+        // Preserve startup failures before the importing server initializes logging.
+        .stderr(std::process::Stdio::from(stderr));
     if crate::session::explicit_session_requested() {
         // The import child no longer has the original `--session` argument, so
         // stale socket overrides must not mask the inherited HERDR_SESSION.
