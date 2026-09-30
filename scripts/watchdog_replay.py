@@ -17,6 +17,14 @@ from pathlib import Path
 
 UTC = dt.timezone.utc
 STATE = Path.home() / ".local/state/herdr"
+OP_DEADLINE_SECS = 30 * 60
+TERMINAL_MARKERS = (
+    "completed successfully", "task completed", "process exited", "command finished",
+    "no shell", "exited with", "exit code", "was killed", "was stopped",
+    "process was terminated", "command was terminated", "stopped by user",
+    "task was stopped", "process was stopped", "process stopped", "stopped process",
+    "has been stopped", "terminated with",
+)
 
 
 def epoch(value: str | None) -> int | None:
@@ -84,22 +92,33 @@ def transcript_events(agent: str, session_id: str, files: tuple[dict[str, Path],
                         calls = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
                         event["call"] = calls
                     elif row.get("type") == "user":
-                        results = [b for b in message.get("content", []) if isinstance(b, dict) and b.get("type") == "tool_result"]
+                        content = message.get("content", [])
+                        event["text"] = text_content(content) if isinstance(content, list) else str(content or "")
+                        results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
                         if results:
                             event["result"] = results
                         else:
                             event["role"] = "user"
+                    if not event["text"]:
+                        content = message.get("content", []) if isinstance(message, dict) else []
+                        event["text"] = text_content(content) if isinstance(content, list) else str(content or "")
+                        if not event["text"]:
+                            event["text"] = str(row.get("text") or "")
                 elif row.get("type") == "response_item":
                     payload = row.get("payload", {})
                     kind = payload.get("type")
-                    if kind == "message" and payload.get("role") == "assistant":
-                        event["role"] = "assistant"
-                        event["text"] = text_content(payload.get("content", []))
-                    elif kind == "function_call":
+                    if kind == "message":
+                        event["role"] = str(payload.get("role") or "")
+                        content = payload.get("content", [])
+                        event["text"] = text_content(content) if isinstance(content, list) else str(content or "")
+                    elif kind in ("function_call", "custom_tool_call"):
                         event["call"] = [{"id": payload.get("call_id"), "name": payload.get("name"), "input": payload.get("arguments", "{}") }]
-                    elif kind == "function_call_output":
+                        if kind == "custom_tool_call":
+                            event["call"][0]["input"] = payload.get("input", {})
+                    elif kind in ("function_call_output", "custom_tool_call_output"):
                         event["result"] = [{"tool_use_id": payload.get("call_id"), "content": payload.get("output", "") }]
-                if event["role"] or event["call"] or event["result"]:
+                event["notifications"] = task_notifications(event["text"])
+                if event["role"] or event["call"] or event["result"] or event["notifications"]:
                     events.append(event)
     except OSError:
         return None
@@ -127,6 +146,84 @@ def tool_result_text(result: dict) -> str:
     if isinstance(value, list):
         return " ".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in value)
     return str(value)
+
+
+def task_notifications(text: str) -> list[dict[str, str]]:
+    notifications = []
+    for block in re.findall(r"<task-notification\b[^>]*>.*?</task-notification\s*>", text, re.I | re.S):
+        fields = {}
+        for name in ("tool-use-id", "task-id", "status"):
+            match = re.search(rf"<{name}\b[^>]*>\s*([^<]+?)\s*</{name}\s*>", block, re.I | re.S)
+            if match:
+                fields[name] = match.group(1).strip()
+        if fields.get("status", "").lower() in {"completed", "failed", "killed"}:
+            notifications.append(fields)
+    return notifications
+
+
+def is_terminal_result(text: str) -> bool:
+    lower = text.lower()
+    return any(marker in lower for marker in TERMINAL_MARKERS)
+
+
+def apply_event(state: dict, event: dict) -> None:
+    """Update pending and background calls from one transcript event."""
+    pending = state.setdefault("pending", {})
+    background = state.setdefault("background_shells", {})
+    for call in event.get("call") or []:
+        key = str(call.get("id") or "")
+        if key:
+            pending[key] = {"call": call, "ts": event["ts"]}
+    for result in event.get("result") or []:
+        key = str(result.get("tool_use_id") or "")
+        entry = pending.pop(key, None)
+        call = entry["call"] if entry else None
+        name = tool_name(call) if call else ""
+        result_text = tool_result_text(result)
+        call_input_value = call_input(call) if call else {}
+        if is_terminal_result(result_text):
+            target_ids = {key}
+            target_ids.update(str(call_input_value.get(field) or "") for field in ("task_id", "bash_id", "session_id"))
+            target_ids.discard("")
+            matches = [bg_key for bg_key, bg in background.items() if bg["ids"].intersection(target_ids)]
+            if not matches and len(background) == 1 and name in {"bashoutput", "monitor", "exec", "exec_command"}:
+                matches = list(background)
+            for bg_key in matches:
+                background.pop(bg_key, None)
+        if call and name in {"bash", "exec_command", "agent", "task"} and call_input_value.get("run_in_background"):
+            if is_terminal_result(result_text):
+                background.pop(key, None)
+            else:
+                background_ids = {key}
+                for match in re.finditer(r"\b(?:task|bash|shell|session)[-_ ]?id\s*[:=]?\s*([\w.-]+)", result_text, re.I):
+                    background_ids.add(match.group(1))
+                if "background" in result_text.lower():
+                    background_ids.update(re.findall(r"\bID\s*[:=]\s*([\w.-]+)", result_text, re.I))
+                background[key] = {"ids": background_ids, "ts": event["ts"]}
+        elif call and name in {"bashoutput", "monitor"}:
+            pass
+        elif call and name in {"exec", "exec_command"}:
+            if not is_terminal_result(result_text):
+                running_id = re.search(r"\bsession id\s*[:=]?\s*(\d+)\b", result_text, re.I)
+                if running_id:
+                    background[key] = {"ids": {key, running_id.group(1)}, "ts": event["ts"]}
+    for notification in event.get("notifications") or task_notifications(event.get("text", "")):
+        done_ids = {notification.get("tool-use-id", ""), notification.get("task-id", "")} - {""}
+        for key, bg in list(background.items()):
+            if key in done_ids or bg["ids"].intersection(done_ids):
+                background.pop(key, None)
+
+
+def background_status(state: dict, timestamp: int) -> str:
+    pending = state.setdefault("pending", {})
+    background = state.setdefault("background_shells", {})
+    if any(timestamp - call["ts"] < OP_DEADLINE_SECS for call in pending.values()) or any(
+        timestamp - task["ts"] < OP_DEADLINE_SECS for task in background.values()
+    ):
+        return "live"
+    if pending or background:
+        return "unknown"
+    return "none"
 
 
 def external_wait(text: str) -> bool:
@@ -232,14 +329,10 @@ def iter_observations(active, cutoff: int, end: int, host: str):
             background = "unknown" if events is None else "none"
             last_entry = None
             assistant_texts = []
-            pending = {}
-            background_shells = set()
             event_index = current.get((pane, session), {}).get("event_index", 0)
             state = current.get((pane, session), {})
             previous_entry = state.get("last_entry")
             assistant_texts = state.get("assistant_texts", [])
-            pending = state.get("pending", {})
-            background_shells = state.get("background_shells", set())
             last_entry = state.get("last_entry")
             if events is None:
                 last_entry = state.get("last_entry", status_time)
@@ -247,27 +340,12 @@ def iter_observations(active, cutoff: int, end: int, host: str):
                 while event_index < len(events) and events[event_index]["ts"] <= timestamp:
                     event = events[event_index]
                     last_entry = event["ts"]
-                    for call in event["call"] or []:
-                        key = str(call.get("id") or "")
-                        if key:
-                            pending[key] = call
-                    for result in event["result"] or []:
-                        key = str(result.get("tool_use_id") or "")
-                        call = pending.pop(key, None)
-                        if call and tool_name(call) in {"bash", "exec_command", "agent", "task"} and call_input(call).get("run_in_background"):
-                            result_text = tool_result_text(result).lower()
-                            completed = any(marker in result_text for marker in ("completed successfully", "task completed", "process exited", "command finished", "no shell"))
-                            if not completed:
-                                background_shells.add(key)
-                        elif call and tool_name(call) in {"bashoutput", "monitor"}:
-                            if any(token in tool_result_text(result).lower() for token in ("completed", "exited", "finished", "no shell")):
-                                background_shells.clear()
+                    apply_event(state, event)
                     if event["role"] == "assistant" and event["text"]:
                         assistant_texts.append(event["text"])
                         assistant_texts = assistant_texts[-6:]
                     event_index += 1
-                if pending or background_shells:
-                    background = "live"
+                background = background_status(state, timestamp)
                 if assistant_texts:
                     tail = "\n".join(assistant_texts)[-7000:] + "\n❯ \n"
                     if background == "none" and external_wait(tail):
@@ -277,8 +355,6 @@ def iter_observations(active, cutoff: int, end: int, host: str):
                 state.update({
                     "event_index": event_index,
                     "assistant_texts": assistant_texts,
-                    "pending": pending,
-                    "background_shells": background_shells,
                     "last_entry": last_entry,
                 })
             else:
@@ -313,7 +389,20 @@ def main() -> int:
     parser.add_argument("--host", default=os.uname().nodename.split(".")[0])
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--out", default=f"/tmp/wd-replay-{os.uname().nodename.split('.')[0]}")
+    parser.add_argument(
+        "--expect-stall", action="append", default=[], metavar="HOST:PANE:FROM_UTC:TO_UTC",
+        help="recall check: require a would-nudge attempt for this pane inside the UTC window (repeatable)",
+    )
     args = parser.parse_args()
+    expected_stalls = []
+    for spec in args.expect_stall:
+        match = re.fullmatch(r"([^:]+):(.+):(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ):(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)", spec)
+        if not match:
+            parser.error(f"invalid --expect-stall {spec!r}; expected HOST:PANE:YYYY-MM-DDTHH:MM:SSZ:YYYY-MM-DDTHH:MM:SSZ")
+        from_ts, to_ts = epoch(match.group(3)), epoch(match.group(4))
+        if from_ts is None or to_ts is None or from_ts > to_ts:
+            parser.error(f"invalid --expect-stall time range: {spec!r}")
+        expected_stalls.append({"host": match.group(1), "pane_id": match.group(2), "from": from_ts, "to": to_ts, "spec": spec})
     end = int(dt.datetime.now(UTC).timestamp())
     cutoff = end - args.hours * 3600
     out = Path(args.out)
@@ -339,12 +428,14 @@ def main() -> int:
         return result.returncode
 
     attempts = []
+    decisions = []
     with decisions_path.open() as source:
         for line in source:
             try:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            decisions.append(row)
             if row.get("would_nudge"):
                 attempts.append(row)
     with attempts_path.open("w") as target:
@@ -353,6 +444,29 @@ def main() -> int:
     episode_counts = defaultdict(int)
     for row in attempts:
         episode_counts[(row["pane_id"], row["session_id"], row["tail_hash"])] += 1
+    stalled_background = defaultdict(int)
+    for row in decisions:
+        if row.get("class") == "stalled":
+            stalled_background[row.get("background", "unknown")] += 1
+    recall = []
+    for expected in expected_stalls:
+        window_attempts = [row for row in attempts if expected["host"] == args.host and row["pane_id"] == expected["pane_id"] and expected["from"] <= row["timestamp"] <= expected["to"]]
+        midpoint = (expected["from"] + expected["to"]) // 2
+        nearby = [row for row in decisions if expected["host"] == args.host and row["pane_id"] == expected["pane_id"]]
+        nearest = min(nearby, key=lambda row: abs(row["timestamp"] - midpoint)) if nearby else None
+        recall.append({
+            **expected,
+            "detected": bool(window_attempts),
+            "attempts": window_attempts,
+            "midpoint": midpoint,
+            "midpoint_decision": nearest,
+            "reason": None if window_attempts else ("no replay decision for pane" if nearest is None else "no would-nudge attempt inside the expected window"),
+            "eligibility_block": (
+                None if window_attempts or nearest is None else
+                (f"background is {nearest.get('background')}; nudging requires background=none" + (" because no terminal result was observed" if nearest.get("background") == "live" else "") if nearest.get("background") != "none" else
+                 ("classifier did not produce a stalled class" if nearest.get("class") != "stalled" else "other watchdog quiet/deadline rule did not make an attempt due"))
+            ),
+        })
     summary = {
         "host": args.host,
         "window_start_utc": dt.datetime.fromtimestamp(cutoff, UTC).isoformat(),
@@ -363,6 +477,11 @@ def main() -> int:
         "quiet_periods": quiet_periods,
         "observations": observation_count,
         "would_nudge_attempts": len(attempts),
+        "stalled_background_breakdown": dict(stalled_background),
+        "expected_stall_recall": [
+            {"spec": row["spec"], "detected": row["detected"], "reason": row["reason"], "eligibility_block": row["eligibility_block"], "class": (row["midpoint_decision"] or {}).get("class"), "evidence": (row["midpoint_decision"] or {}).get("evidence"), "background": (row["midpoint_decision"] or {}).get("background")}
+            for row in recall
+        ],
         "distinct_panes_episodes_nudged": len(episode_counts),
         "max_attempts_per_episode": max(episode_counts.values(), default=0),
         "old_watchdog_nudges_same_window": old_nudge_count(cutoff, end),
@@ -385,26 +504,43 @@ def main() -> int:
         f"- Would-nudge attempts: {len(attempts)}; distinct pane/episodes: {len(episode_counts)}; max attempts per episode: {summary['max_attempts_per_episode']}.",
         f"- Old watchdog nudge records in the same window: {summary['old_watchdog_nudges_same_window']}.",
         f"- Pane/session entries without a matching transcript: {summary['pane_sessions_without_transcript']} (conservatively ineligible).",
+        f"- Stalled-observation background: live {stalled_background['live']}; none {stalled_background['none']}; unknown {stalled_background['unknown']}",
+        "- Unresolved calls with no result after the 30-minute operation deadline are `unknown`; this remains ineligible for nudging.",
+        "",
+        "## Recall checks",
+        "",
+    ]
+    if not recall:
+        lines.append("None requested.")
+    for item in recall:
+        lines.append(f"- {'DETECTED' if item['detected'] else 'MISSED'} `{item['spec']}`")
+        if not item["detected"]:
+            decision = item["midpoint_decision"] or {}
+            lines.append(f"  - Why: {item['reason']}; midpoint class `{decision.get('class', 'unavailable')}`, evidence `{decision.get('evidence', 'unavailable')}`, background `{decision.get('background', 'unavailable')}`. Eligibility blocker: {item['eligibility_block'] or 'unavailable'}.")
+    lines.extend([
         "",
         "## Would-nudge rows for hand check",
         "",
-    ]
+    ])
     if not attempts:
         lines.append("None.")
-    for index, row in enumerate(attempts, 1):
-        when = dt.datetime.fromtimestamp(row["timestamp"], UTC).isoformat()
-        lines.extend([
-            f"### {index}. {row['pane_id']} / {row['session_id']} — attempt {row['attempt']}",
-            "",
-            f"- Time: {when}; idle: {row['idle_secs'] // 60} min; hook age: {(row.get('hook_age_secs') or 0) // 60} min.",
-            f"- Evidence: {row['evidence']}",
-            f"- Background: {row['background']}; simulated delivered: {str(row['delivered']).lower()}.",
-            "- Last 12 screen lines used:",
-            "```text",
-            *row["tail"],
-            "```",
-            "",
-        ])
+    attempt_groups = defaultdict(list)
+    for row in attempts:
+        attempt_groups[(row["pane_id"], row["session_id"], row["tail_hash"])].append(row)
+    for (pane, session, tail_hash), group in sorted(attempt_groups.items(), key=lambda item: (item[0][0], item[1][0]["timestamp"])):
+        first = group[0]
+        start_when = dt.datetime.fromtimestamp(first["timestamp"], UTC).isoformat()
+        lines.extend([f"### {pane} / {session} — episode from {start_when} (`tail_hash={tail_hash}`)", ""])
+        for index, row in enumerate(group, 1):
+            when = dt.datetime.fromtimestamp(row["timestamp"], UTC).isoformat()
+            lines.extend([
+                f"#### Attempt {row['attempt']} (row {index})",
+                "",
+                f"- Time: {when}; idle: {row['idle_secs'] // 60} min; hook age: {(row.get('hook_age_secs') or 0) // 60} min.",
+                f"- Class: {row['class']}; evidence: {row['evidence']}",
+                f"- Background: {row['background']}; simulated delivered: {str(row['delivered']).lower()}.",
+                "- Last 12 screen lines used:", "```text", *row["tail"], "```", "",
+            ])
     report_path.write_text("\n".join(lines) + "\n")
     print(json.dumps(summary, indent=2))
     print(f"REPORT {report_path}")
