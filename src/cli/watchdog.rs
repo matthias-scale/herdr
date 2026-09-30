@@ -28,20 +28,225 @@ mod workers;
 mod nudge_delivery_tests {
     use super::{
         nudge_due, nudge_retry_text, nudge_text, promised_nudges_stalled, record_nudge_attempt,
-        replay_observations, update_promised_memory, ReplayObservation, NUDGE_REPEAT_SECS,
+        replay_observations, replay_observations_with_runs_dir, update_promised_memory, wait_event,
+        wait_target_finished, ReplayObservation, NUDGE_REPEAT_SECS, NUDGE_SAFE_SUFFIX,
     };
-    use crate::{api::schema::AgentStatus, watchdog::PaneV3Memory};
+    use crate::{
+        api::schema::AgentStatus,
+        watchdog::{PaneV3Memory, PaneV3Observation},
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temporary_runs_dir() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-watchdog-wait-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).expect("runs dir");
+        path
+    }
 
     #[test]
     fn nudge_appends_only_the_suffix_to_an_existing_draft() {
         assert_eq!(
             nudge_text(Some("cont"), "resume work"),
-            (" — resume work\r".into(), "cont — resume work".into())
+            (
+                format!(" — resume work {NUDGE_SAFE_SUFFIX}\r"),
+                format!("cont — resume work {NUDGE_SAFE_SUFFIX}")
+            )
         );
         assert_eq!(
             nudge_text(None, "resume work"),
-            ("resume work\r".into(), "resume work".into())
+            (
+                format!("resume work {NUDGE_SAFE_SUFFIX}\r"),
+                format!("resume work {NUDGE_SAFE_SUFFIX}")
+            )
         );
+        assert!(nudge_text(None, "resume work")
+            .1
+            .ends_with(NUDGE_SAFE_SUFFIX));
+    }
+
+    #[test]
+    fn wait_resolver_fails_closed_and_only_accepts_terminal_checkable_objects() {
+        let runs_dir = temporary_runs_dir();
+        let run_id = "ra-260930-foo-abc123";
+        let run_dir = runs_dir.join(run_id);
+        std::fs::create_dir_all(&run_dir).expect("run dir");
+        let mut observations = vec![PaneV3Observation {
+            pane_id: "w1:p5".into(),
+            agent: "codex".into(),
+            terminal_id: None,
+            agent_session: None,
+            status: AgentStatus::Done,
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            tail: "Done".into(),
+            transcript_waiting: false,
+            process_group: None,
+            read_error: None,
+        }];
+        observations.push(PaneV3Observation {
+            pane_id: "w5S:pA".into(),
+            agent: "codex".into(),
+            terminal_id: None,
+            agent_session: None,
+            status: AgentStatus::Idle,
+            wait: None,
+            eta_s: None,
+            reported_at: None,
+            tail: "Done".into(),
+            transcript_waiting: false,
+            process_group: None,
+            read_error: None,
+        });
+
+        assert_eq!(
+            wait_event("Now: wait — your reply on 1a/1b\n"),
+            Some("your reply on 1a/1b".to_owned())
+        );
+        assert_eq!(
+            wait_event("**Now:** waiting on you\n"),
+            Some("you".to_owned())
+        );
+        assert!(!wait_target_finished(
+            "your reply on 1a/1b",
+            &runs_dir,
+            &observations
+        ));
+        assert!(!wait_target_finished(
+            "CI on PR #482",
+            &runs_dir,
+            &observations
+        ));
+        assert!(wait_target_finished("pane w1:p5", &runs_dir, &observations));
+        assert!(wait_target_finished(
+            "pane w5S:pA",
+            &runs_dir,
+            &observations
+        ));
+        assert!(!wait_target_finished(
+            "pane w9:p9",
+            &runs_dir,
+            &observations
+        ));
+
+        assert!(wait_event("Now: waiting for ra-260930-foo-abc123 result\n").is_some());
+        assert!(!wait_target_finished(
+            "ra-260930-unknown-abc123 result",
+            &runs_dir,
+            &observations
+        ));
+        std::fs::write(
+            run_dir.join("state.json"),
+            r#"{"schema":1,"state":"active","exit_reason":null}"#,
+        )
+        .expect("active run state");
+        assert!(!wait_target_finished(
+            "ra-260930-foo-abc123 result",
+            &runs_dir,
+            &observations
+        ));
+        std::fs::write(
+            run_dir.join("state.json"),
+            r#"{"schema":1,"state":"done","exit_reason":"completed"}"#,
+        )
+        .expect("finished run state");
+        assert!(wait_target_finished(
+            "ra-260930-foo-abc123 result",
+            &runs_dir,
+            &observations
+        ));
+        std::fs::write(run_dir.join("state.json"), "not json").expect("malformed run state");
+        assert!(!wait_target_finished(
+            "ra-260930-foo-abc123 result",
+            &runs_dir,
+            &observations
+        ));
+        std::fs::remove_dir_all(runs_dir).expect("remove test runs");
+    }
+
+    #[test]
+    fn wait_lines_nudge_only_after_the_named_worker_finishes() {
+        let runs_dir = temporary_runs_dir();
+        let run_id = "ra-260930-foo-abc123";
+        let run_dir = runs_dir.join(run_id);
+        std::fs::create_dir_all(&run_dir).expect("run dir");
+        let result = |tail: &str| {
+            let observations = [0, 1801].map(|timestamp| ReplayObservation {
+                timestamp,
+                pane_id: "w1:p1".into(),
+                session_id: "session-1".into(),
+                agent: "codex".into(),
+                status: AgentStatus::Idle,
+                reported_at: Some("2026-09-30T00:00:00Z".into()),
+                hook_age_secs: Some(1801),
+                tail: tail.into(),
+                background: "none".into(),
+            });
+            replay_observations_with_runs_dir(&observations, &runs_dir)
+        };
+
+        let human = result("Now: wait — your ChatGPT sign-in in the harness\n❯ \n");
+        assert!(human.iter().all(|row| row.attempt.is_none()));
+        assert_eq!(
+            human.last().map(|row| row.class),
+            Some(crate::watchdog::PaneClass::WaitingHuman)
+        );
+        let incident_tail = "Now: wait — your ChatGPT sign-in in the harness\n❯ \n";
+        let incident = [0, 1801].map(|timestamp| ReplayObservation {
+            timestamp,
+            pane_id: "w1:p5".into(),
+            session_id: "session-incident".into(),
+            agent: "codex".into(),
+            status: AgentStatus::Working,
+            reported_at: Some("2026-09-30T00:00:00Z".into()),
+            hook_age_secs: Some(3600),
+            tail: incident_tail.into(),
+            background: "none".into(),
+        });
+        let incident = replay_observations_with_runs_dir(&incident, &runs_dir);
+        assert!(incident.iter().all(|row| row.attempt.is_none()));
+        assert_eq!(
+            incident.last().map(|row| row.class),
+            Some(crate::watchdog::PaneClass::WaitingHuman)
+        );
+
+        let reply = result("Now: wait — your reply on 1a/1b\n❯ \n");
+        assert!(reply.iter().all(|row| row.attempt.is_none()));
+        let human_wait = result("**Now:** waiting on you\n❯ \n");
+        assert!(human_wait.iter().all(|row| row.attempt.is_none()));
+        assert_eq!(
+            human_wait.last().map(|row| row.class),
+            Some(crate::watchdog::PaneClass::WaitingHuman)
+        );
+
+        let event = format!("Now: wait — {run_id} result\n❯ \n");
+        let unknown = result(&event);
+        assert!(unknown.iter().all(|row| row.attempt.is_none()));
+        std::fs::write(
+            run_dir.join("state.json"),
+            r#"{"schema":1,"state":"active"}"#,
+        )
+        .expect("active state");
+        let running = result(&event);
+        assert!(running.iter().all(|row| row.attempt.is_none()));
+        std::fs::write(
+            run_dir.join("state.json"),
+            r#"{"schema":1,"state":"done","exit_reason":"completed"}"#,
+        )
+        .expect("finished state");
+        let finished = result(&event);
+        assert_eq!(finished.last().and_then(|row| row.attempt), Some(1));
+
+        let pr = result("Now: wait — CI on PR #482\n❯ \n");
+        assert!(pr.iter().all(|row| row.attempt.is_none()));
+        std::fs::remove_dir_all(runs_dir).expect("remove test runs");
     }
 
     #[test]
@@ -346,6 +551,7 @@ mod nudge_delivery_tests {
 }
 
 fn nudge_text(draft: Option<&str>, action: &str) -> (String, String) {
+    let action = format!("{action} {NUDGE_SAFE_SUFFIX}");
     let expected = draft.map_or_else(|| action.to_owned(), |s| format!("{s} — {action}"));
     let sent = draft.map_or_else(|| action.to_owned(), |_| format!(" — {action}"));
     (format!("{sent}\r"), expected)
@@ -357,6 +563,119 @@ const NUDGE_REPEAT_SECS: u64 = 300;
 const NUDGE_EPISODE_ATTEMPT_LIMIT: u8 = watchdog::MAX_NUDGE_ATTEMPTS_PER_EPISODE;
 const NUDGE_DAILY_ATTEMPT_LIMIT: usize = 6;
 const NUDGE_DAILY_WINDOW_SECS: u64 = 24 * 60 * 60;
+const NUDGE_SAFE_SUFFIX: &str =
+    "If you're waiting on Matthias or an approval, reply with your Now line and do nothing else.";
+
+fn wait_event(text: &str) -> Option<String> {
+    let work = watchdog::evidence::now_line_value(text)?;
+    let lower = work.to_ascii_lowercase();
+    if lower == "wait" || lower.starts_with("wait ") {
+        let rest = work.get(4..)?.trim_start();
+        let rest = rest
+            .strip_prefix('—')
+            .or_else(|| rest.strip_prefix('–'))
+            .or_else(|| rest.strip_prefix('-'))
+            .or_else(|| rest.strip_prefix(':'))
+            .unwrap_or(rest)
+            .trim();
+        return Some(rest.to_owned());
+    }
+    for prefix in ["waiting for ", "waiting on ", "waiting at "] {
+        if lower.starts_with(prefix) {
+            return Some(work[prefix.len()..].trim().to_owned());
+        }
+    }
+    None
+}
+
+/// Confirms only a terminal state for a uniquely named local RA run or pane.
+/// PR/CI, human, malformed, missing, unreadable, and nonterminal targets return false.
+/// Unknown always means no nudge; this lookup must never infer completion from prose.
+fn wait_target_finished(event: &str, runs_dir: &Path, observations: &[PaneV3Observation]) -> bool {
+    let words = event
+        .split_whitespace()
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != ':')
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    let runs = words
+        .iter()
+        .filter(|word| {
+            word.starts_with("ra-")
+                && word.len() <= 64
+                && word
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+        .collect::<Vec<_>>();
+    let panes = words
+        .iter()
+        .filter(|word| is_pane_id(&word.to_ascii_lowercase()))
+        .collect::<Vec<_>>();
+    if runs.len() + panes.len() != 1 {
+        return false;
+    }
+    if runs.len() == 1 {
+        let target = runs[0].as_str();
+        if words.iter().any(|word| {
+            word != target
+                && !["run", "worker", "result", "finished", "ended"]
+                    .contains(&word.to_ascii_lowercase().as_str())
+        }) {
+            return false;
+        }
+        {
+            let Ok(raw) = fs::read(runs_dir.join(target).join("state.json")) else {
+                return false;
+            };
+            let Ok(state) = serde_json::from_slice::<Value>(&raw) else {
+                return false;
+            };
+            matches!(
+                (
+                    state.get("state").and_then(Value::as_str),
+                    state.get("exit_reason").and_then(Value::as_str)
+                ),
+                (Some("done"), Some("completed")) | (Some("failed"), Some("failed"))
+            )
+        }
+    } else {
+        let target = panes[0].as_str();
+        if words.iter().any(|word| {
+            word != target
+                && !["pane", "tab", "finished", "idle", "done"]
+                    .contains(&word.to_ascii_lowercase().as_str())
+        }) {
+            return false;
+        }
+        observations
+            .iter()
+            .find(|observation| observation.pane_id == target)
+            .is_some_and(|observation| {
+                matches!(observation.status, AgentStatus::Idle | AgentStatus::Done)
+            })
+    }
+}
+
+fn local_runs_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".agents/runs")
+}
+
+fn is_pane_id(value: &str) -> bool {
+    let Some((workspace, pane)) = value.split_once(":p") else {
+        return false;
+    };
+    workspace
+        .strip_prefix('w')
+        .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric()))
+        && !pane.is_empty()
+        && pane.bytes().all(|b| b.is_ascii_alphanumeric())
+}
 
 fn nudge_due(
     expected: bool,
@@ -508,10 +827,19 @@ struct ReplayDecision {
     would_nudge: bool,
     attempt: Option<u8>,
     delivered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wait_resolution: Option<&'static str>,
     tail: Vec<String>,
 }
 
 fn replay_observations(inputs: &[ReplayObservation]) -> Vec<ReplayDecision> {
+    replay_observations_with_runs_dir(inputs, &local_runs_dir())
+}
+
+fn replay_observations_with_runs_dir(
+    inputs: &[ReplayObservation],
+    runs_dir: &Path,
+) -> Vec<ReplayDecision> {
     let mut memory = PaneV3MemoryMap::new();
     let mut decisions = Vec::with_capacity(inputs.len());
     let options = PaneV3Options {
@@ -522,11 +850,37 @@ fn replay_observations(inputs: &[ReplayObservation]) -> Vec<ReplayDecision> {
         stale_draft_secs: watchdog::STALE_DRAFT_SECS,
     };
     for input in inputs {
+        let observation = PaneV3Observation {
+            pane_id: input.pane_id.clone(),
+            agent: input.agent.clone(),
+            terminal_id: Some(input.pane_id.clone()),
+            agent_session: Some(input.session_id.clone()),
+            status: input.status,
+            wait: None,
+            eta_s: None,
+            reported_at: input.reported_at.clone(),
+            tail: input.tail.clone(),
+            transcript_waiting: false,
+            process_group: None,
+            read_error: None,
+        };
         let mem = memory.entry(input.pane_id.clone()).or_default();
-        let expected = watchdog::evidence::expected_to_continue(&input.tail)
+        let wait_allowed = wait_event(&input.tail).is_none_or(|event| {
+            wait_target_finished(&event, runs_dir, std::slice::from_ref(&observation))
+        });
+        let wait_resolution = wait_event(&input.tail).map(|_| {
+            if wait_allowed {
+                "finished"
+            } else {
+                "uncheckable_or_unfinished"
+            }
+        });
+        let expected = wait_allowed
+            && watchdog::evidence::expected_to_continue(&input.tail)
             && matches!(input.status, AgentStatus::Idle | AgentStatus::Done);
         let quiet_track = expected
-            || (watchdog::evidence::promised_work(&input.tail).is_some()
+            || (wait_allowed
+                && watchdog::evidence::promised_work(&input.tail).is_some()
                 && matches!(input.status, AgentStatus::Working | AgentStatus::Unknown)
                 && !watchdog::evidence::closing_block_open(&input.tail)
                 && watchdog::evidence::background_shell_count(&input.tail) == 0
@@ -551,31 +905,18 @@ fn replay_observations(inputs: &[ReplayObservation]) -> Vec<ReplayDecision> {
             nudge_echo,
             input.timestamp,
         );
-        let mut classified = watchdog::classify_pane_v3(
-            &PaneV3Observation {
-                pane_id: input.pane_id.clone(),
-                agent: input.agent.clone(),
-                terminal_id: Some(input.pane_id.clone()),
-                agent_session: Some(input.session_id.clone()),
-                status: input.status,
-                wait: None,
-                eta_s: None,
-                reported_at: input.reported_at.clone(),
-                tail: input.tail.clone(),
-                transcript_waiting: false,
-                process_group: None,
-                read_error: None,
-            },
-            mem,
-            input.timestamp,
-            options,
-        );
+        let mut classified =
+            watchdog::classify_pane_v3(&observation, mem, input.timestamp, options);
+        if !wait_allowed {
+            classified.class = watchdog::PaneClass::WaitingHuman;
+            classified.evidence = "waiting on an uncheckable or unfinished event".into();
+        }
         let promised_stalled = classified.class == watchdog::PaneClass::Stalled
             && (classified.evidence.starts_with("promised work stopped:")
                 || classified
                     .evidence
                     .starts_with("promised work stopped (hook status "));
-        let eligible = expected || promised_stalled;
+        let eligible = wait_allowed && (expected || promised_stalled);
         let due = input.background == "none"
             && nudge_due(
                 eligible,
@@ -625,6 +966,7 @@ fn replay_observations(inputs: &[ReplayObservation]) -> Vec<ReplayDecision> {
             // Replay never delivers input; false models a failed delivery for
             // repeat scheduling while remaining strictly read-only.
             delivered: false,
+            wait_resolution,
             tail,
         });
     }
@@ -868,10 +1210,14 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
     let mut promised = Vec::with_capacity(observations.len());
     for o in &observations {
         let mem = memory.entry(o.pane_id.clone()).or_default();
-        let expected = watchdog::evidence::expected_to_continue(&o.tail)
+        let wait_allowed = wait_event(&o.tail)
+            .is_none_or(|event| wait_target_finished(&event, &local_runs_dir(), &observations));
+        let expected = wait_allowed
+            && watchdog::evidence::expected_to_continue(&o.tail)
             && matches!(o.status, AgentStatus::Idle | AgentStatus::Done);
         let quiet_track = expected
-            || (watchdog::evidence::promised_work(&o.tail).is_some()
+            || (wait_allowed
+                && watchdog::evidence::promised_work(&o.tail).is_some()
                 && matches!(o.status, AgentStatus::Working | AgentStatus::Unknown)
                 && !watchdog::evidence::closing_block_open(&o.tail)
                 && watchdog::evidence::background_shell_count(&o.tail) == 0
@@ -908,8 +1254,21 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
             watchdog::classify_pane_v3(o, memory.entry(o.pane_id.clone()).or_default(), now, vopt)
         })
         .collect::<Vec<_>>();
+    for (index, decision) in decisions.iter_mut().enumerate() {
+        if let Some(event) = wait_event(&observations[index].tail) {
+            if !wait_target_finished(&event, &local_runs_dir(), &observations) {
+                decision.class = watchdog::PaneClass::WaitingHuman;
+                decision.evidence = "waiting on an uncheckable or unfinished event".into();
+                decision.new_state = None;
+                decision.status = "consistent".into();
+            }
+        }
+    }
     for (i, (expected, quiet)) in promised.iter().copied().enumerate() {
-        let stale_working_promise = !expected
+        let wait_allowed = wait_event(&observations[i].tail)
+            .is_none_or(|event| wait_target_finished(&event, &local_runs_dir(), &observations));
+        let stale_working_promise = wait_allowed
+            && !expected
             && decisions[i].class == watchdog::PaneClass::Stalled
             && decisions[i]
                 .evidence
@@ -1139,11 +1498,18 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
         }
         let mem = memory.entry(d.pane_id.clone()).or_default();
         let quiet = promised[i].1;
-        let promised_stalled = d.class == watchdog::PaneClass::Stalled
+        let wait_allowed = wait_event(&observations[i].tail)
+            .is_none_or(|event| wait_target_finished(&event, &local_runs_dir(), &observations));
+        if !wait_allowed {
+            d.class = watchdog::PaneClass::WaitingHuman;
+            d.evidence = "waiting on an uncheckable or unfinished event".into();
+        }
+        let promised_stalled = wait_allowed
+            && d.class == watchdog::PaneClass::Stalled
             && (d.evidence.starts_with("promised work stopped:")
                 || d.evidence
                     .starts_with("promised work stopped (hook status "));
-        let should_nudge = promised[i].0 || promised_stalled;
+        let should_nudge = wait_allowed && (promised[i].0 || promised_stalled);
         let due = nudge_due(
             should_nudge,
             quiet,

@@ -438,6 +438,38 @@ def main() -> int:
             decisions.append(row)
             if row.get("would_nudge"):
                 attempts.append(row)
+    by_observation = {
+        (row.get("timestamp"), row.get("pane_id"), row.get("session_id")): row
+        for row in decisions
+    }
+    wait_rows = []
+    with rows_path.open() as source:
+        for observation_line in source:
+            try:
+                observation = json.loads(observation_line)
+            except json.JSONDecodeError:
+                continue
+            tail = str(observation.get("tail") or "")
+            now_lines = [line.strip() for line in tail.splitlines()
+                         if re.match(r"^\s*(?:\*\*)?Now:?(?:\*\*)?\s*", line,
+                                     flags=re.IGNORECASE)]
+            if not now_lines:
+                continue
+            now_line = now_lines[-1]
+            if not re.match(r"^\s*(?:\*\*)?Now:?(?:\*\*)?\s*(?:wait\b|waiting\b)",
+                            now_line, flags=re.IGNORECASE):
+                continue
+            decision = by_observation.get((observation.get("timestamp"), observation.get("pane_id"),
+                                           observation.get("session_id")), {})
+            wait_rows.append({
+                "timestamp": observation.get("timestamp"),
+                "pane_id": observation.get("pane_id"),
+                "session_id": observation.get("session_id"),
+                "now": now_line,
+                "resolver": decision.get("wait_resolution", "uncheckable_or_unfinished"),
+                "class": decision.get("class"),
+                "would_nudge": bool(decision.get("would_nudge")),
+            })
     with attempts_path.open("w") as target:
         for row in attempts:
             target.write(json.dumps({"host": args.host, **row}, ensure_ascii=False) + "\n")
@@ -483,6 +515,7 @@ def main() -> int:
             for row in recall
         ],
         "distinct_panes_episodes_nudged": len(episode_counts),
+        "wait_rows": wait_rows,
         "max_attempts_per_episode": max(episode_counts.values(), default=0),
         "old_watchdog_nudges_same_window": old_nudge_count(cutoff, end),
         "pane_sessions_without_transcript": sum(item["events"] is None for item in active.values()),
@@ -517,6 +550,16 @@ def main() -> int:
         if not item["detected"]:
             decision = item["midpoint_decision"] or {}
             lines.append(f"  - Why: {item['reason']}; midpoint class `{decision.get('class', 'unavailable')}`, evidence `{decision.get('evidence', 'unavailable')}`, background `{decision.get('background', 'unavailable')}`. Eligibility blocker: {item['eligibility_block'] or 'unavailable'}.")
+    lines.extend([
+        "",
+        "## Wait rows and resolver results",
+        "",
+    ])
+    if not wait_rows:
+        lines.append("None.")
+    for row in wait_rows:
+        when = dt.datetime.fromtimestamp(row["timestamp"], UTC).isoformat() if row["timestamp"] else "unknown time"
+        lines.append(f"- {when} `{row['pane_id']}` session `{row['session_id']}` `{row['resolver']}`; class `{row['class']}`; would nudge `{str(row['would_nudge']).lower()}`; {row['now']}")
     lines.extend([
         "",
         "## Would-nudge rows for hand check",

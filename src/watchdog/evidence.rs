@@ -166,6 +166,14 @@ pub(crate) fn promised_work(text: &str) -> Option<String> {
     (dead_background || !work.is_empty()).then_some(work)
 }
 
+pub(crate) fn now_line_value(text: &str) -> Option<String> {
+    let reply = reply_text(text);
+    reply.lines().rev().find_map(|line| {
+        let captures = NOW_LINE.captures(line.trim())?;
+        Some(captures[1].trim().trim_matches('*').trim().to_owned())
+    })
+}
+
 fn is_done_now_status(value: &str) -> bool {
     let value = value.trim().to_ascii_lowercase();
     value == "done"

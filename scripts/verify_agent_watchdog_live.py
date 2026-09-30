@@ -25,6 +25,9 @@ import time
 from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[1]
+NUDGE_SAFE_SENTENCE = (
+    "If you're waiting on Matthias or an approval, reply with your Now line and do nothing else."
+)
 
 
 def _local_server_pids(sock: Path, binary: Path, pgid: int | None = None) -> list[str]:
@@ -83,7 +86,7 @@ class Harness:
         self.state = self.root / "state"
         self.sock = self.root / "s.sock"
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
-        self.env.update(XDG_CONFIG_HOME=str(self.cfg), XDG_STATE_HOME=str(self.state))
+        self.env.update(HOME=str(self.root), XDG_CONFIG_HOME=str(self.cfg), XDG_STATE_HOME=str(self.state))
         self.server: subprocess.Popen[str] | None = None
         self.started: list[subprocess.Popen[Any]] = []
         self.panes: dict[str, str] = {}
@@ -618,6 +621,26 @@ def setup_gate_now_waiting_review(h: Harness, ident: str) -> str:
     return h.workspace(ident, _script(screen), ("0 shells",))
 
 
+def setup_wait_on_human(h: Harness, ident: str) -> str:
+    screen = ("Now: wait — your ChatGPT sign-in in the harness\n"
+              "────────────────────────\n› Ask Codex to do anything\n"
+              "────────────────────────\n0 shells")
+    return h.workspace(ident, _script(screen), ("Now: wait — your ChatGPT sign-in in the harness",))
+
+
+def setup_wait_on_finished_worker(h: Harness, ident: str) -> str:
+    run_id = "ra-260930-foo-abc123"
+    run_dir = h.root / ".agents" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "state.json").write_text(
+        json.dumps({"schema": 1, "state": "done", "exit_reason": "completed"}),
+        encoding="utf-8")
+    screen = (f"Now: wait — {run_id} result\n"
+              "────────────────────────\n› Ask Codex to do anything\n"
+              "────────────────────────\n0 shells")
+    return h.workspace(ident, _script(screen), (f"Now: wait — {run_id} result",))
+
+
 def setup_promised_background(h: Harness, ident: str) -> str:
     kind = "shell" if "shell" in ident else "agent"
     command = _promised_draft_agent(h.root, "")
@@ -803,6 +826,8 @@ CASES: list[tuple[str, str, Callable[[Harness, str], Any], str]] = [
     ("promised_logged_out_not_nudged", "A", setup_promised_draft, "stalled"),
     ("gate_inline_reply_not_nudged", "A", setup_gate_inline_reply, "waiting_human"),
     ("gate_now_waiting_review_not_nudged", "A", setup_gate_now_waiting_review, "waiting_human"),
+    ("wait_on_human_not_nudged", "A", setup_wait_on_human, "waiting_human"),
+    ("wait_on_finished_worker_nudged", "A", setup_wait_on_finished_worker, "finished_idle"),
     ("promised_background_shell_past_deadline_not_nudged", "A", setup_promised_background, "stalled"),
     ("promised_background_agent_past_deadline_not_nudged", "A", setup_promised_background, "stalled"),
     ("fresh_draft_typing", "A", setup_promised_draft, "working"),
@@ -945,6 +970,7 @@ def main() -> int:
                 session_id = "session-" + ident
                 session_source = ("herdr:codex" if ident in (
                     "stale_draft_promised_work_stalled", "promised_quiet_nudged",
+                    "wait_on_finished_worker_nudged",
                     "promised_stale_working_nudged",
                     "promised_stale_working_active_tool_not_nudged",
                     "promised_stale_working_dead_marker_nudged")
@@ -954,12 +980,16 @@ def main() -> int:
                                      or ident == "stale_draft_promised_work_stalled"
                                      or ident == "done_here_with_suffix_not_nudged"
                                      or ident == "undelivered_nudge_backs_off"
+                                     or ident == "wait_on_finished_worker_nudged"
                                      or (ident.startswith("promised_")
                                          and not ident.startswith("promised_stale_working_")
                                          and not ident.startswith("promised_background_"))) else (
                     "blocked" if ident == "a-approval-hook" else "working")
                 report: dict[str, Any] = {"pane_id": pane_id, "source": status_source,
                     "agent": "codex", "state": status}
+                if ident == "wait_on_human_not_nudged":
+                    report["reported_at"] = time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
                 if ident.startswith("a-retry"):
                     report.update(wait="retry", eta_s=120,
                                   reported_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
@@ -984,6 +1014,9 @@ def main() -> int:
                     # Keep other fixtures on this shared harness server quiet
                     # while memory aging advances this pane's repeat clock.
                     cmd_options += ["--quiet-secs", "1800"]
+                elif ident == "wait_on_finished_worker_nudged":
+                    cmd_options.remove("--dry-run")
+                    cmd_options += ["--quiet-secs", "2"]
                 if args.gemini_bin:
                     cmd_options += ["--gemini-bin", args.gemini_bin]
                 else:
@@ -998,6 +1031,8 @@ def main() -> int:
                 if ident.startswith("promised_"):
                     # These cases exercise promised-work policy. Keep the
                     # composer draft, but age it past the human-typing guard.
+                    age = 1800
+                if ident in ("wait_on_human_not_nudged", "wait_on_finished_worker_nudged"):
                     age = 1800
                 if ident == "undelivered_nudge_backs_off":
                     age = 1800
@@ -1018,6 +1053,7 @@ def main() -> int:
                                                                  "promised_quiet_nudged",
                                                                  "promised_stale_working_nudged",
                                                                  "promised_stale_working_dead_marker_nudged",
+                                                                 "wait_on_finished_worker_nudged",
                                                                  "undelivered_nudge_backs_off"))
                 if ident == "undelivered_nudge_backs_off":
                     # Advance the repeat clock in saved memory between scans;
@@ -1100,6 +1136,20 @@ def main() -> int:
             elif ident == "done_here_with_suffix_not_nudged":
                 case_match = (actual == expected and decision.get("action") is None
                               and not log.exists())
+            elif ident == "wait_on_human_not_nudged":
+                log_rows = ([json.loads(line) for line in log.read_text().splitlines()
+                             if line.strip()] if log.exists() else [])
+                attempts = [row for row in log_rows
+                            if row.get("action") == "nudge" and row.get("pane_id") == pane_id]
+                case_match = (actual == "waiting_human" and not attempts
+                              and decision.get("action") is None)
+                evidence = f"{evidence}; attempts={len(attempts)}; decision={decision}"
+            elif ident == "wait_on_finished_worker_nudged":
+                action_text = str(decision.get("action_text") or "")
+                case_match = (actual == expected and decision.get("action") == "nudge"
+                              and decision.get("delivered") is True
+                              and NUDGE_SAFE_SENTENCE in action_text)
+                evidence = f"{evidence}; action_text={action_text!r}; delivered={decision.get('delivered')}"
             elif ident == "undelivered_nudge_backs_off":
                 action_rows = [json.loads(line) for line in log.read_text().splitlines()
                                if line.strip()]
