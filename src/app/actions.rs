@@ -3440,14 +3440,7 @@ impl AppState {
             // The closing marker consumes this turn and arms the ordinary quiet
             // settlement window. The timed settlement pass still enforces seen,
             // focus, pin, and quiet-time gates before stopping the agent.
-            if let Some(pane) = self
-                .workspaces
-                .iter_mut()
-                .find_map(|workspace| workspace.pane_state_mut(pane_id))
-            {
-                pane.activity.note(std::time::Instant::now());
-                self.mark_session_dirty();
-            }
+            self.note_automated_pane_activity_at(pane_id, std::time::Instant::now());
         }
         (updates.into_iter().collect(), accepted)
     }

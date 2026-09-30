@@ -3383,7 +3383,9 @@ mod tests {
             .activity
             .last_at();
         let output_at = armed_at + std::time::Duration::from_secs(10);
-        active.state.note_pane_activity_at(pane_id, output_at);
+        active
+            .state
+            .note_automated_pane_activity_at(pane_id, output_at);
         assert_eq!(
             active.state.refresh_settled_panes_at(
                 None,
