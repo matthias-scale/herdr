@@ -524,28 +524,74 @@ fn transcript_lines(
         if !lines.is_empty() {
             lines.push(Line::from(""));
         }
-        let user = speaker == "you";
-        let marker = if user { "› " } else { "● " };
+        if speaker != "you" {
+            // Agent turns render their markdown the way the live agent does:
+            // emphasis without its asterisks, and lists without blank rows.
+            let mut rendered = crate::ui::markdown::body_lines(
+                palette,
+                Some(&compact_list_gaps(body)),
+                width.saturating_sub(2) as usize,
+                "  ",
+            );
+            if let Some(span) = rendered.first_mut().and_then(|line| line.spans.first_mut()) {
+                if let Some(rest) = span.content.strip_prefix("  ") {
+                    span.content = format!("● {rest}").into();
+                }
+            }
+            lines.extend(rendered);
+            continue;
+        }
         let mut first = true;
         for physical in body.split('\n') {
             for_each_wrapped_line(physical, width.saturating_sub(2) as usize, |fragment| {
-                let prefix = if first { marker } else { "  " };
+                let prefix = if first { "› " } else { "  " };
                 first = false;
                 let mut row = format!("{prefix}{fragment}");
-                if user {
-                    let padding = width.saturating_sub(2 + fragment.width() as u16) as usize;
-                    row.extend(std::iter::repeat_n(' ', padding));
-                    lines.push(
-                        Line::from(row)
-                            .style(Style::default().fg(palette.text).bg(palette.surface0)),
-                    );
-                } else {
-                    lines.push(Line::from(row));
-                }
+                let padding = width.saturating_sub(2 + fragment.width() as u16) as usize;
+                row.extend(std::iter::repeat_n(' ', padding));
+                lines.push(
+                    Line::from(row).style(Style::default().fg(palette.text).bg(palette.surface0)),
+                );
             });
         }
     }
     lines
+}
+
+/// Drop blank rows between consecutive list items, which agents emit as
+/// loose markdown lists but render tightly.
+fn compact_list_gaps(body: &str) -> String {
+    let rows: Vec<&str> = body.lines().collect();
+    let mut kept = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        if row.trim().is_empty() {
+            let previous = rows[..index]
+                .iter()
+                .rev()
+                .find(|row| !row.trim().is_empty());
+            let next = rows[index + 1..].iter().find(|row| !row.trim().is_empty());
+            if previous.is_some_and(|row| is_list_item(row))
+                && next.is_some_and(|row| is_list_item(row))
+            {
+                continue;
+            }
+        }
+        kept.push(*row);
+    }
+    kept.join("\n")
+}
+
+fn is_list_item(row: &str) -> bool {
+    let trimmed = row.trim_start();
+    if ["- ", "* ", "+ "]
+        .iter()
+        .any(|marker| trimmed.starts_with(marker))
+    {
+        return true;
+    }
+    let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+    (1..=3).contains(&digits)
+        && (trimmed[digits..].starts_with(". ") || trimmed[digits..].starts_with(") "))
 }
 
 fn for_each_wrapped_line(mut text: &str, width: usize, mut emit: impl FnMut(&str)) {
@@ -1277,9 +1323,45 @@ mod tests {
         let lines = transcript_lines(&turns, "CoDeX", 20, &palette);
         assert_eq!(
             lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            ["● Alpha", "  ", "  Beta"]
+            ["● Alpha", "", "  Beta"]
         );
         assert_eq!(transcript_lines(&turns, "absent", 20, &palette).len(), 0);
+    }
+
+    #[test]
+    fn settled_transcript_renders_agent_markdown_like_the_live_agent() {
+        let palette = crate::app::state::Palette::catppuccin();
+        let turns = vec![(
+            "claude".into(),
+            "1. First item\n\n2. Second item\n\nClosing with **bold** text.".into(),
+        )];
+        let lines = transcript_lines(&turns, "", 40, &palette);
+        let rows: Vec<_> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            rows,
+            [
+                "● 1. First item",
+                "  2. Second item",
+                "",
+                "  Closing with bold text."
+            ]
+        );
+        let bold = lines[3]
+            .spans
+            .iter()
+            .find(|span| span.content == "bold")
+            .expect("bold span");
+        assert!(bold.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn compact_list_gaps_keeps_gaps_around_prose() {
+        assert_eq!(compact_list_gaps("- a\n\n- b"), "- a\n- b");
+        assert_eq!(compact_list_gaps("para\n\n- a"), "para\n\n- a");
+        assert_eq!(
+            compact_list_gaps("1) a\n\n12. b\n\ntext"),
+            "1) a\n12. b\n\ntext"
+        );
     }
 
     #[test]
