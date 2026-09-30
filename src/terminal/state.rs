@@ -1574,13 +1574,7 @@ impl TerminalState {
             return false;
         }
         report.auto_settle_consumed_turn = Some(turn);
-        let eligible =
-            report.user_replied && report.user_replied_session_id.as_deref() == Some(&session_id);
-        // One human reply authorizes one completed turn. Later nudge-generated
-        // turns need a new reply even when they share the same agent session.
-        report.user_replied = false;
-        report.user_replied_session_id = None;
-        eligible
+        report.user_replied && report.user_replied_session_id.as_deref() == Some(&session_id)
     }
 
     pub(crate) fn note_user_reply(&mut self) {
@@ -6028,9 +6022,6 @@ mod tests {
         assert!(terminal.observe_auto_settle_transition(true, true, false));
         assert!(!terminal.observe_auto_settle_transition(false, true, false));
         terminal.set_closing_report_scope("herdr:codex".into(), Some("session-a".into()), Some(2));
-        assert!(!terminal.observe_auto_settle_transition(true, true, false));
-        terminal.note_user_reply();
-        terminal.set_closing_report_scope("herdr:codex".into(), Some("session-a".into()), Some(3));
         assert!(terminal.observe_auto_settle_transition(true, true, false));
     }
 
