@@ -1716,11 +1716,13 @@ impl App {
                     external_wait: external_wait.clone(),
                     parse_status,
                     workers_unknown,
+                    settle_ready: params.settle_ready == Some(true),
                     dependencies_authoritative,
                     session_id: params
                         .agent_session_id
                         .clone()
                         .or_else(|| legacy_session_id.clone()),
+                    last_turn_at: params.last_turn_at,
                 })
             });
         let reported_state = detect_state_from_api(params.state);
@@ -2698,6 +2700,23 @@ impl App {
                 (tab.layout.pane_count() <= 1 || leaves_only_companions).then_some(tab_idx)
             });
             if let Some(tab_idx) = close_tab_idx {
+                if self
+                    .state
+                    .workspaces
+                    .get(ws_idx)
+                    .is_some_and(|workspace| workspace.tabs.len() == 1)
+                {
+                    return self
+                        .close_last_tab_workspace(ws_idx, tab_idx)
+                        .map_err(|message| {
+                            let code = if message.starts_with("confirmation_required:") {
+                                "confirmation_required"
+                            } else {
+                                "pane_close_failed"
+                            };
+                            encode_error(id, code, message)
+                        });
+                }
                 return self
                     .close_tab_preserving_workspace(ws_idx, tab_idx, true)
                     .map_err(|message| encode_error(id, "pane_close_failed", message));
@@ -3166,6 +3185,7 @@ mod tests {
             wait: None,
             eta_s: None,
             reported_at: None,
+            last_turn_at: None,
             agent_session_id: None,
             agent_session_path: None,
             gates: Some(gates),
@@ -3176,6 +3196,7 @@ mod tests {
             parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
             workers_unknown: Some(false),
             agents: Some(0),
+            settle_ready: None,
         }
     }
 
@@ -3478,11 +3499,26 @@ mod tests {
             ),
             0
         );
+        // Clearing a gate reports fresh output, which stays unread until the human sees it.
+        let settle_at = cleared_at + app.state.settle_done_after;
+        if !app.state.workspaces[0].tabs[0].panes[&pane_id].seen {
+            assert_eq!(
+                app.state
+                    .refresh_settled_panes_at(None, settle_at, 1_725_001_800),
+                0,
+                "unread result must not settle"
+            );
+            app.state.workspaces[0].tabs[0]
+                .panes
+                .get_mut(&pane_id)
+                .unwrap()
+                .seen = true;
+        }
         assert_eq!(
             app.state.refresh_settled_panes_at(
                 None,
-                cleared_at + app.state.settle_done_after,
-                1_725_001_800,
+                settle_at + std::time::Duration::from_nanos(1),
+                1_725_001_801,
             ),
             1
         );
@@ -3568,6 +3604,8 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -4990,10 +5028,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_pane_close_last_pane_keeps_linked_worktree_workspace() {
+    async fn api_pane_close_last_pane_closes_linked_worktree_workspace() {
         let mut app = app_with_linked_worktree();
-        let workspace_id = app.state.workspaces[0].id.clone();
-        let workspace_cwd = app.state.workspaces[0].identity_cwd.clone();
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
 
@@ -5007,12 +5043,7 @@ mod tests {
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(success.id, "req");
         assert_eq!(app.state.request_remove_linked_worktree, None);
-        assert_eq!(app.state.workspaces.len(), 1);
-        assert_eq!(app.state.workspaces[0].id, workspace_id);
-        assert_eq!(app.state.workspaces[0].identity_cwd, workspace_cwd);
-        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
-        assert!(app.state.workspaces[0].worktree_space.is_some());
-        assert!(app.state.workspaces[0].pane_state(pane_id).is_none());
+        assert!(app.state.workspaces.is_empty());
         for (_terminal_id, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
@@ -5023,8 +5054,6 @@ mod tests {
         let (mut app, _) = app_with_test_workspace();
         let primary = app.state.workspaces[0].tabs[0].root_pane;
         let companion = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
-        let workspace_id = app.state.workspaces[0].id.clone();
-        let workspace_cwd = app.state.workspaces[0].identity_cwd.clone();
         app.state.workspaces[0].tabs[0].layout.focus_pane(primary);
         app.state.workspaces[0]
             .pane_state_mut(companion)
@@ -5043,22 +5072,9 @@ mod tests {
         );
 
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
-        assert_eq!(app.state.workspaces.len(), 1);
-        assert_eq!(app.state.workspaces[0].id, workspace_id);
-        assert_eq!(app.state.workspaces[0].identity_cwd, workspace_cwd);
-        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
-        assert_ne!(app.state.workspaces[0].tabs[0].root_pane, primary);
-        assert_ne!(app.state.workspaces[0].tabs[0].root_pane, companion);
+        assert!(app.state.workspaces.is_empty());
         assert!(!app.state.terminals.contains_key(&primary_terminal));
         assert!(!app.state.terminals.contains_key(&companion_terminal));
-        let replacement_terminal = app
-            .state
-            .terminal_id_for_pane(0, app.state.workspaces[0].tabs[0].root_pane)
-            .unwrap();
-        assert_eq!(
-            app.state.terminals[&replacement_terminal].cwd,
-            workspace_cwd
-        );
         for (_terminal_id, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
@@ -6899,6 +6915,8 @@ mod tests {
             parse_status: None,
             workers_unknown: None,
             agents: None,
+            last_turn_at: None,
+            settle_ready: None,
         };
 
         let response = app.handle_pane_report_agent("working-1".into(), report(1));
@@ -6988,6 +7006,8 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -7052,6 +7072,8 @@ mod tests {
                 parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
                 workers_unknown: Some(false),
                 agents: Some(1),
+                last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -7862,6 +7884,7 @@ mod tests {
             .unwrap()
             .set_detected_state(Some(Agent::Claude), AgentState::Working);
         let reported_at = "2026-08-10T10:00:00Z".to_string();
+        let last_turn_at = "2026-08-10T09:59:50Z".to_string();
 
         let response = app.handle_pane_report_agent(
             "declared-wait".into(),
@@ -7876,6 +7899,7 @@ mod tests {
                 wait: Some("CI run 4123".into()),
                 eta_s: Some(720),
                 reported_at: Some(reported_at.clone()),
+                last_turn_at: Some(last_turn_at.clone()),
                 agent_session_id: None,
                 agent_session_path: None,
                 gates: Some(Vec::new()),
@@ -7886,6 +7910,7 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -7902,6 +7927,7 @@ mod tests {
         assert_eq!(pane.wait.as_deref(), Some("CI run 4123"));
         assert_eq!(pane.eta_s, Some(720));
         assert_eq!(pane.reported_at.as_deref(), Some(reported_at.as_str()));
+        assert_eq!(pane.last_turn_at.as_deref(), Some(last_turn_at.as_str()));
         assert!(app
             .event_hub
             .events_after(0)
@@ -7913,8 +7939,9 @@ mod tests {
                     wait: Some(wait),
                     eta_s: Some(720),
                     reported_at: Some(value),
+                    last_turn_at: Some(turn_at),
                     ..
-                } if wait == "CI run 4123" && value == &reported_at
+                } if wait == "CI run 4123" && value == &reported_at && turn_at == &last_turn_at
             )));
     }
 
@@ -7989,6 +8016,8 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -8055,6 +8084,8 @@ mod tests {
             parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
             workers_unknown: Some(false),
             agents: None,
+            last_turn_at: None,
+            settle_ready: None,
         };
 
         let _: SuccessResponse = serde_json::from_str(
@@ -8233,6 +8264,8 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -8286,6 +8319,8 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -8315,6 +8350,8 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -9455,6 +9492,8 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse =
@@ -10065,7 +10104,10 @@ mod tests {
             parse_status: None,
             workers_unknown: None,
             agents: None,
+            last_turn_at: None,
+            settle_ready: None,
         };
+
         assert_eq!(
             metadata_error_code(
                 &app.handle_pane_report_agent("unknown-pane-report".into(), unknown_report,)
@@ -10225,6 +10267,8 @@ mod tests {
                 parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
                 workers_unknown: Some(false),
                 agents: Some(0),
+                last_turn_at: None,
+                settle_ready: None,
             }
         };
         let metadata = |seq: u64| PaneReportMetadataParams {

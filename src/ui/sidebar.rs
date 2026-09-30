@@ -244,7 +244,8 @@ const NEEDS_YOU_REQUESTED_PREFIX_WIDTH: usize = 4;
 const SIDEBAR_PROVIDER_GAP_WIDTH: usize = 1;
 const SIDEBAR_AGE_FIELD_WIDTH: usize = 5;
 const SIDEBAR_AGE_MIN_ROW_WIDTH: usize = 24;
-const SIDEBAR_MACHINE_FIELD_WIDTH: usize = 2;
+const SIDEBAR_MACHINE_LABEL_WIDTH: usize = 3;
+const SIDEBAR_MACHINE_FIELD_WIDTH: usize = SIDEBAR_MACHINE_LABEL_WIDTH + 1;
 const SIDEBAR_MIN_NESTED_TITLE_WIDTH: usize = 8;
 const SIDEBAR_MIN_NESTED_PREFIX_WIDTH: usize = 3;
 const SIDEBAR_TITLE_TARGET_WIDTH: usize = 16;
@@ -366,28 +367,89 @@ fn sidebar_machine_host<'a>(app: &'a AppState, entry: &'a AgentPanelEntry) -> &'
         .unwrap_or(app.agent_host_name.as_str())
 }
 
-fn sidebar_machine_icon<'a>(app: &'a AppState, host: &str) -> &'a str {
-    let override_icon = app
-        .machines
-        .iter()
-        .find(|machine| machine.name == host)
-        .and_then(|machine| machine.icon.as_deref());
-    crate::ui::icons::machine_icon(host, override_icon, app.nerd_font)
+/// Machine column label: the host's first three characters, lowercased and
+/// padded, so `ub1`, `ub2`, `mbpro` and `mbair` read as `ub1`, `ub2`, `mbp`, `mba`.
+fn sidebar_machine_icon(_app: &AppState, host: &str) -> String {
+    let label: String = host
+        .to_lowercase()
+        .chars()
+        .take(SIDEBAR_MACHINE_LABEL_WIDTH)
+        .collect();
+    format!("{label:<width$}", width = SIDEBAR_MACHINE_LABEL_WIDTH)
 }
 
 fn machine_icon_cell_offset(row_width: usize, age_width: usize) -> usize {
-    row_width.saturating_sub(age_width + 1)
+    row_width.saturating_sub(age_width + SIDEBAR_MACHINE_LABEL_WIDTH)
 }
 
 fn compact_age(
     entry: &AgentPanelEntry,
     now: std::time::Instant,
 ) -> (String, Option<std::time::Instant>) {
-    let instant = entry.reported_at.or(entry.activity_at);
+    let instant = entry
+        .last_turn_at
+        .map(|timestamp| timestamp.instant)
+        .or(entry.reported_at)
+        .or(entry.activity_at);
     let age = instant
         .and_then(|instant| status_report_age_compact_label(Some(instant), now))
         .unwrap_or_else(|| "—".to_string());
     (age, instant)
+}
+
+fn reply_timestamp(value: Option<&str>, now: std::time::Instant) -> Option<AgentReplyTimestamp> {
+    let unix_seconds = crate::fleet::parse_utc_timestamp(value?)?;
+    let now_unix_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let age = now_unix_seconds.checked_sub(unix_seconds)?;
+    Some(AgentReplyTimestamp {
+        instant: now.checked_sub(std::time::Duration::from_secs(age))?,
+        unix_seconds,
+    })
+}
+
+fn cached_reply_timestamp(
+    instant: Option<std::time::Instant>,
+    unix_seconds: Option<u64>,
+) -> Option<AgentReplyTimestamp> {
+    Some(AgentReplyTimestamp {
+        instant: instant?,
+        unix_seconds: unix_seconds?,
+    })
+}
+
+fn age_words(instant: std::time::Instant, now: std::time::Instant) -> String {
+    let minutes = now
+        .checked_duration_since(instant)
+        .unwrap_or_default()
+        .as_secs()
+        / 60;
+    if minutes >= 60 {
+        format!("{}h {}m", minutes / 60, minutes % 60)
+    } else {
+        format!("{minutes}m")
+    }
+}
+
+fn age_tooltip(
+    last_turn_at: Option<AgentReplyTimestamp>,
+    reported_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> String {
+    if let Some(last_turn_at) = last_turn_at {
+        let ago = age_words(last_turn_at.instant, now);
+        let clock = crate::platform::local_datetime_at(last_turn_at.unix_seconds)
+            .map(|local| format!("{:02}:{:02}", local.hour(), local.minute()))
+            .unwrap_or_else(|| "local time unavailable".to_string());
+        format!("Last reply {ago} ago\n({clock})")
+    } else {
+        let ago = reported_at
+            .map(|instant| format!("{} ago", age_words(instant, now)))
+            .unwrap_or_else(|| "time unavailable".to_string());
+        format!("Last status report {ago}\nAgent reply time unavailable")
+    }
 }
 
 fn remote_compact_age(remote: &RemoteAgentPanelEntry, now: std::time::Instant) -> String {
@@ -966,10 +1028,8 @@ fn render_remote_compact_agent_row_with_prefix(
         .add_modifier(Modifier::DIM);
     let age_style = Style::default().fg(if remote.snoozed_until.is_some() {
         p.overlay0
-    } else if remote.state == AgentState::Working {
-        p.blue
     } else {
-        p.overlay0
+        p.yellow
     });
 
     let mut x = rect.x.saturating_add(widths.prefix as u16);
@@ -1151,11 +1211,7 @@ fn render_compact_agent_row_with_prefix(
     let provider_style = Style::default()
         .fg(provider_color(entry, p))
         .add_modifier(Modifier::DIM);
-    let age_style = Style::default().fg(if entry.state == AgentState::Working {
-        p.blue
-    } else {
-        p.overlay0
-    });
+    let age_style = Style::default().fg(p.yellow);
     let mut spans = vec![
         Span::styled(prefix, row_style(compact_row_style(Style::default(), bg))),
         Span::styled(dot, row_style(dot_style)),
@@ -1477,6 +1533,7 @@ pub(crate) enum AgentPanelIdentity {
 #[allow(dead_code)]
 pub(crate) struct AgentPanelEntry {
     pub(crate) identity: AgentPanelIdentity,
+    pub(crate) last_turn_at: Option<AgentReplyTimestamp>,
     data: std::sync::Arc<AgentPanelEntryData>,
     pub(crate) pinned: bool,
     /// Projection-only overlay. Keeping it outside shared row data lets group
@@ -1495,6 +1552,12 @@ pub(crate) struct AgentPanelEntry {
     pub(crate) working_shelf: bool,
     /// Read-only membership token projected once for a canonical pane row.
     pub(crate) pod: Option<PodToken>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AgentReplyTimestamp {
+    pub(crate) instant: std::time::Instant,
+    pub(crate) unix_seconds: u64,
 }
 
 #[derive(Clone)]
@@ -1569,6 +1632,7 @@ impl AgentPanelEntry {
     pub(crate) fn new(identity: AgentPanelIdentity, data: AgentPanelEntryData) -> Self {
         Self {
             identity,
+            last_turn_at: None,
             data: std::sync::Arc::new(data),
             pinned: false,
             space_label_redundant: false,
@@ -2273,6 +2337,12 @@ fn collect_agent_panel_entries_with_runtimes(
                             remote_host,
                         },
                     );
+                    entry.last_turn_at = terminal.and_then(|terminal| {
+                        cached_reply_timestamp(
+                            terminal.last_turn_at_instant(),
+                            terminal.last_turn_at_unix_s(),
+                        )
+                    });
                     entry.pinned = pinned;
                     entry
                 })
@@ -2423,6 +2493,8 @@ pub(crate) fn remote_agent_panel_entries_at(
                     remote_host: None,
                 },
             );
+            panel_entry.last_turn_at =
+                reply_timestamp(row.last_turn_at.as_deref(), std::time::Instant::now());
             panel_entry.pending_ask = row
                 .agent_info()
                 .and_then(|info| pending_ask_from_items(&info.gates, &info.items));
@@ -3659,14 +3731,15 @@ fn compact_sidebar_rows_inner(
         let remote_activity = sidebar_remote_activity(app, &remote_entries);
         let mut space_entries = Vec::new();
         let mut working_entries = Vec::new();
+        // Working agents get their own section; every other active pane
+        // (blocked, done, idle, unknown) stays in the tree above it, so the
+        // sidebar holds every pane agent cycling can reach.
         for mut entry in visible_entries.iter().cloned() {
-            if entry.has_agent
-                && (entry_is_blocked(&entry) || (entry.state == AgentState::Idle && !entry.seen))
-            {
-                space_entries.push(entry);
-            } else if entry.has_agent && entry.state == AgentState::Working {
+            if sidebar_entry_is_working(&entry) {
                 entry.working_shelf = true;
                 working_entries.push(entry);
+            } else {
+                space_entries.push(entry);
             }
         }
         let mut remote_snoozed = Vec::new();
@@ -3674,14 +3747,11 @@ fn compact_sidebar_rows_inner(
         for mut entry in remote_entries.iter().cloned() {
             match sidebar_entry_lifecycle(app, &entry) {
                 SidebarEntryLifecycle::Active => {
-                    if entry.has_agent
-                        && (entry_is_blocked(&entry)
-                            || (entry.state == AgentState::Idle && !entry.seen))
-                    {
-                        space_entries.push(entry);
-                    } else if entry.has_agent && entry.state == AgentState::Working {
+                    if sidebar_entry_is_working(&entry) {
                         entry.working_shelf = true;
                         working_entries.push(entry);
+                    } else {
+                        space_entries.push(entry);
                     }
                 }
                 SidebarEntryLifecycle::Snoozed => remote_snoozed.push(entry),
@@ -3752,7 +3822,8 @@ fn compact_sidebar_rows_inner(
             &visible_entries,
             &[],
             &[],
-            &[],
+            &visible_entries,
+            &remote_entries,
             expand_worktrees,
             &pods,
             false,
@@ -3816,6 +3887,7 @@ fn compact_sidebar_rows_inner(
         &visible_entries,
         &snoozed_entries,
         &settled_entries,
+        &visible_entries,
         &remote_entries,
         expand_worktrees,
         &pods,
@@ -3895,7 +3967,11 @@ fn mark_ambiguous_remote_titles(rows: &mut [SidebarRow], width: usize, nerd_font
         let requested_prefix = usize::from(depth) * 3 + 1;
         let title = compact_row_title_for_width(title, &provider, width, requested_prefix);
         let widths = compact_row_widths(title, &provider, width, requested_prefix);
-        let fixed = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
+        let fixed = widths.prefix
+            + SIDEBAR_DOT_FIELD_WIDTH
+            + widths.provider
+            + SIDEBAR_MACHINE_FIELD_WIDTH
+            + widths.age;
         Some(truncate_end(title, width.saturating_sub(fixed)).to_ascii_lowercase())
     };
     let mut counts = std::collections::HashMap::<String, usize>::new();
@@ -4079,6 +4155,10 @@ fn append_legacy_space_rows(
         None,
         None,
     );
+}
+
+fn sidebar_entry_is_working(entry: &AgentPanelEntry) -> bool {
+    entry.has_agent && entry.state == AgentState::Working && !entry_is_blocked(entry)
 }
 
 fn append_shelf_space_rows(
@@ -5079,6 +5159,7 @@ fn append_ordered_sidebar_blocks(
     active_entries: &[AgentPanelEntry],
     snoozed_entries: &[AgentPanelEntry],
     settled_entries: &[AgentPanelEntry],
+    local_fleet_entries: &[AgentPanelEntry],
     remote_entries: &[AgentPanelEntry],
     expand_worktrees: bool,
     pods: &PodProjection,
@@ -5108,7 +5189,9 @@ fn append_ordered_sidebar_blocks(
                     expand_worktrees,
                 );
             }
-            SidebarBlock::Fleet => append_fleet_rows(app, &mut block_rows, remote_entries),
+            SidebarBlock::Fleet => {
+                append_fleet_rows(app, &mut block_rows, local_fleet_entries, remote_entries)
+            }
             SidebarBlock::Ambient => {
                 if sidebar_area_is_visible(app, crate::config::SidebarArea::Runs) {
                     runs::append_rows(app, &mut block_rows);
@@ -5248,26 +5331,27 @@ fn needs_you_space_icon(
     }
 }
 
-fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[AgentPanelEntry]) {
-    if entries.is_empty() {
+fn append_fleet_rows(
+    app: &AppState,
+    rows: &mut Vec<SidebarRow>,
+    local_entries: &[AgentPanelEntry],
+    entries: &[AgentPanelEntry],
+) {
+    if !fleet_shows_hosts(app, entries) {
         return;
     }
     let mut hosts = Vec::<(String, Vec<AgentPanelEntry>)>::new();
-    for entry in entries.iter().cloned() {
-        let Some(host) = entry
-            .remote_entry
-            .as_ref()
-            .map(|remote| remote.agent_ref.host.clone())
-        else {
-            continue;
-        };
-        match hosts.iter_mut().find(|(name, _)| name == &host) {
-            Some((_, host_entries)) => host_entries.push(entry),
-            None => hosts.push((host, vec![entry])),
-        }
-    }
-    if hosts.is_empty() {
-        return;
+    let mut local_entries = local_entries.to_vec();
+    local_entries.retain(|entry| {
+        entry.has_agent
+            && entry
+                .local_target()
+                .is_some_and(|target| !app.remote_focus_proxy_panes.contains(&target.pane_id))
+    });
+    hosts.push((app.agent_host_name.clone(), local_entries));
+    for host in fleet_remote_host_names(app, entries) {
+        let host_entries = remote_entries_on_host(entries, &host);
+        hosts.push((host, host_entries));
     }
     let host_tokens = hosts
         .iter()
@@ -5276,13 +5360,15 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
                 .first()
                 .and_then(|entry| entry.remote_entry.as_ref())
                 .and_then(|remote| remote.narrow_host_suffix.strip_prefix(" · "))
-                .expect("host token for Fleet row");
-            (host.clone(), token.to_string())
+                .map(str::to_string)
+                .unwrap_or_else(|| middle_elide(host, SIDEBAR_HOST_TOKEN_NARROW_WIDTH));
+            (host.clone(), token)
         })
         .collect::<std::collections::HashMap<_, _>>();
     let host_counts = hosts
         .iter()
-        .filter_map(|(host, entries)| {
+        .filter(|(host, _)| host != &app.agent_host_name)
+        .map(|(host, entries)| {
             let count = entries
                 .iter()
                 .filter(|entry| {
@@ -5292,19 +5378,20 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
                         .is_some_and(|remote| !remote.settled && remote.snoozed_until.is_none())
                 })
                 .count();
-            (count > 0).then(|| SidebarHostCount {
+            SidebarHostCount {
                 host: host_tokens
                     .get(host)
                     .cloned()
-                    .expect("host token for Fleet host"),
+                    .unwrap_or_else(|| middle_elide(host, SIDEBAR_HOST_TOKEN_NARROW_WIDTH)),
                 count,
-            })
+            }
         })
+        .filter(|count| count.count > 0)
         .collect::<Vec<_>>();
     let collapsed = section_is_collapsed(app, FLEET_SECTION_TITLE);
     rows.push(SidebarRow::SectionHeader {
         title: FLEET_SECTION_TITLE,
-        count: entries.len(),
+        count: hosts.iter().map(|(_, entries)| entries.len()).sum(),
         host_counts,
         collapsed,
     });
@@ -5319,11 +5406,101 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
             action_key: None,
             sort_key: None,
             sort_mode: SidebarSortMode::Default,
-            title: host_tokens
-                .get(&host)
-                .cloned()
-                .expect("host token for Fleet host"),
+            title: if host == app.agent_host_name {
+                format!("{host} · this device")
+            } else {
+                host.clone()
+            },
             count: host_entries.len(),
+            activity_count: None,
+            collapsed,
+            // Empty hosts keep their `(0)`: a dim header hides its count.
+            dim: false,
+            status: None,
+            spawn: false,
+        });
+        if !collapsed {
+            append_fleet_repo_rows(app, rows, host, host_entries);
+        }
+    }
+}
+
+/// Whether the sidebar should list the fleet's devices: the whole fleet is in
+/// scope and at least one remote host is configured, reachable, or reporting.
+fn fleet_shows_hosts(app: &AppState, remote_entries: &[AgentPanelEntry]) -> bool {
+    app.sidebar_work_filter.machine_scope == crate::app::state::SidebarMachineScope::AllMachines
+        && (!app.fleet_snapshot.configured_hosts.is_empty()
+            || app.fleet_snapshot.hosts.iter().any(|host| !host.local)
+            || !remote_entries.is_empty())
+}
+
+/// Remote hosts in fleet configuration order, including reachable hosts with
+/// no agent rows, then any host only known from its entries.
+fn fleet_remote_host_names(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<String> {
+    let mut names = app
+        .fleet_snapshot
+        .hosts
+        .iter()
+        .filter(|host| !host.local && host.state == crate::fleet::HostState::Reachable)
+        .map(|host| host.name.clone())
+        .collect::<Vec<_>>();
+    for entry in entries {
+        if let Some(remote) = entry.remote_entry.as_ref() {
+            if !names.contains(&remote.agent_ref.host) {
+                names.push(remote.agent_ref.host.clone());
+            }
+        }
+    }
+    names
+}
+
+fn remote_entries_on_host(entries: &[AgentPanelEntry], host: &str) -> Vec<AgentPanelEntry> {
+    entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .remote_entry
+                .as_ref()
+                .is_some_and(|remote| remote.agent_ref.host == host)
+        })
+        .cloned()
+        .collect()
+}
+
+fn append_fleet_repo_rows(
+    app: &AppState,
+    rows: &mut Vec<SidebarRow>,
+    host: String,
+    entries: Vec<AgentPanelEntry>,
+) {
+    let mut groups = std::collections::BTreeMap::<String, (String, Vec<AgentPanelEntry>)>::new();
+    for entry in entries {
+        let (key, title) = entry_repo_group(app, &entry)
+            .unwrap_or_else(|| ("no-repo".to_string(), "no repo".to_string()));
+        groups
+            .entry(key)
+            .or_insert_with(|| (title, Vec::new()))
+            .1
+            .push(entry);
+    }
+    let mut groups = groups.into_iter().collect::<Vec<_>>();
+    groups.sort_by(|left, right| {
+        (left.1 .0 == "no repo")
+            .cmp(&(right.1 .0 == "no repo"))
+            .then_with(|| cmp_sidebar_entry_names(&left.1 .0, &right.1 .0))
+    });
+    for (key, (title, members)) in groups {
+        // `sort_by` on the outer groups is stable; keep members in their
+        // original snapshot/pane order, especially in the no-repo group.
+        let key = format!("fleet:repo:{host}:{key}");
+        let collapsed = section_is_collapsed(app, &key);
+        rows.push(SidebarRow::NestedHeader {
+            key,
+            action_key: None,
+            sort_key: None,
+            sort_mode: SidebarSortMode::Default,
+            title,
+            count: members.len(),
             activity_count: None,
             collapsed,
             dim: false,
@@ -5331,7 +5508,7 @@ fn append_fleet_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &[Agen
             spawn: false,
         });
         if !collapsed {
-            append_tab_rows(rows, host_entries, 1);
+            append_tab_rows(rows, members, 2);
         }
     }
 }
@@ -5342,9 +5519,6 @@ fn append_snoozed_rows(
     entries: Vec<AgentPanelEntry>,
     pod_tokens: &std::collections::HashMap<String, PodToken>,
 ) {
-    if entries.is_empty() {
-        return;
-    }
     let collapsed = section_is_collapsed(app, SNOOZED_SECTION_TITLE);
     rows.push(SidebarRow::SectionHeader {
         title: SNOOZED_SECTION_TITLE,
@@ -5374,9 +5548,6 @@ fn append_settled_rows(
     entries: Vec<AgentPanelEntry>,
     _expand_worktrees: bool,
 ) {
-    if entries.is_empty() {
-        return;
-    }
     rows.push(SidebarRow::SectionHeader {
         title: SETTLED_SECTION_TITLE,
         count: entries.len(),
@@ -8036,7 +8207,7 @@ fn nested_header_areas_from_rows(
                 dim: *dim,
                 status: *status,
                 spawn: *spawn,
-                rect: Rect::new(body.x, y, body.width, height),
+                rect: nested_header_rect(key, body, y, height),
             });
         }
         y = y
@@ -8044,6 +8215,14 @@ fn nested_header_areas_from_rows(
             .saturating_add(sidebar_row_gap(app, rows, idx));
     }
     out
+}
+
+/// Fleet repo groups sit one level under their host header, the only nested
+/// header with a nested header as its parent.
+fn nested_header_rect(key: &str, body: Rect, y: u16, height: u16) -> Rect {
+    let indent = if key.starts_with("fleet:repo:") { 2 } else { 0 };
+    let indent = indent.min(body.width);
+    Rect::new(body.x + indent, y, body.width - indent, height)
 }
 
 /// Hit area for a remote agent row. A fleet agent owns no local pane, so it is
@@ -8622,7 +8801,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                     body,
                     row_y,
                     machine_icon_cell_offset(usize::from(body.width), age_width),
-                    1,
+                    SIDEBAR_MACHINE_LABEL_WIDTH,
                 ) {
                     targets.push(crate::app::state::SidebarHoverTarget {
                         rect,
@@ -8669,7 +8848,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                     body,
                     row_y,
                     machine_icon_cell_offset(usize::from(body.width), widths.age),
-                    1,
+                    SIDEBAR_MACHINE_LABEL_WIDTH,
                 ) {
                     targets.push(crate::app::state::SidebarHoverTarget {
                         rect,
@@ -8677,6 +8856,25 @@ pub(crate) fn compute_sidebar_hover_targets(
                         action: None,
                         row_hover: false,
                     });
+                }
+                if widths.age > 0 {
+                    if let Some(rect) = clamp_row_cells(
+                        body,
+                        row_y,
+                        usize::from(body.width).saturating_sub(widths.age),
+                        widths.age,
+                    ) {
+                        targets.push(crate::app::state::SidebarHoverTarget {
+                            rect,
+                            label: age_tooltip(
+                                entry.last_turn_at,
+                                entry.reported_at.or(entry.activity_at),
+                                app.view_observed_at,
+                            ),
+                            action: None,
+                            row_hover: false,
+                        });
+                    }
                 }
                 let title_width = usize::from(body.width).saturating_sub(fixed_width);
                 let control_pane = row_control_pane(app, entry, tab);
@@ -8784,7 +8982,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                     body,
                     row_y,
                     machine_icon_cell_offset(row_width, widths.age),
-                    1,
+                    SIDEBAR_MACHINE_LABEL_WIDTH,
                 ) {
                     targets.push(crate::app::state::SidebarHoverTarget {
                         rect,
@@ -8792,6 +8990,25 @@ pub(crate) fn compute_sidebar_hover_targets(
                         action: None,
                         row_hover: false,
                     });
+                }
+                if widths.age > 0 && entry.snoozed_until.is_none() {
+                    if let Some(rect) = clamp_row_cells(
+                        body,
+                        row_y,
+                        row_width.saturating_sub(widths.age),
+                        widths.age,
+                    ) {
+                        targets.push(crate::app::state::SidebarHoverTarget {
+                            rect,
+                            label: age_tooltip(
+                                entry.entry.last_turn_at,
+                                entry.entry.reported_at.or(entry.entry.activity_at),
+                                app.view_observed_at,
+                            ),
+                            action: None,
+                            row_hover: false,
+                        });
+                    }
                 }
                 let title_width = row_width.saturating_sub(fixed_width);
                 let control = remote_row_control(entry);
@@ -10772,7 +10989,11 @@ fn render_section_header(
                     Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!(" {count}"),
+                    if count == 0 {
+                        " (0)".to_string()
+                    } else {
+                        format!(" {count}")
+                    },
                     Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
                 ),
             ])),
@@ -13527,7 +13748,7 @@ pub(crate) mod tests {
                 rows.iter()
                     .filter(|row| matches!(row, SidebarRow::NestedHeader { key, .. } if key.starts_with("fleet:host:")))
                     .count(),
-                2,
+                3,
                 "{surface}"
             );
             assert_eq!(
@@ -13537,6 +13758,104 @@ pub(crate) mod tests {
                 3,
                 "{surface}"
             );
+        }
+    }
+
+    #[test]
+    fn fleet_starts_with_local_device_and_preserves_remote_config_order() {
+        let mut app = app_with_two_remote_hosts();
+        app.sidebar_width = 60;
+        let rows = sidebar_rows(&app);
+        let hosts = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::NestedHeader { key, title, .. } if key.starts_with("fleet:host:") => {
+                    Some((key.as_str(), title.as_str()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(hosts[0].1, format!("{} · this device", app.agent_host_name));
+        assert_eq!(hosts[1].0, "fleet:host:remote-b");
+        assert_eq!(hosts[2].0, "fleet:host:remote-a");
+    }
+
+    #[test]
+    fn sections_layout_lists_devices_in_the_fleet_section() {
+        let mut app = app_with_two_remote_hosts();
+        app.sidebar_sections_layout = true;
+        app.sidebar_width = 60;
+        // Fleet starts collapsed in the sections layout; the stored key expands it.
+        app.collapsed_sidebar_groups
+            .insert(format!("sections:{FLEET_SECTION_TITLE}"));
+        let rows = sidebar_rows(&app);
+        let fleet = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: FLEET_SECTION_TITLE,
+                        ..
+                    }
+                )
+            })
+            .expect("fleet section");
+        let hosts = rows[fleet..]
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::NestedHeader { key, title, .. } if key.starts_with("fleet:host:") => {
+                    Some((key.as_str(), title.as_str()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(hosts.len(), 3, "{hosts:?}");
+        assert_eq!(hosts[0].1, format!("{} · this device", app.agent_host_name));
+        assert_eq!(hosts[1].0, "fleet:host:remote-b");
+        assert_eq!(hosts[2].0, "fleet:host:remote-a");
+
+        app.sidebar_work_filter.machine_scope = crate::app::state::SidebarMachineScope::ThisMachine;
+        assert!(!sidebar_rows(&app).iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: FLEET_SECTION_TITLE,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn fleet_has_empty_remote_hosts_but_is_absent_without_fleet_configuration() {
+        let mut app = app_with_agents(&["local"]);
+        app.fleet_snapshot.hosts = vec![fleet_host_snapshot("empty", false, Vec::new())];
+        app.fleet_snapshot.configured_hosts = vec!["empty".into()];
+        expand_fleet(&mut app);
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(row,
+            SidebarRow::NestedHeader { title, count: 0, dim: false, .. } if title == "empty")));
+
+        app.fleet_snapshot.hosts.clear();
+        app.fleet_snapshot.configured_hosts.clear();
+        assert!(!sidebar_rows(&app).iter().any(|row| matches!(row,
+            SidebarRow::SectionHeader { title, .. } if *title == FLEET_SECTION_TITLE)));
+    }
+
+    #[test]
+    fn fleet_repo_groups_report_member_counts() {
+        let app = app_with_two_remote_hosts();
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(row,
+            SidebarRow::NestedHeader { title, count: 2, .. } if title == "no repo")));
+    }
+
+    #[test]
+    fn empty_lifecycle_shelves_keep_zero_counts() {
+        let app = AppState::test_new();
+        let rows = sidebar_rows(&app);
+        for title in [SNOOZED_SECTION_TITLE, SETTLED_SECTION_TITLE] {
+            assert!(rows.iter().any(|row| matches!(row,
+                SidebarRow::SectionHeader { title: row_title, count: 0, .. } if *row_title == title)));
         }
     }
 
@@ -14081,9 +14400,9 @@ pub(crate) mod tests {
             })
             .unwrap();
         let rendered = row_text(terminal.backend().buffer(), 0, width);
-        assert!(rendered.contains("cc 1"), "{rendered:?}");
+        assert!(rendered.contains("cc ub1"), "{rendered:?}");
 
-        // Search still matches the host even though its row shows only an icon.
+        // Search still matches the host even though its row shows only a short label.
         app.sidebar_work_filter.query = "ub1".into();
         assert_eq!(sidebar_filtered_agent_entries_from(&app, None).len(), 1);
         app.sidebar_work_filter.query = "ub9".into();
@@ -14166,10 +14485,7 @@ pub(crate) mod tests {
                 })
                 .unwrap();
             let rendered = row_text(terminal.backend().buffer(), 0, 80);
-            assert!(
-                rendered.contains(crate::ui::icons::machine_icon("ub1", None, true)),
-                "{rendered:?}"
-            );
+            assert!(rendered.contains("ub1"), "{rendered:?}");
             assert!(!rendered.contains(" · ub1"), "{rendered:?}");
             assert!(rendered.contains(expected), "{rendered:?}");
         }
@@ -14285,7 +14601,10 @@ pub(crate) mod tests {
                 .unwrap();
             let rendered = row_text(terminal.backend().buffer(), 0, 18);
             assert!(rendered.contains('x'), "{rendered:?}");
-            assert!(rendered.contains('?'), "{rendered:?}");
+            assert!(
+                rendered.contains("alp") || rendered.contains("bet"),
+                "{rendered:?}"
+            );
             assert!(!rendered.contains(" · "), "{rendered:?}");
         }
     }
@@ -15334,11 +15653,11 @@ pub(crate) mod tests {
     #[test]
     fn collapsed_and_expanded_sidebars_render_separator_on_shared_column() {
         let app = AppState::test_new();
-        let area = Rect::new(3, 1, 26, 8);
+        let area = Rect::new(3, 1, 26, 16);
         let separator_col = sidebar_separator_col(area).expect("non-empty sidebar");
 
         for collapsed in [true, false] {
-            let mut terminal = Terminal::new(TestBackend::new(32, 10)).unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(32, 18)).unwrap();
             terminal
                 .draw(|frame| {
                     if collapsed {
@@ -15490,7 +15809,7 @@ pub(crate) mod tests {
                     assert!(dot_x < title_x, "{rendered:?}");
                     assert_eq!(buffer[(dot_x, 0)].style().fg, Some(expected_dot));
                     assert_eq!(buffer[(title_x, 0)].style().fg, Some(expected_title));
-                    let machine = if is_remote { "2" } else { "?" };
+                    let machine = if is_remote { "u" } else { "l" };
                     let machine_x = find_symbol_x(buffer, 0, width, machine);
                     assert_eq!(
                         buffer[(machine_x, 0)].style().fg,
@@ -15766,7 +16085,7 @@ pub(crate) mod tests {
             vec![
                 (
                     "●".into(),
-                    "working title r…".into(),
+                    "working title…".into(),
                     "cx".into(),
                     Some("2m".into()),
                     Color::Rgb(137, 180, 250),
@@ -15902,6 +16221,7 @@ pub(crate) mod tests {
             row,
             SidebarRow::SectionHeader {
                 title: SNOOZED_SECTION_TITLE,
+                count: 1..,
                 ..
             }
         )));
@@ -16043,6 +16363,7 @@ pub(crate) mod tests {
             row,
             SidebarRow::SectionHeader {
                 title: SNOOZED_SECTION_TITLE,
+                count: 1..,
                 ..
             }
         )));
@@ -16159,6 +16480,7 @@ pub(crate) mod tests {
             row,
             SidebarRow::SectionHeader {
                 title: SNOOZED_SECTION_TITLE,
+                count: 1..,
                 ..
             }
         )));
@@ -16176,6 +16498,7 @@ pub(crate) mod tests {
             row,
             SidebarRow::SectionHeader {
                 title: SNOOZED_SECTION_TITLE,
+                count: 1..,
                 ..
             }
         )));
@@ -16294,6 +16617,7 @@ pub(crate) mod tests {
                     row,
                     SidebarRow::SectionHeader {
                         title: SETTLED_SECTION_TITLE,
+                        count: 1..,
                         ..
                     }
                 )),
@@ -16378,6 +16702,7 @@ pub(crate) mod tests {
                         row,
                         SidebarRow::SectionHeader {
                             title: SETTLED_SECTION_TITLE,
+                            count: 1..,
                             ..
                         }
                     )),
@@ -16527,8 +16852,8 @@ pub(crate) mod tests {
                 .iter()
                 .find(|target| {
                     target.label == *host
-                        && target.rect.width == 1
-                        && buffer[(target.rect.x, target.rect.y)].symbol() == icon
+                        && target.rect.width == SIDEBAR_MACHINE_LABEL_WIDTH as u16
+                        && buffer[(target.rect.x, target.rect.y)].symbol() == &icon[..1]
                 })
                 .unwrap_or_else(|| panic!("missing {host} machine icon and tooltip"));
             let rendered = row_text(buffer, machine.rect.y, area.width);
@@ -16584,18 +16909,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn remote_rows_with_similar_host_names_keep_distinct_icons_and_tooltips() {
+    fn remote_rows_with_similar_host_names_share_a_label_but_keep_distinct_tooltips() {
         let mut app = AppState::test_new();
         app.nerd_font = true;
-        app.machines
-            .extend([("alpha-a1", "◆"), ("alpha-b1", "◇")].map(|(name, icon)| {
-                crate::app::machines::Machine {
-                    name: name.into(),
-                    icon: Some(icon.into()),
-                    target: Some(name.into()),
-                    socket: None,
-                }
-            }));
         let snapshot = crate::fleet::Snapshot {
             hosts: ["alpha-a1", "alpha-b1"]
                 .into_iter()
@@ -18072,7 +18388,7 @@ pub(crate) mod tests {
         let linked_layout = tab_row_layout(
             linked,
             app.view_observed_at,
-            18,
+            20,
             4,
             &app.palette,
             app.status_indicators,
@@ -18081,7 +18397,7 @@ pub(crate) mod tests {
         let unlinked_layout = tab_row_layout(
             unlinked,
             app.view_observed_at,
-            18,
+            20,
             4,
             &app.palette,
             app.status_indicators,
@@ -19929,6 +20245,82 @@ row_gap = 1
     }
 
     #[test]
+    fn agent_sidebar_age_prefers_last_turn_and_tooltip_explains_fallback() {
+        let now = std::time::Instant::now();
+        let entry = AgentPanelEntry::new(
+            AgentPanelIdentity::Local(AgentPanelLocalTarget {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: PaneId::from_raw(1),
+            }),
+            AgentPanelEntryData {
+                primary_label: String::new(),
+                space_label: String::new(),
+                primary_tab_label: None,
+                tab_has_custom_name: false,
+                tab_label_leads_with_agent: false,
+                pane_label: None,
+                pane_label_is_agent_identity: false,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                agent_label: None,
+                agent_kind_label: None,
+                agent: None,
+                foreground_process_name: None,
+                agent_context: None,
+                has_agent: true,
+                prio: false,
+                starred: false,
+                state: AgentState::Working,
+                attention_tier: None,
+                open_blockers: false,
+                completion_tier: None,
+                usage_limited: false,
+                active_subagents: None,
+                model_letter: None,
+                waiting_on_agents: false,
+                holds_shell: false,
+                gate_count: 0,
+                seen: true,
+                done_since: None,
+                stale: false,
+                reported_at: Some(now),
+                last_agent_state_change_seq: None,
+                activity_at: Some(now),
+                state_labels: Default::default(),
+                tokens: Default::default(),
+                tab_first_pane: false,
+                remote_host: None,
+            },
+        );
+        let mut entry = entry;
+        let reply_instant = now - std::time::Duration::from_secs(71 * 60);
+        let reply_unix_seconds = 1_725_000_900;
+        entry.last_turn_at = Some(AgentReplyTimestamp {
+            instant: reply_instant,
+            unix_seconds: reply_unix_seconds,
+        });
+        assert_eq!(compact_age(&entry, now).0, "1h");
+        let local = crate::platform::local_datetime_at(reply_unix_seconds).expect("local time");
+        assert_eq!(
+            age_tooltip(entry.last_turn_at, entry.reported_at, now),
+            format!(
+                "Last reply 1h 11m ago\n({:02}:{:02})",
+                local.hour(),
+                local.minute()
+            )
+        );
+        assert_eq!(
+            age_tooltip(
+                None,
+                Some(now - std::time::Duration::from_secs(4 * 60)),
+                now
+            ),
+            "Last status report 4m ago\nAgent reply time unavailable"
+        );
+    }
+
+    #[test]
     fn long_foreground_process_name_is_truncated_to_its_budget() {
         let mut app = app_with_agents(&["one"]);
         let pane_id = app.workspaces[0].tabs[0].root_pane;
@@ -20834,16 +21226,19 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         };
         let mut width_probe = entry.clone();
         width_probe.primary_tab_label = Some("sample-pr-title-uses-width".into());
-        let wide_with_machine = render_at_row_width(&width_probe, 44, 0);
+        let wide_with_machine = render_at_row_width(&width_probe, 46, 0);
         assert!(
             wide_with_machine.contains("sample-pr-title-uses-wid"),
             "{wide_with_machine:?}"
         );
-        assert!(wide_with_machine.contains("pi ?"), "{wide_with_machine:?}");
-        let (before_machine, _) = wide_with_machine.split_once('?').expect("machine icon");
+        assert!(
+            wide_with_machine.contains("pi loc"),
+            "{wide_with_machine:?}"
+        );
+        let (before_machine, _) = wide_with_machine.split_once("loc").expect("machine label");
         assert_eq!(
             display_width(before_machine),
-            machine_icon_cell_offset(44, 5)
+            machine_icon_cell_offset(46, 5)
         );
         assert!(wide_with_machine.ends_with("2m"), "{wide_with_machine:?}");
         assert!(
@@ -20855,24 +21250,24 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(default_width.contains("sample-pr"), "{default_width:?}");
         assert!(default_width.contains("2m"), "{default_width:?}");
         assert!(!default_width.contains("· t3-sample"), "{default_width:?}");
-        let github_depth = render_at_row_width(&entry, 25, 1);
-        let repo_branch_depth = render_at_row_width(&entry, 25, 2);
+        let github_depth = render_at_row_width(&entry, 27, 1);
+        let repo_branch_depth = render_at_row_width(&entry, 27, 2);
         let indent = |row: &str| row.len() - row.trim_start().len();
         assert!(
-            // At 25 cells the machine column takes the extra nesting cells;
+            // At 27 cells the machine column takes the extra nesting cells;
             // children never start left of their parent.
             indent(&repo_branch_depth) >= indent(&github_depth),
             "{github_depth:?} {repo_branch_depth:?}"
         );
         for row in [&github_depth, &repo_branch_depth] {
             assert!(row.contains("●  sa"), "{row:?}");
-            assert!(row.ends_with("pi ?   2m"), "{row:?}");
+            assert!(row.ends_with("pi loc   2m"), "{row:?}");
         }
         let mut ticket_entry = entry.clone();
         ticket_entry.primary_tab_label = Some("SCA-3165 · sample-linear".into());
-        let nested_ticket = render_at_row_width(&ticket_entry, 25, 2);
+        let nested_ticket = render_at_row_width(&ticket_entry, 27, 2);
         assert!(nested_ticket.contains("●  sam"), "{nested_ticket:?}");
-        assert!(nested_ticket.ends_with("pi ?   2m"), "{nested_ticket:?}");
+        assert!(nested_ticket.ends_with("pi loc   2m"), "{nested_ticket:?}");
 
         let wide = render_first_tab_row(&app, 80);
         assert!(wide.contains("sample-pr"), "{wide:?}");
@@ -21085,7 +21480,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let short_github = compact_row_title_for_width("#1 · fix", "cc", 24, 7);
         assert_eq!(short_github, "fix");
-        assert_eq!(compact_row_widths(short_github, "cc", 24, 7).prefix, 7);
+        assert_eq!(compact_row_widths(short_github, "cc", 24, 7).prefix, 6);
 
         assert_eq!(
             narrow_view_tab_prefix_from_rows(&rows, 43, false),
@@ -21381,7 +21776,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(
             !rows.iter().any(|row| matches!(
                 row,
-                SidebarRow::SectionHeader { title, .. } if *title == SETTLED_SECTION_TITLE
+                SidebarRow::SectionHeader { title, count: 1.., .. } if *title == SETTLED_SECTION_TITLE
             )),
             "a pane waiting on a human must not be filed under Settled"
         );
@@ -21405,7 +21800,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let boundary = sidebar_rows(&app);
         assert!(!boundary.iter().any(|row| matches!(
             row,
-            SidebarRow::SectionHeader { title, .. }
+            SidebarRow::SectionHeader { title, count: 1.., .. }
                 if *title == SETTLED_SECTION_TITLE
         )));
         assert!(boundary
@@ -25033,7 +25428,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             "{}:{group_key}",
             app.sidebar_group_mode.collapse_namespace()
         );
-        let area = Rect::new(0, 0, 40, 12);
+        let area = Rect::new(0, 0, 40, 20);
         let render_header = |app: &AppState| {
             let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
             terminal
@@ -25607,7 +26002,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             rendered.contains("Use Repository Instructions"),
             "{rendered:?}"
         );
-        assert!(rendered.contains("pi ?"), "{rendered:?}");
+        assert!(rendered.contains("pi loc"), "{rendered:?}");
         assert!(!rendered.contains(">_"), "{rendered:?}");
 
         app.nerd_font = true;
@@ -25621,7 +26016,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             icon_rendered.contains("Use Repository Instructions"),
             "{icon_rendered:?}"
         );
-        assert!(icon_rendered.contains("\u{f0379}"), "{icon_rendered:?}");
+        assert!(icon_rendered.contains(" loc"), "{icon_rendered:?}");
+        assert!(!icon_rendered.contains("\u{f0379}"), "{icon_rendered:?}");
         assert!(!icon_rendered.contains("\u{ea85}"), "{icon_rendered:?}");
     }
 
@@ -25650,7 +26046,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .detected_agent = Some(Agent::Claude);
         app.reconcile_sidebar_presentation();
 
-        let area = Rect::new(0, 0, 34, 10);
+        let area = Rect::new(0, 0, 38, 10);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
@@ -26144,7 +26540,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let metrics = workspace_list_scroll_metrics(&app, ws_area);
 
         assert_eq!(metrics.viewport_rows, 3);
-        assert_eq!(metrics.max_offset_from_bottom, 3);
+        // Three display rows plus the always-visible Snoozed/Settled shelves
+        // and their divider.
+        assert_eq!(metrics.max_offset_from_bottom, 6);
         assert_eq!(metrics.offset_from_bottom, metrics.max_offset_from_bottom);
     }
 
@@ -26505,6 +26903,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "---",
                 SNOOZED_SECTION_TITLE,
                 SETTLED_SECTION_TITLE,
+                "---",
+                FLEET_SECTION_TITLE,
                 "---",
                 RUNS_SECTION_TITLE,
                 SYMPHONY_SECTION_TITLE,
@@ -28211,7 +28611,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             }),
             "unhovered rows keep lifecycle hit areas hidden"
         );
-        let hover = crate::ui::hovered_control_at(&app, row.rect.right() - 1, row.rect.y)
+        let hover = crate::ui::hovered_control_at(&app, row.rect.x + 3, row.rect.y)
             .expect("row-wide hover target");
         assert_eq!(
             hover,
@@ -29347,7 +29747,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .into_iter()
             .find(|row| row.agent_ref == entry.agent_ref)
             .expect("remote row geometry");
-        let hover = crate::ui::hovered_control_at(&app, row.rect.right() - 1, row.rect.y)
+        let hover = crate::ui::hovered_control_at(&app, row.rect.x + 3, row.rect.y)
             .expect("row-wide hover target");
         assert_eq!(
             hover,
@@ -29486,6 +29886,37 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             SidebarRow::SectionHeader {
                 title: SETTLED_SECTION_TITLE,
                 collapsed: true,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn focus_sidebar_keeps_seen_idle_tabs_in_spaces() {
+        let mut app = sort_app(&[
+            sort_tab("read", "owner/herdr", AgentState::Idle, 1),
+            sort_tab("build", "owner/herdr", AgentState::Working, 2),
+        ]);
+        app.sidebar_sections_layout = true;
+        app.sidebar_group_mode = SidebarGroupMode::Spaces;
+        let read_pane = app.workspaces[0].tabs[0].root_pane;
+        app.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&read_pane)
+            .expect("read pane")
+            .seen = true;
+        app.reconcile_sidebar_presentation();
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. }
+                if !entry.working_shelf && entry.state == AgentState::Idle
+        )));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: WORKING_SECTION_TITLE,
+                count: 1,
                 ..
             }
         )));
@@ -30493,8 +30924,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 let buffer = terminal.backend().buffer();
                 let blocked_dot_x = find_symbol_x(buffer, 1, width, "○");
                 assert_eq!(buffer[(blocked_dot_x, 1)].style().fg, Some(app.palette.red));
-                let tab_x = find_symbol_x(buffer, 0, width, "1");
-                let blocker_x = find_symbol_x(buffer, 1, width, "1");
+                let tab_x = find_symbol_x(buffer, 0, width, "u");
+                let blocker_x = find_symbol_x(buffer, 1, width, "u");
                 assert_eq!(tab_x, blocker_x);
                 assert_eq!(
                     usize::from(tab_x),
@@ -30527,9 +30958,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let body = workspace_list_body_rect(&app, list, should_show_scrollbar(metrics));
         assert_eq!(
             machine.rect.x,
-            body.right() - 1 - SIDEBAR_AGE_FIELD_WIDTH as u16
+            body.right() - SIDEBAR_MACHINE_LABEL_WIDTH as u16 - SIDEBAR_AGE_FIELD_WIDTH as u16
         );
-        assert_eq!(machine.rect.width, 1);
+        assert_eq!(machine.rect.width, SIDEBAR_MACHINE_LABEL_WIDTH as u16);
         assert!(machine.action.is_none());
     }
 
@@ -30552,11 +30983,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .draw(|frame| render_compact_agent_row(&app, frame, &entry, area, 0, true, None))
             .unwrap();
         let rendered = row_text(terminal.backend().buffer(), 0, area.width);
-        assert!(rendered.contains('2'), "{rendered:?}");
+        assert!(rendered.contains("ub2"), "{rendered:?}");
     }
 
     #[test]
-    fn configured_remote_machine_icon_reaches_sidebar_row() {
+    fn machine_label_is_three_lowercase_characters_and_ignores_icon_overrides() {
         let mut app = AppState::test_new();
         app.machines.push(crate::app::machines::Machine {
             name: "lab3".into(),
@@ -30564,9 +30995,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             target: Some("lab3".into()),
             socket: None,
         });
-        assert_eq!(sidebar_machine_icon(&app, "lab3"), "◆");
-        app.nerd_font = false;
-        assert_eq!(sidebar_machine_icon(&app, "lab3"), "?");
+        assert_eq!(sidebar_machine_icon(&app, "lab3"), "lab");
+        assert_eq!(sidebar_machine_icon(&app, "ub1"), "ub1");
+        assert_eq!(sidebar_machine_icon(&app, "mbpro"), "mbp");
+        assert_eq!(sidebar_machine_icon(&app, "MBAir"), "mba");
+        assert_eq!(sidebar_machine_icon(&app, "x"), "x  ");
     }
 
     #[test]

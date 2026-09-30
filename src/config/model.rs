@@ -327,13 +327,13 @@ pub struct SessionConfig {
     /// Settle a pane that has been inactive for `settle_after_days`.
     /// Default: true.
     pub auto_settle_inactive: bool,
-    /// Settle an inactive agent pane after it stays idle with no closing gates,
-    /// usage limit, active sub-agents, or held shell for
-    /// `settle_done_after_minutes`. Applies whether the pane was seen and when
-    /// stale supervision resolves to an idle screen. Default: true.
+    /// Settle a seen, inactive agent pane after it stays idle with no closing
+    /// gates, usage limit, active sub-agents, or held shell for
+    /// `settle_done_after_minutes`. Unread Done panes remain in the active
+    /// section. Default: true.
     pub auto_settle_done: bool,
-    /// How long an eligible agent pane has to stay quiet before
-    /// `auto_settle_done` settles it. Default: 30.
+    /// How long a seen Done pane has to stay quiet before `auto_settle_done`
+    /// settles it. Default: 30.
     pub settle_done_after_minutes: u64,
     /// Stop resumable agent processes when their pane settles.
     /// Default: true.
@@ -1882,6 +1882,10 @@ pub struct UiConfig {
     /// times. Toggled at runtime; this is only the starting state. Default: false.
     #[serde(default)]
     pub status_bar_expanded: bool,
+    /// Show `fleet:` with one dot per other device that needs you. Clicking
+    /// `fleet:` toggles it at runtime; this is only the starting state.
+    /// Default: true.
+    pub fleet_status: bool,
     /// Full-width top status row.
     pub status_bar: StatusBarConfig,
     /// Legacy indexed-Agent projection ordering. The visible sidebar remains canonical.
@@ -2332,6 +2336,7 @@ impl Default for UiConfig {
             show_agent_labels_on_pane_borders: false,
             hide_tab_bar_when_single_tab: false,
             status_bar_expanded: false,
+            fleet_status: true,
             status_bar: StatusBarConfig::default(),
             tab_bar_position: TabBarPositionConfig::Hidden,
             tab_bar_right: Vec::new(),

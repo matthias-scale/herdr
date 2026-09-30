@@ -120,6 +120,7 @@ mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
+mod watchdog;
 mod work_context;
 mod work_index;
 mod work_projection;
@@ -484,6 +485,10 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # column, instead of the columns alone. Toggle at runtime with the status-bar
 # button or keys.toggle_status_detail.
 # status_bar_expanded = false
+
+# Show `fleet:` in the status row with a dot for each other device that has
+# blocked agents or stopped reporting. Click `fleet:` to hide or show the dots.
+# fleet_status = true
 
 # Desktop tab row placement: "hidden", "top" or "bottom". Hidden is the default
 # because the sidebar already lists every tab in every space.

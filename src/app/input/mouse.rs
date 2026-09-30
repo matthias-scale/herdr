@@ -218,6 +218,43 @@ impl AppState {
             owner,
             InputOwner::Dock(_) | InputOwner::Sidebar | InputOwner::Pane | InputOwner::None
         );
+        // The fleet dots sit on the status row, above every other click target.
+        let status_kind = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            .then(|| self.status_segment_kind_at(mouse.column, mouse.row))
+            .flatten();
+        if let Some(kind) = status_kind {
+            match kind {
+                crate::app::state::StatusSegmentKind::FleetLabel => {
+                    // Persist like the dock strip toggle, so the choice
+                    // survives restarts and a config reload.
+                    self.fleet_status = !self.fleet_status;
+                    return Some(MouseAction::Settings(SettingsAction::SaveConfigEdit(
+                        crate::app::settings_general::ConfigEdit::Bool {
+                            section: "ui",
+                            key: "fleet_status",
+                            value: self.fleet_status,
+                        },
+                    )));
+                }
+                crate::app::state::StatusSegmentKind::FleetDevice(idx) => {
+                    let target = self
+                        .fleet_snapshot
+                        .devices_needing_attention()
+                        .into_iter()
+                        .nth(idx)
+                        .and_then(|device| device.first_blocked);
+                    if let Some(agent_ref) = target {
+                        return Some(MouseAction::OpenFleetHost {
+                            name: agent_ref.host,
+                            focus_agent: Some(agent_ref.agent),
+                        });
+                    }
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
         // The read-only agent tab deliberately does not take editor focus, but
         // its visible rows still own pointer input over the notepad panel.
         if (owner == InputOwner::Notepad
@@ -3956,6 +3993,12 @@ impl AppState {
         else {
             return false;
         };
+        // A proxy's terminal modes describe the remote application, but local
+        // selection must remain available over its rendered frame. Shift is
+        // the established terminal mouse override for forwarding the gesture.
+        if proxy_mouse_selection_is_local(rt.is_remote_proxy(), mouse) {
+            return false;
+        }
         let Some(position) = self.pane_mouse_position(rt, info.inner_rect, mouse) else {
             return false;
         };
@@ -4160,6 +4203,19 @@ impl AppState {
     }
 }
 
+fn proxy_mouse_selection_is_local(is_proxy: bool, mouse: MouseEvent) -> bool {
+    is_proxy
+        && !mouse
+            .modifiers
+            .contains(crossterm::event::KeyModifiers::SHIFT)
+        && matches!(
+            mouse.kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+        )
+}
+
 #[cfg(test)]
 pub(super) fn wheel_routing(input_state: crate::pane::InputState) -> WheelRouting {
     if input_state.mouse_protocol_mode.reporting_enabled() {
@@ -4212,6 +4268,37 @@ mod tests {
         input::TerminalKey,
         workspace::Workspace,
     };
+
+    fn app_with_remote_proxy() -> (
+        App,
+        crate::layout::PaneInfo,
+        tokio::sync::mpsc::Receiver<crate::pane::ProxyOutbound>,
+    ) {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("remote proxy");
+        let pane_id = ws.tabs[0].root_pane;
+        let infos = ws.tabs[0].layout.panes(Rect::new(26, 2, 80, 18));
+        let info = infos[0].clone();
+        let (runtime, channels) = crate::terminal::TerminalRuntime::spawn_remote_proxy(
+            pane_id,
+            info.inner_rect.height,
+            info.inner_rect.width,
+            0,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+            crate::remote::RemoteFocusOperationState::new(),
+        )
+        .expect("proxy runtime");
+        assert!(runtime.set_remote_proxy_input_enabled(true));
+        assert!(runtime.process_remote_frame(b"\x1b[?1000h\x1b[?1006h\x1b[1;1Hproxy frame text"));
+        ws.insert_test_runtime(pane_id, runtime);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.view.pane_infos = infos;
+        (app, info, channels.outbound_rx)
+    }
 
     #[cfg(unix)]
     fn context_tab_ids(app: &App, ws_idx: usize, tab_idx: usize) -> (String, String) {
@@ -4852,7 +4939,7 @@ mod tests {
             })
             .collect();
         app.state.collapsed_sidebar_groups.remove("repo:Fleet");
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 24));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 40));
         let rows =
             crate::ui::compute_remote_agent_row_areas(&app.state, app.state.view.sidebar_rect);
         assert_eq!(rows.len(), 2);
@@ -10181,7 +10268,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clicking_pane_context_menu_close_last_parent_group_pane_keeps_group() {
+    async fn clicking_pane_context_menu_close_last_parent_group_pane_confirms_group_close() {
         let mut app = app_for_mouse_test();
         let mut parent = Workspace::test_new("main");
         let pane_id = parent.tabs[0].root_pane;
@@ -10191,6 +10278,7 @@ mod tests {
         app.state.workspaces = vec![parent, child];
         app.state.active = Some(0);
         app.state.selected = 1;
+        app.state.confirm_close = true;
         app.state.set_server_mode(Mode::Terminal);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
@@ -10226,11 +10314,11 @@ mod tests {
             menu.y + 1 + close_idx as u16,
         ));
 
-        assert_eq!(app.state.selected, 1);
-        assert_ne!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
+        assert_eq!(app.state.selected, 0);
+        assert_eq!(app.state.effective_interaction_mode(), Mode::ConfirmClose);
         assert_eq!(app.state.workspaces.len(), 2);
         assert_eq!(app.state.workspaces[0].tabs.len(), 1);
-        assert_ne!(app.state.workspaces[0].tabs[0].root_pane, pane_id);
+        assert_eq!(app.state.workspaces[0].tabs[0].root_pane, pane_id);
         assert!(app.state.context_menu.is_none());
         for (_terminal_id, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
@@ -10546,17 +10634,16 @@ mod tests {
 
         let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
 
-        app.handle_mouse(mouse(
-            MouseEventKind::ScrollDown,
-            viewport.x + 2,
-            viewport.y,
-        ));
-        app.handle_mouse(mouse(
-            MouseEventKind::ScrollDown,
-            viewport.x + 2,
-            viewport.y,
-        ));
-        assert_eq!(app.state.mobile_switcher_scroll, 4);
+        // The tabs list sits below the section shelves, which always render
+        // (Snoozed and Settled show `(0)` when empty).
+        for _ in 0..4 {
+            app.handle_mouse(mouse(
+                MouseEventKind::ScrollDown,
+                viewport.x + 2,
+                viewport.y,
+            ));
+        }
+        assert_eq!(app.state.mobile_switcher_scroll, 8);
         let tab_row = (viewport.y..viewport.y + viewport.height)
             .find(|row| {
                 matches!(
@@ -11598,5 +11685,190 @@ mod tests {
                 crate::app::state::ClientOverlay::RenameWorkspace
             );
         }
+    }
+
+    #[test]
+    fn proxy_selection_uses_local_mouse_without_shift_override() {
+        let down = mouse(MouseEventKind::Down(MouseButton::Left), 4, 3);
+        let drag = mouse(MouseEventKind::Drag(MouseButton::Left), 8, 3);
+
+        assert!(proxy_mouse_selection_is_local(true, down));
+        assert!(proxy_mouse_selection_is_local(true, drag));
+        assert!(!proxy_mouse_selection_is_local(false, down));
+    }
+
+    #[test]
+    fn remote_proxy_mouse_drag_selects_locally_without_forwarding() {
+        let (mut app, info, mut outbound) = app_with_remote_proxy();
+        let row = info.inner_rect.y;
+        let start = info.inner_rect.x;
+        let end = start + 5;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), start, row));
+        assert!(app.state.selection.is_some(), "down starts Herdr selection");
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), end, row));
+
+        let selection = app.state.selection.as_ref().expect("drag selection");
+        assert_eq!(selection.pane_id, info.id);
+        assert!(selection.is_visible(), "drag extends the selection");
+        assert!(
+            outbound.try_recv().is_err(),
+            "local selection sends no bytes"
+        );
+    }
+
+    #[test]
+    fn remote_proxy_shift_mouse_override_forwards_without_selection() {
+        let (mut app, info, mut outbound) = app_with_remote_proxy();
+        let row = info.inner_rect.y;
+        let col = info.inner_rect.x;
+        let mut down = mouse(MouseEventKind::Down(MouseButton::Left), col, row);
+        down.modifiers = crossterm::event::KeyModifiers::SHIFT;
+
+        app.handle_mouse(down);
+
+        assert!(app.state.selection.is_none());
+        assert!(matches!(
+            outbound.try_recv(),
+            Ok(crate::pane::ProxyOutbound::Input(bytes)) if !bytes.is_empty()
+        ));
+    }
+
+    #[test]
+    fn remote_proxy_selection_copy_reads_displayed_frame_text() {
+        let (mut app, info, _outbound) = app_with_remote_proxy();
+        app.state.copy_on_select = false;
+        let row = info.inner_rect.y;
+        let start = info.inner_rect.x;
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), start, row));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            start + 10,
+            row,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            start + 10,
+            row,
+        ));
+        app.state.copy_selection(&app.terminal_runtimes);
+
+        let copied = app
+            .state
+            .request_clipboard_write
+            .take()
+            .expect("copy result");
+        assert_eq!(
+            String::from_utf8(copied).expect("UTF-8 frame text"),
+            "proxy frame"
+        );
+    }
+
+    #[test]
+    fn proxy_selection_shift_override_keeps_remote_mouse_forwarding() {
+        let mut down = mouse(MouseEventKind::Down(MouseButton::Left), 4, 3);
+        let mut drag = mouse(MouseEventKind::Drag(MouseButton::Left), 8, 3);
+        down.modifiers = crossterm::event::KeyModifiers::SHIFT;
+        drag.modifiers = crossterm::event::KeyModifiers::SHIFT;
+
+        assert!(!proxy_mouse_selection_is_local(true, down));
+        assert!(!proxy_mouse_selection_is_local(true, drag));
+    }
+}
+
+#[cfg(test)]
+mod fleet_status_click_tests {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    use super::MouseAction;
+    use crate::app::state::StatusSegmentKind;
+    use crate::app::App;
+    use crate::config::Config;
+    use crate::workspace::Workspace;
+
+    fn app_with_blocked_device() -> App {
+        let config = Config::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(&config, true, None, api_rx, crate::api::EventHub::default());
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let mut row =
+            crate::fleet::FleetRow::test_agent_row_with_state("ub1", "w3K:p11", "blocked");
+        row.blocked = true;
+        app.state.fleet_snapshot.hosts = vec![crate::fleet::HostSnapshot {
+            name: "ub1".into(),
+            target: "ub1".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            remote_identity: None,
+            entries: vec![row],
+        }];
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 160, 24));
+        app
+    }
+
+    fn click_segment(app: &mut App, kind: StatusSegmentKind) -> Option<MouseAction> {
+        let rect = app
+            .state
+            .view
+            .status_segment_hit_areas
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, rect)| *rect)
+            .unwrap_or_else(|| panic!("{kind:?} not rendered"));
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            },
+        )
+    }
+
+    #[test]
+    fn clicking_a_blocked_device_opens_its_first_blocked_agent() {
+        let mut app = app_with_blocked_device();
+        let expected = app.state.fleet_snapshot.hosts[0].entries[0]
+            .agent_ref
+            .clone();
+        let action = click_segment(&mut app, StatusSegmentKind::FleetDevice(0));
+        assert!(matches!(
+            action,
+            Some(MouseAction::OpenFleetHost { name, focus_agent })
+                if name == expected.host && focus_agent == Some(expected.agent.clone())
+        ));
+    }
+
+    #[test]
+    fn clicking_fleet_label_hides_every_device_dot() {
+        let mut app = app_with_blocked_device();
+        assert!(matches!(
+            click_segment(&mut app, StatusSegmentKind::FleetLabel),
+            Some(MouseAction::Settings(_))
+        ));
+        assert!(!app.state.fleet_status);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 160, 24));
+        let kinds: Vec<_> = app
+            .state
+            .view
+            .status_segment_hit_areas
+            .iter()
+            .map(|(k, _)| *k)
+            .collect();
+        assert!(kinds.contains(&StatusSegmentKind::FleetLabel));
+        assert!(!kinds
+            .iter()
+            .any(|k| matches!(k, StatusSegmentKind::FleetDevice(_))));
     }
 }

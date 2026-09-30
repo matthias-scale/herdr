@@ -381,10 +381,17 @@ pub struct ClosingReport {
     pub(crate) closing_contract: Option<String>,
     pub(crate) closing_contract_met: Option<bool>,
     pub(crate) closing_contract_met_at: Option<Instant>,
+    pub(crate) last_turn_at: Option<String>,
+    last_turn_at_instant: Option<Instant>,
+    last_turn_at_unix_s: Option<u64>,
     completion: Option<crate::api::schema::ClosingCompletion>,
     external_wait: Option<String>,
     parse_status: Option<crate::api::schema::ClosingParseStatus>,
     workers_unknown: Option<bool>,
+    /// A successful human input reached this agent session at least once.
+    user_replied: bool,
+    user_replied_session_id: Option<String>,
+    auto_settle_consumed_turn: Option<(String, u64)>,
 }
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -412,10 +419,16 @@ impl Default for ClosingReport {
             closing_contract: None,
             closing_contract_met: None,
             closing_contract_met_at: None,
+            last_turn_at: None,
+            last_turn_at_instant: None,
+            last_turn_at_unix_s: None,
             completion: None,
             external_wait: None,
             parse_status: None,
             workers_unknown: None,
+            user_replied: false,
+            user_replied_session_id: None,
+            auto_settle_consumed_turn: None,
         }
     }
 }
@@ -463,10 +476,20 @@ struct ClosingReportHandoffState {
     contract: Option<String>,
     contract_met: Option<bool>,
     contract_met_elapsed: Option<Duration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_turn_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_turn_at_elapsed: Option<Duration>,
     completion: Option<crate::api::schema::ClosingCompletion>,
     external_wait: Option<String>,
     parse_status: Option<crate::api::schema::ClosingParseStatus>,
     workers_unknown: Option<bool>,
+    #[serde(default)]
+    user_replied: bool,
+    #[serde(default)]
+    user_replied_session_id: Option<String>,
+    #[serde(default)]
+    auto_settle_consumed_turn: Option<(String, u64)>,
 }
 
 #[cfg(unix)]
@@ -491,10 +514,17 @@ impl ClosingReportHandoffState {
             contract_met_elapsed: report
                 .closing_contract_met_at
                 .map(|at| now.saturating_duration_since(at)),
+            last_turn_at: report.last_turn_at.clone(),
+            last_turn_at_elapsed: report
+                .last_turn_at_instant
+                .map(|at| now.saturating_duration_since(at)),
             completion: report.completion,
             external_wait: report.external_wait.clone(),
             parse_status: report.parse_status,
             workers_unknown: report.workers_unknown,
+            user_replied: report.user_replied,
+            user_replied_session_id: report.user_replied_session_id.clone(),
+            auto_settle_consumed_turn: report.auto_settle_consumed_turn.clone(),
         }
     }
 
@@ -520,10 +550,21 @@ impl ClosingReportHandoffState {
             closing_contract_met_at: self
                 .contract_met_elapsed
                 .and_then(|elapsed| now.checked_sub(elapsed)),
+            last_turn_at: self.last_turn_at.clone(),
+            last_turn_at_instant: self
+                .last_turn_at_elapsed
+                .and_then(|elapsed| now.checked_sub(elapsed)),
+            last_turn_at_unix_s: self
+                .last_turn_at
+                .as_deref()
+                .and_then(crate::fleet::parse_utc_timestamp),
             completion: self.completion,
             external_wait: self.external_wait,
             parse_status: self.parse_status,
             workers_unknown: self.workers_unknown,
+            user_replied: self.user_replied,
+            user_replied_session_id: self.user_replied_session_id,
+            auto_settle_consumed_turn: self.auto_settle_consumed_turn,
         }
     }
 }
@@ -1321,6 +1362,48 @@ impl TerminalState {
             .and_then(|report| report.closing_contract_met_at)
     }
 
+    pub(crate) fn last_turn_at(&self) -> Option<&str> {
+        self.closing_report
+            .as_ref()
+            .and_then(|report| report.last_turn_at.as_deref())
+    }
+
+    pub(crate) fn last_turn_at_instant(&self) -> Option<Instant> {
+        self.closing_report
+            .as_ref()
+            .and_then(|report| report.last_turn_at_instant)
+    }
+
+    pub(crate) fn last_turn_at_unix_s(&self) -> Option<u64> {
+        self.closing_report
+            .as_ref()
+            .and_then(|report| report.last_turn_at_unix_s)
+    }
+
+    pub(crate) fn set_last_turn_at(&mut self, last_turn_at: Option<String>) -> bool {
+        let Some(last_turn_at) = last_turn_at.filter(|value| !value.trim().is_empty()) else {
+            return false;
+        };
+        let report = self.closing_report.get_or_insert_default();
+        if report.last_turn_at.as_deref() != Some(last_turn_at.as_str()) {
+            let unix_seconds = crate::fleet::parse_utc_timestamp(&last_turn_at);
+            let elapsed = unix_seconds.and_then(|seconds| {
+                let now_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_secs();
+                now_unix.checked_sub(seconds).map(Duration::from_secs)
+            });
+            report.last_turn_at = Some(last_turn_at);
+            report.last_turn_at_unix_s = unix_seconds;
+            report.last_turn_at_instant = elapsed.and_then(|age| Instant::now().checked_sub(age));
+            self.revision = self.revision.saturating_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
     pub(crate) fn closing_external_wait(&self) -> Option<&str> {
         self.closing_report
             .as_ref()
@@ -1404,7 +1487,8 @@ impl TerminalState {
         session_id: Option<String>,
         turn_seq: Option<u64>,
     ) {
-        let scope = &mut self.closing_report.get_or_insert_default().scope;
+        let report = self.closing_report.get_or_insert_default();
+        let scope = &mut report.scope;
         scope.source = Some(source);
         scope.session_id = session_id;
         scope.turn_seq = turn_seq;
@@ -1441,6 +1525,81 @@ impl TerminalState {
             report.completion == Some(crate::api::schema::ClosingCompletion::Complete)
                 || report.closing_contract_met == Some(true)
         })
+    }
+
+    pub(crate) fn closing_completion_is_complete(&self) -> bool {
+        self.closing_report.as_ref().is_some_and(|report| {
+            report.completion == Some(crate::api::schema::ClosingCompletion::Complete)
+        })
+    }
+
+    pub(crate) fn auto_settle_persistence_state(&self, session_id: &str) -> (bool, Option<u64>) {
+        let Some(report) = self.closing_report.as_ref() else {
+            return (false, None);
+        };
+        let replied =
+            report.user_replied && report.user_replied_session_id.as_deref() == Some(session_id);
+        let consumed = report
+            .auto_settle_consumed_turn
+            .as_ref()
+            .filter(|(saved_session, _)| saved_session == session_id)
+            .map(|(_, seq)| *seq);
+        (replied, consumed)
+    }
+
+    /// Consume each ready closing turn once, after an actual Herdr client reply.
+    pub(crate) fn observe_auto_settle_transition(
+        &mut self,
+        settle_ready: bool,
+        complete_idle_without_blockers: bool,
+        session_replaced: bool,
+    ) -> bool {
+        if session_replaced {
+            if let Some(report) = self.closing_report.as_mut() {
+                report.user_replied = false;
+                report.user_replied_session_id = None;
+                report.auto_settle_consumed_turn = None;
+            }
+        }
+        let report = self.closing_report.get_or_insert_default();
+        if !settle_ready || !complete_idle_without_blockers {
+            return false;
+        }
+        let Some(turn_seq) = report.scope.turn_seq else {
+            return false;
+        };
+        let session_id = report.scope.session_id.clone().unwrap_or_default();
+        let turn = (session_id.clone(), turn_seq);
+        if report.auto_settle_consumed_turn.as_ref() == Some(&turn) {
+            return false;
+        }
+        report.auto_settle_consumed_turn = Some(turn);
+        report.user_replied && report.user_replied_session_id.as_deref() == Some(&session_id)
+    }
+
+    pub(crate) fn note_user_reply(&mut self) {
+        let Some(session_id) = self
+            .current_session_identity_for_persistence()
+            .map(|(_, _, _, value)| value)
+        else {
+            return;
+        };
+        let report = self.closing_report.get_or_insert_default();
+        report.user_replied = true;
+        report.user_replied_session_id = Some(session_id);
+    }
+
+    pub(crate) fn restore_auto_settle_state(
+        &mut self,
+        session_id: &str,
+        user_replied: bool,
+        consumed_turn_seq: Option<u64>,
+    ) {
+        let report = self.closing_report.get_or_insert_default();
+        report.user_replied = user_replied;
+        report.user_replied_session_id = user_replied.then(|| session_id.to_string());
+        report.auto_settle_consumed_turn =
+            consumed_turn_seq.map(|seq| (session_id.to_string(), seq));
     }
 
     pub(crate) fn take_retired_closing_report_completion(&mut self) -> bool {
@@ -1583,6 +1742,17 @@ impl TerminalState {
             .closing_report
             .as_ref()
             .and_then(|report| report.unanswered.clone());
+        let (user_replied, user_replied_session_id, auto_settle_consumed_turn) = self
+            .closing_report
+            .as_ref()
+            .map(|report| {
+                (
+                    report.user_replied,
+                    report.user_replied_session_id.clone(),
+                    report.auto_settle_consumed_turn.clone(),
+                )
+            })
+            .unwrap_or_default();
         let empty = ClosingReport {
             requires_legacy_session_guard,
             legacy_session_guard,
@@ -1593,6 +1763,9 @@ impl TerminalState {
                 .as_ref()
                 .map_or_else(Vec::new, |latch| latch.items.clone()),
             unanswered,
+            user_replied,
+            user_replied_session_id,
+            auto_settle_consumed_turn,
             ..ClosingReport::default()
         };
         let report_changed = self
@@ -1614,6 +1787,9 @@ impl TerminalState {
             let report = self.closing_report.get_or_insert_default();
             report.requires_legacy_session_guard = true;
             report.legacy_session_guard = None;
+            report.user_replied = false;
+            report.user_replied_session_id = None;
+            report.auto_settle_consumed_turn = None;
         }
         if !session_changed || !self.has_closing_report() {
             return false;
@@ -5823,6 +5999,65 @@ mod tests {
     }
 
     #[test]
+    fn auto_settle_requires_ready_complete_idle_and_consumes_each_turn_once() {
+        let mut terminal = test_terminal();
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("session-a").unwrap(),
+        });
+        terminal.restore_auto_settle_state("session-a", true, None);
+        terminal.set_closing_report_scope("herdr:codex".into(), Some("session-a".into()), Some(1));
+        assert!(!terminal.observe_auto_settle_transition(false, true, false));
+        assert!(!terminal.observe_auto_settle_transition(true, false, false));
+        assert!(terminal.observe_auto_settle_transition(true, true, false));
+        assert!(!terminal.observe_auto_settle_transition(false, true, false));
+        terminal.set_closing_report_scope("herdr:codex".into(), Some("session-a".into()), Some(2));
+        assert!(terminal.observe_auto_settle_transition(true, true, false));
+    }
+
+    #[test]
+    fn auto_settle_does_not_fire_until_the_user_has_replied() {
+        let mut terminal = test_terminal();
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:codex".into(),
+            agent: "codex".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("session-a").unwrap(),
+        });
+        terminal.restore_auto_settle_state("session-a", false, None);
+        terminal.set_closing_report_scope("herdr:codex".into(), Some("session-a".into()), Some(1));
+        assert!(!terminal.observe_auto_settle_transition(true, true, false));
+        terminal.note_user_reply();
+        assert!(!terminal.observe_auto_settle_transition(true, true, false));
+        terminal.set_closing_report_scope("herdr:codex".into(), Some("session-a".into()), Some(2));
+        assert!(terminal.observe_auto_settle_transition(true, true, false));
+    }
+
+    #[test]
+    fn user_input_without_an_agent_session_does_not_arm_auto_settle() {
+        let mut terminal = test_terminal();
+        terminal.note_user_reply();
+        terminal.set_closing_report_scope("herdr:codex".into(), Some("session-a".into()), Some(1));
+        assert!(!terminal.observe_auto_settle_transition(true, true, false));
+        assert_eq!(
+            terminal.auto_settle_persistence_state("session-a"),
+            (false, Some(1))
+        );
+    }
+
+    #[test]
+    fn new_session_clears_pending_auto_settle_evidence() {
+        let mut terminal = test_terminal();
+        terminal.restore_auto_settle_state("session-a", true, None);
+        terminal.set_closing_report_scope("herdr:codex".into(), Some("session-b".into()), Some(2));
+        assert!(!terminal.observe_auto_settle_transition(true, true, true));
+        assert_eq!(
+            terminal.auto_settle_persistence_state("session-b"),
+            (false, Some(2))
+        );
+    }
+
+    #[test]
     fn closing_contract_tokens_replace_clear_and_reject_malformed_pairs() {
         let now = Instant::now();
         let mut terminal = test_terminal();
@@ -6430,6 +6665,7 @@ mod tests {
     fn handoff_preserves_latched_gate_without_a_followup_report() {
         let captured_at = Instant::now();
         let mut source = test_terminal();
+        source.set_last_turn_at(Some("2026-09-29T12:34:56Z".into()));
         source.apply_closing_block_payload(
             vec![crate::api::schema::ClosingBlockItem {
                 blocking: true,
@@ -6465,6 +6701,7 @@ mod tests {
         restored
             .restore_terminal_agent_handoff_state(decoded, captured_at + Duration::from_secs(1));
 
+        assert_eq!(restored.last_turn_at(), Some("2026-09-29T12:34:56Z"));
         assert_eq!(restored.closing_gates, source.closing_gates);
         assert_eq!(
             restored.closing_report.as_ref().unwrap().unanswered,

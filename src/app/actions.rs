@@ -253,6 +253,7 @@ pub struct PaneStateUpdate {
     pub previous_wait: Option<String>,
     pub previous_eta_s: Option<u64>,
     pub previous_reported_at: Option<String>,
+    pub previous_last_turn_at: Option<String>,
     pub previous_stale: bool,
     pub previous_waiting_on_agents: bool,
     pub previous_presentation: crate::terminal::EffectivePresentation,
@@ -263,6 +264,7 @@ pub struct PaneStateUpdate {
     pub wait: Option<String>,
     pub eta_s: Option<u64>,
     pub reported_at: Option<String>,
+    pub last_turn_at: Option<String>,
     pub stale: bool,
     pub waiting_on_agents: bool,
     pub presentation: crate::terminal::EffectivePresentation,
@@ -1210,6 +1212,8 @@ impl AppState {
                     agent_released: false,
                     agent_release_status: None,
                     suppress_completion: false,
+                    last_turn_at: None,
+                    previous_last_turn_at: None,
                 };
                 Some(update)
             })
@@ -1343,18 +1347,6 @@ impl AppState {
             self.reconcile_dock_home_with_focused_pane();
         }
         true
-    }
-
-    /// Focus a tab without moving the independent workspace row selection.
-    pub(crate) fn switch_workspace_tab_preserving_workspace_selection(
-        &mut self,
-        ws_idx: usize,
-        tab_idx: usize,
-    ) -> bool {
-        let selected = self.selected;
-        let switched = self.switch_workspace_tab(ws_idx, tab_idx);
-        self.selected = selected;
-        switched
     }
 
     pub(crate) fn ensure_workspace_visible(&mut self, idx: usize) {
@@ -2381,7 +2373,17 @@ impl AppState {
     pub(crate) fn close_pane_would_close_workspace(&self, ws_idx: usize, pane_id: PaneId) -> bool {
         self.workspaces.get(ws_idx).is_some_and(|ws| {
             ws.find_tab_index_for_pane(pane_id).is_some_and(|tab_idx| {
-                ws.tabs[tab_idx].layout.pane_count() <= 1 && ws.tabs.len() <= 1
+                let tab = &ws.tabs[tab_idx];
+                let pane_is_non_companion = tab
+                    .panes
+                    .get(&pane_id)
+                    .is_some_and(|pane| !pane.is_companion);
+                pane_is_non_companion
+                    && ws.tabs.len() == 1
+                    && !tab
+                        .panes
+                        .iter()
+                        .any(|(candidate, pane)| *candidate != pane_id && !pane.is_companion)
             })
         })
     }
@@ -2429,7 +2431,18 @@ impl AppState {
             return false;
         };
         if close_tab {
-            self.close_tab_preserving_workspace_for_test(ws_idx, tab_idx);
+            if self.workspaces[ws_idx].tabs.len() == 1 {
+                if self.confirm_close
+                    && self.workspace_close_indices(ws_idx).len() > 1
+                    && self.begin_workspace_close_confirmation(ws_idx)
+                {
+                    return false;
+                }
+                self.selected = ws_idx;
+                self.close_selected_workspace();
+            } else {
+                self.close_tab_preserving_workspace_for_test(ws_idx, tab_idx);
+            }
         } else {
             let terminal_id = self.terminal_id_for_pane(ws_idx, pane_id);
             self.workspaces[ws_idx].close_pane(pane_id);
@@ -2451,7 +2464,18 @@ impl AppState {
                 .get(ws_idx)
                 .map(|ws| ws.active_tab)
                 .unwrap_or(0);
-            self.close_tab_preserving_workspace_for_test(ws_idx, tab_idx);
+            if self.workspaces[ws_idx].tabs.len() == 1 {
+                if self.confirm_close
+                    && self.workspace_close_indices(ws_idx).len() > 1
+                    && self.begin_workspace_close_confirmation(ws_idx)
+                {
+                    return false;
+                }
+                self.selected = ws_idx;
+                self.close_selected_workspace();
+            } else {
+                self.close_tab_preserving_workspace_for_test(ws_idx, tab_idx);
+            }
         }
         false
     }
@@ -3293,6 +3317,7 @@ impl AppState {
             closing_block,
         } = report;
         let mut accepted = false;
+        let mut auto_settle = false;
         let updates = if crate::agent_resume::is_reserved_native_state_source(&source, &agent_label)
         {
             self.update_terminal_state(pane_id, |terminal| {
@@ -3336,6 +3361,8 @@ impl AppState {
                         closing_block.session_id,
                         closing_turn_seq,
                     );
+                    mutation.sidebar_projection_changed |=
+                        terminal.set_last_turn_at(closing_block.last_turn_at);
                     let task_changed = terminal.apply_closing_task_report(
                         closing_block.completion,
                         closing_block.external_wait,
@@ -3388,12 +3415,40 @@ impl AppState {
                         state: after.state,
                         presentation: after.presentation,
                     });
+                    let has_blockers = terminal
+                        .closing_gates()
+                        .iter()
+                        .any(|item| item.requires_human_input())
+                        || terminal
+                            .closing_items()
+                            .iter()
+                            .any(|item| item.requires_human_input());
+                    auto_settle = terminal.observe_auto_settle_transition(
+                        closing_block.settle_ready,
+                        after.state == AgentState::Idle
+                            && terminal.closing_completion_is_complete()
+                            && !has_blockers,
+                        mutation.session_replaced,
+                    );
                     mutation.sidebar_projection_changed |=
                         task_changed || payload_changed || agents_changed;
                 }
                 Some(mutation)
             })
         };
+        if auto_settle {
+            if let Some(ws_idx) = self
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.pane_state(pane_id).is_some())
+            {
+                self.settle_pane_at(
+                    ws_idx,
+                    pane_id,
+                    crate::app::settled::unix_seconds(std::time::SystemTime::now()),
+                );
+            }
+        }
         (updates.into_iter().collect(), accepted)
     }
 
@@ -3918,17 +3973,21 @@ impl AppState {
             report,
             previous_waiting_on_agents,
             waiting_on_agents,
+            previous_last_turn_at,
+            last_turn_at,
         ) = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
             let previous_agent_name = terminal.agent_name.clone();
             let previous_report = terminal.status_report_snapshot();
             let previous_waiting_on_agents = terminal.waiting_on_agents();
+            let previous_last_turn_at = terminal.last_turn_at().map(str::to_string);
             let managed_launch_pending = terminal.managed_agent_launch_pending();
             let mutation = update(terminal)?;
             let managed_changed = terminal.reconcile_managed_agent_at(now, false);
             let suppress_acquisition_completion = terminal.finish_agent_process_acquisition();
             let agent_name_changed = terminal.agent_name != previous_agent_name;
             let report = terminal.status_report_snapshot();
+            let last_turn_at = terminal.last_turn_at().map(str::to_string);
             let waiting_on_agents = terminal.waiting_on_agents();
             let report_changed = previous_report != report;
             let unchanged_change = (mutation.agent_released
@@ -3950,6 +4009,8 @@ impl AppState {
                 report,
                 previous_waiting_on_agents,
                 waiting_on_agents,
+                previous_last_turn_at,
+                last_turn_at,
             )
         };
         if mutation.session_ref_changed
@@ -4025,6 +4086,7 @@ impl AppState {
             previous_wait: previous_report.0,
             previous_eta_s: previous_report.1,
             previous_reported_at: previous_report.2,
+            previous_last_turn_at,
             previous_stale: previous_report.3,
             previous_waiting_on_agents,
             previous_presentation: change.previous_presentation.clone(),
@@ -4043,6 +4105,7 @@ impl AppState {
             wait: report.0,
             eta_s: report.1,
             reported_at: report.2,
+            last_turn_at,
             stale: report.3,
             waiting_on_agents,
             presentation: change.presentation.clone(),
@@ -7164,6 +7227,8 @@ mod tests {
                 workers_unknown: None,
                 dependencies_authoritative: true,
                 session_id: None,
+                last_turn_at: None,
+                settle_ready: false,
             })),
         });
         assert_eq!(started.len(), 1);
@@ -7193,6 +7258,8 @@ mod tests {
                 workers_unknown: None,
                 dependencies_authoritative: true,
                 session_id: None,
+                last_turn_at: None,
+                settle_ready: false,
             })),
         });
         assert_eq!(finished.len(), 1);
@@ -7251,6 +7318,8 @@ mod tests {
                 workers_unknown: Some(false),
                 dependencies_authoritative: true,
                 session_id: Some(session.into()),
+                last_turn_at: None,
+                settle_ready: false,
             })),
         };
 
@@ -8170,24 +8239,16 @@ mod tests {
     }
 
     #[test]
-    fn close_tab_last_tab_opens_fresh_tab_and_keeps_workspace() {
+    fn close_tab_last_tab_closes_workspace() {
         let mut state = app_with_workspaces(&["kept"]);
         state.ensure_test_terminals();
-        let workspace_id = state.workspaces[0].id.clone();
-        let workspace_cwd = state.workspaces[0].identity_cwd.clone();
         let old_pane = state.workspaces[0].tabs[0].root_pane;
+        let old_terminal = state.terminal_id_for_pane(0, old_pane).unwrap();
 
         state.close_tab();
 
-        assert_eq!(state.workspaces.len(), 1);
-        assert_eq!(state.workspaces[0].id, workspace_id);
-        assert_eq!(state.workspaces[0].identity_cwd, workspace_cwd);
-        assert_eq!(state.workspaces[0].tabs.len(), 1);
-        assert_ne!(state.workspaces[0].tabs[0].root_pane, old_pane);
-        let replacement_terminal = state
-            .terminal_id_for_pane(0, state.workspaces[0].tabs[0].root_pane)
-            .unwrap();
-        assert_eq!(state.terminals[&replacement_terminal].cwd, workspace_cwd);
+        assert!(state.workspaces.is_empty());
+        assert!(!state.terminals.contains_key(&old_terminal));
         state.assert_invariants_for_test();
     }
 
@@ -8209,7 +8270,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_primary_closes_orphaned_companion_and_replaces_last_tab() {
+    fn closing_primary_closes_orphaned_companion_and_final_workspace() {
         let mut state = app_with_workspaces(&["test"]);
         let primary = state.workspaces[0].tabs[0].root_pane;
         let companion = state.workspaces[0].test_split(Direction::Horizontal);
@@ -8220,15 +8281,9 @@ mod tests {
             .is_companion = true;
         state.ensure_test_terminals();
         let old_companion_terminal = state.terminal_id_for_pane(0, companion).unwrap();
-        let workspace_id = state.workspaces[0].id.clone();
-
         state.close_pane();
 
-        assert_eq!(state.workspaces.len(), 1);
-        assert_eq!(state.workspaces[0].id, workspace_id);
-        assert_eq!(state.workspaces[0].tabs.len(), 1);
-        assert!(state.workspaces[0].pane_state(primary).is_none());
-        assert!(state.workspaces[0].pane_state(companion).is_none());
+        assert!(state.workspaces.is_empty());
         assert!(!state.terminals.contains_key(&old_companion_terminal));
         state.assert_invariants_for_test();
     }
@@ -8295,7 +8350,7 @@ mod tests {
     }
 
     #[test]
-    fn close_tab_last_tab_keeps_active_workspace_not_selected_workspace() {
+    fn close_tab_last_tab_closes_active_workspace_not_selected_workspace() {
         let mut state = app_with_workspaces(&["selected", "active"]);
         let active_terminal_id = state
             .terminal_id_for_pane(1, state.workspaces[1].tabs[0].root_pane)
@@ -8305,17 +8360,15 @@ mod tests {
 
         state.close_tab();
 
-        assert_eq!(state.workspaces.len(), 2);
+        assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "selected");
-        assert_eq!(state.workspaces[1].display_name(), "active");
-        assert_eq!(state.workspaces[1].tabs.len(), 1);
-        assert_eq!(state.active, Some(1));
+        assert_eq!(state.active, Some(0));
         assert!(!state.terminals.contains_key(&active_terminal_id));
         state.assert_invariants_for_test();
     }
 
     #[test]
-    fn close_pane_last_pane_keeps_active_workspace_not_selected_workspace() {
+    fn close_pane_last_pane_closes_active_workspace_not_selected_workspace() {
         let mut state = app_with_workspaces(&["selected", "active"]);
         let active_terminal_id = state
             .terminal_id_for_pane(1, state.workspaces[1].tabs[0].root_pane)
@@ -8325,33 +8378,29 @@ mod tests {
 
         state.close_pane();
 
-        assert_eq!(state.workspaces.len(), 2);
+        assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "selected");
-        assert_eq!(state.workspaces[1].display_name(), "active");
-        assert_eq!(state.workspaces[1].tabs.len(), 1);
-        assert_eq!(state.active, Some(1));
+        assert_eq!(state.active, Some(0));
         assert!(!state.terminals.contains_key(&active_terminal_id));
         state.assert_invariants_for_test();
     }
 
     #[test]
-    fn close_pane_last_pane_in_parent_worktree_group_keeps_workspaces() {
+    fn close_pane_last_pane_in_parent_worktree_group_closes_workspaces() {
         let mut state = app_with_workspaces(&["parent", "child"]);
         mark_parent_worktree(&mut state, 0);
         mark_linked_worktree(&mut state, 1);
         state.active = Some(0);
         state.selected = 1;
+        state.confirm_close = false;
 
-        let deferred = state.close_pane();
+        state.close_pane();
 
-        assert!(!deferred);
-        assert_ne!(state.effective_interaction_mode(), Mode::ConfirmClose);
-        assert_eq!(state.selected, 1);
-        assert_eq!(state.workspaces.len(), 2);
+        assert!(state.workspaces.is_empty());
     }
 
     #[test]
-    fn close_tab_in_linked_worktree_keeps_worktree_workspace() {
+    fn close_tab_in_linked_worktree_closes_workspace_without_removing_worktree() {
         let mut state = app_with_workspaces(&["selected", "active"]);
         mark_linked_worktree(&mut state, 1);
         state.active = Some(1);
@@ -8360,29 +8409,26 @@ mod tests {
         state.close_tab();
 
         assert_eq!(state.request_remove_linked_worktree, None);
-        assert_eq!(state.workspaces.len(), 2);
+        assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "selected");
-        assert_eq!(state.workspaces[1].display_name(), "active");
     }
 
     #[test]
-    fn close_tab_last_tab_in_parent_worktree_group_keeps_workspaces() {
+    fn close_tab_last_tab_in_parent_worktree_group_closes_workspaces() {
         let mut state = app_with_workspaces(&["parent", "child"]);
         mark_parent_worktree(&mut state, 0);
         mark_linked_worktree(&mut state, 1);
         state.active = Some(0);
         state.selected = 1;
+        state.confirm_close = false;
 
-        let deferred = state.close_tab();
+        state.close_tab();
 
-        assert!(!deferred);
-        assert_ne!(state.effective_interaction_mode(), Mode::ConfirmClose);
-        assert_eq!(state.selected, 1);
-        assert_eq!(state.workspaces.len(), 2);
+        assert!(state.workspaces.is_empty());
     }
 
     #[test]
-    fn close_pane_last_pane_in_linked_worktree_keeps_worktree_workspace() {
+    fn close_pane_last_pane_in_linked_worktree_closes_worktree_workspace() {
         let mut state = app_with_workspaces(&["selected", "active"]);
         mark_linked_worktree(&mut state, 1);
         state.active = Some(1);
@@ -8390,14 +8436,12 @@ mod tests {
 
         state.close_pane();
 
-        assert_eq!(state.request_remove_linked_worktree, None);
-        assert_eq!(state.workspaces.len(), 2);
+        assert_eq!(state.workspaces.len(), 1);
         assert_eq!(state.workspaces[0].display_name(), "selected");
-        assert_eq!(state.workspaces[1].display_name(), "active");
     }
 
     #[test]
-    fn close_pane_last_pane_in_parent_worktree_group_is_kept_when_confirmation_disabled() {
+    fn close_pane_last_pane_in_parent_worktree_group_closes_when_confirmation_disabled() {
         let mut state = app_with_workspaces(&["parent", "child", "notes"]);
         mark_parent_worktree(&mut state, 0);
         mark_linked_worktree(&mut state, 1);
@@ -8408,9 +8452,7 @@ mod tests {
         let deferred = state.close_pane();
 
         assert!(!deferred);
-        assert_eq!(state.workspaces.len(), 3);
-        assert_eq!(state.workspaces[0].display_name(), "parent");
-        assert_eq!(state.workspaces[1].display_name(), "child");
-        assert_eq!(state.workspaces[2].display_name(), "notes");
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces[0].display_name(), "notes");
     }
 }

@@ -372,28 +372,19 @@ impl AppState {
         snapshot: &str,
         now: Instant,
     ) -> bool {
-        let Some((ws_idx, pane)) = self.pane_state_mut(pane_id) else {
+        let Some((_, pane)) = self.pane_state_mut(pane_id) else {
             return false;
         };
         let activity = pane
             .activity
             .observe_detection_snapshot(revision, agent, snapshot, now);
-        let changed = activity && pane.settled_at.take().is_some();
         if activity {
             self.mark_session_dirty();
         }
-        if changed {
-            let workspace_id = self.workspaces[ws_idx].id.clone();
-            self.pending_pane_settlement_changes
-                .push(PaneSettlementChange {
-                    workspace_id,
-                    pane_id,
-                    settled_at: None,
-                });
-            self.mark_session_dirty();
-            self.mark_sidebar_projection_changed();
-        }
-        changed
+        // Detection snapshots can change because settling stopped the agent and
+        // its resume stub repainted the pane. Only input or an agent state
+        // transition should unsettle it.
+        false
     }
 
     pub(crate) fn refresh_settled_panes_at(
@@ -457,6 +448,7 @@ impl AppState {
                     // pending. Use the pane activity clock rather than the
                     // transient unread-Done clock, which focus clears.
                     let quiet_ripe = self.auto_settle_done
+                        && pane.seen
                         && !self.is_active_pane(ws_idx, tab_idx, *pane_id)
                         && !tab.pinned
                         && quiet
@@ -1604,14 +1596,36 @@ mod tests {
         let done_since = Instant::now();
         let now = done_since + Duration::from_secs(29 * 60);
         let (mut state, pane_id) = done_state(true, done_since);
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("done pane")
+            .seen = true;
         assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_030), 0);
         assert!(!state.pane_is_settled(0, pane_id));
 
         let done_since = Instant::now();
         let now = done_since + Duration::from_secs(31 * 60);
         let (mut state, pane_id) = done_state(true, done_since);
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("done pane")
+            .seen = true;
         assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_031), 1);
         assert!(state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn unread_done_pane_does_not_auto_settle() {
+        let done_since = Instant::now();
+        let (mut state, pane_id) = done_state(true, done_since);
+        let deadline = done_since + state.settle_done_after;
+        assert_eq!(
+            state.refresh_settled_panes_at(None, deadline, 1_725_000_031),
+            0
+        );
+        assert!(!state.pane_is_settled(0, pane_id));
     }
 
     #[test]
@@ -1637,6 +1651,11 @@ mod tests {
         let quiet_since = Instant::now();
         let now = quiet_since + Duration::from_secs(31 * 60);
         let (mut state, pane_id) = done_state(true, quiet_since);
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("done pane")
+            .seen = true;
         let terminal_id = state.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
             .clone();
@@ -1718,9 +1737,9 @@ mod tests {
             + idle.settle_done_after;
         assert_eq!(
             idle.refresh_settled_panes_at(None, settle_at, 1_725_000_037),
-            1
+            0
         );
-        assert!(idle.pane_is_settled(0, idle_pane));
+        assert!(!idle.pane_is_settled(0, idle_pane));
 
         let (mut unresolved, unresolved_pane) = stale_state(None, now);
         let settle_at = unresolved.workspaces[0].tabs[0].panes[&unresolved_pane]
@@ -1794,7 +1813,7 @@ mod tests {
         );
         assert_eq!(
             state.refresh_settled_panes_at(None, now + state.settle_done_after, 1_725_001_840,),
-            1
+            0
         );
     }
 
@@ -1829,7 +1848,7 @@ mod tests {
         );
         assert_eq!(
             state.refresh_settled_panes_at(None, now + state.settle_done_after, 1_725_001_842,),
-            1
+            0
         );
     }
 
@@ -1901,6 +1920,8 @@ mod tests {
                 workers_unknown: None,
                 dependencies_authoritative: true,
                 session_id: None,
+                last_turn_at: None,
+                settle_ready: false,
             })),
         });
         state.workspaces[0].tabs[0]
@@ -1935,6 +1956,8 @@ mod tests {
                 workers_unknown: None,
                 dependencies_authoritative: true,
                 session_id: None,
+                last_turn_at: None,
+                settle_ready: false,
             })),
         });
         let settled_at = now + Duration::from_secs(1);
@@ -1966,6 +1989,11 @@ mod tests {
         let done_since = Instant::now();
         let now = done_since + Duration::from_secs(5 * 60 * 60);
         let (mut state, pane_id) = done_state(false, done_since);
+        state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("done pane")
+            .seen = true;
         assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_032), 1);
         assert!(state.pane_is_settled(0, pane_id));
         assert_eq!(
@@ -1973,7 +2001,7 @@ mod tests {
             Some(now),
             "settling an unresumable pane must preserve its reap clock"
         );
-        assert!(state.next_done_settle_deadline(now).is_none());
+        assert_eq!(state.next_done_settle_deadline(now), None);
     }
 
     #[test]
@@ -2096,7 +2124,7 @@ mod tests {
     }
 
     #[test]
-    fn inactivity_settles_and_detection_snapshot_change_unsettles() {
+    fn detection_snapshot_change_preserves_settlement_and_updates_activity() {
         let (mut state, pane_id) = state_with_context(Default::default());
         let now = Instant::now();
         assert!(!state.observe_pane_detection_snapshot_at(pane_id, 1, None, "before", now));
@@ -2109,8 +2137,14 @@ mod tests {
             .set_last_at(now - state.settle_after);
         assert_eq!(state.refresh_settled_panes_at(None, now, 1_725_000_002), 1);
 
-        assert!(state.observe_pane_detection_snapshot_at(pane_id, 2, None, "after", now));
-        assert!(!state.pane_is_settled(0, pane_id));
+        assert!(!state.observe_pane_detection_snapshot_at(pane_id, 2, None, "after", now));
+        assert!(state.pane_is_settled(0, pane_id));
+        assert_eq!(
+            state.workspaces[0].tabs[0].panes[&pane_id]
+                .activity
+                .inactive_for(now),
+            Duration::ZERO
+        );
     }
 
     #[test]
@@ -2721,6 +2755,44 @@ mod tests {
         assert!(app.state.terminals[&terminal_id]
             .settled_auto_label
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn stopped_agent_resume_repaint_keeps_pane_settled() {
+        let (mut app, pane_id, terminal_id, _rx) = app_with_runtime(
+            &crate::config::Config::default(),
+            crate::work_context::PaneWorkContext::default(),
+        );
+        set_persisted_session(&mut app, &terminal_id, "herdr:codex");
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .expect("root runtime")
+            .test_process_pty_bytes(b"agent output before settle\r\n");
+        let now = Instant::now();
+        app.refresh_pane_settlement_at_with_wall_clock(now, 1_725_000_017);
+
+        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_017));
+        assert!(app.flush_pane_settlement_events());
+        assert!(app.state.pane_is_settled(0, pane_id));
+
+        // Stopping the agent prints a resume stub, changing the pane snapshot.
+        let before_repaint = app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("root runtime")
+            .detection_text();
+        app.terminal_runtimes
+            .get(&terminal_id)
+            .expect("root runtime")
+            .test_process_pty_bytes(b"\r\nResume with herdr agent resume\r\n");
+        let after_repaint = app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("root runtime")
+            .detection_text();
+        assert_ne!(before_repaint, after_repaint);
+        app.refresh_pane_settlement_at_with_wall_clock(now + Duration::from_secs(1), 1_725_000_018);
+        assert!(app.state.pane_is_settled(0, pane_id));
     }
 
     #[test]

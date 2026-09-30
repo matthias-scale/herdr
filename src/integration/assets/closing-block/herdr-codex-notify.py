@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# HERDR_INTEGRATION_VERSION=3
+# HERDR_INTEGRATION_VERSION=4
 """Codex `notify` handler -> herdr turn-end status.
 
 Codex invokes the notify program with a single JSON argument. For a finished
@@ -25,9 +25,10 @@ import fcntl
 import os
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from closing_block import parse  # noqa: E402
+from closing_block import parse, settle_ready  # noqa: E402
 from herdr_status import accepts_payload, mirror_path, report, reserve_sequence  # noqa: E402
 
 # Codex has used both spellings across versions.
@@ -184,9 +185,11 @@ def main() -> int:
             external_wait=block.external_wait,
             parse_status=block.parse_status,
             workers_unknown=block.workers_unknown,
+            settle_ready=settle_ready(text),
             session_id=session_id or None,
             title=title_from(payload, pane_id),
             seq=seq,
+            last_turn_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         ),
     )
     if outcome is not None and os.environ.get("HERDR_CLOSING_BLOCK_DEBUG"):
