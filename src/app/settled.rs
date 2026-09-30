@@ -34,11 +34,12 @@ pub(crate) fn settle_countdown(
         return None;
     }
     let quiet_for = quiet_for.unwrap_or_default();
-    if active {
-        return Some(SettleHint::Focused(threshold));
-    }
+    // Pinned wins over focus: leaving a pinned pane still never settles it.
     if pinned {
         return Some(SettleHint::Pinned);
+    }
+    if active {
+        return Some(SettleHint::Focused(threshold));
     }
     Some(SettleHint::Countdown(threshold.saturating_sub(quiet_for)))
 }
@@ -878,6 +879,10 @@ mod tests {
         );
         assert_eq!(
             hint(true, true, false, true, true, false, Some(duration(20))),
+            Some(SettleHint::Pinned)
+        );
+        assert_eq!(
+            hint(true, true, true, true, true, false, Some(duration(20))),
             Some(SettleHint::Pinned)
         );
         for args in [
