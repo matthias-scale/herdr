@@ -128,6 +128,12 @@
               },
               "type": "array"
             },
+            "last_turn_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "launch_pending": {
               "type": "boolean"
             },
@@ -9387,6 +9393,12 @@
               "type": "array"
             },
             "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_turn_at": {
               "type": [
                 "string",
                 "null"
