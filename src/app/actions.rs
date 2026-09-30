@@ -253,6 +253,7 @@ pub struct PaneStateUpdate {
     pub previous_wait: Option<String>,
     pub previous_eta_s: Option<u64>,
     pub previous_reported_at: Option<String>,
+    pub previous_last_turn_at: Option<String>,
     pub previous_stale: bool,
     pub previous_waiting_on_agents: bool,
     pub previous_presentation: crate::terminal::EffectivePresentation,
@@ -263,6 +264,7 @@ pub struct PaneStateUpdate {
     pub wait: Option<String>,
     pub eta_s: Option<u64>,
     pub reported_at: Option<String>,
+    pub last_turn_at: Option<String>,
     pub stale: bool,
     pub waiting_on_agents: bool,
     pub presentation: crate::terminal::EffectivePresentation,
@@ -1210,6 +1212,8 @@ impl AppState {
                     agent_released: false,
                     agent_release_status: None,
                     suppress_completion: false,
+                    last_turn_at: None,
+                    previous_last_turn_at: None,
                 };
                 Some(update)
             })
@@ -3357,6 +3361,8 @@ impl AppState {
                         closing_block.session_id,
                         closing_turn_seq,
                     );
+                    mutation.sidebar_projection_changed |=
+                        terminal.set_last_turn_at(closing_block.last_turn_at);
                     let task_changed = terminal.apply_closing_task_report(
                         closing_block.completion,
                         closing_block.external_wait,
@@ -3418,9 +3424,9 @@ impl AppState {
                             .iter()
                             .any(|item| item.requires_human_input());
                     auto_settle = terminal.observe_auto_settle_transition(
-                        has_blockers,
+                        closing_block.settle_ready,
                         after.state == AgentState::Idle
-                            && terminal.closing_task_complete()
+                            && terminal.closing_completion_is_complete()
                             && !has_blockers,
                         mutation.session_replaced,
                     );
@@ -3905,7 +3911,8 @@ impl AppState {
         let pane = self.workspaces[ws_idx].pane_state_mut(pane_id)?;
         let entered_active_state =
             projected_state_changed && matches!(state, AgentState::Working | AgentState::Blocked);
-        let unsettled = entered_active_state && pane.settled_at.take().is_some();
+        let unsettled =
+            entered_active_state && !pane.settle_resume_guard && pane.settled_at.take().is_some();
 
         if unsettled {
             let workspace_id = self.workspaces[ws_idx].id.clone();
@@ -3967,17 +3974,21 @@ impl AppState {
             report,
             previous_waiting_on_agents,
             waiting_on_agents,
+            previous_last_turn_at,
+            last_turn_at,
         ) = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
             let previous_agent_name = terminal.agent_name.clone();
             let previous_report = terminal.status_report_snapshot();
             let previous_waiting_on_agents = terminal.waiting_on_agents();
+            let previous_last_turn_at = terminal.last_turn_at().map(str::to_string);
             let managed_launch_pending = terminal.managed_agent_launch_pending();
             let mutation = update(terminal)?;
             let managed_changed = terminal.reconcile_managed_agent_at(now, false);
             let suppress_acquisition_completion = terminal.finish_agent_process_acquisition();
             let agent_name_changed = terminal.agent_name != previous_agent_name;
             let report = terminal.status_report_snapshot();
+            let last_turn_at = terminal.last_turn_at().map(str::to_string);
             let waiting_on_agents = terminal.waiting_on_agents();
             let report_changed = previous_report != report;
             let unchanged_change = (mutation.agent_released
@@ -3999,6 +4010,8 @@ impl AppState {
                 report,
                 previous_waiting_on_agents,
                 waiting_on_agents,
+                previous_last_turn_at,
+                last_turn_at,
             )
         };
         if mutation.session_ref_changed
@@ -4074,6 +4087,7 @@ impl AppState {
             previous_wait: previous_report.0,
             previous_eta_s: previous_report.1,
             previous_reported_at: previous_report.2,
+            previous_last_turn_at,
             previous_stale: previous_report.3,
             previous_waiting_on_agents,
             previous_presentation: change.previous_presentation.clone(),
@@ -4092,6 +4106,7 @@ impl AppState {
             wait: report.0,
             eta_s: report.1,
             reported_at: report.2,
+            last_turn_at,
             stale: report.3,
             waiting_on_agents,
             presentation: change.presentation.clone(),
@@ -4294,7 +4309,8 @@ impl AppState {
         if should_note_activity {
             pane.activity.note(now);
         }
-        let unsettled = should_unsettle && pane.settled_at.take().is_some();
+        let unsettled =
+            should_unsettle && !pane.settle_resume_guard && pane.settled_at.take().is_some();
 
         let previous_status = crate::app::api_helpers::pane_agent_status_with_stale(
             change.previous_state,
@@ -7213,6 +7229,8 @@ mod tests {
                 workers_unknown: None,
                 dependencies_authoritative: true,
                 session_id: None,
+                last_turn_at: None,
+                settle_ready: false,
             })),
         });
         assert_eq!(started.len(), 1);
@@ -7242,6 +7260,8 @@ mod tests {
                 workers_unknown: None,
                 dependencies_authoritative: true,
                 session_id: None,
+                last_turn_at: None,
+                settle_ready: false,
             })),
         });
         assert_eq!(finished.len(), 1);
@@ -7300,6 +7320,8 @@ mod tests {
                 workers_unknown: Some(false),
                 dependencies_authoritative: true,
                 session_id: Some(session.into()),
+                last_turn_at: None,
+                settle_ready: false,
             })),
         };
 

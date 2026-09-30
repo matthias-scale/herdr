@@ -30,7 +30,7 @@ from typing import Any
 
 from closing_block import GATE_LABELS, HUMAN_INPUT_LABELS
 
-# HERDR_INTEGRATION_VERSION=3
+# HERDR_INTEGRATION_VERSION=4
 VERSION = 2
 
 
@@ -342,6 +342,7 @@ def report(
     external_wait: str | None = None,
     parse_status: str = "ok",
     workers_unknown: bool = False,
+    settle_ready: bool = False,
     session_id: str | None = None,
     session_path: str | None = None,
     title: str | None = None,
@@ -349,6 +350,7 @@ def report(
     sock_path: str | None = None,
     state: str | None = None,
     seq: int | None = None,
+    last_turn_at: str | None = None,
 ) -> dict:
     """Push one v2 turn-end status. Never raises; returns what it did."""
     gate_objects = [
@@ -382,6 +384,7 @@ def report(
 
     seq = seq if isinstance(seq, int) else reserve_sequence()
     reported_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    last_turn_at = last_turn_at if isinstance(last_turn_at, str) and last_turn_at else None
     completion = (
         completion if completion in {"complete", "incomplete", "missing"} else "missing"
     )
@@ -423,6 +426,8 @@ def report(
             payload["items"] = action_points
     if reported_agents is not None:
         payload["agents"] = reported_agents
+    if last_turn_at is not None:
+        payload["last_turn_at"] = last_turn_at
     if title:
         payload["title"] = title
     if state == "working" and wait and isinstance(eta_s, int) and eta_s >= 0:
@@ -453,10 +458,12 @@ def report(
     agent_params = {"pane_id": pane_id, "source": source, "agent": agent,
                     "state": state, "seq": seq, "v": VERSION,
                     "reported_at": reported_at,
+                    "last_turn_at": last_turn_at,
                     "completion": completion,
                     "external_wait": external_wait,
                     "parse_status": parse_status,
                     "workers_unknown": workers_unknown}
+    agent_params["settle_ready"] = settle_ready is True
     if dependencies_authoritative:
         agent_params["gates"] = gate_objects
         agent_params["items"] = item_objects

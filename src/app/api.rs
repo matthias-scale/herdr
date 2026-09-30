@@ -1318,7 +1318,12 @@ impl App {
         answers_human_gate: bool,
     ) {
         self.cancel_pending_stall_nudge_for_pane(pane_id);
-        self.state.note_pane_activity_at(pane_id, observed_at);
+        if answers_human_gate {
+            self.state.note_human_pane_activity_at(pane_id, observed_at);
+        } else {
+            self.state
+                .note_automated_pane_activity_at(pane_id, observed_at);
+        }
         self.record_contract_false_positive_for_pane(pane_id, observed_at);
         self.handle_internal_event(AppEvent::HookAuthorityRetired {
             pane_id,
@@ -1575,6 +1580,7 @@ impl App {
             || update.previous_wait != update.wait
             || update.previous_eta_s != update.eta_s
             || update.previous_reported_at != update.reported_at
+            || update.previous_last_turn_at != update.last_turn_at
             || update.previous_presentation != update.presentation
         {
             let presentation = update.presentation.clone();
@@ -1588,6 +1594,7 @@ impl App {
                     wait: update.wait.clone(),
                     eta_s: update.eta_s,
                     reported_at: update.reported_at.clone(),
+                    last_turn_at: update.last_turn_at.clone(),
                     agent: update.agent_label.clone(),
                     title: presentation.title,
                     display_agent: presentation.display_agent,

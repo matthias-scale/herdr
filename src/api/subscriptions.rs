@@ -71,6 +71,7 @@ struct PanePresentationSnapshot {
     wait: Option<String>,
     eta_s: Option<u64>,
     reported_at: Option<String>,
+    last_turn_at: Option<String>,
     waiting_on_agents: bool,
 }
 
@@ -83,6 +84,7 @@ impl PanePresentationSnapshot {
             wait: pane.wait.clone(),
             eta_s: pane.eta_s,
             reported_at: pane.reported_at.clone(),
+            last_turn_at: pane.last_turn_at.clone(),
             waiting_on_agents: pane.waiting_on_agents,
         }
     }
@@ -94,6 +96,7 @@ impl PanePresentationSnapshot {
         wait: &Option<String>,
         eta_s: Option<u64>,
         reported_at: &Option<String>,
+        last_turn_at: &Option<String>,
         waiting_on_agents: bool,
     ) -> Self {
         Self {
@@ -103,6 +106,7 @@ impl PanePresentationSnapshot {
             wait: wait.clone(),
             eta_s,
             reported_at: reported_at.clone(),
+            last_turn_at: last_turn_at.clone(),
             waiting_on_agents,
         }
     }
@@ -110,6 +114,10 @@ impl PanePresentationSnapshot {
 
 pub(super) struct ActiveEventSubscription {
     event_kind: crate::api::schema::EventKind,
+    last_sequence: u64,
+}
+
+pub(super) struct ActiveSessionChangedSubscription {
     last_sequence: u64,
 }
 
@@ -125,6 +133,7 @@ pub(super) enum ActiveSubscription {
     AgentStatusChanged(Box<ActiveAgentStatusChangedSubscription>),
     ScrollChanged(ActiveScrollChangedSubscription),
     FleetAgentsChanged(ActiveFleetAgentsSubscription),
+    SessionChanged(ActiveSessionChangedSubscription),
 }
 
 impl ActiveSubscription {
@@ -199,6 +208,11 @@ impl ActiveSubscription {
                     request_prefix: format!("{request_id}:sub:{index}"),
                 }))
             }
+            Subscription::SessionChanged {} => {
+                Ok(Self::SessionChanged(ActiveSessionChangedSubscription {
+                    last_sequence: event_start_sequence,
+                }))
+            }
             Subscription::PaneOutputMatched {
                 pane_id,
                 source,
@@ -261,6 +275,7 @@ impl ActiveSubscription {
                         wait: probe.wait,
                         eta_s: probe.eta_s,
                         reported_at: probe.reported_at,
+                        last_turn_at: probe.last_turn_at,
                         agent: probe.agent,
                         title: probe.title,
                         display_agent: probe.display_agent,
@@ -312,6 +327,11 @@ impl ActiveSubscription {
                 .ok()?
                 .into_iter()
                 .next(),
+            Self::SessionChanged(subscription) => {
+                // Each event carries a full snapshot, so the newest supersedes older events
+                // drained in the same poll.
+                subscription.poll(event_hub).ok()?.into_iter().last()
+            }
         }
     }
 
@@ -368,6 +388,7 @@ impl ActiveSubscription {
                 Ok(self.poll(api_tx, event_hub).into_iter().collect())
             }
             Self::FleetAgentsChanged(subscription) => subscription.poll_batch(api_tx, event_hub),
+            Self::SessionChanged(subscription) => subscription.poll_batch(event_hub),
         }
     }
 }
@@ -425,6 +446,41 @@ impl ActiveFleetAgentsSubscription {
     }
 }
 
+impl ActiveSessionChangedSubscription {
+    fn poll(&mut self, event_hub: &EventHub) -> Result<Vec<serde_json::Value>, ErrorBody> {
+        self.poll_batch(event_hub)
+    }
+
+    fn poll_batch(&mut self, event_hub: &EventHub) -> Result<Vec<serde_json::Value>, ErrorBody> {
+        let events = subscription_events_after(event_hub, self.last_sequence)?;
+        let mut matching = Vec::new();
+        for (sequence, event) in events {
+            self.last_sequence = sequence;
+            if let crate::api::schema::EventData::SessionChanged {
+                epoch,
+                revision,
+                snapshot,
+            } = event.data
+            {
+                matching.push(
+                    serde_json::to_value(SubscriptionEventEnvelope {
+                        event: SubscriptionEventKind::SessionChanged,
+                        data: SubscriptionEventData::SessionChanged(
+                            crate::api::schema::SessionChangedEvent {
+                                epoch,
+                                revision,
+                                snapshot,
+                            },
+                        ),
+                    })
+                    .map_err(event_encoding_error)?,
+                );
+            }
+        }
+        Ok(matching)
+    }
+}
+
 fn changes_fleet_agent_inventory(event: EventKind) -> bool {
     matches!(
         event,
@@ -453,6 +509,7 @@ fn changes_fleet_agent_inventory(event: EventKind) -> bool {
             | EventKind::PaneAgentDetected
             | EventKind::PaneAgentStatusChanged
             | EventKind::LayoutUpdated
+            | EventKind::SessionChanged
     )
 }
 
@@ -572,6 +629,7 @@ impl ActiveAgentStatusChangedSubscription {
             wait,
             eta_s,
             reported_at,
+            last_turn_at,
             agent,
             title,
             display_agent,
@@ -592,6 +650,7 @@ impl ActiveAgentStatusChangedSubscription {
             &wait,
             eta_s,
             &reported_at,
+            &last_turn_at,
             waiting_on_agents,
         ));
         self.initial_event = None;
@@ -612,6 +671,7 @@ impl ActiveAgentStatusChangedSubscription {
                 wait,
                 eta_s,
                 reported_at,
+                last_turn_at,
                 agent,
                 title,
                 display_agent,
@@ -685,6 +745,7 @@ impl ActiveAgentStatusChangedSubscription {
                 wait: pane.wait,
                 eta_s: pane.eta_s,
                 reported_at: pane.reported_at,
+                last_turn_at: pane.last_turn_at,
                 agent: pane.agent,
                 title: pane.title,
                 display_agent: pane.display_agent,
@@ -854,6 +915,7 @@ mod tests {
                 title: title.map(str::to_string),
                 display_agent: None,
                 state_labels: HashMap::new(),
+                last_turn_at: None,
             },
         }
     }
@@ -899,6 +961,7 @@ mod tests {
             agent_session: None,
             scroll,
             revision: 0,
+            last_turn_at: None,
         }
     }
 
@@ -955,6 +1018,97 @@ mod tests {
     }
 
     #[test]
+    fn session_changed_subscription_delivers_revision_and_snapshot() {
+        let event_hub = EventHub::default();
+        let (api_tx, _api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut subscription = ActiveSubscription::new(
+            Subscription::SessionChanged {},
+            "test",
+            0,
+            &api_tx,
+            &event_hub,
+            event_hub.current_sequence(),
+        )
+        .expect("session changed subscription");
+        event_hub.push(crate::api::schema::EventEnvelope {
+            event: EventKind::SessionChanged,
+            data: crate::api::schema::EventData::SessionChanged {
+                epoch: "epoch-1".into(),
+                revision: 7,
+                snapshot: Box::new(crate::api::schema::SessionSnapshot {
+                    epoch: Some("epoch-1".into()),
+                    revision: Some(7),
+                    version: "0.9.1".into(),
+                    protocol: 16,
+                    focused_workspace_id: None,
+                    focused_tab_id: None,
+                    focused_pane_id: None,
+                    workspaces: Vec::new(),
+                    tabs: Vec::new(),
+                    panes: Vec::new(),
+                    layouts: Vec::new(),
+                    agents: Vec::new(),
+                }),
+            },
+        });
+
+        let event = subscription
+            .poll(&api_tx, &event_hub)
+            .expect("session change event");
+
+        assert_eq!(event["event"], "session.changed");
+        assert_eq!(event["data"]["revision"], 7);
+        assert_eq!(event["data"]["epoch"], "epoch-1");
+        assert_eq!(event["data"]["snapshot"]["revision"], 7);
+    }
+
+    #[test]
+    fn session_changed_poll_returns_newest_of_queued_snapshots() {
+        let event_hub = EventHub::default();
+        let (api_tx, _api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut subscription = ActiveSubscription::new(
+            Subscription::SessionChanged {},
+            "test",
+            0,
+            &api_tx,
+            &event_hub,
+            event_hub.current_sequence(),
+        )
+        .expect("session changed subscription");
+
+        for revision in [3, 4, 5] {
+            event_hub.push(crate::api::schema::EventEnvelope {
+                event: EventKind::SessionChanged,
+                data: crate::api::schema::EventData::SessionChanged {
+                    epoch: "epoch-1".into(),
+                    revision,
+                    snapshot: Box::new(crate::api::schema::SessionSnapshot {
+                        epoch: Some("epoch-1".into()),
+                        revision: Some(revision),
+                        version: "0.9.1".into(),
+                        protocol: 16,
+                        focused_workspace_id: None,
+                        focused_tab_id: None,
+                        focused_pane_id: None,
+                        workspaces: Vec::new(),
+                        tabs: Vec::new(),
+                        panes: Vec::new(),
+                        layouts: Vec::new(),
+                        agents: Vec::new(),
+                    }),
+                },
+            });
+        }
+
+        let event = subscription
+            .poll(&api_tx, &event_hub)
+            .expect("newest session change event");
+        assert_eq!(event["data"]["revision"], 5);
+        assert_eq!(event["data"]["snapshot"]["revision"], 5);
+        assert!(subscription.poll(&api_tx, &event_hub).is_none());
+    }
+
+    #[test]
     fn scroll_subscription_emits_when_scroll_snapshot_changes() {
         let at_bottom = PaneScrollInfo {
             offset_from_bottom: 0,
@@ -1003,6 +1157,7 @@ mod tests {
                 eta_s: None,
                 reported_at: None,
                 waiting_on_agents: false,
+                last_turn_at: None,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: None,
@@ -1044,6 +1199,7 @@ mod tests {
                 eta_s: None,
                 reported_at: None,
                 waiting_on_agents: false,
+                last_turn_at: None,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: None,
@@ -1084,6 +1240,7 @@ mod tests {
                 eta_s: None,
                 reported_at: None,
                 waiting_on_agents: false,
+                last_turn_at: None,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: Some(PaneAgentStatusChangedEvent {
@@ -1098,6 +1255,7 @@ mod tests {
                 title: None,
                 display_agent: None,
                 state_labels: HashMap::new(),
+                last_turn_at: None,
             }),
             request_prefix: "test".into(),
         };
@@ -1137,6 +1295,7 @@ mod tests {
                 eta_s: None,
                 reported_at: None,
                 waiting_on_agents: false,
+                last_turn_at: None,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: Some(PaneAgentStatusChangedEvent {
@@ -1151,6 +1310,7 @@ mod tests {
                 title: Some("short lived".into()),
                 display_agent: None,
                 state_labels: HashMap::new(),
+                last_turn_at: None,
             }),
             request_prefix: "test".into(),
         };

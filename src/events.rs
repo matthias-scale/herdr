@@ -19,8 +19,10 @@ pub struct ClosingBlockReport {
     pub external_wait: Option<String>,
     pub parse_status: Option<crate::api::schema::ClosingParseStatus>,
     pub workers_unknown: Option<bool>,
+    pub settle_ready: bool,
     pub dependencies_authoritative: bool,
     pub session_id: Option<String>,
+    pub last_turn_at: Option<String>,
 }
 
 #[derive(Debug)]
