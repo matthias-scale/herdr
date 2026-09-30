@@ -99,6 +99,19 @@ pub(super) fn append_remote_entry_groups(
     section: &str,
     entries: Vec<super::AgentPanelEntry>,
 ) {
+    let fallback_activity = app.remote_device_activity.is_none().then(|| {
+        let activity_entries = app
+            .remote_agent_panel_entries
+            .iter()
+            .map(super::remote_agent_as_panel_entry)
+            .collect::<Vec<_>>();
+        super::sidebar_remote_activity(app, &activity_entries)
+    });
+    let remote_activity = app
+        .remote_device_activity
+        .as_ref()
+        .or(fallback_activity.as_ref())
+        .expect("remote activity fallback is present when no snapshot cache exists");
     let mut included =
         std::collections::HashMap::<String, std::collections::HashSet<String>>::new();
     for entry in &entries {
@@ -124,7 +137,7 @@ pub(super) fn append_remote_entry_groups(
                 .filter(|remote| agent_ids.contains(&remote.agent_ref.agent))
                 .map(super::remote_agent_as_panel_entry)
                 .collect::<Vec<_>>();
-            append_device_group(app, rows, section, group, group_entries);
+            append_device_group(app, rows, section, group, group_entries, &remote_activity);
         }
         return;
     }
@@ -144,7 +157,14 @@ pub(super) fn append_remote_entry_groups(
         }),
     );
     for group in &groups {
-        append_device_group(app, rows, section, group, group.items.clone());
+        append_device_group(
+            app,
+            rows,
+            section,
+            group,
+            group.items.clone(),
+            &remote_activity,
+        );
     }
 }
 
@@ -154,6 +174,7 @@ fn append_device_group<T>(
     section: &str,
     group: &DeviceGroup<T>,
     entries: Vec<super::AgentPanelEntry>,
+    remote_activity: &std::collections::HashMap<(String, String), super::SidebarActivityCount>,
 ) {
     if entries.is_empty() {
         return;
@@ -174,7 +195,19 @@ fn append_device_group<T>(
         spawn: false,
     });
     if !collapsed {
-        super::append_tab_rows(rows, entries, 1);
+        super::append_space_tree_rows(
+            app,
+            rows,
+            entries,
+            false,
+            None,
+            super::SidebarGroupMode::Spaces,
+            false,
+            true,
+            None,
+            Some(remote_activity),
+            None,
+        );
     }
 }
 

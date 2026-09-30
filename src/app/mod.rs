@@ -991,6 +991,7 @@ impl App {
             local_agent_panel_identities,
             remote_agent_panel_entries: Vec::new(),
             remote_agent_device_groups: None,
+            remote_device_activity: None,
             agent_run_device_groups: None,
             remote_loop_device_groups: None,
             agent_runs_active_count: None,

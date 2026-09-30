@@ -2139,7 +2139,9 @@ pub(crate) fn all_agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
     collect_agent_panel_entries_with_runtimes(app, None)
 }
 
-fn remote_agent_as_panel_entry(remote: &std::sync::Arc<RemoteAgentPanelEntry>) -> AgentPanelEntry {
+pub(crate) fn remote_agent_as_panel_entry(
+    remote: &std::sync::Arc<RemoteAgentPanelEntry>,
+) -> AgentPanelEntry {
     let mut entry = remote.entry.clone();
     entry.identity = AgentPanelIdentity::Remote(remote.agent_ref.clone());
     entry.remote_entry = Some(std::sync::Arc::clone(remote));
@@ -4072,12 +4074,12 @@ fn pane_context_has_sidebar_metadata(context: &crate::work_context::PaneWorkCont
 }
 
 #[derive(Clone, Copy, Default)]
-struct SidebarActivityCount {
-    working: usize,
-    total: usize,
+pub(crate) struct SidebarActivityCount {
+    pub(crate) working: usize,
+    pub(crate) total: usize,
 }
 
-fn sidebar_remote_activity(
+pub(crate) fn sidebar_remote_activity(
     app: &AppState,
     entries: &[AgentPanelEntry],
 ) -> std::collections::HashMap<(String, String), SidebarActivityCount> {
@@ -30395,18 +30397,32 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
         app.sidebar_show_ask_subtitles = true;
+        let device_key = devices::group_key("main", "ub2");
+        app.collapsed_sidebar_groups
+            .insert(format!("expanded:{device_key}"));
         app.remote_agent_panel_entries =
             remote_agent_panel_entries_at(&snapshot, 1_725_000_000, false);
 
         let rows = sidebar_rows(&app);
-        assert!(rows.iter().any(|row| matches!(
-            row,
-            SidebarRow::NestedHeader {
-                key,
-                count: 1,
-                activity_count: Some((1, 2)),
-                ..
-            } if key.starts_with("remote-space:ub2:"))));
+        let nested_keys = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::NestedHeader { key, .. } => Some(key.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            rows.iter().any(|row| matches!(
+                row,
+                SidebarRow::NestedHeader {
+                    key,
+                    count: 1,
+                    activity_count: Some((1, 2)),
+                    ..
+                } if key.starts_with("remote-space:ub2:")
+            )),
+            "nested keys: {nested_keys:?}"
+        );
         let area = Rect::new(0, 0, 42, 32);
         let mut rendered = Terminal::new(TestBackend::new(area.width, area.height))
             .expect("remote focus sidebar terminal");

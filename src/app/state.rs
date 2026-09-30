@@ -4345,6 +4345,9 @@ pub struct AppState {
             >,
         >,
     >,
+    pub(crate) remote_device_activity: Option<
+        std::collections::HashMap<(String, String), crate::ui::sidebar::SidebarActivityCount>,
+    >,
     pub(crate) agent_run_device_groups:
         Option<Vec<crate::ui::sidebar::devices::DeviceGroup<crate::agent_runs::HostProjection>>>,
     pub(crate) remote_loop_device_groups:
@@ -7640,6 +7643,7 @@ impl AppState {
             local_agent_panel_identities: std::collections::HashMap::new(),
             remote_agent_panel_entries: Vec::new(),
             remote_agent_device_groups: None,
+            remote_device_activity: None,
             agent_run_device_groups: None,
             remote_loop_device_groups: None,
             agent_runs_active_count: None,

@@ -52,6 +52,16 @@ impl App {
                     (host, false, reachable, entry)
                 }),
         ));
+        let activity_entries = self
+            .state
+            .remote_agent_panel_entries
+            .iter()
+            .map(crate::ui::sidebar::remote_agent_as_panel_entry)
+            .collect::<Vec<_>>();
+        self.state.remote_device_activity = Some(crate::ui::sidebar::sidebar_remote_activity(
+            &self.state,
+            &activity_entries,
+        ));
         let run_projection = crate::agent_runs::project(&self.state.fleet_snapshot);
         self.state.agent_runs_active_count = Some(run_projection.active_count);
         self.state.agent_run_device_groups = Some(crate::ui::sidebar::devices::group_items(
