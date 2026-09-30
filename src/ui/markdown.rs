@@ -544,9 +544,14 @@ mod tests {
 
     #[test]
     fn glued_words_wrap_as_one_unit() {
+        let lines = body_lines(&palette(), Some("ab x`cd`,"), 5, "");
+        assert_eq!(text(&lines), vec!["ab", "xcd,"]);
+    }
+
+    #[test]
+    fn an_over_wide_glued_unit_breaks_inside_itself() {
         let lines = body_lines(&palette(), Some("abc`de`, x"), 4, "");
-        assert_eq!(text(&lines), vec!["abcde,", "x"]);
-        assert_eq!(lines[0].width(), 6, "the glued unit may exceed the width");
+        assert_eq!(text(&lines), vec!["abc", "de,", "x"]);
     }
 
     #[test]
