@@ -19,6 +19,7 @@ pub(crate) mod workers;
 
 pub(crate) const WATCHDOG_SOURCE: &str = "watchdog";
 pub(crate) const STALE_DRAFT_SECS: u64 = 300;
+pub(crate) const MAX_NUDGE_ATTEMPTS_PER_EPISODE: u8 = 3;
 #[cfg(test)]
 const PROMPT_WINDOW_LINES: usize = 12;
 #[cfg(test)]
@@ -779,6 +780,8 @@ pub(crate) struct PaneV3Memory {
     #[serde(default)]
     pub last_nudge_at: Option<u64>,
     #[serde(default)]
+    pub nudge_attempts_at: Vec<u64>,
+    #[serde(default)]
     pub last_reported_at: Option<String>,
     #[serde(default)]
     pub nudge_rebaseline: bool,
@@ -987,7 +990,13 @@ pub(crate) fn classify_pane_v3(
                 let quiet_age = now.saturating_sub(m.quiet_since.unwrap_or(now));
                 let quiet_stale = age >= opt.stall_secs && quiet_age >= opt.quiet_secs;
                 let promise_already_satisfied = evidence::finished_reply(&o.tail);
-                if promise_already_satisfied {
+                if o.status == AgentStatus::Blocked
+                    && m.nudge_count >= MAX_NUDGE_ATTEMPTS_PER_EPISODE
+                    && !promise_already_satisfied
+                {
+                    class = PaneClass::Stalled;
+                    ev = "did not resume after 3 nudge attempts".into();
+                } else if promise_already_satisfied {
                     class = PaneClass::FinishedIdle;
                     ev = "reply finished; promised work already satisfied".into();
                 } else if !active_tool
@@ -1005,17 +1014,13 @@ pub(crate) fn classify_pane_v3(
                     class = PaneClass::Stalled;
                     let status = format!("{:?}", o.status).to_ascii_lowercase();
                     ev = format!("promised work stopped (hook status {status} is stale): {work}");
+                } else if active_tool {
+                    class = PaneClass::Working;
+                    ev = "active tool and background work are still running".into();
                 } else if background_work {
                     if age >= opt.op_deadline_secs {
                         class = PaneClass::Stalled;
-                        if stale_hook {
-                            let status = format!("{:?}", o.status).to_ascii_lowercase();
-                            ev = format!(
-                                "promised work stopped (hook status {status} is stale): {work}"
-                            );
-                        } else {
-                            ev = format!("promised work stopped: {work}");
-                        }
+                        ev = format!("background work past operation deadline: {work}");
                     } else {
                         class = PaneClass::Working;
                         ev = "promised work has active background work".into();
@@ -1052,7 +1057,11 @@ pub(crate) fn classify_pane_v3(
             {
                 let shells = evidence::background_shell_count(&o.tail);
                 let agents = evidence::background_agent_count(&o.tail);
-                class = if age >= opt.op_deadline_secs {
+                let processes = o.process_group.as_deref().unwrap_or(&[]);
+                let leader = processes.iter().find(|p| p.pid == p.pgid).map(|p| p.pid);
+                let active_tool =
+                    !evidence::current_tool_processes(processes, leader, age).is_empty();
+                class = if !active_tool && age >= opt.op_deadline_secs {
                     PaneClass::Stalled
                 } else {
                     PaneClass::Working
@@ -1855,6 +1864,55 @@ mod tests {
     }
 
     #[test]
+    fn pane_v3_classifies_human_now_waits_before_promised_work() {
+        for line in [
+            "Now: waiting on you to approve",
+            "Now: waiting at the /hcode review gate.",
+            "Now: waiting for your review",
+            "Now: waiting for human approval",
+            "Now: waiting for Matthias's sign-off",
+            "Now: waiting for your reply",
+            "Now: waiting for human decision",
+            "Now: awaiting approval",
+            "Now: awaiting review",
+        ] {
+            let tail = claude_pane(line, "", "0 shells");
+            let observation = pane_v3(AgentStatus::Working, &tail);
+            let decision =
+                classify_pane_v3(&observation, &mut PaneV3Memory::default(), 1000, v3opt());
+            assert_eq!(
+                decision.class,
+                PaneClass::WaitingHuman,
+                "{line}: {decision:?}"
+            );
+        }
+
+        for line in ["Now: waiting on CI", "Now: waiting for the build"] {
+            let tail = claude_pane(line, "", "0 shells");
+            let observation = pane_v3(AgentStatus::Working, &tail);
+            assert!(evidence::promised_work(&tail).is_some(), "{line}");
+            let decision =
+                classify_pane_v3(&observation, &mut PaneV3Memory::default(), 1000, v3opt());
+            assert_eq!(decision.class, PaneClass::Working, "{line}: {decision:?}");
+        }
+    }
+
+    #[test]
+    fn blocked_status_after_three_nudge_attempts_stays_stalled() {
+        let tail = claude_pane("Now: Codex reviewers — finishing review", "", "0 shells");
+        let observation = pane_v3(AgentStatus::Blocked, &tail);
+        let mut memory = PaneV3Memory {
+            nudge_count: MAX_NUDGE_ATTEMPTS_PER_EPISODE,
+            ..PaneV3Memory::default()
+        };
+        let decision = classify_pane_v3(&observation, &mut memory, 1000, v3opt());
+        assert_eq!(decision.class, PaneClass::Stalled);
+        assert!(decision
+            .evidence
+            .contains("did not resume after 3 nudge attempts"));
+    }
+
+    #[test]
     fn pane_v3_keeps_open_blocker_visible_while_working_and_from_transcript() {
         let blocker = "**Needs you (1)**\n1. **Approve** — Merge X?\nReply 1a / 1b. Silence holds.\n**Now:** Codex — fixing Y";
         let o = pane_v3(
@@ -1989,7 +2047,10 @@ mod tests {
         let mut memory = old_pane_memory(&observation, now - v3opt().op_deadline_secs);
         let decision = classify_pane_v3(&observation, &mut memory, now, v3opt());
         assert_eq!(decision.class, PaneClass::Stalled);
-        assert!(decision.evidence.starts_with("promised work stopped:"));
+        assert!(decision
+            .evidence
+            .starts_with("background work past operation deadline:"));
+        assert!(!decision.evidence.starts_with("promised work stopped:"));
 
         let agent = claude_pane("Now: wait — CI on #463", "", "● main\n◯ fork  Watching CI");
         let observation = pane_v3(AgentStatus::Working, &agent);
@@ -1998,7 +2059,20 @@ mod tests {
         assert_eq!(decision.class, PaneClass::Stalled);
         assert!(decision
             .evidence
-            .starts_with("promised work stopped (hook status working is stale):"));
+            .starts_with("background work past operation deadline:"));
+        assert!(!decision.evidence.starts_with("promised work stopped"));
+
+        #[cfg(unix)]
+        {
+            let active = claude_pane("Now: wait — CI on #463", "", "2 shells");
+            let mut observation = pane_v3(AgentStatus::Working, &active);
+            observation.process_group = Some(evidence::parse_ps_rows(
+                "100 1 100 S 00:05 0:00.01 claude\n102 100 100 R 00:40 0:00.52 cargo test",
+            ));
+            let mut memory = old_pane_memory(&observation, now - v3opt().op_deadline_secs);
+            let decision = classify_pane_v3(&observation, &mut memory, now, v3opt());
+            assert_eq!(decision.class, PaneClass::Working);
+        }
     }
 
     #[test]

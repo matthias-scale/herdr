@@ -1042,6 +1042,7 @@ pub struct SidebarHoverTarget {
 pub enum SidebarHoverAction {
     Snooze { target: SidebarPaneLifecycleTarget },
     Settle { target: SidebarPaneLifecycleTarget },
+    Unsettle { target: SidebarPaneLifecycleTarget },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3287,6 +3288,7 @@ pub(crate) enum SidebarPanelSettingTarget {
     NotepadTab(crate::notepad::NotepadTabTarget),
     Goals,
     Pomodoro,
+    Animation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3343,6 +3345,11 @@ pub(crate) fn settings_sidebar_panel_items(state: &AppState) -> Vec<SidebarPanel
         target: SidebarPanelSettingTarget::Pomodoro,
         label: "Pomodoro widget".to_string(),
         visible: state.pomodoro.sidebar_visible,
+    });
+    items.push(SidebarPanelSettingItem {
+        target: SidebarPanelSettingTarget::Animation,
+        label: "Animation".to_string(),
+        visible: state.hyperspace.enabled,
     });
     items
 }
@@ -3618,6 +3625,9 @@ pub enum ContextMenuKind {
         /// offers a picker that would have something to pick.
         has_agent_targets: bool,
     },
+    RemoteAgent {
+        agent_ref: crate::api::schema::AgentRef,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3722,6 +3732,7 @@ pub const UNSTAR_ITEM: &str = "Unstar";
 pub const MOVE_TO_SUBGROUP_ITEM: &str = "Move to subgroup…";
 pub const REMOVE_FROM_SUBGROUP_ITEM: &str = "Remove from subgroup";
 pub const SETTLE_ITEM: &str = "Settle";
+pub const UNSETTLE_ITEM: &str = "Unsettle";
 pub const SNOOZE_ITEM: &str = "Snooze ▸";
 pub const SET_TIME_ITEM: &str = "Set time…";
 pub const CHANGE_TIME_ITEM: &str = "Change time…";
@@ -3924,6 +3935,7 @@ pub enum ContextMenuAction {
     SetTime,
     ChangeTime,
     Settle,
+    Unsettle,
     CloseTab,
     RenamePane,
     WorkLink,
@@ -3963,6 +3975,7 @@ impl ContextMenuAction {
             Self::SetTime => SET_TIME_ITEM,
             Self::ChangeTime => CHANGE_TIME_ITEM,
             Self::Settle => SETTLE_ITEM,
+            Self::Unsettle => UNSETTLE_ITEM,
             Self::RenamePane => "Rename pane",
             Self::WorkLink => "work link",
             Self::OpenLink => OPEN_LINK_ITEM,
@@ -4021,6 +4034,7 @@ impl ContextMenuState {
                 ContextMenuAction::RenameWorkspace,
                 ContextMenuAction::CloseWorkspace,
             ],
+            ContextMenuKind::RemoteAgent { .. } => vec![ContextMenuAction::Unsettle],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
@@ -4261,6 +4275,7 @@ pub(crate) struct PaneSettlementChange {
     pub(crate) workspace_id: String,
     pub(crate) pane_id: PaneId,
     pub(crate) settled_at: Option<u64>,
+    pub(crate) lock_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4462,6 +4477,8 @@ pub struct AppState {
     /// How long a Done pane stays quiet before `auto_settle_done` settles it
     /// (`session.settle_done_after_minutes`).
     pub(crate) settle_done_after: std::time::Duration,
+    /// Delay before a settled pane becomes read-only and its agent is stopped.
+    pub(crate) settled_read_only_after: std::time::Duration,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Runtime-only facts reported or observed for each pane. Session snapshots
@@ -4607,6 +4624,7 @@ pub struct AppState {
     /// Attach-local TUI state; provider objects remain shared work-index facts.
     pub(crate) sidebar_unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
     pub(crate) sidebar_selected_settled: Option<PaneFocusTarget>,
+    pub(crate) settled_view: Option<crate::app::settled_view::SettledViewState>,
     pub(crate) sidebar_snooze: Option<SidebarSnoozeUiState>,
     pub(crate) sidebar_settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) sidebar_settled_menu_selected: usize,
@@ -7702,6 +7720,7 @@ impl AppState {
             settle_after: std::time::Duration::from_secs(3 * 24 * 60 * 60),
             settle_finished_after: std::time::Duration::from_secs(10 * 60),
             settle_done_after: std::time::Duration::from_secs(30 * 60),
+            settled_read_only_after: std::time::Duration::from_secs(15 * 60),
             terminals: std::collections::HashMap::new(),
             agent_states: crate::agent_state::AgentStateStore::default(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
@@ -7785,6 +7804,7 @@ impl AppState {
             sidebar_group_sorts: std::collections::HashMap::new(),
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
+            settled_view: None,
             sidebar_snooze: None,
             sidebar_settled_menu_target: None,
             sidebar_settled_menu_selected: 0,
@@ -8498,6 +8518,7 @@ impl AppState {
                         assert_live_pane(source_pane_id, "context menu source pane");
                     }
                 }
+                ContextMenuKind::RemoteAgent { .. } => {}
             }
         }
     }

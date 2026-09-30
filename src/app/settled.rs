@@ -12,6 +12,40 @@ use super::{
 
 pub(crate) const MAX_SNOOZE_SECONDS: u64 = 7 * 24 * 60 * 60;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettleHint {
+    Countdown(std::time::Duration),
+    Focused(std::time::Duration),
+    Pinned,
+    SettledCountdown(std::time::Duration),
+    SettledLocked,
+}
+
+/// Shared eligibility and remaining-time calculation for the settled pass and sidebar.
+pub(crate) fn settle_countdown(
+    enabled: bool,
+    seen: bool,
+    active: bool,
+    pinned: bool,
+    quiet: bool,
+    settled_or_snoozed: bool,
+    quiet_for: Option<Duration>,
+    threshold: Duration,
+) -> Option<SettleHint> {
+    if !enabled || !seen || settled_or_snoozed || !quiet {
+        return None;
+    }
+    let quiet_for = quiet_for.unwrap_or_default();
+    // Pinned wins over focus: leaving a pinned pane still never settles it.
+    if pinned {
+        return Some(SettleHint::Pinned);
+    }
+    if active {
+        return Some(SettleHint::Focused(threshold));
+    }
+    Some(SettleHint::Countdown(threshold.saturating_sub(quiet_for)))
+}
+
 /// UNIX deadlines survive restarts; converting at the scheduler boundary avoids
 /// relying on a monotonic Instant from the previous process.
 pub(crate) fn snooze_instant(deadline: u64, now_unix: u64, now: Instant) -> Instant {
@@ -31,6 +65,14 @@ pub(crate) fn unix_seconds(now: SystemTime) -> u64 {
     now.duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_secs()
+}
+
+pub(crate) fn settled_read_only_remaining(
+    settled_at: u64,
+    now_unix: u64,
+    after: Duration,
+) -> Duration {
+    after.saturating_sub(Duration::from_secs(now_unix.saturating_sub(settled_at)))
 }
 
 fn state_is(value: Option<&str>, expected: &str) -> bool {
@@ -329,6 +371,12 @@ impl AppState {
                 return false;
             }
             pane.settled_at = Some(settled_at);
+            pane.settled_locked = settled_read_only_remaining(
+                settled_at,
+                unix_seconds(SystemTime::now()),
+                self.settled_read_only_after,
+            )
+            .is_zero();
             pane.attached_terminal_id.clone()
         };
         if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
@@ -340,6 +388,7 @@ impl AppState {
                 workspace_id,
                 pane_id,
                 settled_at: Some(settled_at),
+                lock_only: false,
             });
         self.mark_session_dirty();
         self.mark_sidebar_projection_changed();
@@ -353,6 +402,9 @@ impl AppState {
         pane.activity.note(now);
         pane.settle_resume_guard = false;
         let changed = pane.settled_at.take().is_some();
+        if changed {
+            pane.settled_locked = false;
+        }
         self.mark_session_dirty();
         if changed {
             let workspace_id = self.workspaces[ws_idx].id.clone();
@@ -361,6 +413,7 @@ impl AppState {
                     workspace_id,
                     pane_id,
                     settled_at: None,
+                    lock_only: false,
                 });
             self.mark_session_dirty();
             self.mark_sidebar_projection_changed();
@@ -407,6 +460,7 @@ impl AppState {
         let mut candidates = Vec::new();
         let mut observed_work_keys = Vec::new();
         let mut arm_writes = Vec::new();
+        let mut lock_writes = Vec::new();
         for (ws_idx, workspace) in self.workspaces.iter().enumerate() {
             for (tab_idx, tab) in workspace.tabs.iter().enumerate() {
                 for (pane_id, pane) in &tab.panes {
@@ -417,6 +471,18 @@ impl AppState {
                     let quiet = crate::app::pane_lifecycle::pane_is_quiet(pane, terminal);
                     let quiet_observation_changed = pane.activity.quiet_observation_changes(quiet);
                     if pane.settled_at.is_some() || pane.snoozed_until().is_some() {
+                        if !pane.settled_locked {
+                            if let Some(settled_at) = pane.settled_at.filter(|settled_at| {
+                                settled_read_only_remaining(
+                                    *settled_at,
+                                    now_unix,
+                                    self.settled_read_only_after,
+                                )
+                                .is_zero()
+                            }) {
+                                lock_writes.push((ws_idx, *pane_id, settled_at));
+                            }
+                        }
                         if quiet_observation_changed {
                             arm_writes.push((ws_idx, *pane_id, pane.finished_since, quiet));
                         }
@@ -458,13 +524,19 @@ impl AppState {
                     // A quiet agent has no work running and no human decision
                     // pending. Use the pane activity clock rather than the
                     // transient unread-Done clock, which focus clears.
-                    let quiet_ripe = self.auto_settle_done
-                        && pane.seen
-                        && !self.is_active_pane(ws_idx, tab_idx, *pane_id)
-                        && !tab.pinned
-                        && quiet
-                        && pane.activity.quiet_for(now).unwrap_or_default()
-                            >= self.settle_done_after;
+                    let quiet_ripe = matches!(
+                        settle_countdown(
+                            self.auto_settle_done,
+                            pane.seen,
+                            self.is_active_pane(ws_idx, tab_idx, *pane_id),
+                            tab.pinned,
+                            quiet,
+                            false,
+                            pane.activity.quiet_for(now),
+                            self.settle_done_after,
+                        ),
+                        Some(SettleHint::Countdown(remaining)) if remaining.is_zero()
+                    );
                     let holding = new_work_trigger && !finished_ripe;
                     let armed = holding.then_some(finished_since);
                     if pane.finished_since != armed || quiet_observation_changed {
@@ -515,7 +587,22 @@ impl AppState {
         if quiet_clock_changed {
             self.mark_session_dirty();
         }
-        self.settle_owned_candidates(&candidates, now_unix)
+        for (ws_idx, pane_id, settled_at) in &lock_writes {
+            let workspace_id = self.workspaces[*ws_idx].id.clone();
+            if let Some(pane) = self.workspaces[*ws_idx].pane_state_mut(*pane_id) {
+                pane.settled_locked = true;
+                self.pending_pane_settlement_changes
+                    .push(PaneSettlementChange {
+                        workspace_id,
+                        pane_id: *pane_id,
+                        settled_at: Some(*settled_at),
+                        lock_only: true,
+                    });
+                self.mark_session_dirty();
+                self.mark_sidebar_projection_changed();
+            }
+        }
+        self.settle_owned_candidates(&candidates, now_unix) + lock_writes.len()
     }
 }
 
@@ -617,6 +704,25 @@ impl App {
                 > 0;
         self.flush_status_transitions();
         changed |= self.flush_pane_settlement_events();
+        let active_locked = self.state.active.and_then(|ws_idx| {
+            let workspace = self.state.workspaces.get(ws_idx)?;
+            let pane_id = workspace.focused_pane_id()?;
+            let pane = workspace.pane_state(pane_id)?;
+            (pane.settled_locked
+                && self.state.settled_view.is_none()
+                && self
+                    .state
+                    .terminals
+                    .get(&pane.attached_terminal_id)
+                    .is_some_and(|terminal| terminal.pending_agent_resume_plan.is_some()))
+            .then(|| crate::app::state::PaneFocusTarget {
+                workspace_id: workspace.id.clone(),
+                pane_id,
+            })
+        });
+        if let Some(target) = active_locked {
+            self.focus_settled_pane(target);
+        }
         changed
     }
 
@@ -696,7 +802,15 @@ impl App {
             };
 
             match change.settled_at {
-                Some(_) if self.state.settle_stops_agent => {
+                Some(_)
+                    if self.state.settle_stops_agent
+                        && self
+                            .state
+                            .workspaces
+                            .get(ws_idx)
+                            .and_then(|workspace| workspace.pane_state(change.pane_id))
+                            .is_some_and(|pane| pane.settled_locked) =>
+                {
                     let derived_label = derived_pane_label(&self.state, ws_idx, change.pane_id);
                     let (resume_plan, settled_label) =
                         self.state
@@ -800,7 +914,9 @@ impl App {
                     },
                 ),
             };
-            self.emit_event(crate::api::schema::EventEnvelope { event, data });
+            if !change.lock_only {
+                self.emit_event(crate::api::schema::EventEnvelope { event, data });
+            }
             self.emit_pane_updated(ws_idx, change.pane_id);
         }
         self.schedule_session_save();
@@ -811,6 +927,84 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settled_read_only_countdown_uses_persisted_settled_at() {
+        let grace = Duration::from_secs(15 * 60);
+        assert_eq!(
+            settled_read_only_remaining(100, 100 + 60, grace),
+            Duration::from_secs(14 * 60)
+        );
+        assert_eq!(
+            settled_read_only_remaining(100, 100 + 1, Duration::ZERO),
+            Duration::ZERO
+        );
+        assert_eq!(
+            settled_read_only_remaining(100, 100 + 900, grace),
+            Duration::ZERO
+        );
+        assert_eq!(settled_read_only_remaining(100, 99, grace), grace);
+    }
+
+    #[test]
+    fn settle_countdown_respects_all_eligibility_gates_and_rounding() {
+        let duration = Duration::from_secs;
+        let hint = |enabled, seen, active, pinned, quiet, stopped, elapsed| {
+            settle_countdown(
+                enabled,
+                seen,
+                active,
+                pinned,
+                quiet,
+                stopped,
+                elapsed,
+                duration(300),
+            )
+        };
+        assert_eq!(
+            hint(true, true, false, false, true, false, Some(duration(59))),
+            Some(SettleHint::Countdown(duration(241)))
+        );
+        assert_eq!(
+            hint(true, true, false, false, true, false, Some(duration(300))),
+            Some(SettleHint::Countdown(Duration::ZERO))
+        );
+        assert_eq!(
+            hint(true, true, true, false, true, false, Some(duration(20))),
+            Some(SettleHint::Focused(duration(300)))
+        );
+        assert_eq!(
+            hint(true, true, false, true, true, false, Some(duration(20))),
+            Some(SettleHint::Pinned)
+        );
+        assert_eq!(
+            hint(true, true, true, true, true, false, Some(duration(20))),
+            Some(SettleHint::Pinned)
+        );
+        for args in [
+            (false, true, false, false, true, false),
+            (true, false, false, false, true, false),
+            (true, true, false, false, false, false),
+            (true, true, false, false, true, true),
+        ] {
+            assert_eq!(
+                hint(
+                    args.0,
+                    args.1,
+                    args.2,
+                    args.3,
+                    args.4,
+                    args.5,
+                    Some(duration(20))
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            hint(true, true, false, false, true, false, None),
+            Some(SettleHint::Countdown(duration(300)))
+        );
+    }
     use crate::{
         detect::AgentState,
         terminal::{TerminalId, TerminalRuntime, TerminalState},
@@ -2888,6 +3082,106 @@ mod tests {
         assert!(app.state.terminals[&terminal_id]
             .settled_auto_label
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn manual_settle_keeps_runtime_live_until_grace_expires_then_locks() {
+        let config = crate::config::Config::default();
+        let (mut app, pane_id, terminal_id, _rx) =
+            app_with_runtime(&config, crate::work_context::PaneWorkContext::default());
+        set_persisted_session(&mut app, &terminal_id, "herdr:codex");
+
+        let settled_at = unix_seconds(SystemTime::now());
+        assert!(app.state.settle_pane_at(0, pane_id, settled_at));
+        assert!(app.flush_pane_settlement_events());
+        assert!(!app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .is_suspended());
+        assert!(app.state.terminals[&terminal_id]
+            .pending_agent_resume_plan
+            .is_none());
+        assert_eq!(
+            app.state
+                .refresh_settled_panes_at(None, Instant::now(), settled_at + 899),
+            0
+        );
+        assert_eq!(
+            app.state
+                .refresh_settled_panes_at(None, Instant::now(), settled_at + 900),
+            1
+        );
+        assert!(app.flush_pane_settlement_events());
+        assert!(
+            app.state.workspaces[0]
+                .pane_state(pane_id)
+                .unwrap()
+                .settled_locked
+        );
+        assert!(app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .is_suspended());
+        assert!(app.state.terminals[&terminal_id]
+            .pending_agent_resume_plan
+            .is_some());
+        app.focus_settled_pane(crate::app::state::PaneFocusTarget {
+            workspace_id: app.state.workspaces[0].id.clone(),
+            pane_id,
+        });
+        assert!(app
+            .state
+            .settled_view
+            .as_ref()
+            .is_some_and(|view| view.pane_id == pane_id));
+    }
+
+    #[tokio::test]
+    async fn human_input_during_grace_unsettles_without_resume_or_nudge() {
+        let config = crate::config::Config::default();
+        let (mut app, pane_id, terminal_id, _rx) =
+            app_with_runtime(&config, crate::work_context::PaneWorkContext::default());
+        set_persisted_session(&mut app, &terminal_id, "herdr:codex");
+        assert!(app
+            .state
+            .settle_pane_at(0, pane_id, unix_seconds(SystemTime::now())));
+        app.flush_pane_settlement_events();
+
+        app.resume_settled_pane_before_input(pane_id);
+        app.flush_pane_settlement_events();
+        assert!(!app.state.pane_is_settled(0, pane_id));
+        assert!(!app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .is_suspended());
+        assert!(app.state.terminals[&terminal_id]
+            .pending_agent_resume_plan
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn zero_grace_keeps_immediate_stop_behavior() {
+        let mut config = crate::config::Config::default();
+        config.session.settled_read_only_after_minutes = 0;
+        let (mut app, pane_id, terminal_id, _rx) =
+            app_with_runtime(&config, crate::work_context::PaneWorkContext::default());
+        set_persisted_session(&mut app, &terminal_id, "herdr:codex");
+        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
+        app.flush_pane_settlement_events();
+        assert!(
+            app.state.workspaces[0]
+                .pane_state(pane_id)
+                .unwrap()
+                .settled_locked
+        );
+        assert!(app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .unwrap()
+            .is_suspended());
     }
 
     #[tokio::test]
