@@ -513,7 +513,7 @@ def _script(text: str, repeat: bool = False) -> str:
     return _fixture_command(code)
 
 
-def _promised_draft_agent(root: Path, account: str) -> str:
+def _promised_draft_agent(root: Path, account: str, active_tool: bool = False) -> str:
     script = root / "fake_agent.sh"
     script.write_text('''#!/bin/sh
 draft=cont
@@ -537,6 +537,9 @@ while IFS= read -r submitted; do
   draw
 done
 '''.replace("__ACCOUNT_LINE__", account), encoding="utf-8")
+    if active_tool:
+        script.write_text(script.read_text(encoding="utf-8").replace("draw\nwhile", "sleep 3600 &\ndraw\nwhile"),
+                          encoding="utf-8")
     script.chmod(0o755)
     return "clear; exec /bin/sh " + shlex.quote(str(script))
 
@@ -570,6 +573,8 @@ def setup_summary(h: Harness, ident: str) -> str:
 def setup_promised_draft(h: Harness, ident: str) -> str:
     account = ("You hit your usage limit" if "usage_limit" in ident else
                "Please sign in" if "logged_out" in ident else
+               "" if ident in ("promised_stale_working_nudged",
+                             "promised_stale_working_active_tool_not_nudged") else
                "● Background shell command didn't finish before the previous session ended")
     screen = ("Now: Codex reviewers — reviewing PR 1656; the config-folder worker starts after it merges\n"
               "⎿ Stop says: /review completed — invoke /retro to capture lessons.\n"
@@ -577,8 +582,53 @@ def setup_promised_draft(h: Harness, ident: str) -> str:
               "────────────────────────\n❯ cont\n────────────────────────\n"
               "░░░░░░ 92% 78k tokens │ 2h 24m ago │ -- INSERT -- · 1 feedback draft")
     ready = tuple(screen.splitlines())
-    pane_id = h.workspace(ident, _promised_draft_agent(h.root, account), ready)
+    pane_id = h.workspace(ident, _promised_draft_agent(
+        h.root, account, ident == "promised_stale_working_active_tool_not_nudged"), ready)
     return pane_id
+
+
+def setup_gate_inline_reply(h: Harness, ident: str) -> str:
+    screen = ("**Needs you (1)**\n"
+              "1. **Approve** — review the change\n"
+              "a) Approve. b) Hold. Reply 1a / 1b. Silence holds.\n"
+              "Now: waiting at the /hcode review gate.\n\n"
+              "› Stall check: verify live state, then reply only `Progressing`\n"
+              "• No subagents are active or stalled. PR #1674 remains at the required human review gate.\n"
+              "↳ Recap: the required human diff review still blocks rollout.\n"
+              "Next: Have you reviewed the diff and approved the merge and rollout?\n"
+              "────────────────────────\n› Ask Codex to do anything\n"
+              "────────────────────────\n0 shells")
+    return h.workspace(ident, _script(screen),
+                       ("0 shells",))
+
+
+def setup_gate_now_waiting_review(h: Harness, ident: str) -> str:
+    screen = ("Now: waiting at the /hcode review gate.\n"
+              "────────────────────────\n› Ask Codex to do anything\n"
+              "────────────────────────\n0 shells")
+    return h.workspace(ident, _script(screen), ("0 shells",))
+
+
+def setup_promised_background(h: Harness, ident: str) -> str:
+    kind = "shell" if "shell" in ident else "agent"
+    command = _promised_draft_agent(h.root, "")
+    script = h.root / "fake_agent.sh"
+    contents = script.read_text(encoding="utf-8")
+    contents = contents.replace("draft=cont", "draft=")
+    contents = contents.replace(
+        "Now: Codex reviewers — reviewing PR 1656; the config-folder worker starts after it merges",
+        "Now: running the verification job until its result is ready")
+    if kind == "shell":
+        contents = contents.replace("1 feedback draft", "1 shell")
+    else:
+        contents = contents.replace("1 feedback draft", "0 shells")
+        contents = contents.replace(
+            "'░░░░░░ 92% 78k tokens │ 2h 24m ago │ -- INSERT -- · 0 shells'",
+            "'░░░░░░ 92% 78k tokens │ 2h 24m ago │ -- INSERT -- · 0 shells' "
+            "'● main' '◯ subagent  Running tests'")
+    script.write_text(contents, encoding="utf-8")
+    return h.workspace(ident, command,
+                       ("Now: running the verification job until its result is ready",))
 
 
 def setup_done_here(h: Harness, ident: str) -> str:
@@ -716,9 +766,16 @@ CASES: list[tuple[str, str, Callable[[Harness, str], Any], str]] = [
     ("a-finished-idle", "A", setup_summary, "finished_idle"),
     ("stale_draft_promised_work_stalled", "A", setup_promised_draft, "finished_idle"),
     ("promised_quiet_nudged", "A", setup_promised_draft, "finished_idle"),
+    ("promised_stale_working_nudged", "A", setup_promised_draft, "finished_idle"),
+    ("promised_stale_working_active_tool_not_nudged", "A", setup_promised_draft, "working"),
+    ("promised_stale_working_dead_marker_nudged", "A", setup_promised_draft, "finished_idle"),
     ("promised_quiet_repeats_then_blocked", "A", setup_promised_draft, "stalled"),
     ("promised_usage_limit_not_nudged", "A", setup_promised_draft, "stalled"),
     ("promised_logged_out_not_nudged", "A", setup_promised_draft, "stalled"),
+    ("gate_inline_reply_not_nudged", "A", setup_gate_inline_reply, "waiting_human"),
+    ("gate_now_waiting_review_not_nudged", "A", setup_gate_now_waiting_review, "waiting_human"),
+    ("promised_background_shell_past_deadline_not_nudged", "A", setup_promised_background, "stalled"),
+    ("promised_background_agent_past_deadline_not_nudged", "A", setup_promised_background, "stalled"),
     ("fresh_draft_typing", "A", setup_promised_draft, "working"),
     ("done_here_negative_control", "A", setup_done_here, "finished_idle"),
     ("a-retry-backoff", "A", setup_retry, "waiting_retry"),
@@ -856,12 +913,17 @@ def main() -> int:
                 pane_id = harness.panes[ident]
                 session_id = "session-" + ident
                 session_source = ("herdr:codex" if ident in (
-                    "stale_draft_promised_work_stalled", "promised_quiet_nudged")
+                    "stale_draft_promised_work_stalled", "promised_quiet_nudged",
+                    "promised_stale_working_nudged",
+                    "promised_stale_working_active_tool_not_nudged",
+                    "promised_stale_working_dead_marker_nudged")
                     else "watchdog-harness")
                 status_source = "watchdog-harness"
                 status = "idle" if (ident == "a-finished-idle"
                                      or ident == "stale_draft_promised_work_stalled"
-                                     or ident.startswith("promised_")) else (
+                                     or (ident.startswith("promised_")
+                                         and not ident.startswith("promised_stale_working_")
+                                         and not ident.startswith("promised_background_"))) else (
                     "blocked" if ident == "a-approval-hook" else "working")
                 report: dict[str, Any] = {"pane_id": pane_id, "source": status_source,
                     "agent": "codex", "state": status}
@@ -889,7 +951,9 @@ def main() -> int:
                     cmd_options.append("--no-model")
                 harness.run_watchdog("A", cmd_options,
                                      dry=ident not in ("stale_draft_promised_work_stalled",
-                                                       "promised_quiet_nudged"))
+                                                       "promised_quiet_nudged",
+                                                       "promised_stale_working_nudged",
+                                                       "promised_stale_working_dead_marker_nudged"))
                 age = 1800 if ident == "stale_draft_promised_work_stalled" else 900 if ident in ("a-quiet-build", "a-silent-stall", "a-spinner-only",
                                        "a-spinner-progress", "a-resumed") else 0
                 if ident.startswith("promised_"):
@@ -910,7 +974,9 @@ def main() -> int:
                     harness.age_memory(state, pane_id, 1800)
                 payload = harness.run_watchdog("A", cmd_options,
                                                dry=ident not in ("stale_draft_promised_work_stalled",
-                                                                 "promised_quiet_nudged"))
+                                                                 "promised_quiet_nudged",
+                                                                 "promised_stale_working_nudged",
+                                                                 "promised_stale_working_dead_marker_nudged"))
                 decisions = payload.get("decisions", [])
                 decision = next((d for d in decisions if d.get("pane_id") == pane_id), {})
                 actual = decision.get("class", "missing")
@@ -962,10 +1028,22 @@ def main() -> int:
                     evidence = f"{evidence}; decision={decision}; pane={pane_text!r}"
             elif ident in ("fresh_draft_typing", "done_here_negative_control"):
                 case_match = (actual == expected and decision.get("action") is None)
-            elif ident == "promised_quiet_nudged":
+            elif ident in ("promised_quiet_nudged", "promised_stale_working_nudged",
+                           "promised_stale_working_dead_marker_nudged"):
                 case_match = (actual == expected and decision.get("action") == "nudge"
                               and decision.get("delivered") is True
                               and decision.get("nudge_count") == 1)
+                if not case_match:
+                    evidence = f"{evidence}; decision={decision}"
+            elif ident == "promised_stale_working_active_tool_not_nudged":
+                case_match = (actual == expected and decision.get("action") is None)
+            elif ident in ("gate_inline_reply_not_nudged",
+                           "gate_now_waiting_review_not_nudged",
+                           "promised_background_shell_past_deadline_not_nudged",
+                           "promised_background_agent_past_deadline_not_nudged"):
+                case_match = (actual == expected
+                              and (decision.get("action") is None
+                                   or decision.get("delivered") is False))
                 if not case_match:
                     evidence = f"{evidence}; decision={decision}"
             elif ident == "promised_quiet_repeats_then_blocked":

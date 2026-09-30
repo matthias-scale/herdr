@@ -39,6 +39,7 @@ pub(crate) use input::SidebarWorkGroupKeyAction;
 mod notepad;
 pub(crate) mod pane_graphics;
 mod pane_lifecycle;
+pub(crate) use pane_lifecycle::pane_is_quiet;
 mod pane_send;
 mod popup;
 pub(crate) mod probes;
@@ -54,6 +55,7 @@ pub(crate) mod settings_general;
 pub(crate) mod settings_keybindings;
 pub(crate) mod settings_providers;
 pub(crate) mod settled;
+pub(crate) mod settled_view;
 pub mod state;
 pub(crate) mod status_log;
 mod tab_bar_status;
@@ -384,6 +386,8 @@ pub struct App {
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<session::SessionSaveResult>>,
     pub(crate) session_save_failures: u32,
     pub(crate) session_save_retry_deadline: Option<Instant>,
+    pub(crate) session_dirty_since: Option<Instant>,
+    pub(crate) session_save_stall_warning_at: Option<Instant>,
     session_writer: Arc<std::sync::Mutex<crate::persist::SessionWriter>>,
     pane_exit_checkpoint_requests: HashSet<crate::layout::PaneId>,
     pane_exit_checkpoint_pending: bool,
@@ -960,6 +964,7 @@ impl App {
             sidebar_group_sorts,
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
+            settled_view: None,
             sidebar_snooze: None,
             sidebar_settled_menu_target: None,
             sidebar_settled_menu_selected: 0,
@@ -1054,6 +1059,12 @@ impl App {
             ),
             settle_done_after: std::time::Duration::from_secs(
                 config.session.settle_done_after_minutes.saturating_mul(60),
+            ),
+            settled_read_only_after: std::time::Duration::from_secs(
+                config
+                    .session
+                    .settled_read_only_after_minutes
+                    .saturating_mul(60),
             ),
             terminals: std::collections::HashMap::new(),
             agent_states: crate::agent_state::AgentStateStore::default(),
@@ -1743,6 +1754,8 @@ impl App {
             session_save_thread: None,
             session_save_failures: 0,
             session_save_retry_deadline: None,
+            session_dirty_since: None,
+            session_save_stall_warning_at: None,
             session_writer,
             pane_exit_checkpoint_requests: HashSet::new(),
             pane_exit_checkpoint_pending: false,
@@ -2714,6 +2727,12 @@ impl App {
                 config.session.settle_done_after_minutes.saturating_mul(60),
             );
             self.state.settle_stops_agent = config.session.settle_stops_agent;
+            self.state.settled_read_only_after = std::time::Duration::from_secs(
+                config
+                    .session
+                    .settled_read_only_after_minutes
+                    .saturating_mul(60),
+            );
             self.state.nudge_resumed_agents = config.session.nudge_resumed_agents;
             self.state
                 .resume_nudge_message
@@ -2858,6 +2877,12 @@ impl App {
                 self.state
                     .hyperspace
                     .set_enabled(config.ui.sidebar_animation, Instant::now());
+                if !self.state.hyperspace.enabled {
+                    // Drop the hidden box's geometry now so its pause edge stops
+                    // taking clicks before the next view pass reflows the footer.
+                    self.state.view.hyperspace_rect = Rect::default();
+                    self.state.view.hyperspace_pause_hit_area = Rect::default();
+                }
                 self.state.mobile_width_threshold = config.ui.mobile_width_threshold;
                 // Re-clamp the live width to the new bounds. No source guard — bounds
                 // always apply, including to widths owned by Persisted or Manual.
@@ -3605,6 +3630,25 @@ impl App {
                         continue;
                     }
                     self.state.clear_hovered_control();
+                    if owner.forwards_unhandled_input_to_pane()
+                        && self
+                            .state
+                            .active
+                            .and_then(|ws_idx| {
+                                self.state
+                                    .workspaces
+                                    .get(ws_idx)
+                                    .and_then(|ws| ws.focused_pane_id())
+                            })
+                            .is_some_and(|pane_id| {
+                                self.state
+                                    .settled_view
+                                    .as_ref()
+                                    .is_some_and(|view| view.pane_id == pane_id)
+                            })
+                    {
+                        continue;
+                    }
                     if owner == state::InputOwner::Popup {
                         self.try_route_paste_to_popup(&text);
                     } else if owner == state::InputOwner::Dock(state::DockInputOwner::Editor) {
@@ -6549,6 +6593,27 @@ mod tests {
     }
 
     #[test]
+    fn reload_config_updates_settled_read_only_grace() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let path = temp_config_path("reload-settled-read-only-grace");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut app = test_app();
+        assert_eq!(
+            app.state.settled_read_only_after,
+            std::time::Duration::from_secs(900)
+        );
+
+        std::fs::write(&path, "[session]\nsettled_read_only_after_minutes = 0\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.settled_read_only_after, std::time::Duration::ZERO);
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn reload_config_updates_sidebar_bounds_and_reclamps() {
         let mut env = crate::config::TestConfigEnvGuard::acquire();
         let path = temp_config_path("reload-config-sidebar-bounds");
@@ -8695,6 +8760,59 @@ mod tests {
         assert!(app.state.session_dirty);
         assert_eq!(app.session_save_failures, 1);
         assert_eq!(app.session_save_deadline, Some(retry_deadline));
+    }
+
+    #[test]
+    fn session_save_retries_after_a_stalled_writer_releases() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let config_home = unique_temp_path("recovered-background-session-save");
+        env.set("XDG_CONFIG_HOME", &config_home);
+        env.remove(crate::session::SESSION_ENV_VAR);
+
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.workspaces = vec![Workspace::test_new("recovered-autosave")];
+        app.state.ensure_test_terminals();
+        app.state.mark_session_dirty();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let revision = app.state.session_dirty_revision;
+        app.session_save_thread = Some(std::thread::spawn(move || {
+            let _ = release_rx.recv();
+            session::SessionSaveResult {
+                revision,
+                result: Err(std::io::Error::other("injected stalled writer failure")),
+            }
+        }));
+        let now = Instant::now();
+        app.session_dirty_since = Some(now - Duration::from_secs(60));
+        app.sync_session_save_schedule();
+        assert!(app.session_save_thread.is_some());
+        assert!(app.session_save_stall_warning_at.is_some());
+
+        release_tx.send(()).unwrap();
+        while app
+            .session_save_thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+        {
+            std::thread::yield_now();
+        }
+        app.reap_finished_session_save();
+        assert!(app.state.session_dirty);
+        assert!(app.session_save_retry_deadline.is_some());
+
+        std::fs::create_dir_all(&config_home).unwrap();
+        app.session_save_retry_deadline = Some(Instant::now() - Duration::from_millis(1));
+        app.session_save_deadline = app.session_save_retry_deadline;
+        app.start_background_session_save();
+        app.save_session_now();
+
+        assert!(crate::session::data_dir().join("session.json").exists());
+        assert!(!app.state.session_dirty);
+        assert_eq!(app.session_save_failures, 0);
+
+        drop(env);
+        let _ = std::fs::remove_dir_all(config_home);
     }
 
     #[test]

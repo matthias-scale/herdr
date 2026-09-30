@@ -654,6 +654,10 @@ fn restore_tab(
                 terminal.set_persisted_agent_session(session);
                 restore_auto_settle_state(&mut terminal, saved_agent_session);
             }
+            if let Some(report) = saved_pane.and_then(|pane| pane.closing_report.clone()) {
+                terminal
+                    .restore_closing_report_persistence_state(report, std::time::Instant::now());
+            }
             match (saved_agent_name, saved_managed_agent) {
                 (Some(agent_name), Some(agent)) => {
                     terminal.restore_managed_agent(agent_name, agent)
@@ -683,6 +687,7 @@ fn restore_tab(
                 .map(|pane| pane.group_membership.clone())
                 .unwrap_or_default();
             pane.settled_at = saved_pane.and_then(|pane| pane.settled_at);
+            pane.settled_locked = saved_pane.is_some_and(|pane| pane.settled_locked);
             pane.set_snoozed_until(saved_pane.and_then(|pane| pane.snoozed_until));
             pane.settled_work_key = saved_pane.and_then(|pane| pane.settled_work_key.clone());
             restore_pane_activity(&mut pane, saved_pane);
@@ -772,6 +777,12 @@ fn restore_tab(
                     terminal.set_persisted_agent_session(session);
                     restore_auto_settle_state(&mut terminal, saved_agent_session);
                 }
+                if let Some(report) = saved_pane.and_then(|pane| pane.closing_report.clone()) {
+                    terminal.restore_closing_report_persistence_state(
+                        report,
+                        std::time::Instant::now(),
+                    );
+                }
                 match (saved_agent_name, saved_managed_agent) {
                     (Some(agent_name), Some(agent)) if was_imported => {
                         terminal.restore_managed_agent(agent_name, agent)
@@ -818,6 +829,7 @@ fn restore_tab(
                     .map(|pane| pane.group_membership.clone())
                     .unwrap_or_default();
                 pane.settled_at = saved_pane.and_then(|pane| pane.settled_at);
+                pane.settled_locked = saved_pane.is_some_and(|pane| pane.settled_locked);
                 pane.set_snoozed_until(saved_pane.and_then(|pane| pane.snoozed_until));
                 pane.settled_work_key = saved_pane.and_then(|pane| pane.settled_work_key.clone());
                 restore_pane_activity(&mut pane, saved_pane);
@@ -1216,6 +1228,7 @@ mod tests {
             detection_output_at: Some(now_unix.saturating_sub(120)),
             quiet_since_at: Some(now_unix.saturating_sub(60)),
             settled_at: None,
+            settled_locked: false,
             snoozed_until: None,
             settled_work_key: None,
             settled_auto_label: None,
@@ -1224,6 +1237,7 @@ mod tests {
             label: None,
             agent_name: None,
             managed_agent_kind: None,
+            closing_report: None,
             agent_session: None,
             group_membership: Default::default(),
             launch_argv: None,
@@ -1903,6 +1917,7 @@ mod tests {
                             detection_output_at: None,
                             quiet_since_at: None,
                             settled_at: None,
+                            settled_locked: false,
                             snoozed_until: Some(snoozed_until),
                             settled_work_key: None,
                             settled_auto_label: Some("#3 Restore context".into()),
@@ -1924,6 +1939,7 @@ mod tests {
                             label: Some("reviewer".into()),
                             agent_name: Some("reviewer".into()),
                             managed_agent_kind: Some("opencode".into()),
+                            closing_report: None,
                             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                                 source: "herdr:opencode".into(),
                                 agent: "opencode".into(),
@@ -2057,6 +2073,7 @@ mod tests {
                                 detection_output_at: None,
                                 quiet_since_at: None,
                                 settled_at: None,
+                                settled_locked: false,
                                 snoozed_until: None,
                                 settled_work_key: None,
                                 settled_auto_label: None,
@@ -2065,6 +2082,7 @@ mod tests {
                                 label: None,
                                 agent_name: None,
                                 managed_agent_kind: None,
+                                closing_report: None,
                                 agent_session: None,
                                 group_membership: Default::default(),
                                 launch_argv: None,
@@ -2079,6 +2097,7 @@ mod tests {
                                 detection_output_at: None,
                                 quiet_since_at: None,
                                 settled_at: None,
+                                settled_locked: false,
                                 snoozed_until: None,
                                 settled_work_key: None,
                                 settled_auto_label: None,
@@ -2087,6 +2106,7 @@ mod tests {
                                 label: None,
                                 agent_name: None,
                                 managed_agent_kind: None,
+                                closing_report: None,
                                 agent_session: None,
                                 group_membership: Default::default(),
                                 launch_argv: None,
@@ -2150,6 +2170,7 @@ mod tests {
                     detection_output_at: None,
                     quiet_since_at: None,
                     settled_at: None,
+                    settled_locked: false,
                     snoozed_until: None,
                     settled_work_key: None,
                     settled_auto_label: None,
@@ -2158,6 +2179,7 @@ mod tests {
                     label: None,
                     agent_name: None,
                     managed_agent_kind: None,
+                    closing_report: None,
                     agent_session: None,
                     group_membership: Default::default(),
                     launch_argv: None,
@@ -2171,6 +2193,7 @@ mod tests {
             detection_output_at: None,
             quiet_since_at: None,
             settled_at: None,
+            settled_locked: false,
             snoozed_until: None,
             settled_work_key: None,
             settled_auto_label: None,
@@ -2179,6 +2202,7 @@ mod tests {
             label: Some("planner".into()),
             agent_name: Some("planner".into()),
             managed_agent_kind: None,
+            closing_report: None,
             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                 source: "herdr:codex".into(),
                 agent: "codex".into(),
@@ -2379,6 +2403,7 @@ mod tests {
                             detection_output_at: None,
                             quiet_since_at: None,
                             settled_at: None,
+                            settled_locked: false,
                             snoozed_until: None,
                             settled_work_key: None,
                             settled_auto_label: None,
@@ -2387,6 +2412,7 @@ mod tests {
                             label: None,
                             agent_name: None,
                             managed_agent_kind: None,
+                            closing_report: None,
                             agent_session: Some(super::super::snapshot::PaneAgentSessionSnapshot {
                                 source: "herdr:codex".into(),
                                 agent: "codex".into(),
@@ -2765,6 +2791,7 @@ mod tests {
                 detection_output_at: None,
                 quiet_since_at: None,
                 settled_at: None,
+                settled_locked: false,
                 snoozed_until: None,
                 settled_work_key: None,
                 settled_auto_label: None,
@@ -2773,6 +2800,7 @@ mod tests {
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,
+                closing_report: None,
                 agent_session: None,
                 group_membership: Default::default(),
                 launch_argv: None,

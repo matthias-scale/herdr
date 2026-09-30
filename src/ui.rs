@@ -33,6 +33,7 @@ pub(crate) mod notepad_agent;
 pub(crate) mod notepad_usage;
 mod onboarding;
 mod panes;
+pub(crate) use panes::settled_max_scroll;
 pub(crate) mod pomodoro;
 pub(crate) mod pr_actions;
 mod release_notes;
@@ -3444,7 +3445,12 @@ mod tests {
 
         let card = app.view.workspace_card_areas[0].rect;
         let line1 = buffer_row_text(buffer, card, card.y);
-        assert!(line1.starts_with(" ▾ one (0/1)"), "{line1:?}");
+        assert_eq!(
+            line1.split_whitespace().take(2).collect::<Vec<_>>(),
+            ["▾", "one"],
+            "{line1:?}"
+        );
+        assert!(!line1.contains("0/1"), "{line1:?}");
         assert!(!line1.contains("1 one"));
         assert_eq!(card.height, 1);
         assert!(!line1.contains("main"));

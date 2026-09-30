@@ -203,7 +203,7 @@ pub(super) fn render(app: &AppState, frame: &mut Frame, area: &Area, now: std::t
             Span::raw(" ".repeat(widths.prefix)),
             Span::styled(
                 pad_right(
-                    compact_dot_for_state(state, true, true, false, false),
+                    compact_dot_for_state(state, true, true, false, false, false),
                     SIDEBAR_DOT_FIELD_WIDTH,
                 ),
                 Style::default().fg(state_label_color(state, true, &app.palette)),
@@ -244,6 +244,9 @@ mod tests {
             protocol: None,
             error: (state == crate::fleet::HostState::Unreachable).then(|| "timeout".to_string()),
             remote_identity: None,
+            sessions: None,
+            reachable: false,
+            last_seen_unix_ms: None,
             entries: Vec::new(),
         }
     }

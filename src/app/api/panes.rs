@@ -3241,6 +3241,170 @@ mod tests {
         );
     }
 
+    #[test]
+    fn closing_marker_arms_delayed_quiet_settlement() {
+        let (mut app, public_pane_id, pane_id, terminal_id) = quiet_settle_test_app();
+        app.state.settle_done_after = std::time::Duration::from_secs(30);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .note_user_reply();
+        let mut report = closing_block_report(&public_pane_id, 1, Vec::new());
+        report.agent_session_id = Some("quiet-settle-test".into());
+        report.settle_ready = Some(true);
+        let response = app.handle_pane_report_agent("closing-ready".into(), report);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        assert!(!app.state.pane_is_settled(0, pane_id));
+        let armed_at = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .activity
+            .last_at();
+        assert_eq!(
+            app.state.refresh_settled_panes_at(
+                None,
+                armed_at + app.state.settle_done_after - std::time::Duration::from_nanos(1),
+                1_725_000_000,
+            ),
+            0
+        );
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = false;
+        assert_eq!(
+            app.state.refresh_settled_panes_at(
+                None,
+                armed_at + app.state.settle_done_after,
+                1_725_000_001,
+            ),
+            0,
+            "unseen pane must not settle"
+        );
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = true;
+        assert_eq!(
+            app.state.refresh_settled_panes_at(
+                None,
+                armed_at + app.state.settle_done_after + std::time::Duration::from_nanos(1),
+                1_725_000_002,
+            ),
+            1
+        );
+        assert!(app.state.pane_is_settled(0, pane_id));
+    }
+
+    #[test]
+    fn closing_marker_settlement_respects_focus_pin_and_new_activity() {
+        let (mut focused, public_pane_id, pane_id, terminal_id) = quiet_settle_test_app();
+        focused.state.settle_done_after = std::time::Duration::from_secs(30);
+        focused
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .note_user_reply();
+        let mut report = closing_block_report(&public_pane_id, 1, Vec::new());
+        report.agent_session_id = Some("quiet-settle-test".into());
+        report.settle_ready = Some(true);
+        let response = focused.handle_pane_report_agent("closing-ready".into(), report);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let armed_at = focused.state.workspaces[0].tabs[0].panes[&pane_id]
+            .activity
+            .last_at();
+        focused.handle_pane_focus(
+            "focus".into(),
+            PaneTarget {
+                pane_id: public_pane_id,
+            },
+        );
+        assert_eq!(
+            focused.state.refresh_settled_panes_at(
+                None,
+                armed_at + focused.state.settle_done_after,
+                1_725_000_002,
+            ),
+            0,
+            "focus must block marker-triggered settlement"
+        );
+
+        let (mut pinned, public_pane_id, pane_id, terminal_id) = quiet_settle_test_app();
+        pinned.state.settle_done_after = std::time::Duration::from_secs(30);
+        pinned
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .note_user_reply();
+        let mut report = closing_block_report(&public_pane_id, 1, Vec::new());
+        report.agent_session_id = Some("quiet-settle-test".into());
+        report.settle_ready = Some(true);
+        let response = pinned.handle_pane_report_agent("closing-ready".into(), report);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let armed_at = pinned.state.workspaces[0].tabs[0].panes[&pane_id]
+            .activity
+            .last_at();
+        let tab_id = pinned.public_tab_id(0, 0).unwrap();
+        pinned.handle_tab_pin(
+            "pin".into(),
+            crate::api::schema::TabPinParams {
+                tab_id,
+                mode: crate::api::schema::TabPinMode::Pin,
+            },
+        );
+        assert_eq!(
+            pinned.state.refresh_settled_panes_at(
+                None,
+                armed_at + pinned.state.settle_done_after,
+                1_725_000_003,
+            ),
+            0,
+            "pinning must block marker-triggered settlement"
+        );
+
+        let (mut active, public_pane_id, pane_id, terminal_id) = quiet_settle_test_app();
+        active.state.settle_done_after = std::time::Duration::from_secs(30);
+        active
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .note_user_reply();
+        let mut report = closing_block_report(&public_pane_id, 1, Vec::new());
+        report.agent_session_id = Some("quiet-settle-test".into());
+        report.settle_ready = Some(true);
+        let response = active.handle_pane_report_agent("closing-ready".into(), report);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let armed_at = active.state.workspaces[0].tabs[0].panes[&pane_id]
+            .activity
+            .last_at();
+        let output_at = armed_at + std::time::Duration::from_secs(10);
+        active
+            .state
+            .note_automated_pane_activity_at(pane_id, output_at);
+        assert_eq!(
+            active.state.refresh_settled_panes_at(
+                None,
+                armed_at + active.state.settle_done_after,
+                1_725_000_004,
+            ),
+            0,
+            "new activity must restart the quiet window"
+        );
+        assert_eq!(
+            active.state.refresh_settled_panes_at(
+                None,
+                output_at + active.state.settle_done_after,
+                1_725_000_005,
+            ),
+            1
+        );
+    }
+
     fn test_gate() -> crate::api::schema::ClosingBlockItem {
         test_attention_item("Gate")
     }
@@ -5029,7 +5193,18 @@ mod tests {
 
     #[tokio::test]
     async fn api_pane_close_last_pane_closes_linked_worktree_workspace() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let config_home = std::env::temp_dir().join(format!(
+            "herdr-pane-close-session-save-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&config_home);
+        env.set("XDG_CONFIG_HOME", &config_home);
+        env.remove(crate::session::SESSION_ENV_VAR);
         let mut app = app_with_linked_worktree();
+        app.no_session = false;
+        app.state.session_dirty = false;
+        app.state.session_dirty_revision = 0;
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
 
@@ -5044,9 +5219,28 @@ mod tests {
         assert_eq!(success.id, "req");
         assert_eq!(app.state.request_remove_linked_worktree, None);
         assert!(app.state.workspaces.is_empty());
+        assert!(
+            app.state.session_dirty,
+            "closing the final tab must dirty persistence"
+        );
+        assert!(
+            app.session_save_deadline.is_some(),
+            "close must schedule a save"
+        );
+        std::fs::create_dir_all(crate::session::data_dir()).unwrap();
+        std::fs::write(
+            crate::session::data_dir().join("session.json"),
+            b"old session",
+        )
+        .unwrap();
+        app.save_session_now();
+        assert!(!crate::session::data_dir().join("session.json").exists());
+        assert!(!app.state.session_dirty);
         for (_terminal_id, runtime) in app.terminal_runtimes.drain() {
             runtime.shutdown();
         }
+        drop(env);
+        let _ = std::fs::remove_dir_all(config_home);
     }
 
     #[tokio::test]
@@ -7127,6 +7321,9 @@ mod tests {
                 protocol: None,
                 error: None,
                 remote_identity: None,
+                sessions: None,
+                reachable: true,
+                last_seen_unix_ms: None,
                 entries: vec![crate::fleet::FleetRow::test_agent_info_row(
                     "remote", get_agent,
                 )],

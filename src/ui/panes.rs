@@ -5,6 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::scrollbar::{render_pane_scrollbar, should_show_scrollbar};
 #[cfg(test)]
@@ -355,6 +356,14 @@ pub(super) fn render_panes(
                 && !pane_is_scrolled_back(rt)
                 && app.pane_exposes_host_cursor(ws_idx, info.id);
             rt.render(frame, info.inner_rect, show_cursor);
+            if let Some(view) = app
+                .settled_view
+                .as_ref()
+                .filter(|view| view.pane_id == info.id)
+            {
+                render_settled_view(app, frame, info.inner_rect, ws_idx, info.id, view);
+                continue;
+            }
             render_pane_scrollbar(app, frame, info, rt);
 
             let should_dim = !info.is_focused && multi_pane && !terminal_active;
@@ -403,6 +412,356 @@ pub(super) fn render_panes(
     }
 
     render_pane_borders(app, ws, pane_infos, split_borders, frame);
+}
+
+fn render_settled_view(
+    app: &AppState,
+    frame: &mut Frame,
+    area: Rect,
+    ws_idx: usize,
+    pane_id: crate::layout::PaneId,
+    view: &crate::app::settled_view::SettledViewState,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(Clear, area);
+    let terminal = app
+        .workspaces
+        .get(ws_idx)
+        .and_then(|ws| ws.terminal_id(pane_id).and_then(|id| app.terminals.get(id)));
+    let title = app.workspaces.get(ws_idx).map(|ws| {
+        let derived = ws
+            .tabs
+            .iter()
+            .position(|tab| tab.panes.contains_key(&pane_id))
+            .and_then(|tab_idx| ws.tab_display_projection(&app.terminals, tab_idx))
+            .and_then(|projection| crate::workspace::session_title(Some(&projection), None));
+        settled_title(terminal.and_then(|t| t.manual_label.as_deref()), derived)
+    });
+    let agent = view
+        .transcript
+        .as_ref()
+        .and_then(|transcript| {
+            transcript
+                .turns
+                .iter()
+                .find(|(speaker, _)| speaker != "you")
+        })
+        .map(|(speaker, _)| speaker.as_str())
+        .unwrap_or_else(|| {
+            if view.command.to_ascii_lowercase().contains("codex") {
+                "codex"
+            } else {
+                "claude"
+            }
+        });
+    let name = if agent == "codex" {
+        "Codex"
+    } else {
+        "Claude Code"
+    };
+    let secondary = settled_secondary(&app.palette);
+    let header = Line::from(vec![
+        Span::styled(
+            name,
+            Style::default()
+                .fg(app.palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" · settled transcript  ", Style::default().fg(secondary)),
+        Span::styled(
+            "read-only",
+            Style::default()
+                .fg(Color::Rgb(17, 17, 27))
+                .bg(app.palette.yellow),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(header),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    if area.height > 1 {
+        let cwd = terminal
+            .map(|t| t.cwd.display().to_string())
+            .unwrap_or_default();
+        let model = terminal
+            .and_then(|t| t.agent_model.as_deref())
+            .map(|m| format!("{m} · "))
+            .unwrap_or_default();
+        let label = title
+            .filter(|title| title != name && title != "Settled session")
+            .map(|title| format!(" · {title}"))
+            .unwrap_or_default();
+        frame.render_widget(
+            Paragraph::new(format!("{model}{cwd}{label}")).style(Style::default().fg(secondary)),
+            Rect::new(area.x, area.y + 1, area.width, 1),
+        );
+    }
+    if area.height > 2 {
+        let source = view
+            .transcript
+            .as_ref()
+            .map(|t| t.source.as_str())
+            .unwrap_or("unavailable");
+        frame.render_widget(
+            Paragraph::new(format!(
+                "restored from {source} · nothing runs · ↑/↓ PgUp/PgDn scroll · / search"
+            ))
+            .style(Style::default().fg(secondary)),
+            Rect::new(area.x, area.y + 2, area.width, 1),
+        );
+    }
+    let content_height = area.height.saturating_sub(4);
+    if content_height > 0 {
+        let mut lines = Vec::new();
+        if let Some(transcript) = &view.transcript {
+            lines.extend(transcript_lines(
+                &transcript.turns,
+                &view.search,
+                area.width,
+                &app.palette,
+            ));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "Transcript unavailable · Enter resumes the session",
+                Style::default().fg(secondary),
+            )));
+        }
+        if view.searching {
+            lines.push(Line::from(format!("/{}", view.search)));
+        }
+        let max_scroll = lines.len().saturating_sub(content_height as usize);
+        let first_row = max_scroll.saturating_sub(view.scroll.min(max_scroll));
+        frame.render_widget(
+            Paragraph::new(
+                lines
+                    .into_iter()
+                    .skip(first_row)
+                    .take(content_height as usize)
+                    .collect::<Vec<_>>(),
+            ),
+            Rect::new(area.x, area.y + 3, area.width, content_height),
+        );
+    }
+    if area.height > 1 {
+        let suffix = if view.editing {
+            " · editing keeps it settled · Esc cancels"
+        } else {
+            " · Enter resumes · edit or Esc keeps it settled"
+        };
+        let command = Line::from(vec![
+            Span::styled(
+                format!("$ {}", view.command),
+                Style::default().fg(app.palette.text),
+            ),
+            Span::styled(suffix, Style::default().fg(secondary)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(command),
+            Rect::new(area.x, area.y + area.height - 1, area.width, 1),
+        );
+    }
+}
+
+fn settled_secondary(palette: &Palette) -> Color {
+    // Terminal colours are theme-defined; use the primary text colour there.
+    if palette.text == Color::Reset {
+        Color::Reset
+    } else if settled_contrast(palette.subtext0, palette.panel_bg).is_some_and(|ratio| ratio >= 4.5)
+    {
+        palette.subtext0
+    } else {
+        palette.text
+    }
+}
+
+fn settled_contrast(a: Color, b: Color) -> Option<f64> {
+    fn luminance(color: Color) -> Option<f64> {
+        let Color::Rgb(r, g, b) = color else {
+            return None;
+        };
+        let channel = |value: u8| {
+            let s = f64::from(value) / 255.0;
+            if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        Some(0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b))
+    }
+    let (a, b) = (luminance(a)?, luminance(b)?);
+    Some((a.max(b) + 0.05) / (a.min(b) + 0.05))
+}
+
+pub(crate) fn settled_max_scroll(
+    view: &crate::app::settled_view::SettledViewState,
+    width: u16,
+    height: u16,
+    palette: &Palette,
+) -> usize {
+    let visible = height.saturating_sub(4) as usize;
+    if visible == 0 {
+        return 0;
+    }
+    let rows = view
+        .transcript
+        .as_ref()
+        .map(|transcript| transcript_lines(&transcript.turns, &view.search, width, palette).len())
+        .unwrap_or(1)
+        + usize::from(view.searching);
+    rows.saturating_sub(visible)
+}
+
+fn transcript_lines(
+    turns: &[(String, String)],
+    search: &str,
+    width: u16,
+    palette: &crate::app::state::Palette,
+) -> Vec<Line<'static>> {
+    let needle = search.to_lowercase();
+    let mut lines = Vec::new();
+    let prompt_colour = settled_secondary(palette);
+    let band = if palette.text == Color::Reset {
+        Color::Reset
+    } else if settled_contrast(palette.text, palette.surface1).is_some_and(|ratio| ratio >= 4.5) {
+        palette.surface1
+    } else if settled_contrast(palette.text, palette.surface0).is_some_and(|ratio| ratio >= 4.5) {
+        palette.surface0
+    } else {
+        palette.panel_bg
+    };
+    for (speaker, body) in turns {
+        if !needle.is_empty()
+            && !body.to_lowercase().contains(&needle)
+            && !speaker.to_lowercase().contains(&needle)
+        {
+            continue;
+        }
+        if !lines.is_empty() {
+            lines.push(Line::from(""));
+        }
+        if speaker != "you" {
+            // Agent turns render their markdown the way the live agent does:
+            // emphasis without its asterisks, and lists without blank rows.
+            let mut rendered = crate::ui::markdown::transcript_body_lines(
+                palette,
+                Some(&compact_list_gaps(body)),
+                width.saturating_sub(2) as usize,
+                "  ",
+            );
+            for line in &mut rendered {
+                for span in &mut line.spans {
+                    if span.style.fg == Some(palette.mauve) {
+                        span.style.fg = Some(palette.peach);
+                    }
+                }
+            }
+            if let Some(span) = rendered.first_mut().and_then(|line| line.spans.first_mut()) {
+                if let Some(rest) = span.content.strip_prefix("  ") {
+                    span.content = format!("● {rest}").into();
+                }
+            }
+            lines.extend(rendered);
+            continue;
+        }
+        let mut first = true;
+        for physical in body.split('\n') {
+            for_each_wrapped_line(physical, width.saturating_sub(2) as usize, |fragment| {
+                let prefix = if first { "❯ " } else { "  " };
+                first = false;
+                let mut row = format!("{prefix}{fragment}");
+                let padding = width.saturating_sub(2 + fragment.width() as u16) as usize;
+                row.extend(std::iter::repeat_n(' ', padding));
+                let mut line = Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(prompt_colour)),
+                    Span::styled(
+                        row[prefix.len()..].to_string(),
+                        Style::default().fg(palette.text),
+                    ),
+                ]);
+                line.style = Style::default().bg(band);
+                lines.push(line);
+            });
+        }
+    }
+    lines
+}
+
+/// Drop blank rows between consecutive list items, which agents emit as
+/// loose markdown lists but render tightly.
+fn compact_list_gaps(body: &str) -> String {
+    let rows: Vec<&str> = body.lines().collect();
+    let mut kept = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        if row.trim().is_empty() {
+            let previous = rows[..index]
+                .iter()
+                .rev()
+                .find(|row| !row.trim().is_empty());
+            let next = rows[index + 1..].iter().find(|row| !row.trim().is_empty());
+            if previous.is_some_and(|row| is_list_item(row))
+                && next.is_some_and(|row| is_list_item(row))
+            {
+                continue;
+            }
+        }
+        kept.push(*row);
+    }
+    kept.join("\n")
+}
+
+fn is_list_item(row: &str) -> bool {
+    let trimmed = row.trim_start();
+    if ["- ", "* ", "+ "]
+        .iter()
+        .any(|marker| trimmed.starts_with(marker))
+    {
+        return true;
+    }
+    let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+    (1..=3).contains(&digits)
+        && (trimmed[digits..].starts_with(". ") || trimmed[digits..].starts_with(") "))
+}
+
+fn for_each_wrapped_line(mut text: &str, width: usize, mut emit: impl FnMut(&str)) {
+    if text.is_empty() {
+        emit("");
+        return;
+    }
+    while !text.is_empty() {
+        let mut used = 0;
+        let mut end = 0;
+        let mut last_space = None;
+        for (index, ch) in text.char_indices() {
+            let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + char_width > width && end > 0 {
+                break;
+            }
+            used += char_width;
+            end = index + ch.len_utf8();
+            if ch == ' ' && index > 0 {
+                last_space = Some(index);
+            }
+        }
+        if end == text.len() {
+            emit(text);
+            break;
+        }
+        let split = last_space.unwrap_or(end);
+        emit(&text[..split]);
+        text = text[split..].trim_start_matches(' ');
+    }
+}
+
+fn settled_title(manual: Option<&str>, derived: Option<String>) -> String {
+    manual
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
+        .or_else(|| derived.filter(|title| !title.trim().is_empty()))
+        .unwrap_or_else(|| "Settled session".into())
 }
 
 pub(crate) fn popup_pane_rects(app: &AppState, area: Rect) -> Option<(Rect, Rect)> {
@@ -1044,6 +1403,253 @@ mod tests {
             Ok(crate::pane::ProxyOutbound::SyncResize),
             "a changed proxy geometry must wake the writer"
         );
+    }
+
+    #[test]
+    fn settled_title_prefers_manual_then_derived_then_fallback() {
+        assert_eq!(
+            settled_title(Some(" manual "), Some("derived".into())),
+            "manual"
+        );
+        assert_eq!(settled_title(None, Some("derived".into())), "derived");
+        assert_eq!(settled_title(Some("  "), None), "Settled session");
+    }
+
+    #[test]
+    fn settled_transcript_wraps_with_conversation_markers_and_turn_spacing() {
+        let palette = crate::app::state::Palette::catppuccin();
+        let turns = vec![
+            ("you".into(), "Explain the billing API migration.".into()),
+            (
+                "claude".into(),
+                "A billing API migration needs versioned requests and a clear transition plan.\nKeep old clients working.".into(),
+            ),
+        ];
+        let lines = transcript_lines(&turns, "", 60, &palette);
+        let rows: Vec<_> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            rows.iter().map(|row| row.trim_end()).collect::<Vec<_>>(),
+            [
+                "❯ Explain the billing API migration.",
+                "",
+                "● A billing API migration needs versioned requests and a",
+                "  clear transition plan.",
+                "  Keep old clients working.",
+            ]
+        );
+        assert_eq!(UnicodeWidthStr::width(rows[0].as_str()), 60);
+        assert_eq!(lines[0].style.bg, Some(palette.surface1));
+        assert_eq!(lines[0].spans[0].style.fg, Some(palette.subtext0));
+        assert_eq!(lines[0].spans[1].style.fg, Some(palette.text));
+        assert!(lines[2].style.bg.is_none());
+    }
+
+    #[test]
+    fn settled_transcript_filters_turns_and_preserves_body_blank_lines() {
+        let palette = crate::app::state::Palette::catppuccin();
+        let turns = vec![
+            ("you".into(), "First".into()),
+            ("codex".into(), "Alpha\n\nBeta".into()),
+            ("claude".into(), "Hidden".into()),
+        ];
+        let lines = transcript_lines(&turns, "CoDeX", 20, &palette);
+        assert_eq!(
+            lines.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["● Alpha", "", "  Beta"]
+        );
+        assert_eq!(transcript_lines(&turns, "absent", 20, &palette).len(), 0);
+    }
+
+    #[test]
+    fn settled_transcript_renders_agent_markdown_like_the_live_agent() {
+        let palette = crate::app::state::Palette::catppuccin();
+        let turns = vec![(
+            "claude".into(),
+            "1. First item\n\n2. Second item\n\nClosing with **bold** text.".into(),
+        )];
+        let lines = transcript_lines(&turns, "", 40, &palette);
+        let rows: Vec<_> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            rows,
+            [
+                "● 1. First item",
+                "  2. Second item",
+                "",
+                "  Closing with bold text."
+            ]
+        );
+        let bold = lines[3]
+            .spans
+            .iter()
+            .find(|span| span.content == "bold")
+            .expect("bold span");
+        assert!(bold.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn settled_lists_keep_literal_markers_and_hanging_indent() {
+        let palette = Palette::catppuccin();
+        let turns = vec![(
+            "claude".into(),
+            "- A list item with enough words to wrap\n1. One more item".into(),
+        )];
+        let rows: Vec<_> = transcript_lines(&turns, "", 18, &palette)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(rows[0].starts_with("● - A list"));
+        assert!(rows[1].starts_with("    "));
+        assert!(rows.iter().any(|row| row.starts_with("  1. One")));
+    }
+
+    #[test]
+    fn compact_list_gaps_keeps_gaps_around_prose() {
+        assert_eq!(compact_list_gaps("- a\n\n- b"), "- a\n- b");
+        assert_eq!(compact_list_gaps("para\n\n- a"), "para\n\n- a");
+        assert_eq!(
+            compact_list_gaps("1) a\n\n12. b\n\ntext"),
+            "1) a\n12. b\n\ntext"
+        );
+    }
+
+    #[test]
+    fn settled_transcript_wraps_wide_characters_by_display_width() {
+        let palette = crate::app::state::Palette::catppuccin();
+        let turns = vec![("you".into(), "你好世界好".into())];
+        let lines = transcript_lines(&turns, "", 8, &palette);
+        let rows: Vec<_> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(rows, ["❯ 你好世", "  界好  "]);
+        assert!(rows
+            .iter()
+            .all(|row| UnicodeWidthStr::width(row.as_str()) == 8));
+    }
+
+    #[test]
+    fn settled_transcript_colours_meet_text_contrast() {
+        fn luminance(color: Color) -> f64 {
+            let Color::Rgb(r, g, b) = color else {
+                panic!("RGB palette required");
+            };
+            let channel = |value: u8| {
+                let s = f64::from(value) / 255.0;
+                if s <= 0.04045 {
+                    s / 12.92
+                } else {
+                    ((s + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        }
+        fn ratio(a: Color, b: Color) -> f64 {
+            let (light, dark) = (luminance(a), luminance(b));
+            (light.max(dark) + 0.05) / (light.min(dark) + 0.05)
+        }
+        for palette in [Palette::catppuccin(), Palette::catppuccin_latte()] {
+            let turns = vec![("you".into(), "text".into())];
+            let lines = transcript_lines(&turns, "", 20, &palette);
+            assert!(ratio(settled_secondary(&palette), palette.panel_bg) >= 4.5);
+            assert!(ratio(palette.text, lines[0].style.bg.expect("band")) >= 4.5);
+            assert!(ratio(Color::Rgb(17, 17, 27), palette.yellow) >= 4.5);
+        }
+        // A terminal theme owns both default foreground and background; keep
+        // those paired rather than guessing whether its background is light.
+        let terminal = Palette::terminal();
+        assert_eq!(settled_secondary(&terminal), Color::Reset);
+        assert_eq!(
+            transcript_lines(&[("you".into(), "text".into())], "", 20, &terminal)[0]
+                .style
+                .bg,
+            Some(Color::Reset)
+        );
+    }
+
+    #[test]
+    fn settled_scroll_range_uses_wrapped_and_filtered_rows() {
+        let view = crate::app::settled_view::SettledViewState {
+            pane_id: crate::layout::PaneId::alloc(),
+            transcript: Some(crate::app::settled_view::SettledTranscript {
+                source: "test".into(),
+                turns: vec![
+                    ("you".into(), "one two three four five".into()),
+                    ("claude".into(), "needle".into()),
+                ],
+            }),
+            command: String::new(),
+            scroll: 0,
+            search: String::new(),
+            searching: false,
+            editing: false,
+        };
+        let palette = Palette::catppuccin();
+        assert_eq!(settled_max_scroll(&view, 10, 6, &palette), 4);
+        assert_eq!(settled_max_scroll(&view, 40, 20, &palette), 0);
+        let filtered = crate::app::settled_view::SettledViewState {
+            search: "needle".into(),
+            ..view
+        };
+        assert_eq!(settled_max_scroll(&filtered, 10, 6, &palette), 0);
+    }
+
+    #[test]
+    fn settled_header_names_agent_and_keeps_resume_command() {
+        let app = AppState::test_new();
+        let view = crate::app::settled_view::SettledViewState {
+            pane_id: crate::layout::PaneId::alloc(),
+            transcript: Some(crate::app::settled_view::SettledTranscript {
+                source: "session.jsonl".into(),
+                turns: vec![("codex".into(), "done".into())],
+            }),
+            command: "codex resume session".into(),
+            scroll: 0,
+            search: String::new(),
+            searching: false,
+            editing: false,
+        };
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 8))
+            .expect("test backend");
+        terminal
+            .draw(|frame| {
+                render_settled_view(&app, frame, Rect::new(0, 0, 80, 8), 0, view.pane_id, &view)
+            })
+            .expect("render settled view");
+        let buffer = terminal.backend().buffer();
+        let row = |y| {
+            (0..80)
+                .map(|x| buffer.cell((x, y)).expect("cell").symbol().to_string())
+                .collect::<String>()
+        };
+        assert!(row(0).contains("Codex · settled transcript  read-only"));
+        assert!(row(2).contains("restored from session.jsonl · nothing runs"));
+        assert!(row(7).contains("$ codex resume session"));
+    }
+
+    #[test]
+    fn settled_view_opens_on_latest_turn() {
+        let app = AppState::test_new();
+        let view = crate::app::settled_view::SettledViewState {
+            pane_id: crate::layout::PaneId::alloc(),
+            transcript: Some(crate::app::settled_view::SettledTranscript {
+                source: "test".into(),
+                turns: vec![("you".into(), "one\ntwo\nthree\nfour\nfive\nlatest".into())],
+            }),
+            command: String::new(),
+            scroll: 0,
+            search: String::new(),
+            searching: false,
+            editing: false,
+        };
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(20, 8))
+            .expect("test backend");
+        terminal
+            .draw(|frame| {
+                render_settled_view(&app, frame, Rect::new(0, 0, 20, 8), 0, view.pane_id, &view)
+            })
+            .expect("render settled view");
+        let buffer = terminal.backend().buffer();
+        let last_content_row = (0..20)
+            .map(|x| buffer.cell((x, 6)).expect("cell").symbol().to_string())
+            .collect::<String>();
+        assert!(last_content_row.contains("latest"));
     }
 
     #[test]

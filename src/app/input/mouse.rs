@@ -480,7 +480,12 @@ impl AppState {
         // press that focuses a pane revokes it again when the resulting action
         // runs `release_dock_focus_to_pane`.
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            if self.sidebar_claims_pointer(mouse.column, mouse.row) {
+            // The global menu is a server popup drawn over the sidebar; its
+            // presses must not hand the keyboard to the sidebar, or
+            // `input_owner` hides the menu and any modal it opens.
+            if self.effective_interaction_mode() != Mode::GlobalMenu
+                && self.sidebar_claims_pointer(mouse.column, mouse.row)
+            {
                 self.focus_client_on_sidebar();
             } else {
                 self.sidebar_focused = false;
@@ -3961,6 +3966,34 @@ impl AppState {
 
         if let Some(info) = self.pane_at(mouse.column, mouse.row).cloned() {
             self.focus_pane(info.id);
+            if self
+                .settled_view
+                .as_ref()
+                .is_some_and(|view| view.pane_id == info.id)
+            {
+                if let Some(view) = self.settled_view.as_mut() {
+                    let max_scroll = crate::ui::settled_max_scroll(
+                        view,
+                        info.inner_rect.width,
+                        info.inner_rect.height,
+                        &self.palette,
+                    );
+                    view.scroll = view.scroll.min(max_scroll);
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            view.scroll = view
+                                .scroll
+                                .saturating_add(self.mouse_scroll_lines)
+                                .min(max_scroll)
+                        }
+                        MouseEventKind::ScrollDown => {
+                            view.scroll = view.scroll.saturating_sub(self.mouse_scroll_lines)
+                        }
+                        _ => {}
+                    }
+                }
+                return;
+            }
             if self.forward_pane_wheel(terminal_runtimes, &info, mouse) {
                 return;
             }
@@ -5076,6 +5109,9 @@ mod tests {
                 protocol: None,
                 error: None,
                 remote_identity: None,
+                sessions: None,
+                reachable: true,
+                last_seen_unix_ms: None,
                 entries: Vec::new(),
             }],
             ..crate::fleet::Snapshot::default()
@@ -11958,6 +11994,9 @@ mod fleet_status_click_tests {
             protocol: None,
             error: None,
             remote_identity: None,
+            sessions: None,
+            reachable: true,
+            last_seen_unix_ms: None,
             entries: vec![row],
         }];
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 160, 24));

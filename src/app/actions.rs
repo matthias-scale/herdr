@@ -3437,17 +3437,10 @@ impl AppState {
             })
         };
         if auto_settle {
-            if let Some(ws_idx) = self
-                .workspaces
-                .iter()
-                .position(|workspace| workspace.pane_state(pane_id).is_some())
-            {
-                self.settle_pane_at(
-                    ws_idx,
-                    pane_id,
-                    crate::app::settled::unix_seconds(std::time::SystemTime::now()),
-                );
-            }
+            // The closing marker consumes this turn and arms the ordinary quiet
+            // settlement window. The timed settlement pass still enforces seen,
+            // focus, pin, and quiet-time gates before stopping the agent.
+            self.note_automated_pane_activity_at(pane_id, std::time::Instant::now());
         }
         (updates.into_iter().collect(), accepted)
     }
@@ -3456,6 +3449,7 @@ impl AppState {
         match event {
             AppEvent::FleetRefreshed { .. } => Vec::new(),
             AppEvent::FleetAgentInventoryChanged { .. } => Vec::new(),
+            AppEvent::FleetSessionInventoryChanged { .. } => Vec::new(),
             AppEvent::AuthorityAcceptanceLedgerPersisted { .. } => Vec::new(),
             AppEvent::AuthorityAcceptanceLedgerReconciled { .. } => Vec::new(),
             AppEvent::RemoteFocusTransition { .. } => Vec::new(),
@@ -3913,14 +3907,19 @@ impl AppState {
             projected_state_changed && matches!(state, AgentState::Working | AgentState::Blocked);
         let unsettled =
             entered_active_state && !pane.settle_resume_guard && pane.settled_at.take().is_some();
+        if unsettled {
+            pane.settled_locked = false;
+        }
 
         if unsettled {
+            pane.settled_locked = false;
             let workspace_id = self.workspaces[ws_idx].id.clone();
             self.pending_pane_settlement_changes
                 .push(crate::app::state::PaneSettlementChange {
                     workspace_id,
                     pane_id,
                     settled_at: None,
+                    lock_only: false,
                 });
             self.mark_session_dirty();
         }
@@ -4356,6 +4355,7 @@ impl AppState {
                     workspace_id,
                     pane_id,
                     settled_at: None,
+                    lock_only: false,
                 });
             self.mark_session_dirty();
             self.mark_sidebar_projection_changed();

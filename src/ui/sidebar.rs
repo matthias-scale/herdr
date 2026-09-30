@@ -272,6 +272,7 @@ fn compact_row_dot(entry: &AgentPanelEntry) -> &'static str {
         entry.has_agent,
         entry.state == AgentState::Working && entry_has_gate(entry),
         entry.usage_limited,
+        entry.working_while_blocked,
     )
 }
 
@@ -289,12 +290,14 @@ pub(crate) fn compact_dot_for_state(
     has_agent: bool,
     _gate: bool,
     _usage_limited: bool,
+    working_while_blocked: bool,
 ) -> &'static str {
     if !has_agent {
         return "·";
     }
     match state {
         AgentState::Working => "●",
+        AgentState::Blocked if working_while_blocked => "●",
         AgentState::Blocked => "○",
         AgentState::Idle if has_agent => "○",
         // Unknown agent state: a solid grey dot, not an empty one.
@@ -367,7 +370,11 @@ fn sidebar_machine_host<'a>(app: &'a AppState, entry: &'a AgentPanelEntry) -> &'
 
 /// Machine column label: the host's first three characters, lowercased and
 /// padded, so `ub1`, `ub2`, `mbpro` and `mbair` read as `ub1`, `ub2`, `mbp`, `mba`.
-fn sidebar_machine_icon(_app: &AppState, host: &str) -> String {
+/// The local machine renders blank: only other hosts need naming.
+fn sidebar_machine_icon(app: &AppState, host: &str) -> String {
+    if host == app.agent_host_name {
+        return " ".repeat(SIDEBAR_MACHINE_LABEL_WIDTH);
+    }
     let label: String = host
         .to_lowercase()
         .chars()
@@ -1572,6 +1579,7 @@ pub(crate) enum AgentPanelIdentity {
 pub(crate) struct AgentPanelEntry {
     pub(crate) identity: AgentPanelIdentity,
     pub(crate) last_turn_at: Option<AgentReplyTimestamp>,
+    pub(crate) settle_hint: Option<crate::app::settled::SettleHint>,
     data: std::sync::Arc<AgentPanelEntryData>,
     pub(crate) pinned: bool,
     /// Projection-only overlay. Keeping it outside shared row data lets group
@@ -1648,6 +1656,7 @@ pub(crate) struct AgentPanelEntryData {
     /// after the agent icon. Local panes only; remote rows carry `None`.
     pub model_letter: Option<&'static str>,
     pub waiting_on_agents: bool,
+    pub working_while_blocked: bool,
     pub holds_shell: bool,
     pub gate_count: usize,
     pub seen: bool,
@@ -1671,6 +1680,7 @@ impl AgentPanelEntry {
         Self {
             identity,
             last_turn_at: None,
+            settle_hint: None,
             data: std::sync::Arc::new(data),
             pinned: false,
             space_label_redundant: false,
@@ -2361,6 +2371,7 @@ fn collect_agent_panel_entries_with_runtimes(
                             active_subagents,
                             model_letter,
                             waiting_on_agents: detail.waiting_on_agents,
+                            working_while_blocked: detail.working_while_blocked,
                             seen: detail.seen,
                             done_since: detail.done_since,
                             stale: detail.stale,
@@ -2382,6 +2393,49 @@ fn collect_agent_panel_entries_with_runtimes(
                         )
                     });
                     entry.pinned = pinned;
+                    let pane = ws
+                        .tabs
+                        .get(detail.tab_idx)
+                        .and_then(|tab| tab.panes.get(&detail.pane_id));
+                    entry.settle_hint = pane.and_then(|pane| {
+                        let tab = ws.tabs.get(detail.tab_idx)?;
+                        let terminal = app.terminals.get(&pane.attached_terminal_id)?;
+                        if let Some(settled_at) = pane.settled_at {
+                            if pane.settled_locked {
+                                return Some(crate::app::settled::SettleHint::SettledLocked);
+                            }
+                            let remaining = crate::app::settled::settled_read_only_remaining(
+                                settled_at,
+                                crate::app::settled::unix_seconds(std::time::SystemTime::now()),
+                                app.settled_read_only_after,
+                            );
+                            return Some(if remaining.is_zero() {
+                                crate::app::settled::SettleHint::SettledLocked
+                            } else {
+                                crate::app::settled::SettleHint::SettledCountdown(remaining)
+                            });
+                        }
+                        let quiet = crate::app::pane_is_quiet(pane, terminal);
+                        let now = std::time::Instant::now();
+                        let hint = crate::app::settled::settle_countdown(
+                            app.auto_settle_done,
+                            pane.seen,
+                            app.is_active_pane(ws_idx, detail.tab_idx, detail.pane_id),
+                            tab.pinned,
+                            quiet,
+                            pane.settled_at.is_some() || pane.snoozed_until().is_some(),
+                            pane.activity.quiet_for(now),
+                            app.settle_done_after,
+                        );
+                        match hint {
+                            Some(crate::app::settled::SettleHint::Countdown(remaining))
+                                if remaining.is_zero() =>
+                            {
+                                None
+                            }
+                            other => other,
+                        }
+                    });
                     entry
                 })
         })
@@ -2517,6 +2571,7 @@ pub(crate) fn remote_agent_panel_entries_at(
                     active_subagents: None,
                     model_letter: None,
                     waiting_on_agents: lifecycle.waiting_on_agents,
+                    working_while_blocked: lifecycle.working_while_blocked,
                     holds_shell: false,
                     gate_count,
                     seen: lifecycle.seen,
@@ -2724,6 +2779,7 @@ fn aggregate_tab_entries(
                         (current, candidate) => current.or(candidate),
                     };
                     tab_entry.holds_shell |= entry.holds_shell;
+                    tab_entry.working_while_blocked |= entry.working_while_blocked;
                     // Like a mixed provider, a machine name only labels a tab
                     // whose panes all sit on that machine.
                     if tab_entry.remote_host != entry.remote_host {
@@ -2759,6 +2815,7 @@ fn aggregate_tab_entries(
                         Some(entry_attention_tier(tab_entry).max(entry_attention_tier(entry)));
                     tab_entry.usage_limited |= entry.usage_limited;
                     tab_entry.waiting_on_agents |= entry.waiting_on_agents;
+                    tab_entry.working_while_blocked |= entry.working_while_blocked;
                 },
             )
             .or_insert_with(|| {
@@ -5362,7 +5419,11 @@ fn needs_you_space_icon(
         &app.space_icons,
     );
     if app.nerd_font {
-        icon.map(|icon| crate::ui::icons::themed(icon, &app.palette).to_string())
+        if let Some(icon) = crate::ui::icons::leading_label_icon(name) {
+            return icon.to_string();
+        }
+        icon.and_then(|icon| crate::ui::icons::badge_icon_for_label(name, icon))
+            .map(|icon| crate::ui::icons::themed(icon, &app.palette).to_string())
             .unwrap_or_else(|| space_abbreviation(name))
     } else {
         space_abbreviation(name)
@@ -8665,19 +8726,71 @@ fn agent_dot_tooltip(entry: &AgentPanelEntry) -> String {
     } else {
         agent_panel_status_key(entry.state, entry.seen)
     };
-    if let Some(label) = entry.state_labels.get(key) {
-        return label.clone();
+    let label = entry.state_labels.get(key).cloned().unwrap_or_else(|| {
+        match key {
+            "usage" => "Usage limit",
+            "blocked" if entry.working_while_blocked => "Blocked, waiting on you · still working",
+            "blocked" => "Blocked, waiting on you",
+            "working" => "Working",
+            "waiting_on_agents" => "Waiting on agents",
+            "done" => "Done, unread",
+            "idle" => "Idle",
+            _ => "?",
+        }
+        .to_string()
+    });
+    match entry.settle_hint {
+        Some(crate::app::settled::SettleHint::SettledLocked) => {
+            let label = entry
+                .state_labels
+                .get("idle")
+                .cloned()
+                .unwrap_or_else(|| "Settled".to_string());
+            return format!("{label} · read-only");
+        }
+        Some(crate::app::settled::SettleHint::SettledCountdown(remaining)) => {
+            let label = entry
+                .state_labels
+                .get("idle")
+                .cloned()
+                .unwrap_or_else(|| "Settled".to_string());
+            if remaining < std::time::Duration::from_secs(60) {
+                return format!("{label} · read-only in <1 min");
+            }
+            return format!(
+                "{label} · read-only in {} min",
+                remaining.as_secs().div_ceil(60)
+            );
+        }
+        _ => {}
     }
-    match key {
-        "usage" => "Usage limit",
-        "blocked" => "Blocked, waiting on you",
-        "working" => "Working",
-        "waiting_on_agents" => "Waiting on agents",
-        "done" => "Done, unread",
-        "idle" => "Idle",
-        _ => "?",
+    if key != "idle" {
+        return label;
     }
-    .to_string()
+    match entry.settle_hint {
+        Some(crate::app::settled::SettleHint::Countdown(remaining)) => {
+            let minutes = remaining.as_secs().div_ceil(60);
+            if remaining < std::time::Duration::from_secs(60) {
+                format!("{label} · settles in <1 min")
+            } else {
+                format!("{label} · settles in {minutes} min")
+            }
+        }
+        Some(crate::app::settled::SettleHint::Focused(after)) => {
+            format!(
+                "{label} · settles {} min after you leave",
+                after.as_secs().div_ceil(60)
+            )
+        }
+        Some(crate::app::settled::SettleHint::Pinned) => {
+            format!("{label} · pinned, won’t settle")
+        }
+        Some(
+            crate::app::settled::SettleHint::SettledCountdown(_)
+            | crate::app::settled::SettleHint::SettledLocked,
+        ) => label,
+        None => label,
+    }
 }
 
 fn snooze_deadline_tooltip(
@@ -8840,7 +8953,9 @@ pub(crate) fn compute_sidebar_hover_targets(
                     row_y,
                     machine_icon_cell_offset(usize::from(body.width), age_width),
                     SIDEBAR_MACHINE_LABEL_WIDTH,
-                ) {
+                )
+                .filter(|_| host != app.agent_host_name.as_str())
+                {
                     targets.push(crate::app::state::SidebarHoverTarget {
                         rect,
                         label: host.clone(),
@@ -8887,7 +9002,9 @@ pub(crate) fn compute_sidebar_hover_targets(
                     row_y,
                     machine_icon_cell_offset(usize::from(body.width), widths.age),
                     SIDEBAR_MACHINE_LABEL_WIDTH,
-                ) {
+                )
+                .filter(|_| sidebar_machine_host(app, entry) != app.agent_host_name.as_str())
+                {
                     targets.push(crate::app::state::SidebarHoverTarget {
                         rect,
                         label: sidebar_machine_host(app, entry).to_string(),
@@ -9031,7 +9148,9 @@ pub(crate) fn compute_sidebar_hover_targets(
                     row_y,
                     machine_icon_cell_offset(row_width, widths.age),
                     SIDEBAR_MACHINE_LABEL_WIDTH,
-                ) {
+                )
+                .filter(|_| entry.agent_ref.host != app.agent_host_name.as_str())
+                {
                     targets.push(crate::app::state::SidebarHoverTarget {
                         rect,
                         label: entry.agent_ref.host.clone(),
@@ -9426,7 +9545,7 @@ fn render_symphony_job(
     let title_width = width.saturating_sub(fixed_width);
     let title = pad_right(&truncate_end(&job.name, title_width), title_width);
     let dot = pad_right(
-        compact_dot_for_state(state, true, true, false, false),
+        compact_dot_for_state(state, true, true, false, false, false),
         SIDEBAR_DOT_FIELD_WIDTH,
     );
     let status = pad_left(&status, widths.provider);
@@ -9957,7 +10076,8 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                             .is_some_and(|terminal| terminal.agent_lifecycle_context().is_some())
                     })
                 });
-                let icon = compact_dot_for_state(agg_state, agg_seen, has_agent, false, false);
+                let icon =
+                    compact_dot_for_state(agg_state, agg_seen, has_agent, false, false, false);
                 let icon_color = if has_agent {
                     match attention_tier {
                         AttentionTier::Blocked => p.red,
@@ -10078,8 +10198,9 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                         buf[(x, y)].set_bg(p.active_row_bg);
                     }
                 }
-                if app.pane_is_settled(target.ws_idx, target.pane_id)
-                    || app.pane_is_snoozed(target.ws_idx, target.pane_id)
+                if !is_active
+                    && (app.pane_is_settled(target.ws_idx, target.pane_id)
+                        || app.pane_is_snoozed(target.ws_idx, target.pane_id))
                 {
                     dim_inactive_pane_row(
                         frame,
@@ -10153,8 +10274,9 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
                         buf[(x, y)].set_bg(p.active_row_bg);
                     }
                 }
-                if app.pane_is_settled(target.ws_idx, target.pane_id)
-                    || app.pane_is_snoozed(target.ws_idx, target.pane_id)
+                if !is_active
+                    && (app.pane_is_settled(target.ws_idx, target.pane_id)
+                        || app.pane_is_snoozed(target.ws_idx, target.pane_id))
                 {
                     dim_inactive_pane_row(
                         frame,
@@ -11140,12 +11262,13 @@ struct NestedHeaderSpans {
 const SIDEBAR_SORT_GLYPH: &str = "⇅";
 
 fn nested_header_count_label(header: &NestedHeaderArea) -> Option<String> {
-    if header.dim {
+    // An expanded group lists its rows, so only a collapsed one needs the count.
+    if header.dim || !header.collapsed {
         None
-    } else if let Some((working, total)) = header.activity_count {
-        Some(format!(" ({working} of {total})"))
+    } else if let Some((_, total)) = header.activity_count {
+        Some(format!(" {total}"))
     } else {
-        Some(format!(" ({})", header.count))
+        Some(format!(" {}", header.count))
     }
 }
 
@@ -11397,27 +11520,17 @@ fn render_workspace_list(
             );
             crate::ui::icons::themed(icon, &app.palette)
         });
+        let space_icon =
+            space_icon.filter(|_| crate::ui::icons::leading_label_icon(&display_label).is_none());
         let space_icon_width = space_icon.map_or(0, |icon| display_width(icon) + 1);
 
-        let (agent_count, window_count) = match header {
-            Some((_, _, _, _, Some(counts), ..)) => *counts,
-            _ => {
-                let windows = member_indices
-                    .iter()
-                    .filter_map(|member| app.workspaces.get(*member))
-                    .map(|workspace| workspace.tabs.len())
-                    .sum();
-                let agents = sidebar_thread_entries_from(app, terminal_runtimes)
-                    .into_iter()
-                    .filter(|entry| {
-                        entry.has_agent
-                            && entry
-                                .local_target()
-                                .is_some_and(|target| member_indices.contains(&target.ws_idx))
-                    })
-                    .count();
-                (agents, windows)
-            }
+        let window_count = match header {
+            Some((_, _, _, _, Some((_, windows)), ..)) => *windows,
+            _ => member_indices
+                .iter()
+                .filter_map(|member| app.workspaces.get(*member))
+                .map(|workspace| workspace.tabs.len())
+                .sum(),
         };
         let repo_header = card.repo_header;
         let expanded =
@@ -11431,13 +11544,16 @@ fn render_workspace_list(
             state_counts
         };
         let activity_count = header.and_then(|(_, _, count, ..)| *count);
-        let count_label = if let Some((working, total)) = activity_count {
-            format!(" ({working} of {total})")
+        // An expanded group lists its rows, so only a collapsed one needs the count.
+        let count_label = if expanded {
+            String::new()
+        } else if let Some((_, total)) = activity_count {
+            format!(" {total}")
         } else if state_counts.is_empty() {
             match header {
-                Some((_, _, _, _, Some((agents, windows)), ..)) => format!(" ({agents}/{windows})"),
-                Some((_, Some(count), ..)) => format!(" ({count})"),
-                _ => format!(" ({agent_count}/{window_count})"),
+                Some((_, _, _, _, Some((_, windows)), ..)) => format!(" {windows}"),
+                Some((_, Some(count), ..)) => format!(" {count}"),
+                _ => format!(" {window_count}"),
             }
         } else {
             String::new()
@@ -11475,23 +11591,10 @@ fn render_workspace_list(
             spans.push(Span::raw(" "));
         }
         spans.push(Span::styled(title, name_style));
-        if let Some((working, total)) = activity_count {
-            spans.extend([
-                Span::styled(
-                    format!(" ({working}"),
-                    Style::default().fg(p.blue).add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    format!(" of {total})"),
-                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
-                ),
-            ]);
-        } else {
-            spans.push(Span::styled(
-                count_label,
-                Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
-            ));
-        }
+        spans.push(Span::styled(
+            count_label,
+            Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+        ));
         for count in visible_state_counts {
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
@@ -11853,7 +11956,9 @@ fn render_tab_card(
         return;
     };
     let settled = app.pane_is_settled(target.ws_idx, target.pane_id);
-    if settled || app.pane_is_snoozed(target.ws_idx, target.pane_id) {
+    if (settled || app.pane_is_snoozed(target.ws_idx, target.pane_id))
+        && !app.is_active_pane(target.ws_idx, target.tab_idx, target.pane_id)
+    {
         dim_inactive_pane_row(frame, card.rect, app.palette.overlay0);
     }
     if settled {
@@ -11923,8 +12028,9 @@ fn render_agent_card(
         );
     }
     if detail.local_target().is_some_and(|target| {
-        app.pane_is_settled(target.ws_idx, target.pane_id)
-            || app.pane_is_snoozed(target.ws_idx, target.pane_id)
+        (app.pane_is_settled(target.ws_idx, target.pane_id)
+            || app.pane_is_snoozed(target.ws_idx, target.pane_id))
+            && !app.is_active_pane(target.ws_idx, target.tab_idx, target.pane_id)
     }) {
         dim_inactive_pane_row(frame, rect, app.palette.overlay0);
     }
@@ -13717,6 +13823,9 @@ pub(crate) mod tests {
             protocol: None,
             error: None,
             remote_identity: None,
+            sessions: None,
+            reachable: true,
+            last_seen_unix_ms: None,
             entries,
         }
     }
@@ -15868,13 +15977,17 @@ pub(crate) mod tests {
                     assert!(dot_x < title_x, "{rendered:?}");
                     assert_eq!(buffer[(dot_x, 0)].style().fg, Some(expected_dot));
                     assert_eq!(buffer[(title_x, 0)].style().fg, Some(expected_title));
-                    let machine = if is_remote { "u" } else { "l" };
-                    let machine_x = find_symbol_x(buffer, 0, width, machine);
+                    assert!(!rendered.contains("· ub2"), "{rendered:?}");
+                    if !is_remote {
+                        // The local machine label is blank.
+                        assert!(!rendered.contains("loc"), "{rendered:?}");
+                        continue;
+                    }
+                    let machine_x = find_symbol_x(buffer, 0, width, "u");
                     assert_eq!(
                         buffer[(machine_x, 0)].style().fg,
                         Some(expected_remote_suffix)
                     );
-                    assert!(!rendered.contains("· ub2"), "{rendered:?}");
                     if width == 60 {
                         let provider_x = find_symbol_x(buffer, 0, width, "c");
                         assert_eq!(buffer[(provider_x, 0)].style().fg, Some(expected_provider));
@@ -16365,6 +16478,47 @@ pub(crate) mod tests {
         let style = terminal.backend().buffer()[(card.rect.x + 2, card.rect.y)].style();
         assert_eq!(style.fg, Some(app.palette.overlay0));
         assert!(style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn focused_settled_row_keeps_selected_title_and_row_styles() {
+        for locked in [false, true] {
+            let mut app = app_with_agents(&["settled-focus"]);
+            let pane_id = app.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            app.terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_manual_label("Focused settled pane".into());
+            app.active = Some(0);
+            app.workspaces[0].tabs[0].layout.focus_pane(pane_id);
+            assert!(app.settle_pane_at(0, pane_id, 1_725_000_000));
+            assert!(app.is_active_pane(0, 0, pane_id));
+            app.sidebar_selected_settled = Some(crate::app::state::PaneFocusTarget {
+                workspace_id: app.workspaces[0].id.clone(),
+                pane_id,
+            });
+            app.workspaces[0]
+                .pane_state_mut(pane_id)
+                .unwrap()
+                .settled_locked = locked;
+            expand_section_for_all_views(&mut app, SETTLED_SECTION_TITLE);
+            let area = Rect::new(0, 0, 100, 30);
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let y = (0..area.height)
+                .find(|y| row_text(buffer, *y, area.width).contains("Focused settled pane"))
+                .expect("settled title is rendered");
+            let x = find_symbol_x(buffer, y, area.width, "F");
+            assert_eq!(buffer[(x, y)].fg, active_sidebar_title_color(&app.palette));
+            assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD));
+            assert_eq!(buffer[(x, y)].bg, app.palette.surface1);
+        }
     }
 
     #[test]
@@ -17911,6 +18065,67 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn blocked_working_dot_is_filled_red_and_names_both_facts() {
+        let palette = Palette::one_dark();
+        let mut entry = aggregation_entry(AgentState::Blocked, true, None, "blocked");
+        entry.state_labels.remove("blocked");
+
+        assert_eq!(compact_row_dot(&entry), "○");
+        assert_eq!(compact_row_color(&entry, &palette), palette.red);
+        assert_eq!(agent_dot_tooltip(&entry), "Blocked, waiting on you");
+
+        entry.working_while_blocked = true;
+        assert_eq!(compact_row_dot(&entry), "●");
+        assert_eq!(compact_row_color(&entry, &palette), palette.red);
+        assert_eq!(
+            agent_dot_tooltip(&entry),
+            "Blocked, waiting on you · still working"
+        );
+
+        let working = aggregation_entry(AgentState::Working, true, None, "working");
+        assert_eq!(compact_row_dot(&working), "●");
+        let waiting = {
+            let mut entry = working;
+            entry.waiting_on_agents = true;
+            entry
+        };
+        assert_eq!(compact_row_dot(&waiting), "◌");
+    }
+
+    #[test]
+    fn blocked_working_projection_requires_a_fresh_blocked_agent() {
+        use crate::api::schema::AgentStatus;
+
+        let blocked = remote_agent_info("blocked", "blocked", AgentStatus::Blocked, false, false);
+        let mut blocked = blocked;
+        blocked.working_while_blocked = true;
+        assert!(blocked.agent_projection().working_while_blocked);
+
+        let stale = remote_agent_info("stale", "stale", AgentStatus::Stale, false, false);
+        let mut stale = stale;
+        stale.working_while_blocked = true;
+        assert!(!stale.agent_projection().working_while_blocked);
+
+        let mut idle = remote_agent_info("idle", "idle", AgentStatus::Idle, false, false);
+        idle.working_while_blocked = true;
+        assert!(!idle.agent_projection().working_while_blocked);
+    }
+
+    #[test]
+    fn blocked_working_evidence_aggregates_across_tab_panes() {
+        let blocked_idle = aggregation_entry(AgentState::Blocked, true, None, "blocked");
+        let mut blocked_working = blocked_idle.clone();
+        blocked_working.working_while_blocked = true;
+
+        let aggregated = aggregate_tab_entries(&[blocked_idle.clone(), blocked_working])
+            .remove(&SidebarEntryKey::Local(0, 0))
+            .expect("aggregated tab entry");
+
+        assert!(aggregated.working_while_blocked);
+        assert_eq!(compact_row_dot(&aggregated), "●");
+    }
+
+    #[test]
     fn waiting_on_agents_has_a_distinct_glyph_and_blocked_still_outranks_it() {
         let palette = Palette::one_dark();
         let mut entry = aggregation_entry(AgentState::Working, true, None, "working");
@@ -17983,6 +18198,7 @@ pub(crate) mod tests {
                 active_subagents: None,
                 model_letter: None,
                 waiting_on_agents: false,
+                working_while_blocked: false,
                 holds_shell: false,
                 gate_count: 0,
                 seen,
@@ -18732,7 +18948,7 @@ pub(crate) mod tests {
             compact_row_color(&settled, &app.palette),
             app.palette.overlay0
         );
-        assert_eq!(agent_dot_tooltip(&settled), "?");
+        assert_eq!(agent_dot_tooltip(&settled), "Settled · read-only");
     }
 
     /// Owner correction to #77: the same latched gate is not blocking while
@@ -20338,6 +20554,7 @@ row_gap = 1
                 active_subagents: None,
                 model_letter: None,
                 waiting_on_agents: false,
+                working_while_blocked: false,
                 holds_shell: false,
                 gate_count: 0,
                 seen: true,
@@ -20892,7 +21109,10 @@ rows = [[{ token = "$hype", fg = "#abcdef", bold = true, dim = false }, "workspa
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let rendered = row_text(terminal.backend().buffer(), row, 25);
-        assert!(rendered.contains("one (0/1)"), "{rendered:?}");
+        assert!(
+            rendered.trim_end().ends_with("one                ⇅"),
+            "{rendered:?}"
+        );
         assert!(!rendered.contains("HI"), "{rendered:?}");
     }
 
@@ -21290,14 +21510,16 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             wide_with_machine.contains("sample-pr-title-uses-wid"),
             "{wide_with_machine:?}"
         );
+        // The local machine leaves its label cell blank.
+        let machine_cell = machine_icon_cell_offset(46, 5);
         assert!(
-            wide_with_machine.contains("pi loc"),
+            wide_with_machine.contains("pi ")
+                && wide_with_machine
+                    .chars()
+                    .skip(machine_cell)
+                    .take(SIDEBAR_MACHINE_LABEL_WIDTH)
+                    .all(|c| c == ' '),
             "{wide_with_machine:?}"
-        );
-        let (before_machine, _) = wide_with_machine.split_once("loc").expect("machine label");
-        assert_eq!(
-            display_width(before_machine),
-            machine_icon_cell_offset(46, 5)
         );
         assert!(wide_with_machine.ends_with("2m"), "{wide_with_machine:?}");
         assert!(
@@ -21320,13 +21542,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
         for row in [&github_depth, &repo_branch_depth] {
             assert!(row.contains("●  sa"), "{row:?}");
-            assert!(row.ends_with("pi loc   2m"), "{row:?}");
+            assert!(row.ends_with("pi       2m"), "{row:?}");
         }
         let mut ticket_entry = entry.clone();
         ticket_entry.primary_tab_label = Some("SCA-3165 · sample-linear".into());
         let nested_ticket = render_at_row_width(&ticket_entry, 27, 2);
         assert!(nested_ticket.contains("●  sam"), "{nested_ticket:?}");
-        assert!(nested_ticket.ends_with("pi loc   2m"), "{nested_ticket:?}");
+        assert!(nested_ticket.ends_with("pi       2m"), "{nested_ticket:?}");
 
         let wide = render_first_tab_row(&app, 80);
         assert!(wide.contains("sample-pr"), "{wide:?}");
@@ -25573,7 +25795,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     .map(|(title, _)| title.trim())
                     .expect("title before Codex provider");
                 assert!(display_width(title) >= 3, "{child_text:?}");
-                assert!(child_text.contains('1'), "{child_text:?}");
+                assert!(!child_text.contains("ub1"), "{child_text:?}");
             } else {
                 assert!(
                     first_non_space(header.rect.y, header.rect.width)
@@ -25853,7 +26075,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             "agent disclosure hitbox follows the rendered repo-header chevron"
         );
         let grouped = row_text(buffer, cards[0].rect.y, cards[0].rect.width);
-        assert!(grouped.contains("main (0/3)"), "{grouped:?}");
+        assert!(grouped.contains("main 3"), "{grouped:?}");
         assert!(!grouped.contains("issue"), "{grouped:?}");
         assert!(!grouped.contains("review"), "{grouped:?}");
     }
@@ -26061,7 +26283,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             rendered.contains("Use Repository Instructions"),
             "{rendered:?}"
         );
-        assert!(rendered.contains("pi loc"), "{rendered:?}");
+        assert!(!rendered.contains("loc"), "{rendered:?}");
         assert!(!rendered.contains(">_"), "{rendered:?}");
 
         app.nerd_font = true;
@@ -26075,7 +26297,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             icon_rendered.contains("Use Repository Instructions"),
             "{icon_rendered:?}"
         );
-        assert!(icon_rendered.contains(" loc"), "{icon_rendered:?}");
+        assert!(!icon_rendered.contains("loc"), "{icon_rendered:?}");
         assert!(!icon_rendered.contains("\u{f0379}"), "{icon_rendered:?}");
         assert!(!icon_rendered.contains("\u{ea85}"), "{icon_rendered:?}");
     }
@@ -28484,7 +28706,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn agent_dot_unknown_state_is_a_solid_grey_dot_with_question_tooltip() {
         assert_eq!(
-            compact_dot_for_state(AgentState::Unknown, false, true, false, false),
+            compact_dot_for_state(AgentState::Unknown, false, true, false, false, false),
             "●"
         );
         assert_eq!(
@@ -28492,7 +28714,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             Palette::catppuccin().overlay0
         );
         assert_eq!(
-            compact_dot_for_state(AgentState::Unknown, false, false, false, false),
+            compact_dot_for_state(AgentState::Unknown, false, false, false, false, false),
             "·"
         );
     }
@@ -28531,6 +28753,59 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let shell = compact_test_entry("terminal", None);
         assert_eq!(agent_dot_tooltip(&shell), "No agent");
+    }
+
+    #[test]
+    fn settled_tooltip_shows_read_only_countdown_rounding_and_custom_label() {
+        let mut entry = compact_test_entry("task", Some(Agent::Claude));
+        entry.settle_hint = Some(crate::app::settled::SettleHint::SettledCountdown(
+            std::time::Duration::from_secs(11 * 60 + 59),
+        ));
+        assert_eq!(agent_dot_tooltip(&entry), "Settled · read-only in 12 min");
+        entry.settle_hint = Some(crate::app::settled::SettleHint::SettledCountdown(
+            std::time::Duration::from_secs(59),
+        ));
+        assert_eq!(agent_dot_tooltip(&entry), "Settled · read-only in <1 min");
+        entry
+            .state_labels
+            .insert("idle".into(), "Quiet here".into());
+        assert_eq!(
+            agent_dot_tooltip(&entry),
+            "Quiet here · read-only in <1 min"
+        );
+        entry.settle_hint = Some(crate::app::settled::SettleHint::SettledLocked);
+        assert_eq!(agent_dot_tooltip(&entry), "Quiet here · read-only");
+    }
+
+    #[test]
+    fn idle_tooltip_appends_settlement_hint_and_keeps_custom_label() {
+        let mut entry = compact_test_entry("task", Some(Agent::Claude));
+        entry.state = AgentState::Idle;
+        entry.settle_hint = Some(crate::app::settled::SettleHint::Countdown(
+            std::time::Duration::from_secs(3 * 60 + 59),
+        ));
+        assert_eq!(agent_dot_tooltip(&entry), "Idle · settles in 4 min");
+        entry.settle_hint = Some(crate::app::settled::SettleHint::Countdown(
+            std::time::Duration::from_secs(59),
+        ));
+        assert_eq!(agent_dot_tooltip(&entry), "Idle · settles in <1 min");
+        entry.settle_hint = Some(crate::app::settled::SettleHint::Focused(
+            std::time::Duration::from_secs(7 * 60),
+        ));
+        assert_eq!(
+            agent_dot_tooltip(&entry),
+            "Idle · settles 7 min after you leave"
+        );
+        entry.settle_hint = Some(crate::app::settled::SettleHint::Pinned);
+        assert_eq!(agent_dot_tooltip(&entry), "Idle · pinned, won’t settle");
+        entry.state_labels.insert("idle".into(), "Quiet".into());
+        assert_eq!(agent_dot_tooltip(&entry), "Quiet · pinned, won’t settle");
+        entry.state = AgentState::Idle;
+        entry.seen = false;
+        assert_eq!(agent_dot_tooltip(&entry), "Done, unread");
+        entry.seen = true;
+        entry.settle_hint = None;
+        assert_eq!(agent_dot_tooltip(&entry), "Quiet");
     }
 
     #[test]
@@ -29489,8 +29764,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
         let subgroup_row = lines
             .iter()
-            .position(|line| line.contains("api (2)"))
-            .expect("subgroup header with its count");
+            .position(|line| line.contains("api") && !line.contains("api 2"))
+            .expect("expanded subgroup header without a count");
         assert!(
             lines[subgroup_row].contains(SIDEBAR_SORT_GLYPH),
             "the subgroup header has its own sort glyph:\n{text}"
@@ -30057,7 +30332,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .filter(|line| !line.is_empty())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(snapshot.contains("1 of 3"), "{snapshot}");
+        assert!(!snapshot.contains("(1/3)"), "{snapshot}");
         assert!(
             snapshot.find("Working").unwrap_or(usize::MAX) < snapshot.find("Snoozed").unwrap_or(0),
             "{snapshot}"
@@ -30405,7 +30680,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .map(|y| row_text(rendered.backend().buffer(), y, area.width))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(snapshot.contains("1 of 2"), "{snapshot}");
+        assert!(!snapshot.contains("(1/2)"), "{snapshot}");
         assert!(snapshot.contains("↳ Approve remote work"), "{snapshot}");
         let blocked = rows
             .iter()
@@ -30947,10 +31222,13 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .get_mut(&terminal_id)
             .expect("terminal")
             .set_raw_agent_state_for_test(AgentState::Blocked);
-        let entry = sidebar_thread_entries(&app)
+        let mut entry = sidebar_thread_entries(&app)
             .into_iter()
             .next()
             .expect("tab");
+        // The local machine renders blank, so align against a named host.
+        app.agent_host_name = "self".into();
+        entry.remote_host = Some("ub1".into());
 
         for layout in [
             crate::app::state::ViewLayout::Desktop,
@@ -31005,7 +31283,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn machine_icon_uses_existing_sidebar_hover_target() {
+    fn local_machine_icon_has_no_hover_target() {
         let mut app = app_with_agents(&["working"]);
         make_agents_blocked(&mut app);
         app.agent_host_name = "ub1".into();
@@ -31013,23 +31291,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.nerd_font = false;
         let area = Rect::new(0, 0, 60, 30);
         let targets = compute_sidebar_hover_targets(&app, area);
-        let machine = targets
-            .iter()
-            .find(|target| target.label == "ub1")
-            .expect("machine tooltip");
-        let list = workspace_list_rect_for_app(&app, area);
-        let metrics = workspace_list_scroll_metrics(&app, list);
-        let body = workspace_list_body_rect(&app, list, should_show_scrollbar(metrics));
-        assert_eq!(
-            machine.rect.x,
-            body.right() - SIDEBAR_MACHINE_LABEL_WIDTH as u16 - SIDEBAR_AGE_FIELD_WIDTH as u16
-        );
-        assert_eq!(machine.rect.width, SIDEBAR_MACHINE_LABEL_WIDTH as u16);
-        assert!(machine.action.is_none());
+        // The local machine renders blank, so it carries no tooltip.
+        assert!(!targets.iter().any(|target| target.label == "ub1"));
     }
 
     #[test]
-    fn local_machine_identity_uses_resolved_self_name() {
+    fn local_machine_label_is_blank() {
         let mut app = app_with_agents(&["working"]);
         app.agent_host_name = "ub2".into();
         app.machines = vec![crate::app::machines::Machine {
@@ -31047,7 +31314,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .draw(|frame| render_compact_agent_row(&app, frame, &entry, area, 0, true, None))
             .unwrap();
         let rendered = row_text(terminal.backend().buffer(), 0, area.width);
-        assert!(rendered.contains("ub2"), "{rendered:?}");
+        assert!(!rendered.contains("ub2"), "{rendered:?}");
     }
 
     #[test]
