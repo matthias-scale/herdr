@@ -473,6 +473,9 @@ pub struct PaneReportAgentParams {
     /// A previously reported worker disappeared without terminal evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workers_unknown: Option<bool>,
+    /// Both closing-block settlement markers were present in the final-message tail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_ready: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<u32>,
 }
@@ -524,6 +527,8 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             parse_status: Option<ClosingParseStatus>,
             #[serde(default)]
             workers_unknown: Option<bool>,
+            #[serde(default)]
+            settle_ready: Option<bool>,
             agents: Option<u32>,
         }
 
@@ -567,6 +572,7 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
                 external_wait: None,
                 parse_status: None,
                 workers_unknown: None,
+                settle_ready: None,
                 agents: None,
             });
         }
@@ -595,6 +601,7 @@ impl<'de> Deserialize<'de> for PaneReportAgentParams {
             external_wait: raw.external_wait,
             parse_status: raw.parse_status,
             workers_unknown: raw.workers_unknown,
+            settle_ready: raw.settle_ready,
             agents: raw.agents,
         })
     }

@@ -1638,6 +1638,7 @@ fn pane_report_agent(args: &[String]) -> std::io::Result<i32> {
         workers_unknown: None,
         agents: None,
         last_turn_at: None,
+        settle_ready: None,
     }))
 }
 

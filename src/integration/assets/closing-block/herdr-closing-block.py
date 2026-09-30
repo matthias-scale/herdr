@@ -24,7 +24,7 @@ import time
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from closing_block import parse  # noqa: E402
+from closing_block import parse, settle_ready  # noqa: E402
 from herdr_status import report, reserve_sequence  # noqa: E402
 
 # Claude Code fires Stop hooks concurrently with flushing the final assistant
@@ -133,6 +133,7 @@ def main() -> int:
         external_wait=block.external_wait,
         parse_status=block.parse_status,
         workers_unknown=block.workers_unknown,
+        settle_ready=settle_ready(text),
         session_id=payload.get("session_id"),
         session_path=payload.get("transcript_path"),
         seq=seq,

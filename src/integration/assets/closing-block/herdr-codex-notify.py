@@ -28,7 +28,7 @@ import tempfile
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from closing_block import parse  # noqa: E402
+from closing_block import parse, settle_ready  # noqa: E402
 from herdr_status import accepts_payload, mirror_path, report, reserve_sequence  # noqa: E402
 
 # Codex has used both spellings across versions.
@@ -185,6 +185,7 @@ def main() -> int:
             external_wait=block.external_wait,
             parse_status=block.parse_status,
             workers_unknown=block.workers_unknown,
+            settle_ready=settle_ready(text),
             session_id=session_id or None,
             title=title_from(payload, pane_id),
             seq=seq,

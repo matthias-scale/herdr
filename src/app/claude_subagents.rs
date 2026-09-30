@@ -2562,6 +2562,7 @@ mod tests {
                 dependencies_authoritative: true,
                 session_id: Some(SESSION_ID.into()),
                 last_turn_at: None,
+                settle_ready: false,
             })),
         });
         let pane = app.state.workspaces[0].pane_state(pane_id).unwrap();

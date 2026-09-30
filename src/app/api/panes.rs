@@ -1716,6 +1716,7 @@ impl App {
                     external_wait: external_wait.clone(),
                     parse_status,
                     workers_unknown,
+                    settle_ready: params.settle_ready == Some(true),
                     dependencies_authoritative,
                     session_id: params
                         .agent_session_id
@@ -3195,6 +3196,7 @@ mod tests {
             parse_status: Some(crate::api::schema::ClosingParseStatus::Ok),
             workers_unknown: Some(false),
             agents: Some(0),
+            settle_ready: None,
         }
     }
 
@@ -3497,11 +3499,26 @@ mod tests {
             ),
             0
         );
+        // Clearing a gate reports fresh output, which stays unread until the human sees it.
+        let settle_at = cleared_at + app.state.settle_done_after;
+        if !app.state.workspaces[0].tabs[0].panes[&pane_id].seen {
+            assert_eq!(
+                app.state
+                    .refresh_settled_panes_at(None, settle_at, 1_725_001_800),
+                0,
+                "unread result must not settle"
+            );
+            app.state.workspaces[0].tabs[0]
+                .panes
+                .get_mut(&pane_id)
+                .unwrap()
+                .seen = true;
+        }
         assert_eq!(
             app.state.refresh_settled_panes_at(
                 None,
-                cleared_at + app.state.settle_done_after,
-                1_725_001_800,
+                settle_at + std::time::Duration::from_nanos(1),
+                1_725_001_801,
             ),
             1
         );
@@ -3588,6 +3605,7 @@ mod tests {
                 workers_unknown: None,
                 agents: None,
                 last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -6898,6 +6916,7 @@ mod tests {
             workers_unknown: None,
             agents: None,
             last_turn_at: None,
+            settle_ready: None,
         };
 
         let response = app.handle_pane_report_agent("working-1".into(), report(1));
@@ -6988,6 +7007,7 @@ mod tests {
                 workers_unknown: None,
                 agents: None,
                 last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -7053,6 +7073,7 @@ mod tests {
                 workers_unknown: Some(false),
                 agents: Some(1),
                 last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -7889,6 +7910,7 @@ mod tests {
                 parse_status: None,
                 workers_unknown: None,
                 agents: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -7995,6 +8017,7 @@ mod tests {
                 workers_unknown: None,
                 agents: None,
                 last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -8062,6 +8085,7 @@ mod tests {
             workers_unknown: Some(false),
             agents: None,
             last_turn_at: None,
+            settle_ready: None,
         };
 
         let _: SuccessResponse = serde_json::from_str(
@@ -8241,6 +8265,7 @@ mod tests {
                 workers_unknown: None,
                 agents: None,
                 last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -8295,6 +8320,7 @@ mod tests {
                 workers_unknown: None,
                 agents: None,
                 last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -8325,6 +8351,7 @@ mod tests {
                 workers_unknown: None,
                 agents: None,
                 last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -9466,6 +9493,7 @@ mod tests {
                 workers_unknown: None,
                 agents: None,
                 last_turn_at: None,
+                settle_ready: None,
             },
         );
         let _: SuccessResponse =
@@ -10077,7 +10105,9 @@ mod tests {
             workers_unknown: None,
             agents: None,
             last_turn_at: None,
+            settle_ready: None,
         };
+
         assert_eq!(
             metadata_error_code(
                 &app.handle_pane_report_agent("unknown-pane-report".into(), unknown_report,)
@@ -10238,6 +10268,7 @@ mod tests {
                 workers_unknown: Some(false),
                 agents: Some(0),
                 last_turn_at: None,
+                settle_ready: None,
             }
         };
         let metadata = |seq: u64| PaneReportMetadataParams {

@@ -2982,6 +2982,7 @@ action = "missing"
                 workers_unknown: None,
                 agents: None,
                 last_turn_at: None,
+                settle_ready: None,
             },
         );
 

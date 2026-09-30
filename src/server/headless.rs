@@ -21570,7 +21570,8 @@ next_tab = ""
                             workers_unknown: None,
                             agents: None,
                             last_turn_at: None,
-                        },
+                            settle_ready: None,
+                        }
                     ),
                 },
                 respond_to,
@@ -21899,6 +21900,7 @@ next_tab = ""
                     workers_unknown: None,
                     agents: None,
                     last_turn_at: None,
+                    settle_ready: None,
                 }),
             },
             respond_to,

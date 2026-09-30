@@ -8,6 +8,7 @@ and parse quality remain separate facts.
 from __future__ import annotations
 
 import re
+import string
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -907,3 +908,15 @@ def parse(text: str) -> ClosingBlock:
             block.contract_met = contract.group("state").lower() == "met"
 
     return block
+
+
+def settle_ready(text: str) -> bool:
+    """Return whether the final assistant message closes with both markers."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()][-6:]
+    markers = set()
+    for line in lines:
+        normalized = line.replace("**", "").strip()
+        normalized = normalized.rstrip(string.punctuation).strip().casefold()
+        if normalized in {"needs you: nothing", "done here"}:
+            markers.add(normalized)
+    return markers == {"needs you: nothing", "done here"}
