@@ -32,8 +32,7 @@ pub(super) fn append_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
     ) {
         (Some(active_count), Some(groups)) => (active_count, groups.clone()),
         _ => {
-            let mut projection = crate::agent_runs::project(&app.fleet_snapshot);
-            projection.hosts.retain(|host| host.active_count > 0);
+            let projection = crate::agent_runs::project(&app.fleet_snapshot);
             let groups = super::devices::group_items(
                 &app.agent_host_name,
                 projection.hosts.into_iter().map(|host| {
@@ -294,6 +293,9 @@ mod tests {
         app.collapsed_sidebar_groups.remove("repo:Runs");
         app.fleet_snapshot.polled = true;
         app.fleet_snapshot.hosts = vec![host(crate::fleet::HostState::Reachable)];
+        let device_key = super::super::devices::group_key("runs", "ub2");
+        app.collapsed_sidebar_groups
+            .insert(format!("expanded:{device_key}"));
 
         let rows = super::super::sidebar_rows(&app);
         assert!(rows.iter().any(|row| matches!(
