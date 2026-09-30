@@ -2361,10 +2361,7 @@ fn collect_agent_panel_entries_with_runtimes(
                             app.is_active_pane(ws_idx, detail.tab_idx, detail.pane_id),
                             tab.pinned,
                             quiet,
-                            pane.settled_at.is_some()
-                                || pane.snoozed_until().is_some()
-                                || (app.settle_stops_agent
-                                    && !crate::app::settled::pane_has_resume_plan(terminal)),
+                            pane.settled_at.is_some() || pane.snoozed_until().is_some(),
                             pane.activity.quiet_for(now),
                             app.settle_done_after,
                         );
