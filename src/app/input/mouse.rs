@@ -6866,16 +6866,115 @@ mod tests {
             ),
         );
 
-        let items = app
-            .state
-            .context_menu
-            .as_ref()
-            .expect("settled session menu")
-            .items();
+        let menu = app.state.context_menu.as_ref().expect("settled session menu");
+        let items = app.state.context_menu_items(menu);
         assert!(
             !items.contains(&crate::app::state::SETTLE_ITEM),
             "{items:?}"
         );
+        assert!(
+            items.contains(&crate::app::state::UNSETTLE_ITEM),
+            "{items:?}"
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].panes[&pane_id].settled_at,
+            Some(1_725_000_000),
+            "opening the context menu must preserve settlement"
+        );
+    }
+
+    #[test]
+    fn settled_local_row_hover_control_dispatches_unsettle() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.set_server_mode(Mode::Terminal);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        assert!(app.state.settle_pane_at(0, pane_id, 1_725_000_000));
+        app.state.collapsed_sidebar_groups.remove("repo:Settled");
+        app.state.sidebar_width = 60;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let control = app
+            .state
+            .view
+            .sidebar_hover_targets
+            .iter()
+            .find(|target| {
+                matches!(
+                    target.action.as_ref(),
+                    Some(crate::app::state::SidebarHoverAction::Unsettle {
+                        target: crate::app::state::SidebarPaneLifecycleTarget::Local(pane),
+                    }) if pane.pane_id == pane_id
+                )
+            })
+            .expect("settled local row Unsettle control")
+            .rect;
+
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                control.x,
+                control.y,
+            ),
+        );
+        assert!(matches!(
+            action,
+            Some(MouseAction::UnsettlePane(
+                crate::app::state::SidebarPaneLifecycleTarget::Local(pane)
+            )) if pane.pane_id == pane_id
+        ));
+    }
+
+    #[test]
+    fn settled_remote_row_hover_control_dispatches_unsettle() {
+        let mut app = app_for_mouse_test();
+        let (remote, entry) = crate::ui::sidebar::tests::remote_control_fixture(
+            crate::fleet::HostState::Reachable,
+            crate::api::schema::AgentStatus::Done,
+            false,
+            true,
+            false,
+        );
+        app.state.remote_agent_panel_entries = remote.remote_agent_panel_entries;
+        app.state.sidebar_selected_remote_agent = Some(entry.agent_ref.clone());
+        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
+        app.state.sidebar_width = 60;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let control = app
+            .state
+            .view
+            .sidebar_hover_targets
+            .iter()
+            .find(|target| {
+                matches!(
+                    target.action.as_ref(),
+                    Some(crate::app::state::SidebarHoverAction::Unsettle {
+                        target: crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref),
+                    }) if agent_ref == &entry.agent_ref
+                )
+            })
+            .expect("settled remote row Unsettle control")
+            .rect;
+
+        let action = app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                control.x,
+                control.y,
+            ),
+        );
+        assert!(matches!(
+            action,
+            Some(MouseAction::UnsettlePane(
+                crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref)
+            )) if agent_ref == entry.agent_ref
+        ));
     }
 
     #[test]

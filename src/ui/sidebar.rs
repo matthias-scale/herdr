@@ -8932,20 +8932,30 @@ pub(crate) fn compute_sidebar_hover_targets(
                             {
                                 targets.push(crate::app::state::SidebarHoverTarget {
                                     rect,
-                                    label: snooze_control_tooltip(
-                                        app,
-                                        target.ws_idx,
-                                        match &control.target {
-                                            crate::app::state::SidebarPaneLifecycleTarget::Local(
-                                                pane,
-                                            ) => pane.pane_id,
-                                            crate::app::state::SidebarPaneLifecycleTarget::Remote(
-                                                _,
-                                            ) => target.pane_id,
-                                        },
-                                    ),
-                                    action: Some(crate::app::state::SidebarHoverAction::Snooze {
-                                        target: control.target.clone(),
+                                    label: if control.show_unsettle {
+                                        "Unsettle".into()
+                                    } else {
+                                        snooze_control_tooltip(
+                                            app,
+                                            target.ws_idx,
+                                            match &control.target {
+                                                crate::app::state::SidebarPaneLifecycleTarget::Local(
+                                                    pane,
+                                                ) => pane.pane_id,
+                                                crate::app::state::SidebarPaneLifecycleTarget::Remote(
+                                                    _,
+                                                ) => target.pane_id,
+                                            },
+                                        )
+                                    },
+                                    action: Some(if control.show_unsettle {
+                                        crate::app::state::SidebarHoverAction::Unsettle {
+                                            target: control.target.clone(),
+                                        }
+                                    } else {
+                                        crate::app::state::SidebarHoverAction::Snooze {
+                                            target: control.target.clone(),
+                                        }
                                     }),
                                     row_hover: false,
                                 });
@@ -9070,9 +9080,19 @@ pub(crate) fn compute_sidebar_hover_targets(
                             {
                                 targets.push(crate::app::state::SidebarHoverTarget {
                                     rect,
-                                    label: remote_snooze_control_tooltip(entry),
-                                    action: Some(crate::app::state::SidebarHoverAction::Snooze {
-                                        target: control.target.clone(),
+                                    label: if control.show_unsettle {
+                                        "Unsettle".into()
+                                    } else {
+                                        remote_snooze_control_tooltip(entry)
+                                    },
+                                    action: Some(if control.show_unsettle {
+                                        crate::app::state::SidebarHoverAction::Unsettle {
+                                            target: control.target.clone(),
+                                        }
+                                    } else {
+                                        crate::app::state::SidebarHoverAction::Snooze {
+                                            target: control.target.clone(),
+                                        }
                                     }),
                                     row_hover: false,
                                 });
