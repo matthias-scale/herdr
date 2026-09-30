@@ -10985,12 +10985,13 @@ struct NestedHeaderSpans {
 const SIDEBAR_SORT_GLYPH: &str = "⇅";
 
 fn nested_header_count_label(header: &NestedHeaderArea) -> Option<String> {
-    if header.dim {
+    // An expanded group lists its rows, so only a collapsed one needs the count.
+    if header.dim || !header.collapsed {
         None
-    } else if let Some((working, total)) = header.activity_count {
-        Some(format!(" ({working}/{total})"))
+    } else if let Some((_, total)) = header.activity_count {
+        Some(format!(" {total}"))
     } else {
-        Some(format!(" ({})", header.count))
+        Some(format!(" {}", header.count))
     }
 }
 
@@ -11244,25 +11245,13 @@ fn render_workspace_list(
         });
         let space_icon_width = space_icon.map_or(0, |icon| display_width(icon) + 1);
 
-        let (agent_count, window_count) = match header {
-            Some((_, _, _, _, Some(counts), ..)) => *counts,
-            _ => {
-                let windows = member_indices
-                    .iter()
-                    .filter_map(|member| app.workspaces.get(*member))
-                    .map(|workspace| workspace.tabs.len())
-                    .sum();
-                let agents = sidebar_thread_entries_from(app, terminal_runtimes)
-                    .into_iter()
-                    .filter(|entry| {
-                        entry.has_agent
-                            && entry
-                                .local_target()
-                                .is_some_and(|target| member_indices.contains(&target.ws_idx))
-                    })
-                    .count();
-                (agents, windows)
-            }
+        let window_count = match header {
+            Some((_, _, _, _, Some((_, windows)), ..)) => *windows,
+            _ => member_indices
+                .iter()
+                .filter_map(|member| app.workspaces.get(*member))
+                .map(|workspace| workspace.tabs.len())
+                .sum(),
         };
         let repo_header = card.repo_header;
         let expanded =
@@ -11276,13 +11265,16 @@ fn render_workspace_list(
             state_counts
         };
         let activity_count = header.and_then(|(_, _, count, ..)| *count);
-        let count_label = if let Some((working, total)) = activity_count {
-            format!(" ({working}/{total})")
+        // An expanded group lists its rows, so only a collapsed one needs the count.
+        let count_label = if expanded {
+            String::new()
+        } else if let Some((_, total)) = activity_count {
+            format!(" {total}")
         } else if state_counts.is_empty() {
             match header {
-                Some((_, _, _, _, Some((agents, windows)), ..)) => format!(" ({agents}/{windows})"),
-                Some((_, Some(count), ..)) => format!(" ({count})"),
-                _ => format!(" ({agent_count}/{window_count})"),
+                Some((_, _, _, _, Some((_, windows)), ..)) => format!(" {windows}"),
+                Some((_, Some(count), ..)) => format!(" {count}"),
+                _ => format!(" {window_count}"),
             }
         } else {
             String::new()
@@ -20651,7 +20643,10 @@ rows = [[{ token = "$hype", fg = "#abcdef", bold = true, dim = false }, "workspa
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let rendered = row_text(terminal.backend().buffer(), row, 25);
-        assert!(rendered.contains("one (0/1)"), "{rendered:?}");
+        assert!(
+            rendered.trim_end().ends_with("one                ⇅"),
+            "{rendered:?}"
+        );
         assert!(!rendered.contains("HI"), "{rendered:?}");
     }
 
@@ -25614,7 +25609,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             "agent disclosure hitbox follows the rendered repo-header chevron"
         );
         let grouped = row_text(buffer, cards[0].rect.y, cards[0].rect.width);
-        assert!(grouped.contains("main (0/3)"), "{grouped:?}");
+        assert!(grouped.contains("main 3"), "{grouped:?}");
         assert!(!grouped.contains("issue"), "{grouped:?}");
         assert!(!grouped.contains("review"), "{grouped:?}");
     }
@@ -29250,8 +29245,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         );
         let subgroup_row = lines
             .iter()
-            .position(|line| line.contains("api (2)"))
-            .expect("subgroup header with its count");
+            .position(|line| line.contains("api") && !line.contains("api 2"))
+            .expect("expanded subgroup header without a count");
         assert!(
             lines[subgroup_row].contains(SIDEBAR_SORT_GLYPH),
             "the subgroup header has its own sort glyph:\n{text}"
@@ -29813,7 +29808,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .filter(|line| !line.is_empty())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(snapshot.contains("(1/3)"), "{snapshot}");
+        assert!(!snapshot.contains("(1/3)"), "{snapshot}");
         assert!(
             snapshot.find("Working").unwrap_or(usize::MAX) < snapshot.find("Snoozed").unwrap_or(0),
             "{snapshot}"
@@ -30161,7 +30156,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .map(|y| row_text(rendered.backend().buffer(), y, area.width))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(snapshot.contains("(1/2)"), "{snapshot}");
+        assert!(!snapshot.contains("(1/2)"), "{snapshot}");
         assert!(snapshot.contains("↳ Approve remote work"), "{snapshot}");
         let blocked = rows
             .iter()
