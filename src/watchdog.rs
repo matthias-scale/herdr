@@ -1942,18 +1942,6 @@ mod tests {
         let decision = classify_pane_v3(&observation, &mut memory, 1000, v3opt());
         assert_eq!(decision.class, PaneClass::Stalled);
 
-        let active_tail = claude_pane("Now: wait — CI on #463", "", "0 shells");
-        let mut observation = pane_v3(AgentStatus::Working, &active_tail);
-        observation.process_group = Some(evidence::parse_ps_rows(
-            "100 1 100 S 00:05 0:00.01 claude\n102 100 100 R 00:40 0:00.52 cargo test",
-        ));
-        let mut memory = old_pane_memory(&observation, 1);
-        memory.quiet_since = Some(1);
-        assert_eq!(
-            classify_pane_v3(&observation, &mut memory, 1000, v3opt()).class,
-            PaneClass::Working
-        );
-
         let observation = pane_v3(AgentStatus::Working, &quiet_tail);
         let mut memory = old_pane_memory(&observation, 1000 - v3opt().stall_secs + 1);
         memory.quiet_since = Some(1);
@@ -1967,6 +1955,22 @@ mod tests {
         let decision = classify_pane_v3(&observation, &mut PaneV3Memory::default(), 1000, v3opt());
         assert_eq!(decision.class, PaneClass::Working);
         assert!(decision.evidence.contains("human is typing"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn promised_stale_working_with_active_tool_stays_working() {
+        let active_tail = claude_pane("Now: wait — CI on #463", "", "0 shells");
+        let mut observation = pane_v3(AgentStatus::Working, &active_tail);
+        observation.process_group = Some(evidence::parse_ps_rows(
+            "100 1 100 S 00:05 0:00.01 claude\n102 100 100 R 00:40 0:00.52 cargo test",
+        ));
+        let mut memory = old_pane_memory(&observation, 1);
+        memory.quiet_since = Some(1);
+        assert_eq!(
+            classify_pane_v3(&observation, &mut memory, 1000, v3opt()).class,
+            PaneClass::Working
+        );
     }
 
     #[test]
