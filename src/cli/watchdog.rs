@@ -26,7 +26,11 @@ mod workers;
 
 #[cfg(test)]
 mod nudge_delivery_tests {
-    use super::{nudge_due, nudge_retry_text, nudge_text};
+    use super::{
+        nudge_due, nudge_retry_text, nudge_text, promised_nudges_stalled, record_nudge_delivery,
+        update_promised_memory,
+    };
+    use crate::{api::schema::AgentStatus, watchdog::PaneV3Memory};
 
     #[test]
     fn nudge_appends_only_the_suffix_to_an_existing_draft() {
@@ -68,6 +72,134 @@ mod nudge_delivery_tests {
         assert!(!nudge_due(true, 2699, 3, Some(2400), 1800, 2699));
         assert!(!nudge_due(true, 900, 0, None, 1800, 900));
     }
+
+    #[test]
+    fn submitted_nudge_rebaselines_once_and_preserves_repeat_schedule() {
+        let before_nudge = "Now: Keep working until tests pass.\n────\n❯ cont\n────";
+        let after_nudge = "Now: Keep working until tests pass.\ncont — resume: continue your open work to its done criterion\n────\n❯ \n────";
+        let before_hash = crate::watchdog::evidence::semantic_hash(before_nudge);
+        let after_hash = crate::watchdog::evidence::semantic_hash(after_nudge);
+        assert_ne!(before_hash, after_hash);
+        assert!(crate::watchdog::evidence::composer_is_empty(after_nudge));
+        assert_eq!(crate::watchdog::evidence::composer_text(after_nudge), None);
+        let mut mem = PaneV3Memory {
+            hash: before_hash,
+            since: 1,
+            quiet_since: Some(100),
+            last_status: Some(AgentStatus::Idle),
+            last_reported_at: Some("reported".into()),
+            ..PaneV3Memory::default()
+        };
+        let quiet = update_promised_memory(
+            &mut mem,
+            AgentStatus::Idle,
+            Some("reported"),
+            before_hash,
+            true,
+            false,
+            false,
+            1900,
+        );
+        assert_eq!(quiet, 1800);
+        assert!(nudge_due(
+            true,
+            quiet,
+            mem.nudge_count,
+            mem.last_nudge_at,
+            1800,
+            1900
+        ));
+        record_nudge_delivery(&mut mem, 1900);
+
+        let quiet = update_promised_memory(
+            &mut mem,
+            AgentStatus::Idle,
+            Some("reported"),
+            after_hash,
+            true,
+            false,
+            false,
+            1901,
+        );
+        assert_eq!(quiet, 1801);
+        assert_eq!(mem.nudge_count, 1);
+        assert!(!mem.nudge_rebaseline);
+        for (now, expected_count) in [(2199, 1), (2200, 2), (2499, 2), (2500, 3)] {
+            let quiet = update_promised_memory(
+                &mut mem,
+                AgentStatus::Idle,
+                Some("reported"),
+                after_hash,
+                true,
+                false,
+                false,
+                now,
+            );
+            if nudge_due(true, quiet, mem.nudge_count, mem.last_nudge_at, 1800, now) {
+                record_nudge_delivery(&mut mem, now);
+            }
+            assert_eq!(mem.nudge_count, expected_count);
+        }
+        let quiet = update_promised_memory(
+            &mut mem,
+            AgentStatus::Idle,
+            Some("reported"),
+            after_hash,
+            true,
+            false,
+            false,
+            2800,
+        );
+        assert_eq!(quiet, 2700);
+        assert_eq!(mem.nudge_count, 3);
+        assert!(!nudge_due(
+            true,
+            quiet,
+            mem.nudge_count,
+            mem.last_nudge_at,
+            1800,
+            2800
+        ));
+        assert!(promised_nudges_stalled(true, quiet, mem.nudge_count, 1800));
+    }
+
+    #[test]
+    fn status_or_report_change_after_delivery_resets_promised_clock() {
+        for (status, reported_at) in [
+            (AgentStatus::Working, Some("reported")),
+            (AgentStatus::Idle, Some("new-report")),
+        ] {
+            let mut mem = PaneV3Memory {
+                hash: 10,
+                quiet_since: Some(100),
+                nudge_count: 1,
+                last_nudge_at: Some(1900),
+                last_status: Some(AgentStatus::Idle),
+                last_reported_at: Some("reported".into()),
+                nudge_rebaseline: true,
+                ..PaneV3Memory::default()
+            };
+            let expected = status == AgentStatus::Idle;
+            let quiet = update_promised_memory(
+                &mut mem,
+                status,
+                reported_at,
+                20,
+                expected,
+                false,
+                false,
+                2000,
+            );
+            assert!(!mem.nudge_rebaseline);
+            if expected {
+                assert_eq!(quiet, 0);
+                assert_eq!(mem.nudge_count, 0);
+            } else {
+                assert_eq!(mem.quiet_since, None);
+                assert_eq!(mem.nudge_count, 0);
+            }
+        }
+    }
 }
 
 fn nudge_text(draft: Option<&str>, action: &str) -> (String, String) {
@@ -91,6 +223,57 @@ fn nudge_due(
         } else {
             last.is_some_and(|at| now.saturating_sub(at) >= 300)
         }
+}
+
+fn promised_nudges_stalled(expected: bool, quiet: u64, count: u8, threshold: u64) -> bool {
+    expected && count >= 3 && quiet >= threshold.saturating_add(900)
+}
+
+fn record_nudge_delivery(mem: &mut crate::watchdog::PaneV3Memory, now: u64) {
+    mem.nudge_count = mem.nudge_count.saturating_add(1);
+    mem.last_nudge_at = Some(now);
+    mem.nudge_rebaseline = true;
+}
+
+fn update_promised_memory(
+    mem: &mut crate::watchdog::PaneV3Memory,
+    status: AgentStatus,
+    reported_at: Option<&str>,
+    hash: u64,
+    expected: bool,
+    rebound: bool,
+    nudge_echo: bool,
+    now: u64,
+) -> u64 {
+    if rebound {
+        mem.quiet_since = Some(now);
+        mem.nudge_count = 0;
+        mem.last_nudge_at = None;
+    }
+    let submitted_nudge = mem.nudge_rebaseline;
+    mem.nudge_rebaseline = false;
+    let status_unchanged = mem.last_status.is_none_or(|previous| previous == status);
+    let report_unchanged = mem.last_reported_at.as_deref() == reported_at;
+    let activity = mem.hash != 0
+        && !nudge_echo
+        && (mem.hash != hash || !status_unchanged || !report_unchanged);
+    if !expected {
+        mem.quiet_since = None;
+        mem.nudge_count = 0;
+        mem.last_nudge_at = None;
+    } else if submitted_nudge && status_unchanged && report_unchanged && !rebound {
+        // Submission changes transcript semantics; accept that single screen change as baseline.
+        mem.hash = hash;
+        mem.quiet_since.get_or_insert(now);
+    } else if activity && !rebound {
+        mem.quiet_since = Some(now);
+        mem.nudge_count = 0;
+        mem.last_nudge_at = None;
+    } else {
+        mem.quiet_since.get_or_insert(now);
+    }
+    mem.last_reported_at = reported_at.map(str::to_owned);
+    now.saturating_sub(mem.quiet_since.unwrap_or(now))
 }
 
 const DEFAULT_INTERVAL_SECS: u64 = 30;
@@ -345,35 +528,24 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
             && mem.terminal_id.as_ref() != o.terminal_id.as_ref())
             || (mem.agent_session.is_some()
                 && mem.agent_session.as_ref() != o.agent_session.as_ref());
-        if rebound {
-            mem.quiet_since = Some(now);
-            mem.nudge_count = 0;
-            mem.last_nudge_at = None;
-        }
         let nudge_echo = mem.nudge_count > 0
             && watchdog::evidence::composer_text(&o.tail)
                 .is_some_and(|draft| draft.contains("resume: continue your open work"));
-        let activity = mem.hash != 0
-            && !nudge_echo
-            && (mem.hash != hash
-                || mem.last_status.is_some_and(|s| s != o.status)
-                || mem.last_reported_at.as_deref() != o.reported_at.as_deref());
-        if !expected {
-            mem.quiet_since = None;
-            mem.nudge_count = 0;
-            mem.last_nudge_at = None;
-        } else if activity && !rebound {
-            mem.quiet_since = Some(now);
-            mem.nudge_count = 0;
-            mem.last_nudge_at = None;
-        } else {
+        let quiet = update_promised_memory(
+            mem,
+            o.status,
+            o.reported_at.as_deref(),
+            hash,
+            expected,
+            rebound,
+            nudge_echo,
+            now,
+        );
+        // A nudge still in the composer is our own draft, not submitted activity.
+        if nudge_echo && expected {
             mem.quiet_since.get_or_insert(now);
         }
-        promised.push((
-            expected,
-            mem.quiet_since.map(|s| now.saturating_sub(s)).unwrap_or(0),
-        ));
-        mem.last_reported_at = o.reported_at.clone();
+        promised.push((expected, quiet));
     }
     let mut decisions = observations
         .iter()
@@ -389,9 +561,12 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
             decisions[i].expected_to_continue = Some(true);
             decisions[i].quiet_secs = Some(quiet);
             decisions[i].nudge_count = Some(memory[&observations[i].pane_id].nudge_count);
-            if memory[&observations[i].pane_id].nudge_count >= 3
-                && quiet >= options.quiet_secs + 900
-            {
+            if promised_nudges_stalled(
+                expected,
+                quiet,
+                memory[&observations[i].pane_id].nudge_count,
+                options.quiet_secs,
+            ) {
                 decisions[i].class = watchdog::PaneClass::Stalled;
                 decisions[i].evidence = "did not resume after 3 nudges".into();
                 decisions[i].new_state = Some(AgentStatus::Blocked);
@@ -666,8 +841,8 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
                         d.delivered = Some(true);
                         d.reason = None;
                         d.status = "nudged".into();
-                        mem.nudge_count += 1;
-                        mem.last_nudge_at = Some(now);
+                        record_nudge_delivery(mem, now);
+                        mem.nudge_rebaseline = true;
                         d.nudge_count = Some(mem.nudge_count);
                     }
                     reason => {

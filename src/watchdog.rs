@@ -780,6 +780,8 @@ pub(crate) struct PaneV3Memory {
     pub last_nudge_at: Option<u64>,
     #[serde(default)]
     pub last_reported_at: Option<String>,
+    #[serde(default)]
+    pub nudge_rebaseline: bool,
 }
 pub(crate) type PaneV3MemoryMap = HashMap<String, PaneV3Memory>;
 
