@@ -137,7 +137,7 @@ pub(super) fn append_remote_entry_groups(
                 .filter(|remote| agent_ids.contains(&remote.agent_ref.agent))
                 .map(super::remote_agent_as_panel_entry)
                 .collect::<Vec<_>>();
-            append_device_group(app, rows, section, group, group_entries, &remote_activity);
+            append_device_group(app, rows, section, group, group_entries, remote_activity);
         }
         return;
     }
@@ -163,7 +163,7 @@ pub(super) fn append_remote_entry_groups(
             section,
             group,
             group.items.clone(),
-            &remote_activity,
+            remote_activity,
         );
     }
 }
