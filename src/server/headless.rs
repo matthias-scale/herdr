@@ -2916,6 +2916,30 @@ impl HeadlessServer {
             })
     }
 
+    fn detach_terminal_clients_blocked_by_planning_lock(&mut self) {
+        let now = crate::app::settled::unix_seconds(std::time::SystemTime::now());
+        if !self.app.state.planning_lock.is_locked(now) {
+            return;
+        }
+        let blocked = self
+            .clients
+            .iter()
+            .filter_map(|(client_id, client)| match &client.mode {
+                ClientConnectionMode::TerminalAttach { terminal_id, .. }
+                | ClientConnectionMode::TerminalObserve { terminal_id }
+                    if !self.planning_lock_allows_terminal(terminal_id) =>
+                {
+                    Some(*client_id)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for client_id in blocked {
+            self.send_terminal_stream_detach_shutdown(client_id);
+            self.remove_client_and_resize_if_needed(client_id);
+        }
+    }
+
     fn runtime_for_terminal_id_string(
         &self,
         terminal_id: &str,
@@ -3941,6 +3965,19 @@ impl HeadlessServer {
             return self.handle_client_owned_worktree_event(client_id, ev);
         }
         match &ev {
+            AppEvent::PlanningLockFileChanged(lock) => {
+                self.app.state.planning_lock = lock.clone();
+                self.app.state.mark_session_dirty();
+                true
+            }
+            AppEvent::PlanningLockRemoteSnapshot(snapshot) => {
+                self.app
+                    .state
+                    .planning_lock
+                    .apply_remote_snapshot(snapshot.clone());
+                self.app.state.mark_session_dirty();
+                true
+            }
             AppEvent::FleetRefreshed { .. } | AppEvent::FleetAgentInventoryChanged { .. } => {
                 let changed = self.app.handle_internal_event_with_render_impact(ev);
                 let remote_entries = &self.app.state.remote_agent_panel_entries;
@@ -6802,6 +6839,7 @@ impl HeadlessServer {
     }
 
     fn render_and_stream(&mut self) {
+        self.detach_terminal_clients_blocked_by_planning_lock();
         let full_started = crate::render_prof::timer();
         let render_targets = render_targets(&self.clients, self.foreground_client_id);
 
@@ -7384,6 +7422,9 @@ impl HeadlessServer {
         now: Instant,
         geometry_dirty: bool,
     ) -> ScheduledTaskRender {
+        // Unlock windows can expire while no client is rendering. Enforce the
+        // new lock state on the periodic server tick as well as on renders.
+        self.detach_terminal_clients_blocked_by_planning_lock();
         // Nothing renders the status row without an attached app client, so a
         // detached server never samples native metrics.
         let has_app_client = self.has_app_client();
@@ -8151,8 +8192,6 @@ mod tests {
     use crate::protocol::{CellData, CursorState};
     use unicode_width::UnicodeWidthStr;
 
-    #[path = "../idle_render_tests.rs"]
-    mod idle_render_tests;
     #[path = "pane_graphics.rs"]
     mod pane_graphics_tests;
 
@@ -11006,6 +11045,61 @@ next_tab = ""
         });
     }
 
+    #[test]
+    fn planning_lock_detaches_existing_terminal_clients_outside_discussion_tab() {
+        with_terminal_session_test_server(|server, _terminal_id, terminal_id, _public_pane_id| {
+            let control_rx = connect_pending_terminal_client_with_control_rx(server, 20);
+            assert!(
+                server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                    client_id: 20,
+                    terminal_id,
+                    takeover: false,
+                })
+            );
+            let mut lock = crate::planning_lock::PlanningLock::default();
+            lock.configure("a planning password longer than twenty four", "other-tab")
+                .expect("configure lock");
+            server.app.state.planning_lock = lock;
+
+            server.detach_terminal_clients_blocked_by_planning_lock();
+
+            assert!(!server.clients.contains_key(&20));
+            assert_eq!(
+                read_server_shutdown_reason(control_rx.recv().expect("shutdown message")),
+                Some("detached".to_owned())
+            );
+        });
+    }
+
+    #[test]
+    fn planning_lock_expiry_detaches_clients_on_tick_without_a_render() {
+        with_terminal_session_test_server(|server, _terminal_id, terminal_id, _public_pane_id| {
+            let control_rx = connect_pending_terminal_client_with_control_rx(server, 21);
+            assert!(
+                server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                    client_id: 21,
+                    terminal_id,
+                    takeover: false,
+                })
+            );
+            server.app.state.planning_lock.apply_remote_snapshot(Some(
+                crate::planning_lock::Snapshot {
+                    locked: false,
+                    discussion_tab_id: "another-host-tab".into(),
+                    unlock_until_unix_s: Some(0),
+                },
+            ));
+
+            server.handle_scheduled_tasks_headless(Instant::now(), false);
+
+            assert!(!server.clients.contains_key(&21));
+            assert_eq!(
+                read_server_shutdown_reason(control_rx.recv().expect("shutdown message")),
+                Some("detached".to_owned())
+            );
+        });
+    }
+
     fn with_terminal_session_test_server(
         test: impl FnOnce(&mut HeadlessServer, crate::terminal::TerminalId, String, String),
     ) {
@@ -13490,11 +13584,8 @@ next_tab = ""
         );
     }
 
-    /// The animation ships through the server loop, not `App::run`, so this is
-    /// the path that has to advance it. It shipped ticking only in `App::run`,
-    /// which is why the field stood still in front of every real client.
     #[test]
-    fn an_attached_headless_server_advances_the_sidebar_animation() {
+    fn an_attached_headless_server_does_not_advance_the_removed_sidebar_animation() {
         let mut server = test_headless_server();
         server.app.state.hyperspace.enabled = true;
         let (writer, _control_rx, _render_rx) = test_client_writer();
@@ -13514,21 +13605,19 @@ next_tab = ""
             &mut server.app.state,
             ratatui::layout::Rect::new(0, 0, 120, 40),
         );
-        assert!(
-            server.app.state.view.hyperspace_rect.height > 0,
-            "the panel has to be on screen for the tick to mean anything"
+        assert_eq!(
+            server.app.state.view.hyperspace_rect,
+            ratatui::layout::Rect::default(),
+            "the removed sidebar panel has no render area"
         );
 
         let before = server.app.state.hyperspace.step();
         let now = Instant::now() + crate::hyperspace::FRAME_INTERVAL * 2;
-        assert!(
-            server.handle_scheduled_tasks_headless(now, false),
-            "advancing the field is a render-worthy change"
-        );
-        assert_ne!(
+        server.handle_scheduled_tasks_headless(now, false);
+        assert_eq!(
             server.app.state.hyperspace.step(),
             before,
-            "the star field has to move"
+            "an off-screen panel has no render-worthy animation ticks"
         );
     }
 

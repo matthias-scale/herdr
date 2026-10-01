@@ -369,6 +369,24 @@ fn sidebar_machine_host<'a>(app: &'a AppState, entry: &'a AgentPanelEntry) -> &'
         .unwrap_or(app.agent_host_name.as_str())
 }
 
+fn effort_from_launch_argv(argv: &[String]) -> Option<&str> {
+    argv.iter().enumerate().find_map(|(index, argument)| {
+        argument
+            .strip_prefix("--effort=")
+            .or_else(|| argument.strip_prefix("--reasoning-effort="))
+            .or_else(|| {
+                matches!(argument.as_str(), "--effort" | "--reasoning-effort")
+                    .then(|| argv.get(index + 1).map(String::as_str))
+                    .flatten()
+            })
+            .or_else(|| {
+                argument
+                    .strip_prefix("model_reasoning_effort=")
+                    .filter(|_| index > 0 && argv[index - 1] == "-c")
+            })
+    })
+}
+
 /// Machine column label: the host's first three characters, lowercased and
 /// padded, so `ub1`, `ub2`, `mbpro` and `mbair` read as `ub1`, `ub2`, `mbp`, `mba`.
 /// The local machine renders blank: only other hosts need naming.
@@ -401,6 +419,15 @@ fn compact_age(
         .and_then(|instant| status_report_age_compact_label(Some(instant), now))
         .unwrap_or_else(|| "—".to_string());
     (age, instant)
+}
+
+fn compact_age_color(entry: &AgentPanelEntry, now: std::time::Instant, p: &Palette) -> Color {
+    let (_, instant) = compact_age(entry, now);
+    if instant.is_some_and(|instant| now.saturating_duration_since(instant).as_secs() >= 3600) {
+        p.yellow
+    } else {
+        p.overlay0
+    }
 }
 
 fn reply_timestamp(value: Option<&str>, now: std::time::Instant) -> Option<AgentReplyTimestamp> {
@@ -1035,7 +1062,7 @@ fn render_remote_compact_agent_row_with_prefix(
     let age_style = Style::default().fg(if remote.snoozed_until.is_some() {
         p.overlay0
     } else {
-        p.yellow
+        compact_age_color(&remote.entry, app.view_observed_at, p)
     });
 
     let mut x = rect.x.saturating_add(widths.prefix as u16);
@@ -1236,7 +1263,7 @@ fn render_compact_agent_row_with_prefix(
     let provider_style = Style::default()
         .fg(provider_color(entry, p))
         .add_modifier(Modifier::DIM);
-    let age_style = Style::default().fg(p.yellow);
+    let age_style = Style::default().fg(compact_age_color(entry, app.view_observed_at, p));
     let mut spans = vec![
         Span::styled(prefix, row_style(compact_row_style(Style::default(), bg))),
         Span::styled(dot, row_style(dot_style)),
@@ -1769,10 +1796,11 @@ fn take_remote_agent_panel_data_copies() -> usize {
 pub(crate) struct RemoteAgentPanelEntry {
     pub agent_ref: crate::api::schema::AgentRef,
     pub entry: AgentPanelEntry,
+    pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
     render_dot: &'static str,
     pub(crate) render_title: String,
     render_provider: String,
-    narrow_host_suffix: String,
     search_key_lowercase: String,
     work_context: crate::work_context::PaneWorkContext,
     workspace_id: String,
@@ -1787,11 +1815,11 @@ impl RemoteAgentPanelEntry {
     pub(crate) fn new(agent_ref: crate::api::schema::AgentRef, entry: AgentPanelEntry) -> Self {
         let mut entry = entry;
         entry.identity = AgentPanelIdentity::Remote(agent_ref.clone());
-        let narrow_host = middle_elide(agent_ref.host.as_str(), SIDEBAR_HOST_TOKEN_NARROW_WIDTH);
         Self::new_with_narrow_host(
             agent_ref,
             entry,
-            narrow_host,
+            None,
+            None,
             crate::work_context::PaneWorkContext::default(),
             String::new(),
             false,
@@ -1804,7 +1832,8 @@ impl RemoteAgentPanelEntry {
     fn new_with_narrow_host(
         agent_ref: crate::api::schema::AgentRef,
         entry: AgentPanelEntry,
-        narrow_host: String,
+        model: Option<String>,
+        effort: Option<String>,
         work_context: crate::work_context::PaneWorkContext,
         workspace_id: String,
         settled: bool,
@@ -1815,7 +1844,6 @@ impl RemoteAgentPanelEntry {
         let render_dot = compact_row_dot(&entry);
         let render_title = compact_row_title(&entry, false).to_string();
         let render_provider = compact_provider(&entry, nerd_font);
-        let narrow_host_suffix = format!(" · {narrow_host}");
         let search_key_lowercase = format!(
             "{} {} {} {} {}",
             agent_ref.host,
@@ -1830,7 +1858,8 @@ impl RemoteAgentPanelEntry {
             render_dot,
             render_title,
             render_provider,
-            narrow_host_suffix,
+            model,
+            effort,
             search_key_lowercase,
             work_context,
             workspace_id,
@@ -1880,18 +1909,6 @@ where
         tokens.insert(host.to_string(), candidate);
     }
     tokens
-}
-
-fn narrow_remote_host_tokens(
-    snapshot: &crate::fleet::Snapshot,
-) -> std::collections::HashMap<String, String> {
-    narrow_host_tokens(
-        snapshot
-            .hosts
-            .iter()
-            .filter(|host| !host.local)
-            .map(|host| host.name.as_str()),
-    )
 }
 
 pub(crate) fn short_fleet_host_names<'a, I>(hosts: I) -> std::collections::HashMap<String, String>
@@ -2524,7 +2541,6 @@ pub(crate) fn remote_agent_panel_entries_at(
     now_unix_s: u64,
     nerd_font: bool,
 ) -> Vec<std::sync::Arc<RemoteAgentPanelEntry>> {
-    let narrow_host_tokens = narrow_remote_host_tokens(snapshot);
     let mut entries = snapshot
         .hosts
         .iter()
@@ -2600,12 +2616,6 @@ pub(crate) fn remote_agent_panel_entries_at(
             let reported_at = row.age_seconds_at(now_unix_s).and_then(|age| {
                 std::time::Instant::now().checked_sub(std::time::Duration::from_secs(age))
             });
-            let narrow_host = narrow_host_tokens
-                .get(&row.agent_ref.host)
-                .cloned()
-                .unwrap_or_else(|| {
-                    middle_elide(row.agent_ref.host.as_str(), SIDEBAR_HOST_TOKEN_NARROW_WIDTH)
-                });
             let has_agent = agent_label.is_some();
             let mut panel_entry = AgentPanelEntry::new(
                 AgentPanelIdentity::Remote(row.agent_ref.clone()),
@@ -2660,7 +2670,8 @@ pub(crate) fn remote_agent_panel_entries_at(
                 RemoteAgentPanelEntry::new_with_narrow_host(
                     row.agent_ref.clone(),
                     panel_entry,
-                    narrow_host,
+                    row.model().map(str::to_string),
+                    row.effort().map(str::to_string),
                     work_context,
                     workspace_id,
                     lifecycle.settled,
@@ -4022,8 +4033,6 @@ fn compact_sidebar_rows_inner(
             &visible_entries,
             &[],
             &[],
-            &visible_entries,
-            &remote_entries,
             expand_worktrees,
             &pods,
             false,
@@ -4033,12 +4042,24 @@ fn compact_sidebar_rows_inner(
         return rows;
     }
 
+    // Remote tabs share the ordinary space/repo groups in compact layout.
+    // They used to appear only in the removed Fleet block.
+    let mut projected_active = visible_entries.clone();
+    let mut projected_snoozed = snoozed_entries.clone();
+    let mut projected_settled = settled_entries.clone();
+    for entry in remote_entries.iter().cloned() {
+        match sidebar_entry_lifecycle(app, &entry) {
+            SidebarEntryLifecycle::Active => projected_active.push(entry),
+            SidebarEntryLifecycle::Snoozed => projected_snoozed.push(entry),
+            SidebarEntryLifecycle::Settled => projected_settled.push(entry),
+        }
+    }
+
     let mut rows = Vec::new();
     if sidebar_rows_are_filtered(app)
-        && visible_entries.is_empty()
-        && snoozed_entries.is_empty()
-        && settled_entries.is_empty()
-        && remote_entries.is_empty()
+        && projected_active.is_empty()
+        && projected_snoozed.is_empty()
+        && projected_settled.is_empty()
     {
         append_pod_rows(app, &mut rows, &pods);
         let mut ambient = Vec::new();
@@ -4054,17 +4075,17 @@ fn compact_sidebar_rows_inner(
     let legacy_space_tree = app.sidebar_group_mode == SidebarGroupMode::Spaces
         || app.sidebar_group_mode == SidebarGroupMode::RepoWorktree
         || (app.sidebar_group_mode == SidebarGroupMode::Repo
-            && !visible_entries
+            && !projected_active
                 .iter()
                 .any(|entry| entry_repo_label(app, entry).is_some())
-            && !visible_entries.iter().any(|entry| {
+            && !projected_active.iter().any(|entry| {
                 entry_work_context(app, entry).is_some_and(pane_context_has_sidebar_metadata)
             }));
     if legacy_space_tree {
         append_legacy_space_rows(
             app,
             &mut rows,
-            visible_entries.clone(),
+            projected_active.clone(),
             expand_worktrees,
             terminal_runtimes,
             None,
@@ -4073,22 +4094,20 @@ fn compact_sidebar_rows_inner(
     } else {
         match app.sidebar_group_mode {
             SidebarGroupMode::Repo | SidebarGroupMode::RepoWorktree => {
-                append_repo_group_rows(app, &mut rows, &visible_entries, false);
+                append_repo_group_rows(app, &mut rows, &projected_active, false);
             }
             SidebarGroupMode::Spaces => {}
             SidebarGroupMode::RepoPr | SidebarGroupMode::LinearTeam | SidebarGroupMode::Missive => {
-                append_object_group_rows(app, &mut rows, &visible_entries, false);
+                append_object_group_rows(app, &mut rows, &projected_active, false);
             }
         }
     }
     append_ordered_sidebar_blocks(
         app,
         &mut rows,
-        &visible_entries,
-        &snoozed_entries,
-        &settled_entries,
-        &visible_entries,
-        &remote_entries,
+        &projected_active,
+        &projected_snoozed,
+        &projected_settled,
         expand_worktrees,
         &pods,
         true,
@@ -5400,15 +5419,13 @@ enum SidebarBlock {
     Pods,
     Unassigned,
     Deferred,
-    Fleet,
     Ambient,
 }
 
-const SIDEBAR_BLOCK_ORDER: [SidebarBlock; 5] = [
+const SIDEBAR_BLOCK_ORDER: [SidebarBlock; 4] = [
     SidebarBlock::Pods,
     SidebarBlock::Unassigned,
     SidebarBlock::Deferred,
-    SidebarBlock::Fleet,
     SidebarBlock::Ambient,
 ];
 
@@ -5418,8 +5435,6 @@ fn append_ordered_sidebar_blocks(
     active_entries: &[AgentPanelEntry],
     snoozed_entries: &[AgentPanelEntry],
     settled_entries: &[AgentPanelEntry],
-    local_fleet_entries: &[AgentPanelEntry],
-    remote_entries: &[AgentPanelEntry],
     expand_worktrees: bool,
     pods: &PodProjection,
     include_deferred: bool,
@@ -5447,9 +5462,6 @@ fn append_ordered_sidebar_blocks(
                     settled_entries.to_vec(),
                     expand_worktrees,
                 );
-            }
-            SidebarBlock::Fleet => {
-                append_fleet_rows(app, &mut block_rows, local_fleet_entries, remote_entries)
             }
             SidebarBlock::Ambient => {
                 if sidebar_area_is_visible(app, crate::config::SidebarArea::Runs) {
@@ -5591,187 +5603,6 @@ fn needs_you_space_icon(
             .unwrap_or_else(|| space_abbreviation(name))
     } else {
         space_abbreviation(name)
-    }
-}
-
-fn append_fleet_rows(
-    app: &AppState,
-    rows: &mut Vec<SidebarRow>,
-    local_entries: &[AgentPanelEntry],
-    entries: &[AgentPanelEntry],
-) {
-    if !fleet_shows_hosts(app, entries) {
-        return;
-    }
-    let mut hosts = Vec::<(String, Vec<AgentPanelEntry>)>::new();
-    let mut local_entries = local_entries.to_vec();
-    local_entries.retain(|entry| {
-        entry.has_agent
-            && entry
-                .local_target()
-                .is_some_and(|target| !app.remote_focus_proxy_panes.contains(&target.pane_id))
-    });
-    hosts.push((app.agent_host_name.clone(), local_entries));
-    for host in fleet_remote_host_names(app, entries) {
-        let host_entries = remote_entries_on_host(entries, &host);
-        hosts.push((host, host_entries));
-    }
-    let host_tokens = hosts
-        .iter()
-        .map(|(host, entries)| {
-            let token = entries
-                .first()
-                .and_then(|entry| entry.remote_entry.as_ref())
-                .and_then(|remote| remote.narrow_host_suffix.strip_prefix(" · "))
-                .map(str::to_string)
-                .unwrap_or_else(|| middle_elide(host, SIDEBAR_HOST_TOKEN_NARROW_WIDTH));
-            (host.clone(), token)
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-    let host_counts = hosts
-        .iter()
-        .filter(|(host, _)| host != &app.agent_host_name)
-        .map(|(host, entries)| {
-            let count = entries
-                .iter()
-                .filter(|entry| {
-                    entry
-                        .remote_entry
-                        .as_ref()
-                        .is_some_and(|remote| !remote.settled && remote.snoozed_until.is_none())
-                })
-                .count();
-            SidebarHostCount {
-                host: host_tokens
-                    .get(host)
-                    .cloned()
-                    .unwrap_or_else(|| middle_elide(host, SIDEBAR_HOST_TOKEN_NARROW_WIDTH)),
-                count,
-            }
-        })
-        .filter(|count| count.count > 0)
-        .collect::<Vec<_>>();
-    let collapsed = section_is_collapsed(app, FLEET_SECTION_TITLE);
-    rows.push(SidebarRow::SectionHeader {
-        title: FLEET_SECTION_TITLE,
-        count: hosts.iter().map(|(_, entries)| entries.len()).sum(),
-        host_counts,
-        collapsed,
-    });
-    if collapsed {
-        return;
-    }
-    for (host, host_entries) in hosts {
-        let key = format!("fleet:host:{host}");
-        let collapsed = section_is_collapsed(app, &key);
-        rows.push(SidebarRow::NestedHeader {
-            key: key.clone(),
-            action_key: None,
-            sort_key: None,
-            sort_mode: SidebarSortMode::Default,
-            title: if host == app.agent_host_name {
-                format!("{host} · this device")
-            } else {
-                host.clone()
-            },
-            count: host_entries.len(),
-            activity_count: None,
-            collapsed,
-            // Empty hosts keep their `(0)`: a dim header hides its count.
-            dim: false,
-            status: None,
-            spawn: false,
-        });
-        if !collapsed {
-            append_fleet_repo_rows(app, rows, host, host_entries);
-        }
-    }
-}
-
-/// Whether the sidebar should list the fleet's devices: the whole fleet is in
-/// scope and at least one remote host is configured, reachable, or reporting.
-fn fleet_shows_hosts(app: &AppState, remote_entries: &[AgentPanelEntry]) -> bool {
-    !app.fleet_snapshot.configured_hosts.is_empty()
-        || app.fleet_snapshot.hosts.iter().any(|host| !host.local)
-        || !remote_entries.is_empty()
-}
-
-/// Remote hosts in fleet configuration order, including reachable hosts with
-/// no agent rows, then any host only known from its entries.
-fn fleet_remote_host_names(app: &AppState, entries: &[AgentPanelEntry]) -> Vec<String> {
-    let mut names = app
-        .fleet_snapshot
-        .hosts
-        .iter()
-        .filter(|host| !host.local && host.state == crate::fleet::HostState::Reachable)
-        .map(|host| host.name.clone())
-        .collect::<Vec<_>>();
-    for entry in entries {
-        if let Some(remote) = entry.remote_entry.as_ref() {
-            if !names.contains(&remote.agent_ref.host) {
-                names.push(remote.agent_ref.host.clone());
-            }
-        }
-    }
-    names
-}
-
-fn remote_entries_on_host(entries: &[AgentPanelEntry], host: &str) -> Vec<AgentPanelEntry> {
-    entries
-        .iter()
-        .filter(|entry| {
-            entry
-                .remote_entry
-                .as_ref()
-                .is_some_and(|remote| remote.agent_ref.host == host)
-        })
-        .cloned()
-        .collect()
-}
-
-fn append_fleet_repo_rows(
-    app: &AppState,
-    rows: &mut Vec<SidebarRow>,
-    host: String,
-    entries: Vec<AgentPanelEntry>,
-) {
-    let mut groups = std::collections::BTreeMap::<String, (String, Vec<AgentPanelEntry>)>::new();
-    for entry in entries {
-        let (key, title) = entry_repo_group(app, &entry)
-            .unwrap_or_else(|| ("no-repo".to_string(), "no repo".to_string()));
-        groups
-            .entry(key)
-            .or_insert_with(|| (title, Vec::new()))
-            .1
-            .push(entry);
-    }
-    let mut groups = groups.into_iter().collect::<Vec<_>>();
-    groups.sort_by(|left, right| {
-        (left.1 .0 == "no repo")
-            .cmp(&(right.1 .0 == "no repo"))
-            .then_with(|| cmp_sidebar_entry_names(&left.1 .0, &right.1 .0))
-    });
-    for (key, (title, members)) in groups {
-        // `sort_by` on the outer groups is stable; keep members in their
-        // original snapshot/pane order, especially in the no-repo group.
-        let key = format!("fleet:repo:{host}:{key}");
-        let collapsed = section_is_collapsed(app, &key);
-        rows.push(SidebarRow::NestedHeader {
-            key,
-            action_key: None,
-            sort_key: None,
-            sort_mode: SidebarSortMode::Default,
-            title,
-            count: members.len(),
-            activity_count: None,
-            collapsed,
-            dim: false,
-            status: None,
-            spawn: false,
-        });
-        if !collapsed {
-            append_tab_rows(rows, members, 2);
-        }
     }
 }
 
@@ -7962,14 +7793,7 @@ pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
 /// Everything above the animation - the workspace list and the notepad - is
 /// laid out inside this, so both shrink with it.
 fn expanded_sidebar_body(app: &AppState, area: Rect) -> Rect {
-    let content = expanded_sidebar_content_for_app(app, area);
-    let animation = crate::ui::hyperspace::animation_height(app, content);
-    Rect::new(
-        content.x,
-        content.y,
-        content.width,
-        content.height.saturating_sub(animation),
-    )
+    expanded_sidebar_content_for_app(app, area)
 }
 
 /// The workspace list gets the sidebar's content area minus whatever the
@@ -7989,10 +7813,8 @@ fn sidebar_goals_rect(app: &AppState, area: Rect) -> Rect {
     crate::ui::goals::split_sidebar_panels(app, expanded_sidebar_body(app, area)).goals
 }
 
-/// The idle animation's box, in the bottom-left corner of the sidebar's content
-/// area and below the notepad.
-pub(crate) fn sidebar_animation_rect(app: &AppState, area: Rect) -> Rect {
-    crate::ui::hyperspace::animation_box_rect(app, expanded_sidebar_content_for_app(app, area))
+pub(crate) fn sidebar_animation_rect(_app: &AppState, _area: Rect) -> Rect {
+    Rect::default()
 }
 
 pub(crate) fn workspace_list_body_rect(app: &AppState, area: Rect, has_scrollbar: bool) -> Rect {
@@ -9247,6 +9069,37 @@ pub(crate) fn compute_sidebar_hover_targets(
                     }
                 }
                 let title_width = usize::from(body.width).saturating_sub(fixed_width);
+                if widths.provider > 0 {
+                    if let Some(rect) = clamp_row_cells(
+                        body,
+                        row_y,
+                        prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width,
+                        widths.provider,
+                    ) {
+                        let terminal = app
+                            .workspaces
+                            .get(target.ws_idx)
+                            .and_then(|workspace| workspace.tabs.get(target.tab_idx))
+                            .and_then(|tab| tab.panes.get(&target.pane_id))
+                            .and_then(|pane| app.terminals.get(&pane.attached_terminal_id));
+                        let model = terminal
+                            .and_then(|terminal| terminal.agent_model.as_deref())
+                            .unwrap_or("model unknown");
+                        let effort = terminal
+                            .and_then(|terminal| terminal.launch_argv.as_deref())
+                            .and_then(effort_from_launch_argv)
+                            .unwrap_or("effort unknown");
+                        targets.push(crate::app::state::SidebarHoverTarget {
+                            rect,
+                            label: format!(
+                                "{} · {model} · effort {effort}",
+                                entry.agent_label.as_deref().unwrap_or("agent")
+                            ),
+                            action: None,
+                            row_hover: false,
+                        });
+                    }
+                }
                 let control_pane = row_control_pane(app, entry, tab);
                 let available_width =
                     selected_row_controls_width(control_pane.as_ref(), title_width, body.width);
@@ -9393,6 +9246,26 @@ pub(crate) fn compute_sidebar_hover_targets(
                     }
                 }
                 let title_width = row_width.saturating_sub(fixed_width);
+                if widths.provider > 0 {
+                    if let Some(rect) = clamp_row_cells(
+                        body,
+                        row_y,
+                        widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width,
+                        widths.provider,
+                    ) {
+                        targets.push(crate::app::state::SidebarHoverTarget {
+                            rect,
+                            label: format!(
+                                "{} · {} · effort {}",
+                                entry.entry.agent_label.as_deref().unwrap_or("agent"),
+                                entry.model.as_deref().unwrap_or("model unknown"),
+                                entry.effort.as_deref().unwrap_or("effort unknown"),
+                            ),
+                            action: None,
+                            row_hover: false,
+                        });
+                    }
+                }
                 let control = remote_row_control(entry);
                 let available_width =
                     selected_row_controls_width(control.as_ref(), title_width, body.width);
@@ -10730,7 +10603,6 @@ pub(super) fn render_sidebar(
     render_workspace_list(app, terminal_runtimes, frame, area, is_navigating);
     crate::ui::notepad::render_notepad(app, frame, sidebar_notepad_rect(app, area));
     crate::ui::goals::render_goals(app, frame, sidebar_goals_rect(app, area));
-    crate::ui::hyperspace::render_animation(app, frame, sidebar_animation_rect(app, area));
     render_sidebar_header(app, frame, area, p);
     render_sidebar_hosts(app, frame, area);
     let settings = sidebar_footer_settings_hit_area(area);
@@ -14054,8 +13926,11 @@ pub(crate) mod tests {
 
     fn expand_fleet(app: &mut AppState) {
         for mode in SidebarGroupMode::ALL {
-            app.collapsed_sidebar_groups
-                .remove(&format!("{}:Fleet", mode.collapse_namespace()));
+            let namespace = mode.collapse_namespace();
+            for section in [SNOOZED_SECTION_TITLE, SETTLED_SECTION_TITLE] {
+                app.collapsed_sidebar_groups
+                    .remove(&format!("{namespace}:{section}"));
+            }
         }
     }
 
@@ -14160,118 +14035,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn fleet_desktop_and_mobile_share_rows_with_host_headers() {
-        let mut app = app_with_two_remote_hosts();
-        expand_fleet(&mut app);
-        for (surface, rows) in [
-            ("desktop", sidebar_rows(&app)),
-            ("mobile", mobile_sidebar_rows(&app)),
-        ] {
-            assert_eq!(
-                rows.iter()
-                    .filter(|row| matches!(row, SidebarRow::NestedHeader { key, .. } if key.starts_with("fleet:host:")))
-                    .count(),
-                3,
-                "{surface}"
-            );
-            assert_eq!(
-                rows.iter()
-                    .filter(|row| matches!(row, SidebarRow::RemoteAgent { .. }))
-                    .count(),
-                3,
-                "{surface}"
-            );
-        }
-    }
-
-    #[test]
-    fn fleet_starts_with_local_device_and_preserves_remote_config_order() {
-        let mut app = app_with_two_remote_hosts();
-        app.sidebar_width = 60;
-        let rows = sidebar_rows(&app);
-        let hosts = rows
-            .iter()
-            .filter_map(|row| match row {
-                SidebarRow::NestedHeader { key, title, .. } if key.starts_with("fleet:host:") => {
-                    Some((key.as_str(), title.as_str()))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(hosts[0].1, format!("{} · this device", app.agent_host_name));
-        assert_eq!(hosts[1].0, "fleet:host:remote-b");
-        assert_eq!(hosts[2].0, "fleet:host:remote-a");
-    }
-
-    #[test]
-    fn sections_layout_lists_devices_in_the_fleet_section_without_machine_filter() {
-        let mut app = app_with_two_remote_hosts();
-        app.sidebar_sections_layout = true;
-        app.sidebar_width = 60;
-        // Fleet starts collapsed in the sections layout; the stored key expands it.
-        app.collapsed_sidebar_groups
-            .insert(format!("sections:{FLEET_SECTION_TITLE}"));
-        let rows = sidebar_rows(&app);
-        let fleet = rows
-            .iter()
-            .position(|row| {
-                matches!(
-                    row,
-                    SidebarRow::SectionHeader {
-                        title: FLEET_SECTION_TITLE,
-                        ..
-                    }
-                )
-            })
-            .expect("fleet section");
-        let hosts = rows[fleet..]
-            .iter()
-            .filter_map(|row| match row {
-                SidebarRow::NestedHeader { key, title, .. } if key.starts_with("fleet:host:") => {
-                    Some((key.as_str(), title.as_str()))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(hosts.len(), 3, "{hosts:?}");
-        assert_eq!(hosts[0].1, format!("{} · this device", app.agent_host_name));
-        assert_eq!(hosts[1].0, "fleet:host:remote-b");
-        assert_eq!(hosts[2].0, "fleet:host:remote-a");
-
-        assert!(sidebar_rows(&app).iter().any(|row| matches!(
-            row,
-            SidebarRow::SectionHeader {
-                title: FLEET_SECTION_TITLE,
-                ..
-            }
-        )));
-    }
-
-    #[test]
-    fn fleet_has_empty_remote_hosts_but_is_absent_without_fleet_configuration() {
-        let mut app = app_with_agents(&["local"]);
-        app.fleet_snapshot.hosts = vec![fleet_host_snapshot("empty", false, Vec::new())];
-        app.fleet_snapshot.configured_hosts = vec!["empty".into()];
-        expand_fleet(&mut app);
-        let rows = sidebar_rows(&app);
-        assert!(rows.iter().any(|row| matches!(row,
-            SidebarRow::NestedHeader { title, count: 0, dim: false, .. } if title == "empty")));
-
-        app.fleet_snapshot.hosts.clear();
-        app.fleet_snapshot.configured_hosts.clear();
-        assert!(!sidebar_rows(&app).iter().any(|row| matches!(row,
-            SidebarRow::SectionHeader { title, .. } if *title == FLEET_SECTION_TITLE)));
-    }
-
-    #[test]
-    fn fleet_repo_groups_report_member_counts() {
-        let app = app_with_two_remote_hosts();
-        let rows = sidebar_rows(&app);
-        assert!(rows.iter().any(|row| matches!(row,
-            SidebarRow::NestedHeader { title, count: 2, .. } if title == "no repo")));
-    }
-
-    #[test]
     fn empty_lifecycle_shelves_keep_zero_counts() {
         let app = AppState::test_new();
         let rows = sidebar_rows(&app);
@@ -14323,35 +14086,16 @@ pub(crate) mod tests {
         app.view_observed_unix_s = 1_725_000_899;
 
         let rows = sidebar_rows(&app);
-        let header = rows
-            .iter()
-            .find_map(|row| match row {
-                SidebarRow::SectionHeader {
-                    title,
-                    collapsed,
-                    host_counts,
-                    ..
-                } if *title == FLEET_SECTION_TITLE => Some((*collapsed, host_counts)),
-                _ => None,
-            })
-            .expect("collapsed Fleet header");
-        assert!(header.0);
-        assert_eq!(
-            header
-                .1
-                .iter()
-                .map(|count| (count.host.as_str(), count.count))
-                .collect::<Vec<_>>(),
-            [("ub1", 1)]
-        );
-
-        expand_fleet(&mut app);
-        let rows = sidebar_rows(&app);
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader { title, .. } if *title == FLEET_SECTION_TITLE
+        )));
         assert_eq!(
             rows.iter()
                 .filter(|row| matches!(row, SidebarRow::RemoteAgent { .. }))
                 .count(),
-            3
+            1,
+            "only active agents occupy the active row; snoozed and settled agents live in their lifecycle shelves"
         );
         let snoozed = app
             .remote_agent_panel_entries
@@ -14411,26 +14155,15 @@ pub(crate) mod tests {
         let all_machine_rows = sidebar_rows(&app);
         assert!(all_machine_rows.iter().any(|row| matches!(
             row,
-            SidebarRow::SectionHeader { title, .. } if *title == FLEET_SECTION_TITLE
-        )));
-        assert!(all_machine_rows.iter().any(|row| matches!(
-            row,
             SidebarRow::SectionHeader { title, .. } if *title == RUNS_SECTION_TITLE
         )));
         assert!(all_machine_rows.iter().any(|row| matches!(
             row,
             SidebarRow::AgentRun { host, .. } if host == "remote-b"
         )));
-        assert!(sidebar_rows(&app)
-            .iter()
-            .any(|row| matches!(row, SidebarRow::SectionHeader { title, .. } if *title == FLEET_SECTION_TITLE)));
 
         app.agent_host_name = "mbpro".into();
         let rows = sidebar_rows(&app);
-        assert!(rows.iter().any(|row| matches!(
-            row,
-            SidebarRow::SectionHeader { title, .. } if *title == FLEET_SECTION_TITLE
-        )));
         assert!(rows.iter().any(|row| matches!(
             row,
             SidebarRow::SectionHeader { title, .. } if *title == RUNS_SECTION_TITLE
@@ -14602,8 +14335,6 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
         app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
-        expand_fleet(&mut app);
-
         let rows = sidebar_rows(&app);
         assert_eq!(
             rows.iter()
@@ -14690,28 +14421,21 @@ pub(crate) mod tests {
             SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
                 if entry.local_target().is_some_and(|target| target.pane_id == snoozed_pane)
         )));
-        let fleet_at = rows
-            .iter()
-            .position(|row| {
-                matches!(
-                    row,
-                    SidebarRow::SectionHeader {
-                        title: FLEET_SECTION_TITLE,
-                        ..
-                    }
-                )
-            })
-            .expect("fleet section");
-        assert!(rows[fleet_at + 1..].iter().any(|row| matches!(
+        assert!(rows.iter().any(|row| matches!(
             row,
-            SidebarRow::RemoteAgent { entry, .. } if entry.agent_ref.agent == "remote-snoozed"
+            SidebarRow::Agent { entry, .. }
+                if matches!(&entry.identity, AgentPanelIdentity::Remote(agent_ref) if agent_ref.agent == "remote-snoozed")
         )));
         assert!(rows[settled_at + 1..].iter().any(|row| matches!(
             row,
             SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. }
                 if entry.local_target().is_some_and(|target| target.pane_id == settled_pane)
         )));
-        assert!(rows[fleet_at + 1..].iter().any(|row| matches!(
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Agent { entry, .. }
+                if matches!(&entry.identity, AgentPanelIdentity::Remote(agent_ref) if agent_ref.agent == "remote-settled")
+        ) || matches!(
             row,
             SidebarRow::RemoteAgent { entry, .. } if entry.agent_ref.agent == "remote-settled"
         )));
@@ -20817,6 +20541,25 @@ row_gap = 1
             ),
             "Last status report 4m ago\nAgent reply time unavailable"
         );
+    }
+
+    #[test]
+    fn agent_sidebar_age_turns_yellow_at_one_hour() {
+        let now = std::time::Instant::now();
+        let app = app_with_agents(&["one"]);
+        let mut entry = sidebar_thread_entries(&app).remove(0);
+        entry.reported_at = None;
+        entry.activity_at = None;
+        for (minutes, expected) in [(59, false), (60, true)] {
+            entry.last_turn_at = Some(AgentReplyTimestamp {
+                instant: now - std::time::Duration::from_secs(minutes * 60),
+                unix_seconds: 0,
+            });
+            assert_eq!(
+                compact_age_color(&entry, now, &app.palette) == app.palette.yellow,
+                expected
+            );
+        }
     }
 
     #[test]
@@ -27376,8 +27119,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 SNOOZED_SECTION_TITLE,
                 SETTLED_SECTION_TITLE,
                 "---",
-                FLEET_SECTION_TITLE,
-                "---",
                 RUNS_SECTION_TITLE,
                 SYMPHONY_SECTION_TITLE,
             ]
@@ -31893,7 +31634,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn sections_animation_preserves_three_workspace_rows_at_heights_14_and_15() {
+    fn removed_sidebar_animation_does_not_reserve_workspace_rows() {
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
         app.sidebar_areas.sky_header = true;
@@ -31915,11 +31656,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "height {height} leaves only {} workspace rows",
                 body.height
             );
-            if height == 14 {
-                assert_eq!(animation.height, 0, "animation yields its space at 14 rows");
-            } else {
-                assert_eq!(animation.height, 6, "animation fits above the list floor");
-            }
+            assert_eq!(animation.height, 0, "sidebar animation is removed");
         }
     }
     #[test]
