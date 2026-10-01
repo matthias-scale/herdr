@@ -7007,7 +7007,7 @@ mod tests {
         );
         app.state.remote_agent_panel_entries = remote.remote_agent_panel_entries;
         app.state.sidebar_selected_remote_agent = Some(entry.agent_ref.clone());
-        app.state.collapsed_sidebar_groups.remove("repo:Fleet");
+        app.state.collapsed_sidebar_groups.remove("repo:Settled");
         app.state.sidebar_width = 60;
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
         let control = app
