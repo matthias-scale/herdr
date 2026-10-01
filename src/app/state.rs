@@ -1070,25 +1070,11 @@ pub struct TabCardArea {
     pub rect: Rect,
 }
 
-/// Per-view narrowing for work-item projections. This remains TUI-only state:
-/// provider observations are shared runtime facts, while each attached client
-/// chooses its own filters.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub(crate) enum SidebarMachineScope {
-    #[serde(rename = "this_machine")]
-    ThisMachine,
-    #[serde(rename = "all_machines")]
-    #[default]
-    AllMachines,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub(crate) struct SidebarWorkFilter {
     /// Persisted row-search query shared by every sidebar view.
     pub(crate) query: String,
-    /// Whether the sidebar includes remote fleet sessions in its body.
-    pub(crate) machine_scope: SidebarMachineScope,
     /// Id of the `[[projects]]` entry the sidebar is scoped to. `None` shows
     /// every project, which is what an unconfigured Herdr always shows.
     pub(crate) project: Option<String>,
@@ -1276,7 +1262,6 @@ impl Default for SidebarWorkFilter {
     fn default() -> Self {
         Self {
             query: String::new(),
-            machine_scope: SidebarMachineScope::default(),
             project: None,
             team: Some("SCA".into()),
             assignee: Some("me".into()),
@@ -1876,6 +1861,7 @@ pub(crate) struct ClientOverlayState {
     pub(crate) confirm_close_workspace_id: Option<String>,
     pub(crate) confirm_close_remote_agent_ref: Option<crate::api::schema::AgentRef>,
     pub(crate) name_input: String,
+    pub(crate) name_input_caret: usize,
     pub(crate) name_input_replace_on_type: bool,
     pub(crate) creating_new_tab: bool,
     pub(crate) pending_workspace_create_cwd: Option<std::path::PathBuf>,
@@ -4365,6 +4351,20 @@ pub struct AppState {
         std::collections::HashMap<PaneId, crate::ui::AgentPanelLocalIdentity>,
     /// TUI projection materialized only when the fleet snapshot changes.
     pub(crate) remote_agent_panel_entries: Vec<std::sync::Arc<crate::ui::RemoteAgentPanelEntry>>,
+    /// Device grouping is built when the fleet snapshot installs, so sidebar
+    /// projection only filters cached host buckets.
+    pub(crate) remote_agent_device_groups: Option<crate::ui::sidebar::RemoteAgentDeviceGroups>,
+    pub(crate) remote_device_activity: Option<
+        std::collections::HashMap<(String, String), crate::ui::sidebar::SidebarActivityCount>,
+    >,
+    pub(crate) agent_run_device_groups: Option<
+        std::sync::Arc<
+            [crate::ui::sidebar::devices::DeviceGroup<crate::agent_runs::HostProjection>],
+        >,
+    >,
+    pub(crate) remote_loop_device_groups:
+        Option<Vec<crate::ui::sidebar::devices::DeviceGroup<crate::api::schema::LoopInfo>>>,
+    pub(crate) agent_runs_active_count: Option<usize>,
     /// Producer-derived aloop rows are immutable between fleet refreshes.
     /// Keeping the projection here prevents layout and render passes from
     /// repeating the nested run/finding/stable-id scan.
@@ -4637,6 +4637,7 @@ pub struct AppState {
     pub(crate) pending_pane_snooze_changes: Vec<PaneSnoozeChange>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
+    pub name_input_caret: usize,
     pub name_input_replace_on_type: bool,
     /// Label the rename-tab modal was prefilled with, so an unedited Enter stays a
     /// no-op even when the live derived label changes while the modal is open.
@@ -5468,6 +5469,8 @@ pub(crate) enum StatusSegmentKind {
     FleetLabel,
     /// One other device that needs attention, by fleet host name.
     FleetDevice(usize),
+    /// Availability indicator for a configured fleet host.
+    FleetHost(usize),
     /// Set a machine and best available launch profile for the next Home run.
     FleetUseMachine(usize),
     RemoteHost,
@@ -6406,6 +6409,10 @@ impl AppState {
         std::mem::swap(&mut self.agent_picker, &mut other.overlay.agent_picker);
         std::mem::swap(&mut self.name_input, &mut other.overlay.name_input);
         std::mem::swap(
+            &mut self.name_input_caret,
+            &mut other.overlay.name_input_caret,
+        );
+        std::mem::swap(
             &mut self.name_input_replace_on_type,
             &mut other.overlay.name_input_replace_on_type,
         );
@@ -6430,6 +6437,10 @@ impl AppState {
     pub(crate) fn set_server_mode(&mut self, mode: Mode) {
         self.server_interaction = ServerInteractionState::new(mode);
         self.client_focus_intent = ClientFocusIntent::FollowShared;
+    }
+
+    pub(crate) fn restore_server_mode_preserving_client_focus(&mut self, mode: Mode) {
+        self.server_interaction = ServerInteractionState::new(mode);
     }
 
     pub(crate) fn effective_interaction_mode(&self) -> Mode {
@@ -6611,6 +6622,7 @@ impl AppState {
             self.rename_pane_target = None;
             self.rename_tab_prefill = None;
             self.name_input.clear();
+            self.name_input_caret = 0;
             self.name_input_replace_on_type = false;
             self.close_client_overlay();
         }
@@ -7690,6 +7702,11 @@ impl AppState {
             board_return: None,
             local_agent_panel_identities: std::collections::HashMap::new(),
             remote_agent_panel_entries: Vec::new(),
+            remote_agent_device_groups: None,
+            remote_device_activity: None,
+            agent_run_device_groups: None,
+            remote_loop_device_groups: None,
+            agent_runs_active_count: None,
             aloop_projection: None,
             remote_focus_proxy_panes: std::collections::HashSet::new(),
             sidebar_selected_remote_agent: None,
@@ -7841,6 +7858,7 @@ impl AppState {
             pending_pane_snooze_changes: Vec::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
+            name_input_caret: 0,
             name_input_replace_on_type: false,
             rename_tab_prefill: None,
             release_notes: None,
