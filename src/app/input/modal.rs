@@ -2738,6 +2738,7 @@ mod tests {
         assert_eq!(state.name_input, "website ");
 
         state.name_input = "website-zero".into();
+        state.name_input_caret = state.name_input.len();
         handle_rename_key(
             &mut state,
             KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT),
@@ -2745,6 +2746,7 @@ mod tests {
         assert_eq!(state.name_input, "website-");
 
         state.name_input = "website-zero".into();
+        state.name_input_caret = state.name_input.len();
         handle_rename_key(
             &mut state,
             KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
@@ -2752,6 +2754,7 @@ mod tests {
         assert_eq!(state.name_input, "website-");
 
         state.name_input = "website-zero".into();
+        state.name_input_caret = state.name_input.len();
         handle_rename_key(
             &mut state,
             KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
@@ -2765,6 +2768,7 @@ mod tests {
         assert!(state.name_input.is_empty());
 
         state.name_input = "website zero".into();
+        state.name_input_caret = state.name_input.len();
         handle_rename_key(
             &mut state,
             KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
