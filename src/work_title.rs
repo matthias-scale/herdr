@@ -538,6 +538,7 @@ fn secret_regex() -> &'static Regex {
             |\b(?:sk|ghp|github_pat|xox[baprs]|sb_secret|akia)[-_][a-z0-9_-]{4,}\b
             |\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b
             |(?:^|\s)(?:/|~/|[a-z]:\\)\S+
+            |\b[a-z][a-z0-9+.-]*://\S+
             |@[a-z0-9_-]{2,}
             "#,
         )
@@ -907,6 +908,17 @@ mod tests {
             .as_deref(),
             Some("Agent Title Herdr")
         );
+    }
+
+    #[test]
+    fn leading_url_does_not_become_the_title() {
+        let title = calculate_work_title(
+            "https://mail.missiveapp.com/#team_unassigned/abc/conversations/def Fix the A+ error copy",
+        )
+        .expect("title");
+        assert!(!title.to_lowercase().contains("https"), "{title}");
+        assert!(!title.to_lowercase().contains("missiveapp"), "{title}");
+        assert!(title.contains("Error"), "{title}");
     }
 
     #[test]
