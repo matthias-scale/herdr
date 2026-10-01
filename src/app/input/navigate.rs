@@ -4626,6 +4626,56 @@ mod tests {
     }
 
     #[test]
+    fn next_window_opens_remote_agent_hidden_in_collapsed_device_group() {
+        let (mut app, agent_ref) = app_with_remote_agent();
+        app.state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
+        app.state.skip_collapsed_cycle = true;
+        app.state.sidebar_sections_layout = true;
+        app.state.remote_agent_device_groups =
+            Some(crate::ui::sidebar::remote_agent_device_groups(&app.state));
+        app.state
+            .collapsed_sidebar_groups
+            .insert(format!("device:main/{}", agent_ref.host));
+
+        assert!(!crate::ui::sidebar_rows(&app.state)
+            .iter()
+            .any(|row| matches!(
+                row,
+                crate::ui::SidebarRow::RemoteAgent { entry, .. } if entry.agent_ref == agent_ref
+            )));
+
+        app.focus_relative_window(true);
+
+        assert_eq!(app.state.sidebar_selected_remote_agent, Some(agent_ref));
+        assert_eq!(app.remote_focus_operations.len(), 1);
+        assert!(app.state.toast.is_none());
+    }
+
+    #[test]
+    fn next_agent_opens_remote_agent_hidden_in_collapsed_device_group() {
+        let (mut app, agent_ref) = app_with_remote_agent();
+        app.state.sidebar_sections_layout = true;
+        app.state.remote_agent_device_groups =
+            Some(crate::ui::sidebar::remote_agent_device_groups(&app.state));
+        app.state
+            .collapsed_sidebar_groups
+            .insert(format!("device:main/{}", agent_ref.host));
+
+        assert!(!crate::ui::sidebar_rows(&app.state)
+            .iter()
+            .any(|row| matches!(
+                row,
+                crate::ui::SidebarRow::RemoteAgent { entry, .. } if entry.agent_ref == agent_ref
+            )));
+
+        app.execute_tui_navigate_action(NavigateAction::NextAgent, ActionContext::Prefix);
+
+        assert_eq!(app.state.sidebar_selected_remote_agent, Some(agent_ref));
+        assert_eq!(app.remote_focus_operations.len(), 1);
+        assert!(app.state.toast.is_none());
+    }
+
+    #[test]
     fn fleet_workspace_ac9_skip_collapsed_spaces_section_excludes_local_windows() {
         let mut app = app_with_global_window_fixture();
         for terminal in app.state.terminals.values_mut() {
