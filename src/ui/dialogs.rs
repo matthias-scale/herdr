@@ -1242,6 +1242,7 @@ mod tests {
         app.open_client_overlay(crate::app::state::ClientOverlay::RenameWorkspace);
         app.rename_target = Some(crate::app::state::RenameTarget::Workspace { workspace_id });
         app.name_input = "ab".into();
+        app.name_input_caret = app.name_input.len();
 
         // The widget tests above stop at the ratatui frame. This one goes through
         // the server's cursor resolution, which is where the bug lived: the frame
