@@ -1729,6 +1729,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn claude_effort_hint_does_not_reset_semantic_stall_age() {
+        let base = "Now: preparing the acceptance response\nCrunched for done PM\n────────────────────────\n❯ \n────────────────────────\n0 shells";
+        let hinted = "Now: preparing the acceptance response\nCrunched for done PM\nmedium · /effort\n────────────────────────\n❯ \n────────────────────────\n0 shells";
+        let first = pane_v3(AgentStatus::Idle, base);
+        let second = pane_v3(AgentStatus::Idle, hinted);
+        assert_eq!(
+            evidence::semantic_hash(&first.tail),
+            evidence::semantic_hash(&second.tail)
+        );
+
+        for observation in [first, second] {
+            let mut memory = old_pane_memory(&observation, 100);
+            let decision = classify_pane_v3(&observation, &mut memory, 700, v3opt());
+            assert_eq!(decision.class, PaneClass::Stalled);
+            assert_eq!(memory.since, 100);
+        }
+    }
+
     fn claude_pane(reply: &str, composer: &str, footer: &str) -> String {
         format!(
             "{reply}\n────────────────────────\n❯ {composer}\n────────────────────────\n{footer}"

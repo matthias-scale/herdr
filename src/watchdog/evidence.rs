@@ -81,6 +81,9 @@ static REPLY_SILENCE_HOLDS: LazyLock<Regex> = LazyLock::new(|| {
 });
 static COMPOSER_PROMPT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*[❯›>]\s*(.*)$").expect("static regex"));
+static CLAUDE_EFFORT_HINT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*(?:low|medium|high|max|xhigh)\s*·\s*/effort\s*$").expect("static regex")
+});
 static USER_PROMPT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*❯\s+\S").expect("static regex"));
 static DONE_HERE: LazyLock<Regex> = LazyLock::new(|| {
@@ -379,7 +382,14 @@ pub(crate) fn normalize_line(line: &str) -> String {
 }
 pub(crate) fn semantic_lines(text: &str) -> Vec<String> {
     let lines = text.lines().collect::<Vec<_>>();
-    let content = composer_index(&lines).map_or(text.to_owned(), |i| lines[..i - 1].join("\n"));
+    let content = composer_index(&lines).map_or(text.to_owned(), |i| {
+        let end = if i >= 2 && CLAUDE_EFFORT_HINT.is_match(lines[i - 2]) {
+            i - 2
+        } else {
+            i - 1
+        };
+        lines[..end].join("\n")
+    });
     let v: Vec<_> = content
         .lines()
         .map(normalize_line)
@@ -746,6 +756,23 @@ mod tests {
             "3m ago │ 🖥8.1 │ 141.2k ↻5d09h@20:00 │ 6h:91%",
         );
         assert_eq!(semantic_hash(&a), semantic_hash(&b));
+    }
+
+    #[test]
+    fn semantic_hash_ignores_effort_hint_in_composer_status_row() {
+        let transcript = "Now: preparing the acceptance response\nCrunched for done PM";
+        let without_hint = claude_screen(transcript, "", "0 shells");
+        let with_hint = format!(
+            "{transcript}\nmedium · /effort\n────────────────────────\n❯ \n────────────────────────\n0 shells"
+        );
+        assert_eq!(semantic_hash(&without_hint), semantic_hash(&with_hint));
+        assert_eq!(
+            semantic_lines(&with_hint),
+            [
+                "Now: preparing the acceptance response",
+                "Crunched for done PM"
+            ]
+        );
     }
 
     #[test]
