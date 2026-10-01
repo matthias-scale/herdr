@@ -6609,8 +6609,8 @@ mod tests {
         ];
         assert!(areas[..5]
             .iter()
-            .all(|area| area.width == 2 && area.height == 1));
-        assert_eq!(areas[5].width, 1);
+            .all(|area| area.width == 3 && area.height == 1));
+        assert_eq!(areas[5].width, 2);
         assert_eq!(areas[5].height, 1);
         assert!(areas.windows(2).all(|pair| pair[0].right() == pair[1].x));
         for (area, item) in areas.iter().zip([
@@ -11080,8 +11080,8 @@ mod tests {
         ];
         assert!(areas[..5]
             .iter()
-            .all(|area| area.width == 2 && area.height == 1));
-        assert_eq!(areas[5].width, 1);
+            .all(|area| area.width == 3 && area.height == 1));
+        assert_eq!(areas[5].width, 2);
         assert_eq!(areas[5].height, 1);
         assert!(areas.windows(2).all(|pair| pair[0].right() == pair[1].x));
 

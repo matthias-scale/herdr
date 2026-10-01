@@ -23,8 +23,8 @@ use crate::pomodoro::{PomodoroPhase, PomodoroPrompt, SEND_OFF_DURATION};
 
 /// Width of `⏱ 25:00` plus a leading space.
 const INDICATOR_WIDTH: u16 = 8;
-/// Left margin, six two-cell slots, then one-cell board and lock icons.
-const FOOTER_ICON_COLUMNS: u16 = 14;
+/// Left margin, six three-cell slots, then two-cell refresh, board and lock slots.
+const FOOTER_ICON_COLUMNS: u16 = 22;
 const NOTIFICATION_WIDTH: u16 = 2;
 const CYCLE_MODE_WIDTH: u16 = 1;
 const SIDEBAR_AREAS_WIDTH: u16 = 1;
@@ -419,7 +419,7 @@ pub(crate) fn notification_hit_area(app: &AppState, sidebar: Rect) -> Rect {
 
 pub(crate) fn window_cycle_mode_hit_area(app: &AppState, sidebar: Rect) -> Rect {
     if app.sidebar_sections_layout {
-        if app.sidebar_collapsed || sidebar.height == 0 || sidebar.width.saturating_sub(1) < 17 {
+        if app.sidebar_collapsed || sidebar.height == 0 || sidebar.width.saturating_sub(1) < 25 {
             return Rect::default();
         }
         let slot = Rect::new(

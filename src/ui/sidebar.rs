@@ -2028,14 +2028,14 @@ fn expanded_sidebar_content_for_app(app: &AppState, area: Rect) -> Rect {
 
 fn sidebar_footer_slot(area: Rect, index: u16) -> Rect {
     let content_width = area.width.saturating_sub(1);
-    let x_offset = 1 + index.saturating_mul(2);
-    if content_width < x_offset.saturating_add(2) || area.height == 0 {
+    let x_offset = 1 + index.saturating_mul(3);
+    if content_width < x_offset.saturating_add(3) || area.height == 0 {
         return Rect::default();
     }
     Rect::new(
         area.x.saturating_add(x_offset),
         area.bottom().saturating_sub(1),
-        2,
+        3,
         1,
     )
 }
@@ -2176,39 +2176,39 @@ pub(crate) fn sidebar_footer_missive_hit_area(area: Rect) -> Rect {
 
 pub(crate) fn sidebar_footer_refresh_hit_area(area: Rect) -> Rect {
     let content_width = area.width.saturating_sub(1);
-    if content_width < 12 || area.height == 0 {
+    if content_width < 18 || area.height == 0 {
         return Rect::default();
     }
     Rect::new(
-        area.x.saturating_add(11),
+        area.x.saturating_add(16),
         area.bottom().saturating_sub(1),
-        1,
+        2,
         1,
     )
 }
 
 pub(crate) fn sidebar_footer_planning_lock_hit_area(area: Rect) -> Rect {
     let content_width = area.width.saturating_sub(1);
-    if content_width < 14 || area.height == 0 {
+    if content_width < 22 || area.height == 0 {
         return Rect::default();
     }
     Rect::new(
-        area.x.saturating_add(13),
+        area.x.saturating_add(20),
         area.bottom().saturating_sub(1),
-        1,
+        2,
         1,
     )
 }
 
 pub(crate) fn sidebar_footer_board_hit_area(area: Rect) -> Rect {
     let content_width = area.width.saturating_sub(1);
-    if content_width < 13 || area.height == 0 {
+    if content_width < 20 || area.height == 0 {
         return Rect::default();
     }
     Rect::new(
-        area.x.saturating_add(12),
+        area.x.saturating_add(18),
         area.bottom().saturating_sub(1),
-        1,
+        2,
         1,
     )
 }
@@ -15628,7 +15628,7 @@ pub(crate) mod tests {
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .expect("render footer");
         let footer = row_text(terminal.backend().buffer(), area.bottom() - 1, area.width);
-        assert!(footer.contains("⚙ ⑂ ▥ ◎ ✉ ⟳"), "{footer:?}");
+        assert!(footer.contains("⚙ ⑂  ▥  ◎  ✉ ⟳"), "{footer:?}");
     }
 
     #[test]
