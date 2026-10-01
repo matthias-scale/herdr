@@ -316,7 +316,7 @@ pub(crate) struct Snapshot {
     #[serde(skip)]
     pub(crate) aloop: Option<crate::aloop::ProducerSnapshot>,
     #[serde(skip)]
-    pub(crate) inbox: Option<crate::inbox::ProducerSnapshot>,
+    pub(crate) inbox: Option<Arc<crate::inbox::ProducerSnapshot>>,
     pub(crate) configured_hosts: Vec<String>,
     pub(crate) hosts: Vec<HostSnapshot>,
     /// Complete owner catalogs observed by the periodic fleet poll. Admission
@@ -1869,10 +1869,10 @@ fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
                     polling_fleet.resolved_aloop_host(),
                     error.clone(),
                 )),
-                inbox: Some(crate::inbox::ProducerSnapshot::unreachable(
+                inbox: Some(Arc::new(crate::inbox::ProducerSnapshot::unreachable(
                     polling_fleet.resolved_inbox_host(),
                     error.clone(),
-                )),
+                ))),
                 configured_hosts: polling_fleet
                     .hosts
                     .iter()
@@ -2953,9 +2953,9 @@ fn inbox_snapshot_from_evidence(
     fleet: &FleetConfig,
     evidence: Option<Result<crate::inbox::Healthcheck, String>>,
     refreshed_at: SystemTime,
-) -> Option<crate::inbox::ProducerSnapshot> {
+) -> Option<Arc<crate::inbox::ProducerSnapshot>> {
     let host = fleet.resolved_inbox_host();
-    Some(match evidence {
+    Some(Arc::new(match evidence {
         Some(Ok(data)) => crate::inbox::ProducerSnapshot::read(host, data, refreshed_at),
         Some(Err(error)) => crate::inbox::ProducerSnapshot::unreachable(host, error),
         None if host == fleet.resolved_self_name() => {
@@ -2965,7 +2965,7 @@ fn inbox_snapshot_from_evidence(
             }
         }
         None => crate::inbox::ProducerSnapshot::unconfigured(host),
-    })
+    }))
 }
 
 fn read_local_inbox(timeout: Duration) -> Result<crate::inbox::Healthcheck, String> {

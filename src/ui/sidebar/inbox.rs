@@ -344,12 +344,12 @@ mod tests {
         let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_790_836_800);
         let mut app = AppState::test_new();
         app.fleet_snapshot.polled = true;
-        app.fleet_snapshot.inbox = Some(crate::inbox::ProducerSnapshot {
+        app.fleet_snapshot.inbox = Some(std::sync::Arc::new(crate::inbox::ProducerSnapshot {
             host: "ub2".into(),
             state,
             data,
             refreshed_at: Some(now),
-        });
+        }));
         let backend = TestBackend::new(100, 1);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
@@ -446,12 +446,12 @@ mod tests {
         };
         let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_790_836_800);
         let mut app = AppState::test_new();
-        app.fleet_snapshot.inbox = Some(crate::inbox::ProducerSnapshot {
+        app.fleet_snapshot.inbox = Some(std::sync::Arc::new(crate::inbox::ProducerSnapshot {
             host: "ub2".into(),
             state: crate::inbox::ProducerState::Read,
             data,
             refreshed_at: Some(now),
-        });
+        }));
         assert_eq!(
             hover_detail(&app, &InboxLine::Source(0), now).as_deref(),
             Some("cred missing")
@@ -474,12 +474,12 @@ mod tests {
         );
         assert!(text.contains("▾ inbox ● on  ✗"));
         let mut app = AppState::test_new();
-        app.fleet_snapshot.inbox = Some(crate::inbox::ProducerSnapshot {
+        app.fleet_snapshot.inbox = Some(std::sync::Arc::new(crate::inbox::ProducerSnapshot {
             host: "ub2".into(),
             state: crate::inbox::ProducerState::Read,
             data,
             refreshed_at: Some(now),
-        });
+        }));
         assert_eq!(
             hover_detail(&app, &InboxLine::Header { collapsed: false }, now).as_deref(),
             Some("timer failed; surface unreachable")
@@ -490,11 +490,11 @@ mod tests {
     fn collapse_uses_the_shared_persisted_sidebar_group_setting() {
         let mut app = AppState::test_new();
         app.fleet_snapshot.polled = true;
-        app.fleet_snapshot.inbox = Some(crate::inbox::ProducerSnapshot::read(
+        app.fleet_snapshot.inbox = Some(std::sync::Arc::new(crate::inbox::ProducerSnapshot::read(
             "ub2".into(),
             crate::inbox::Healthcheck::default(),
             std::time::SystemTime::now(),
-        ));
+        )));
         assert!(app.collapsed_sidebar_groups.contains("repo:Inbox"));
         app.toggle_sidebar_group(crate::ui::sidebar::INBOX_SECTION_TITLE);
         assert!(!app.collapsed_sidebar_groups.contains("repo:Inbox"));
