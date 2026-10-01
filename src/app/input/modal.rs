@@ -796,32 +796,24 @@ fn delete_rename_input_word(state: &mut AppState) {
         return;
     }
 
-    while state
-        .name_input
-        .chars()
-        .last()
-        .is_some_and(char::is_whitespace)
-    {
-        state.name_input.pop();
+    let caret = state.name_input_caret.min(state.name_input.len());
+    let mut start = caret;
+    let preceding_char = |end: usize| state.name_input[..end].char_indices().next_back();
+
+    while preceding_char(start).is_some_and(|(_, ch)| ch.is_whitespace()) {
+        start = preceding_char(start).map_or(start, |(idx, _)| idx);
     }
 
-    let Some(class) = state
-        .name_input
-        .chars()
-        .last()
-        .map(rename_word_delete_class)
-    else {
-        return;
-    };
-
-    while state
-        .name_input
-        .chars()
-        .last()
-        .is_some_and(|ch| !ch.is_whitespace() && rename_word_delete_class(ch) == class)
-    {
-        state.name_input.pop();
+    if let Some(class) = preceding_char(start).map(|(_, ch)| rename_word_delete_class(ch)) {
+        while preceding_char(start)
+            .is_some_and(|(_, ch)| !ch.is_whitespace() && rename_word_delete_class(ch) == class)
+        {
+            start = preceding_char(start).map_or(start, |(idx, _)| idx);
+        }
     }
+
+    state.name_input.drain(start..caret);
+    state.name_input_caret = start;
 }
 
 fn handle_rename_edit_key(state: &mut AppState, key: KeyEvent) {
@@ -2778,6 +2770,30 @@ mod tests {
             KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
         );
         assert!(state.name_input.is_empty());
+    }
+
+    #[test]
+    fn rename_word_delete_uses_caret_and_preserves_suffix() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.name_input = "one two  three".into();
+        state.name_input_caret = "one two ".len();
+
+        delete_rename_input_word(&mut state);
+
+        assert_eq!(state.name_input, "one  three");
+        assert_eq!(state.name_input_caret, "one ".len());
+    }
+
+    #[test]
+    fn rename_word_delete_handles_multibyte_chars() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.name_input = "start café界 end".into();
+        state.name_input_caret = "start café界".len();
+
+        delete_rename_input_word(&mut state);
+
+        assert_eq!(state.name_input, "start  end");
+        assert_eq!(state.name_input_caret, "start ".len());
     }
 
     #[test]

@@ -6617,6 +6617,7 @@ impl AppState {
             self.rename_pane_target = None;
             self.rename_tab_prefill = None;
             self.name_input.clear();
+            self.name_input_caret = 0;
             self.name_input_replace_on_type = false;
             self.close_client_overlay();
         }
