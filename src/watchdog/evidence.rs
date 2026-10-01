@@ -390,8 +390,20 @@ pub(crate) fn semantic_lines(text: &str) -> Vec<String> {
         };
         lines[..end].join("\n")
     });
-    let v: Vec<_> = content
-        .lines()
+    let mut source_lines = content.lines().collect::<Vec<_>>();
+    // Claude Code may reveal its two-row welcome banner when a short transcript
+    // is re-rendered or scrolled. It is terminal chrome, not transcript progress.
+    let first = source_lines.iter().position(|line| !line.trim().is_empty());
+    if let Some(first) = first.filter(|&i| {
+        source_lines[i].trim_start().starts_with("▝▜")
+            && source_lines
+                .get(i + 1)
+                .is_some_and(|line| line.trim_start().starts_with("▝▝ ▝▝"))
+    }) {
+        source_lines.drain(first..first + 2);
+    }
+    let v: Vec<_> = source_lines
+        .into_iter()
         .map(normalize_line)
         .filter(|s| !s.is_empty())
         .collect();

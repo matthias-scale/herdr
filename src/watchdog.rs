@@ -868,7 +868,9 @@ pub(crate) fn classify_pane_v3(
         && m.last_status.is_some_and(|s| s != AgentStatus::Working)
         && o.status == AgentStatus::Working;
     if rebound {
-        m.since = now;
+        if m.hash != hash {
+            m.since = now;
+        }
         m.retry_since = None;
         ev = "rebound identity".into();
     } else if new_turn {
@@ -1746,6 +1748,51 @@ mod tests {
             assert_eq!(decision.class, PaneClass::Stalled);
             assert_eq!(memory.since, 100);
         }
+    }
+
+    #[test]
+    fn claude_welcome_repaint_and_identity_rebind_keep_stall_age() {
+        let transcript = concat!(
+            "❯ This is a watchdog acceptance probe. Reply with the exact word READY. Then end your reply\n",
+            "with exactly this closing block on its own final lines:\n",
+            "Needs you: nothing\nNow: idle\nDone here\nDo not add text after it\n",
+            "READY\nNeeds you: nothing\nNow: idle\nDone here\nSautéed for done PM\n",
+            "❯ Reply with the exact word READY, then end this turn with exactly this closing block on\n",
+            "its own final lines:\nNeeds you: nothing\nNow: preparing the acceptance response\n",
+            "Do not add text after it\nREADY\nNeeds you: nothing\n",
+            "Now: preparing the acceptance response\nCooked for done PM"
+        );
+        let repainted = format!(
+            "▝▜██████▀ Sonnet 5.5 Claude Max\n▝▝ ▝▝ /private/tmp/claude-cwd-real_claude_promised_idle\n{transcript}"
+        );
+        let first = pane_v3(AgentStatus::Idle, transcript);
+        let mut rebound = pane_v3(AgentStatus::Idle, &repainted);
+        rebound.terminal_id = Some("new-terminal".into());
+        rebound.agent_session = Some("new-session".into());
+
+        assert_eq!(
+            evidence::semantic_hash(&first.tail),
+            evidence::semantic_hash(&rebound.tail)
+        );
+        let mut memory = old_pane_memory(&first, 100);
+        let decision = classify_pane_v3(&rebound, &mut memory, 100 + v3opt().stall_secs, v3opt());
+        assert_eq!(memory.since, 100);
+        assert_eq!(decision.class, PaneClass::Stalled);
+        assert!(decision.evidence.contains("rebound identity"));
+    }
+
+    #[test]
+    fn new_claude_transcript_line_resets_stall_age_after_rebind() {
+        let original = "❯ Reply with the exact word READY\nNow: preparing the acceptance response";
+        let changed = format!("{original}\nA genuinely new transcript line");
+        let first = pane_v3(AgentStatus::Idle, original);
+        let mut rebound = pane_v3(AgentStatus::Idle, &changed);
+        rebound.terminal_id = Some("new-terminal".into());
+        let mut memory = old_pane_memory(&first, 100);
+
+        let decision = classify_pane_v3(&rebound, &mut memory, 700, v3opt());
+        assert_eq!(memory.since, 700);
+        assert_eq!(decision.class, PaneClass::Working);
     }
 
     fn claude_pane(reply: &str, composer: &str, footer: &str) -> String {
