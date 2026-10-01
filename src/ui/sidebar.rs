@@ -31448,6 +31448,41 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn inbox_fault_row_hover_target_carries_the_producer_error() {
+        let mut app = AppState::test_new();
+        app.fleet_snapshot.polled = true;
+        app.fleet_snapshot.inbox = Some(std::sync::Arc::new(crate::inbox::ProducerSnapshot {
+            host: "ub2".into(),
+            state: crate::inbox::ProducerState::Unreachable("connection refused".into()),
+            data: crate::inbox::Healthcheck::default(),
+            refreshed_at: Some(std::time::SystemTime::now()),
+        }));
+        app.toggle_sidebar_group(INBOX_SECTION_TITLE);
+
+        let rows = sidebar_rows(&app);
+        assert!(
+            rows.iter()
+                .any(|row| matches!(row, SidebarRow::Inbox(inbox::InboxLine::Fault(_)))),
+            "inbox fault row missing"
+        );
+
+        let area = Rect::new(0, 0, 60, 40);
+        let fault_rect = inbox::areas(&app, area)
+            .into_iter()
+            .find(|row| matches!(row.line, inbox::InboxLine::Fault(_)))
+            .expect("visible inbox fault row")
+            .rect;
+        let targets = compute_sidebar_hover_targets(&app, area);
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.rect == fault_rect
+                    && target.label.contains("connection refused")),
+            "fault row hover target should carry producer error; targets: {targets:?}"
+        );
+    }
+
+    #[test]
     fn sidebar_header_omits_machine_scope_picker() {
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
