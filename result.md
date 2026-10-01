@@ -34,9 +34,10 @@ agent cases above were skipped. `incident_rearm` passed.
 - `just test-one closing_block_authority_outranks_visible_idle_prompt_box`:
   passed.
 - `just lint`: passed.
-- `just check-parallel`: could not be completed in this execution session.
-  Its first run failed because Cargo's default cache was read-only; a rerun
-  using the writable Cargo cache stalled without returning a check summary.
+- `just check-parallel` with the writable Cargo cache: lint passed. Rust ran
+  6,857 tests: 6,856 passed and
+  `ui::status::tests::attached_focused_pane_names_the_remote_host_before_the_local_one`
+  failed. `just test-one` reproduced that same unrelated UI status failure.
 - `just test`: started 7,564 Rust tests but did not return a summary in this
   execution session; the run was stopped. Focused Rust coverage and the
   touched integration asset suite passed separately.
