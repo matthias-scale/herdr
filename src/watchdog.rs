@@ -1734,15 +1734,18 @@ mod tests {
     #[test]
     fn claude_effort_hint_does_not_reset_semantic_stall_age() {
         let base = "Now: preparing the acceptance response\nCrunched for done PM\n────────────────────────\n❯ \n────────────────────────\n0 shells";
-        let hinted = "Now: preparing the acceptance response\nCrunched for done PM\nmedium · /effort\n────────────────────────\n❯ \n────────────────────────\n0 shells";
         let first = pane_v3(AgentStatus::Idle, base);
-        let second = pane_v3(AgentStatus::Idle, hinted);
-        assert_eq!(
-            evidence::semantic_hash(&first.tail),
-            evidence::semantic_hash(&second.tail)
-        );
-
-        for observation in [first, second] {
+        let hinted_tails = [
+            "Now: preparing the acceptance response\nCrunched for done PM\nmedium · /effort\n────────────────────────\n❯ \n────────────────────────\n0 shells",
+            "Now: preparing the acceptance response\nCrunched for done PM\nmedium · /effort\n\n────────────────────────\n❯ \n────────────────────────\n0 shells",
+            "Now: preparing the acceptance response\nCrunched for done PM\n    medium · /effort\n────────────────────────\n❯ \n────────────────────────\n0 shells",
+        ];
+        for tail in hinted_tails {
+            let observation = pane_v3(AgentStatus::Idle, tail);
+            assert_eq!(
+                evidence::semantic_hash(&first.tail),
+                evidence::semantic_hash(&observation.tail)
+            );
             let mut memory = old_pane_memory(&observation, 100);
             let decision = classify_pane_v3(&observation, &mut memory, 700, v3opt());
             assert_eq!(decision.class, PaneClass::Stalled);

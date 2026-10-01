@@ -384,12 +384,26 @@ pub(crate) fn normalize_line(line: &str) -> String {
 pub(crate) fn semantic_lines(text: &str) -> Vec<String> {
     let lines = text.lines().collect::<Vec<_>>();
     let content = composer_index(&lines).map_or(text.to_owned(), |i| {
-        let end = if i >= 2 && CLAUDE_EFFORT_HINT.is_match(lines[i - 2]) {
-            i - 2
-        } else {
-            i - 1
-        };
-        lines[..end].join("\n")
+        let end = i.saturating_sub(1);
+        let mut hint = end;
+        while hint > 0 {
+            let above = hint - 1;
+            if lines[above].trim().is_empty() {
+                hint = above;
+            } else {
+                if CLAUDE_EFFORT_HINT.is_match(lines[above]) {
+                    hint = above;
+                } else {
+                    hint = end;
+                }
+                break;
+            }
+        }
+        let mut content = lines[..end].to_vec();
+        if hint < end && !lines[hint].trim().is_empty() {
+            content.remove(hint);
+        }
+        content.join("\n")
     });
     let v: Vec<_> = content
         .lines()
@@ -767,17 +781,26 @@ mod tests {
     fn semantic_hash_ignores_effort_hint_in_composer_status_row() {
         let transcript = "Now: preparing the acceptance response\nCrunched for done PM";
         let without_hint = claude_screen(transcript, "", "0 shells");
-        let with_hint = format!(
-            "{transcript}\nmedium · /effort\n────────────────────────\n❯ \n────────────────────────\n0 shells"
+        for hint in ["medium · /effort", "    medium · /effort"] {
+            let with_hint = format!(
+                "{transcript}\n{hint}\n────────────────────────\n❯ \n────────────────────────\n0 shells"
+            );
+            assert_eq!(semantic_hash(&without_hint), semantic_hash(&with_hint));
+            assert_eq!(semantic_lines(&with_hint), semantic_lines(&without_hint));
+        }
+
+        let with_blank = format!(
+            "{transcript}\nmedium · /effort\n\n────────────────────────\n❯ \n────────────────────────\n0 shells"
         );
-        assert_eq!(semantic_hash(&without_hint), semantic_hash(&with_hint));
-        assert_eq!(
-            semantic_lines(&with_hint),
-            [
-                "Now: preparing the acceptance response",
-                "Crunched for done PM"
-            ]
-        );
+        assert_eq!(semantic_hash(&without_hint), semantic_hash(&with_blank));
+        assert_eq!(semantic_lines(&with_blank), semantic_lines(&without_hint));
+    }
+
+    #[test]
+    fn effort_text_in_transcript_is_not_dropped() {
+        let transcript = "We should discuss /effort after the release";
+        let screen = claude_screen(transcript, "", "0 shells");
+        assert!(semantic_lines(&screen).contains(&transcript.to_owned()));
     }
 
     #[test]
