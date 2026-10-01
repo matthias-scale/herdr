@@ -2797,7 +2797,7 @@ mod tests {
             &mut state,
             KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT),
         );
-        assert_eq!(state.name_input, "websiteZ");
+        assert_eq!(state.name_input, "Zwebsite");
     }
 
     #[test]
