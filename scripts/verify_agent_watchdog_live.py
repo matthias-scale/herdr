@@ -271,11 +271,10 @@ class Harness:
         return result
 
     def workspace(self, label: str, command: str, ready_lines: tuple[str, ...],
-                  report_fixture_agent: bool = True) -> str:
-        # Real-agent CLI trust prompts block both agent status and hook startup
-        # in a fresh /tmp directory. Run those probes from this already trusted
-        # checkout; fixture workspaces remain rooted in their disposable dir.
-        cwd = ROOT if self.real_agent else self.root
+                  report_fixture_agent: bool = True, cwd_override: Path | None = None) -> str:
+        # Codex's project hooks need an explicitly trusted checkout. Claude's
+        # real-agent cases pass their own empty temporary cwd here.
+        cwd = cwd_override or (ROOT if self.real_agent else self.root)
         result = self.cli("workspace", "create", "--cwd", str(cwd), "--label", label)
         payload = _last_json(result.stdout)
         pane = _find_value(payload, "pane_id")
@@ -289,6 +288,50 @@ class Harness:
             self.call("pane.report_agent", {"pane_id": str(pane), "source": "watchdog-harness",
                                             "agent": "codex", "state": "working"})
         return str(pane)
+
+    def real_agent_screen(self, pane_id: str) -> str:
+        response = self.call("pane.read", {"pane_id": pane_id, "source": "detection",
+            "lines": 60, "format": "text"})
+        return (response.get("read") or {}).get("text", "")
+
+    def real_agent_dialog(self, screen: str) -> str | None:
+        """Name known blocking startup dialogs before any prompt is submitted."""
+        lowered = screen.lower()
+        dialogs = (
+            ("codex_update_available", "update available"),
+            ("codex_hooks_need_review", "hooks need review"),
+            ("codex_folder_trust", "do you trust the contents of this directory"),
+            ("claude_folder_trust", "trust this folder?"),
+            ("claude_folder_safety_check", "quick safety check:"),
+            ("agent_login_required", "login required"),
+            ("agent_sign_in_required", "sign in to"),
+        )
+        return next((name for name, marker in dialogs if marker in lowered), None)
+
+    def prepare_real_agent_prompt(self, pane_id: str) -> None:
+        dialog = self.real_agent_dialog(self.real_agent_screen(pane_id))
+        if dialog:
+            raise RuntimeError(f"blocking_dialog:{dialog}")
+
+    def trust_codex_hooks_for_probe(self, pane_id: str) -> None:
+        """Choose Trust all and wait for Codex's isolated pane to clear dialogs."""
+        deadline = time.monotonic() + 15
+        sent_trust = False
+        while time.monotonic() < deadline:
+            screen = self.real_agent_screen(pane_id)
+            dialog = self.real_agent_dialog(screen)
+            if dialog == "codex_hooks_need_review":
+                if not re.search(r"(?m)^\s*2[.)]?\s+Trust all\b", screen, re.IGNORECASE):
+                    raise RuntimeError("codex_hooks_dialog_missing_trust_all_option")
+                self.cli("pane", "send-keys", pane_id, "2", "enter")
+                sent_trust = True
+            elif dialog:
+                raise RuntimeError(f"blocking_dialog:{dialog}")
+            else:
+                return
+            time.sleep(.2)
+        if sent_trust:
+            raise RuntimeError("blocking_dialog:codex_hooks_dialog_did_not_clear")
 
     def real_agent_setup_evidence(self, ident: str, error: Exception) -> str:
         """Capture the isolated pane screen when real-agent setup fails."""
@@ -395,16 +438,24 @@ class Harness:
             return {"id": ident, "watchdog": "real-agents", "expected": "pass",
                     "actual": "skipped", "match": None,
                     "evidence": f"skipped: {agent} executable is unavailable"}
-        pane = self.workspace("real-" + ident, "", (), report_fixture_agent=False)
+        cwd_override = None
+        if agent == "claude":
+            # Keep Claude's project context empty so repo-local instructions do
+            # not change the acceptance probe's model or permission mode.
+            cwd_override = self.root / ("claude-cwd-" + ident)
+            cwd_override.mkdir()
+        pane = self.workspace("real-" + ident, "", (), report_fixture_agent=False,
+                              cwd_override=cwd_override)
         agent_name = "wd-" + hashlib.sha256(ident.encode()).hexdigest()[:12]
         start_args = ["agent", "start", agent_name, "--kind", agent,
                       "--timeout", "30000",
                       "--pane", pane]
         if agent == "claude":
-            start_args += ["--", "--model", "haiku", "--permission-mode", "plan"]
+            start_args += ["--", "--model", "haiku", "--tools", ""]
         else:
             start_args += ["--", "--model", "gpt-6.1-sol", "-c",
-                           "model_reasoning_effort=low", "--sandbox", "read-only"]
+                           "model_reasoning_effort=low", "-c", "check_for_update_on_startup=false",
+                           "--sandbox", "read-only"]
         interactive_env = self.env.copy()
         interactive_env["HERDR_INTERACTIVE"] = "1"
         startup_deadline = time.monotonic() + 15
@@ -452,11 +503,17 @@ class Harness:
                 return {"id": ident, "watchdog": "real-agents", "expected": "pass",
                         "actual": "skipped", "match": None,
                         "evidence": f"skipped: {agent} subscription auth unavailable: {detail}"}
+            dialog = self.real_agent_dialog(screen)
+            if dialog:
+                raise RuntimeError(f"blocking_dialog:{dialog}: agent start failed: {detail}")
             raise RuntimeError(f"agent start failed: {detail}")
+        if agent == "codex":
+            self.trust_codex_hooks_for_probe(pane)
         interim_footer = "Now: probe worker — preparing the probe"
         prompt = ("Complete this small acceptance probe without tools. Your final response "
                   "must end with exactly this closing block on its own final line: `"
                   + interim_footer + "`. Do not add text after it.")
+        self.prepare_real_agent_prompt(pane)
         response = self.cli("agent", "prompt", pane, prompt, "--wait", "--until", "idle",
                             "--timeout", "180000", timeout=200)
         if response.returncode:
@@ -464,6 +521,7 @@ class Harness:
         time.sleep(1)
         final_prompt = ("Complete the probe and end this turn with exactly this closing block "
                         "on its own final line: `" + footer + "`. Do not add text after it.")
+        self.prepare_real_agent_prompt(pane)
         response = self.cli("agent", "prompt", pane, final_prompt, "--wait", "--until", "idle",
                             "--timeout", "180000", timeout=200)
         if response.returncode:
@@ -479,6 +537,9 @@ class Harness:
         if footer not in screen_text or interim_footer not in screen_text:
             raise RuntimeError(f"real agent did not change from {interim_footer!r} to "
                                f"{footer!r}: {screen_text[-1200:]}")
+        # Clear any CLI suggestion left in the composer. A visible draft is
+        # correctly treated as active human typing by the watchdog.
+        self.cli("pane", "send-keys", pane, "ctrl+u")
         state = self.root / f"{ident}.json"
         log = self.root / f"{ident}.jsonl"
         options = ["--stall-secs", str(self.args.real_stall_secs),
