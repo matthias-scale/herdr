@@ -36,10 +36,11 @@ pub(super) fn append_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
     if collapsed {
         return;
     }
-    if let crate::inbox::ProducerState::Unreachable(error) = &snapshot.state {
-        rows.push(SidebarRow::Inbox(InboxLine::Fault(format!(
-            "healthcheck failed: {error}"
-        ))));
+    if let crate::inbox::ProducerState::Unreachable(_) = &snapshot.state {
+        // Error details are hover-only; the row shows a generic marker.
+        rows.push(SidebarRow::Inbox(InboxLine::Fault(
+            "healthcheck failed".into(),
+        )));
         return;
     }
     if !matches!(snapshot.state, crate::inbox::ProducerState::Read) {
@@ -260,7 +261,7 @@ pub(super) fn hover_detail(
     let snapshot = app.fleet_snapshot.inbox.as_ref()?;
     match line {
         InboxLine::Source(index) => snapshot.data.sources.get(*index)?.error.clone(),
-        InboxLine::Header { .. } if section_fault(snapshot, now) => {
+        InboxLine::Header { .. } | InboxLine::Fault(_) if section_fault(snapshot, now) => {
             let mut issues = Vec::new();
             match &snapshot.state {
                 crate::inbox::ProducerState::Unreachable(error) => {
@@ -502,5 +503,41 @@ mod tests {
             app.take_sidebar_group_collapsed_persistence_request(),
             Some(("repo:Inbox".into(), false))
         );
+    }
+
+    #[test]
+    fn unreachable_producer_detail_is_only_a_hover_target() {
+        let now = std::time::SystemTime::now();
+        let mut app = AppState::test_new();
+        app.fleet_snapshot.polled = true;
+        app.fleet_snapshot.inbox = Some(std::sync::Arc::new(crate::inbox::ProducerSnapshot {
+            host: "ub2".into(),
+            state: crate::inbox::ProducerState::Unreachable("connection refused".into()),
+            data: crate::inbox::Healthcheck::default(),
+            refreshed_at: Some(now),
+        }));
+        app.toggle_sidebar_group(crate::ui::sidebar::INBOX_SECTION_TITLE);
+        let mut rows = Vec::new();
+        append_rows(&app, &mut rows);
+        let fault = rows
+            .iter()
+            .find_map(|row| match row {
+                SidebarRow::Inbox(line @ InboxLine::Fault(_)) => Some(line.clone()),
+                _ => None,
+            })
+            .expect("fault row");
+        let InboxLine::Fault(label) = &fault else {
+            unreachable!("matched a fault row")
+        };
+        assert!(!label.contains("connection refused"));
+        let text = rendered(
+            crate::inbox::Healthcheck::default(),
+            fault.clone(),
+            crate::inbox::ProducerState::Unreachable("connection refused".into()),
+        );
+        assert!(text.contains("healthcheck failed"));
+        assert!(!text.contains("connection refused"));
+        assert!(hover_detail(&app, &fault, now)
+            .is_some_and(|detail| detail.contains("connection refused")));
     }
 }
