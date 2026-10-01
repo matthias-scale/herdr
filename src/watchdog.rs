@@ -1752,38 +1752,43 @@ mod tests {
 
     #[test]
     fn claude_welcome_repaint_and_identity_rebind_keep_stall_age() {
-        let transcript = concat!(
+        let no_banner = concat!(
             "❯ This is a watchdog acceptance probe. Reply with the exact word READY. Then end your reply\n",
             "with exactly this closing block on its own final lines:\n",
             "Needs you: nothing\nNow: idle\nDone here\nDo not add text after it\n",
-            "READY\nNeeds you: nothing\nNow: idle\nDone here\nSautéed for done PM\n",
+            "READY\nNeeds you: nothing\nNow: idle\nDone here\nCogitated for done PM\n",
             "❯ Reply with the exact word READY, then end this turn with exactly this closing block on\n",
             "its own final lines:\nNeeds you: nothing\nNow: preparing the acceptance response\n",
             "Do not add text after it\nREADY\nNeeds you: nothing\n",
-            "Now: preparing the acceptance response\nCooked for done PM"
+            "Now: preparing the acceptance response\nBaked for done PM"
         );
-        let repainted = format!(
-            "▝▜██████▀ Sonnet 5.5 Claude Max\n▝▝ ▝▝ /private/tmp/claude-cwd-real_claude_promised_idle\n{transcript}"
+        let two_row_banner = format!(
+            "▝▜██████▀ Sonnet 5.5 Claude Max\n▝▝ ▝▝ /private/tmp/claude-cwd-real_claude_promised_idle\n{no_banner}"
         );
-        let first = pane_v3(AgentStatus::Idle, transcript);
-        let mut rebound = pane_v3(AgentStatus::Idle, &repainted);
-        rebound.terminal_id = Some("new-terminal".into());
-        rebound.agent_session = Some("new-session".into());
-
-        assert_eq!(
-            evidence::semantic_hash(&first.tail),
-            evidence::semantic_hash(&rebound.tail)
+        let three_row_banner = format!(
+            " ▐▛███▜▌   Claude Code v2.1.286\n▝▜██████▀ Sonnet 5.5 Claude Max\n▝▝ ▝▝ /private/tmp/claude-cwd-real_claude_promised_idle\n{no_banner}"
         );
-        let mut memory = old_pane_memory(&first, 100);
-        let decision = classify_pane_v3(&rebound, &mut memory, 100 + v3opt().stall_secs, v3opt());
-        assert_eq!(memory.since, 100);
-        assert_eq!(decision.class, PaneClass::Stalled);
-        assert!(decision.evidence.contains("rebound identity"));
+        for tail in [two_row_banner.as_str(), three_row_banner.as_str()] {
+            assert_eq!(
+                evidence::semantic_hash(no_banner),
+                evidence::semantic_hash(tail)
+            );
+            let first = pane_v3(AgentStatus::Idle, no_banner);
+            let mut rebound = pane_v3(AgentStatus::Idle, tail);
+            rebound.terminal_id = Some("new-terminal".into());
+            rebound.agent_session = Some("new-session".into());
+            let mut memory = old_pane_memory(&first, 100);
+            let decision =
+                classify_pane_v3(&rebound, &mut memory, 100 + v3opt().stall_secs, v3opt());
+            assert_eq!(memory.since, 100);
+            assert_eq!(decision.class, PaneClass::Stalled);
+            assert!(decision.evidence.contains("rebound identity"));
+        }
     }
 
     #[test]
     fn new_claude_transcript_line_resets_stall_age_after_rebind() {
-        let original = "❯ Reply with the exact word READY\nNow: preparing the acceptance response";
+        let original = "transcript content line 0\ntranscript content line 1\nNow: preparing the acceptance response";
         let changed = format!("{original}\nA genuinely new transcript line");
         let first = pane_v3(AgentStatus::Idle, original);
         let mut rebound = pane_v3(AgentStatus::Idle, &changed);

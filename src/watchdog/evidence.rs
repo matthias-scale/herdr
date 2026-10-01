@@ -84,6 +84,7 @@ static COMPOSER_PROMPT: LazyLock<Regex> =
 static CLAUDE_EFFORT_HINT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^\s*(?:low|medium|high|max|xhigh)\s*·\s*/effort\s*$").expect("static regex")
 });
+const SEMANTIC_SUFFIX_LINES: usize = 12;
 static USER_PROMPT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\s*❯\s+\S").expect("static regex"));
 static DONE_HERE: LazyLock<Regex> = LazyLock::new(|| {
@@ -390,24 +391,16 @@ pub(crate) fn semantic_lines(text: &str) -> Vec<String> {
         };
         lines[..end].join("\n")
     });
-    let mut source_lines = content.lines().collect::<Vec<_>>();
-    // Claude Code may reveal its two-row welcome banner when a short transcript
-    // is re-rendered or scrolled. It is terminal chrome, not transcript progress.
-    let first = source_lines.iter().position(|line| !line.trim().is_empty());
-    if let Some(first) = first.filter(|&i| {
-        source_lines[i].trim_start().starts_with("▝▜")
-            && source_lines
-                .get(i + 1)
-                .is_some_and(|line| line.trim_start().starts_with("▝▝ ▝▝"))
-    }) {
-        source_lines.drain(first..first + 2);
-    }
-    let v: Vec<_> = source_lines
-        .into_iter()
+    let v: Vec<_> = content
+        .lines()
         .map(normalize_line)
         .filter(|s| !s.is_empty())
         .collect();
-    v[v.len().saturating_sub(40)..].to_vec()
+    // A fixed transcript suffix prevents rows entering/leaving the top edge of
+    // a short terminal screen (including welcome chrome) from shifting the
+    // semantic window. Twelve lines retain recent conversational context while
+    // still detecting any newly emitted line at the bottom.
+    v[v.len().saturating_sub(SEMANTIC_SUFFIX_LINES)..].to_vec()
 }
 pub(crate) fn semantic_hash(text: &str) -> u64 {
     stable_hash(&semantic_lines(text).join("\n"))
