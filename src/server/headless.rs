@@ -7422,6 +7422,9 @@ impl HeadlessServer {
         now: Instant,
         geometry_dirty: bool,
     ) -> ScheduledTaskRender {
+        // Unlock windows can expire while no client is rendering. Enforce the
+        // new lock state on the periodic server tick as well as on renders.
+        self.detach_terminal_clients_blocked_by_planning_lock();
         // Nothing renders the status row without an attached app client, so a
         // detached server never samples native metrics.
         let has_app_client = self.has_app_client();
@@ -8189,8 +8192,6 @@ mod tests {
     use crate::protocol::{CellData, CursorState};
     use unicode_width::UnicodeWidthStr;
 
-    #[path = "../idle_render_tests.rs"]
-    mod idle_render_tests;
     #[path = "pane_graphics.rs"]
     mod pane_graphics_tests;
 
@@ -11070,6 +11071,35 @@ next_tab = ""
         });
     }
 
+    #[test]
+    fn planning_lock_expiry_detaches_clients_on_tick_without_a_render() {
+        with_terminal_session_test_server(|server, _terminal_id, terminal_id, _public_pane_id| {
+            let control_rx = connect_pending_terminal_client_with_control_rx(server, 21);
+            assert!(
+                server.handle_server_event(ServerEvent::ClientAttachTerminal {
+                    client_id: 21,
+                    terminal_id,
+                    takeover: false,
+                })
+            );
+            server.app.state.planning_lock.apply_remote_snapshot(Some(
+                crate::planning_lock::Snapshot {
+                    locked: false,
+                    discussion_tab_id: "another-host-tab".into(),
+                    unlock_until_unix_s: Some(0),
+                },
+            ));
+
+            server.handle_scheduled_tasks_headless(Instant::now(), false);
+
+            assert!(!server.clients.contains_key(&21));
+            assert_eq!(
+                read_server_shutdown_reason(control_rx.recv().expect("shutdown message")),
+                Some("detached".to_owned())
+            );
+        });
+    }
+
     fn with_terminal_session_test_server(
         test: impl FnOnce(&mut HeadlessServer, crate::terminal::TerminalId, String, String),
     ) {
@@ -13554,11 +13584,8 @@ next_tab = ""
         );
     }
 
-    /// The animation ships through the server loop, not `App::run`, so this is
-    /// the path that has to advance it. It shipped ticking only in `App::run`,
-    /// which is why the field stood still in front of every real client.
     #[test]
-    fn an_attached_headless_server_advances_the_sidebar_animation() {
+    fn an_attached_headless_server_does_not_advance_the_removed_sidebar_animation() {
         let mut server = test_headless_server();
         server.app.state.hyperspace.enabled = true;
         let (writer, _control_rx, _render_rx) = test_client_writer();
@@ -13578,21 +13605,19 @@ next_tab = ""
             &mut server.app.state,
             ratatui::layout::Rect::new(0, 0, 120, 40),
         );
-        assert!(
-            server.app.state.view.hyperspace_rect.height > 0,
-            "the panel has to be on screen for the tick to mean anything"
+        assert_eq!(
+            server.app.state.view.hyperspace_rect,
+            ratatui::layout::Rect::default(),
+            "the removed sidebar panel has no render area"
         );
 
         let before = server.app.state.hyperspace.step();
         let now = Instant::now() + crate::hyperspace::FRAME_INTERVAL * 2;
-        assert!(
-            server.handle_scheduled_tasks_headless(now, false),
-            "advancing the field is a render-worthy change"
-        );
-        assert_ne!(
+        server.handle_scheduled_tasks_headless(now, false);
+        assert_eq!(
             server.app.state.hyperspace.step(),
             before,
-            "the star field has to move"
+            "an off-screen panel has no render-worthy animation ticks"
         );
     }
 

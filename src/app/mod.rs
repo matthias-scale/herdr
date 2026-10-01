@@ -1356,11 +1356,21 @@ impl App {
             ),
             goals: crate::goals::GoalsPanelState::from_config(&config.goals_panel),
             pomodoro: crate::pomodoro::PomodoroState::from_config(&config.pomodoro, Instant::now()),
-            planning_lock: if cfg!(test) {
-                crate::planning_lock::PlanningLock::default()
-            } else {
-                let path = crate::config::config_dir().join(crate::planning_lock::CONFIG_FILE_NAME);
-                crate::planning_lock::PlanningLock::load(&path)
+            planning_lock: {
+                let mut lock = if cfg!(test) {
+                    crate::planning_lock::PlanningLock::default()
+                } else {
+                    let path =
+                        crate::config::config_dir().join(crate::planning_lock::CONFIG_FILE_NAME);
+                    crate::planning_lock::PlanningLock::load(&path)
+                };
+                if let Some(tab_id) = config.planning_lock.discussion_tab_id.as_deref() {
+                    let _ = lock.set_local_discussion_tab(
+                        tab_id,
+                        crate::app::settled::unix_seconds(std::time::SystemTime::now()),
+                    );
+                }
+                lock
             },
             planning_lock_dialog: None,
             hyperspace: crate::hyperspace::HyperspaceState::new(
@@ -1401,6 +1411,8 @@ impl App {
             combine_repos_across_hosts: config.ui.combine_repos_across_hosts,
             new_thread_workspace: config.ui.new_thread_workspace,
             launch_profiles: crate::app::launch_profiles::resolve(&config.launch_profiles),
+            next_home_machine: None,
+            next_home_profile: None,
             projects: crate::app::projects::resolve(&config.projects),
             machines: crate::app::machines::resolve(&config.remote.fleet),
             add_project_start_dir: config.ui.add_project_start_dir.clone(),
