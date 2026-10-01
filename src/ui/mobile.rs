@@ -1521,8 +1521,8 @@ fn render_mobile_switcher_content(
                         );
                         (label, style)
                     }
-                    crate::ui::sidebar::inbox::InboxLine::Fault(detail) => {
-                        (format!("  ✗ {detail}"), Style::default().fg(p.red))
+                    crate::ui::sidebar::inbox::InboxLine::Fault(_) => {
+                        ("  ✗ healthcheck failed".into(), Style::default().fg(p.red))
                     }
                 };
                 render_one_line_item(
@@ -2114,6 +2114,37 @@ fn draw_horizontal_rule(frame: &mut Frame, area: Rect, p: &Palette) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mobile_inbox_healthcheck_fault_hides_raw_error_detail() {
+        let detail = "connection refused at 127.0.0.1:8765";
+        let mut app = AppState::test_new();
+        app.fleet_snapshot.polled = true;
+        app.fleet_snapshot.inbox = Some(std::sync::Arc::new(
+            crate::inbox::ProducerSnapshot::unreachable("ub2".into(), detail.into()),
+        ));
+        app.collapsed_sidebar_groups.remove("repo:Inbox");
+
+        let area = Rect::new(0, 0, 60, 20);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
+                .expect("mobile terminal");
+        terminal
+            .draw(|frame| {
+                render_mobile_switcher_content(&app, &TerminalRuntimeRegistry::new(), frame, area)
+            })
+            .expect("mobile render");
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("healthcheck failed"));
+        assert!(!text.contains(detail));
+    }
 
     #[test]
     fn mobile_header_aggregates_the_workspace_in_one_pane_pass() {
