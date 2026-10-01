@@ -239,6 +239,10 @@ struct ServerCapabilitiesJson {
     live_handoff: bool,
     detached_server_daemon: bool,
     groups_v1: bool,
+    session_events: bool,
+    endpoint_protocol_generation: u32,
+    surface_interest: bool,
+    health_check: bool,
 }
 
 #[derive(Serialize)]
@@ -274,6 +278,10 @@ fn server_status_json(server: &ServerRuntimeStatus) -> ServerStatusJson {
                     live_handoff: capabilities.live_handoff,
                     detached_server_daemon: capabilities.detached_server_daemon,
                     groups_v1: capabilities.groups_v1,
+                    session_events: capabilities.session_events,
+                    endpoint_protocol_generation: crate::remote::ENDPOINT_PROTOCOL_GENERATION,
+                    surface_interest: true,
+                    health_check: true,
                 }),
             compatible: protocol.map(|value| value == crate::protocol::PROTOCOL_VERSION),
             socket: super::target::socket_label(),
@@ -339,4 +347,34 @@ fn print_status_help() {
     eprintln!("  herdr status [--json]         show local client and running server status");
     eprintln!("  herdr status server [--json]  show running server status");
     eprintln!("  herdr status client [--json]  show local client binary status");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_status_json_exposes_session_event_capability() {
+        let status = ServerRuntimeStatus::Running {
+            version: Some("0.9.1".into()),
+            protocol: Some(crate::protocol::PROTOCOL_VERSION),
+            capabilities: Some(crate::api::schema::ServerCapabilities {
+                live_handoff: true,
+                detached_server_daemon: false,
+                groups_v1: true,
+                fleet_agent_events: true,
+                session_events: true,
+            }),
+        };
+
+        let json = serde_json::to_value(server_status_json(&status)).expect("status JSON");
+
+        assert_eq!(json["capabilities"]["session_events"], true);
+        assert_eq!(
+            json["capabilities"]["endpoint_protocol_generation"],
+            crate::remote::ENDPOINT_PROTOCOL_GENERATION
+        );
+        assert_eq!(json["capabilities"]["surface_interest"], true);
+        assert_eq!(json["capabilities"]["health_check"], true);
+    }
 }

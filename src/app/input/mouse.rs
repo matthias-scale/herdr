@@ -1517,7 +1517,7 @@ impl AppState {
                     self.release_surface_focus_to_pane();
 
                     if !self.pane_is_settled_anywhere(info.id) {
-                        self.note_pane_activity_at(info.id, std::time::Instant::now());
+                        self.note_human_pane_activity_at(info.id, std::time::Instant::now());
                     }
 
                     if self.forward_pane_mouse_button(terminal_runtimes, &info, mouse) {
@@ -5044,6 +5044,9 @@ mod tests {
                 protocol: None,
                 error: None,
                 remote_identity: None,
+                sessions: None,
+                reachable: true,
+                last_seen_unix_ms: None,
                 entries: Vec::new(),
             }],
             ..crate::fleet::Snapshot::default()
@@ -9236,10 +9239,29 @@ mod tests {
             save.y,
         ));
 
+        let revision_before_sync = app.state.session_event_revision;
+        app.sync_session_save_schedule();
+
         assert_eq!(app.state.workspaces[0].custom_name.as_deref(), Some("new"));
-        assert!(app.event_hub.events_after(0).iter().any(|(_, event)| {
+        let events = app.event_hub.events_after(0);
+        assert!(events.iter().any(|(_, event)| {
             matches!(event.event, crate::api::schema::EventKind::WorkspaceRenamed)
         }));
+        let session_events = events
+            .iter()
+            .filter(|(_, event)| {
+                matches!(event.event, crate::api::schema::EventKind::SessionChanged)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(session_events.len(), 1);
+        let crate::api::schema::EventData::SessionChanged {
+            revision, snapshot, ..
+        } = &session_events[0].1.data
+        else {
+            panic!("expected session change event");
+        };
+        assert!(*revision > revision_before_sync);
+        assert_eq!(snapshot.workspaces[0].label, "new");
     }
 
     #[test]
@@ -11810,6 +11832,9 @@ mod fleet_status_click_tests {
             protocol: None,
             error: None,
             remote_identity: None,
+            sessions: None,
+            reachable: true,
+            last_seen_unix_ms: None,
             entries: vec![row],
         }];
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 160, 24));

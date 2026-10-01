@@ -3456,6 +3456,7 @@ impl AppState {
         match event {
             AppEvent::FleetRefreshed { .. } => Vec::new(),
             AppEvent::FleetAgentInventoryChanged { .. } => Vec::new(),
+            AppEvent::FleetSessionInventoryChanged { .. } => Vec::new(),
             AppEvent::AuthorityAcceptanceLedgerPersisted { .. } => Vec::new(),
             AppEvent::AuthorityAcceptanceLedgerReconciled { .. } => Vec::new(),
             AppEvent::RemoteFocusTransition { .. } => Vec::new(),
@@ -3911,7 +3912,8 @@ impl AppState {
         let pane = self.workspaces[ws_idx].pane_state_mut(pane_id)?;
         let entered_active_state =
             projected_state_changed && matches!(state, AgentState::Working | AgentState::Blocked);
-        let unsettled = entered_active_state && pane.settled_at.take().is_some();
+        let unsettled =
+            entered_active_state && !pane.settle_resume_guard && pane.settled_at.take().is_some();
 
         if unsettled {
             let workspace_id = self.workspaces[ws_idx].id.clone();
@@ -4308,7 +4310,8 @@ impl AppState {
         if should_note_activity {
             pane.activity.note(now);
         }
-        let unsettled = should_unsettle && pane.settled_at.take().is_some();
+        let unsettled =
+            should_unsettle && !pane.settle_resume_guard && pane.settled_at.take().is_some();
 
         let previous_status = crate::app::api_helpers::pane_agent_status_with_stale(
             change.previous_state,

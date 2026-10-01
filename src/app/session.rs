@@ -5,6 +5,8 @@ use super::{App, SESSION_SAVE_DEBOUNCE};
 const SESSION_SAVE_COMPLETION_POLL: Duration = Duration::from_millis(100);
 const SESSION_SAVE_RETRY_BASE: Duration = Duration::from_millis(250);
 const SESSION_SAVE_RETRY_MAX: Duration = Duration::from_secs(30);
+const SESSION_SAVE_STALL_WARN_AFTER: Duration = Duration::from_secs(60);
+const SESSION_SAVE_STALL_WARN_INTERVAL: Duration = Duration::from_secs(60);
 
 enum SessionSaveJob {
     Clear,
@@ -87,6 +89,9 @@ impl App {
 
     pub(super) fn schedule_session_save(&mut self) {
         if self.no_session {
+            // Nothing is persisted, but connected clients still need the
+            // structural change announced as a session revision.
+            self.state.mark_session_dirty();
             return;
         }
 
@@ -98,12 +103,28 @@ impl App {
     }
 
     pub(crate) fn sync_session_save_schedule(&mut self) {
+        if self.state.session_dirty_revision > self.state.session_event_revision {
+            let revision = self.state.session_dirty_revision;
+            let epoch = self.state.session_epoch.clone();
+            let snapshot = self.session_snapshot();
+            self.event_hub.push(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::SessionChanged,
+                data: crate::api::schema::EventData::SessionChanged {
+                    epoch,
+                    revision,
+                    snapshot: Box::new(snapshot),
+                },
+            });
+            self.state.session_event_revision = revision;
+        }
         self.reap_finished_session_save();
+        self.warn_if_session_save_stalled(Instant::now());
         if let Some(retry_at) = self.session_save_retry_deadline {
             self.session_save_deadline = Some(retry_at);
             return;
         }
         if self.state.session_dirty
+            && !self.no_session
             && self.session_save_thread.is_none()
             && (self.session_save_deadline.is_none()
                 || self.session_save_scheduled_revision != Some(self.state.session_dirty_revision))
@@ -141,6 +162,8 @@ impl App {
                 if self.state.session_dirty_revision == result.revision {
                     self.state.session_dirty = false;
                     self.session_save_deadline = None;
+                    self.session_dirty_since = None;
+                    self.session_save_stall_warning_at = None;
                 }
             }
             Err(err) => {
@@ -214,8 +237,12 @@ impl App {
         }
         if !self.state.session_dirty {
             self.session_save_deadline = None;
+            self.session_dirty_since = None;
+            self.session_save_stall_warning_at = None;
             return;
         }
+
+        self.session_dirty_since.get_or_insert_with(Instant::now);
 
         self.pane_exit_checkpoint_pending = false;
         let job = self.capture_session_save_job();
@@ -292,6 +319,33 @@ impl App {
         }
         self.save_session_now();
     }
+
+    fn warn_if_session_save_stalled(&mut self, now: Instant) {
+        if self.no_session || !self.state.session_dirty {
+            self.session_dirty_since = None;
+            self.session_save_stall_warning_at = None;
+            return;
+        }
+
+        let dirty_since = *self.session_dirty_since.get_or_insert(now);
+        if now.duration_since(dirty_since) < SESSION_SAVE_STALL_WARN_AFTER
+            || self
+                .session_save_stall_warning_at
+                .is_some_and(|last| now.duration_since(last) < SESSION_SAVE_STALL_WARN_INTERVAL)
+        {
+            return;
+        }
+
+        let dirty_for = now.duration_since(dirty_since);
+        tracing::warn!(
+            dirty_for_secs = dirty_for.as_secs(),
+            revision = self.state.session_dirty_revision,
+            writer_running = self.session_save_thread.is_some(),
+            save_deadline_set = self.session_save_deadline.is_some(),
+            "session has remained dirty without a successful save"
+        );
+        self.session_save_stall_warning_at = Some(now);
+    }
 }
 
 fn session_save_retry_delay(failures: u32) -> Duration {
@@ -321,6 +375,58 @@ fn run_session_save_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_app() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = crate::config::Config::default();
+        config.work_index.enabled = false;
+        App::new(&config, true, None, api_rx, crate::api::EventHub::default())
+    }
+
+    #[test]
+    fn dirty_session_publishes_one_revisioned_snapshot_event_per_sync() {
+        let mut app = test_app();
+        app.state.mark_session_dirty();
+        let revision = app.state.session_dirty_revision;
+
+        app.sync_session_save_schedule();
+        app.sync_session_save_schedule();
+
+        let events = app.event_hub.events_after(0);
+        assert_eq!(events.len(), 1);
+        let event = &events[0].1;
+        let crate::api::schema::EventData::SessionChanged {
+            epoch,
+            revision: event_revision,
+            snapshot,
+        } = &event.data
+        else {
+            panic!("expected session change event");
+        };
+        assert_eq!(*event_revision, revision);
+        assert_eq!(snapshot.epoch.as_deref(), Some(epoch.as_str()));
+        assert_eq!(snapshot.revision, Some(revision));
+        assert_eq!(snapshot.as_ref(), &app.session_snapshot());
+        assert_eq!(app.state.session_event_revision, revision);
+    }
+
+    #[test]
+    fn dirty_session_warns_when_no_save_completes_for_sixty_seconds() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.session_dirty = true;
+        let now = Instant::now();
+        app.session_dirty_since = Some(now - SESSION_SAVE_STALL_WARN_AFTER);
+
+        app.warn_if_session_save_stalled(now);
+
+        assert_eq!(app.session_save_stall_warning_at, Some(now));
+        app.warn_if_session_save_stalled(now + SESSION_SAVE_STALL_WARN_INTERVAL);
+        assert_eq!(
+            app.session_save_stall_warning_at,
+            Some(now + SESSION_SAVE_STALL_WARN_INTERVAL)
+        );
+    }
 
     #[test]
     fn ac1_retry_backoff_is_bounded() {

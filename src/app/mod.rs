@@ -384,6 +384,8 @@ pub struct App {
     pub(crate) session_save_thread: Option<std::thread::JoinHandle<session::SessionSaveResult>>,
     pub(crate) session_save_failures: u32,
     pub(crate) session_save_retry_deadline: Option<Instant>,
+    pub(crate) session_dirty_since: Option<Instant>,
+    pub(crate) session_save_stall_warning_at: Option<Instant>,
     session_writer: Arc<std::sync::Mutex<crate::persist::SessionWriter>>,
     pane_exit_checkpoint_requests: HashSet<crate::layout::PaneId>,
     pane_exit_checkpoint_pending: bool,
@@ -1478,6 +1480,14 @@ impl App {
             host_mouse_pixels: None,
             session_dirty: false,
             session_dirty_revision: 0,
+            session_epoch: format!(
+                "{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
+            session_event_revision: 0,
             terminal_runtime_shutdowns: Vec::new(),
             confirm_close_workspace_id: None,
             confirm_close_remote_agent_ref: None,
@@ -1737,6 +1747,8 @@ impl App {
             session_save_thread: None,
             session_save_failures: 0,
             session_save_retry_deadline: None,
+            session_dirty_since: None,
+            session_save_stall_warning_at: None,
             session_writer,
             pane_exit_checkpoint_requests: HashSet::new(),
             pane_exit_checkpoint_pending: false,
@@ -2064,6 +2076,13 @@ impl App {
     pub(crate) fn focus_client_on_pane(&mut self) {
         self.state.focus_client_on_pane();
         self.pending_client_pane_focus = true;
+    }
+
+    /// Set the shared default focus for future attaches without changing any
+    /// currently attached client's presentation.
+    pub(crate) fn focus_shared_default_on_pane(&mut self) {
+        self.state.focus_client_on_pane();
+        self.pending_client_pane_focus = false;
     }
 
     pub(crate) fn take_pending_client_pane_focus(&mut self) -> bool {
@@ -8682,6 +8701,59 @@ mod tests {
         assert!(app.state.session_dirty);
         assert_eq!(app.session_save_failures, 1);
         assert_eq!(app.session_save_deadline, Some(retry_deadline));
+    }
+
+    #[test]
+    fn session_save_retries_after_a_stalled_writer_releases() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let config_home = unique_temp_path("recovered-background-session-save");
+        env.set("XDG_CONFIG_HOME", &config_home);
+        env.remove(crate::session::SESSION_ENV_VAR);
+
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.workspaces = vec![Workspace::test_new("recovered-autosave")];
+        app.state.ensure_test_terminals();
+        app.state.mark_session_dirty();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let revision = app.state.session_dirty_revision;
+        app.session_save_thread = Some(std::thread::spawn(move || {
+            let _ = release_rx.recv();
+            session::SessionSaveResult {
+                revision,
+                result: Err(std::io::Error::other("injected stalled writer failure")),
+            }
+        }));
+        let now = Instant::now();
+        app.session_dirty_since = Some(now - Duration::from_secs(60));
+        app.sync_session_save_schedule();
+        assert!(app.session_save_thread.is_some());
+        assert!(app.session_save_stall_warning_at.is_some());
+
+        release_tx.send(()).unwrap();
+        while app
+            .session_save_thread
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+        {
+            std::thread::yield_now();
+        }
+        app.reap_finished_session_save();
+        assert!(app.state.session_dirty);
+        assert!(app.session_save_retry_deadline.is_some());
+
+        std::fs::create_dir_all(&config_home).unwrap();
+        app.session_save_retry_deadline = Some(Instant::now() - Duration::from_millis(1));
+        app.session_save_deadline = app.session_save_retry_deadline;
+        app.start_background_session_save();
+        app.save_session_now();
+
+        assert!(crate::session::data_dir().join("session.json").exists());
+        assert!(!app.state.session_dirty);
+        assert_eq!(app.session_save_failures, 0);
+
+        drop(env);
+        let _ = std::fs::remove_dir_all(config_home);
     }
 
     #[test]

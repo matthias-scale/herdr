@@ -330,9 +330,6 @@ impl App {
             NavigateAction::ToggleTabPrio => {
                 if toggle_tab_prio(&mut self.state, context) {
                     self.schedule_session_save();
-                    if self.no_session {
-                        self.state.mark_session_dirty();
-                    }
                     if context == ActionContext::Navigate {
                         leave_navigate_mode(&mut self.state);
                     }
@@ -341,9 +338,6 @@ impl App {
             NavigateAction::TogglePrioPanel => {
                 self.state.toggle_prio_panel();
                 self.schedule_session_save();
-                if self.no_session {
-                    self.state.mark_session_dirty();
-                }
                 if context == ActionContext::Navigate {
                     leave_navigate_mode(&mut self.state);
                 }
@@ -4478,6 +4472,9 @@ mod tests {
             protocol: None,
             error: None,
             remote_identity: None,
+            sessions: None,
+            reachable: true,
+            last_seen_unix_ms: None,
             entries: Vec::new(),
         }];
         let argv = crate::fleet::agent_attach_argv_from_config(
@@ -5213,6 +5210,9 @@ mod tests {
                 protocol: None,
                 error: None,
                 remote_identity: None,
+                sessions: None,
+                reachable: true,
+                last_seen_unix_ms: None,
                 entries: vec![crate::fleet::FleetRow::test_agent_info_row(host, info)],
             }],
             ..crate::fleet::Snapshot::default()
@@ -5621,6 +5621,9 @@ mod tests {
                 protocol: None,
                 error: None,
                 remote_identity: None,
+                sessions: None,
+                reachable: true,
+                last_seen_unix_ms: None,
                 entries: vec![
                     crate::fleet::FleetRow::test_agent_info_row(
                         "remote",
@@ -5711,6 +5714,9 @@ mod tests {
             protocol: None,
             error: None,
             remote_identity: None,
+            sessions: None,
+            reachable: true,
+            last_seen_unix_ms: None,
             entries: Vec::new(),
         }];
         let argv = crate::fleet::agent_attach_argv_from_config(
@@ -5785,6 +5791,9 @@ mod tests {
             protocol: None,
             error: None,
             remote_identity: None,
+            sessions: None,
+            reachable: true,
+            last_seen_unix_ms: None,
             entries: Vec::new(),
         }];
         let fleet_terminal_ids = app.state.workspaces[1]
