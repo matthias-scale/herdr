@@ -91,9 +91,14 @@ class Harness:
                                          "printf %s \"$PATH\""], text=True,
                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                         check=False).stdout
-            self.env = {key: os.environ[key] for key in ("HOME", "USER", "LANG")
+            self.env = {key: os.environ[key] for key in (
+                            "HOME", "USER", "LANG", "CODEX_HOME", "CLAUDE_CONFIG_DIR")
                         if key in os.environ}
             self.env["PATH"] = login_path or os.environ.get("PATH", "")
+            # Installed agent hooks are inert unless the pane is explicitly
+            # marked as a Herdr environment. The isolated socket below keeps
+            # their reports scoped to this harness server.
+            self.env["HERDR_ENV"] = "1"
         else:
             self.env = {k: v for k, v in os.environ.items() if not k.startswith("HERDR_")}
         self.env.update(XDG_CONFIG_HOME=str(self.cfg), XDG_STATE_HOME=str(self.state))
@@ -267,7 +272,11 @@ class Harness:
 
     def workspace(self, label: str, command: str, ready_lines: tuple[str, ...],
                   report_fixture_agent: bool = True) -> str:
-        result = self.cli("workspace", "create", "--cwd", str(self.root), "--label", label)
+        # Real-agent CLI trust prompts block both agent status and hook startup
+        # in a fresh /tmp directory. Run those probes from this already trusted
+        # checkout; fixture workspaces remain rooted in their disposable dir.
+        cwd = ROOT if self.real_agent else self.root
+        result = self.cli("workspace", "create", "--cwd", str(cwd), "--label", label)
         payload = _last_json(result.stdout)
         pane = _find_value(payload, "pane_id")
         if not pane:
@@ -280,6 +289,49 @@ class Harness:
             self.call("pane.report_agent", {"pane_id": str(pane), "source": "watchdog-harness",
                                             "agent": "codex", "state": "working"})
         return str(pane)
+
+    def real_agent_setup_evidence(self, ident: str, error: Exception) -> str:
+        """Capture the isolated pane screen when real-agent setup fails."""
+        label = "real-" + ident
+        pane = self.panes.get(label)
+        if not pane:
+            return str(error)
+        screen = self.cli("pane", "read", pane, "--source", "detection", "--lines", "60",
+                          "--format", "text", check=False)
+        process = self.cli("pane", "process-info", "--pane", pane, check=False)
+        body = (f"setup_error: {error}\npane: {pane}\n\n"
+                f"process_info:\n{process.stdout}{process.stderr}\n"
+                f"pane_read:\n{screen.stdout}{screen.stderr}")
+        evidence_dir = self.args.out / "real-agent-setup-errors"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        evidence_path = evidence_dir / f"{ident}.txt"
+        evidence_path.write_text(body, encoding="utf-8")
+        return f"{body}\nevidence_file: {evidence_path}"
+
+    def accept_real_agent_folder_trust(self, pane_id: str) -> bool:
+        """Accept the CLI trust gate only for this probe's known repo cwd."""
+        screen = self.cli("pane", "read", pane_id, "--source", "detection", "--lines", "50",
+                          "--format", "text", check=False)
+        text = screen.stdout
+        if "Trust this folder?" in text and "1. Trust and continue" in text:
+            keys = ["enter"]
+        elif ("Quick safety check: Is this a project you created or one you trust?" in text
+              and "Yes, I trust this folder" in text):
+            keys = ["down", "enter"]
+        else:
+            return False
+        self.cli("pane", "send-keys", pane_id, *keys)
+        return True
+
+    def real_agent_process_running(self, pane_id: str, agent: str) -> bool:
+        result = self.cli("pane", "process-info", "--pane", pane_id, check=False)
+        payload = _last_json(result.stdout)
+        if not isinstance(payload, dict):
+            return False
+        info = _find_value(payload, "process_info")
+        processes = info.get("foreground_processes", []) if isinstance(info, dict) else []
+        return any(isinstance(item, dict) and item.get("name", "").lower() == agent
+                   for item in processes)
 
     def wait_for_pane_stable(self, pane_id: str, ready_lines: tuple[str, ...]) -> None:
         deadline = time.monotonic() + 20
@@ -361,6 +413,16 @@ class Harness:
             started = subprocess.run([str(self.args.binary), *start_args], cwd=self.root,
                                      env=interactive_env, text=True, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, timeout=40, check=False)
+            if started.returncode and self.accept_real_agent_folder_trust(pane):
+                if time.monotonic() < startup_deadline:
+                    time.sleep(.5)
+                    continue
+            if started.returncode and self.real_agent_process_running(pane, agent):
+                # A retry after a startup-state transition can see the already
+                # launched process and return agent_name_taken. Reuse the pane
+                # process we just started instead of treating it as setup loss.
+                started.returncode = 0
+                break
             if started.returncode == 0 or "agent_pane_busy" not in (started.stdout + started.stderr):
                 break
             if time.monotonic() >= startup_deadline:
@@ -1130,10 +1192,11 @@ def main() -> int:
                         agent_skips[agent] = str(row.get("evidence", "agent unavailable")).removeprefix(
                             "skipped: ")
                 except Exception as exc:
+                    evidence = real_harness.real_agent_setup_evidence(ident, exc)
                     rows.append({"id": ident, "watchdog": "real-agents",
                                  "expected": "real-agent acceptance", "actual": "setup_error",
                                  "setup_error": str(exc), "model_calls": 0, "match": False,
-                                 "evidence": str(exc), "wall_time_ms": None,
+                                 "evidence": evidence, "wall_time_ms": None,
                                  "model_latency_ms": None})
                 finally:
                     real_harness.cleanup()
