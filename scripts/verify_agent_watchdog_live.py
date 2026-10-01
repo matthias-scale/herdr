@@ -340,12 +340,22 @@ class Harness:
         hook.chmod(0o700)
         command = shlex.quote(str(hook)) + " session"
         if agent == "claude":
+            closing_block_dir = hook_dir / "closing-block"
+            closing_block_dir.mkdir()
+            for name in ("closing_block.py", "herdr_status.py", "herdr-closing-block.py"):
+                shutil.copy2(ROOT / "src/integration/assets/closing-block" / name,
+                             closing_block_dir / name)
+            closing_hook = shlex.quote(str(closing_block_dir / "herdr-closing-block.py"))
             config_dir = cwd / ".claude"
             config_dir.mkdir()
-            settings = {"hooks": {"SessionStart": [{
-                "matcher": "^(startup|resume|clear|compact|fork)$",
-                "hooks": [{"type": "command", "command": command}],
-            }]}}
+            settings = {"hooks": {
+                "SessionStart": [{
+                    "matcher": "^(startup|resume|clear|compact|fork)$",
+                    "hooks": [{"type": "command", "command": command}],
+                }],
+                "Stop": [{"hooks": [{"type": "command",
+                                      "command": "python3 " + closing_hook}]}],
+            }}
             (config_dir / "settings.json").write_text(
                 json.dumps(settings, indent=2) + "\n", encoding="utf-8")
             return ["--setting-sources", "project"]
