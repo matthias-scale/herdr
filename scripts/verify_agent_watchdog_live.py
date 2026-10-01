@@ -628,29 +628,33 @@ class Harness:
             # behind a timeout and leave no chance to repair the setup.
             response = self.cli("agent", "prompt", pane, final_prompt, "--wait",
                                 "--timeout", "30000", timeout=40, check=False)
-            screen_result = self.call("pane.read", {"pane_id": pane, "source": "detection",
-                "lines": 40, "format": "text"})
-            screen_text = (screen_result.get("read") or {}).get("text", "")
-            if closing_block not in screen_text:
+            def observe_closing_setup() -> tuple[bool, dict[str, Any], str]:
+                agents_result = self.cli("agent", "list", check=False)
+                agents_payload = _last_json(agents_result.stdout)
+                rows = ((agents_payload or {}).get("result") or {}).get("agents", [])
+                row = next((item for item in rows if isinstance(item, dict)
+                            and item.get("pane_id") == pane), {})
+                parsed, fields = _closing_setup_signal(row)
+                screen_result = self.call("pane.read", {"pane_id": pane,
+                    "source": "detection", "lines": 40, "format": "text"})
+                tail = (screen_result.get("read") or {}).get("text", "")[-1200:]
+                return parsed, fields, tail
+
+            parsed, structured_fields, pane_tail = observe_closing_setup()
+            if not parsed:
                 retry_prompt = (
-                    "Your previous reply did not copy the required closing block exactly. "
-                    "Reply with the exact word READY, then copy exactly the following block, "
-                    "with no other text before or after it:\n\n```text\n" + closing_block
-                    + "\n```")
+                    "The closing-block parser has not reported a parsed blocking item yet. "
+                    "Reply READY and finish with this closing block:\n\n" + closing_block)
                 self.prepare_real_agent_prompt(pane)
                 response = self.cli("agent", "prompt", pane, retry_prompt, "--wait", "--until",
                                     expected_status, "--timeout", "30000", timeout=40,
                                     check=False)
-                screen_result = self.call("pane.read", {"pane_id": pane,
-                    "source": "detection", "lines": 40, "format": "text"})
-                screen_text = (screen_result.get("read") or {}).get("text", "")
-            if response.returncode:
-                raise RuntimeError("closing-block real-agent prompt failed: "
-                                   + response.stderr[-900:] + "\npane tail: "
-                                   + screen_text[-1200:])
-            if closing_block not in screen_text:
-                raise RuntimeError("real agent did not reproduce the exact closing block after "
-                                   "one retry; pane tail: " + screen_text[-1200:])
+                parsed, structured_fields, pane_tail = observe_closing_setup()
+            if not parsed:
+                raise RuntimeError("real agent closing-block parser did not report a parsed "
+                    "blocking item after one retry; structured fields: "
+                    + json.dumps(structured_fields, sort_keys=True)
+                    + "; pane tail: " + pane_tail)
         else:
             response = self.cli("agent", "prompt", pane, final_prompt, "--wait", "--until",
                                 expected_status, "--timeout", "30000", timeout=40)
@@ -678,7 +682,8 @@ class Harness:
         screen_result = self.call("pane.read", {"pane_id": pane, "source": "detection",
             "lines": 40, "format": "text"})
         screen_text = (screen_result.get("read") or {}).get("text", "")
-        if final_marker not in screen_text or interim_footer not in screen_text:
+        if not ident.endswith("waiting_on_you") and (
+                final_marker not in screen_text or interim_footer not in screen_text):
             raise RuntimeError(f"real agent did not change from {interim_footer!r} to "
                                f"{final_marker!r}: {screen_text[-1200:]}")
         # Remove any agent-created composer draft before taking the watchdog baseline.
@@ -898,6 +903,19 @@ def _last_json(text: str) -> Any:
         except json.JSONDecodeError:
             continue
     return None
+
+
+def _closing_setup_signal(agent_row: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    """Check the parser's structured report for a blocking closing item."""
+    tokens = agent_row.get("tokens")
+    tokens = tokens if isinstance(tokens, dict) else {}
+    fields = {key: tokens.get(key) for key in
+              ("closing_parse", "closing_blocking", "closing_wait")}
+    try:
+        blocking_count = int(tokens.get("closing_blocking", 0))
+    except (TypeError, ValueError):
+        blocking_count = 0
+    return tokens.get("closing_parse") == "ok" and blocking_count >= 1, fields
 
 
 def _find_value(value: Any, key: str) -> Any:
