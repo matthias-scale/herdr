@@ -401,10 +401,10 @@ class Harness:
                       "--timeout", "30000",
                       "--pane", pane]
         if agent == "claude":
-            start_args += ["--", "--model", "haiku"]
+            start_args += ["--", "--model", "haiku", "--permission-mode", "plan"]
         else:
             start_args += ["--", "--model", "gpt-6.1-sol", "-c",
-                           "model_reasoning_effort=low"]
+                           "model_reasoning_effort=low", "--sandbox", "read-only"]
         interactive_env = self.env.copy()
         interactive_env["HERDR_INTERACTIVE"] = "1"
         startup_deadline = time.monotonic() + 15
