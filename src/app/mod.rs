@@ -197,6 +197,7 @@ pub struct App {
     /// Server-owned remote focus operations. This state is touched only by
     /// API requests and transport events, never by render or pane loops.
     pub(crate) remote_focus_operations: remote_focus::RemoteFocusOperations,
+    pub(crate) planning_lock_key_burst: std::collections::VecDeque<Instant>,
     pub(crate) fleet_attach_agents:
         std::collections::HashMap<crate::layout::PaneId, crate::api::schema::AgentRef>,
     pub(crate) remote_focus_transport: Box<dyn remote_focus::RemoteFocusTransport>,
@@ -993,6 +994,11 @@ impl App {
             board_return: None,
             local_agent_panel_identities,
             remote_agent_panel_entries: Vec::new(),
+            remote_agent_device_groups: None,
+            remote_device_activity: None,
+            agent_run_device_groups: None,
+            remote_loop_device_groups: None,
+            agent_runs_active_count: None,
             aloop_projection: None,
             remote_focus_proxy_panes: std::collections::HashSet::new(),
             sidebar_selected_remote_agent: None,
@@ -1355,11 +1361,21 @@ impl App {
             ),
             goals: crate::goals::GoalsPanelState::from_config(&config.goals_panel),
             pomodoro: crate::pomodoro::PomodoroState::from_config(&config.pomodoro, Instant::now()),
-            planning_lock: if cfg!(test) {
-                crate::planning_lock::PlanningLock::default()
-            } else {
-                let path = crate::config::config_dir().join(crate::planning_lock::CONFIG_FILE_NAME);
-                crate::planning_lock::PlanningLock::load(&path)
+            planning_lock: {
+                let mut lock = if cfg!(test) {
+                    crate::planning_lock::PlanningLock::default()
+                } else {
+                    let path =
+                        crate::config::config_dir().join(crate::planning_lock::CONFIG_FILE_NAME);
+                    crate::planning_lock::PlanningLock::load(&path)
+                };
+                if let Some(tab_id) = config.planning_lock.discussion_tab_id.as_deref() {
+                    let _ = lock.set_local_discussion_tab(
+                        tab_id,
+                        crate::app::settled::unix_seconds(std::time::SystemTime::now()),
+                    );
+                }
+                lock
             },
             planning_lock_dialog: None,
             hyperspace: crate::hyperspace::HyperspaceState::new(
@@ -1400,6 +1416,8 @@ impl App {
             combine_repos_across_hosts: config.ui.combine_repos_across_hosts,
             new_thread_workspace: config.ui.new_thread_workspace,
             launch_profiles: crate::app::launch_profiles::resolve(&config.launch_profiles),
+            next_home_machine: None,
+            next_home_profile: None,
             projects: crate::app::projects::resolve(&config.projects),
             machines: crate::app::machines::resolve(&config.remote.fleet),
             add_project_start_dir: config.ui.add_project_start_dir.clone(),
@@ -1621,6 +1639,7 @@ impl App {
             terminal_runtimes: restored_terminal_runtimes,
             status_log: crate::status_log::StatusLog::for_server(),
             remote_focus_operations: remote_focus::RemoteFocusOperations::default(),
+            planning_lock_key_burst: std::collections::VecDeque::new(),
             fleet_attach_agents: std::collections::HashMap::new(),
             remote_focus_transport: Box::new(crate::remote::SshRemoteFocusTransport::new(
                 &config.remote.fleet,
@@ -1802,6 +1821,13 @@ impl App {
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
         app.rebuild_group_membership_projection();
+        if let Some(authority) = config.planning_lock.authority.clone() {
+            app.state.planning_lock.fail_closed_remote();
+            crate::planning_lock_sync::start_polling(authority, app.event_tx.clone());
+        } else {
+            let path = crate::config::config_dir().join(crate::planning_lock::CONFIG_FILE_NAME);
+            crate::planning_lock_sync::watch_authority_file(path, app.event_tx.clone());
+        }
         app
     }
 
@@ -1927,6 +1953,13 @@ impl App {
         )>,
     ) {
         for (editor, import) in editor_imports {
+            let Some(master_fd) = import.master_fd else {
+                tracing::warn!(
+                    pane_id = editor.editor_pane_id,
+                    "dropping closed dock editor runtime during handoff restore"
+                );
+                continue;
+            };
             let agent_pane_id = self
                 .state
                 .pane_id_aliases
@@ -1943,7 +1976,7 @@ impl App {
             let editor_pane_id = crate::layout::PaneId::alloc();
             let terminal_id = crate::terminal::TerminalId::alloc();
             let import = crate::handoff_runtime::ImportedHandoffRuntime {
-                master_fd: import.master_fd,
+                master_fd: Some(master_fd),
                 state: import.state.with_pane_id(editor_pane_id),
             };
             match crate::terminal::TerminalRuntime::from_handoff_fd(
@@ -4090,7 +4123,10 @@ mod tests {
         let state = runtime.handoff_runtime_state(pane_id.raw());
         (
             runtime,
-            crate::handoff_runtime::ImportedHandoffRuntime { master_fd, state },
+            crate::handoff_runtime::ImportedHandoffRuntime {
+                master_fd: Some(master_fd),
+                state,
+            },
         )
     }
 

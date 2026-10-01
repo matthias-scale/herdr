@@ -30,42 +30,30 @@ const API_NOTIFICATION_RATE_LIMIT: Duration = Duration::from_secs(1);
 #[cfg(windows)]
 const WINDOWS_POWERSHELL_AGENT_EXIT_RESPAWN_GRACE: Duration = Duration::from_secs(2);
 
-fn is_agent_command(method: &crate::api::schema::Method) -> bool {
-    use crate::api::schema::Method;
-    matches!(
-        method,
-        Method::AgentList(_)
-            | Method::AgentGet(_)
-            | Method::AgentState(_)
-            | Method::AgentReport(_)
-            | Method::AgentRead(_)
-            | Method::AgentExplain(_)
-            | Method::AgentSendKeys(_)
-            | Method::AgentRename(_)
-            | Method::AgentViewSet(_)
-            | Method::AgentViewClear(_)
-            | Method::AgentFocus(_)
-            | Method::AgentFocusStatus(_)
-            | Method::AgentStart(_)
-            | Method::AgentPrompt(_)
-            | Method::AgentWait(_)
-            | Method::PaneSendText(_)
-            | Method::PaneSendTextIf(_)
-            | Method::PaneSendKeys(_)
-            | Method::PaneSendInput(_)
-            | Method::PaneRead(_)
-            | Method::PaneWaitForOutput(_)
-            | Method::PaneReportAgent(_)
-            | Method::PaneReportAgentSession(_)
-            | Method::PaneClearAgentAuthority(_)
-            | Method::PaneReleaseAgent(_)
-    )
-}
-
 impl App {
+    fn planning_lock_api_allows(method: &crate::api::schema::Method) -> bool {
+        use crate::api::schema::Method;
+        matches!(
+            method,
+            Method::Ping(_)
+                | Method::SessionSnapshot(_)
+                | Method::WorkspaceFocus(_)
+                | Method::TabFocus(_)
+                | Method::PaneFocus(_)
+                | Method::PaneFocusDirection(_)
+                | Method::AgentFocus(_)
+                | Method::AgentFocusStatus(_)
+                | Method::PluginPaneFocus(_)
+        )
+    }
+
     fn agent_request_targets_discussion(&self, method: &crate::api::schema::Method) -> bool {
         use crate::api::schema::Method;
         let target = match method {
+            Method::TabGet(params) => {
+                return self.state.planning_lock.discussion_tab_id()
+                    == Some(params.tab_id.as_str());
+            }
             Method::AgentGet(params) | Method::AgentExplain(params) => Some(params.target.as_str()),
             Method::AgentState(params) => Some(params.target.as_str()),
             Method::AgentReport(params) => Some(params.target.as_str()),
@@ -89,6 +77,28 @@ impl App {
             Method::PaneReportAgentSession(params) => Some(params.pane_id.as_str()),
             Method::PaneClearAgentAuthority(params) => Some(params.pane_id.as_str()),
             Method::PaneReleaseAgent(params) => Some(params.pane_id.as_str()),
+            Method::PaneGet(params)
+            | Method::PaneSettle(params)
+            | Method::PaneUnsettle(params)
+            | Method::PaneUnsnooze(params)
+            | Method::PaneFocus(params)
+            | Method::PaneGraphicsInfo(params)
+            | Method::PaneClose(params) => Some(params.pane_id.as_str()),
+            Method::PaneInputSet(params) => Some(params.pane_id.as_str()),
+            Method::PaneRename(params) => Some(params.pane_id.as_str()),
+            Method::PaneGroupSet(params) => Some(params.pane_id.as_str()),
+            Method::PaneWorkContextSet(params) => Some(params.pane_id.as_str()),
+            Method::PaneSnooze(params) => Some(params.pane_id.as_str()),
+            Method::PaneSplit(params) | Method::PaneSplitCompanion(params) => {
+                params.target_pane_id.as_deref()
+            }
+            Method::PaneMove(params) => Some(params.pane_id.as_str()),
+            Method::PaneZoom(params) => params.pane_id.as_deref(),
+            Method::PaneLayout(params) => params.pane_id.as_deref(),
+            Method::PaneProcessInfo(params) => params.pane_id.as_deref(),
+            Method::PaneResize(params) => params.pane_id.as_deref(),
+            Method::PaneGraphicsSet(params) => Some(params.pane_id.as_str()),
+            Method::PaneGraphicsClear(params) => Some(params.pane_id.as_str()),
             _ => None,
         };
         let Some(target) = target else {
@@ -113,6 +123,52 @@ impl App {
     pub(crate) fn refresh_remote_agent_panel_entries(&mut self) {
         self.state.remote_agent_panel_entries =
             crate::ui::remote_agent_panel_entries(&self.state.fleet_snapshot, self.state.nerd_font);
+        self.state.remote_agent_device_groups =
+            Some(crate::ui::sidebar::remote_agent_device_groups(&self.state));
+        let activity_entries = self
+            .state
+            .remote_agent_panel_entries
+            .iter()
+            .map(crate::ui::sidebar::remote_agent_as_panel_entry)
+            .collect::<Vec<_>>();
+        self.state.remote_device_activity = Some(crate::ui::sidebar::sidebar_remote_activity(
+            &self.state,
+            &activity_entries,
+        ));
+        let run_projection = crate::agent_runs::project(&self.state.fleet_snapshot);
+        self.state.agent_runs_active_count = Some(run_projection.active_count);
+        self.state.agent_run_device_groups = Some(
+            crate::ui::sidebar::devices::group_items(
+                &self.state.agent_host_name,
+                run_projection.hosts.into_iter().map(|host| {
+                    let local = host.name == self.state.agent_host_name;
+                    let reachable =
+                        crate::ui::sidebar::devices::host_reachable(&self.state, &host.name);
+                    (host.name.clone(), local, reachable, host)
+                }),
+            )
+            .into(),
+        );
+        self.state.remote_loop_device_groups = Some(crate::ui::sidebar::devices::group_items(
+            &self.state.agent_host_name,
+            self.state
+                .fleet_snapshot
+                .hosts
+                .iter()
+                .filter_map(|host| {
+                    let local = host.name == self.state.agent_host_name;
+                    let reachable = host.reachable;
+                    let inventory = host.sessions.as_ref()?;
+                    Some(
+                        inventory
+                            .loops
+                            .iter()
+                            .cloned()
+                            .map(move |item| (host.name.clone(), local, reachable, item)),
+                    )
+                })
+                .flatten(),
+        ));
         self.state.aloop_projection =
             crate::aloop::project(&self.state.fleet_snapshot).map(std::sync::Arc::new);
         if self
@@ -341,6 +397,28 @@ impl App {
         self.authority_mutation_router.observe_snapshot(&snapshot);
         self.remote_focus_transport
             .observe_fleet_snapshot(&snapshot);
+        const DEVICE_SECTIONS: [&str; 5] = ["main", "snoozed", "settled", "runs", "loops"];
+        for host in snapshot.hosts.iter().filter(|host| {
+            !host.local
+                && !host.reachable
+                && self
+                    .state
+                    .fleet_snapshot
+                    .hosts
+                    .iter()
+                    .find(|previous| previous.name == host.name)
+                    .is_none_or(|previous| previous.reachable)
+        }) {
+            for section in DEVICE_SECTIONS {
+                let key = crate::ui::sidebar::devices::group_key(section, &host.name);
+                crate::ui::sidebar::devices::reset_offline_expansions(
+                    &mut self.state.collapsed_sidebar_groups,
+                    section,
+                    &host.name,
+                );
+                self.state.collapsed_sidebar_groups.insert(key);
+            }
+        }
         let catalogs_changed = self.state.fleet_snapshot.group_catalogs != snapshot.group_catalogs;
         let changed = self.state.fleet_snapshot != snapshot;
         self.state.fleet_snapshot = snapshot;
@@ -523,6 +601,16 @@ impl App {
 
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
+            AppEvent::PlanningLockFileChanged(lock) => {
+                self.state.planning_lock = lock;
+                self.state.mark_session_dirty();
+                true
+            }
+            AppEvent::PlanningLockRemoteSnapshot(snapshot) => {
+                self.state.planning_lock.apply_remote_snapshot(snapshot);
+                self.state.mark_session_dirty();
+                true
+            }
             AppEvent::FleetRefreshed { snapshot } => {
                 let changed = self.install_fleet_snapshot(snapshot);
                 self.refresh_board_remote_lines();
@@ -2108,7 +2196,7 @@ impl App {
             .is_locked(crate::app::settled::unix_seconds(
                 std::time::SystemTime::now(),
             ))
-            && is_agent_command(&request.method)
+            && !Self::planning_lock_api_allows(&request.method)
             && !self.agent_request_targets_discussion(&request.method)
         {
             return responses::encode_error(
@@ -2655,6 +2743,28 @@ mod tests {
         let response: crate::api::schema::ErrorResponse =
             serde_json::from_str(&response).expect("blocked response");
         assert_eq!(response.error.code, "planning_lock_active");
+    }
+
+    #[test]
+    fn planning_lock_api_allowlist_is_narrow_and_explicit() {
+        use crate::api::schema::{EmptyParams, Method};
+        assert!(App::planning_lock_api_allows(&Method::Ping(
+            crate::api::schema::PingParams {},
+        )));
+        assert!(App::planning_lock_api_allows(&Method::SessionSnapshot(
+            EmptyParams::default(),
+        )));
+        assert!(App::planning_lock_api_allows(&Method::PaneFocus(
+            crate::api::schema::PaneTarget {
+                pane_id: "pane".into(),
+            },
+        )));
+        assert!(!App::planning_lock_api_allows(&Method::ThemeStatus(
+            EmptyParams::default(),
+        )));
+        assert!(!App::planning_lock_api_allows(&Method::ServerStop(
+            EmptyParams::default(),
+        )));
     }
 
     #[test]

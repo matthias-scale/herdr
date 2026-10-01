@@ -282,6 +282,8 @@ impl AppState {
             now_unix,
             self.nerd_font,
         );
+        self.remote_agent_device_groups =
+            Some(crate::ui::sidebar::remote_agent_device_groups(self));
         true
     }
     fn settle_owned_candidates(
@@ -1076,9 +1078,14 @@ mod tests {
             state.next_snooze_deadline_at(now, 199),
             Some(now + Duration::from_secs(1))
         );
-        assert!(crate::ui::sidebar_rows(&state)
-            .iter()
-            .any(|row| matches!(row, crate::ui::SidebarRow::RemoteAgent { .. })));
+        assert!(crate::ui::sidebar_rows(&state).iter().any(|row| matches!(
+            row,
+            crate::ui::SidebarRow::SectionHeader {
+                title: crate::ui::sidebar::SNOOZED_SECTION_TITLE,
+                count: 1,
+                ..
+            }
+        )));
 
         assert!(state.refresh_remote_snoozes_at(200));
         state.view_observed_unix_s = 200;
