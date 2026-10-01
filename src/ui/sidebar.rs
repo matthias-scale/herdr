@@ -14390,6 +14390,11 @@ pub(crate) mod tests {
             remote_agent_panel_entries_at(&snapshot, 1_725_000_899, false);
         app.view_observed_unix_s = 1_725_000_899;
         expand_fleet(&mut app);
+        for section in ["snoozed", "settled"] {
+            let key = devices::group_key(section, "remote");
+            app.collapsed_sidebar_groups
+                .insert(format!("expanded:{key}"));
+        }
 
         let rows = sidebar_rows(&app);
         let settled_at = rows
@@ -14425,6 +14430,9 @@ pub(crate) mod tests {
             row,
             SidebarRow::Agent { entry, .. }
                 if matches!(&entry.identity, AgentPanelIdentity::Remote(agent_ref) if agent_ref.agent == "remote-snoozed")
+        ) || matches!(
+            row,
+            SidebarRow::RemoteAgent { entry, .. } if entry.agent_ref.agent == "remote-snoozed"
         )));
         assert!(rows[settled_at + 1..].iter().any(|row| matches!(
             row,

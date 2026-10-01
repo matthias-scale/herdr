@@ -6003,7 +6003,7 @@ mod tests {
     }
 
     #[test]
-    fn next_blocked_window_reaches_fleet_blockers_hidden_by_the_machine_filter() {
+    fn next_blocked_window_reaches_remote_blockers_after_machine_filter_removal() {
         for sections in [false, true] {
             let mut app = app_with_global_window_fixture();
             app.state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
@@ -6020,17 +6020,17 @@ mod tests {
             app.state.remote_agent_panel_entries = vec![std::sync::Arc::new(
                 crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), remote),
             )];
-            let reaches_fleet = |state: &AppState| {
+            let reaches_remote = |state: &AppState| {
                 blocked_pane_cycle(state).iter().any(|(target, _)| {
                     matches!(target, BlockedPaneTarget::Remote(found) if *found == agent_ref)
                 })
             };
 
             app.state.skip_collapsed_cycle = false;
-            assert!(reaches_fleet(&app.state), "sections={sections}");
-            // Skip-collapsed follows the sidebar, which hides the fleet row.
+            assert!(reaches_remote(&app.state), "sections={sections}");
+            // Compact layout keeps the blocker in Needs you; sections layout hides the collapsed device.
             app.state.skip_collapsed_cycle = true;
-            assert!(!reaches_fleet(&app.state), "sections={sections}");
+            assert_eq!(reaches_remote(&app.state), !sections, "sections={sections}");
         }
     }
 
