@@ -169,6 +169,8 @@ pub struct PaneSnapshot {
     pub quiet_since_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub settled_locked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snoozed_until: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,6 +192,10 @@ pub struct PaneSnapshot {
     pub managed_agent_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_session: Option<PaneAgentSessionSnapshot>,
+    /// Versioned closing-block state, including the unanswered-human latch.
+    /// Stored per pane so reports without an agent session ID also survive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closing_report: Option<crate::terminal::state::ClosingReportHandoffState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
 }
@@ -659,6 +665,7 @@ fn capture_tab(
                         .quiet_unix_timestamp_at(captured_at, captured_at_unix)
                 }),
                 settled_at: pane.and_then(|pane| pane.settled_at),
+                settled_locked: pane.is_some_and(|pane| pane.settled_locked),
                 snoozed_until: pane.and_then(crate::pane::PaneState::snoozed_until),
                 settled_work_key: pane.and_then(|pane| pane.settled_work_key.clone()),
                 settled_auto_label: terminal
@@ -669,6 +676,8 @@ fn capture_tab(
                 agent_name,
                 managed_agent_kind,
                 agent_session,
+                closing_report: terminal
+                    .and_then(|terminal| terminal.closing_report_persistence_state(captured_at)),
                 launch_argv,
             },
         );
@@ -1903,6 +1912,7 @@ mod tests {
         }))
         .expect("older pane snapshot still loads");
         assert_eq!(legacy.snoozed_until, None);
+        assert!(!legacy.settled_locked);
         let mut panes = HashMap::new();
         panes.insert(
             0,
@@ -1913,6 +1923,7 @@ mod tests {
                 detection_output_at: None,
                 quiet_since_at: None,
                 settled_at: Some(1_725_000_000),
+                settled_locked: true,
                 snoozed_until: None,
                 settled_work_key: Some("pr:https://github.com/owner/repo/pull/7:merged".into()),
                 settled_auto_label: Some("#7 Fix restore".into()),
@@ -1921,6 +1932,7 @@ mod tests {
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,
+                closing_report: None,
                 agent_session: None,
                 group_membership: Default::default(),
                 launch_argv: None,
@@ -1935,6 +1947,7 @@ mod tests {
                 detection_output_at: None,
                 quiet_since_at: None,
                 settled_at: None,
+                settled_locked: false,
                 snoozed_until: Some(1_725_000_360),
                 settled_work_key: None,
                 settled_auto_label: None,
@@ -1943,6 +1956,7 @@ mod tests {
                 label: Some("website".into()),
                 agent_name: None,
                 managed_agent_kind: None,
+                closing_report: None,
                 agent_session: None,
                 group_membership: Default::default(),
                 launch_argv: None,
@@ -2010,6 +2024,7 @@ mod tests {
             restored.workspaces[0].tabs[0].panes[&0].settled_at,
             Some(1_725_000_000)
         );
+        assert!(restored.workspaces[0].tabs[0].panes[&0].settled_locked);
         assert_eq!(
             restored.workspaces[0].tabs[0].panes[&1].snoozed_until,
             Some(1_725_000_360)
@@ -2669,6 +2684,63 @@ mod tests {
     }
 
     #[test]
+    fn capture_persists_the_blocked_closing_report_and_unanswered_latch() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Pi),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_hook_authority_at(
+            "herdr:pi-closing-block".into(),
+            "pi".into(),
+            crate::detect::AgentState::Blocked,
+            None,
+            None,
+            Some(1),
+            std::time::Instant::now(),
+        );
+        terminal.apply_closing_block_payload(
+            vec![crate::api::schema::ClosingBlockItem {
+                n: 1,
+                label: "Gate".into(),
+                text: "Choose the release path".into(),
+                blocking: true,
+                pr: None,
+                ticket: None,
+                url: None,
+                default: None,
+                default_at: None,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let snapshot = capture_from_state(&state);
+        let saved_pane = &snapshot.workspaces[0].tabs[0].panes[&root.raw()];
+        assert!(saved_pane.agent_session.is_none());
+        let saved = saved_pane
+            .closing_report
+            .as_ref()
+            .expect("closing report and latch should be captured");
+        let encoded = serde_json::to_value(saved).unwrap();
+        assert_eq!(encoded["gates"].as_array().unwrap().len(), 1);
+        assert_eq!(encoded["unanswered"]["gates"].as_array().unwrap().len(), 1);
+        assert_eq!(encoded["version"], 3);
+
+        let mut legacy = serde_json::to_value(saved_pane).unwrap();
+        legacy.as_object_mut().unwrap().remove("closing_report");
+        let restored: PaneSnapshot =
+            serde_json::from_value(legacy).expect("old pane snapshots remain compatible");
+        assert!(restored.closing_report.is_none());
+    }
+
+    #[test]
     fn capture_leaves_a_working_report_unblocked() {
         // Working is re-derived from the screen on restore, so persisting it
         // would only let a stale report outrank live detection.
@@ -2822,6 +2894,7 @@ mod tests {
                 detection_output_at: None,
                 quiet_since_at: None,
                 settled_at: None,
+                settled_locked: false,
                 snoozed_until: None,
                 settled_work_key: None,
                 settled_auto_label: None,
@@ -2830,6 +2903,7 @@ mod tests {
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,
+                closing_report: None,
                 agent_session: None,
                 group_membership: Default::default(),
                 launch_argv: None,
@@ -2846,6 +2920,7 @@ mod tests {
                 detection_output_at: None,
                 quiet_since_at: None,
                 settled_at: None,
+                settled_locked: false,
                 snoozed_until: None,
                 settled_work_key: None,
                 settled_auto_label: None,
@@ -2854,6 +2929,7 @@ mod tests {
                 label: None,
                 agent_name: None,
                 managed_agent_kind: None,
+                closing_report: None,
                 agent_session: None,
                 group_membership: Default::default(),
                 launch_argv: None,

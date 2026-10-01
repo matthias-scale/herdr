@@ -3693,6 +3693,7 @@ pub(crate) struct EffectiveRemoteLifecycle<'a> {
     pub(crate) open_blockers: bool,
     pub(crate) usage_limited: bool,
     pub(crate) waiting_on_agents: bool,
+    pub(crate) working_while_blocked: bool,
     pub(crate) settled: bool,
     pub(crate) snoozed_until: Option<u64>,
 }
@@ -3747,6 +3748,7 @@ impl FleetRow {
                 open_blockers: false,
                 usage_limited: false,
                 waiting_on_agents: false,
+                working_while_blocked: false,
                 settled,
                 snoozed_until,
             };
@@ -3762,6 +3764,7 @@ impl FleetRow {
                 open_blockers: projection.open_blockers,
                 usage_limited: projection.usage_limited,
                 waiting_on_agents: projection.waiting_on_agents,
+                working_while_blocked: projection.working_while_blocked,
                 settled,
                 snoozed_until,
             };
@@ -3785,6 +3788,7 @@ impl FleetRow {
             open_blockers: false,
             usage_limited: false,
             waiting_on_agents: false,
+            working_while_blocked: false,
             settled: false,
             snoozed_until: None,
         }

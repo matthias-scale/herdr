@@ -1042,6 +1042,7 @@ pub struct SidebarHoverTarget {
 pub enum SidebarHoverAction {
     Snooze { target: SidebarPaneLifecycleTarget },
     Settle { target: SidebarPaneLifecycleTarget },
+    Unsettle { target: SidebarPaneLifecycleTarget },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2691,6 +2692,7 @@ pub struct ViewState {
     /// Sidebar-footer entry for refreshing work and Git metadata.
     pub(crate) sidebar_footer_refresh_hit_area: Rect,
     pub(crate) sidebar_footer_board_hit_area: Rect,
+    pub(crate) sidebar_footer_planning_lock_hit_area: Rect,
     pub workspace_card_areas: Vec<WorkspaceCardArea>,
     pub agent_card_areas: Vec<AgentCardArea>,
     /// Hover targets for sidebar row internals and lifecycle controls. Row-wide
@@ -3300,6 +3302,7 @@ pub(crate) enum SidebarPanelSettingTarget {
     NotepadTab(crate::notepad::NotepadTabTarget),
     Goals,
     Pomodoro,
+    Animation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3356,6 +3359,11 @@ pub(crate) fn settings_sidebar_panel_items(state: &AppState) -> Vec<SidebarPanel
         target: SidebarPanelSettingTarget::Pomodoro,
         label: "Pomodoro widget".to_string(),
         visible: state.pomodoro.sidebar_visible,
+    });
+    items.push(SidebarPanelSettingItem {
+        target: SidebarPanelSettingTarget::Animation,
+        label: "Animation".to_string(),
+        visible: state.hyperspace.enabled,
     });
     items
 }
@@ -3631,6 +3639,9 @@ pub enum ContextMenuKind {
         /// offers a picker that would have something to pick.
         has_agent_targets: bool,
     },
+    RemoteAgent {
+        agent_ref: crate::api::schema::AgentRef,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3735,6 +3746,7 @@ pub const UNSTAR_ITEM: &str = "Unstar";
 pub const MOVE_TO_SUBGROUP_ITEM: &str = "Move to subgroup…";
 pub const REMOVE_FROM_SUBGROUP_ITEM: &str = "Remove from subgroup";
 pub const SETTLE_ITEM: &str = "Settle";
+pub const UNSETTLE_ITEM: &str = "Unsettle";
 pub const SNOOZE_ITEM: &str = "Snooze ▸";
 pub const SET_TIME_ITEM: &str = "Set time…";
 pub const CHANGE_TIME_ITEM: &str = "Change time…";
@@ -3937,6 +3949,7 @@ pub enum ContextMenuAction {
     SetTime,
     ChangeTime,
     Settle,
+    Unsettle,
     CloseTab,
     RenamePane,
     WorkLink,
@@ -3976,6 +3989,7 @@ impl ContextMenuAction {
             Self::SetTime => SET_TIME_ITEM,
             Self::ChangeTime => CHANGE_TIME_ITEM,
             Self::Settle => SETTLE_ITEM,
+            Self::Unsettle => UNSETTLE_ITEM,
             Self::RenamePane => "Rename pane",
             Self::WorkLink => "work link",
             Self::OpenLink => OPEN_LINK_ITEM,
@@ -4034,6 +4048,7 @@ impl ContextMenuState {
                 ContextMenuAction::RenameWorkspace,
                 ContextMenuAction::CloseWorkspace,
             ],
+            ContextMenuKind::RemoteAgent { .. } => vec![ContextMenuAction::Unsettle],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
                 has_worktree_children: false,
@@ -4274,6 +4289,7 @@ pub(crate) struct PaneSettlementChange {
     pub(crate) workspace_id: String,
     pub(crate) pane_id: PaneId,
     pub(crate) settled_at: Option<u64>,
+    pub(crate) lock_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4462,6 +4478,8 @@ pub struct AppState {
     /// How long a Done pane stays quiet before `auto_settle_done` settles it
     /// (`session.settle_done_after_minutes`).
     pub(crate) settle_done_after: std::time::Duration,
+    /// Delay before a settled pane becomes read-only and its agent is stopped.
+    pub(crate) settled_read_only_after: std::time::Duration,
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Runtime-only facts reported or observed for each pane. Session snapshots
@@ -4607,6 +4625,7 @@ pub struct AppState {
     /// Attach-local TUI state; provider objects remain shared work-index facts.
     pub(crate) sidebar_unassigned_expanded_views: std::collections::HashSet<SidebarGroupMode>,
     pub(crate) sidebar_selected_settled: Option<PaneFocusTarget>,
+    pub(crate) settled_view: Option<crate::app::settled_view::SettledViewState>,
     pub(crate) sidebar_snooze: Option<SidebarSnoozeUiState>,
     pub(crate) sidebar_settled_menu_target: Option<PaneFocusTarget>,
     pub(crate) sidebar_settled_menu_selected: usize,
@@ -4837,6 +4856,11 @@ pub struct AppState {
     pub(crate) goals: crate::goals::GoalsPanelState,
     /// The break reminder shown next to it.
     pub(crate) pomodoro: crate::pomodoro::PomodoroState,
+    /// Authoritative server lock policy. Password material is excluded from
+    /// persisted session snapshots and API projections.
+    pub(crate) planning_lock: crate::planning_lock::PlanningLock,
+    /// Local flow for setting up, unlocking, or managing the planning lock.
+    pub(crate) planning_lock_dialog: Option<crate::planning_lock::Dialog>,
     /// The idle star field pinned under both of them.
     pub(crate) hyperspace: crate::hyperspace::HyperspaceState,
     pub mobile_width_threshold: u16,
@@ -5143,6 +5167,29 @@ impl ClientInputOwnerState {
 }
 
 impl AppState {
+    pub(crate) fn planning_lock_tab_projection(&self) -> Vec<(String, String)> {
+        let mut tabs = Vec::new();
+        for workspace in &self.workspaces {
+            for (tab_idx, tab) in workspace.tabs.iter().enumerate() {
+                let Some(tab_number) = workspace.public_tab_number(tab_idx) else {
+                    continue;
+                };
+                let id = crate::workspace::public_tab_id_for_number(&workspace.id, tab_number);
+                let name = tab
+                    .custom_name
+                    .clone()
+                    .unwrap_or_else(|| format!("Tab {}", tab_idx + 1));
+                let label = format!(
+                    "{} · {}",
+                    workspace.custom_name.as_deref().unwrap_or("Workspace"),
+                    name
+                );
+                tabs.push((id, label));
+            }
+        }
+        tabs
+    }
+
     pub(crate) fn client_presentation_policy(&self) -> ClientPresentationPolicy<'_> {
         ClientPresentationPolicy::from_app(self)
     }
@@ -5368,6 +5415,7 @@ impl From<crate::config::LinearLayoutConfig> for LinearViewLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarFooterItem {
     Board,
+    PlanningLock,
     Settings,
     AskSubtitles,
     PullRequests,
@@ -7699,6 +7747,7 @@ impl AppState {
             settle_after: std::time::Duration::from_secs(3 * 24 * 60 * 60),
             settle_finished_after: std::time::Duration::from_secs(10 * 60),
             settle_done_after: std::time::Duration::from_secs(30 * 60),
+            settled_read_only_after: std::time::Duration::from_secs(15 * 60),
             terminals: std::collections::HashMap::new(),
             agent_states: crate::agent_state::AgentStateStore::default(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
@@ -7782,6 +7831,7 @@ impl AppState {
             sidebar_group_sorts: std::collections::HashMap::new(),
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
+            settled_view: None,
             sidebar_snooze: None,
             sidebar_settled_menu_target: None,
             sidebar_settled_menu_selected: 0,
@@ -7836,6 +7886,7 @@ impl AppState {
                 hyperspace_pause_hit_area: Rect::default(),
                 sidebar_footer_refresh_hit_area: Rect::default(),
                 sidebar_footer_board_hit_area: Rect::default(),
+                sidebar_footer_planning_lock_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 sidebar_hover_targets: Vec::new(),
@@ -8023,6 +8074,8 @@ impl AppState {
             ),
             goals: crate::goals::GoalsPanelState::default(),
             pomodoro: crate::pomodoro::PomodoroState::default(),
+            planning_lock: crate::planning_lock::PlanningLock::default(),
+            planning_lock_dialog: None,
             // Off in fixtures, the way the break timer is: a decorative panel
             // must not silently move every existing sidebar layout assertion.
             // Tests that care about it set `hyperspace.enabled = true`.
@@ -8495,6 +8548,7 @@ impl AppState {
                         assert_live_pane(source_pane_id, "context menu source pane");
                     }
                 }
+                ContextMenuKind::RemoteAgent { .. } => {}
             }
         }
     }

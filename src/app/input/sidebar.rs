@@ -10,6 +10,7 @@ use super::ScrollbarClickTarget;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SettledMenuAction {
+    Unsettle(crate::app::state::PaneFocusTarget),
     Resume(crate::app::state::PaneFocusTarget),
     FocusLive(crate::app::state::PaneFocusTarget),
     NewThread {
@@ -25,6 +26,24 @@ pub(crate) enum SidebarWorkGroupKeyAction {
     Dispatch(Box<crate::app::home::HomeDispatchPlan>),
     RenamePod(crate::groups::GroupRecord),
     DeletePod(crate::groups::GroupRecord),
+}
+
+fn settled_sidebar_neighbor(
+    rows: &[crate::app::state::PaneFocusTarget],
+    selected: Option<&crate::app::state::PaneFocusTarget>,
+    previous: bool,
+) -> Option<crate::app::state::PaneFocusTarget> {
+    if rows.is_empty() {
+        return None;
+    }
+    let index = selected.and_then(|target| rows.iter().position(|row| row == target));
+    let next = match index {
+        Some(index) if previous => index.saturating_sub(1),
+        Some(index) => index.saturating_add(1).min(rows.len() - 1),
+        None if previous => rows.len() - 1,
+        None => 0,
+    };
+    rows.get(next).cloned()
 }
 
 fn pod_record_for_key(state: &AppState, key: &str) -> Option<crate::groups::GroupRecord> {
@@ -562,6 +581,7 @@ impl AppState {
                 workspace: crate::app::home::HomeWorkspace::NewWorktree,
             }),
             3 => Some(SettledMenuAction::Delete(target)),
+            4 => Some(SettledMenuAction::Unsettle(target)),
             _ => None,
         }
     }
@@ -2597,18 +2617,49 @@ impl super::super::App {
             }
             return true;
         }
+        let rows = crate::ui::compute_sidebar_row_areas(&self.state, self.state.view.sidebar_rect)
+            .0
+            .into_iter()
+            .filter_map(|card| {
+                let pane_id = card.settled_pane_id?;
+                let ws = self.state.workspaces.get(card.ws_idx)?;
+                Some(crate::app::state::PaneFocusTarget {
+                    workspace_id: ws.id.clone(),
+                    pane_id,
+                })
+            })
+            .collect::<Vec<_>>();
         let Some(target) = self.state.sidebar_selected_settled.clone() else {
-            return false;
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.state.sidebar_selected_settled =
+                        settled_sidebar_neighbor(&rows, None, true)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.state.sidebar_selected_settled =
+                        settled_sidebar_neighbor(&rows, None, false)
+                }
+                _ => return false,
+            }
+            return self.state.sidebar_selected_settled.is_some();
         };
         match key.code {
             KeyCode::Enter => {
-                if !self.state.settled_target_has_resume_plan(&target) {
-                    self.focus_settled_pane(target);
-                    return true;
-                }
+                self.focus_settled_pane(target);
+                true
+            }
+            KeyCode::Char('m') => {
                 self.state.sidebar_settled_menu_target = Some(target);
                 self.state.sidebar_settled_menu_selected = 0;
                 self.state.sidebar_settled_menu_delete_armed = false;
+                true
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
+                self.state.sidebar_selected_settled = settled_sidebar_neighbor(
+                    &rows,
+                    Some(&target),
+                    matches!(key.code, KeyCode::Up | KeyCode::Char('k')),
+                );
                 true
             }
             KeyCode::Esc => {
@@ -2627,6 +2678,9 @@ impl super::super::App {
             return;
         };
         match action {
+            SettledMenuAction::Unsettle(target) => self.unsettle_sidebar_pane(
+                crate::app::state::SidebarPaneLifecycleTarget::Local(target),
+            ),
             SettledMenuAction::Resume(target) => self.resume_settled_pane(target),
             SettledMenuAction::FocusLive(target) => self.focus_settled_pane(target),
             SettledMenuAction::NewThread {
@@ -2653,6 +2707,10 @@ impl super::super::App {
     }
 
     pub(crate) fn focus_settled_pane(&mut self, target: crate::app::state::PaneFocusTarget) {
+        let now = std::time::Instant::now();
+        let now_unix = crate::app::settled::unix_seconds(std::time::SystemTime::now());
+        self.state.refresh_settled_panes_at(None, now, now_unix);
+        self.flush_pane_settlement_events();
         let Some(ws_idx) = self
             .state
             .workspaces
@@ -2661,10 +2719,54 @@ impl super::super::App {
         else {
             return;
         };
+        if let Some(terminal_id) = self.state.workspaces[ws_idx]
+            .terminal_id(target.pane_id)
+            .cloned()
+        {
+            let is_locked = self.state.workspaces[ws_idx]
+                .pane_state(target.pane_id)
+                .is_some_and(|pane| pane.settled_locked);
+            if is_locked {
+                if let Some(terminal) = self.state.terminals.get(&terminal_id) {
+                    if let Some(plan) = terminal.pending_agent_resume_plan.as_ref() {
+                        let transcript =
+                            terminal
+                                .persisted_agent_session
+                                .as_ref()
+                                .and_then(|session| {
+                                    crate::app::settled_view::load_transcript(
+                                        session,
+                                        &terminal.cwd,
+                                    )
+                                });
+                        let command = crate::app::agent_resume::shell_command_from_argv(&plan.argv)
+                            .unwrap_or_default();
+                        self.state.settled_view =
+                            Some(crate::app::settled_view::SettledViewState {
+                                pane_id: target.pane_id,
+                                transcript,
+                                command,
+                                scroll: 0,
+                                search: String::new(),
+                                searching: false,
+                                editing: false,
+                            });
+                    }
+                }
+            }
+        }
         self.focus_pane_internal_via_api(ws_idx, target.pane_id);
     }
 
     pub(crate) fn resume_settled_pane(&mut self, target: crate::app::state::PaneFocusTarget) {
+        if self
+            .state
+            .settled_view
+            .as_ref()
+            .is_some_and(|view| view.pane_id == target.pane_id)
+        {
+            self.state.settled_view = None;
+        }
         let toast_target = crate::app::state::SidebarPaneLifecycleTarget::Local(target.clone());
         let now = std::time::Instant::now();
         let tab_panes = self
@@ -2725,6 +2827,30 @@ impl super::super::App {
                 }
             }
         }
+    }
+
+    pub(crate) fn unsettle_sidebar_pane(
+        &mut self,
+        target: crate::app::state::SidebarPaneLifecycleTarget,
+    ) {
+        match &target {
+            crate::app::state::SidebarPaneLifecycleTarget::Local(_) => {
+                if let Some(pane_id) = self.sidebar_pane_lifecycle_public_id(&target) {
+                    let response = self.runtime_pane_unsettle("tui.sidebar.unsettle", pane_id);
+                    if !self.show_local_pane_lifecycle_error("unsettle", &response) {
+                        self.show_sidebar_shelf_toast(&target, "Active");
+                    }
+                }
+            }
+            crate::app::state::SidebarPaneLifecycleTarget::Remote(agent_ref) => {
+                if let Err(error) = self.remote_pane_unsettle(agent_ref.clone()) {
+                    self.show_remote_pane_lifecycle_error(agent_ref, error);
+                } else {
+                    self.show_sidebar_shelf_toast(&target, "Active");
+                }
+            }
+        }
+        self.flush_pane_settlement_events();
     }
 
     pub(crate) fn settle_local_pane_or_tab(
@@ -4892,6 +5018,12 @@ mod tests {
 
         app.state.sidebar_settled_menu_target = Some(target.clone());
         assert_eq!(
+            app.state.select_settled_menu_action(4),
+            Some(super::SettledMenuAction::Unsettle(target.clone()))
+        );
+
+        app.state.sidebar_settled_menu_target = Some(target.clone());
+        assert_eq!(
             app.state.select_settled_menu_action(0),
             Some(super::SettledMenuAction::Resume(target.clone()))
         );
@@ -5051,16 +5183,29 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_enter_still_opens_the_settled_menu() {
+    fn keyboard_enter_focuses_settled_pane_and_m_opens_its_menu() {
         let mut app = app_for_mouse_test();
         let target = settled_target(&mut app);
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(target.pane_id)
+            .unwrap()
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .pending_agent_resume_plan = Some(crate::agent_resume::AgentResumePlan {
+            agent: "codex".into(),
+            argv: vec!["codex".into(), "resume".into(), "session".into()],
+            dedupe_key: "session".into(),
+        });
         app.state.sidebar_selected_settled = Some(target.clone());
 
         assert!(
             app.handle_sidebar_settled_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty(),))
         );
 
-        assert_eq!(app.state.sidebar_settled_menu_target, Some(target.clone()));
+        assert_eq!(app.state.sidebar_settled_menu_target, None);
         let ws_idx = app
             .state
             .workspaces
@@ -5068,6 +5213,49 @@ mod tests {
             .position(|workspace| workspace.id == target.workspace_id)
             .expect("settled target workspace");
         assert!(app.state.pane_is_settled(ws_idx, target.pane_id));
+        assert!(app.state.terminals[&terminal_id]
+            .pending_agent_resume_plan
+            .is_some());
+        assert_eq!(app.state.active, Some(ws_idx));
+        assert_eq!(
+            app.state.workspaces[ws_idx].focused_pane_id(),
+            Some(target.pane_id)
+        );
+        app.state.sidebar_selected_settled = Some(target.clone());
+        assert!(app
+            .handle_sidebar_settled_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::empty())));
+        assert_eq!(app.state.sidebar_settled_menu_target, Some(target));
+    }
+
+    #[test]
+    fn settled_sidebar_keyboard_moves_into_and_through_visible_rows() {
+        let mut workspace = Workspace::test_new("settled rows");
+        let first_pane = workspace.tabs[0].root_pane;
+        let second_pane = workspace.test_split(Direction::Horizontal);
+        let rows = [first_pane, second_pane].map(|pane_id| crate::app::state::PaneFocusTarget {
+            workspace_id: workspace.id.clone(),
+            pane_id,
+        });
+        assert_eq!(
+            super::settled_sidebar_neighbor(&rows, None, false),
+            Some(rows[0].clone())
+        );
+        assert_eq!(
+            super::settled_sidebar_neighbor(&rows, None, true),
+            Some(rows[1].clone())
+        );
+        assert_eq!(
+            super::settled_sidebar_neighbor(&rows, Some(&rows[0]), false),
+            Some(rows[1].clone())
+        );
+        assert_eq!(
+            super::settled_sidebar_neighbor(&rows, Some(&rows[1]), true),
+            Some(rows[0].clone())
+        );
+        assert_eq!(
+            super::settled_sidebar_neighbor(&rows, Some(&rows[0]), true),
+            Some(rows[0].clone())
+        );
     }
 
     #[test]
@@ -5100,6 +5288,84 @@ mod tests {
         ));
 
         assert_eq!(app.state.server_mode(), Mode::GlobalMenu);
+    }
+
+    #[test]
+    fn launcher_global_menu_owns_input_renders_and_releases_settings() {
+        use crate::app::state::{InputOwner, ServerInputOwner};
+        let mut app = app_for_mouse_test();
+        let area = Rect::new(0, 0, 106, 30);
+        crate::ui::compute_view(&mut app.state, area);
+        let rect = app.state.global_launcher_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x,
+            rect.y,
+        ));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), rect.x, rect.y));
+        assert_eq!(app.state.server_mode(), Mode::GlobalMenu);
+        assert_eq!(
+            app.state.input_owner(),
+            InputOwner::Server(ServerInputOwner::GlobalMenu)
+        );
+
+        let backend = ratatui::backend::TestBackend::new(area.width, area.height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::ui::render(&app.state, frame))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let menu = app.state.global_menu_rect();
+        let text: String = (menu.y..menu.bottom())
+            .flat_map(|y| (menu.x..menu.right()).map(move |x| (x, y)))
+            .map(|(x, y)| buffer[(x, y)].symbol().to_string())
+            .collect();
+        for label in app.state.global_menu_labels() {
+            assert!(text.contains(label), "menu should draw {label:?}: {text}");
+        }
+        for (idx, label) in app.state.global_menu_labels().iter().enumerate() {
+            let row = menu.y + 1 + idx as u16;
+            assert!(
+                app.state.global_menu_item_at(menu.x + 1, row).is_some(),
+                "row for {label:?} resolves an action"
+            );
+        }
+
+        crate::app::input::handle_global_menu_key(
+            &mut app.state,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        );
+        assert!(!matches!(app.state.server_mode(), Mode::GlobalMenu));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x,
+            rect.y,
+        ));
+        assert_eq!(app.state.server_mode(), Mode::GlobalMenu);
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 90, 20));
+        assert!(!matches!(app.state.server_mode(), Mode::GlobalMenu));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            rect.x,
+            rect.y,
+        ));
+        let settings_row = app.state.global_menu_rect().y + 1;
+        let menu_x = app.state.global_menu_rect().x + 1;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu_x,
+            settings_row,
+        ));
+        assert_eq!(app.state.server_mode(), Mode::Settings);
+        assert_eq!(
+            app.state.input_owner(),
+            InputOwner::Server(ServerInputOwner::Settings)
+        );
     }
 
     #[test]

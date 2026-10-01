@@ -34,6 +34,7 @@ struct Word {
     text: String,
     emphasis: Emphasis,
     width: usize,
+    space_before: bool,
 }
 
 /// Render `body` as styled lines wrapped to `width`, prefixing every line with
@@ -43,6 +44,26 @@ pub(crate) fn body_lines(
     body: Option<&str>,
     width: usize,
     indent: &str,
+) -> Vec<Line<'static>> {
+    body_lines_with_list_style(palette, body, width, indent, false)
+}
+
+/// Settled transcripts use Claude's literal markers and hanging list rows.
+pub(crate) fn transcript_body_lines(
+    palette: &Palette,
+    body: Option<&str>,
+    width: usize,
+    indent: &str,
+) -> Vec<Line<'static>> {
+    body_lines_with_list_style(palette, body, width, indent, true)
+}
+
+fn body_lines_with_list_style(
+    palette: &Palette,
+    body: Option<&str>,
+    width: usize,
+    indent: &str,
+    hanging_lists: bool,
 ) -> Vec<Line<'static>> {
     let dash = || {
         vec![Line::from(Span::styled(
@@ -70,7 +91,7 @@ pub(crate) fn body_lines(
             continue;
         }
 
-        let (block, prefix, content) = classify(source_line);
+        let (block, prefix, content) = classify(source_line, hanging_lists);
         if content.trim().is_empty() && prefix.is_empty() {
             if lines.last().is_some_and(|line| line.width() > indent.len()) {
                 lines.push(Line::default());
@@ -79,18 +100,42 @@ pub(crate) fn body_lines(
         }
 
         let mut words = Vec::new();
-        if !prefix.is_empty() {
+        let hanging_width =
+            if hanging_lists && (!prefix.is_empty()) && (prefix == "-" || prefix.ends_with('.')) {
+                prefix.len() + 1
+            } else {
+                0
+            };
+        let has_prefix = !prefix.is_empty();
+        if has_prefix {
             words.push(Word {
                 width: display_width(&prefix),
                 text: prefix,
                 emphasis: Emphasis::default(),
+                space_before: false,
             });
         }
-        words.extend(parse_words(content, block));
-        let words = split_wide_words(words, width);
+        let mut content_words = parse_words(content, block);
+        if has_prefix {
+            if let Some(first) = content_words.first_mut() {
+                first.space_before = true;
+            }
+        }
+        words.extend(content_words);
+        let line_width = width.saturating_sub(hanging_width);
+        let words = split_wide_words(words, line_width);
 
-        for line in wrap_words(&words, width) {
-            lines.push(styled_line(palette, block, indent, line));
+        for (row_index, line) in wrap_words(&words, line_width).into_iter().enumerate() {
+            if row_index > 0 && hanging_width > 0 {
+                lines.push(styled_line(
+                    palette,
+                    block,
+                    &format!("{indent}{}", " ".repeat(hanging_width)),
+                    line,
+                ));
+            } else {
+                lines.push(styled_line(palette, block, indent, line));
+            }
         }
     }
 
@@ -105,7 +150,7 @@ pub(crate) fn body_lines(
 
 /// Split a source line into its block role, a literal prefix that must lead the
 /// first wrapped row, and the inline-markdown remainder.
-fn classify(source: &str) -> (Block, String, &str) {
+fn classify(source: &str, literal_lists: bool) -> (Block, String, &str) {
     let trimmed = source.trim();
     let heading = trimmed.trim_start_matches('#');
     if heading.len() != trimmed.len() {
@@ -123,7 +168,11 @@ fn classify(source: &str) -> (Block, String, &str) {
                     return (Block::Body, box_mark.to_string(), item);
                 }
             }
-            return (Block::Body, "•".to_string(), rest);
+            return (
+                Block::Body,
+                if literal_lists { "-" } else { "•" }.to_string(),
+                rest,
+            );
         }
     }
     if let Some(rest) = trimmed.strip_prefix("> ") {
@@ -160,8 +209,13 @@ fn parse_words(content: &str, block: Block) -> Vec<Word> {
     let mut current = String::new();
     let mut emphasis = base;
     let mut index = 0usize;
+    let mut space_before = false;
+    let mut has_pending_space = false;
 
-    let flush = |current: &mut String, emphasis: Emphasis, words: &mut Vec<Word>| {
+    let flush = |current: &mut String,
+                 emphasis: Emphasis,
+                 words: &mut Vec<Word>,
+                 space_before: &mut bool| {
         if current.is_empty() {
             return;
         }
@@ -169,26 +223,35 @@ fn parse_words(content: &str, block: Block) -> Vec<Word> {
             width: display_width(current),
             text: std::mem::take(current),
             emphasis,
+            space_before: *space_before,
         });
+        *space_before = false;
     };
 
     while index < chars.len() {
         let ch = chars[index];
         if ch.is_whitespace() {
-            flush(&mut current, emphasis, &mut words);
+            flush(&mut current, emphasis, &mut words, &mut space_before);
+            has_pending_space = true;
             index += 1;
             continue;
         }
         if ch == '`' && !emphasis.code {
             if let Some(end) = chars[index + 1..].iter().position(|c| *c == '`') {
-                flush(&mut current, emphasis, &mut words);
+                flush(&mut current, emphasis, &mut words, &mut space_before);
                 let literal: String = chars[index + 1..index + 1 + end].iter().collect();
-                for token in literal.split_whitespace() {
+                for (token_index, token) in literal.split_whitespace().enumerate() {
                     words.push(Word {
                         width: display_width(token),
                         text: token.to_string(),
                         emphasis: Emphasis { code: true, ..base },
+                        space_before: if token_index == 0 {
+                            has_pending_space
+                        } else {
+                            true
+                        },
                     });
+                    has_pending_space = false;
                 }
                 index += end + 2;
                 continue;
@@ -198,22 +261,26 @@ fn parse_words(content: &str, block: Block) -> Vec<Word> {
             let doubled = chars.get(index + 1).is_some_and(|next| *next == ch);
             // A lone `_` is left literal so snake_case identifiers survive.
             if doubled {
-                flush(&mut current, emphasis, &mut words);
+                flush(&mut current, emphasis, &mut words, &mut space_before);
                 emphasis.bold = !emphasis.bold;
                 index += 2;
                 continue;
             }
             if ch == '*' {
-                flush(&mut current, emphasis, &mut words);
+                flush(&mut current, emphasis, &mut words, &mut space_before);
                 emphasis.italic = !emphasis.italic;
                 index += 1;
                 continue;
             }
         }
+        if current.is_empty() {
+            space_before = has_pending_space;
+        }
+        has_pending_space = false;
         current.push(ch);
         index += 1;
     }
-    flush(&mut current, emphasis, &mut words);
+    flush(&mut current, emphasis, &mut words, &mut space_before);
     words
 }
 
@@ -233,31 +300,45 @@ fn split_wide_words(words: Vec<Word>, width: usize) -> Vec<Word> {
         }
         let mut chunk = String::new();
         let mut chunk_width = 0usize;
+        let mut first_chunk = true;
         for character in word.text.chars() {
             let character_width = display_width(&character.to_string());
             if chunk_width + character_width > width && !chunk.is_empty() {
+                let chunk_space_before = if first_chunk {
+                    word.space_before
+                } else {
+                    false
+                };
                 out.push(Word {
                     width: chunk_width,
                     text: std::mem::take(&mut chunk),
                     emphasis: word.emphasis,
+                    space_before: chunk_space_before,
                 });
+                first_chunk = false;
                 chunk_width = 0;
             }
             chunk.push(character);
             chunk_width += character_width;
         }
         if !chunk.is_empty() {
+            let chunk_space_before = if first_chunk {
+                word.space_before
+            } else {
+                false
+            };
             out.push(Word {
                 width: chunk_width,
                 text: chunk,
                 emphasis: word.emphasis,
+                space_before: chunk_space_before,
             });
         }
     }
     out
 }
 
-/// Greedily pack words into rows no wider than `width`.
+/// Greedily pack glued word units into rows no wider than `width`.
 fn wrap_words(words: &[Word], width: usize) -> Vec<Vec<&Word>> {
     if width == 0 || words.is_empty() {
         return Vec::new();
@@ -265,14 +346,32 @@ fn wrap_words(words: &[Word], width: usize) -> Vec<Vec<&Word>> {
     let mut rows: Vec<Vec<&Word>> = Vec::new();
     let mut row: Vec<&Word> = Vec::new();
     let mut row_width = 0usize;
-    for word in words {
-        let separator = usize::from(!row.is_empty());
-        if !row.is_empty() && row_width + separator + word.width > width {
+    let mut unit_start = 0;
+    while unit_start < words.len() {
+        let mut unit_end = unit_start + 1;
+        while unit_end < words.len() && !words[unit_end].space_before {
+            unit_end += 1;
+        }
+        let unit = &words[unit_start..unit_end];
+        let unit_width: usize = unit.iter().map(|word| word.width).sum::<usize>()
+            + unit.iter().skip(1).filter(|word| word.space_before).count();
+        let separator = usize::from(words[unit_start].space_before && !row.is_empty());
+        // Keep a glued unit together when it fits; oversized units can break between words.
+        if !row.is_empty() && row_width + separator + unit_width > width {
             rows.push(std::mem::take(&mut row));
             row_width = 0;
         }
-        row_width += usize::from(!row.is_empty()) + word.width;
-        row.push(word);
+        for word in unit {
+            let separator = usize::from(word.space_before && !row.is_empty());
+            if !row.is_empty() && row_width + separator + word.width > width {
+                rows.push(std::mem::take(&mut row));
+                row_width = 0;
+            }
+            let separator = usize::from(word.space_before && !row.is_empty());
+            row_width += separator + word.width;
+            row.push(word);
+        }
+        unit_start = unit_end;
     }
     if !row.is_empty() {
         rows.push(row);
@@ -291,16 +390,20 @@ fn styled_line(palette: &Palette, block: Block, indent: &str, row: Vec<&Word>) -
     for (position, word) in row.iter().enumerate() {
         match pending.as_mut() {
             Some((text, emphasis)) if *emphasis == word.emphasis => {
-                text.push(' ');
+                if word.space_before {
+                    text.push(' ');
+                }
                 text.push_str(&word.text);
             }
             Some(_) => {
                 let (text, emphasis) = pending.take().expect("pending run");
                 spans.push(Span::styled(text, style_for(palette, block, emphasis)));
-                spans.push(Span::styled(
-                    " ".to_string(),
-                    style_for(palette, block, Emphasis::default()),
-                ));
+                if word.space_before {
+                    spans.push(Span::styled(
+                        " ".to_string(),
+                        style_for(palette, block, Emphasis::default()),
+                    ));
+                }
                 pending = Some((word.text.clone(), word.emphasis));
             }
             None => {
@@ -413,6 +516,42 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
         assert_eq!(code, vec!["render_home"]);
+    }
+
+    #[test]
+    fn inline_spans_stay_glued_to_adjacent_source_text() {
+        let p = palette();
+        for (source, expected) in [
+            (
+                "using `restore-snapshot.sh`, verifying",
+                "using restore-snapshot.sh, verifying",
+            ),
+            (
+                "a **canary strategy**, routing",
+                "a canary strategy, routing",
+            ),
+            ("(`v2`)", "(v2)"),
+            ("foo**bar**", "foobar"),
+        ] {
+            let lines = body_lines(&p, Some(source), 80, "");
+            assert_eq!(text(&lines), vec![expected], "{source}");
+        }
+        let lines = body_lines(&p, Some("`restore-snapshot.sh`,"), 80, "");
+        assert_eq!(lines[0].spans[0].style.fg, Some(p.mauve));
+        assert_eq!(lines[0].spans[1].content, ",");
+        assert_eq!(lines[0].spans[1].style.fg, Some(p.text));
+    }
+
+    #[test]
+    fn glued_words_wrap_as_one_unit() {
+        let lines = body_lines(&palette(), Some("ab x`cd`,"), 5, "");
+        assert_eq!(text(&lines), vec!["ab", "xcd,"]);
+    }
+
+    #[test]
+    fn an_over_wide_glued_unit_breaks_inside_itself() {
+        let lines = body_lines(&palette(), Some("abc`de`, x"), 4, "");
+        assert_eq!(text(&lines), vec!["abc", "de,", "x"]);
     }
 
     #[test]

@@ -39,6 +39,7 @@ pub(crate) use input::SidebarWorkGroupKeyAction;
 mod notepad;
 pub(crate) mod pane_graphics;
 mod pane_lifecycle;
+pub(crate) use pane_lifecycle::pane_is_quiet;
 mod pane_send;
 mod popup;
 pub(crate) mod probes;
@@ -54,6 +55,7 @@ pub(crate) mod settings_general;
 pub(crate) mod settings_keybindings;
 pub(crate) mod settings_providers;
 pub(crate) mod settled;
+pub(crate) mod settled_view;
 pub mod state;
 pub(crate) mod status_log;
 mod tab_bar_status;
@@ -195,6 +197,7 @@ pub struct App {
     /// Server-owned remote focus operations. This state is touched only by
     /// API requests and transport events, never by render or pane loops.
     pub(crate) remote_focus_operations: remote_focus::RemoteFocusOperations,
+    pub(crate) planning_lock_key_burst: std::collections::VecDeque<Instant>,
     pub(crate) fleet_attach_agents:
         std::collections::HashMap<crate::layout::PaneId, crate::api::schema::AgentRef>,
     pub(crate) remote_focus_transport: Box<dyn remote_focus::RemoteFocusTransport>,
@@ -962,6 +965,7 @@ impl App {
             sidebar_group_sorts,
             sidebar_unassigned_expanded_views: std::collections::HashSet::new(),
             sidebar_selected_settled: None,
+            settled_view: None,
             sidebar_snooze: None,
             sidebar_settled_menu_target: None,
             sidebar_settled_menu_selected: 0,
@@ -1056,6 +1060,12 @@ impl App {
             ),
             settle_done_after: std::time::Duration::from_secs(
                 config.session.settle_done_after_minutes.saturating_mul(60),
+            ),
+            settled_read_only_after: std::time::Duration::from_secs(
+                config
+                    .session
+                    .settled_read_only_after_minutes
+                    .saturating_mul(60),
             ),
             terminals: std::collections::HashMap::new(),
             agent_states: crate::agent_state::AgentStateStore::default(),
@@ -1163,6 +1173,7 @@ impl App {
                 hyperspace_pause_hit_area: Rect::default(),
                 sidebar_footer_refresh_hit_area: Rect::default(),
                 sidebar_footer_board_hit_area: Rect::default(),
+                sidebar_footer_planning_lock_hit_area: Rect::default(),
                 workspace_card_areas: Vec::new(),
                 agent_card_areas: Vec::new(),
                 sidebar_hover_targets: Vec::new(),
@@ -1345,6 +1356,13 @@ impl App {
             ),
             goals: crate::goals::GoalsPanelState::from_config(&config.goals_panel),
             pomodoro: crate::pomodoro::PomodoroState::from_config(&config.pomodoro, Instant::now()),
+            planning_lock: if cfg!(test) {
+                crate::planning_lock::PlanningLock::default()
+            } else {
+                let path = crate::config::config_dir().join(crate::planning_lock::CONFIG_FILE_NAME);
+                crate::planning_lock::PlanningLock::load(&path)
+            },
+            planning_lock_dialog: None,
             hyperspace: crate::hyperspace::HyperspaceState::new(
                 config.ui.sidebar_animation,
                 Instant::now(),
@@ -1606,6 +1624,7 @@ impl App {
             terminal_runtimes: restored_terminal_runtimes,
             status_log: crate::status_log::StatusLog::for_server(),
             remote_focus_operations: remote_focus::RemoteFocusOperations::default(),
+            planning_lock_key_burst: std::collections::VecDeque::new(),
             fleet_attach_agents: std::collections::HashMap::new(),
             remote_focus_transport: Box::new(crate::remote::SshRemoteFocusTransport::new(
                 &config.remote.fleet,
@@ -1787,6 +1806,13 @@ impl App {
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
         app.rebuild_group_membership_projection();
+        if let Some(authority) = config.planning_lock.authority.clone() {
+            app.state.planning_lock.fail_closed_remote();
+            crate::planning_lock_sync::start_polling(authority, app.event_tx.clone());
+        } else {
+            let path = crate::config::config_dir().join(crate::planning_lock::CONFIG_FILE_NAME);
+            crate::planning_lock_sync::watch_authority_file(path, app.event_tx.clone());
+        }
         app
     }
 
@@ -1912,6 +1938,13 @@ impl App {
         )>,
     ) {
         for (editor, import) in editor_imports {
+            let Some(master_fd) = import.master_fd else {
+                tracing::warn!(
+                    pane_id = editor.editor_pane_id,
+                    "dropping closed dock editor runtime during handoff restore"
+                );
+                continue;
+            };
             let agent_pane_id = self
                 .state
                 .pane_id_aliases
@@ -1928,7 +1961,7 @@ impl App {
             let editor_pane_id = crate::layout::PaneId::alloc();
             let terminal_id = crate::terminal::TerminalId::alloc();
             let import = crate::handoff_runtime::ImportedHandoffRuntime {
-                master_fd: import.master_fd,
+                master_fd: Some(master_fd),
                 state: import.state.with_pane_id(editor_pane_id),
             };
             match crate::terminal::TerminalRuntime::from_handoff_fd(
@@ -2720,6 +2753,12 @@ impl App {
                 config.session.settle_done_after_minutes.saturating_mul(60),
             );
             self.state.settle_stops_agent = config.session.settle_stops_agent;
+            self.state.settled_read_only_after = std::time::Duration::from_secs(
+                config
+                    .session
+                    .settled_read_only_after_minutes
+                    .saturating_mul(60),
+            );
             self.state.nudge_resumed_agents = config.session.nudge_resumed_agents;
             self.state
                 .resume_nudge_message
@@ -2864,6 +2903,12 @@ impl App {
                 self.state
                     .hyperspace
                     .set_enabled(config.ui.sidebar_animation, Instant::now());
+                if !self.state.hyperspace.enabled {
+                    // Drop the hidden box's geometry now so its pause edge stops
+                    // taking clicks before the next view pass reflows the footer.
+                    self.state.view.hyperspace_rect = Rect::default();
+                    self.state.view.hyperspace_pause_hit_area = Rect::default();
+                }
                 self.state.mobile_width_threshold = config.ui.mobile_width_threshold;
                 // Re-clamp the live width to the new bounds. No source guard — bounds
                 // always apply, including to widths owned by Persisted or Manual.
@@ -3611,6 +3656,25 @@ impl App {
                         continue;
                     }
                     self.state.clear_hovered_control();
+                    if owner.forwards_unhandled_input_to_pane()
+                        && self
+                            .state
+                            .active
+                            .and_then(|ws_idx| {
+                                self.state
+                                    .workspaces
+                                    .get(ws_idx)
+                                    .and_then(|ws| ws.focused_pane_id())
+                            })
+                            .is_some_and(|pane_id| {
+                                self.state
+                                    .settled_view
+                                    .as_ref()
+                                    .is_some_and(|view| view.pane_id == pane_id)
+                            })
+                    {
+                        continue;
+                    }
                     if owner == state::InputOwner::Popup {
                         self.try_route_paste_to_popup(&text);
                     } else if owner == state::InputOwner::Dock(state::DockInputOwner::Editor) {
@@ -4044,7 +4108,10 @@ mod tests {
         let state = runtime.handoff_runtime_state(pane_id.raw());
         (
             runtime,
-            crate::handoff_runtime::ImportedHandoffRuntime { master_fd, state },
+            crate::handoff_runtime::ImportedHandoffRuntime {
+                master_fd: Some(master_fd),
+                state,
+            },
         )
     }
 
@@ -6549,6 +6616,27 @@ mod tests {
             app.state.sidebar_collapsed_mode,
             crate::config::SidebarCollapsedModeConfig::Hidden
         );
+
+        env.remove(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn reload_config_updates_settled_read_only_grace() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let path = temp_config_path("reload-settled-read-only-grace");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut app = test_app();
+        assert_eq!(
+            app.state.settled_read_only_after,
+            std::time::Duration::from_secs(900)
+        );
+
+        std::fs::write(&path, "[session]\nsettled_read_only_after_minutes = 0\n").unwrap();
+        let report = app.reload_config();
+        assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
+        assert_eq!(app.state.settled_read_only_after, std::time::Duration::ZERO);
 
         env.remove(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
