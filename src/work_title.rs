@@ -201,8 +201,11 @@ pub(crate) fn request_from_turn_start(
 }
 
 pub(crate) fn calculate_work_title(prompt: &str) -> Option<String> {
+    // URLs stay in the prompt for work-context extraction, but their host and
+    // path segments are never the objective, so drop them before picking words.
     let sanitized = sanitize_prompt(prompt);
-    let words = meaningful_objective_words(&sanitized)?;
+    let without_urls = url_regex().replace_all(&sanitized, " ");
+    let words = meaningful_objective_words(&without_urls)?;
     let mut title_words = Vec::new();
     for word in words.into_iter().take(WORK_TITLE_MAX_WORDS) {
         let word = title_case_word(&word);
@@ -528,6 +531,11 @@ fn ansi_regex() -> &'static Regex {
     })
 }
 
+fn url_regex() -> &'static Regex {
+    static URL: OnceLock<Regex> = OnceLock::new();
+    URL.get_or_init(|| Regex::new(r"(?i)\b[a-z][a-z0-9+.-]*://\S+").expect("url regex"))
+}
+
 fn secret_regex() -> &'static Regex {
     static SECRET: OnceLock<Regex> = OnceLock::new();
     SECRET.get_or_init(|| {
@@ -538,7 +546,6 @@ fn secret_regex() -> &'static Regex {
             |\b(?:sk|ghp|github_pat|xox[baprs]|sb_secret|akia)[-_][a-z0-9_-]{4,}\b
             |\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b
             |(?:^|\s)(?:/|~/|[a-z]:\\)\S+
-            |\b[a-z][a-z0-9+.-]*://\S+
             |@[a-z0-9_-]{2,}
             "#,
         )
