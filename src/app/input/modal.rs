@@ -2731,6 +2731,7 @@ mod tests {
         let mut state = state_with_workspaces(&["test"]);
         state.open_client_overlay(crate::app::state::ClientOverlay::RenameWorkspace);
         state.name_input = "website zero".into();
+        state.name_input_caret = state.name_input.len();
 
         handle_rename_key(
             &mut state,
@@ -2784,6 +2785,7 @@ mod tests {
         let mut state = state_with_workspaces(&["test"]);
         state.open_client_overlay(crate::app::state::ClientOverlay::RenameWorkspace);
         state.name_input = "website".into();
+        state.name_input_caret = state.name_input.len();
 
         handle_rename_key(
             &mut state,
