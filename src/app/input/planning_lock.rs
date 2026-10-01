@@ -62,15 +62,18 @@ impl App {
     }
 
     fn persist_local_discussion_tab(&mut self, tab_id: &str) -> Result<(), String> {
-        self.save_config_edit(crate::app::settings_general::ConfigEdit::Text {
+        let mut candidate = self.state.planning_lock.clone();
+        candidate
+            .set_local_discussion_tab(tab_id, Self::planning_lock_now())
+            .map_err(|error| error.to_string())?;
+        if !self.save_config_edit(crate::app::settings_general::ConfigEdit::Text {
             section: "planning_lock",
             key: "discussion_tab_id",
             value: tab_id.to_owned(),
-        });
-        self.state
-            .planning_lock
-            .set_local_discussion_tab(tab_id)
-            .map_err(|error| error.to_string())?;
+        }) {
+            return Err("failed to save discussion tab".into());
+        }
+        self.state.planning_lock = candidate;
         self.state.mark_session_dirty();
         Ok(())
     }
@@ -305,6 +308,9 @@ impl App {
                     }
                     DialogFlow::Manage => match input.as_str() {
                         "u" => dialog.flow = DialogFlow::UnlockPassword,
+                        "d" if self.state.planning_lock.is_locked(now) => {
+                            dialog.error = Some(crate::planning_lock::Error::Locked.to_string())
+                        }
                         "d" => dialog.flow = DialogFlow::ChooseDiscussionTab,
                         "x" => dialog.flow = DialogFlow::DisablePassword,
                         _ => {
@@ -457,17 +463,51 @@ mod tests {
     }
 
     #[test]
-    fn follower_can_choose_its_local_discussion_tab_while_locked() {
+    fn follower_can_choose_its_local_discussion_tab_only_while_unlocked() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let path = std::env::temp_dir().join(format!(
+            "herdr-planning-lock-{}.toml",
+            crate::config::test_unique_suffix()
+        ));
+        env.set(crate::config::CONFIG_PATH_ENV_VAR, &path);
         let mut app = app();
         let mut workspace = crate::workspace::Workspace::test_new("planning-lock-follower");
         workspace.test_add_tab(None);
         app.state.workspaces = vec![workspace];
         let discussion_tab = app.public_tab_id(0, 1).expect("second tab");
         app.state.planning_lock.fail_closed_remote();
+        app.state.planning_lock_dialog = Some(Dialog::new(DialogFlow::Manage));
+        app.handle_planning_lock_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
+        app.handle_planning_lock_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(app
+            .state
+            .planning_lock_dialog
+            .as_ref()
+            .is_some_and(|dialog| {
+                dialog.flow == DialogFlow::Manage
+                    && dialog.error.as_deref() == Some("the planning lock is active")
+            }));
+
         let mut dialog = Dialog::new(DialogFlow::ChooseDiscussionTab);
         dialog.selected_tab = 1;
         app.state.planning_lock_dialog = Some(dialog);
 
+        app.handle_planning_lock_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+
+        assert_eq!(app.state.planning_lock.discussion_tab_id(), Some(""));
+        assert!(app
+            .state
+            .planning_lock_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.error.as_deref() == Some("the planning lock is active")));
+
+        app.state
+            .planning_lock
+            .apply_remote_snapshot(Some(crate::planning_lock::Snapshot {
+                locked: false,
+                discussion_tab_id: String::new(),
+                unlock_until_unix_s: Some(App::planning_lock_now() + 60),
+            }));
         app.handle_planning_lock_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
 
         assert_eq!(
@@ -485,6 +525,7 @@ mod tests {
                 .map(|dialog| dialog.flow),
             Some(DialogFlow::Manage)
         );
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

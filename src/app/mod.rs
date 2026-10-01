@@ -1365,7 +1365,10 @@ impl App {
                     crate::planning_lock::PlanningLock::load(&path)
                 };
                 if let Some(tab_id) = config.planning_lock.discussion_tab_id.as_deref() {
-                    let _ = lock.set_local_discussion_tab(tab_id);
+                    let _ = lock.set_local_discussion_tab(
+                        tab_id,
+                        crate::app::settled::unix_seconds(std::time::SystemTime::now()),
+                    );
                 }
                 lock
             },

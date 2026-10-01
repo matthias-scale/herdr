@@ -256,7 +256,10 @@ impl PlanningLock {
         self.corrupt = false;
     }
 
-    pub fn set_local_discussion_tab(&mut self, tab_id: &str) -> Result<(), Error> {
+    pub fn set_local_discussion_tab(&mut self, tab_id: &str, now_unix_s: u64) -> Result<(), Error> {
+        if self.is_locked(now_unix_s) {
+            return Err(Error::Locked);
+        }
         if tab_id.trim().is_empty() {
             return Err(Error::EmptyDiscussionTab);
         }
@@ -464,21 +467,31 @@ mod tests {
     }
 
     #[test]
-    fn follower_uses_its_local_discussion_tab_with_authority_lock_state() {
+    fn follower_sets_its_local_discussion_tab_only_after_authority_unlocks() {
         let mut lock = PlanningLock::default();
         lock.apply_remote_snapshot(Some(Snapshot {
             locked: true,
             discussion_tab_id: "authority-tab-id".into(),
             unlock_until_unix_s: None,
         }));
-        lock.set_local_discussion_tab("follower-tab-id")
-            .expect("local discussion tab");
+        assert_eq!(
+            lock.set_local_discussion_tab("follower-tab-id", 1_000),
+            Err(Error::Locked)
+        );
+
+        lock.apply_remote_snapshot(Some(Snapshot {
+            locked: false,
+            discussion_tab_id: "authority-tab-id".into(),
+            unlock_until_unix_s: Some(2_000),
+        }));
+        lock.set_local_discussion_tab("follower-tab-id", 1_000)
+            .expect("unlocked local discussion tab");
 
         let snapshot = lock.snapshot(1_000).expect("authority enabled lock");
-        assert!(snapshot.locked);
+        assert!(!snapshot.locked);
         assert_eq!(snapshot.discussion_tab_id, "follower-tab-id");
         assert!(lock.permits_tab("follower-tab-id", 1_000));
-        assert!(!lock.permits_tab("authority-tab-id", 1_000));
+        assert!(lock.permits_tab("authority-tab-id", 1_000));
     }
 
     #[test]
