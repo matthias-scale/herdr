@@ -8966,7 +8966,11 @@ pub(crate) fn compute_sidebar_hover_targets(
                 };
                 (label, false)
             }
-            SidebarRow::Inbox(inbox::InboxLine::Fault(label)) => (label.clone(), false),
+            SidebarRow::Inbox(line @ inbox::InboxLine::Fault(label)) => (
+                inbox::hover_detail(app, line, std::time::SystemTime::now())
+                    .unwrap_or_else(|| label.clone()),
+                false,
+            ),
             _ => continue,
         };
         if let Some(rect) = clamp_row_cells(body, *row_y, 0, usize::from(body.width)) {
