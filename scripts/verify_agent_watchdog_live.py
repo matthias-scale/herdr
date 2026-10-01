@@ -517,7 +517,7 @@ class Harness:
                       "--timeout", "30000",
                       "--pane", pane]
         if agent == "claude":
-            start_args += ["--", "--model", "haiku", "--tools", "",
+            start_args += ["--", "--model", "sonnet", "--tools", "",
                            *hook_args]
         else:
             start_args += ["--", "--model", "gpt-6-luna", "-c",
@@ -612,11 +612,40 @@ class Harness:
                         "this closing block on its own final lines:\n\n" + closing_block
                         + "\nDo not add text after it.")
         self.prepare_real_agent_prompt(pane)
-        response = self.cli("agent", "prompt", pane, final_prompt, "--wait", "--until",
-                            expected_status,
-                            "--timeout", "30000", timeout=40)
-        if response.returncode:
-            raise RuntimeError("closing-block real-agent prompt failed: " + response.stderr[-900:])
+        if ident.endswith("waiting_on_you"):
+            # First let the model finish, then inspect its actual pane output.
+            # Waiting for the blocked hook here would hide a malformed reply
+            # behind a timeout and leave no chance to repair the setup.
+            response = self.cli("agent", "prompt", pane, final_prompt, "--wait",
+                                "--timeout", "30000", timeout=40, check=False)
+            screen_result = self.call("pane.read", {"pane_id": pane, "source": "detection",
+                "lines": 40, "format": "text"})
+            screen_text = (screen_result.get("read") or {}).get("text", "")
+            if closing_block not in screen_text:
+                retry_prompt = (
+                    "Your previous reply did not copy the required closing block exactly. "
+                    "Reply with the exact word READY, then copy exactly the following block, "
+                    "with no other text before or after it:\n\n```text\n" + closing_block
+                    + "\n```")
+                self.prepare_real_agent_prompt(pane)
+                response = self.cli("agent", "prompt", pane, retry_prompt, "--wait", "--until",
+                                    expected_status, "--timeout", "30000", timeout=40,
+                                    check=False)
+                screen_result = self.call("pane.read", {"pane_id": pane,
+                    "source": "detection", "lines": 40, "format": "text"})
+                screen_text = (screen_result.get("read") or {}).get("text", "")
+            if response.returncode:
+                raise RuntimeError("closing-block real-agent prompt failed: "
+                                   + response.stderr[-900:] + "\npane tail: "
+                                   + screen_text[-1200:])
+            if closing_block not in screen_text:
+                raise RuntimeError("real agent did not reproduce the exact closing block after "
+                                   "one retry; pane tail: " + screen_text[-1200:])
+        else:
+            response = self.cli("agent", "prompt", pane, final_prompt, "--wait", "--until",
+                                expected_status, "--timeout", "30000", timeout=40)
+            if response.returncode:
+                raise RuntimeError("closing-block real-agent prompt failed: " + response.stderr[-900:])
         settled = self.cli("agent", "wait", pane, "--until", expected_status,
                            "--timeout", "30000", timeout=40, check=False)
         if settled.returncode:
