@@ -2432,7 +2432,7 @@ fn blocked_pane_cycle_in_order(
                     state
                         .terminals
                         .get(&pane.attached_terminal_id)
-                        .map(|terminal| pane.agent_projection(terminal).counts_as_blocked())
+                        .map(|terminal| pane.agent_projection(terminal).needs_human_attention())
                 })
                 .unwrap_or(false);
             Some((
