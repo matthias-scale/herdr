@@ -2245,23 +2245,28 @@ impl App {
                 snapshot
                     .order
                     .iter()
-                    .filter(|target| match target {
-                        WindowCycleTarget::Local { ws_idx, tab_idx } => snapshot
-                            .local_roots
-                            .get(&(*ws_idx, *tab_idx))
-                            .zip(
-                                self.state
-                                    .workspaces
-                                    .get(*ws_idx)
-                                    .and_then(|workspace| workspace.tabs.get(*tab_idx))
-                                    .map(|tab| &tab.root_pane),
+                    .filter_map(|target| match target {
+                        WindowCycleTarget::Local { ws_idx, tab_idx } => {
+                            let root = snapshot.local_roots.get(&(*ws_idx, *tab_idx))?;
+                            self.state.workspaces.iter().enumerate().find_map(
+                                |(current_ws_idx, workspace)| {
+                                    workspace.tabs.iter().enumerate().find_map(
+                                        |(current_tab_idx, tab)| {
+                                            (tab.root_pane == *root).then_some(
+                                                WindowCycleTarget::Local {
+                                                    ws_idx: current_ws_idx,
+                                                    tab_idx: current_tab_idx,
+                                                },
+                                            )
+                                        },
+                                    )
+                                },
                             )
-                            .is_some_and(|(expected, actual)| expected == actual),
+                        }
                         WindowCycleTarget::Remote(_) => {
-                            window_cycle_target_exists(&self.state, target)
+                            window_cycle_target_exists(&self.state, target).then(|| target.clone())
                         }
                     })
-                    .cloned()
                     .collect()
             })
             .unwrap_or_default()
@@ -5227,6 +5232,37 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 1,
             }));
+    }
+
+    #[test]
+    fn frozen_window_cycle_resolves_survivors_after_an_earlier_tab_closes() {
+        let mut app = app_with_global_window_fixture();
+        let now = Instant::now();
+        let frozen = app.window_cycle_order_at(now);
+        let roots = |app: &App, order: &[WindowCycleTarget]| {
+            order
+                .iter()
+                .filter_map(|target| match target {
+                    WindowCycleTarget::Local { ws_idx, tab_idx } => app
+                        .state
+                        .workspaces
+                        .get(*ws_idx)
+                        .and_then(|workspace| workspace.tabs.get(*tab_idx))
+                        .map(|tab| tab.root_pane),
+                    WindowCycleTarget::Remote(_) => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected = roots(&app, &frozen);
+        let removed = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.workspaces[0].tabs.remove(0);
+
+        let surviving = app.window_cycle_order_at(now + Duration::from_millis(20));
+        let expected: Vec<_> = expected
+            .into_iter()
+            .filter(|root| *root != removed)
+            .collect();
+        assert_eq!(roots(&app, &surviving), expected);
     }
 
     fn set_window_agent_state(

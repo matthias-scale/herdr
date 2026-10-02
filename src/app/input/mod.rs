@@ -191,11 +191,14 @@ impl App {
         key: TerminalKey,
         owner: InputOwner,
     ) -> Option<super::TerminalInputTarget> {
-        if !is_window_cycle_key(&self.state, &key) {
-            self.invalidate_window_cycle_snapshot();
-        }
+        let enters_prefix = self.state.server_mode() != crate::app::state::Mode::Prefix
+            && self.state.is_prefix_key(&key);
+        let preserves_window_cycle = is_window_cycle_key(&self.state, &key) || enters_prefix;
         self.state.clear_hovered_control();
         let target = self.handle_key_inner_for_input_owner(key, owner).await;
+        if !preserves_window_cycle {
+            self.invalidate_window_cycle_snapshot();
+        }
         // Every keyboard path that can enter a probed settings section runs
         // through here, so the probes start once from one place.
         self.start_requested_tool_probes();
