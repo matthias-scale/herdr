@@ -1898,7 +1898,7 @@ impl crate::app::state::AppState {
         true
     }
 
-    fn home_target_for_directory(&self, directory: &Path) -> HomeTarget {
+    pub(crate) fn home_target_for_directory(&self, directory: &Path) -> HomeTarget {
         let direct_match = self
             .workspaces
             .iter()

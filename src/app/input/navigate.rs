@@ -199,6 +199,10 @@ impl App {
                 self.state.open_sidebar_new_thread();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::NewAgentDock => {
+                leave_navigate_mode(&mut self.state);
+                self.state.open_spawn_dock();
+            }
             NavigateAction::NewWorktree => {
                 if let Some(ws_idx) = workspace_action_target(&self.state, context).filter(|idx| {
                     workspace_can_start_worktree_action(&self.state, &self.terminal_runtimes, *idx)
@@ -2699,6 +2703,7 @@ fn next_blocked_window_target(state: &AppState) -> Option<BlockedPaneTarget> {
 pub(crate) enum NavigateAction {
     NewWorkspace,
     NewThread,
+    NewAgentDock,
     NewWorktree,
     OpenWorktree,
     RemoveWorktree,
@@ -2983,6 +2988,7 @@ macro_rules! non_indexed_action_bindings {
             (&kb.workspace_picker, NavigateAction::WorkspacePicker),
             (&kb.new_workspace, NavigateAction::NewWorkspace),
             (&kb.new_thread, NavigateAction::NewThread),
+            (&kb.new_agent_dock, NavigateAction::NewAgentDock),
             (&kb.new_worktree, NavigateAction::NewWorktree),
             (&kb.open_worktree, NavigateAction::OpenWorktree),
             (&kb.remove_worktree, NavigateAction::RemoveWorktree),
@@ -3189,6 +3195,10 @@ pub(super) fn execute_navigate_action_in_context(
             state.focus_client_on_sidebar();
             state.open_sidebar_new_thread();
             leave_navigate_mode(state);
+        }
+        NavigateAction::NewAgentDock => {
+            leave_navigate_mode(state);
+            state.open_spawn_dock();
         }
         NavigateAction::NewWorktree => {
             if let Some(ws_idx) = workspace_action_target(state, context)
