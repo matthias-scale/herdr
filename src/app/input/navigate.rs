@@ -2206,7 +2206,7 @@ pub(crate) enum WindowCycleTarget {
 pub(crate) struct WindowCycleSnapshot {
     order: Vec<WindowCycleTarget>,
     local_roots: std::collections::HashMap<(usize, usize), crate::layout::PaneId>,
-    captured_at: Instant,
+    last_used_at: Instant,
 }
 
 const WINDOW_CYCLE_SNAPSHOT_IDLE: Duration = Duration::from_millis(1500);
@@ -2214,7 +2214,7 @@ const WINDOW_CYCLE_SNAPSHOT_IDLE: Duration = Duration::from_millis(1500);
 impl App {
     fn window_cycle_order_at(&mut self, now: Instant) -> Vec<WindowCycleTarget> {
         let fresh = self.window_cycle_snapshot.as_ref().is_some_and(|snapshot| {
-            now.saturating_duration_since(snapshot.captured_at) < WINDOW_CYCLE_SNAPSHOT_IDLE
+            now.saturating_duration_since(snapshot.last_used_at) < WINDOW_CYCLE_SNAPSHOT_IDLE
         });
         if !fresh {
             let order = window_navigation_order(&self.state);
@@ -2233,8 +2233,11 @@ impl App {
             self.window_cycle_snapshot = Some(WindowCycleSnapshot {
                 order,
                 local_roots,
-                captured_at: now,
+                last_used_at: now,
             });
+        }
+        if let Some(snapshot) = self.window_cycle_snapshot.as_mut() {
+            snapshot.last_used_at = now;
         }
         self.window_cycle_snapshot
             .as_ref()
@@ -5177,18 +5180,32 @@ mod tests {
                 .sidebar_group_sorts
                 .insert(format!("space:{}", workspace.id), SidebarSortMode::Recent);
         }
-        assert_eq!(
-            app.window_cycle_order_at(now + Duration::from_millis(50)),
-            frozen
-        );
         assert_ne!(window_navigation_order(&app.state), frozen);
 
-        let refreshed = app.window_cycle_order_at(now + WINDOW_CYCLE_SNAPSHOT_IDLE);
+        assert_eq!(
+            app.window_cycle_order_at(now + Duration::from_secs(1)),
+            frozen
+        );
+        assert_eq!(
+            app.window_cycle_order_at(now + Duration::from_secs(2)),
+            frozen
+        );
+        assert_eq!(
+            app.window_cycle_order_at(now + Duration::from_secs(3)),
+            frozen
+        );
+
+        let refreshed =
+            app.window_cycle_order_at(now + Duration::from_secs(3) + WINDOW_CYCLE_SNAPSHOT_IDLE);
         assert_eq!(refreshed, window_navigation_order(&app.state));
         app.execute_tui_navigate_action(NavigateAction::ToggleSidebar, ActionContext::Prefix);
         app.state.sidebar_group_sorts.clear();
         assert_eq!(
-            app.window_cycle_order_at(now + WINDOW_CYCLE_SNAPSHOT_IDLE + Duration::from_millis(1)),
+            app.window_cycle_order_at(
+                now + Duration::from_secs(3)
+                    + WINDOW_CYCLE_SNAPSHOT_IDLE
+                    + Duration::from_millis(1)
+            ),
             window_navigation_order(&app.state)
         );
     }
