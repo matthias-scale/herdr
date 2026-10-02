@@ -6917,6 +6917,7 @@ sidebar_visible = true
     #[test]
     fn topbar_buttons_dispatch_to_home_new_session_board_and_scratchpad() {
         let mut app = test_app();
+        app.state = crate::app::state::AppState::test_new();
 
         app.activate_status_button(crate::app::state::StatusButtonAction::Home);
         assert!(app.state.home.is_some());
@@ -6924,7 +6925,10 @@ sidebar_visible = true
         app.activate_status_button(crate::app::state::StatusButtonAction::NewSession);
         assert!(app.state.request_new_workspace);
 
-        let note = crate::board::WeekNote::current().expect("current board week");
+        let date = time::Date::from_calendar_date(2026, time::Month::September, 28)
+            .expect("fixed board date");
+        let note = crate::board::WeekNote::for_date(std::path::Path::new("/vault"), date)
+            .expect("synthetic board week");
         app.state.board_view = Some(crate::board::BoardView::test_new(
             note,
             crate::board::Board::default(),
