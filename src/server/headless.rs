@@ -5095,6 +5095,7 @@ impl HeadlessServer {
             | ServerEvent::ClientInputPixels { client_id, .. }
             | ServerEvent::ClientInputEvents { client_id, .. }
             | ServerEvent::ClientDockWidth { client_id, .. }
+            | ServerEvent::ClientPresentationIdentity { client_id, .. }
             | ServerEvent::ClientPasteRejected { client_id, .. }
             | ServerEvent::ClientClipboardImage { client_id, .. }
             | ServerEvent::ClientAttachTerminal { client_id, .. }
@@ -5427,6 +5428,21 @@ impl HeadlessServer {
                 }
                 client.dock_presentation.width =
                     width.clamp(crate::ui::DOCK_MIN_WIDTH, crate::ui::DOCK_MAX_WIDTH);
+                true
+            }
+            ServerEvent::ClientPresentationIdentity { client_id, id } => {
+                if id.is_empty() || id.len() > 512 {
+                    return false;
+                }
+                let Some(client) = self.clients.get_mut(&client_id) else {
+                    return false;
+                };
+                if !client.is_full_app_client()
+                    || client.sidebar_presentation.spawn_dock_client_id.is_some()
+                {
+                    return false;
+                }
+                client.sidebar_presentation.spawn_dock_client_id = Some(id);
                 true
             }
             ServerEvent::ClientPasteRejected {
@@ -17647,6 +17663,26 @@ next_tab = ""
             )
         });
 
+        crate::protocol::write_message(
+            &mut client_socket,
+            &ClientMessage::ClientPresentationIdentity {
+                id: "socket-client-1".into(),
+            },
+        )
+        .expect("write client presentation identity");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), server_event_rx.recv())
+            .await
+            .expect("socket reader decodes client presentation identity")
+            .expect("socket reader stays connected");
+        assert!(server.handle_server_event(event));
+        assert_eq!(
+            server.clients[&1]
+                .sidebar_presentation
+                .spawn_dock_client_id
+                .as_deref(),
+            Some("socket-client-1")
+        );
+
         send(
             &mut server,
             &mut client_socket,
@@ -17717,9 +17753,34 @@ next_tab = ""
                 .map(|dock| dock.home.prompt.as_str()),
             Some("hello qa")
         );
+
+        send(
+            &mut server,
+            &mut client_socket,
+            &mut server_event_rx,
+            vec![ClientInputEvent::TextCommit(" via IME".into())],
+        )
+        .await;
+        send(
+            &mut server,
+            &mut client_socket,
+            &mut server_event_rx,
+            vec![ClientInputEvent::Paste {
+                text: " and paste".into(),
+            }],
+        )
+        .await;
+        assert_eq!(
+            server.clients[&1]
+                .sidebar_presentation
+                .spawn_dock
+                .as_ref()
+                .map(|dock| dock.home.prompt.as_str()),
+            Some("hello qa via IME and paste")
+        );
         assert!(
             input_rx.try_recv().is_err(),
-            "dock keys must not reach the PTY"
+            "dock input, including committed and pasted text, must not reach the PTY"
         );
 
         send(
@@ -17731,11 +17792,37 @@ next_tab = ""
         .await;
         assert!(server.clients[&1].sidebar_presentation.spawn_dock.is_none());
         assert_eq!(
-            crate::client::presentation::saved_spawn_dock_draft_for_test()
+            crate::client::presentation::saved_spawn_dock_draft_for_test("socket-client-1")
                 .map(|draft| draft.prompt),
-            Some("hello qa".into())
+            Some("hello qa via IME and paste".into())
         );
-        crate::client::presentation::save_spawn_dock_draft(None);
+        server.clients.insert(2, test_app_client(Some(true), 2));
+        assert!(
+            server.handle_server_event(ServerEvent::ClientPresentationIdentity {
+                client_id: 2,
+                id: "socket-client-2".into(),
+            })
+        );
+        server.clients[&2]
+            .sidebar_presentation
+            .save_spawn_dock_draft(Some(crate::client::presentation::SpawnDockDraft {
+                prompt: "second client".into(),
+                project: "project-b".into(),
+                ..Default::default()
+            }));
+        assert_eq!(
+            crate::client::presentation::saved_spawn_dock_draft_for_test("socket-client-1")
+                .map(|draft| draft.prompt),
+            Some("hello qa via IME and paste".into())
+        );
+        assert_eq!(
+            crate::client::presentation::saved_spawn_dock_draft_for_test("socket-client-2")
+                .map(|draft| draft.prompt),
+            Some("second client".into())
+        );
+        server.clients[&1]
+            .sidebar_presentation
+            .save_spawn_dock_draft(None);
         should_quit.store(true, std::sync::atomic::Ordering::Release);
         drop(client_socket);
         reader

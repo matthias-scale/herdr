@@ -1532,6 +1532,8 @@ impl SidebarSortMode {
 /// app keeps its own instance directly.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SidebarPresentationState {
+    /// Stable local TUI identity used only for this client's spawn-dock draft.
+    pub(crate) spawn_dock_client_id: Option<String>,
     pub(crate) focused: bool,
     pub(crate) focus_intent: ClientFocusIntent,
     pub(crate) expanded_workspace_ids: std::collections::HashSet<String>,
@@ -1888,6 +1890,23 @@ pub(crate) struct SidebarSnoozeUiState {
 }
 
 impl SidebarPresentationState {
+    pub(crate) fn load_spawn_dock_draft(
+        &self,
+    ) -> Option<crate::client::presentation::SpawnDockDraft> {
+        self.spawn_dock_client_id
+            .as_deref()
+            .and_then(crate::client::presentation::load_spawn_dock_draft)
+    }
+
+    pub(crate) fn save_spawn_dock_draft(
+        &self,
+        draft: Option<crate::client::presentation::SpawnDockDraft>,
+    ) {
+        if let Some(client_id) = self.spawn_dock_client_id.as_deref() {
+            crate::client::presentation::save_spawn_dock_draft(client_id, draft);
+        }
+    }
+
     pub(crate) fn initialize_group_mode(
         &mut self,
         group_mode: SidebarGroupMode,
@@ -6313,6 +6332,10 @@ impl AppState {
         std::mem::swap(
             &mut self.sidebar_presentation.known_workspace_ids,
             &mut other.known_workspace_ids,
+        );
+        std::mem::swap(
+            &mut self.sidebar_presentation.spawn_dock_client_id,
+            &mut other.spawn_dock_client_id,
         );
         std::mem::swap(
             &mut self.sidebar_presentation.revealed_workspace_id,

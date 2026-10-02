@@ -947,6 +947,14 @@ impl App {
         #[cfg(test)]
         let sidebar_group_collapsed = std::collections::HashMap::new();
 
+        #[cfg(not(test))]
+        let sidebar_presentation = state::SidebarPresentationState {
+            spawn_dock_client_id: Some(crate::platform::client_presentation_identity()),
+            ..Default::default()
+        };
+        #[cfg(test)]
+        let sidebar_presentation = state::SidebarPresentationState::default();
+
         let mut state = AppState {
             agent_picker: None,
             collapsed_sidebar_groups: crate::ui::initial_collapsed_sidebar_groups(
@@ -1159,7 +1167,7 @@ impl App {
             work_link_picker: None,
             add_action: None,
             copy_mode: None,
-            sidebar_presentation: state::SidebarPresentationState::default(),
+            sidebar_presentation,
             sidebar_projection_revision: 0,
             workspace_picker_forces_spaces_tree: false,
             workspace_scroll: 0,

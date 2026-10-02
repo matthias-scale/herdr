@@ -464,6 +464,9 @@ pub enum ClientMessage {
 
     /// The direct command was written and flushed; terminal response timing starts now.
     GraphicsTransmissionStarted { transfer_id: u64, image_id: u32 },
+
+    /// Stable identity for this local TUI presentation across process restarts.
+    ClientPresentationIdentity { id: String },
 }
 
 #[derive(Serialize, Deserialize)]

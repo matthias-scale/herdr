@@ -456,17 +456,21 @@ impl App {
         match action {
             Some(crate::app::spawn_dock::SpawnDockAction::Close) => {
                 if let Some(dock) = self.state.spawn_dock.as_ref() {
-                    crate::client::presentation::save_spawn_dock_draft(Some(dock.draft()));
+                    self.state
+                        .sidebar_presentation
+                        .save_spawn_dock_draft(Some(dock.draft()));
                 }
                 self.state.spawn_dock = None;
             }
             Some(crate::app::spawn_dock::SpawnDockAction::Clear) => {
                 self.state.spawn_dock = None;
-                crate::client::presentation::save_spawn_dock_draft(None);
+                self.state.sidebar_presentation.save_spawn_dock_draft(None);
             }
             Some(crate::app::spawn_dock::SpawnDockAction::Spawn) => {
                 if let Some(dock) = self.state.spawn_dock.as_ref() {
-                    crate::client::presentation::save_spawn_dock_draft(Some(dock.draft()));
+                    self.state
+                        .sidebar_presentation
+                        .save_spawn_dock_draft(Some(dock.draft()));
                     self.state.home = Some(dock.home.clone());
                     self.dispatch_home_prompt();
                     if let Some(home) = self.state.home.clone() {
@@ -480,13 +484,15 @@ impl App {
                         }
                     } else {
                         self.state.spawn_dock = None;
-                        crate::client::presentation::save_spawn_dock_draft(None);
+                        self.state.sidebar_presentation.save_spawn_dock_draft(None);
                     }
                 }
             }
             Some(crate::app::spawn_dock::SpawnDockAction::Consumed) => {
                 if let Some(dock) = self.state.spawn_dock.as_ref() {
-                    crate::client::presentation::save_spawn_dock_draft(Some(dock.draft()));
+                    self.state
+                        .sidebar_presentation
+                        .save_spawn_dock_draft(Some(dock.draft()));
                 }
             }
             None => {}
@@ -505,7 +511,9 @@ impl App {
             crate::ui::SpawnDockHitTarget::Field(field) => {
                 if let Some(dock) = self.state.spawn_dock.as_mut() {
                     dock.focus = field;
-                    crate::client::presentation::save_spawn_dock_draft(Some(dock.draft()));
+                    self.state
+                        .sidebar_presentation
+                        .save_spawn_dock_draft(Some(dock.draft()));
                 }
             }
             crate::ui::SpawnDockHitTarget::Spawn => {
@@ -4924,6 +4932,15 @@ impl App {
             }
             InputOwner::AddProject | InputOwner::Surface(SurfaceInputOwner::Home) => {
                 self.handle_home_text_commit(text);
+                true
+            }
+            InputOwner::SpawnDock => {
+                if let Some(dock) = self.state.spawn_dock.as_mut() {
+                    dock.insert_text(text);
+                    self.state
+                        .sidebar_presentation
+                        .save_spawn_dock_draft(Some(dock.draft()));
+                }
                 true
             }
             InputOwner::Surface(SurfaceInputOwner::Board) => self.board_insert_text(text),

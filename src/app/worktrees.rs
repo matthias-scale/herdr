@@ -1099,7 +1099,7 @@ impl App {
                     result_path.clone(),
                 ) {
                     self.state.clear_home();
-                    crate::client::presentation::save_spawn_dock_draft(None);
+                    self.state.sidebar_presentation.save_spawn_dock_draft(None);
                     self.state.spawn_dock = None;
                     self.focus_client_on_pane();
                 } else {
@@ -1171,7 +1171,7 @@ impl App {
                     }
                 }
                 self.state.clear_home();
-                crate::client::presentation::save_spawn_dock_draft(None);
+                self.state.sidebar_presentation.save_spawn_dock_draft(None);
                 self.state.spawn_dock = None;
                 self.focus_client_on_pane();
             }

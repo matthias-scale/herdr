@@ -173,6 +173,22 @@ impl SpawnDockState {
         }
     }
 
+    pub(crate) fn insert_text(&mut self, text: &str) {
+        let text: String = text
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect();
+        if text.is_empty() {
+            return;
+        }
+        if self.picker.is_some() {
+            self.filter.push_str(&text);
+            self.home.picker_selected = 0;
+        } else if self.focus == SpawnDockField::Prompt {
+            self.home.prompt.push_str(&text);
+        }
+    }
+
     pub(crate) fn handle_key(
         &mut self,
         event: KeyEvent,
@@ -509,7 +525,7 @@ impl AppState {
                 .unwrap_or_default();
             home.set_workspace_options(super::home::home_workspace_options_from_entries(&entries));
             let auto_host = self.least_loaded_spawn_host();
-            if let Some(draft) = crate::client::presentation::load_spawn_dock_draft() {
+            if let Some(draft) = self.sidebar_presentation.load_spawn_dock_draft() {
                 if draft.host == "auto" {
                     if let Some(name) = auto_host {
                         home.set_machine(&name);

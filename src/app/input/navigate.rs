@@ -209,7 +209,9 @@ impl App {
                 leave_navigate_mode(&mut self.state);
                 self.state.open_spawn_dock();
                 if let Some(dock) = self.state.spawn_dock.as_ref() {
-                    crate::client::presentation::save_spawn_dock_draft(Some(dock.draft()));
+                    self.state
+                        .sidebar_presentation
+                        .save_spawn_dock_draft(Some(dock.draft()));
                 }
             }
             NavigateAction::NewWorktree => {
@@ -4012,8 +4014,9 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_dock_owns_prefix_keys_and_persists_prompt_when_closed() {
-        crate::client::presentation::save_spawn_dock_draft(None);
         let mut app = app_with_test_workspaces(&["local"]);
+        app.state.sidebar_presentation.spawn_dock_client_id = Some("test-spawn-dock".into());
+        app.state.sidebar_presentation.save_spawn_dock_draft(None);
         app.state.active = None;
         app.state.set_server_mode(Mode::Prefix);
 
@@ -4055,11 +4058,11 @@ mod tests {
             .await;
         assert!(app.state.spawn_dock.is_none());
         assert_eq!(
-            crate::client::presentation::saved_spawn_dock_draft_for_test()
+            crate::client::presentation::saved_spawn_dock_draft_for_test("test-spawn-dock")
                 .map(|draft| draft.prompt),
             Some("ship it".into())
         );
-        crate::client::presentation::save_spawn_dock_draft(None);
+        app.state.sidebar_presentation.save_spawn_dock_draft(None);
     }
 
     #[test]
