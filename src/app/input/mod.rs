@@ -1306,20 +1306,18 @@ impl App {
             StatusButtonAction::Home => {
                 self.state.toggle_home();
             }
-            StatusButtonAction::Work => self.toggle_work_view(),
-            StatusButtonAction::BlockedFilter => {
-                self.state.blocked_filter = !self.state.blocked_filter;
-                self.state.workspace_scroll = crate::ui::normalized_workspace_scroll(
-                    &self.state,
-                    self.state.view.sidebar_rect,
-                    self.state.workspace_scroll,
-                );
-            }
-            StatusButtonAction::Attention => {
-                self.state.toggle_home();
-            }
-            StatusButtonAction::Dock => {
-                self.state.dock_collapsed = !self.state.dock_collapsed;
+            StatusButtonAction::NewSession => self.state.request_new_workspace = true,
+            StatusButtonAction::Board => self.toggle_board_view(),
+            StatusButtonAction::Scratch => {
+                // The writer/Notes implementation is owned by the scratch PR.
+                // Keep the approved entry safe and visible until that lands.
+                self.state.toast = Some(crate::app::state::ToastNotification {
+                    kind: crate::app::state::ToastKind::NeedsAttention,
+                    title: "Scratch".into(),
+                    context: "The scratch writer is not available in this build.".into(),
+                    position: None,
+                    target: None,
+                });
             }
         }
     }
@@ -6914,6 +6912,36 @@ sidebar_visible = true
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[test]
+    fn topbar_buttons_dispatch_to_home_new_session_board_and_scratchpad() {
+        let mut app = test_app();
+
+        app.activate_status_button(crate::app::state::StatusButtonAction::Home);
+        assert!(app.state.home.is_some());
+
+        app.activate_status_button(crate::app::state::StatusButtonAction::NewSession);
+        assert!(app.state.request_new_workspace);
+
+        let note = crate::board::WeekNote::current().expect("current board week");
+        app.state.board_view = Some(crate::board::BoardView::test_new(
+            note,
+            crate::board::Board::default(),
+        ));
+        app.activate_status_button(crate::app::state::StatusButtonAction::Board);
+        assert!(app.state.board_view.is_none());
+
+        app.activate_status_button(crate::app::state::StatusButtonAction::Scratch);
+        assert!(app
+            .state
+            .toast
+            .as_ref()
+            .is_some_and(|toast| toast.title == "Scratch"));
+        assert_ne!(
+            app.state.dock_tab,
+            Some(crate::app::DockSurface::Scratchpad)
+        );
     }
 
     #[test]
