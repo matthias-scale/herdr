@@ -14,6 +14,95 @@ use crate::app::{
 
 const DOCK_HEIGHT: u16 = 14;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HitTarget {
+    Field(SpawnDockField),
+    Spawn,
+}
+
+pub(crate) fn hit_test(app: &AppState, column: u16, row: u16) -> Option<HitTarget> {
+    let dock = app.spawn_dock.as_ref()?;
+    let area = app.view.terminal_area;
+    if area.height < 5 || area.width < 30 {
+        return None;
+    }
+    let dock_area = Rect::new(
+        area.x,
+        area.y + area.height.saturating_sub(DOCK_HEIGHT.min(area.height)),
+        area.width,
+        DOCK_HEIGHT.min(area.height),
+    );
+    if !contains(dock_area, column, row) {
+        return None;
+    }
+    let content_area = Rect::new(
+        dock_area.x,
+        dock_area.y.saturating_add(1),
+        dock_area.width,
+        dock_area.height.saturating_sub(1),
+    );
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(2)])
+        .split(content_area);
+    let field_areas = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(22),
+            Constraint::Percentage(14),
+            Constraint::Percentage(22),
+            Constraint::Percentage(16),
+            Constraint::Percentage(10),
+            Constraint::Percentage(16),
+        ])
+        .split(rows[0]);
+    let fields = [
+        SpawnDockField::Project,
+        SpawnDockField::Host,
+        SpawnDockField::Profile,
+        SpawnDockField::Model,
+        SpawnDockField::Effort,
+        SpawnDockField::Worktree,
+    ];
+    if let Some((index, _)) = field_areas
+        .iter()
+        .enumerate()
+        .find(|(_, area)| contains(**area, column, row))
+    {
+        return fields.get(index).copied().map(HitTarget::Field);
+    }
+    if dock.picker.is_some() || !contains(rows[1], column, row) {
+        return None;
+    }
+    let prompt_area = Block::default()
+        .borders(Borders::ALL)
+        .padding(ratatui::widgets::Padding::uniform(1))
+        .inner(rows[1]);
+    let button = format!(
+        "⇧⏎ Spawn on {}",
+        dock.home
+            .machine()
+            .map(|machine| machine.name.as_str())
+            .unwrap_or("host")
+    );
+    let width = button.chars().count() as u16 + 3;
+    let button_area = Rect::new(
+        prompt_area.x + prompt_area.width.saturating_sub(width),
+        prompt_area.y + prompt_area.height.saturating_sub(3),
+        width.min(prompt_area.width),
+        3.min(prompt_area.height),
+    );
+    if contains(button_area, column, row) {
+        Some(HitTarget::Spawn)
+    } else {
+        Some(HitTarget::Field(SpawnDockField::Prompt))
+    }
+}
+
+fn contains(rect: Rect, column: u16, row: u16) -> bool {
+    column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
+}
+
 pub(super) fn render(app: &AppState, frame: &mut Frame, area: Rect) {
     let Some(dock) = app.spawn_dock.as_ref() else {
         return;

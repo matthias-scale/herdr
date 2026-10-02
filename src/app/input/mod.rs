@@ -35,6 +35,28 @@ fn modified_url_click_modifier() -> KeyModifiers {
     KeyModifiers::CONTROL
 }
 
+fn spawn_dock_input_is_interrupted(owner: &InputOwner) -> bool {
+    matches!(
+        owner,
+        InputOwner::Pomodoro
+            | InputOwner::Client(_)
+            | InputOwner::AddProject
+            | InputOwner::Server(
+                ServerInputOwner::Onboarding
+                    | ServerInputOwner::ReleaseNotes
+                    | ServerInputOwner::ProductAnnouncement
+                    | ServerInputOwner::GitMenu
+                    | ServerInputOwner::AddAction
+                    | ServerInputOwner::Settings
+                    | ServerInputOwner::GlobalMenu
+                    | ServerInputOwner::KeybindHelp
+                    | ServerInputOwner::Navigator
+                    | ServerInputOwner::CommandPalette
+                    | ServerInputOwner::WorkLinkPicker
+            )
+    )
+}
+
 #[cfg(test)]
 #[test]
 fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
@@ -231,13 +253,7 @@ impl App {
         if self.handle_planning_lock_key(key_event) {
             return None;
         }
-        let interrupting_overlay = matches!(
-            owner,
-            InputOwner::Pomodoro
-                | InputOwner::Client(_)
-                | InputOwner::AddProject
-                | InputOwner::Server(_)
-        );
+        let interrupting_overlay = spawn_dock_input_is_interrupted(&owner);
         if self.state.spawn_dock.is_some() && !interrupting_overlay {
             self.handle_spawn_dock_key(key_event);
             return None;
@@ -432,6 +448,10 @@ impl App {
             .spawn_dock
             .as_mut()
             .map(|dock| dock.handle_key(event, auto_host.as_deref()));
+        self.apply_spawn_dock_action(action);
+    }
+
+    fn apply_spawn_dock_action(&mut self, action: Option<crate::app::spawn_dock::SpawnDockAction>) {
         match action {
             Some(crate::app::spawn_dock::SpawnDockAction::Close) => {
                 if let Some(dock) = self.state.spawn_dock.as_ref() {
@@ -470,6 +490,28 @@ impl App {
             }
             None => {}
         }
+    }
+
+    fn handle_spawn_dock_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return false;
+        }
+        let Some(target) = crate::ui::spawn_dock_hit_test(&self.state, mouse.column, mouse.row)
+        else {
+            return false;
+        };
+        match target {
+            crate::ui::SpawnDockHitTarget::Field(field) => {
+                if let Some(dock) = self.state.spawn_dock.as_mut() {
+                    dock.focus = field;
+                    crate::client::presentation::save_spawn_dock_draft(Some(dock.draft()));
+                }
+            }
+            crate::ui::SpawnDockHitTarget::Spawn => {
+                self.apply_spawn_dock_action(Some(crate::app::spawn_dock::SpawnDockAction::Spawn));
+            }
+        }
+        true
     }
 
     pub(super) fn handle_client_overlay_key(
@@ -5085,6 +5127,12 @@ impl App {
         }
         if let InputOwner::Client(owner) = owner {
             self.handle_client_mouse_for_input_owner(source_id, mouse, owner);
+            return;
+        }
+        if self.state.spawn_dock.is_some()
+            && !spawn_dock_input_is_interrupted(&owner)
+            && self.handle_spawn_dock_mouse(mouse)
+        {
             return;
         }
         match mouse.kind {

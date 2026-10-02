@@ -49,6 +49,7 @@ pub(crate) use dock::symphony::dashboard_url as dock_symphony_dashboard_url;
 #[cfg(test)]
 pub(crate) use sidebar::entry_is_blocked;
 mod spawn_dock;
+pub(crate) use spawn_dock::{hit_test as spawn_dock_hit_test, HitTarget as SpawnDockHitTarget};
 pub(crate) mod status;
 mod symphony;
 mod tab_surface;

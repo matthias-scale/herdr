@@ -20,6 +20,11 @@ pub(crate) struct SpawnDockDraft {
     pub(crate) saved_at_unix: u64,
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_SPAWN_DOCK_DRAFT: std::cell::RefCell<Option<SpawnDockDraft>> = const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct ClientPresentationFile {
     #[serde(default)]
@@ -44,26 +49,39 @@ fn presentation_path() -> PathBuf {
 }
 
 pub(crate) fn load_spawn_dock_draft() -> Option<SpawnDockDraft> {
-    if cfg!(test) {
-        return None;
+    #[cfg(test)]
+    {
+        None
     }
-    let path = presentation_path();
-    match load_from_path(&path) {
-        Ok(state) => state.spawn_dock_draft,
-        Err(err) => {
-            warn!(path = %path.display(), err = %err, "failed to load spawn dock draft");
-            None
+    #[cfg(not(test))]
+    {
+        let path = presentation_path();
+        match load_from_path(&path) {
+            Ok(state) => state.spawn_dock_draft,
+            Err(err) => {
+                warn!(path = %path.display(), err = %err, "failed to load spawn dock draft");
+                None
+            }
         }
     }
 }
 
+#[cfg(test)]
+pub(crate) fn saved_spawn_dock_draft_for_test() -> Option<SpawnDockDraft> {
+    TEST_SPAWN_DOCK_DRAFT.with(|draft| draft.borrow().clone())
+}
+
 pub(crate) fn save_spawn_dock_draft(draft: Option<SpawnDockDraft>) {
-    if cfg!(test) {
-        return;
+    #[cfg(test)]
+    {
+        TEST_SPAWN_DOCK_DRAFT.with(|saved| *saved.borrow_mut() = draft);
     }
-    let path = presentation_path();
-    if let Err(err) = update_path(&path, |state| state.spawn_dock_draft = draft) {
-        warn!(path = %path.display(), err = %err, "failed to save spawn dock draft");
+    #[cfg(not(test))]
+    {
+        let path = presentation_path();
+        if let Err(err) = update_path(&path, |state| state.spawn_dock_draft = draft) {
+            warn!(path = %path.display(), err = %err, "failed to save spawn dock draft");
+        }
     }
 }
 
