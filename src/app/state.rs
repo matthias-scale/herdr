@@ -1555,6 +1555,8 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) search_active: bool,
     pub(crate) new_menu: Option<SidebarNewMenuState>,
     pub(crate) new_thread: Option<SidebarNewThreadState>,
+    /// TUI-only spawn draft. Swapped with this attach and never projected by the server API.
+    pub(crate) spawn_dock: Option<crate::app::spawn_dock::SpawnDockState>,
     pub(crate) project_menu: Option<SidebarProjectMenuState>,
     pub(crate) selected_work_group: Option<String>,
     pub(crate) object_menu: Option<SidebarObjectMenuState>,
@@ -4402,6 +4404,8 @@ pub struct AppState {
     /// Open home view. `Some` means home owns the screen, the same way `inbox`
     /// does; the two are mutually exclusive because each wants the whole frame.
     pub(crate) home: Option<crate::app::home::HomeState>,
+    /// Bottom-docked spawn composer, presented over panes without replacing them.
+    pub(crate) spawn_dock: Option<crate::app::spawn_dock::SpawnDockState>,
     /// Client-local provider choices retained when Home closes.
     pub(crate) home_agent_choices: Vec<crate::app::home::HomeAgentChoice>,
     /// Provider choices resolved outside `HomeState`, ready for the next Home open.
@@ -6347,6 +6351,7 @@ impl AppState {
         std::mem::swap(&mut self.sidebar_search_active, &mut other.search_active);
         std::mem::swap(&mut self.sidebar_new_menu, &mut other.new_menu);
         std::mem::swap(&mut self.sidebar_new_thread, &mut other.new_thread);
+        std::mem::swap(&mut self.spawn_dock, &mut other.spawn_dock);
         std::mem::swap(&mut self.sidebar_project_menu, &mut other.project_menu);
         std::mem::swap(
             &mut self.sidebar_selected_work_group,
@@ -7504,7 +7509,11 @@ impl AppState {
             TerminalAreaSurface::Work
         } else if self.dock_collapsed && self.dock_object_preview.is_some() {
             TerminalAreaSurface::DockObjectPreview
-        } else if self.home.is_some() {
+        } else if self
+            .home
+            .as_ref()
+            .is_some_and(|home| home.pending_dispatch.is_none())
+        {
             TerminalAreaSurface::Home
         } else if let Some(inbox) = self.inbox.as_ref() {
             TerminalAreaSurface::Inbox(inbox)
@@ -7723,6 +7732,7 @@ impl AppState {
             request_usage_scan: false,
             inbox: None,
             home: None,
+            spawn_dock: None,
             home_agent_choices: Vec::new(),
             home_catalog: crate::app::home_catalog::HomeCatalog::fallback(),
             launch_profiles: crate::app::launch_profiles::resolve(&[]),

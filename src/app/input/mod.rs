@@ -224,6 +224,17 @@ impl App {
         if self.handle_planning_lock_key(key_event) {
             return None;
         }
+        let interrupting_overlay = matches!(
+            owner,
+            InputOwner::Pomodoro
+                | InputOwner::Client(_)
+                | InputOwner::AddProject
+                | InputOwner::Server(_)
+        );
+        if self.state.spawn_dock.is_some() && !interrupting_overlay {
+            self.handle_spawn_dock_key(key_event);
+            return None;
+        }
         if self.state.board_return.is_some()
             && key_event.code == KeyCode::Esc
             && key_event.modifiers.is_empty()
@@ -405,6 +416,53 @@ impl App {
             InputOwner::None => {}
         }
         None
+    }
+
+    fn handle_spawn_dock_key(&mut self, event: KeyEvent) {
+        let auto_host = self.state.least_loaded_spawn_host();
+        let action = self
+            .state
+            .spawn_dock
+            .as_mut()
+            .map(|dock| dock.handle_key(event, auto_host.as_deref()));
+        match action {
+            Some(crate::app::spawn_dock::SpawnDockAction::Close) => {
+                if let Some(dock) = self.state.spawn_dock.as_ref() {
+                    crate::client::presentation::save_spawn_dock_draft(Some(dock.draft()));
+                }
+                self.state.spawn_dock = None;
+            }
+            Some(crate::app::spawn_dock::SpawnDockAction::Clear) => {
+                self.state.spawn_dock = None;
+                crate::client::presentation::save_spawn_dock_draft(None);
+            }
+            Some(crate::app::spawn_dock::SpawnDockAction::Spawn) => {
+                if let Some(dock) = self.state.spawn_dock.as_ref() {
+                    crate::client::presentation::save_spawn_dock_draft(Some(dock.draft()));
+                    self.state.home = Some(dock.home.clone());
+                    self.dispatch_home_prompt();
+                    if let Some(home) = self.state.home.clone() {
+                        if home.pending_dispatch.is_some() {
+                            if let Some(dock) = self.state.spawn_dock.as_mut() {
+                                dock.home = home;
+                            }
+                        } else if let Some(dock) = self.state.spawn_dock.as_mut() {
+                            dock.home = home;
+                            self.state.home = None;
+                        }
+                    } else {
+                        self.state.spawn_dock = None;
+                        crate::client::presentation::save_spawn_dock_draft(None);
+                    }
+                }
+            }
+            Some(crate::app::spawn_dock::SpawnDockAction::Consumed) => {
+                if let Some(dock) = self.state.spawn_dock.as_ref() {
+                    crate::client::presentation::save_spawn_dock_draft(Some(dock.draft()));
+                }
+            }
+            None => {}
+        }
     }
 
     pub(super) fn handle_client_overlay_key(

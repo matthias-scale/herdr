@@ -202,6 +202,9 @@ impl App {
             NavigateAction::NewAgentDock => {
                 leave_navigate_mode(&mut self.state);
                 self.state.open_spawn_dock();
+                if let Some(dock) = self.state.spawn_dock.as_ref() {
+                    crate::client::presentation::save_spawn_dock_draft(Some(dock.draft()));
+                }
             }
             NavigateAction::NewWorktree => {
                 if let Some(ws_idx) = workspace_action_target(&self.state, context).filter(|idx| {

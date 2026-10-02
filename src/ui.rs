@@ -48,6 +48,7 @@ pub(crate) use dock::symphony::dashboard_url as dock_symphony_dashboard_url;
 /// canonical agent projection.
 #[cfg(test)]
 pub(crate) use sidebar::entry_is_blocked;
+mod spawn_dock;
 pub(crate) mod status;
 mod symphony;
 mod tab_surface;
@@ -1412,6 +1413,7 @@ fn render_with_runtime_registry_inner(
     // Ambient notifications sit above panes, but below interactive overlays.
     render_notifications(app, frame, terminal_area);
     render_popup_pane(app, terminal_runtimes, frame, terminal_area);
+    spawn_dock::render(app, frame, terminal_area);
 
     let mode_bar_area = if app.view.layout == ViewLayout::Desktop
         && app.tab_bar_position == crate::config::TabBarPositionConfig::Bottom

@@ -56,6 +56,7 @@ pub(crate) mod settings_keybindings;
 pub(crate) mod settings_providers;
 pub(crate) mod settled;
 pub(crate) mod settled_view;
+pub(crate) mod spawn_dock;
 pub mod state;
 pub(crate) mod status_log;
 mod tab_bar_status;
@@ -1030,6 +1031,7 @@ impl App {
             request_usage_scan: false,
             inbox: None,
             home: None,
+            spawn_dock: None,
             home_agent_choices: Vec::new(),
             home_catalog: if cfg!(test) {
                 crate::app::home_catalog::HomeCatalog::fallback()

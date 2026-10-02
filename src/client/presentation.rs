@@ -7,6 +7,19 @@ use tracing::warn;
 
 const PRESENTATION_FILE_NAME: &str = "client-presentation.json";
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct SpawnDockDraft {
+    pub(crate) prompt: String,
+    pub(crate) project: String,
+    pub(crate) host: String,
+    pub(crate) profile: String,
+    pub(crate) model: String,
+    pub(crate) effort: Option<String>,
+    pub(crate) worktree: String,
+    pub(crate) worktree_path: Option<PathBuf>,
+    pub(crate) saved_at_unix: u64,
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct ClientPresentationFile {
     #[serde(default)]
@@ -22,10 +35,36 @@ struct ClientPresentationFile {
         Option<std::collections::HashMap<String, crate::app::state::SidebarSortMode>>,
     #[serde(default)]
     sidebar_group_collapsed: Option<std::collections::HashMap<String, bool>>,
+    #[serde(default)]
+    spawn_dock_draft: Option<SpawnDockDraft>,
 }
 
 fn presentation_path() -> PathBuf {
     crate::config::state_dir().join(PRESENTATION_FILE_NAME)
+}
+
+pub(crate) fn load_spawn_dock_draft() -> Option<SpawnDockDraft> {
+    if cfg!(test) {
+        return None;
+    }
+    let path = presentation_path();
+    match load_from_path(&path) {
+        Ok(state) => state.spawn_dock_draft,
+        Err(err) => {
+            warn!(path = %path.display(), err = %err, "failed to load spawn dock draft");
+            None
+        }
+    }
+}
+
+pub(crate) fn save_spawn_dock_draft(draft: Option<SpawnDockDraft>) {
+    if cfg!(test) {
+        return;
+    }
+    let path = presentation_path();
+    if let Err(err) = update_path(&path, |state| state.spawn_dock_draft = draft) {
+        warn!(path = %path.display(), err = %err, "failed to save spawn dock draft");
+    }
 }
 
 fn clamp_dock_width(width: u16) -> u16 {
