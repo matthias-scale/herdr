@@ -30781,6 +30781,56 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn sections_layout_keeps_every_local_tab_visible_with_blocked_filter() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("working"),
+            Workspace::test_new("blocked"),
+            Workspace::test_new("idle"),
+        ];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.sidebar_sections_layout = true;
+        app.blocked_filter = true;
+
+        for (ws_idx, state) in [
+            (0, AgentState::Working),
+            (1, AgentState::Blocked),
+            (2, AgentState::Idle),
+        ] {
+            let pane_id = app.workspaces[ws_idx].tabs[0].root_pane;
+            let terminal_id = app.workspaces[ws_idx].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).expect("fixture terminal");
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.set_raw_agent_state_for_test(state);
+        }
+        app.reconcile_sidebar_presentation();
+
+        let rows = sidebar_rows(&app);
+        let pane_ids = app
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .flat_map(|tab| tab.panes.keys().copied())
+            .collect::<Vec<_>>();
+        for pane_id in pane_ids {
+            let tab_row_count = rows
+                .iter()
+                .filter(|row| {
+                    matches!(row, SidebarRow::Tab { entry, .. }
+                        if entry.local_target().is_some_and(|target| target.pane_id == pane_id))
+                })
+                .count();
+            assert_eq!(
+                tab_row_count, 1,
+                "pane {pane_id:?} should appear in exactly one visible section"
+            );
+        }
+    }
+
+    #[test]
     fn sections_sidebar_keeps_needs_you_pods_unassigned_and_ambient_rows() {
         let (mut app, _) = app_with_local_pod(true);
         app.sidebar_sections_layout = true;
