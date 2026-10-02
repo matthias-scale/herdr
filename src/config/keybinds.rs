@@ -347,6 +347,7 @@ pub struct Keybinds {
     pub workspace_picker: ActionKeybinds,
     pub goto: ActionKeybinds,
     pub command_palette: ActionKeybinds,
+    pub agent_finder: ActionKeybinds,
     pub detach: ActionKeybinds,
     pub reload_config: ActionKeybinds,
     pub open_notification_target: ActionKeybinds,
@@ -574,6 +575,7 @@ impl Config {
             workspace_picker: empty_action!(),
             goto: empty_action!(),
             command_palette: empty_action!(),
+            agent_finder: empty_action!(),
             detach: empty_action!(),
             reload_config: empty_action!(),
             open_notification_target: empty_action!(),
@@ -761,6 +763,7 @@ impl Config {
             apply_action!(keybinds.workspace_picker, workspace_picker, source);
             apply_action!(keybinds.goto, goto, source);
             apply_action!(keybinds.command_palette, command_palette, source);
+            apply_action!(keybinds.agent_finder, agent_finder, source);
             apply_action!(keybinds.detach, detach, source);
             apply_action!(keybinds.reload_config, reload_config, source);
             apply_action!(

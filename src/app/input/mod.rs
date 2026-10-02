@@ -411,6 +411,33 @@ impl App {
                 }
             }
             InputOwner::Sidebar => {
+                if self.state.agent_finder_saved_query.is_some()
+                    && key_event.code == KeyCode::Enter
+                    && !key_event.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    if let Some(hit) = self
+                        .state
+                        .agent_finder_results
+                        .get(self.state.agent_finder_selected)
+                        .cloned()
+                    {
+                        if self
+                            .state
+                            .workspaces
+                            .iter()
+                            .any(|workspace| workspace.id == hit.agent.workspace_id)
+                        {
+                            let _ = self.focus_agent_target(&hit.target);
+                        } else if let Some(agent_ref) = hit.agent.agent_ref.as_ref() {
+                            self.open_fleet_host_from_input(
+                                &agent_ref.host,
+                                Some(&agent_ref.agent),
+                            );
+                        }
+                        self.state.accept_agent_finder_query();
+                    }
+                    return None;
+                }
                 if self.state.handle_sidebar_search_key(key_event) {
                     return None;
                 }
@@ -4751,6 +4778,9 @@ impl App {
         if self.paste_into_input_owner(owner, &text) {
             return;
         }
+        if owner == InputOwner::Sidebar && self.state.insert_agent_finder_text(&text) {
+            return;
+        }
         if !owner.forwards_unhandled_input_to_pane() {
             return;
         }
@@ -4811,7 +4841,13 @@ impl App {
             }
             return;
         }
-        if self.paste_into_input_owner(owner, &text) || !owner.forwards_unhandled_input_to_pane() {
+        if self.paste_into_input_owner(owner, &text) {
+            return;
+        }
+        if owner == InputOwner::Sidebar && self.state.insert_agent_finder_text(&text) {
+            return;
+        }
+        if !owner.forwards_unhandled_input_to_pane() {
             return;
         }
 

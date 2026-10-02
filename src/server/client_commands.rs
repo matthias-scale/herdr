@@ -14,6 +14,7 @@ const ENDPOINT_RESPONSE_CHUNK_BYTES: usize = 512 * 1024;
 
 const CLIENT_SHELL_METHODS: &[&str] = &[
     "client_shell.surface.set",
+    "agent.search",
     "command.invoke",
     "integration.install",
     "integration.list",

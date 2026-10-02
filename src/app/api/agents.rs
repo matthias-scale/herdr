@@ -14,6 +14,215 @@ use super::responses::{encode_error, encode_error_body, encode_success};
 const AGENT_PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 
 impl App {
+    pub(crate) fn tick_agent_finder(&mut self, now: std::time::Instant) -> bool {
+        let Some(deadline) = self.state.agent_finder_deadline else {
+            return false;
+        };
+        if now < deadline {
+            return false;
+        }
+        self.state.agent_finder_deadline = None;
+        let query = self.state.sidebar_work_filter.query.trim().to_owned();
+        if query.is_empty() {
+            self.state.agent_finder_results.clear();
+            self.state.agent_finder_selected = 0;
+            return true;
+        }
+        let body = self.handle_agent_search(
+            "sidebar-finder".into(),
+            crate::api::schema::AgentSearchParams {
+                query,
+                include_session: true,
+                limit: 100,
+            },
+        );
+        if let Ok(response) = serde_json::from_str::<crate::api::schema::SuccessResponse>(&body) {
+            if let crate::api::schema::ResponseResult::AgentSearch { hits } = response.result {
+                self.state.agent_finder_results = hits;
+                self.state.agent_finder_selected = 0;
+            }
+        }
+        true
+    }
+
+    pub(super) fn handle_agent_search(
+        &mut self,
+        id: String,
+        params: crate::api::schema::AgentSearchParams,
+    ) -> String {
+        let query = params.query.trim().to_lowercase();
+        if query.is_empty() {
+            return encode_success(id, ResponseResult::AgentSearch { hits: Vec::new() });
+        }
+
+        let mut hits = Vec::new();
+        let limit = usize::from(params.limit.clamp(1, 200));
+        for agent in self.collect_agent_infos() {
+            let title = agent
+                .display_title
+                .as_deref()
+                .or(agent.title.as_deref())
+                .or(agent.name.as_deref())
+                .unwrap_or("agent")
+                .to_owned();
+            let transcript = params
+                .include_session
+                .then(|| load_agent_transcript(&agent))
+                .flatten();
+            let preview = transcript
+                .as_ref()
+                .map(|transcript| trailing_lines(&transcript.content, 5))
+                .unwrap_or_default();
+            let title_match = [
+                agent.display_title.as_deref(),
+                agent.title.as_deref(),
+                agent.name.as_deref(),
+                agent.display_agent.as_deref(),
+                agent.agent.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .find(|value| value.to_lowercase().contains(&query));
+            if let Some(value) = title_match {
+                hits.push(crate::api::schema::AgentSearchHit {
+                    target: agent.pane_id.clone(),
+                    title,
+                    source: crate::api::schema::AgentSearchSource::Title,
+                    path: None,
+                    line: None,
+                    context: vec![value.to_owned()],
+                    preview,
+                    agent,
+                });
+            } else if let Some(context) = self.search_agent_tail(&agent.pane_id, &query) {
+                hits.push(crate::api::schema::AgentSearchHit {
+                    target: agent.pane_id.clone(),
+                    title,
+                    source: crate::api::schema::AgentSearchSource::Tail,
+                    path: None,
+                    line: None,
+                    preview: if preview.is_empty() {
+                        context.clone()
+                    } else {
+                        preview
+                    },
+                    context,
+                    agent,
+                });
+            } else if params.include_session {
+                if let Some(hit) = self.search_agent_session(agent, title, &query, transcript) {
+                    hits.push(hit);
+                }
+            }
+            if hits.len() >= limit {
+                break;
+            }
+        }
+        if hits.len() < limit {
+            for host in self
+                .state
+                .fleet_snapshot
+                .hosts
+                .iter()
+                .filter(|host| !host.local && host.reachable)
+            {
+                for row in &host.entries {
+                    let Some(agent) = row.agent_info() else {
+                        continue;
+                    };
+                    let title = agent
+                        .display_title
+                        .as_deref()
+                        .or(agent.title.as_deref())
+                        .or(agent.name.as_deref())
+                        .unwrap_or(&row.agent_ref.agent);
+                    let matched = [
+                        Some(title),
+                        agent.display_agent.as_deref(),
+                        agent.agent.as_deref(),
+                        Some(row.agent_ref.host.as_str()),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .find(|value| value.to_lowercase().contains(&query));
+                    let Some(matched) = matched else {
+                        continue;
+                    };
+                    hits.push(crate::api::schema::AgentSearchHit {
+                        target: agent.pane_id.clone(),
+                        title: title.to_owned(),
+                        source: crate::api::schema::AgentSearchSource::Title,
+                        path: None,
+                        line: None,
+                        context: vec![matched.to_owned()],
+                        preview: Vec::new(),
+                        agent: agent.clone(),
+                    });
+                    if hits.len() >= limit {
+                        break;
+                    }
+                }
+                if hits.len() >= limit {
+                    break;
+                }
+            }
+        }
+        encode_success(id, ResponseResult::AgentSearch { hits })
+    }
+
+    fn search_agent_tail(&mut self, target: &str, query: &str) -> Option<Vec<String>> {
+        let resolved = self.resolve_agent_target(target).ok()?;
+        let (pane, _) = self.lookup_runtime(resolved.ws_idx, resolved.pane_id)?;
+        let snapshot = crate::app::api_helpers::read_terminal_snapshot(
+            pane,
+            crate::api::schema::ReadSource::Detection,
+            crate::api::schema::ReadFormat::Text,
+            Some(300),
+        );
+        matching_context(&snapshot.text, query)
+    }
+
+    fn search_agent_session(
+        &self,
+        agent: crate::api::schema::AgentInfo,
+        title: String,
+        query: &str,
+        transcript: Option<AgentTranscript>,
+    ) -> Option<crate::api::schema::AgentSearchHit> {
+        if let Some(transcript) = transcript {
+            if let Some(context) = matching_context(&transcript.content, query) {
+                return Some(crate::api::schema::AgentSearchHit {
+                    target: agent.pane_id.clone(),
+                    title,
+                    source: crate::api::schema::AgentSearchSource::Session,
+                    path: Some(transcript.path),
+                    line: matching_line(&transcript.content, query),
+                    context,
+                    preview: trailing_lines(&transcript.content, 5),
+                    agent,
+                });
+            }
+        }
+
+        let cwd = agent.cwd.as_deref().or(agent.foreground_cwd.as_deref())?;
+        for folder in [".local", "out"] {
+            let root = std::path::Path::new(cwd).join(folder);
+            if let Some((path, line, context, preview)) = search_text_files(&root, query) {
+                return Some(crate::api::schema::AgentSearchHit {
+                    target: agent.pane_id.clone(),
+                    title,
+                    source: crate::api::schema::AgentSearchSource::Path,
+                    path: Some(path),
+                    line: Some(line),
+                    context,
+                    preview,
+                    agent,
+                });
+            }
+        }
+        None
+    }
+
     pub(super) fn handle_agent_list(&mut self, id: String) -> String {
         encode_success(
             id,
@@ -430,6 +639,169 @@ fn agent_not_found(id: String, target: &str) -> String {
         "agent_not_found",
         format!("agent target {target} not found"),
     )
+}
+
+fn matching_context(text: &str, query: &str) -> Option<Vec<String>> {
+    let lines = text.lines().collect::<Vec<_>>();
+    let matched = lines
+        .iter()
+        .position(|line| line.to_lowercase().contains(query))?;
+    let start = matched.saturating_sub(1);
+    let end = (matched + 2).min(lines.len());
+    Some(
+        lines[start..end]
+            .iter()
+            .map(|line| (*line).to_owned())
+            .collect(),
+    )
+}
+
+fn matching_line(text: &str, query: &str) -> Option<u32> {
+    text.lines()
+        .position(|line| line.to_lowercase().contains(query))
+        .and_then(|line| u32::try_from(line + 1).ok())
+}
+
+fn trailing_lines(text: &str, count: usize) -> Vec<String> {
+    let lines = text.lines().collect::<Vec<_>>();
+    lines
+        .iter()
+        .skip(lines.len().saturating_sub(count))
+        .map(|line| (*line).to_owned())
+        .collect()
+}
+
+struct AgentTranscript {
+    path: String,
+    content: String,
+}
+
+fn load_agent_transcript(agent: &crate::api::schema::AgentInfo) -> Option<AgentTranscript> {
+    use crate::agent_resume::{AgentSessionRef, AgentSessionRefKind, PersistedAgentSession};
+
+    let session = agent.agent_session.as_ref()?;
+    if session.kind == AgentSessionRefKind::Path {
+        let path = std::path::PathBuf::from(&session.value);
+        let content = std::fs::read_to_string(&path).ok()?;
+        return Some(AgentTranscript {
+            path: path.display().to_string(),
+            content,
+        });
+    }
+    let cwd = agent.cwd.as_deref().or(agent.foreground_cwd.as_deref())?;
+    let session = PersistedAgentSession {
+        source: session.source.clone(),
+        agent: session.agent.clone(),
+        session_ref: AgentSessionRef {
+            kind: session.kind,
+            value: session.value.clone(),
+        },
+    };
+    let transcript =
+        crate::app::settled_view::load_transcript(&session, std::path::Path::new(cwd))?;
+    let content = transcript
+        .turns
+        .into_iter()
+        .map(|(role, text)| format!("{role}: {text}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(AgentTranscript {
+        path: transcript.source,
+        content,
+    })
+}
+
+fn search_text_files(
+    root: &std::path::Path,
+    query: &str,
+) -> Option<(String, u32, Vec<String>, Vec<String>)> {
+    const MAX_FILES: usize = 200;
+    const MAX_FILE_BYTES: u64 = 512_000;
+    const MAX_TOTAL_BYTES: u64 = 4_000_000;
+    let mut pending = vec![root.to_path_buf()];
+    let mut visited = 0usize;
+    let mut bytes_read = 0u64;
+    while let Some(path) = pending.pop() {
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            let Ok(entries) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                pending.push(entry.path());
+            }
+            continue;
+        }
+        if !metadata.is_file()
+            || metadata.len() > MAX_FILE_BYTES
+            || visited >= MAX_FILES
+            || bytes_read.saturating_add(metadata.len()) > MAX_TOTAL_BYTES
+        {
+            continue;
+        }
+        visited += 1;
+        bytes_read = bytes_read.saturating_add(metadata.len());
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(line) = matching_line(&content, query) else {
+            continue;
+        };
+        let context = matching_context(&content, query)?;
+        return Some((
+            path.display().to_string(),
+            line,
+            context,
+            trailing_lines(&content, 5),
+        ));
+    }
+    None
+}
+
+#[cfg(test)]
+mod agent_search_tests {
+    use super::*;
+
+    #[test]
+    fn matching_context_returns_two_or_three_neighboring_lines() {
+        assert_eq!(
+            matching_context("one\ntwo\nNeedle here\nfour\nfive", "needle"),
+            Some(vec!["two".into(), "Needle here".into(), "four".into()])
+        );
+        assert_eq!(
+            matching_context("Needle\ntwo", "needle"),
+            Some(vec!["Needle".into(), "two".into()])
+        );
+        assert_eq!(matching_context("one\ntwo", "missing"), None);
+    }
+
+    #[test]
+    fn search_text_files_reports_path_and_one_based_line() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-agent-search-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create search fixture");
+        let path = root.join("notes.md");
+        std::fs::write(&path, "heading\nfound token\ntrailing").expect("write search fixture");
+
+        let found = search_text_files(&root, "token").expect("match fixture");
+        assert_eq!(found.0, path.display().to_string());
+        assert_eq!(found.1, 2);
+        assert_eq!(found.2, ["heading", "found token", "trailing"]);
+        assert_eq!(found.3, ["heading", "found token", "trailing"]);
+
+        std::fs::remove_dir_all(root).expect("remove search fixture");
+    }
 }
 
 #[cfg(test)]

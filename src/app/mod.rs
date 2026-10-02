@@ -969,6 +969,12 @@ impl App {
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
             sidebar_search_active: false,
+            agent_finder_saved_query: None,
+            agent_finder_history: Vec::new(),
+            agent_finder_history_index: None,
+            agent_finder_results: Vec::new(),
+            agent_finder_selected: 0,
+            agent_finder_deadline: None,
             sidebar_starred_only: false,
             sidebar_new_menu: None,
             sidebar_areas_menu_selected: None,
@@ -2493,7 +2499,11 @@ impl App {
             };
 
             match event {
-                LoopEvent::Timer => {}
+                LoopEvent::Timer => {
+                    if self.tick_agent_finder(Instant::now()) {
+                        needs_render = true;
+                    }
+                }
                 LoopEvent::Internal(ev) => {
                     if self.handle_internal_event_with_prefix_sync(ev) {
                         needs_render = true;

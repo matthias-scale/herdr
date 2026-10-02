@@ -1204,6 +1204,7 @@ impl App {
             deadline,
             crate::ui::pomodoro::animation_deadline_at(&self.state, self.state.screen_rect(), now),
             self.planning_lock_render_deadline(now),
+            self.state.agent_finder_deadline,
         ]
         .into_iter()
         .flatten()

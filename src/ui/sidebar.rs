@@ -10704,9 +10704,13 @@ pub(super) fn render_sidebar(
     // input paths do; its walkers subtract the separator, notepad and
     // animation reservations themselves. Passing the already-shrunk list rect
     // here takes them twice and clips rows compute_view considers visible.
-    render_workspace_list(app, terminal_runtimes, frame, area, is_navigating);
-    crate::ui::notepad::render_notepad(app, frame, sidebar_notepad_rect(app, area));
-    crate::ui::goals::render_goals(app, frame, sidebar_goals_rect(app, area));
+    if app.agent_finder_saved_query.is_some() {
+        render_agent_finder_results(app, frame, area);
+    } else {
+        render_workspace_list(app, terminal_runtimes, frame, area, is_navigating);
+        crate::ui::notepad::render_notepad(app, frame, sidebar_notepad_rect(app, area));
+        crate::ui::goals::render_goals(app, frame, sidebar_goals_rect(app, area));
+    }
     render_sidebar_header(app, frame, area, p);
     render_sidebar_hosts(app, frame, area);
     let settings = sidebar_footer_settings_hit_area(area);
@@ -10838,6 +10842,123 @@ pub(super) fn render_sidebar(
     render_window_cycle_mode_menu(app, frame);
 }
 
+fn render_agent_finder_results(app: &AppState, frame: &mut Frame, area: Rect) {
+    let body = Rect::new(
+        area.x,
+        area.y.saturating_add(2),
+        area.width.saturating_sub(1),
+        area.height.saturating_sub(3),
+    );
+    if body.is_empty() {
+        return;
+    }
+    let query = app.sidebar_work_filter.query.to_lowercase();
+    let mut lines = Vec::new();
+    for (index, hit) in app.agent_finder_results.iter().enumerate() {
+        let selected = index == app.agent_finder_selected;
+        let background = if selected {
+            app.palette.active_row_bg
+        } else {
+            app.palette.sidebar_bg.unwrap_or(app.palette.panel_bg)
+        };
+        let style = Style::default().bg(background).fg(app.palette.text);
+        let status = match hit.agent.agent_status {
+            crate::api::schema::AgentStatus::Working => "●",
+            crate::api::schema::AgentStatus::Blocked => "●",
+            crate::api::schema::AgentStatus::Done => "●",
+            _ => "○",
+        };
+        let host = hit
+            .agent
+            .agent_ref
+            .as_ref()
+            .map(|host| host.host.as_str())
+            .unwrap_or("local");
+        let source = match hit.source {
+            crate::api::schema::AgentSearchSource::Title => "title".to_owned(),
+            crate::api::schema::AgentSearchSource::Tail => "tail".to_owned(),
+            crate::api::schema::AgentSearchSource::Session => "session".to_owned(),
+            crate::api::schema::AgentSearchSource::Path => format!(
+                "{}:{}",
+                hit.path.as_deref().unwrap_or("path"),
+                hit.line.unwrap_or_default()
+            ),
+        };
+        let mut title_spans = vec![Span::styled(format!("{status} "), style)];
+        title_spans.extend(finder_highlight_spans(
+            &hit.title,
+            &query,
+            style,
+            Style::default()
+                .fg(app.palette.accent)
+                .bg(background)
+                .add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::from(title_spans));
+        lines.push(Line::from(vec![
+            Span::styled("  ", style),
+            Span::styled(
+                host,
+                Style::default().fg(app.palette.overlay0).bg(background),
+            ),
+            Span::styled(" · ", style),
+            Span::styled(
+                source,
+                Style::default().fg(app.palette.overlay0).bg(background),
+            ),
+        ]));
+        for context in hit.context.iter().take(2) {
+            let mut spans = vec![Span::styled("  ", style)];
+            spans.extend(finder_highlight_spans(
+                context,
+                &query,
+                style,
+                Style::default()
+                    .fg(app.palette.accent)
+                    .bg(background)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::from(spans));
+        }
+        if lines.len() >= usize::from(body.height) {
+            break;
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No matches",
+            Style::default().fg(app.palette.overlay0),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines), body);
+}
+
+fn finder_highlight_spans<'a>(
+    text: &'a str,
+    query_lower: &str,
+    normal: Style,
+    accent: Style,
+) -> Vec<Span<'a>> {
+    if query_lower.is_empty() {
+        return vec![Span::styled(text, normal)];
+    }
+    let lower = text.to_lowercase();
+    let Some(start) = lower.find(query_lower) else {
+        return vec![Span::styled(text, normal)];
+    };
+    let end = start.saturating_add(query_lower.len());
+    let (Some(before), Some(matched), Some(after)) =
+        (text.get(..start), text.get(start..end), text.get(end..))
+    else {
+        return vec![Span::styled(text, normal)];
+    };
+    vec![
+        Span::styled(before, normal),
+        Span::styled(matched, accent),
+        Span::styled(after, normal),
+    ]
+}
+
 fn sidebar_footer_style(
     app: &AppState,
     item: crate::app::state::SidebarFooterItem,
@@ -10963,13 +11084,22 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
     }
     if search.width > 0 {
         let query = app.sidebar_work_filter.query.as_str();
+        let icon = if app.agent_finder_saved_query.is_some() {
+            if app.nerd_font {
+                "⌕"
+            } else {
+                "Find"
+            }
+        } else {
+            "🔍"
+        };
         let text = if query.is_empty() && app.sidebar_search_active {
-            "🔍 ▏".to_string()
+            format!("{icon} ▏")
         } else if query.is_empty() {
-            "🔍 Search".to_string()
+            format!("{icon} Search")
         } else {
             format!(
-                "🔍 {query}{}",
+                "{icon} {query}{}",
                 if app.sidebar_search_active { "▏" } else { "" }
             )
         };

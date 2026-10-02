@@ -152,6 +152,9 @@ pub enum ResponseResult {
     AgentList {
         agents: Vec<AgentInfo>,
     },
+    AgentSearch {
+        hits: Vec<super::agents::AgentSearchHit>,
+    },
     DayItem {
         item: super::day::DerivedDayItem,
     },

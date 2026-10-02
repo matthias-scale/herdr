@@ -1410,6 +1410,9 @@ fn render_with_runtime_registry_inner(
     if app.view.layout != ViewLayout::Mobile {
         render_dock(app, terminal_runtimes, frame);
     }
+    if app.agent_finder_saved_query.is_some() {
+        render_agent_finder_preview(app, frame, terminal_area);
+    }
 
     // Ambient notifications sit above panes, but below interactive overlays.
     render_notifications(app, frame, terminal_area);
@@ -1528,6 +1531,88 @@ fn render_with_runtime_registry_inner(
     // operator was looking at, which is the point of it.
     pomodoro::render_overlay(app, frame, frame.area());
     planning_lock::render(app, frame, frame.area());
+}
+
+fn render_agent_finder_preview(app: &AppState, frame: &mut Frame, area: Rect) {
+    use ratatui::{
+        text::{Line, Span},
+        widgets::Paragraph,
+    };
+    if area.is_empty() {
+        return;
+    }
+    let Some(hit) = app.agent_finder_results.get(app.agent_finder_selected) else {
+        frame.render_widget(Paragraph::new("⌕  Search agents in the sidebar"), area);
+        return;
+    };
+    let host = hit
+        .agent
+        .agent_ref
+        .as_ref()
+        .map(|host| host.host.as_str())
+        .unwrap_or("local");
+    let agent = hit
+        .agent
+        .display_agent
+        .as_deref()
+        .or(hit.agent.agent.as_deref())
+        .unwrap_or("agent");
+    let age = agent_state_age(hit.agent.reported_at.as_deref());
+    let status = format!("{:?}", hit.agent.agent_status).to_lowercase();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("{}  {status} · {host} · {agent} · {age}", hit.title),
+            Style::default()
+                .fg(app.palette.text)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "Matched in {}",
+                match hit.source {
+                    crate::api::schema::AgentSearchSource::Title => "title",
+                    crate::api::schema::AgentSearchSource::Tail => "tail",
+                    crate::api::schema::AgentSearchSource::Session => "session",
+                    crate::api::schema::AgentSearchSource::Path => "session files",
+                }
+            ),
+            Style::default().fg(app.palette.overlay0),
+        )),
+        Line::from(""),
+    ];
+    lines.extend(hit.preview.iter().rev().take(40).rev().map(|line| {
+        Line::from(Span::styled(
+            line.as_str(),
+            Style::default().fg(app.palette.text),
+        ))
+    }));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(app.palette.panel_bg))
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        area,
+    );
+}
+
+fn agent_state_age(reported_at: Option<&str>) -> String {
+    let Some(timestamp) = reported_at.and_then(|value| {
+        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()
+    }) else {
+        return "age unknown".into();
+    };
+    let seconds = time::OffsetDateTime::now_utc()
+        .unix_timestamp()
+        .saturating_sub(timestamp.unix_timestamp())
+        .max(0);
+    if seconds < 60 {
+        format!("{seconds}s ago")
+    } else if seconds < 3_600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h ago", seconds / 3_600)
+    } else {
+        format!("{}d ago", seconds / 86_400)
+    }
 }
 
 fn render_navigation_chrome(

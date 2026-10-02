@@ -214,6 +214,11 @@ impl App {
                         .save_spawn_dock_draft(Some(dock.draft()));
                 }
             }
+            NavigateAction::OpenAgentFinder => {
+                leave_navigate_mode(&mut self.state);
+                self.state.focus_client_on_sidebar();
+                self.state.open_agent_finder();
+            }
             NavigateAction::NewWorktree => {
                 if let Some(ws_idx) = workspace_action_target(&self.state, context).filter(|idx| {
                     workspace_can_start_worktree_action(&self.state, &self.terminal_runtimes, *idx)
@@ -2743,6 +2748,7 @@ pub(crate) enum NavigateAction {
     NewWorkspace,
     NewThread,
     NewAgentDock,
+    OpenAgentFinder,
     NewWorktree,
     OpenWorktree,
     RemoveWorktree,
@@ -3024,6 +3030,7 @@ macro_rules! non_indexed_action_bindings {
             (&kb.help, NavigateAction::Help),
             (&kb.settings, NavigateAction::Settings),
             (&kb.command_palette, NavigateAction::OpenCommandPalette),
+            (&kb.agent_finder, NavigateAction::OpenAgentFinder),
             (&kb.workspace_picker, NavigateAction::WorkspacePicker),
             (&kb.new_workspace, NavigateAction::NewWorkspace),
             (&kb.new_thread, NavigateAction::NewThread),
@@ -3239,6 +3246,7 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
             state.open_spawn_dock();
         }
+        NavigateAction::OpenAgentFinder => leave_navigate_mode(state),
         NavigateAction::NewWorktree => {
             if let Some(ws_idx) = workspace_action_target(state, context)
                 .filter(|idx| workspace_can_start_worktree_action(state, terminal_runtimes, *idx))

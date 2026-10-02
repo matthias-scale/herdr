@@ -2364,6 +2364,7 @@ impl App {
             Method::TabMove(params) => return self.handle_tab_move(request.id, params),
             Method::TabClose(target) => return self.handle_tab_close(request.id, target),
             Method::AgentList(_) => return self.handle_agent_list(request.id),
+            Method::AgentSearch(params) => return self.handle_agent_search(request.id, params),
             Method::AgentGet(target) => return self.handle_agent_get(request.id, target),
             Method::AgentState(params) => return self.handle_agent_state(request.id, params),
             Method::AgentReport(params) => return self.handle_agent_report(request.id, params),

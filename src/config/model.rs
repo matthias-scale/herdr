@@ -947,6 +947,8 @@ pub struct KeysConfig {
     pub goto: BindingConfig,
     /// Open the fuzzy command palette. Default: ["ctrl+alt+p", "super+p"]
     pub command_palette: BindingConfig,
+    /// Search agents from the sidebar. Default: "prefix+/".
+    pub agent_finder: BindingConfig,
     /// Move workspace selection up in navigate mode. Default: "up".
     pub navigate_workspace_up: BindingConfig,
     /// Move workspace selection down in navigate mode. Default: "down".
@@ -1195,6 +1197,8 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     command_palette: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    agent_finder: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     navigate_workspace_up: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     navigate_workspace_down: Option<BindingConfig>,
@@ -1427,6 +1431,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(workspace_picker);
         apply_field!(goto);
         apply_field!(command_palette);
+        apply_field!(agent_finder);
         apply_field!(navigate_workspace_up);
         apply_field!(navigate_workspace_down);
         apply_field!(navigate_pane_left);
@@ -1589,6 +1594,7 @@ impl KeysConfig {
         copy_effective_action_field!(workspace_picker, keybinds.workspace_picker);
         copy_effective_action_field!(goto, keybinds.goto);
         copy_effective_action_field!(command_palette, keybinds.command_palette);
+        copy_effective_action_field!(agent_finder, keybinds.agent_finder);
         copy_effective_action_field!(navigate_workspace_up, keybinds.navigate.workspace_up);
         copy_effective_action_field!(navigate_workspace_down, keybinds.navigate.workspace_down);
         copy_effective_action_field!(navigate_pane_left, keybinds.navigate.pane_left);
@@ -2206,6 +2212,7 @@ impl Default for KeysConfig {
             workspace_picker: BindingConfig::one("prefix+w"),
             goto: BindingConfig::one("prefix+g"),
             command_palette: BindingConfig::Many(vec!["ctrl+alt+p".into(), "super+p".into()]),
+            agent_finder: BindingConfig::one("prefix+/"),
             navigate_workspace_up: BindingConfig::one("up"),
             navigate_workspace_down: BindingConfig::one("down"),
             navigate_pane_left: BindingConfig::one("h"),
