@@ -1926,6 +1926,7 @@ impl App {
                 KeyCode::Char('v' | 'l') if key.modifiers.is_empty() => {
                     if let Some(state) = self.state.work_view.as_mut() {
                         state.ticket_layout = crate::app::state::LinearViewLayout::List;
+                        state.selected = None;
                     }
                     return true;
                 }
@@ -5707,6 +5708,9 @@ impl App {
                 .point_in_rect(list_toggle, mouse.column, mouse.row)
             {
                 if let Some(view) = self.state.work_view.as_mut() {
+                    if view.ticket_layout == crate::app::state::LinearViewLayout::Board {
+                        view.selected = None;
+                    }
                     view.ticket_layout = crate::app::state::LinearViewLayout::List;
                     view.board_detail_open = false;
                 }
@@ -9239,6 +9243,62 @@ printf '%s' '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"i
                 .expect("view")
                 .board_detail_open
         );
+    }
+
+    #[test]
+    fn ticket_board_to_list_drops_a_ticket_hidden_by_list_filters() {
+        for mouse in [false, true] {
+            let mut app = ticket_view_app();
+            let mut foreign = app
+                .state
+                .work_view
+                .as_ref()
+                .expect("view")
+                .snapshot
+                .as_ref()
+                .expect("snapshot")
+                .items[0]
+                .clone();
+            foreign.ticket_details[0].identifier = "SCA-5000".into();
+            foreign.ticket_details[0].assignee = Some("other person".into());
+            foreign.ticket_ids = vec!["SCA-5000".into()];
+            app.state.sidebar_work_filter.assignee = Some("matthias".into());
+            app.state.view.terminal_area = ratatui::layout::Rect::new(26, 2, 120, 30);
+            let view = app.state.work_view.as_mut().expect("view");
+            view.snapshot
+                .as_mut()
+                .expect("snapshot")
+                .items
+                .push(foreign);
+            view.ticket_layout = crate::app::state::LinearViewLayout::Board;
+            view.board_mine_only = false;
+            view.selected = Some(crate::app::state::WorkItemKey {
+                repo: String::new(),
+                pr_number: None,
+                pr_url: None,
+                ticket_id: Some("SCA-5000".into()),
+            });
+            if mouse {
+                let layout = crate::ui::work_view::ticket_board_layout(
+                    &app.state,
+                    app.state.work_view.as_ref().expect("view"),
+                    app.state.view.terminal_area,
+                );
+                app.handle_ticket_board_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: layout.list_toggle.x,
+                    row: layout.list_toggle.y,
+                    modifiers: KeyModifiers::empty(),
+                });
+            } else {
+                app.handle_work_view_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::empty()));
+            }
+            let (_, ticket, _) = app.selected_ticket_parts().expect("visible list ticket");
+            assert_eq!(
+                ticket.identifier, "SCA-3165",
+                "List actions must target the ticket List shows after switching from Board all"
+            );
+        }
     }
 
     #[test]
