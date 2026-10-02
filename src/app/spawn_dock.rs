@@ -174,17 +174,25 @@ impl SpawnDockState {
     }
 
     pub(crate) fn insert_text(&mut self, text: &str) {
-        let text: String = text
-            .chars()
-            .filter(|character| !character.is_control())
-            .collect();
-        if text.is_empty() {
-            return;
-        }
         if self.picker.is_some() {
+            let text: String = text
+                .chars()
+                .filter(|character| !character.is_control())
+                .collect();
+            if text.is_empty() {
+                return;
+            }
             self.filter.push_str(&text);
             self.home.picker_selected = 0;
         } else if self.focus == SpawnDockField::Prompt {
+            let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+            let text: String = normalized
+                .chars()
+                .filter(|character| *character == '\n' || !character.is_control())
+                .collect();
+            if text.is_empty() {
+                return;
+            }
             self.home.prompt.push_str(&text);
         }
     }
@@ -647,5 +655,18 @@ mod tests {
             dock.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT), None),
             SpawnDockAction::Spawn
         );
+    }
+
+    #[test]
+    fn pasted_prompt_preserves_normalized_newlines_and_picker_stays_single_line() {
+        let app = AppState::test_new();
+        let mut dock = SpawnDockState::new(app.new_home_state());
+        dock.focus = SpawnDockField::Prompt;
+        dock.insert_text("first\r\nsecond\rthird\n");
+        assert_eq!(dock.home.prompt, "first\nsecond\nthird\n");
+
+        dock.picker = Some(HomePicker::Project);
+        dock.insert_text("one\r\ntwo\rthree");
+        assert_eq!(dock.filter, "onetwothree");
     }
 }
