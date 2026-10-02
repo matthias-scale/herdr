@@ -49,6 +49,7 @@ mod lease;
 mod modal;
 mod mouse;
 mod navigate;
+pub(crate) use navigate::{is_window_cycle_key, WindowCycleSnapshot};
 mod notepad;
 mod overlays;
 mod selection;
@@ -190,6 +191,9 @@ impl App {
         key: TerminalKey,
         owner: InputOwner,
     ) -> Option<super::TerminalInputTarget> {
+        if !is_window_cycle_key(&self.state, &key) {
+            self.invalidate_window_cycle_snapshot();
+        }
         self.state.clear_hovered_control();
         let target = self.handle_key_inner_for_input_owner(key, owner).await;
         // Every keyboard path that can enter a probed settings section runs
