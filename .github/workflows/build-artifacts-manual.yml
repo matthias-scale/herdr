@@ -87,7 +87,7 @@ jobs:
         run: |
           sudo find /etc/apt/sources.list.d -type f \( -iname '*microsoft*' -o -iname '*azure-cli*' \) -print -delete
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build musl-tools gcc-aarch64-linux-gnu crossbuild-essential-arm64
+          sudo apt-get install -y cmake ninja-build musl-tools gcc-aarch64-linux-gnu crossbuild-essential-arm64 qemu-user-static
 
       - name: Set Linux aarch64 linker
         if: matrix.target == 'aarch64-unknown-linux-musl'
@@ -102,6 +102,11 @@ jobs:
       - name: Package artifact
         run: |
           cp target/${{ matrix.target }}/release/herdr ${{ matrix.name }}
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            qemu-aarch64-static ./${{ matrix.name }} --version | grep -Fx "herdr 0.9.1+fork.3abf0f0c96e5"
+          else
+            ./${{ matrix.name }} --version | grep -Fx "herdr 0.9.1+fork.3abf0f0c96e5"
+          fi
           file ${{ matrix.name }} > BUILD_INFO.txt
           ldd ${{ matrix.name }} 2>&1 | tee -a BUILD_INFO.txt
           grep -q "statically linked" BUILD_INFO.txt
@@ -183,6 +188,7 @@ jobs:
       - name: Package artifact
         run: |
           cp target/${{ matrix.target }}/release/herdr ${{ matrix.name }}
+          ./${{ matrix.name }} --version | grep -Fx "herdr 0.9.1+fork.3abf0f0c96e5"
           file ${{ matrix.name }} > BUILD_INFO.txt
           {
             echo "commit=$GITHUB_SHA"
