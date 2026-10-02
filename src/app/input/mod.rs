@@ -334,6 +334,7 @@ impl App {
             InputOwner::AddProject | InputOwner::Surface(SurfaceInputOwner::Home) => {
                 self.handle_home_key_event(key_event);
             }
+            InputOwner::SpawnDock => self.handle_spawn_dock_key(key_event),
             InputOwner::Server(owner) => match owner {
                 ServerInputOwner::Onboarding => self.handle_onboarding_key(key_event),
                 ServerInputOwner::ReleaseNotes => self.handle_release_notes_key(key_event),
@@ -441,7 +442,7 @@ impl App {
         None
     }
 
-    fn handle_spawn_dock_key(&mut self, event: KeyEvent) {
+    pub(super) fn handle_spawn_dock_key(&mut self, event: KeyEvent) {
         let auto_host = self.state.least_loaded_spawn_host();
         let action = self
             .state

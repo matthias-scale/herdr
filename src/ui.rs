@@ -1514,6 +1514,7 @@ fn render_with_runtime_registry_inner(
         | InputOwner::Popup
         | InputOwner::Surface(_)
         | InputOwner::Notepad
+        | InputOwner::SpawnDock
         | InputOwner::Dock(_)
         | InputOwner::Sidebar
         | InputOwner::Pane

@@ -1822,6 +1822,7 @@ pub(crate) enum InputOwner {
     Pomodoro,
     Client(ClientInputOwner),
     AddProject,
+    SpawnDock,
     Server(ServerInputOwner),
     Popup,
     Surface(SurfaceInputOwner),
@@ -6493,6 +6494,9 @@ impl AppState {
         }
         if self.add_project_active() {
             return InputOwner::AddProject;
+        }
+        if self.spawn_dock.is_some() {
+            return InputOwner::SpawnDock;
         }
         if self.sidebar_focused && !self.sidebar_collapsed {
             return InputOwner::Sidebar;

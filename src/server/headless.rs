@@ -17584,6 +17584,169 @@ next_tab = ""
     }
 
     #[tokio::test]
+    async fn semantic_client_input_events_keep_spawn_dock_keys_out_of_the_pty() {
+        use crate::protocol::{
+            ClientInputEvent, ClientKeyCode, ClientKeyKind, ClientKeySource, ClientMessage,
+        };
+
+        fn key(code: ClientKeyCode, generated_text: Option<String>) -> ClientInputEvent {
+            ClientInputEvent::Key {
+                code,
+                modifiers: 0,
+                kind: ClientKeyKind::Press,
+                repeat_count: 1,
+                generated_text,
+                source: ClientKeySource::Synthesized,
+            }
+        }
+
+        async fn send(
+            server: &mut HeadlessServer,
+            writer: &mut crate::ipc::LocalStream,
+            events: &mut tokio::sync::mpsc::Receiver<ServerEvent>,
+            input: Vec<ClientInputEvent>,
+        ) {
+            crate::protocol::write_message(writer, &ClientMessage::InputEvents { events: input })
+                .expect("write client input frame");
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                .await
+                .expect("socket reader decodes client input")
+                .expect("socket reader stays connected");
+            assert!(server.handle_server_event(event));
+        }
+
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"");
+        let mut client = test_app_client(Some(true), 1);
+        client.sidebar_presentation.focus_intent =
+            crate::app::state::ClientFocusIntent::FollowShared;
+        server.clients.insert(1, client);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.app.state.set_server_mode(crate::app::Mode::Prefix);
+
+        let socket_name = format!("hdock-{}.sock", crate::config::test_unique_suffix());
+        #[cfg(unix)]
+        let socket_path = std::path::PathBuf::from("/tmp").join(socket_name);
+        #[cfg(windows)]
+        let socket_path = std::env::temp_dir().join(socket_name);
+        let listener = crate::ipc::bind_local_listener(&socket_path)
+            .expect("bind temporary app-client socket");
+        let mut client_socket = crate::ipc::connect_local_stream(&socket_path)
+            .expect("connect temporary app-client socket");
+        let server_socket = listener.accept().expect("accept app-client socket");
+        let (server_event_tx, mut server_event_rx) = tokio::sync::mpsc::channel(16);
+        let should_quit = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let read_quit = should_quit.clone();
+        let reader = std::thread::spawn(move || {
+            crate::server::client_transport::client_read_loop(
+                server_socket,
+                1,
+                &server_event_tx,
+                &read_quit,
+            )
+        });
+
+        send(
+            &mut server,
+            &mut client_socket,
+            &mut server_event_rx,
+            vec![key(ClientKeyCode::Char('y'), Some("y".into()))],
+        )
+        .await;
+        assert!(server.clients[&1].sidebar_presentation.spawn_dock.is_some());
+        server
+            .clients
+            .get_mut(&1)
+            .unwrap()
+            .sidebar_presentation
+            .focus_intent = crate::app::state::ClientFocusIntent::Pane;
+        server.sync_foreground_client_state();
+
+        send(
+            &mut server,
+            &mut client_socket,
+            &mut server_event_rx,
+            vec![key(ClientKeyCode::Enter, None)],
+        )
+        .await;
+        assert!(server.clients[&1]
+            .sidebar_presentation
+            .spawn_dock
+            .as_ref()
+            .is_some_and(|dock| { dock.picker == Some(crate::app::home::HomePicker::Project) }));
+        send(
+            &mut server,
+            &mut client_socket,
+            &mut server_event_rx,
+            vec![key(ClientKeyCode::Esc, None)],
+        )
+        .await;
+
+        for _ in 0..6 {
+            send(
+                &mut server,
+                &mut client_socket,
+                &mut server_event_rx,
+                vec![key(ClientKeyCode::Tab, None)],
+            )
+            .await;
+        }
+        assert_eq!(
+            server.clients[&1]
+                .sidebar_presentation
+                .spawn_dock
+                .as_ref()
+                .map(|dock| dock.focus),
+            Some(crate::app::spawn_dock::SpawnDockField::Prompt)
+        );
+        for ch in "hello qa".chars() {
+            send(
+                &mut server,
+                &mut client_socket,
+                &mut server_event_rx,
+                vec![key(ClientKeyCode::Char(ch), Some(ch.to_string()))],
+            )
+            .await;
+        }
+        assert_eq!(
+            server.clients[&1]
+                .sidebar_presentation
+                .spawn_dock
+                .as_ref()
+                .map(|dock| dock.home.prompt.as_str()),
+            Some("hello qa")
+        );
+        assert!(
+            input_rx.try_recv().is_err(),
+            "dock keys must not reach the PTY"
+        );
+
+        send(
+            &mut server,
+            &mut client_socket,
+            &mut server_event_rx,
+            vec![key(ClientKeyCode::Esc, None)],
+        )
+        .await;
+        assert!(server.clients[&1].sidebar_presentation.spawn_dock.is_none());
+        assert_eq!(
+            crate::client::presentation::saved_spawn_dock_draft_for_test()
+                .map(|draft| draft.prompt),
+            Some("hello qa".into())
+        );
+        crate::client::presentation::save_spawn_dock_draft(None);
+        should_quit.store(true, std::sync::atomic::Ordering::Release);
+        drop(client_socket);
+        reader
+            .join()
+            .expect("client socket reader joins")
+            .expect("client socket reader exits cleanly");
+        drop(listener);
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    #[tokio::test]
     async fn raw_headless_dock_navigation_intercepts_arrows_but_forwards_pane_input() {
         let mut server = test_headless_server();
         server.app.state.workspaces = [10_u64, 20]

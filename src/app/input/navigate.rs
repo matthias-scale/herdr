@@ -4020,13 +4020,10 @@ mod tests {
         app.handle_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()))
             .await;
         assert!(app.state.spawn_dock.is_some());
-        assert!(matches!(
+        assert_eq!(
             app.state.input_owner(),
-            crate::app::state::InputOwner::Server(
-                crate::app::state::ServerInputOwner::Navigate
-                    | crate::app::state::ServerInputOwner::Prefix
-            )
-        ));
+            crate::app::state::InputOwner::SpawnDock
+        );
 
         app.handle_key(TerminalKey::new(KeyCode::Tab, KeyModifiers::empty()))
             .await;

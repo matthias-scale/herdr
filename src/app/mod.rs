@@ -3561,6 +3561,19 @@ impl App {
                                 );
                                 continue;
                             }
+                            // The headless client path has its own synchronous
+                            // router, so it must consume the shared spawn dock
+                            // before any pane forwarding can occur.
+                            if owner == state::InputOwner::SpawnDock
+                                && self.state.spawn_dock.is_some()
+                            {
+                                self.handle_spawn_dock_key(key.as_key_event());
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
                             if let state::InputOwner::Dock(dock_owner) = owner {
                                 if dock_owner != state::DockInputOwner::Editor
                                     && self.handle_dock_key_for_owner_headless(dock_owner, &key)
@@ -3826,6 +3839,7 @@ impl App {
         }
         match owner {
             state::InputOwner::Pomodoro | state::InputOwner::Popup | state::InputOwner::Pane => {}
+            state::InputOwner::SpawnDock => self.handle_spawn_dock_key(key_event),
             state::InputOwner::Client(owner) => match owner {
                 state::ClientInputOwner::Overlay(overlay) => {
                     self.handle_client_overlay_key(overlay, key_event);
