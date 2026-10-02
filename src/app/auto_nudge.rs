@@ -221,6 +221,10 @@ impl App {
     }
 
     pub(crate) fn note_human_bytes(&mut self, pane_id: crate::layout::PaneId, bytes: &[u8]) {
+        if !bytes.is_empty() && self.unpark_tab_for_human_input(pane_id) {
+            self.schedule_session_save();
+            self.state.mark_sidebar_projection_changed();
+        }
         self.cancel_pending_stall_nudge_for_pane(pane_id);
         self.retire_stall_nudge_episode_for_pane(pane_id);
         self.state.note_human_bytes(pane_id, bytes);
@@ -1370,13 +1374,7 @@ mod tests {
             1
         );
 
-        app.note_human_key(
-            pane_id,
-            &crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Char('x'),
-                crossterm::event::KeyModifiers::empty(),
-            ),
-        );
+        app.note_human_bytes(pane_id, b"x");
         assert!(!app.state.workspaces[0].tabs[0].parked);
         assert!(!app.stall_nudge_episodes.contains_key(&terminal_id));
         assert_eq!(
