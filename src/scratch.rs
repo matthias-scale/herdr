@@ -405,6 +405,14 @@ impl std::ops::DerefMut for ScratchState {
     }
 }
 impl ScratchState {
+    pub(crate) fn has_unsaved_drafts(&self) -> bool {
+        !self.pending_saves.is_empty()
+            || self
+                .editor
+                .as_ref()
+                .is_some_and(|editor| editor.dirty_at.is_some())
+    }
+
     pub fn open_writer(&mut self) {
         self.confirm_delete = false;
         self.delete_target = None;

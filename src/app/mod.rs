@@ -3954,7 +3954,7 @@ impl App {
                 }
             }
             state::InputOwner::Surface(state::SurfaceInputOwner::Scratch) => {
-                self.state.scratch.key(key_event);
+                self.handle_scratch_key(key_event);
             }
             state::InputOwner::Surface(state::SurfaceInputOwner::Inbox) => {
                 self.handle_inbox_key_headless(key_event);
@@ -9260,6 +9260,24 @@ mod tests {
             Mode::Terminal,
             "q should leave navigate mode"
         );
+    }
+
+    #[test]
+    fn scratch_headless_raw_prefix_enters_prefix_without_editing() {
+        let mut app = test_app();
+        app.state = AppState::test_new();
+        app.state.scratch.new_note();
+        app.route_client_input(vec![0x02]);
+        assert_eq!(app.state.server_mode(), Mode::Prefix);
+        assert!(app
+            .state
+            .scratch
+            .editor
+            .as_ref()
+            .expect("editor")
+            .note
+            .body
+            .is_empty());
     }
 
     #[test]

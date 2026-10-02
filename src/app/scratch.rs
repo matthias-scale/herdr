@@ -16,6 +16,17 @@ fn save_editor(editor: &mut scratch::Editor, dir: &std::path::Path) -> std::io::
     }
 }
 impl App {
+    pub(crate) fn handle_scratch_key(&mut self, key: crossterm::event::KeyEvent) {
+        if self
+            .state
+            .is_prefix_key(&crate::input::TerminalKey::from(key))
+        {
+            self.state.set_server_mode(crate::app::state::Mode::Prefix);
+        } else {
+            self.state.scratch.key(key);
+        }
+    }
+
     pub(crate) fn tick_scratch(&mut self, now: Instant, force: bool) -> bool {
         let state = &mut self.state.scratch;
         let dir = state.dir.clone();

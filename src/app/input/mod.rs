@@ -348,7 +348,7 @@ impl App {
                 }
             }
             InputOwner::Surface(SurfaceInputOwner::Scratch) => {
-                self.state.scratch.key(key_event);
+                self.handle_scratch_key(key_event);
             }
             InputOwner::Surface(SurfaceInputOwner::Inbox) => {
                 return self.handle_inbox_key(key).await;
@@ -6927,6 +6927,28 @@ sidebar_visible = true
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[tokio::test]
+    async fn scratch_writer_prefix_key_enters_prefix_without_editing() {
+        let mut app = test_app();
+        app.state = AppState::test_new();
+        app.state.scratch.new_note();
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('b'),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+        app.handle_key_inner(TerminalKey::from(key)).await;
+        assert_eq!(app.state.server_mode(), Mode::Prefix);
+        assert!(app
+            .state
+            .scratch
+            .editor
+            .as_ref()
+            .expect("editor")
+            .note
+            .body
+            .is_empty());
     }
 
     #[test]

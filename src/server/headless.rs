@@ -2077,6 +2077,7 @@ impl HeadlessServer {
         params: crate::api::schema::ServerLiveHandoffParams,
     ) -> io::Result<Vec<api::schema::LiveHandoffSkippedPane>> {
         info!("starting live handoff");
+        self.flush_scratch_presentations()?;
         let import_exe = params.import_exe.as_deref().map(std::path::PathBuf::from);
         let socket_path = crate::server::handoff::handoff_socket_path();
         let token = format!(
@@ -7492,8 +7493,10 @@ impl HeadlessServer {
         }
         other_changed |= self.app.handle_loop_receipt_fallback(now);
         other_changed |= self.app.tick_notepad(now);
-        if has_app_client {
+        if has_app_client || !self.app.state.scratch.pending_saves.is_empty() {
             other_changed |= self.app.tick_scratch(now, false);
+        }
+        if has_app_client {
             for client in self.clients.values_mut() {
                 let scratch = &client.scratch_presentation;
                 if scratch
@@ -7800,6 +7803,7 @@ impl HeadlessServer {
     /// close client connections, remove socket files, and clean up.
     async fn complete_shutdown(&mut self) -> io::Result<()> {
         info!("completing server shutdown");
+        self.flush_scratch_presentations()?;
         self.teardown_remote_focus_proxies();
         self.reject_late_client_connections().await;
 
@@ -7829,6 +7833,30 @@ impl HeadlessServer {
         // Remove socket files.
         self.cleanup_sockets()?;
 
+        Ok(())
+    }
+
+    /// Flush every attach's drafts before clients are drained on shutdown.
+    fn flush_scratch_presentations(&mut self) -> io::Result<()> {
+        self.app.tick_scratch(Instant::now(), true);
+        let mut failed = self.app.state.scratch.has_unsaved_drafts();
+        for client in self.clients.values_mut() {
+            std::mem::swap(
+                &mut self.app.state.scratch.presentation,
+                &mut client.scratch_presentation,
+            );
+            self.app.tick_scratch(Instant::now(), true);
+            failed |= self.app.state.scratch.has_unsaved_drafts();
+            std::mem::swap(
+                &mut self.app.state.scratch.presentation,
+                &mut client.scratch_presentation,
+            );
+        }
+        if failed {
+            return Err(io::Error::other(
+                "Scratch drafts could not be saved before shutdown",
+            ));
+        }
         Ok(())
     }
 
@@ -8491,6 +8519,104 @@ mod tests {
 
     fn test_headless_server() -> HeadlessServer {
         test_headless_server_with_event_hub(api::EventHub::default())
+    }
+
+    #[test]
+    fn scratch_shutdown_flushes_all_attached_clients_and_retained_drafts() {
+        let mut server = test_headless_server();
+        server.app.state = AppState::test_new();
+        let dir = server
+            .client_socket_path
+            .parent()
+            .expect("test dir")
+            .join("scratch");
+        server.app.state.scratch.dir = dir.clone();
+        for id in 1..=2 {
+            let mut client = ClientConnection::new(
+                (100, 30),
+                Default::default(),
+                Default::default(),
+                Some(false),
+                0,
+                RenderEncoding::SemanticFrame,
+                None,
+            );
+            server.app.state.scratch.new_note();
+            server
+                .app
+                .state
+                .scratch
+                .editor
+                .as_mut()
+                .expect("editor")
+                .insert(&format!("client {id}"));
+            std::mem::swap(
+                &mut server.app.state.scratch.presentation,
+                &mut client.scratch_presentation,
+            );
+            server.clients.insert(id, client);
+        }
+        server.app.state.scratch.new_note();
+        server
+            .app
+            .state
+            .scratch
+            .editor
+            .as_mut()
+            .expect("editor")
+            .insert("retained draft");
+        let editor = server.app.state.scratch.editor.take().expect("editor");
+        server.app.state.scratch.pending_saves.push(editor);
+        server.flush_scratch_presentations().expect("flush");
+        let notes = crate::scratch::load_notes(&dir).expect("load");
+        assert_eq!(notes.len(), 3);
+        for body in ["client 1", "client 2", "retained draft"] {
+            assert!(notes.iter().any(|note| note.body == body));
+        }
+        assert!(!server.app.state.scratch.has_unsaved_drafts());
+        assert!(server.clients.values().all(|client| client
+            .scratch_presentation
+            .editor
+            .as_ref()
+            .is_none_or(|editor| editor.dirty_at.is_none())));
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn scratch_shutdown_refuses_to_discard_a_failed_draft() {
+        let mut server = test_headless_server();
+        server.app.state = AppState::test_new();
+        let path = server
+            .client_socket_path
+            .parent()
+            .expect("test dir")
+            .join("not-a-directory");
+        std::fs::write(&path, "blocking file").expect("file");
+        server.app.state.scratch.dir = path.clone();
+        server.app.state.scratch.new_note();
+        server
+            .app
+            .state
+            .scratch
+            .editor
+            .as_mut()
+            .expect("editor")
+            .insert("unsaved");
+        assert!(server.flush_scratch_presentations().is_err());
+        assert!(server.app.state.scratch.has_unsaved_drafts());
+        assert_eq!(
+            server
+                .app
+                .state
+                .scratch
+                .editor
+                .as_ref()
+                .expect("editor")
+                .note
+                .body,
+            "unsaved"
+        );
+        std::fs::remove_file(path).expect("cleanup");
     }
 
     #[cfg(unix)]
