@@ -525,6 +525,7 @@ struct ClientInputPresentation {
     sidebar: crate::app::state::SidebarPresentationState,
     dock: crate::app::state::DockPresentationState,
     notepad: crate::notepad::NotepadPresentationState,
+    scratch: crate::scratch::ScratchPresentation,
     loop_run_history_detail: Option<crate::app::state::LoopRunHistoryDetail>,
     aloop_run_detail: Option<crate::app::state::AloopRunDetail>,
     symphony_detail: Option<crate::app::state::SymphonyDetail>,
@@ -559,6 +560,7 @@ impl ClientInputPresentation {
             sidebar: std::mem::take(&mut client.sidebar_presentation),
             dock: std::mem::take(&mut client.dock_presentation),
             notepad: std::mem::take(&mut client.notepad_presentation),
+            scratch: std::mem::take(&mut client.scratch_presentation),
             loop_run_history_detail: client.loop_run_history_detail.take(),
             aloop_run_detail: client.aloop_run_detail.take(),
             symphony_detail: client.symphony_detail.take(),
@@ -575,6 +577,7 @@ impl ClientInputPresentation {
         state.swap_dock_presentation(&mut self.dock);
         state.reconcile_dock_home_with_focused_pane();
         state.notepad.swap_presentation(&mut self.notepad);
+        std::mem::swap(&mut state.scratch.presentation, &mut self.scratch);
         state.swap_loop_run_history_detail(&mut self.loop_run_history_detail);
         state.swap_aloop_run_detail(&mut self.aloop_run_detail);
         state.swap_symphony_detail(&mut self.symphony_detail);
@@ -600,6 +603,7 @@ impl ClientInputPresentation {
         state.swap_sidebar_presentation(&mut self.sidebar);
         state.swap_dock_presentation(&mut self.dock);
         state.notepad.swap_presentation(&mut self.notepad);
+        std::mem::swap(&mut state.scratch.presentation, &mut self.scratch);
     }
 
     fn store(self, client: &mut ClientConnection, state: &crate::app::state::AppState) {
@@ -613,6 +617,7 @@ impl ClientInputPresentation {
         client.sidebar_presentation = self.sidebar;
         client.dock_presentation = self.dock;
         client.notepad_presentation = self.notepad;
+        client.scratch_presentation = self.scratch;
         client.loop_run_history_detail = self.loop_run_history_detail;
         client.aloop_run_detail = self.aloop_run_detail;
         client.symphony_detail = self.symphony_detail;
@@ -2698,6 +2703,28 @@ impl HeadlessServer {
         let was_foreground = self.foreground_client_id == Some(client_id);
         self.app.clear_input_source(client_id);
         self.send_client_graphics_cleanup(client_id);
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            std::mem::swap(
+                &mut self.app.state.scratch.presentation,
+                &mut client.scratch_presentation,
+            );
+            self.app.tick_scratch(Instant::now(), true);
+            std::mem::swap(
+                &mut self.app.state.scratch.presentation,
+                &mut client.scratch_presentation,
+            );
+            // Failed drafts survive detach in the client presentation cache.
+            if let Some(editor) = client.scratch_presentation.editor.take() {
+                if editor.dirty_at.is_some() {
+                    self.app.state.scratch.pending_saves.push(editor);
+                }
+            }
+            self.app
+                .state
+                .scratch
+                .pending_saves
+                .append(&mut client.scratch_presentation.pending_saves);
+        }
         let removed = self.clients.remove(&client_id);
         if let Some(removed) = removed {
             crate::server::clipboard_image::remove_files(removed.staged_clipboard_files);
@@ -6946,6 +6973,15 @@ impl HeadlessServer {
                     self.app
                         .state
                         .swap_dock_presentation(&mut dock_presentation);
+                    let mut scratch_presentation = self
+                        .clients
+                        .get_mut(&client_id)
+                        .map(|client| std::mem::take(&mut client.scratch_presentation))
+                        .unwrap_or_default();
+                    std::mem::swap(
+                        &mut self.app.state.scratch.presentation,
+                        &mut scratch_presentation,
+                    );
                     let mut notepad_presentation = self
                         .clients
                         .get_mut(&client_id)
@@ -7035,6 +7071,10 @@ impl HeadlessServer {
                         !crate::server::render_stream::dock_editor_is_focused(&self.app.state);
                     let animation_rect = self.app.state.view.hyperspace_rect;
                     crate::render_prof::duration_since("full_render.frame_build", frame_started);
+                    std::mem::swap(
+                        &mut self.app.state.scratch.presentation,
+                        &mut scratch_presentation,
+                    );
                     self.app
                         .state
                         .swap_sidebar_presentation(&mut sidebar_presentation);
@@ -7070,6 +7110,7 @@ impl HeadlessServer {
                         client.focus_initialized = true;
                         client.dock_presentation = dock_presentation;
                         client.notepad_presentation = notepad_presentation;
+                        client.scratch_presentation = scratch_presentation;
                         client.loop_run_history_detail = loop_run_history_detail;
                         client.aloop_run_detail = aloop_run_detail;
                         client.symphony_detail = symphony_detail;
@@ -7451,6 +7492,34 @@ impl HeadlessServer {
         }
         other_changed |= self.app.handle_loop_receipt_fallback(now);
         other_changed |= self.app.tick_notepad(now);
+        if has_app_client {
+            other_changed |= self.app.tick_scratch(now, false);
+            for client in self.clients.values_mut() {
+                let scratch = &client.scratch_presentation;
+                if scratch
+                    .editor
+                    .as_ref()
+                    .is_some_and(|e| e.dirty_at.is_some())
+                    || !scratch.pending_saves.is_empty()
+                    || !scratch.requests.is_empty()
+                {
+                    std::mem::swap(
+                        &mut self.app.state.scratch.presentation,
+                        &mut client.scratch_presentation,
+                    );
+                    let changed = self.app.tick_scratch(now, false);
+                    std::mem::swap(
+                        &mut self.app.state.scratch.presentation,
+                        &mut client.scratch_presentation,
+                    );
+                    other_changed |= changed;
+                    if changed {
+                        client.request_repaint();
+                    }
+                }
+            }
+        }
+
         if has_app_client {
             other_changed |= self.app.schedule_goals_refresh(now);
             let host_focused = self.app_clients_host_focused();
@@ -8364,6 +8433,60 @@ mod tests {
             }),
             RetainedRenderPlan::HiddenPty
         );
+    }
+
+    #[test]
+    fn scratch_writer_presentation_is_attach_local() {
+        let mut state = AppState::test_new();
+        let mut first = ClientConnection::new(
+            (100, 30),
+            Default::default(),
+            Default::default(),
+            Some(false),
+            0,
+            RenderEncoding::SemanticFrame,
+            None,
+        );
+        let mut second = ClientConnection::new(
+            (100, 30),
+            Default::default(),
+            Default::default(),
+            Some(false),
+            0,
+            RenderEncoding::SemanticFrame,
+            None,
+        );
+        let mut presentation = ClientInputPresentation::take(&mut first, &state);
+        presentation.install(&mut state);
+        state.scratch.new_note();
+        state
+            .scratch
+            .editor
+            .as_mut()
+            .expect("editor")
+            .insert("first client");
+        presentation.uninstall(&mut state);
+        presentation.store(&mut first, &state);
+        assert!(!state.scratch.open);
+        assert!(!second.scratch_presentation.open);
+        let mut presentation = ClientInputPresentation::take(&mut second, &state);
+        presentation.install(&mut state);
+        assert!(!state.scratch.open);
+        state.scratch.expanded = true;
+        presentation.uninstall(&mut state);
+        presentation.store(&mut second, &state);
+        assert_eq!(
+            first
+                .scratch_presentation
+                .editor
+                .as_ref()
+                .expect("first editor")
+                .note
+                .body,
+            "first client"
+        );
+        assert!(!first.scratch_presentation.expanded);
+        assert!(second.scratch_presentation.expanded);
     }
 
     fn test_headless_server() -> HeadlessServer {

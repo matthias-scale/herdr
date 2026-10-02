@@ -347,6 +347,9 @@ impl App {
                     self.state.dock_linear_focused = false;
                 }
             }
+            InputOwner::Surface(SurfaceInputOwner::Scratch) => {
+                self.state.scratch.key(key_event);
+            }
             InputOwner::Surface(SurfaceInputOwner::Inbox) => {
                 return self.handle_inbox_key(key).await;
             }
@@ -1296,10 +1299,18 @@ impl App {
     fn activate_status_button(&mut self, action: crate::app::state::StatusButtonAction) {
         use crate::app::state::StatusButtonAction;
         match action {
+            StatusButtonAction::Scratch => {
+                self.tick_scratch(std::time::Instant::now(), true);
+                self.state.scratch.open_writer();
+            }
             StatusButtonAction::Home => {
+                self.state.scratch.open = false;
                 self.state.toggle_home();
             }
-            StatusButtonAction::Work => self.toggle_work_view(),
+            StatusButtonAction::Work => {
+                self.state.scratch.open = false;
+                self.toggle_work_view();
+            }
             StatusButtonAction::BlockedFilter => {
                 self.state.blocked_filter = !self.state.blocked_filter;
                 self.state.workspace_scroll = crate::ui::normalized_workspace_scroll(
@@ -1309,6 +1320,7 @@ impl App {
                 );
             }
             StatusButtonAction::Attention => {
+                self.state.scratch.open = false;
                 self.state.toggle_home();
             }
             StatusButtonAction::Dock => {
@@ -4748,6 +4760,14 @@ impl App {
 
     pub(crate) fn paste_into_input_owner(&mut self, owner: InputOwner, text: &str) -> bool {
         match owner {
+            InputOwner::Surface(SurfaceInputOwner::Scratch) => {
+                if !self.state.scratch.list && !self.state.scratch.confirm_delete {
+                    if let Some(editor) = &mut self.state.scratch.editor {
+                        editor.insert(text);
+                    }
+                }
+                true
+            }
             InputOwner::Notepad => {
                 // Read-only tabs own the input but have no buffer; pasting there
                 // must not reach a note the user cannot see.

@@ -1,6 +1,7 @@
 pub(crate) mod aloops;
 pub(crate) mod devices;
 pub(crate) mod inbox;
+pub(crate) mod notes;
 mod runs;
 #[cfg(test)]
 mod tokens;
@@ -3313,6 +3314,7 @@ pub(crate) enum SidebarRow {
     /// The producer answered and no finding is pending (AC6).
     AloopEmpty,
     Inbox(inbox::InboxLine),
+    Notes(notes::NotesLine),
 }
 
 pub(crate) const SNOOZED_SECTION_TITLE: &str = "Snoozed";
@@ -5502,6 +5504,7 @@ fn append_ordered_sidebar_blocks(
                 if sidebar_area_is_visible(app, crate::config::SidebarArea::Aloops) {
                     aloops::append_rows(app, &mut block_rows);
                 }
+                notes::append_rows(app, &mut block_rows);
                 inbox::append_rows(app, &mut block_rows);
                 if sidebar_area_is_visible(app, crate::config::SidebarArea::Symphony) {
                     append_symphony_rows(app, &mut block_rows);
@@ -7915,6 +7918,7 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
         | SidebarRow::AloopCleanRun { .. }
         | SidebarRow::AloopUnreachable { .. }
         | SidebarRow::AloopEmpty
+        | SidebarRow::Notes(_)
         | SidebarRow::Inbox(_)
         | SidebarRow::AgentRun { .. } => 1,
     }
@@ -7989,6 +7993,7 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
             | SidebarRow::AloopCleanRun { .. }
             | SidebarRow::AloopUnreachable { .. }
             | SidebarRow::AloopEmpty
+            | SidebarRow::Notes(_)
             | SidebarRow::Inbox(_),
             _,
         )
@@ -8002,6 +8007,7 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
             | SidebarRow::AloopCleanRun { .. }
             | SidebarRow::AloopUnreachable { .. }
             | SidebarRow::AloopEmpty
+            | SidebarRow::Notes(_)
             | SidebarRow::Inbox(_),
         ) => 0,
         // Strip rows hug each other and the divider that closes the strip.
@@ -8084,6 +8090,7 @@ pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) 
         | SidebarRow::AloopCleanRun { .. }
         | SidebarRow::AloopUnreachable { .. }
         | SidebarRow::AloopEmpty
+        | SidebarRow::Notes(_)
         | SidebarRow::Inbox(_)
         | SidebarRow::AgentRun { .. } => false,
     }
@@ -8240,6 +8247,7 @@ pub(crate) fn compute_sidebar_row_areas(
             | SidebarRow::AloopCleanRun { .. }
             | SidebarRow::AloopUnreachable { .. }
             | SidebarRow::AloopEmpty
+            | SidebarRow::Notes(_)
             | SidebarRow::Inbox(_)
             | SidebarRow::AgentRun { .. } => {}
         }
@@ -8975,6 +8983,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                 },
                 false,
             ),
+            SidebarRow::Notes(line) => (notes::hover(app, line), false),
             SidebarRow::Inbox(inbox::InboxLine::Source(index)) => {
                 let label = inbox::hover_detail(
                     app,
@@ -10514,6 +10523,7 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             | SidebarRow::AloopCleanRun { .. }
             | SidebarRow::AloopUnreachable { .. }
             | SidebarRow::AloopEmpty
+            | SidebarRow::Notes(_)
             | SidebarRow::Inbox(_)
             | SidebarRow::AgentRun { .. } => {}
             // The rail keeps the strip's one fact: something needs you.
@@ -11921,6 +11931,9 @@ fn render_workspace_list(
     }
     for area in aloops::areas(app, sidebar_area) {
         aloops::render(app, frame, &area, symphony_now);
+    }
+    for (line, rect) in notes::areas(app, sidebar_area) {
+        notes::render(app, frame, &line, rect);
     }
     for area in inbox::areas(app, sidebar_area) {
         inbox::render(app, frame, &area, symphony_now);
@@ -18265,6 +18278,7 @@ pub(crate) mod tests {
                 | SidebarRow::AloopCleanRun { .. }
                 | SidebarRow::AloopUnreachable { .. }
                 | SidebarRow::AloopEmpty
+                | SidebarRow::Notes(_)
                 | SidebarRow::Inbox(_) => None,
             })
             .collect()
@@ -19594,6 +19608,10 @@ pub(crate) mod tests {
                 + workspace_cards.len()
                 + compute_tab_card_areas(&app, area).len()
                 + agent_cards.len()
+                + rows
+                    .iter()
+                    .filter(|row| matches!(row, SidebarRow::Notes(_)))
+                    .count()
         );
         assert_eq!(workspace_cards, geometry_order.0);
         assert_eq!(agent_cards, geometry_order.1);
@@ -19697,6 +19715,7 @@ pub(crate) mod tests {
                 | SidebarRow::AloopCleanRun { .. }
                 | SidebarRow::AloopUnreachable { .. }
                 | SidebarRow::AloopEmpty
+                | SidebarRow::Notes(_)
                 | SidebarRow::Inbox(_)
                 | SidebarRow::AgentRun { .. } => None,
             })
@@ -19762,6 +19781,7 @@ pub(crate) mod tests {
                     | SidebarRow::AloopUnreachable { .. }
                     | SidebarRow::AloopEmpty => ("aloop", 0, None, None),
                     SidebarRow::Inbox(_) => ("inbox", 0, None, None),
+                    SidebarRow::Notes(_) => ("notes", 0, None, None),
                 })
                 .collect::<Vec<_>>()
         };
@@ -22026,6 +22046,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 | SidebarRow::AloopCleanRun { .. }
                 | SidebarRow::AloopUnreachable { .. }
                 | SidebarRow::AloopEmpty
+                | SidebarRow::Notes(_)
                 | SidebarRow::Inbox(_) => None,
             })
             .collect()
@@ -26817,8 +26838,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         assert_eq!(metrics.viewport_rows, 3);
         // Three display rows plus the always-visible Snoozed/Settled shelves
-        // and their divider.
-        assert_eq!(metrics.max_offset_from_bottom, 6);
+        // and their divider, plus the Notes header.
+        assert_eq!(metrics.max_offset_from_bottom, 7);
         assert_eq!(metrics.offset_from_bottom, metrics.max_offset_from_bottom);
     }
 
@@ -29286,6 +29307,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 | SidebarRow::AloopCleanRun { .. }
                 | SidebarRow::AloopUnreachable { .. }
                 | SidebarRow::AloopEmpty
+                | SidebarRow::Notes(_)
                 | SidebarRow::Inbox(_) => None,
             })
             .collect()
