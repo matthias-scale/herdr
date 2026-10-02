@@ -2768,10 +2768,9 @@ pub struct ViewState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusButtonAction {
     Home,
-    Work,
-    BlockedFilter,
-    Attention,
-    Dock,
+    NewSession,
+    Board,
+    Scratch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

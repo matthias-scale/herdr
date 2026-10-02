@@ -560,6 +560,49 @@ fn compact_row_title_for_width<'a>(
     }
 }
 
+pub(crate) fn truncate_remote_title(title: &str, max_width: usize) -> String {
+    let Some((base, host)) = title.rsplit_once(" · ") else {
+        return truncate_end(title, max_width);
+    };
+    let suffix_width = display_width(" · ").saturating_add(display_width(host));
+    if suffix_width.saturating_add(display_width(base).min(5)) > max_width {
+        let base_width = display_width(base).min(5).min(max_width.saturating_sub(4));
+        let host_width = max_width.saturating_sub(base_width + 3);
+        if host_width == 0 {
+            return truncate_end(base, max_width);
+        }
+        return format!(
+            "{} · {}",
+            truncate_end(base, base_width),
+            if display_width(host) <= host_width {
+                host.to_string()
+            } else {
+                let tail = host
+                    .char_indices()
+                    .rev()
+                    .nth(1)
+                    .map_or(host, |(index, _)| &host[index..]);
+                format!(
+                    "{}{}",
+                    truncate_end(host, host_width.saturating_sub(display_width(tail))),
+                    tail
+                )
+            }
+        );
+    }
+    format!("{} · {host}", truncate_end(base, max_width - suffix_width))
+}
+
+fn remote_machine_field_width(row_width: usize) -> usize {
+    // The host suffix already identifies the machine. Let its redundant
+    // short tag yield before the state, title, or provider at narrow widths.
+    if row_width <= 30 {
+        0
+    } else {
+        SIDEBAR_MACHINE_FIELD_WIDTH
+    }
+}
+
 fn compact_title_candidate(title: Option<&str>) -> Option<&str> {
     let title = title?.trim();
     if title.is_empty()
@@ -1006,22 +1049,31 @@ fn render_remote_compact_agent_row_with_prefix(
     let p = &app.palette;
     let render_age = remote_compact_age(remote, app.view_observed_at);
     let requested_prefix = prefix_override.unwrap_or_else(|| usize::from(depth) * 3 + 1);
+    let requested_prefix = if rect.width <= 18 {
+        requested_prefix.min(1)
+    } else {
+        requested_prefix
+    };
     let total_width = usize::from(rect.width);
     let row_width = total_width;
+    let machine_width = remote_machine_field_width(row_width);
+    let fitting_width = row_width + SIDEBAR_MACHINE_FIELD_WIDTH - machine_width;
     let title = compact_row_title_for_width(
         &remote.render_title,
         &remote.render_provider,
-        row_width,
+        fitting_width,
         requested_prefix,
     );
-    let widths = compact_row_widths(title, &remote.render_provider, row_width, requested_prefix);
+    let widths = compact_row_widths(
+        title,
+        &remote.render_provider,
+        fitting_width,
+        requested_prefix,
+    );
     let provider_width = widths.provider;
-    let age_width = widths.age;
-    let fixed_width = widths.prefix
-        + SIDEBAR_DOT_FIELD_WIDTH
-        + provider_width
-        + SIDEBAR_MACHINE_FIELD_WIDTH
-        + age_width;
+    let age_width = if row_width <= 30 { 0 } else { widths.age };
+    let fixed_width =
+        widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + provider_width + machine_width + age_width;
     let title_width = row_width.saturating_sub(fixed_width);
     let selected = app
         .sidebar_selected_remote_agent
@@ -1038,7 +1090,7 @@ fn render_remote_compact_agent_row_with_prefix(
         rect.width,
     );
     let title_text_width = title_width.saturating_sub(controls_width);
-    let title_text = truncate_end(title, title_text_width);
+    let title_text = truncate_remote_title(title, title_text_width);
     let title_style = if selected {
         Style::default()
             .fg(active_sidebar_title_color(p))
@@ -1129,16 +1181,18 @@ fn render_remote_compact_agent_row_with_prefix(
         );
         x = x.saturating_add(provider_width as u16);
     }
-    let machine_icon = sidebar_machine_icon(app, &remote.agent_ref.host);
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            machine_icon,
-            working_row_style(app, fade, Style::default().fg(p.overlay0), bg),
-        ))
-        .alignment(Alignment::Right),
-        Rect::new(x, rect.y, SIDEBAR_MACHINE_FIELD_WIDTH as u16, rect.height),
-    );
-    x = x.saturating_add(SIDEBAR_MACHINE_FIELD_WIDTH as u16);
+    if machine_width > 0 {
+        let machine_icon = sidebar_machine_icon(app, &remote.agent_ref.host);
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                machine_icon,
+                working_row_style(app, fade, Style::default().fg(p.overlay0), bg),
+            ))
+            .alignment(Alignment::Right),
+            Rect::new(x, rect.y, SIDEBAR_MACHINE_FIELD_WIDTH as u16, rect.height),
+        );
+        x = x.saturating_add(machine_width as u16);
+    }
     if age_width > 0 {
         frame.render_widget(
             Paragraph::new(Span::styled(render_age.as_str(), row_style(age_style)))
@@ -1484,21 +1538,29 @@ pub(crate) fn selected_remote_row_control_at(
     _show_host_identity: bool,
     column: u16,
 ) -> Option<crate::app::state::SidebarHoverAction> {
-    let requested_prefix = usize::from(depth) * 3 + 1;
+    let requested_prefix = if rect.width <= 18 {
+        1
+    } else {
+        usize::from(depth) * 3 + 1
+    };
     let total_width = usize::from(rect.width);
     let row_width = total_width;
+    let machine_width = remote_machine_field_width(row_width);
+    let fitting_width = row_width + SIDEBAR_MACHINE_FIELD_WIDTH - machine_width;
     let title = compact_row_title_for_width(
         &entry.render_title,
         &entry.render_provider,
-        row_width,
+        fitting_width,
         requested_prefix,
     );
-    let widths = compact_row_widths(title, &entry.render_provider, row_width, requested_prefix);
-    let fixed_width = widths.prefix
-        + SIDEBAR_DOT_FIELD_WIDTH
-        + widths.provider
-        + SIDEBAR_MACHINE_FIELD_WIDTH
-        + widths.age;
+    let widths = compact_row_widths(
+        title,
+        &entry.render_provider,
+        fitting_width,
+        requested_prefix,
+    );
+    let fixed_width =
+        widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + machine_width + widths.age;
     let title_width = row_width.saturating_sub(fixed_width);
     let selected = app
         .sidebar_selected_remote_agent
@@ -1846,7 +1908,7 @@ impl RemoteAgentPanelEntry {
         nerd_font: bool,
     ) -> Self {
         let render_dot = compact_row_dot(&entry);
-        let render_title = compact_row_title(&entry, false).to_string();
+        let render_title = format!("{} · {}", compact_row_title(&entry, false), agent_ref.host);
         let render_provider = compact_provider(&entry, nerd_font);
         let search_key_lowercase = format!(
             "{} {} {} {} {}",
@@ -2205,17 +2267,8 @@ pub(crate) fn sidebar_footer_planning_lock_hit_area(area: Rect) -> Rect {
     )
 }
 
-pub(crate) fn sidebar_footer_board_hit_area(area: Rect) -> Rect {
-    let content_width = area.width.saturating_sub(1);
-    if content_width < 16 || area.height == 0 {
-        return Rect::default();
-    }
-    Rect::new(
-        area.x.saturating_add(14),
-        area.bottom().saturating_sub(1),
-        2,
-        1,
-    )
+pub(crate) fn sidebar_footer_board_hit_area(_area: Rect) -> Rect {
+    Rect::default()
 }
 
 pub(crate) fn agent_panel_entries(app: &AppState) -> Vec<AgentPanelEntry> {
@@ -2257,18 +2310,15 @@ pub(crate) fn remote_agent_device_groups(app: &AppState) -> RemoteAgentDeviceGro
         Vec<(String, bool, bool, std::sync::Arc<AgentPanelEntry>)>,
     >::new();
     for remote in &app.remote_agent_panel_entries {
-        let entry = std::sync::Arc::new(remote_agent_as_panel_entry(remote));
-        let section = match sidebar_entry_lifecycle(app, &entry) {
-            SidebarEntryLifecycle::Active if !sidebar_entry_is_working(&entry) => "main",
-            SidebarEntryLifecycle::Active => continue,
-            SidebarEntryLifecycle::Snoozed => "snoozed",
-            SidebarEntryLifecycle::Settled => "settled",
-        };
+        let entry = remote_agent_as_panel_entry(remote);
+        let section = "main";
         let host = remote.agent_ref.host.clone();
-        sections
-            .entry(section)
-            .or_default()
-            .push((host, false, remote.host_fresh, entry));
+        sections.entry(section).or_default().push((
+            host,
+            false,
+            remote.host_fresh,
+            std::sync::Arc::new(entry),
+        ));
     }
     sections
         .into_iter()
@@ -3401,8 +3451,7 @@ fn section_title_defaults_to_collapsed(title: &str) -> bool {
     title == NEEDS_YOU_SECTION_TITLE
         || title == SETTLED_SECTION_TITLE
         || title.starts_with(aloops::ALOOP_CLEAN_KEY_PREFIX)
-        || (title != SNOOZED_SECTION_TITLE
-            && INITIAL_COLLAPSED_SHARED_GROUP_TITLES.contains(&title))
+        || INITIAL_COLLAPSED_SHARED_GROUP_TITLES.contains(&title)
         || SidebarGroupMode::ALL
             .into_iter()
             .any(|mode| unassigned_section_title(mode) == Some(title))
@@ -3874,6 +3923,21 @@ fn compact_sidebar_rows_inner(
             (entry, lifecycle)
         })
         .collect::<Vec<_>>();
+    let local_device_agent_count = classified
+        .iter()
+        .filter(|(entry, _)| entry.has_agent)
+        .count();
+    let device_entries = if sections_layout {
+        ordered_tab_entries(
+            app,
+            &classified
+                .iter()
+                .map(|(entry, _)| entry.clone())
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        Vec::new()
+    };
     let active_pane_targets = classified
         .iter()
         .filter(|(_, lifecycle)| *lifecycle == SidebarEntryLifecycle::Active)
@@ -3958,27 +4022,24 @@ fn compact_sidebar_rows_inner(
         let remote_activity = sidebar_remote_activity(app, &remote_entries);
         let mut space_entries = Vec::new();
         let mut remote_main_entries = Vec::new();
-        // Working agents get their own section; every other active pane
-        // (blocked, done, idle, unknown) stays in the tree above it, so the
-        // sidebar holds every pane agent cycling can reach.
-        for entry in visible_entries.iter().cloned() {
-            if !sidebar_entry_is_working(&entry) {
-                if entry.remote_entry.is_some() {
-                    remote_main_entries.push(entry);
-                } else {
-                    space_entries.push(entry);
-                }
+        // Devices own the complete active tree. Working is a separate,
+        // optional summary of these same agents below the device sections.
+        for entry in device_entries {
+            if app.blocked_filter && !entry_has_red_dot(&entry) {
+                continue;
+            }
+            if entry.remote_entry.is_some() {
+                remote_main_entries.push(entry);
+            } else {
+                space_entries.push(entry);
             }
         }
         let mut remote_snoozed = Vec::new();
         let mut remote_settled = Vec::new();
         for entry in remote_entries.iter().cloned() {
+            remote_main_entries.push(entry.clone());
             match sidebar_entry_lifecycle(app, &entry) {
-                SidebarEntryLifecycle::Active => {
-                    if !sidebar_entry_is_working(&entry) {
-                        remote_main_entries.push(entry);
-                    }
-                }
+                SidebarEntryLifecycle::Active => {}
                 SidebarEntryLifecycle::Snoozed => remote_snoozed.push(entry),
                 SidebarEntryLifecycle::Settled => remote_settled.push(entry),
             }
@@ -3995,8 +4056,8 @@ fn compact_sidebar_rows_inner(
             rows.extend(needs_you);
             rows.push(SidebarRow::Divider);
         }
-        let has_local_main = !space_entries.is_empty();
-        if has_local_main && !remote_main_entries.is_empty() {
+        let local_main_agent_count = local_device_agent_count;
+        if local_main_agent_count > 0 {
             let key = devices::group_key("main", &app.agent_host_name);
             let collapsed =
                 devices::group_is_collapsed(app, "main", &app.agent_host_name, true, true);
@@ -4006,7 +4067,7 @@ fn compact_sidebar_rows_inner(
                 sort_key: None,
                 sort_mode: SidebarSortMode::Default,
                 title: devices::device_title(app, &app.agent_host_name, true),
-                count: space_entries.len(),
+                count: local_main_agent_count,
                 activity_count: None,
                 collapsed,
                 dim: false,
@@ -4014,8 +4075,7 @@ fn compact_sidebar_rows_inner(
                 spawn: false,
             });
         }
-        let local_main_collapsed = has_local_main
-            && !remote_main_entries.is_empty()
+        let local_main_collapsed = local_main_agent_count > 0
             && devices::group_is_collapsed(app, "main", &app.agent_host_name, true, true);
         if !local_main_collapsed {
             append_space_tree_rows(
@@ -4041,10 +4101,13 @@ fn compact_sidebar_rows_inner(
             collapsed: working_collapsed,
         });
         if !working_collapsed {
+            let (working_remote, working_local): (Vec<_>, Vec<_>) = working_entries
+                .into_iter()
+                .partition(|entry| entry.remote_entry.is_some());
             append_space_tree_rows(
                 app,
                 &mut rows,
-                working_entries,
+                working_local,
                 false,
                 terminal_runtimes,
                 SidebarGroupMode::Repo,
@@ -4054,6 +4117,7 @@ fn compact_sidebar_rows_inner(
                 Some(&remote_activity),
                 Some("working"),
             );
+            devices::append_remote_entry_groups(app, &mut rows, "working", working_remote);
         }
         snoozed_entries.extend(remote_snoozed);
         rows.push(SidebarRow::ShelfDivider);
@@ -4213,33 +4277,45 @@ fn sidebar_row_render_width(app: &AppState, rows: &[SidebarRow], mobile: bool) -
 
 fn mark_ambiguous_remote_titles(rows: &mut [SidebarRow], width: usize, nerd_font: bool) {
     let rendered_title = |row: &SidebarRow| -> Option<String> {
-        let (title, provider, depth) = match row {
+        let (title, provider, depth, remote) = match row {
             SidebarRow::Agent { entry, depth } => (
                 compact_row_title(entry, false),
                 compact_provider(entry, nerd_font),
                 *depth,
+                false,
             ),
             SidebarRow::Tab { entry, depth } => (
                 compact_row_title(entry, true),
                 compact_provider(entry, nerd_font),
                 *depth,
+                false,
             ),
             SidebarRow::RemoteAgent { entry, depth, .. } => (
                 entry.render_title.as_str(),
                 entry.render_provider.clone(),
                 *depth,
+                true,
             ),
             _ => return None,
         };
         let requested_prefix = usize::from(depth) * 3 + 1;
-        let title = compact_row_title_for_width(title, &provider, width, requested_prefix);
-        let widths = compact_row_widths(title, &provider, width, requested_prefix);
-        let fixed = widths.prefix
-            + SIDEBAR_DOT_FIELD_WIDTH
-            + widths.provider
-            + SIDEBAR_MACHINE_FIELD_WIDTH
-            + widths.age;
-        Some(truncate_end(title, width.saturating_sub(fixed)).to_ascii_lowercase())
+        let machine_width = if remote {
+            remote_machine_field_width(width)
+        } else {
+            SIDEBAR_MACHINE_FIELD_WIDTH
+        };
+        let fitting_width = width + SIDEBAR_MACHINE_FIELD_WIDTH - machine_width;
+        let title = compact_row_title_for_width(title, &provider, fitting_width, requested_prefix);
+        let widths = compact_row_widths(title, &provider, fitting_width, requested_prefix);
+        let fixed =
+            widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + machine_width + widths.age;
+        let title_width = width.saturating_sub(fixed);
+        let title = if remote {
+            truncate_remote_title(title, title_width)
+        } else {
+            truncate_end(title, title_width)
+        };
+        Some(title.to_ascii_lowercase())
     };
     let mut counts = std::collections::HashMap::<String, usize>::new();
     for row in rows.iter() {
@@ -4424,10 +4500,6 @@ fn append_legacy_space_rows(
     );
 }
 
-fn sidebar_entry_is_working(entry: &AgentPanelEntry) -> bool {
-    sidebar_entry_has_working_state(entry) && !entry_is_blocked(entry)
-}
-
 fn sidebar_entry_has_working_state(entry: &AgentPanelEntry) -> bool {
     entry.has_agent && entry.state == AgentState::Working
 }
@@ -4456,40 +4528,19 @@ fn append_shelf_space_rows(
         collapsed,
     });
     if !collapsed {
-        let local_collapsed = !local.is_empty()
-            && !remote.is_empty()
-            && devices::group_is_collapsed(app, section, &app.agent_host_name, true, true);
-        if !local.is_empty() && !remote.is_empty() {
-            let key = devices::group_key(section, &app.agent_host_name);
-            rows.push(SidebarRow::NestedHeader {
-                key,
-                action_key: None,
-                sort_key: None,
-                sort_mode: SidebarSortMode::Default,
-                title: devices::device_title(app, &app.agent_host_name, true),
-                count: local.len(),
-                activity_count: None,
-                collapsed: local_collapsed,
-                dim: false,
-                status: None,
-                spawn: false,
-            });
-        }
-        if !local_collapsed {
-            append_space_tree_rows(
-                app,
-                rows,
-                local,
-                false,
-                terminal_runtimes,
-                SidebarGroupMode::Spaces,
-                false,
-                true,
-                None,
-                None,
-                None,
-            );
-        }
+        append_space_tree_rows(
+            app,
+            rows,
+            local,
+            false,
+            terminal_runtimes,
+            SidebarGroupMode::Spaces,
+            false,
+            true,
+            None,
+            None,
+            Some(section),
+        );
         devices::append_remote_entry_groups(app, rows, section, remote);
     }
 }
@@ -10717,7 +10768,10 @@ pub(super) fn render_sidebar(
             app.server_mode() == Mode::Settings,
             p,
         );
-        frame.render_widget(Paragraph::new(Span::styled("⚙ ", style)), settings);
+        frame.render_widget(
+            Paragraph::new(Span::styled(if app.nerd_font { "⚙ " } else { "ST" }, style)),
+            settings,
+        );
     }
     let ask_subtitles = sidebar_footer_ask_subtitles_hit_area(app, area);
     if ask_subtitles.width > 0 {
@@ -10740,7 +10794,10 @@ pub(super) fn render_sidebar(
             }),
             p,
         );
-        frame.render_widget(Paragraph::new(Span::styled("⑂ ", style)), work);
+        frame.render_widget(
+            Paragraph::new(Span::styled(if app.nerd_font { "⑂ " } else { "PR" }, style)),
+            work,
+        );
     }
     let usage = sidebar_footer_usage_hit_area(area);
     if usage.width > 0 {
@@ -10750,7 +10807,10 @@ pub(super) fn render_sidebar(
             app.usage_view.is_some(),
             p,
         );
-        frame.render_widget(Paragraph::new(Span::styled("▥ ", style)), usage);
+        frame.render_widget(
+            Paragraph::new(Span::styled(if app.nerd_font { "◔ " } else { "U " }, style)),
+            usage,
+        );
     }
     let tickets = sidebar_footer_ticket_hit_area(area);
     if tickets.width > 0 {
@@ -10762,7 +10822,10 @@ pub(super) fn render_sidebar(
                 .is_some_and(|view| view.projection == crate::app::state::WorkProjection::Tickets),
             p,
         );
-        frame.render_widget(Paragraph::new(Span::styled("◎ ", style)), tickets);
+        frame.render_widget(
+            Paragraph::new(Span::styled(if app.nerd_font { "☰ " } else { "L " }, style)),
+            tickets,
+        );
     }
     let missive = sidebar_footer_missive_hit_area(area);
     if missive.width > 0 {
@@ -10852,7 +10915,9 @@ fn sidebar_footer_style(
     } else if app.hovered_control == Some(crate::app::state::ControlId::SidebarFooter(item)) {
         Style::default().fg(palette.text).bg(palette.surface0)
     } else {
-        Style::default().fg(palette.overlay0)
+        Style::default()
+            .fg(palette.subtext0)
+            .add_modifier(Modifier::BOLD)
     }
 }
 
@@ -11469,12 +11534,20 @@ const SIDEBAR_SORT_GLYPH: &str = "⇅";
 
 fn nested_header_count_label(header: &NestedHeaderArea) -> Option<String> {
     // An expanded group lists its rows, so only a collapsed one needs the count.
-    if header.dim || !header.collapsed {
+    if !header.collapsed || (header.dim && !header.key.starts_with("device:")) {
         None
     } else if let Some((_, total)) = header.activity_count {
-        Some(format!(" {total}"))
+        Some(device_count_label(&header.key, total))
     } else {
-        Some(format!(" {}", header.count))
+        Some(device_count_label(&header.key, header.count))
+    }
+}
+
+fn device_count_label(key: &str, count: usize) -> String {
+    if key.starts_with("device:") {
+        format!(" ({count})")
+    } else {
+        format!(" {count}")
     }
 }
 
@@ -11489,16 +11562,32 @@ fn nested_header_spans(header: &NestedHeaderArea) -> NestedHeaderSpans {
     // The status glyph sits before the id, so it costs the title its width.
     let glyph = header.status.map(WorkGroupStatus::glyph);
     let glyph_width = glyph.map(|glyph| display_width(glyph) + 1).unwrap_or(0);
-    let title = truncate_end(
-        &header.title,
-        usize::from(header.rect.width)
-            .saturating_sub(prefix_width)
-            .saturating_sub(glyph_width)
-            .saturating_sub(count_width)
-            .saturating_sub(sort_width)
-            .saturating_sub(action_width)
-            .saturating_sub(spawn_width),
-    );
+    let title_width = usize::from(header.rect.width)
+        .saturating_sub(prefix_width)
+        .saturating_sub(glyph_width)
+        .saturating_sub(count_width)
+        .saturating_sub(sort_width)
+        .saturating_sub(action_width)
+        .saturating_sub(spawn_width);
+    let display_title =
+        if header.key.starts_with("device:") && display_width(&header.title) > title_width {
+            let compact = header
+                .title
+                .strip_suffix(" · this device")
+                .unwrap_or(&header.title);
+            if display_width(compact) <= title_width {
+                compact
+            } else {
+                // Preserve the owner/device name before its redundant decoration.
+                header
+                    .key
+                    .rsplit_once('/')
+                    .map_or(compact, |(_, host)| host)
+            }
+        } else {
+            &header.title
+        };
+    let title = truncate_end(display_title, title_width);
     NestedHeaderSpans {
         prefix_width,
         glyph,
@@ -14414,7 +14503,8 @@ pub(crate) mod tests {
             })
             .expect("remote collision row");
         assert_eq!(remote.agent_ref.agent, local_agent);
-        assert!(show_host_identity);
+        assert!(!show_host_identity);
+        assert!(remote.render_title.ends_with(" · remote"));
     }
 
     #[test]
@@ -14691,12 +14781,15 @@ pub(crate) mod tests {
             entries[0].entry.pane_label.as_deref(),
             Some("Scalable V2 cost levers handoff")
         );
-        assert_eq!(entries[0].render_title, "Scalable V2 cost levers handoff");
-        assert_eq!(entries[1].render_title, "cl-deadbeef");
+        assert_eq!(
+            entries[0].render_title,
+            "Scalable V2 cost levers handoff · ub1"
+        );
+        assert_eq!(entries[1].render_title, "cl-deadbeef · ub1");
 
         for (entry, expected) in entries
             .iter()
-            .zip(["Scalable V2 cost levers handoff", "cl-deadbeef"])
+            .zip(["Scalable V2 cost levers handoff · ub1", "cl-deadbeef · ub1"])
         {
             let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
             terminal
@@ -14713,7 +14806,7 @@ pub(crate) mod tests {
                 .unwrap();
             let rendered = row_text(terminal.backend().buffer(), 0, 80);
             assert!(rendered.contains("ub1"), "{rendered:?}");
-            assert!(!rendered.contains(" · ub1"), "{rendered:?}");
+            assert!(rendered.contains(" · ub1"), "{rendered:?}");
             assert!(rendered.contains(expected), "{rendered:?}");
         }
     }
@@ -14832,7 +14925,7 @@ pub(crate) mod tests {
                 rendered.contains("alp") || rendered.contains("bet"),
                 "{rendered:?}"
             );
-            assert!(!rendered.contains(" · "), "{rendered:?}");
+            assert!(display_width(&rendered) <= 18, "{rendered:?}");
         }
     }
 
@@ -15903,7 +15996,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn sidebar_footer_renders_f17b_glyph_order() {
+    fn sidebar_footer_keeps_icons_without_the_moved_board_button() {
         let app = AppState::test_new();
         let area = Rect::new(0, 0, 26, 8);
         let mut terminal =
@@ -15912,7 +16005,13 @@ pub(crate) mod tests {
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .expect("render footer");
         let footer = row_text(terminal.backend().buffer(), area.bottom() - 1, area.width);
-        assert!(footer.contains("⚙ ⑂ ▥ ◎ ✉ ⟳ ▦"), "{footer:?}");
+        for icon in ["⚙", "⑂", "◔", "☰", "✉", "⟳"] {
+            assert!(footer.contains(icon), "missing {icon}: {footer:?}");
+        }
+        assert!(
+            !footer.contains("▦"),
+            "board belongs in the top bar: {footer:?}"
+        );
     }
 
     #[test]
@@ -16036,16 +16135,24 @@ pub(crate) mod tests {
                     assert!(dot_x < title_x, "{rendered:?}");
                     assert_eq!(buffer[(dot_x, 0)].style().fg, Some(expected_dot));
                     assert_eq!(buffer[(title_x, 0)].style().fg, Some(expected_title));
-                    assert!(!rendered.contains("· ub2"), "{rendered:?}");
                     if !is_remote {
                         // The local machine label is blank.
+                        assert!(!rendered.contains("· ub2"), "{rendered:?}");
                         assert!(!rendered.contains("loc"), "{rendered:?}");
                         continue;
                     }
-                    let machine_x = find_symbol_x(buffer, 0, width, "u");
+                    assert!(rendered.contains("· ub2"), "{rendered:?}");
+                    let machine_x = (0..width)
+                        .rev()
+                        .find(|x| buffer[(*x, 0)].symbol() == "u")
+                        .expect("machine host token");
                     assert_eq!(
                         buffer[(machine_x, 0)].style().fg,
-                        Some(expected_remote_suffix)
+                        Some(if width == 60 {
+                            expected_remote_suffix
+                        } else {
+                            expected_title
+                        })
                     );
                     if width == 60 {
                         let provider_x = find_symbol_x(buffer, 0, width, "c");
@@ -16335,8 +16442,8 @@ pub(crate) mod tests {
                     "done title".into(),
                     "pi".into(),
                     Some("2m".into()),
-                    Color::Rgb(148, 226, 213),
-                    Color::Rgb(148, 226, 213),
+                    Color::Rgb(137, 180, 250),
+                    Color::Rgb(137, 180, 250),
                 ),
                 (
                     "○".into(),
@@ -17108,7 +17215,7 @@ pub(crate) mod tests {
             "missing readable title: {rendered:?}"
         );
         assert!(rendered.contains('1'), "missing machine icon: {rendered:?}");
-        assert!(!rendered.contains("· ub1"), "{rendered:?}");
+        assert!(rendered.contains("· ub1"), "{rendered:?}");
     }
 
     fn assert_remote_machine_icons_and_tooltips(
@@ -17119,19 +17226,15 @@ pub(crate) mod tests {
     ) {
         let targets = compute_sidebar_hover_targets(app, area);
         for host in hosts {
-            let icon = sidebar_machine_icon(app, host);
-            let machine = targets
-                .iter()
-                .find(|target| {
-                    target.label == *host
-                        && target.rect.width == SIDEBAR_MACHINE_LABEL_WIDTH as u16
-                        && buffer[(target.rect.x, target.rect.y)].symbol() == &icon[..1]
-                })
-                .unwrap_or_else(|| panic!("missing {host} machine icon and tooltip"));
-            let rendered = row_text(buffer, machine.rect.y, area.width);
-            assert!(rendered.contains("same"), "{host}: {rendered:?}");
-            assert!(!rendered.contains(&format!("· {host}")), "{rendered:?}");
-            assert!(machine.action.is_none());
+            assert!(
+                targets.iter().any(|target| target.label.contains(host)),
+                "missing {host} tooltip"
+            );
+            assert!(
+                (0..area.height).any(|row| row_text(buffer, row, area.width)
+                    .contains(&format!("· {}", host.chars().take(3).collect::<String>()))),
+                "missing {host} title suffix"
+            );
         }
     }
 
@@ -17264,7 +17367,7 @@ pub(crate) mod tests {
                 .map(|row| row_text(terminal.backend().buffer(), row, area.width))
                 .collect::<Vec<_>>();
             assert!(
-                rendered.iter().any(|row| row.contains("same-agent")),
+                rendered.iter().any(|row| row.contains("same")),
                 "{rendered:?}"
             );
             assert_remote_machine_icons_and_tooltips(
@@ -22228,9 +22331,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .expect("Settled shelf");
         let settled_tab = unpinned_rows
             .iter()
-            .position(|row| {
+            .enumerate()
+            .skip(settled_header + 1)
+            .find_map(|(idx, row)| {
                 matches!(row, SidebarRow::Tab { entry, .. }
                 if entry.local_target().is_some_and(|target| target.pane_id == pane_id))
+                .then_some(idx)
             })
             .expect("settled tab row");
         assert!(settled_header < settled_tab);
@@ -28790,6 +28896,30 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn freeze_remote_title_preserves_host_suffix_and_readable_fragment() {
+        let app = AppState::test_new();
+        assert!(!app.agent_host_name.is_empty());
+        for width in [18, 60] {
+            let title =
+                truncate_remote_title("a long owner task that needs truncation · ub2", width);
+            assert!(title.ends_with(" · ub2"), "{title}");
+            assert!(title.starts_with('a'), "{title}");
+            assert!(display_width(&title) <= width);
+        }
+    }
+
+    #[test]
+    fn focused_rows_keep_working_and_done_unread_dots() {
+        let mut entry = compact_test_entry("focused task", Some(Agent::Codex));
+        entry.state = AgentState::Working;
+        assert_eq!(compact_row_dot(&entry), "●");
+
+        entry.state = AgentState::Idle;
+        entry.seen = false;
+        assert_eq!(compact_row_dot(&entry), "◉");
+    }
+
+    #[test]
     fn settled_tooltip_shows_read_only_countdown_rounding_and_custom_label() {
         let mut entry = compact_test_entry("task", Some(Agent::Claude));
         entry.settle_hint = Some(crate::app::settled::SettleHint::SettledCountdown(
@@ -30301,7 +30431,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             row,
             SidebarRow::SectionHeader {
                 title: SNOOZED_SECTION_TITLE,
-                collapsed: false,
+                collapsed: true,
                 ..
             }
         )));
@@ -30347,7 +30477,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn focus_sidebar_keeps_blocked_tabs_in_spaces_and_folds_working_tabs() {
+    fn device_tree_keeps_all_tabs_and_expands_the_working_summary() {
         let mut app = sort_app(&[
             sort_tab("review", "owner/herdr", AgentState::Blocked, 1),
             sort_tab("done", "owner/herdr", AgentState::Idle, 2),
@@ -30394,7 +30524,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             rows.iter()
                 .filter(|row| matches!(row, SidebarRow::Tab { .. }))
                 .count(),
-            2
+            3
         );
         assert!(rows.iter().any(|row| matches!(
             row,
@@ -30430,7 +30560,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             rows.iter()
                 .filter(|row| matches!(row, SidebarRow::Tab { .. }))
                 .count(),
-            3
+            4
         );
         let working = rows
             .iter()
@@ -30476,8 +30606,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .find("scalablev2")
             .map(|offset| working_label + offset)
             .expect("rendered Space header");
-        let working_tab_label = expanded_snapshot
+        let working_tab_label = expanded_snapshot[group_label..]
             .find("build")
+            .map(|offset| group_label + offset)
             .expect("rendered working tab");
         assert!(
             working_label < group_label && group_label < working_tab_label,
@@ -30657,7 +30788,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .expect("render muted ask subtitle bell");
             let muted = &terminal.backend().buffer()[(slot.x, slot.y)];
             assert_eq!(muted.symbol(), "\u{f0f3}");
-            assert_eq!(muted.fg, app.palette.overlay0);
+            assert_eq!(muted.fg, app.palette.subtext0);
             app.sidebar_show_ask_subtitles = true;
         }
 
@@ -30704,7 +30835,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             rows.iter()
                 .filter(|row| matches!(row, SidebarRow::Tab { .. }))
                 .count(),
-            1
+            2
         );
     }
 
@@ -30761,7 +30892,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 row,
                 SidebarRow::NestedHeader {
                     key,
-                    count: 1,
+                    count: 2,
                     activity_count: Some((1, 2)),
                     ..
                 } if key.starts_with("remote-space:ub2:")
@@ -30790,7 +30921,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn sections_layout_keeps_default_collapsed_groups() {
+    fn freeze_defaults_collapse_lifecycle_sections_and_keep_inbox_visible() {
         let mut app = AppState::test_new();
         app.sidebar_sections_layout = true;
         app.collapsed_sidebar_groups.clear();
@@ -30801,9 +30932,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .filter_map(|key| key.rsplit_once(':').map(|(_, title)| title))
             .collect::<std::collections::HashSet<_>>();
         for title in default_titles {
-            if title == SNOOZED_SECTION_TITLE {
-                continue;
-            }
             assert!(
                 section_is_collapsed(&app, title),
                 "{title} should start collapsed"
@@ -30812,13 +30940,122 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let clean_group = format!("{}weekly", aloops::ALOOP_CLEAN_KEY_PREFIX);
         assert!(section_is_collapsed(&app, &clean_group));
-        assert!(!section_is_collapsed(&app, SNOOZED_SECTION_TITLE));
+        assert!(section_is_collapsed(&app, WORKING_SECTION_TITLE));
+        assert!(section_is_collapsed(&app, SNOOZED_SECTION_TITLE));
         assert!(section_is_collapsed(&app, SETTLED_SECTION_TITLE));
+        assert!(section_is_collapsed(&app, INBOX_SECTION_TITLE));
 
         app.toggle_sidebar_group(RUNS_SECTION_TITLE);
         assert!(!section_is_collapsed(&app, RUNS_SECTION_TITLE));
         app.toggle_sidebar_group(RUNS_SECTION_TITLE);
         assert!(section_is_collapsed(&app, RUNS_SECTION_TITLE));
+    }
+
+    #[test]
+    fn local_device_header_is_present_and_expanded_without_remote_devices() {
+        let mut app = sort_app(&[
+            sort_tab("review", "owner/herdr", AgentState::Blocked, 1),
+            sort_tab("build", "owner/herdr", AgentState::Working, 2),
+        ]);
+        app.sidebar_sections_layout = true;
+        app.remote_agent_panel_entries.clear();
+        app.remote_agent_device_groups = Some(remote_agent_device_groups(&app));
+
+        let rows = sidebar_rows(&app);
+        let device_header = rows
+            .iter()
+            .find(|row| {
+                matches!(
+                    row,
+                    SidebarRow::NestedHeader { key, .. }
+                        if key == &devices::group_key("main", &app.agent_host_name)
+                )
+            })
+            .expect("local device header");
+        assert!(matches!(
+            device_header,
+            SidebarRow::NestedHeader {
+                count: 2,
+                collapsed: false,
+                status: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn device_with_no_agents_has_no_device_header() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("agentless")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.sidebar_sections_layout = true;
+
+        let rows = sidebar_rows(&app);
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader { key, .. }
+                if key == &devices::group_key("main", &app.agent_host_name)
+        )));
+    }
+
+    #[test]
+    fn device_header_shows_only_collapsed_agent_count_without_status_dots() {
+        let mut app = AppState::test_new();
+        app.collapsed_sidebar_groups.clear();
+        let mut header = NestedHeaderArea {
+            key: devices::group_key("main", &app.agent_host_name),
+            action_key: None,
+            sort_key: None,
+            sort_mode: SidebarSortMode::Default,
+            title: devices::device_title(&app, &app.agent_host_name, true),
+            count: 3,
+            activity_count: None,
+            collapsed: true,
+            dim: false,
+            status: None,
+            spawn: false,
+            rect: Rect::new(0, 0, 24, 1),
+        };
+
+        assert_eq!(nested_header_count_label(&header).as_deref(), Some(" (3)"));
+        assert!(header.status.is_none());
+        header.collapsed = false;
+        assert_eq!(nested_header_count_label(&header), None);
+        assert!(header.status.is_none());
+    }
+
+    #[test]
+    fn freeze_device_owner_and_count_render_at_mobile_and_desktop_widths() {
+        let mut app = AppState::test_new();
+        app.agent_host_name = "matthias".into();
+        app.nerd_font = false;
+        for width in [18, 32] {
+            for collapsed in [true, false] {
+                let header = NestedHeaderArea {
+                    key: devices::group_key("main", &app.agent_host_name),
+                    action_key: None,
+                    sort_key: None,
+                    sort_mode: SidebarSortMode::Default,
+                    title: devices::device_title(&app, &app.agent_host_name, true),
+                    count: 3,
+                    activity_count: None,
+                    collapsed,
+                    dim: false,
+                    status: None,
+                    spawn: false,
+                    rect: Rect::new(0, 0, width, 1),
+                };
+                let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+                terminal
+                    .draw(|frame| render_nested_header(&app, frame, &header))
+                    .unwrap();
+                let text = row_text(terminal.backend().buffer(), 0, width);
+                assert!(text.contains("matthias"), "{width} {collapsed}: {text}");
+                assert_eq!(text.contains("(3)"), collapsed, "{text}");
+                assert!(!text.contains('●') && !text.contains('◉'), "{text}");
+            }
+        }
     }
 
     #[test]
@@ -30974,6 +31211,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_sections_layout = true;
         app.sidebar_group_mode = SidebarGroupMode::RepoPr;
         app.agent_host_name = "ub1".into();
+        app.sidebar_areas.runs = true;
+        app.sidebar_areas.aloops = true;
         for title in [
             NEEDS_YOU_SECTION_TITLE,
             PODS_SECTION_TITLE,
@@ -31251,9 +31490,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                     .count(),
                 1
             );
-            assert!(
-                matches!(body.first(), Some(SidebarRow::Workspace { ws_idx: found, shelf_counts: Some((1, 1)), .. }) if *found == ws_idx)
-            );
+            assert!(!body.iter().any(|row| matches!(row, SidebarRow::NestedHeader { key, .. } if key.starts_with("device:"))));
+            assert!(body.iter().any(|row| matches!(row, SidebarRow::Workspace {
+                    ws_idx: found,
+                    shelf_counts: Some((1, 1)),
+                    ..
+                } if *found == ws_idx)));
             assert!(body.iter().any(|row| matches!(row,
                 SidebarRow::Tab { entry, depth: 1 } if entry.local_target().is_some_and(|target| target.ws_idx == ws_idx)
             )));
@@ -31263,7 +31505,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn sections_spaces_show_only_active_attention_tabs() {
+    fn device_tree_keeps_active_snoozed_and_settled_tabs() {
         let mut app = app_with_agents(&["active", "snoozed", "settled"]);
         make_agents_blocked(&mut app);
         app.sidebar_sections_layout = true;
@@ -31284,8 +31526,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(active_spaces, vec![0]);
-        assert!(!rows[..active_end].iter().any(|row| matches!(row,
+        assert_eq!(active_spaces, vec![0, 1, 2]);
+        assert!(rows[..active_end].iter().any(|row| matches!(row,
             SidebarRow::Tab { entry, .. }
                 if entry.local_target().is_some_and(|target| target.ws_idx != 0)
         )));
@@ -31732,7 +31974,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             refreshed_at: Some(std::time::SystemTime::now()),
         }));
         app.toggle_sidebar_group(INBOX_SECTION_TITLE);
-
         let rows = sidebar_rows(&app);
         assert!(
             rows.iter()
@@ -32030,9 +32271,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             let lock = sidebar_footer_planning_lock_hit_area(sidebar);
             let cycle = crate::ui::pomodoro::window_cycle_mode_hit_area(&app, sidebar);
             let notification = crate::ui::pomodoro::notification_hit_area(&app, sidebar);
-            assert_eq!(board.width, 2);
+            assert_eq!(board, Rect::default());
             assert_eq!(lock.width, 2);
-            assert_eq!(board.right(), lock.x);
             assert_eq!(lock.right(), cycle.x);
             assert!(cycle.right() <= notification.x);
         }
