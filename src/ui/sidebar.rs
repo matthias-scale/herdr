@@ -3812,14 +3812,20 @@ fn compact_sidebar_rows_inner(
     let remote_entries = if include_remote {
         app.remote_agent_panel_entries
             .iter()
-            .filter(|remote| {
-                remote_sidebar_entry_matches_query(remote, &remote_terms)
-                    && (!app.blocked_filter || entry_has_red_dot(remote))
-            })
+            .filter(|remote| remote_sidebar_entry_matches_query(remote, &remote_terms))
             .map(remote_agent_as_panel_entry)
             .collect::<Vec<_>>()
     } else {
         Vec::new()
+    };
+    let visible_remote_entries = if app.blocked_filter {
+        remote_entries
+            .iter()
+            .filter(|entry| entry_has_red_dot(entry))
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        remote_entries.clone()
     };
     let sections_layout = app.sidebar_sections_layout;
     let pods = pod_projection(app, &entries);
@@ -3897,7 +3903,7 @@ fn compact_sidebar_rows_inner(
             .cloned()
             .collect::<Vec<_>>()
     } else {
-        active_entries
+        active_entries.clone()
     };
     let (recently_done, visible_entries): (Vec<_>, Vec<_>) =
         visible_entries.into_iter().partition(|entry| {
@@ -3911,21 +3917,24 @@ fn compact_sidebar_rows_inner(
             app,
             &visible_entries,
             &snoozed_entries,
-            &remote_entries,
+            &visible_remote_entries,
             expand_needs_you,
         );
-        let remote_activity = sidebar_remote_activity(app, &remote_entries);
+        let remote_activity = sidebar_remote_activity(app, &visible_remote_entries);
         let mut space_entries = Vec::new();
         let mut working_entries = Vec::new();
         let mut remote_main_entries = Vec::new();
         // Working agents get their own section; every other active pane
         // (blocked, done, idle, unknown) stays in the tree above it, so the
         // sidebar holds every pane agent cycling can reach.
-        for mut entry in visible_entries.iter().cloned() {
+        for mut entry in active_entries.iter().cloned() {
             if sidebar_entry_is_working(&entry) {
                 entry.working_shelf = true;
                 working_entries.push(entry);
-            } else {
+            }
+        }
+        for entry in visible_entries.iter().cloned() {
+            if !sidebar_entry_is_working(&entry) {
                 if entry.remote_entry.is_some() {
                     remote_main_entries.push(entry);
                 } else {
@@ -3941,12 +3950,21 @@ fn compact_sidebar_rows_inner(
                     if sidebar_entry_is_working(&entry) {
                         entry.working_shelf = true;
                         working_entries.push(entry);
-                    } else {
+                    } else if !app.blocked_filter || entry_has_red_dot(&entry) {
                         remote_main_entries.push(entry);
                     }
                 }
-                SidebarEntryLifecycle::Snoozed => remote_snoozed.push(entry),
-                SidebarEntryLifecycle::Settled => remote_settled.push(entry),
+                SidebarEntryLifecycle::Snoozed
+                    if !app.blocked_filter || entry_has_red_dot(&entry) =>
+                {
+                    remote_snoozed.push(entry)
+                }
+                SidebarEntryLifecycle::Settled
+                    if !app.blocked_filter || entry_has_red_dot(&entry) =>
+                {
+                    remote_settled.push(entry)
+                }
+                SidebarEntryLifecycle::Snoozed | SidebarEntryLifecycle::Settled => {}
             }
         }
         let mut rows = Vec::new();
@@ -4052,7 +4070,7 @@ fn compact_sidebar_rows_inner(
     let mut projected_active = visible_entries.clone();
     let mut projected_snoozed = snoozed_entries.clone();
     let mut projected_settled = settled_entries.clone();
-    for entry in remote_entries.iter().cloned() {
+    for entry in visible_remote_entries.iter().cloned() {
         match sidebar_entry_lifecycle(app, &entry) {
             SidebarEntryLifecycle::Active => projected_active.push(entry),
             SidebarEntryLifecycle::Snoozed => projected_snoozed.push(entry),
@@ -4121,7 +4139,7 @@ fn compact_sidebar_rows_inner(
         app,
         &visible_entries,
         &snoozed_entries,
-        &remote_entries,
+        &visible_remote_entries,
         expand_needs_you,
     );
     if !needs_you.is_empty() {
@@ -30244,6 +30262,54 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 collapsed: true,
                 ..
             }
+        )));
+    }
+
+    #[test]
+    fn blocked_filter_keeps_working_agents_in_the_working_section() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.toggle_sidebar_group(WORKING_SECTION_TITLE);
+        app.workspaces = vec![Workspace::test_new("first"), Workspace::test_new("second")];
+        app.ensure_test_terminals();
+        for workspace in &app.workspaces {
+            let pane_id = workspace.tabs[0].root_pane;
+            let terminal_id = workspace.tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
+        }
+        let mut remote_working = compact_test_entry("remote working", Some(Agent::Codex));
+        remote_working.state = AgentState::Working;
+        let remote_ref = crate::api::schema::AgentRef::new("ub2", "remote-working")
+            .expect("valid remote reference");
+        app.remote_agent_panel_entries = vec![std::sync::Arc::new(RemoteAgentPanelEntry::new(
+            remote_ref,
+            remote_working,
+        ))];
+        app.reconcile_sidebar_presentation();
+        app.blocked_filter = true;
+
+        let rows = sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: WORKING_SECTION_TITLE,
+                count: 3,
+                ..
+            }
+        )));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Tab { entry, .. } if entry.working_shelf))
+                .count(),
+            2
+        );
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::RemoteAgent { entry, .. } if entry.state == AgentState::Working
         )));
     }
 
