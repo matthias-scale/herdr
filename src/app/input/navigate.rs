@@ -5215,6 +5215,98 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn window_cycle_snapshot_survives_prefix_chords_and_refreshes_after_other_action() {
+        use crate::app::state::SidebarSortMode;
+
+        let mut app = app_with_global_window_fixture();
+        app.state
+            .set_sidebar_group_mode(crate::app::state::SidebarGroupMode::Spaces);
+        app.state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachine;
+        app.state.sidebar_collapsed = true;
+        app.state.sidebar_focused = false;
+        app.state.focus_client_on_pane();
+        app.state.prefix_code = KeyCode::Char('a');
+        app.state.prefix_mods = KeyModifiers::CONTROL;
+        app.state.keybinds.next_window = crate::config::ActionKeybinds::prefix("n");
+        for workspace in &app.state.workspaces {
+            app.state
+                .sidebar_group_sorts
+                .insert(format!("space:{}", workspace.id), SidebarSortMode::Status);
+        }
+        set_window_agent_state(&mut app.state, (0, 1), crate::detect::AgentState::Blocked);
+        let initial_order = window_navigation_order(&app.state);
+        assert!(initial_order.len() >= 3);
+
+        let prefix = TerminalKey::new(app.state.prefix_code, app.state.prefix_mods);
+        let next = TerminalKey::new(KeyCode::Char('n'), KeyModifiers::empty());
+        let passthrough = TerminalKey::new(KeyCode::F(12), KeyModifiers::empty());
+        let initial_active = active_window(&app.state);
+        let initial_index = initial_order
+            .iter()
+            .position(|target| {
+                *target
+                    == WindowCycleTarget::Local {
+                        ws_idx: initial_active.0,
+                        tab_idx: initial_active.1,
+                    }
+            })
+            .expect("active window in initial order");
+        let frozen_targets = (1..=3)
+            .map(
+                |step| match initial_order[(initial_index + step) % initial_order.len()] {
+                    WindowCycleTarget::Local { ws_idx, tab_idx } => (ws_idx, tab_idx),
+                    WindowCycleTarget::Remote(_) => panic!("fixture has only local windows"),
+                },
+            )
+            .collect::<Vec<_>>();
+        async fn press(app: &mut App, key: TerminalKey) {
+            app.handle_key(key).await;
+        }
+        press(&mut app, prefix.clone()).await;
+        press(&mut app, next.clone()).await;
+        let target_a = active_window(&app.state);
+        assert_eq!(target_a, frozen_targets[0]);
+
+        for workspace in &app.state.workspaces {
+            app.state
+                .sidebar_group_sorts
+                .insert(format!("space:{}", workspace.id), SidebarSortMode::Recent);
+        }
+        let changed_order = window_navigation_order(&app.state);
+        assert_ne!(changed_order, initial_order);
+
+        for expected in frozen_targets.iter().copied().skip(1) {
+            press(&mut app, prefix.clone()).await;
+            press(&mut app, next.clone()).await;
+            assert_eq!(active_window(&app.state), expected);
+        }
+
+        press(&mut app, prefix.clone()).await;
+        press(&mut app, passthrough).await;
+        let before_refresh_cycle = active_window(&app.state);
+        press(&mut app, prefix).await;
+        press(&mut app, next).await;
+        let refreshed_index = changed_order
+            .iter()
+            .position(|target| {
+                *target
+                    == WindowCycleTarget::Local {
+                        ws_idx: before_refresh_cycle.0,
+                        tab_idx: before_refresh_cycle.1,
+                    }
+            })
+            .expect("active window in refreshed order");
+        assert_eq!(
+            active_window(&app.state),
+            match changed_order[(refreshed_index + 1) % changed_order.len()] {
+                WindowCycleTarget::Local { ws_idx, tab_idx } => (ws_idx, tab_idx),
+                WindowCycleTarget::Remote(_) => panic!("fixture has only local windows"),
+            }
+        );
+        assert_eq!(window_navigation_order(&app.state), changed_order);
+    }
+
     #[test]
     fn frozen_window_cycle_drops_tabs_removed_during_the_burst() {
         let mut app = app_with_global_window_fixture();
