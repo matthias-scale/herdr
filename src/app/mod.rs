@@ -3854,6 +3854,15 @@ impl App {
         key: crate::input::TerminalKey,
     ) {
         let key_event = key.as_key_event();
+        if self.state.agent_finder_saved_query.is_some()
+            && key_event.code == crossterm::event::KeyCode::Enter
+            && !key_event
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
+        {
+            self.accept_selected_agent_finder_result();
+            return;
+        }
         if self.handle_sidebar_areas_menu_key(key_event, owner) {
             return;
         }

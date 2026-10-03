@@ -188,6 +188,38 @@ impl App {
         self.open_fleet_host_focused(name, focus_agent);
     }
 
+    pub(super) fn accept_selected_agent_finder_result(&mut self) {
+        let Some(hit) = self
+            .state
+            .agent_finder_results
+            .get(self.state.agent_finder_selected)
+            .cloned()
+        else {
+            self.state
+                .handle_sidebar_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+            return;
+        };
+
+        if let Some(agent_ref) = hit
+            .agent
+            .agent_ref
+            .as_ref()
+            .filter(|agent_ref| agent_ref.host != self.state.agent_host_name)
+        {
+            self.open_fleet_host_from_input(&agent_ref.host, Some(&agent_ref.agent));
+        } else if self
+            .state
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == hit.agent.workspace_id)
+        {
+            let _ = self.focus_agent_target(&hit.target);
+        } else if let Some(agent_ref) = hit.agent.agent_ref.as_ref() {
+            self.open_fleet_host_from_input(&agent_ref.host, Some(&agent_ref.agent));
+        }
+        self.state.accept_agent_finder_query();
+    }
+
     #[cfg(test)]
     pub(super) async fn handle_key(
         &mut self,
@@ -415,37 +447,7 @@ impl App {
                     && key_event.code == KeyCode::Enter
                     && !key_event.modifiers.contains(KeyModifiers::CONTROL)
                 {
-                    if let Some(hit) = self
-                        .state
-                        .agent_finder_results
-                        .get(self.state.agent_finder_selected)
-                        .cloned()
-                    {
-                        if let Some(agent_ref) = hit
-                            .agent
-                            .agent_ref
-                            .as_ref()
-                            .filter(|agent_ref| agent_ref.host != self.state.agent_host_name)
-                        {
-                            self.open_fleet_host_from_input(
-                                &agent_ref.host,
-                                Some(&agent_ref.agent),
-                            );
-                        } else if self
-                            .state
-                            .workspaces
-                            .iter()
-                            .any(|workspace| workspace.id == hit.agent.workspace_id)
-                        {
-                            let _ = self.focus_agent_target(&hit.target);
-                        } else if let Some(agent_ref) = hit.agent.agent_ref.as_ref() {
-                            self.open_fleet_host_from_input(
-                                &agent_ref.host,
-                                Some(&agent_ref.agent),
-                            );
-                        }
-                        self.state.accept_agent_finder_query();
-                    }
+                    self.accept_selected_agent_finder_result();
                     return None;
                 }
                 if self.state.handle_sidebar_search_key(key_event) {

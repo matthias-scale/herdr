@@ -26,27 +26,44 @@ pub(crate) fn load_transcript(
     session: &crate::agent_resume::PersistedAgentSession,
     cwd: &Path,
 ) -> Option<SettledTranscript> {
+    load_transcript_limited(session, cwd, MAX_TRANSCRIPT_BYTES)
+        .map(|(transcript, _)| transcript)
+        .filter(|transcript| !transcript.turns.is_empty())
+}
+
+pub(crate) fn load_transcript_limited(
+    session: &crate::agent_resume::PersistedAgentSession,
+    cwd: &Path,
+    max_bytes: u64,
+) -> Option<(SettledTranscript, u64)> {
     let path = session_path(session, cwd)?;
     let metadata = std::fs::metadata(&path).ok()?;
     let file = std::fs::File::open(&path).ok()?;
     use std::io::{Read, Seek, SeekFrom};
     let mut file = file;
-    let start = metadata.len().saturating_sub(MAX_TRANSCRIPT_BYTES);
+    let byte_limit = max_bytes.min(MAX_TRANSCRIPT_BYTES);
+    if byte_limit == 0 {
+        return None;
+    }
+    let byte_count = metadata.len().min(byte_limit);
+    let start = metadata.len().saturating_sub(byte_count);
     file.seek(SeekFrom::Start(start)).ok()?;
     let mut bytes = Vec::new();
-    file.take(MAX_TRANSCRIPT_BYTES)
-        .read_to_end(&mut bytes)
-        .ok()?;
+    file.take(byte_count).read_to_end(&mut bytes).ok()?;
+    let bytes_read = bytes.len() as u64;
     let text = String::from_utf8_lossy(&bytes);
     let turns = if session.agent.to_ascii_lowercase().contains("claude") {
         parse_claude(&text)
     } else {
         parse_codex(&text)
     };
-    (!turns.is_empty()).then(|| SettledTranscript {
-        source: path.display().to_string(),
-        turns,
-    })
+    Some((
+        SettledTranscript {
+            source: path.display().to_string(),
+            turns,
+        },
+        bytes_read,
+    ))
 }
 
 fn session_path(

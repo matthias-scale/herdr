@@ -632,6 +632,16 @@ impl App {
                 self.state.agent_finder_selected = 0;
                 true
             }
+            AppEvent::AgentSearchFinished {
+                response,
+                respond_to,
+                active,
+            } => {
+                if active.load(std::sync::atomic::Ordering::Acquire) {
+                    let _ = respond_to.send(response);
+                }
+                false
+            }
             AppEvent::BoardRemoteLinesFetched {
                 note_path,
                 fleet_generation,

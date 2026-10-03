@@ -6573,6 +6573,12 @@ impl AppState {
         if self.spawn_dock.is_some() {
             return InputOwner::SpawnDock;
         }
+        // The finder is rendered over the terminal area, so it must keep
+        // input ownership even when the compact layout has collapsed the
+        // sidebar that normally owns search keystrokes.
+        if self.agent_finder_saved_query.is_some() {
+            return InputOwner::Sidebar;
+        }
         if self.sidebar_focused && !self.sidebar_collapsed {
             return InputOwner::Sidebar;
         }

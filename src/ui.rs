@@ -1552,8 +1552,63 @@ fn render_agent_finder_preview(app: &AppState, frame: &mut Frame, area: Rect) {
     } else {
         area
     };
+    let query = app.sidebar_work_filter.query.trim();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("⌕  Search agents: {query}"),
+            Style::default()
+                .fg(app.palette.text)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "↑/↓ select · Enter focus · Ctrl+Enter preview · Esc close",
+            Style::default().fg(app.palette.overlay0),
+        )),
+    ];
+    if app.agent_finder_results.is_empty() {
+        lines.push(Line::from(Span::styled(
+            if query.is_empty() {
+                "Type to search agent names, recent output and sessions"
+            } else {
+                "No matches yet"
+            },
+            Style::default().fg(app.palette.overlay0),
+        )));
+    } else {
+        let list_rows = area.height.saturating_sub(7) as usize;
+        for (index, hit) in app.agent_finder_results.iter().take(list_rows).enumerate() {
+            let agent = hit
+                .agent
+                .display_agent
+                .as_deref()
+                .or(hit.agent.agent.as_deref())
+                .unwrap_or("agent");
+            let marker = if index == app.agent_finder_selected {
+                "›"
+            } else {
+                " "
+            };
+            let style = if index == app.agent_finder_selected {
+                Style::default()
+                    .fg(app.palette.text)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.palette.subtext0)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{marker} {agent} · {}", hit.title),
+                style,
+            )));
+        }
+    }
+    lines.push(Line::from(""));
     let Some(hit) = app.agent_finder_results.get(app.agent_finder_selected) else {
-        frame.render_widget(Paragraph::new("⌕  Search agents in the sidebar"), area);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(Style::default().bg(app.palette.panel_bg))
+                .wrap(ratatui::widgets::Wrap { trim: false }),
+            area,
+        );
         return;
     };
     let host = hit
@@ -1570,7 +1625,7 @@ fn render_agent_finder_preview(app: &AppState, frame: &mut Frame, area: Rect) {
         .unwrap_or("agent");
     let age = agent_state_age(hit.agent.reported_at.as_deref());
     let status = format!("{:?}", hit.agent.agent_status).to_lowercase();
-    let mut lines = vec![
+    lines.extend([
         Line::from(Span::styled(
             format!("{}  {status} · {host} · {agent} · {age}", hit.title),
             Style::default()
@@ -1589,8 +1644,7 @@ fn render_agent_finder_preview(app: &AppState, frame: &mut Frame, area: Rect) {
             ),
             Style::default().fg(app.palette.overlay0),
         )),
-        Line::from(""),
-    ];
+    ]);
     lines.extend(hit.preview.iter().rev().take(40).rev().map(|line| {
         Line::from(Span::styled(
             line.as_str(),

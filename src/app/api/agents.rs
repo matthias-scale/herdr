@@ -12,6 +12,10 @@ use crate::app::App;
 use super::responses::{encode_error, encode_error_body, encode_success};
 
 const AGENT_PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
+const MAX_AGENT_SEARCH_AGENTS: usize = 100;
+const MAX_AGENT_SESSION_SEARCHES: usize = 20;
+const MAX_AGENT_SEARCH_BYTES: u64 = 8 * 1024 * 1024;
+type AgentFileSearchMatch = (String, u32, Vec<String>, Vec<String>);
 
 impl App {
     pub(crate) fn tick_agent_finder(&mut self, now: std::time::Instant) -> bool {
@@ -160,6 +164,149 @@ impl App {
         true
     }
 
+    pub(crate) fn start_deferred_agent_search(
+        &mut self,
+        request: crate::api::schema::Request,
+        respond_to: std::sync::mpsc::Sender<String>,
+        active: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        let crate::api::schema::Method::AgentSearch(params) = request.method else {
+            return;
+        };
+        let query = params.query.trim().to_lowercase();
+        if query.is_empty() {
+            let _ = respond_to.send(encode_success(
+                request.id,
+                ResponseResult::AgentSearch { hits: Vec::new() },
+            ));
+            return;
+        }
+
+        let limit = usize::from(params.limit.clamp(1, 200));
+        let mut hits = Vec::new();
+        let mut candidates = Vec::new();
+        let mut agents_scanned = 0usize;
+        for agent in self.collect_agent_infos_limited(MAX_AGENT_SEARCH_AGENTS) {
+            agents_scanned += 1;
+            let title = agent
+                .display_title
+                .as_deref()
+                .or(agent.title.as_deref())
+                .or(agent.name.as_deref())
+                .unwrap_or("agent")
+                .to_owned();
+            if let Some(value) = agent_title_match(&agent, &query) {
+                let value = value.to_owned();
+                hits.push(agent_search_hit(
+                    agent,
+                    title,
+                    crate::api::schema::AgentSearchSource::Title,
+                    None,
+                    None,
+                    vec![value],
+                    Vec::new(),
+                ));
+            } else if let Some(context) = self.search_agent_tail(&agent.pane_id, &query) {
+                hits.push(agent_search_hit(
+                    agent,
+                    title,
+                    crate::api::schema::AgentSearchSource::Tail,
+                    None,
+                    None,
+                    context.clone(),
+                    context,
+                ));
+            } else {
+                candidates.push((agent, title));
+            }
+            if hits.len() >= limit {
+                break;
+            }
+        }
+
+        if agents_scanned < MAX_AGENT_SEARCH_AGENTS && hits.len() < limit {
+            'hosts: for host in self
+                .state
+                .fleet_snapshot
+                .hosts
+                .iter()
+                .filter(|host| !host.local && host.reachable)
+            {
+                for row in &host.entries {
+                    if agents_scanned >= MAX_AGENT_SEARCH_AGENTS || hits.len() >= limit {
+                        break 'hosts;
+                    }
+                    let Some(agent) = row.agent_info() else {
+                        continue;
+                    };
+                    agents_scanned += 1;
+                    let title = agent
+                        .display_title
+                        .as_deref()
+                        .or(agent.title.as_deref())
+                        .or(agent.name.as_deref())
+                        .unwrap_or(&row.agent_ref.agent);
+                    let matched = [
+                        Some(title),
+                        agent.display_agent.as_deref(),
+                        agent.agent.as_deref(),
+                        Some(row.agent_ref.host.as_str()),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .find(|value| value.to_lowercase().contains(&query));
+                    if let Some(matched) = matched {
+                        hits.push(agent_search_hit(
+                            agent.clone(),
+                            title.to_owned(),
+                            crate::api::schema::AgentSearchSource::Title,
+                            None,
+                            None,
+                            vec![matched.to_owned()],
+                            Vec::new(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        candidates.truncate(MAX_AGENT_SESSION_SEARCHES);
+        let remaining = limit.saturating_sub(hits.len());
+        if candidates.is_empty() || remaining == 0 {
+            let _ = respond_to.send(encode_success(
+                request.id,
+                ResponseResult::AgentSearch { hits },
+            ));
+            return;
+        }
+
+        let id = request.id;
+        let event_tx = self.event_tx.clone();
+        let active =
+            active.unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)));
+        defer_agent_search_response(event_tx, respond_to, active, move |active| {
+            let mut bytes_remaining = MAX_AGENT_SEARCH_BYTES;
+            for (agent, title) in candidates {
+                if !active.load(std::sync::atomic::Ordering::Acquire)
+                    || hits.len() >= limit
+                    || bytes_remaining == 0
+                {
+                    break;
+                }
+                if let Some(hit) = search_agent_session_files_bounded(
+                    agent,
+                    title,
+                    &query,
+                    &mut bytes_remaining,
+                    Some(active),
+                ) {
+                    hits.push(hit);
+                }
+            }
+            encode_success(id, ResponseResult::AgentSearch { hits })
+        });
+    }
+
     pub(super) fn handle_agent_search(
         &mut self,
         id: String,
@@ -172,7 +319,9 @@ impl App {
 
         let mut hits = Vec::new();
         let limit = usize::from(params.limit.clamp(1, 200));
-        for agent in self.collect_agent_infos() {
+        let mut agents_scanned = 0usize;
+        for agent in self.collect_agent_infos_limited(MAX_AGENT_SEARCH_AGENTS) {
+            agents_scanned += 1;
             let title = agent
                 .display_title
                 .as_deref()
@@ -213,7 +362,7 @@ impl App {
                 break;
             }
         }
-        if hits.len() < limit {
+        if hits.len() < limit && agents_scanned < MAX_AGENT_SEARCH_AGENTS {
             for host in self
                 .state
                 .fleet_snapshot
@@ -222,9 +371,13 @@ impl App {
                 .filter(|host| !host.local && host.reachable)
             {
                 for row in &host.entries {
+                    if agents_scanned >= MAX_AGENT_SEARCH_AGENTS || hits.len() >= limit {
+                        break;
+                    }
                     let Some(agent) = row.agent_info() else {
                         continue;
                     };
+                    agents_scanned += 1;
                     let title = agent
                         .display_title
                         .as_deref()
@@ -720,6 +873,27 @@ impl App {
     }
 }
 
+fn defer_agent_search_response<F>(
+    event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    respond_to: std::sync::mpsc::Sender<String>,
+    active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    search: F,
+) where
+    F: FnOnce(&std::sync::atomic::AtomicBool) -> String + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let response = search(&active);
+        if !active.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let _ = event_tx.blocking_send(crate::events::AppEvent::AgentSearchFinished {
+            response,
+            respond_to,
+            active,
+        });
+    });
+}
+
 fn agent_not_ready(id: String, target: &str) -> String {
     encode_error(
         id,
@@ -754,8 +928,23 @@ fn search_agent_session_files(
     title: String,
     query: &str,
 ) -> Option<crate::api::schema::AgentSearchHit> {
-    let transcript = load_agent_transcript(&agent);
-    if let Some(transcript) = transcript {
+    let mut bytes_remaining = MAX_AGENT_SEARCH_BYTES;
+    search_agent_session_files_bounded(agent, title, query, &mut bytes_remaining, None)
+}
+
+fn search_agent_session_files_bounded(
+    agent: crate::api::schema::AgentInfo,
+    title: String,
+    query: &str,
+    bytes_remaining: &mut u64,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> Option<crate::api::schema::AgentSearchHit> {
+    if cancelled.is_some_and(|active| !active.load(std::sync::atomic::Ordering::Acquire)) {
+        return None;
+    }
+    let transcript = load_agent_transcript_bounded(&agent, *bytes_remaining);
+    if let Some((transcript, bytes_read)) = transcript {
+        *bytes_remaining = bytes_remaining.saturating_sub(bytes_read);
         if let Some(context) = matching_context(&transcript.content, query) {
             return Some(crate::api::schema::AgentSearchHit {
                 target: agent.pane_id.clone(),
@@ -772,8 +961,14 @@ fn search_agent_session_files(
 
     let cwd = agent.cwd.as_deref().or(agent.foreground_cwd.as_deref())?;
     for folder in [".local", "out"] {
+        if *bytes_remaining == 0 {
+            break;
+        }
         let root = std::path::Path::new(cwd).join(folder);
-        if let Some((path, line, context, preview)) = search_text_files(&root, query) {
+        let (found, bytes_read) =
+            search_text_files_bounded(&root, query, *bytes_remaining, cancelled);
+        *bytes_remaining = bytes_remaining.saturating_sub(bytes_read);
+        if let Some((path, line, context, preview)) = found {
             return Some(crate::api::schema::AgentSearchHit {
                 target: agent.pane_id.clone(),
                 title,
@@ -787,6 +982,85 @@ fn search_agent_session_files(
         }
     }
     None
+}
+
+fn agent_search_hit(
+    agent: crate::api::schema::AgentInfo,
+    title: String,
+    source: crate::api::schema::AgentSearchSource,
+    path: Option<String>,
+    line: Option<u32>,
+    context: Vec<String>,
+    preview: Vec<String>,
+) -> crate::api::schema::AgentSearchHit {
+    crate::api::schema::AgentSearchHit {
+        target: agent.pane_id.clone(),
+        title,
+        source,
+        path,
+        line,
+        context,
+        preview,
+        agent,
+    }
+}
+
+fn load_agent_transcript_bounded(
+    agent: &crate::api::schema::AgentInfo,
+    max_bytes: u64,
+) -> Option<(AgentTranscript, u64)> {
+    use crate::agent_resume::{AgentSessionRef, AgentSessionRefKind, PersistedAgentSession};
+    let session = agent.agent_session.as_ref()?;
+    let limit = max_bytes.min(8 * 1024 * 1024);
+    if limit == 0 {
+        return None;
+    }
+    if session.kind == AgentSessionRefKind::Path {
+        let path = std::path::PathBuf::from(&session.value);
+        let metadata = std::fs::metadata(&path).ok()?;
+        let mut file = std::fs::File::open(&path).ok()?;
+        use std::io::{Read, Seek, SeekFrom};
+        let count = metadata.len().min(limit);
+        file.seek(SeekFrom::Start(metadata.len().saturating_sub(count)))
+            .ok()?;
+        let mut bytes = Vec::with_capacity(count.min(usize::MAX as u64) as usize);
+        file.take(count).read_to_end(&mut bytes).ok()?;
+        let bytes_read = bytes.len() as u64;
+        return Some((
+            AgentTranscript {
+                path: path.display().to_string(),
+                content: String::from_utf8_lossy(&bytes).into_owned(),
+            },
+            bytes_read,
+        ));
+    }
+    let cwd = agent.cwd.as_deref().or(agent.foreground_cwd.as_deref())?;
+    let persisted = PersistedAgentSession {
+        source: session.source.clone(),
+        agent: session.agent.clone(),
+        session_ref: AgentSessionRef {
+            kind: session.kind,
+            value: session.value.clone(),
+        },
+    };
+    let (transcript, bytes_read) = crate::app::settled_view::load_transcript_limited(
+        &persisted,
+        std::path::Path::new(cwd),
+        limit,
+    )?;
+    let content = transcript
+        .turns
+        .into_iter()
+        .map(|(role, text)| format!("{role}: {text}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some((
+        AgentTranscript {
+            path: transcript.source,
+            content,
+        },
+        bytes_read,
+    ))
 }
 
 fn matching_context(text: &str, query: &str) -> Option<Vec<String>> {
@@ -872,16 +1146,30 @@ fn search_text_files(
     root: &std::path::Path,
     query: &str,
 ) -> Option<(String, u32, Vec<String>, Vec<String>)> {
+    search_text_files_bounded(root, query, 4_000_000, None).0
+}
+
+fn search_text_files_bounded(
+    root: &std::path::Path,
+    query: &str,
+    max_total_bytes: u64,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> (Option<AgentFileSearchMatch>, u64) {
     const MAX_FILES: usize = 200;
     const MAX_FILE_BYTES: u64 = 512_000;
-    const MAX_TOTAL_BYTES: u64 = 4_000_000;
     const MAX_DIRECTORY_ENTRIES: usize = 4_096;
     const MAX_DEPTH: usize = 8;
+    let max_total_bytes = max_total_bytes.min(4_000_000);
     let mut pending = vec![(root.to_path_buf(), 0usize)];
     let mut visited = 0usize;
     let mut entries_seen = 0usize;
     let mut bytes_read = 0u64;
     while let Some((path, depth)) = pending.pop() {
+        if bytes_read >= max_total_bytes
+            || cancelled.is_some_and(|active| !active.load(std::sync::atomic::Ordering::Acquire))
+        {
+            break;
+        }
         let Ok(metadata) = std::fs::symlink_metadata(&path) else {
             continue;
         };
@@ -896,41 +1184,48 @@ fn search_text_files(
                 continue;
             };
             for entry in entries.take(MAX_DIRECTORY_ENTRIES - entries_seen).flatten() {
+                if cancelled
+                    .is_some_and(|active| !active.load(std::sync::atomic::Ordering::Acquire))
+                {
+                    break;
+                }
                 entries_seen += 1;
                 pending.push((entry.path(), depth + 1));
             }
             continue;
         }
-        if !metadata.is_file()
-            || metadata.len() > MAX_FILE_BYTES
-            || visited >= MAX_FILES
-            || bytes_read.saturating_add(metadata.len()) > MAX_TOTAL_BYTES
-        {
+        if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES || visited >= MAX_FILES {
             continue;
         }
         visited += 1;
-        bytes_read = bytes_read.saturating_add(metadata.len());
         use std::io::Read;
         let Ok(file) = std::fs::File::open(&path) else {
             continue;
         };
         let mut bytes = Vec::new();
-        if file.take(MAX_FILE_BYTES).read_to_end(&mut bytes).is_err() {
+        let allowance = MAX_FILE_BYTES.min(max_total_bytes.saturating_sub(bytes_read));
+        if file.take(allowance).read_to_end(&mut bytes).is_err() {
             continue;
         }
+        bytes_read = bytes_read.saturating_add(bytes.len() as u64);
         let content = String::from_utf8_lossy(&bytes);
         let Some(line) = matching_line(&content, query) else {
             continue;
         };
-        let context = matching_context(&content, query)?;
-        return Some((
-            path.display().to_string(),
-            line,
-            context,
-            trailing_lines(&content, 5),
-        ));
+        let Some(context) = matching_context(&content, query) else {
+            continue;
+        };
+        return (
+            Some((
+                path.display().to_string(),
+                line,
+                context,
+                trailing_lines(&content, 5),
+            )),
+            bytes_read,
+        );
     }
-    None
+    (None, bytes_read)
 }
 
 #[cfg(test)]
@@ -948,6 +1243,96 @@ mod agent_search_tests {
             Some(vec!["Needle".into(), "two".into()])
         );
         assert_eq!(matching_context("one\ntwo", "missing"), None);
+    }
+
+    #[tokio::test]
+    async fn app_processes_an_api_request_while_agent_session_search_is_pending() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        defer_agent_search_response(
+            app.event_tx.clone(),
+            respond_to,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            move |_| {
+                started_tx.send(()).expect("signal slow search start");
+                release_rx.recv().expect("release slow search");
+                "deferred search response".into()
+            },
+        );
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("session search worker started");
+
+        let other_response = app.handle_api_request(crate::api::schema::Request {
+            id: "while-search-pending".into(),
+            method: crate::api::schema::Method::AgentList(
+                crate::api::schema::EmptyParams::default(),
+            ),
+        });
+        let other_success: crate::api::schema::SuccessResponse =
+            serde_json::from_str(&other_response).expect("concurrent API response is valid");
+        assert!(matches!(
+            other_success.result,
+            crate::api::schema::ResponseResult::AgentList { .. }
+        ));
+        assert!(response_rx.try_recv().is_err());
+
+        release_tx.send(()).expect("release session search");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), app.event_rx.recv())
+            .await
+            .expect("search completion event arrives")
+            .expect("app event channel remains open");
+        app.handle_internal_event_with_render_impact(event);
+        assert_eq!(
+            response_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("deferred API response"),
+            "deferred search response"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_agent_search_drops_its_deferred_response() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = crate::app::App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let worker_active = active.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        defer_agent_search_response(app.event_tx.clone(), respond_to, active, move |_| {
+            started_tx.send(()).expect("signal slow search start");
+            release_rx.recv().expect("release slow search");
+            done_tx.send(()).expect("signal search work complete");
+            "stale response".into()
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("session search worker started");
+        worker_active.store(false, std::sync::atomic::Ordering::Release);
+        release_tx.send(()).expect("release session search");
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("session search worker exits");
+        tokio::task::yield_now().await;
+        assert!(app.event_rx.try_recv().is_err());
+        assert!(response_rx.try_recv().is_err());
     }
 
     #[test]
