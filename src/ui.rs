@@ -1541,6 +1541,17 @@ fn render_agent_finder_preview(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.is_empty() {
         return;
     }
+    let area = if app.agent_finder_side_pane && area.width >= 48 {
+        let width = area.width / 2;
+        Rect::new(
+            area.x.saturating_add(area.width - width),
+            area.y,
+            width,
+            area.height,
+        )
+    } else {
+        area
+    };
     let Some(hit) = app.agent_finder_results.get(app.agent_finder_selected) else {
         frame.render_widget(Paragraph::new("⌕  Search agents in the sidebar"), area);
         return;

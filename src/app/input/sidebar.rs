@@ -90,6 +90,7 @@ impl AppState {
         self.agent_finder_results.clear();
         self.agent_finder_selected = 0;
         self.agent_finder_deadline = None;
+        self.agent_finder_side_pane = false;
     }
 
     fn close_agent_finder(&mut self) {
@@ -102,6 +103,7 @@ impl AppState {
         self.agent_finder_history_index = None;
         self.agent_finder_deadline = None;
         self.agent_finder_results.clear();
+        self.agent_finder_side_pane = false;
     }
 
     pub(crate) fn accept_agent_finder_query(&mut self) {
@@ -123,6 +125,7 @@ impl AppState {
         self.agent_finder_history_index = None;
         self.sidebar_search_active = false;
         self.agent_finder_deadline = None;
+        self.agent_finder_side_pane = false;
     }
 
     pub(crate) fn settled_target_has_resume_plan(
@@ -367,7 +370,10 @@ impl AppState {
             KeyCode::Esc if self.agent_finder_saved_query.is_some() => self.close_agent_finder(),
             KeyCode::Enter
                 if self.agent_finder_saved_query.is_some()
-                    && key.modifiers.contains(KeyModifiers::CONTROL) => {}
+                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.agent_finder_side_pane = true;
+            }
             KeyCode::Enter if self.agent_finder_saved_query.is_some() => {
                 self.accept_agent_finder_query();
             }
@@ -3133,9 +3139,13 @@ mod tests {
             "finder input must not be sent to a PTY"
         );
         app.state
+            .handle_sidebar_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert!(app.state.agent_finder_side_pane);
+        app.state
             .handle_sidebar_search_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
         assert!(!app.state.sidebar_search_active);
         assert!(app.state.agent_finder_saved_query.is_none());
+        assert!(!app.state.agent_finder_side_pane);
     }
 
     #[test]
