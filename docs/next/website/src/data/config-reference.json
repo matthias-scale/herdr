@@ -571,6 +571,12 @@
           "description": "Open the fuzzy command palette."
         },
         {
+          "key": "keys.agent_finder",
+          "type": "keybinding",
+          "default": "\"prefix+/\"",
+          "description": "Search agents from the sidebar."
+        },
+        {
           "key": "keys.new_workspace",
           "type": "keybinding",
           "default": "\"prefix+shift+n\"",

@@ -129,6 +129,18 @@ impl App {
             self.sync_prefix_input_source(previous_mode);
             return changed | deferred_changed;
         }
+        if matches!(
+            &msg.request.method,
+            crate::api::schema::Method::AgentSearch(params) if params.include_session
+        ) {
+            self.drain_all_internal_events();
+            self.start_deferred_agent_search(msg.request, msg.respond_to, stream_active);
+            if !skip_default_workspace {
+                changed |= self.ensure_default_workspace();
+            }
+            self.sync_prefix_input_source(previous_mode);
+            return changed;
+        }
         if self.should_defer_group_api_request(&msg.request) {
             self.drain_all_internal_events();
             self.start_deferred_group_api_request(msg.request, msg.respond_to);
@@ -1204,6 +1216,7 @@ impl App {
             deadline,
             crate::ui::pomodoro::animation_deadline_at(&self.state, self.state.screen_rect(), now),
             self.planning_lock_render_deadline(now),
+            self.state.agent_finder_deadline,
         ]
         .into_iter()
         .flatten()
