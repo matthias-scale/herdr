@@ -84,6 +84,7 @@ pub enum AppEvent {
         generation: u64,
         query: String,
         hits: Vec<crate::api::schema::AgentSearchHit>,
+        partial: bool,
     },
     /// A filesystem-backed agent search completed without occupying the app loop.
     AgentSearchFinished {

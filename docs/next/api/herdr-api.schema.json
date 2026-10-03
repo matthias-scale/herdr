@@ -15264,6 +15264,9 @@
                   },
                   "type": "array"
                 },
+                "partial": {
+                  "type": "boolean"
+                },
                 "type": {
                   "const": "agent_search",
                   "type": "string"

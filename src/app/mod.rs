@@ -973,6 +973,7 @@ impl App {
             agent_finder_history: Vec::new(),
             agent_finder_history_index: None,
             agent_finder_results: Vec::new(),
+            agent_finder_partial: false,
             agent_finder_selected: 0,
             agent_finder_deadline: None,
             agent_finder_generation: 0,

@@ -1601,6 +1601,12 @@ fn render_agent_finder_preview(app: &AppState, frame: &mut Frame, area: Rect) {
             )));
         }
     }
+    if app.agent_finder_partial {
+        lines.push(Line::from(Span::styled(
+            "Partial results",
+            Style::default().fg(app.palette.yellow),
+        )));
+    }
     lines.push(Line::from(""));
     let Some(hit) = app.agent_finder_results.get(app.agent_finder_selected) else {
         frame.render_widget(
@@ -1865,6 +1871,64 @@ mod tests {
             crate::app::state::Palette::from_name(theme).expect("built-in theme resolves");
         app.theme_name = theme.to_string();
         app
+    }
+
+    #[test]
+    fn mobile_navigate_panel_renders_the_active_finder_over_the_switcher() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("space")];
+        app.active = Some(0);
+        app.selected = 0;
+        app.ensure_test_terminals();
+        app.set_server_mode(Mode::Navigate);
+        app.agent_finder_saved_query = Some(String::new());
+        app.sidebar_search_active = true;
+        app.sidebar_work_filter.query = "pelican".into();
+        let agent: crate::api::schema::AgentInfo = serde_json::from_value(serde_json::json!({
+            "terminal_id": "terminal-1",
+            "agent_status": "working",
+            "workspace_id": app.workspaces[0].id,
+            "tab_id": "tab",
+            "pane_id": "pane",
+            "focused": true,
+            "revision": 1,
+            "display_agent": "Codex",
+            "display_title": "Pelican task"
+        }))
+        .expect("minimal agent fixture deserializes");
+        app.agent_finder_results = vec![crate::api::schema::AgentSearchHit {
+            target: agent.pane_id.clone(),
+            title: "Pelican task".into(),
+            source: crate::api::schema::AgentSearchSource::Session,
+            path: None,
+            line: None,
+            context: vec!["matched context".into()],
+            preview: vec!["visible finder preview".into()],
+            agent,
+        }];
+
+        let area = Rect::new(0, 0, 64, 39);
+        compute_view(&mut app, area);
+        assert_eq!(app.view.layout, ViewLayout::Mobile);
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.width, area.height)).expect("mobile test terminal");
+        terminal
+            .draw(|frame| render(&app, frame))
+            .expect("render through the full client entry point");
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("pelican"), "{rendered}");
+        assert!(rendered.contains("Pelican task"), "{rendered}");
+        assert!(rendered.contains("Enter focus"), "{rendered}");
+        assert!(rendered.contains("visible finder preview"), "{rendered}");
+        assert!(!rendered.contains("switch workspace"), "{rendered}");
     }
 
     /// A cell that only carries the right half of a double-width glyph is

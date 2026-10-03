@@ -1563,6 +1563,7 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) agent_finder_history: Vec<String>,
     pub(crate) agent_finder_history_index: Option<usize>,
     pub(crate) agent_finder_results: Vec<crate::api::schema::AgentSearchHit>,
+    pub(crate) agent_finder_partial: bool,
     pub(crate) agent_finder_selected: usize,
     pub(crate) agent_finder_deadline: Option<std::time::Instant>,
     pub(crate) agent_finder_generation: u64,
@@ -4625,6 +4626,7 @@ pub struct AppState {
     pub(crate) agent_finder_history: Vec<String>,
     pub(crate) agent_finder_history_index: Option<usize>,
     pub(crate) agent_finder_results: Vec<crate::api::schema::AgentSearchHit>,
+    pub(crate) agent_finder_partial: bool,
     pub(crate) agent_finder_selected: usize,
     pub(crate) agent_finder_deadline: Option<std::time::Instant>,
     pub(crate) agent_finder_generation: u64,
@@ -6410,6 +6412,10 @@ impl AppState {
             &mut other.agent_finder_results,
         );
         std::mem::swap(
+            &mut self.agent_finder_partial,
+            &mut other.agent_finder_partial,
+        );
+        std::mem::swap(
             &mut self.agent_finder_selected,
             &mut other.agent_finder_selected,
         );
@@ -7930,6 +7936,7 @@ impl AppState {
             agent_finder_history: Vec::new(),
             agent_finder_history_index: None,
             agent_finder_results: Vec::new(),
+            agent_finder_partial: false,
             agent_finder_selected: 0,
             agent_finder_deadline: None,
             agent_finder_generation: 0,

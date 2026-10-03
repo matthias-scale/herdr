@@ -12,8 +12,6 @@ use crate::app::App;
 use super::responses::{encode_error, encode_error_body, encode_success};
 
 const AGENT_PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
-const MAX_AGENT_SEARCH_AGENTS: usize = 100;
-const MAX_AGENT_SESSION_SEARCHES: usize = 20;
 const MAX_AGENT_SEARCH_BYTES: u64 = 8 * 1024 * 1024;
 type AgentFileSearchMatch = (String, u32, Vec<String>, Vec<String>);
 
@@ -36,6 +34,7 @@ impl App {
         let generation = self.state.agent_finder_generation;
         self.state.agent_finder_results.clear();
         self.state.agent_finder_selected = 0;
+        self.state.agent_finder_partial = false;
 
         let mut candidates = Vec::new();
         for agent in self.collect_agent_infos() {
@@ -46,7 +45,7 @@ impl App {
                 .or(agent.name.as_deref())
                 .unwrap_or("agent")
                 .to_owned();
-            let title_match = agent_title_match(&agent, &query);
+            let title_match = agent_title_match(&agent, &query).map(str::to_owned);
             if let Some(matched) = title_match {
                 self.state
                     .agent_finder_results
@@ -56,7 +55,7 @@ impl App {
                         source: crate::api::schema::AgentSearchSource::Title,
                         path: None,
                         line: None,
-                        context: vec![matched.to_owned()],
+                        context: vec![matched],
                         preview: Vec::new(),
                         agent,
                     });
@@ -76,40 +75,41 @@ impl App {
             } else {
                 candidates.push(agent);
             }
-            if self.state.agent_finder_results.len() >= 100 {
-                break;
-            }
         }
-        if self.state.agent_finder_results.len() < 100 {
-            for host in self
-                .state
-                .fleet_snapshot
-                .hosts
-                .iter()
-                .filter(|host| !host.local && host.reachable)
-            {
-                for row in &host.entries {
-                    let Some(agent) = row.agent_info() else {
-                        continue;
-                    };
-                    let title = agent
-                        .display_title
-                        .as_deref()
-                        .or(agent.title.as_deref())
-                        .or(agent.name.as_deref())
-                        .unwrap_or(&row.agent_ref.agent);
-                    let matched = [
-                        Some(title),
-                        agent.display_agent.as_deref(),
-                        agent.agent.as_deref(),
-                        Some(row.agent_ref.host.as_str()),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .find(|value| value.to_lowercase().contains(&query));
-                    let Some(matched) = matched else {
-                        continue;
-                    };
+        if self.state.agent_finder_results.len() > 100 {
+            self.state.agent_finder_results.truncate(100);
+            self.state.agent_finder_partial = true;
+        }
+        for host in self
+            .state
+            .fleet_snapshot
+            .hosts
+            .iter()
+            .filter(|host| !host.local && host.reachable)
+        {
+            for row in &host.entries {
+                let Some(agent) = row.agent_info() else {
+                    continue;
+                };
+                let title = agent
+                    .display_title
+                    .as_deref()
+                    .or(agent.title.as_deref())
+                    .or(agent.name.as_deref())
+                    .unwrap_or(&row.agent_ref.agent);
+                let matched = [
+                    Some(title),
+                    agent.display_agent.as_deref(),
+                    agent.agent.as_deref(),
+                    Some(row.agent_ref.host.as_str()),
+                ]
+                .into_iter()
+                .flatten()
+                .find(|value| value.to_lowercase().contains(&query));
+                let Some(matched) = matched else {
+                    continue;
+                };
+                if self.state.agent_finder_results.len() < 100 {
                     self.state
                         .agent_finder_results
                         .push(crate::api::schema::AgentSearchHit {
@@ -122,42 +122,42 @@ impl App {
                             preview: Vec::new(),
                             agent: agent.clone(),
                         });
-                    if self.state.agent_finder_results.len() >= 100 {
-                        break;
-                    }
-                }
-                if self.state.agent_finder_results.len() >= 100 {
-                    break;
+                } else {
+                    self.state.agent_finder_partial = true;
                 }
             }
         }
-        if !candidates.is_empty() && self.state.agent_finder_results.len() < 100 {
-            const MAX_SESSION_CANDIDATES: usize = 20;
-            candidates.truncate(MAX_SESSION_CANDIDATES);
+        if self.state.agent_finder_results.len() >= 100 && !candidates.is_empty() {
+            self.state.agent_finder_partial = true;
+        } else if !candidates.is_empty() {
             let remaining = 100 - self.state.agent_finder_results.len();
             let event_tx = self.event_tx.clone();
             tokio::task::spawn_blocking(move || {
-                let mut hits = Vec::new();
-                for agent in candidates {
-                    let title = agent
-                        .display_title
-                        .as_deref()
-                        .or(agent.title.as_deref())
-                        .or(agent.name.as_deref())
-                        .unwrap_or("agent")
-                        .to_owned();
-                    if let Some(hit) = search_agent_session_files(agent, title, &query) {
-                        hits.push(hit);
-                        if hits.len() >= remaining {
-                            break;
-                        }
-                    }
-                }
+                let (hits, partial) = search_agent_session_candidates(
+                    candidates
+                        .into_iter()
+                        .map(|agent| {
+                            let title = agent
+                                .display_title
+                                .as_deref()
+                                .or(agent.title.as_deref())
+                                .or(agent.name.as_deref())
+                                .unwrap_or("agent")
+                                .to_owned();
+                            (agent, title)
+                        })
+                        .collect(),
+                    &query,
+                    remaining,
+                    MAX_AGENT_SEARCH_BYTES,
+                    None,
+                );
                 let _ =
                     event_tx.blocking_send(crate::events::AppEvent::AgentFinderSearchCompleted {
                         generation,
                         query,
                         hits,
+                        partial,
                     });
             });
         }
@@ -177,7 +177,10 @@ impl App {
         if query.is_empty() {
             let _ = respond_to.send(encode_success(
                 request.id,
-                ResponseResult::AgentSearch { hits: Vec::new() },
+                ResponseResult::AgentSearch {
+                    hits: Vec::new(),
+                    partial: false,
+                },
             ));
             return;
         }
@@ -185,9 +188,8 @@ impl App {
         let limit = usize::from(params.limit.clamp(1, 200));
         let mut hits = Vec::new();
         let mut candidates = Vec::new();
-        let mut agents_scanned = 0usize;
-        for agent in self.collect_agent_infos_limited(MAX_AGENT_SEARCH_AGENTS) {
-            agents_scanned += 1;
+        let mut partial = false;
+        for agent in self.collect_agent_infos() {
             let title = agent
                 .display_title
                 .as_deref()
@@ -195,67 +197,71 @@ impl App {
                 .or(agent.name.as_deref())
                 .unwrap_or("agent")
                 .to_owned();
-            if let Some(value) = agent_title_match(&agent, &query) {
-                let value = value.to_owned();
-                hits.push(agent_search_hit(
-                    agent,
-                    title,
-                    crate::api::schema::AgentSearchSource::Title,
-                    None,
-                    None,
-                    vec![value],
-                    Vec::new(),
-                ));
+            if let Some(value) = agent_title_match(&agent, &query).map(str::to_owned) {
+                if hits.len() < limit {
+                    hits.push(agent_search_hit(
+                        agent,
+                        title,
+                        crate::api::schema::AgentSearchSource::Title,
+                        None,
+                        None,
+                        vec![value],
+                        Vec::new(),
+                    ));
+                } else {
+                    partial = true;
+                }
             } else if let Some(context) = self.search_agent_tail(&agent.pane_id, &query) {
-                hits.push(agent_search_hit(
-                    agent,
-                    title,
-                    crate::api::schema::AgentSearchSource::Tail,
-                    None,
-                    None,
-                    context.clone(),
-                    context,
-                ));
+                if hits.len() < limit {
+                    hits.push(agent_search_hit(
+                        agent,
+                        title,
+                        crate::api::schema::AgentSearchSource::Tail,
+                        None,
+                        None,
+                        context.clone(),
+                        context,
+                    ));
+                } else {
+                    partial = true;
+                }
             } else {
                 candidates.push((agent, title));
             }
-            if hits.len() >= limit {
-                break;
-            }
         }
 
-        if agents_scanned < MAX_AGENT_SEARCH_AGENTS && hits.len() < limit {
-            'hosts: for host in self
-                .state
-                .fleet_snapshot
-                .hosts
-                .iter()
-                .filter(|host| !host.local && host.reachable)
-            {
-                for row in &host.entries {
-                    if agents_scanned >= MAX_AGENT_SEARCH_AGENTS || hits.len() >= limit {
-                        break 'hosts;
-                    }
-                    let Some(agent) = row.agent_info() else {
-                        continue;
-                    };
-                    agents_scanned += 1;
-                    let title = agent
-                        .display_title
-                        .as_deref()
-                        .or(agent.title.as_deref())
-                        .or(agent.name.as_deref())
-                        .unwrap_or(&row.agent_ref.agent);
-                    let matched = [
-                        Some(title),
-                        agent.display_agent.as_deref(),
-                        agent.agent.as_deref(),
-                        Some(row.agent_ref.host.as_str()),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .find(|value| value.to_lowercase().contains(&query));
-                    if let Some(matched) = matched {
+        if hits.len() > limit {
+            hits.truncate(limit);
+            partial = true;
+        }
+        for host in self
+            .state
+            .fleet_snapshot
+            .hosts
+            .iter()
+            .filter(|host| !host.local && host.reachable)
+        {
+            for row in &host.entries {
+                let Some(agent) = row.agent_info() else {
+                    continue;
+                };
+                let title = agent
+                    .display_title
+                    .as_deref()
+                    .or(agent.title.as_deref())
+                    .or(agent.name.as_deref())
+                    .unwrap_or(&row.agent_ref.agent);
+                let matched = [
+                    Some(title),
+                    agent.display_agent.as_deref(),
+                    agent.agent.as_deref(),
+                    Some(row.agent_ref.host.as_str()),
+                ]
+                .into_iter()
+                .flatten()
+                .find(|value| value.to_lowercase().contains(&query));
+                if let Some(matched) = matched {
+                    if hits.len() < limit {
                         hits.push(agent_search_hit(
                             agent.clone(),
                             title.to_owned(),
@@ -265,17 +271,19 @@ impl App {
                             vec![matched.to_owned()],
                             Vec::new(),
                         ));
+                    } else {
+                        partial = true;
                     }
                 }
             }
         }
 
-        candidates.truncate(MAX_AGENT_SESSION_SEARCHES);
         let remaining = limit.saturating_sub(hits.len());
         if candidates.is_empty() || remaining == 0 {
+            partial |= remaining == 0 && !candidates.is_empty();
             let _ = respond_to.send(encode_success(
                 request.id,
-                ResponseResult::AgentSearch { hits },
+                ResponseResult::AgentSearch { hits, partial },
             ));
             return;
         }
@@ -285,25 +293,16 @@ impl App {
         let active =
             active.unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)));
         defer_agent_search_response(event_tx, respond_to, active, move |active| {
-            let mut bytes_remaining = MAX_AGENT_SEARCH_BYTES;
-            for (agent, title) in candidates {
-                if !active.load(std::sync::atomic::Ordering::Acquire)
-                    || hits.len() >= limit
-                    || bytes_remaining == 0
-                {
-                    break;
-                }
-                if let Some(hit) = search_agent_session_files_bounded(
-                    agent,
-                    title,
-                    &query,
-                    &mut bytes_remaining,
-                    Some(active),
-                ) {
-                    hits.push(hit);
-                }
-            }
-            encode_success(id, ResponseResult::AgentSearch { hits })
+            let (session_hits, session_partial) = search_agent_session_candidates(
+                candidates,
+                &query,
+                limit.saturating_sub(hits.len()),
+                MAX_AGENT_SEARCH_BYTES,
+                Some(active),
+            );
+            hits.extend(session_hits);
+            partial |= session_partial;
+            encode_success(id, ResponseResult::AgentSearch { hits, partial })
         });
     }
 
@@ -314,14 +313,19 @@ impl App {
     ) -> String {
         let query = params.query.trim().to_lowercase();
         if query.is_empty() {
-            return encode_success(id, ResponseResult::AgentSearch { hits: Vec::new() });
+            return encode_success(
+                id,
+                ResponseResult::AgentSearch {
+                    hits: Vec::new(),
+                    partial: false,
+                },
+            );
         }
 
         let mut hits = Vec::new();
         let limit = usize::from(params.limit.clamp(1, 200));
-        let mut agents_scanned = 0usize;
-        for agent in self.collect_agent_infos_limited(MAX_AGENT_SEARCH_AGENTS) {
-            agents_scanned += 1;
+        let mut partial = false;
+        for agent in self.collect_agent_infos() {
             let title = agent
                 .display_title
                 .as_deref()
@@ -329,7 +333,7 @@ impl App {
                 .or(agent.name.as_deref())
                 .unwrap_or("agent")
                 .to_owned();
-            let title_match = agent_title_match(&agent, &query);
+            let title_match = agent_title_match(&agent, &query).map(str::to_owned);
             if let Some(value) = title_match {
                 hits.push(crate::api::schema::AgentSearchHit {
                     target: agent.pane_id.clone(),
@@ -337,7 +341,7 @@ impl App {
                     source: crate::api::schema::AgentSearchSource::Title,
                     path: None,
                     line: None,
-                    context: vec![value.to_owned()],
+                    context: vec![value],
                     preview: Vec::new(),
                     agent,
                 });
@@ -358,44 +362,41 @@ impl App {
                     hits.push(hit);
                 }
             }
-            if hits.len() >= limit {
-                break;
-            }
         }
-        if hits.len() < limit && agents_scanned < MAX_AGENT_SEARCH_AGENTS {
-            for host in self
-                .state
-                .fleet_snapshot
-                .hosts
-                .iter()
-                .filter(|host| !host.local && host.reachable)
-            {
-                for row in &host.entries {
-                    if agents_scanned >= MAX_AGENT_SEARCH_AGENTS || hits.len() >= limit {
-                        break;
-                    }
-                    let Some(agent) = row.agent_info() else {
-                        continue;
-                    };
-                    agents_scanned += 1;
-                    let title = agent
-                        .display_title
-                        .as_deref()
-                        .or(agent.title.as_deref())
-                        .or(agent.name.as_deref())
-                        .unwrap_or(&row.agent_ref.agent);
-                    let matched = [
-                        Some(title),
-                        agent.display_agent.as_deref(),
-                        agent.agent.as_deref(),
-                        Some(row.agent_ref.host.as_str()),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .find(|value| value.to_lowercase().contains(&query));
-                    let Some(matched) = matched else {
-                        continue;
-                    };
+        if hits.len() > limit {
+            hits.truncate(limit);
+            partial = true;
+        }
+        for host in self
+            .state
+            .fleet_snapshot
+            .hosts
+            .iter()
+            .filter(|host| !host.local && host.reachable)
+        {
+            for row in &host.entries {
+                let Some(agent) = row.agent_info() else {
+                    continue;
+                };
+                let title = agent
+                    .display_title
+                    .as_deref()
+                    .or(agent.title.as_deref())
+                    .or(agent.name.as_deref())
+                    .unwrap_or(&row.agent_ref.agent);
+                let matched = [
+                    Some(title),
+                    agent.display_agent.as_deref(),
+                    agent.agent.as_deref(),
+                    Some(row.agent_ref.host.as_str()),
+                ]
+                .into_iter()
+                .flatten()
+                .find(|value| value.to_lowercase().contains(&query));
+                let Some(matched) = matched else {
+                    continue;
+                };
+                if hits.len() < limit {
                     hits.push(crate::api::schema::AgentSearchHit {
                         target: agent.pane_id.clone(),
                         title: title.to_owned(),
@@ -406,16 +407,12 @@ impl App {
                         preview: Vec::new(),
                         agent: agent.clone(),
                     });
-                    if hits.len() >= limit {
-                        break;
-                    }
-                }
-                if hits.len() >= limit {
-                    break;
+                } else {
+                    partial = true;
                 }
             }
         }
-        encode_success(id, ResponseResult::AgentSearch { hits })
+        encode_success(id, ResponseResult::AgentSearch { hits, partial })
     }
 
     fn search_agent_tail(&mut self, target: &str, query: &str) -> Option<Vec<String>> {
@@ -923,13 +920,39 @@ fn agent_title_match<'a>(agent: &'a crate::api::schema::AgentInfo, query: &str) 
     .find(|value| value.to_lowercase().contains(query))
 }
 
-fn search_agent_session_files(
-    agent: crate::api::schema::AgentInfo,
-    title: String,
+fn search_agent_session_candidates(
+    candidates: Vec<(crate::api::schema::AgentInfo, String)>,
     query: &str,
-) -> Option<crate::api::schema::AgentSearchHit> {
-    let mut bytes_remaining = MAX_AGENT_SEARCH_BYTES;
-    search_agent_session_files_bounded(agent, title, query, &mut bytes_remaining, None)
+    limit: usize,
+    mut bytes_remaining: u64,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> (Vec<crate::api::schema::AgentSearchHit>, bool) {
+    let mut hits = Vec::new();
+    let mut partial = false;
+    for (index, (agent, title)) in candidates.iter().cloned().enumerate() {
+        if cancelled.is_some_and(|active| !active.load(std::sync::atomic::Ordering::Acquire)) {
+            break;
+        }
+        if hits.len() >= limit || bytes_remaining == 0 {
+            partial = true;
+            break;
+        }
+        if let Some(hit) = search_agent_session_files_bounded(
+            agent,
+            title,
+            query,
+            &mut bytes_remaining,
+            &mut partial,
+            cancelled,
+        ) {
+            hits.push(hit);
+        }
+        if bytes_remaining == 0 && index + 1 < candidates.len() {
+            partial = true;
+            break;
+        }
+    }
+    (hits, partial)
 }
 
 fn search_agent_session_files_bounded(
@@ -937,6 +960,7 @@ fn search_agent_session_files_bounded(
     title: String,
     query: &str,
     bytes_remaining: &mut u64,
+    partial: &mut bool,
     cancelled: Option<&std::sync::atomic::AtomicBool>,
 ) -> Option<crate::api::schema::AgentSearchHit> {
     if cancelled.is_some_and(|active| !active.load(std::sync::atomic::Ordering::Acquire)) {
@@ -944,6 +968,7 @@ fn search_agent_session_files_bounded(
     }
     let transcript = load_agent_transcript_bounded(&agent, *bytes_remaining);
     if let Some((transcript, bytes_read)) = transcript {
+        *partial |= bytes_read >= *bytes_remaining;
         *bytes_remaining = bytes_remaining.saturating_sub(bytes_read);
         if let Some(context) = matching_context(&transcript.content, query) {
             return Some(crate::api::schema::AgentSearchHit {
@@ -962,11 +987,13 @@ fn search_agent_session_files_bounded(
     let cwd = agent.cwd.as_deref().or(agent.foreground_cwd.as_deref())?;
     for folder in [".local", "out"] {
         if *bytes_remaining == 0 {
+            *partial = true;
             break;
         }
         let root = std::path::Path::new(cwd).join(folder);
-        let (found, bytes_read) =
+        let (found, bytes_read, budget_exhausted) =
             search_text_files_bounded(&root, query, *bytes_remaining, cancelled);
+        *partial |= budget_exhausted;
         *bytes_remaining = bytes_remaining.saturating_sub(bytes_read);
         if let Some((path, line, context, preview)) = found {
             return Some(crate::api::schema::AgentSearchHit {
@@ -1154,7 +1181,7 @@ fn search_text_files_bounded(
     query: &str,
     max_total_bytes: u64,
     cancelled: Option<&std::sync::atomic::AtomicBool>,
-) -> (Option<AgentFileSearchMatch>, u64) {
+) -> (Option<AgentFileSearchMatch>, u64, bool) {
     const MAX_FILES: usize = 200;
     const MAX_FILE_BYTES: u64 = 512_000;
     const MAX_DIRECTORY_ENTRIES: usize = 4_096;
@@ -1164,10 +1191,12 @@ fn search_text_files_bounded(
     let mut visited = 0usize;
     let mut entries_seen = 0usize;
     let mut bytes_read = 0u64;
+    let mut budget_exhausted = false;
     while let Some((path, depth)) = pending.pop() {
         if bytes_read >= max_total_bytes
             || cancelled.is_some_and(|active| !active.load(std::sync::atomic::Ordering::Acquire))
         {
+            budget_exhausted |= bytes_read >= max_total_bytes && !pending.is_empty();
             break;
         }
         let Ok(metadata) = std::fs::symlink_metadata(&path) else {
@@ -1178,12 +1207,15 @@ fn search_text_files_bounded(
         }
         if metadata.is_dir() {
             if depth >= MAX_DEPTH || entries_seen >= MAX_DIRECTORY_ENTRIES {
+                budget_exhausted = true;
                 continue;
             }
             let Ok(entries) = std::fs::read_dir(&path) else {
                 continue;
             };
-            for entry in entries.take(MAX_DIRECTORY_ENTRIES - entries_seen).flatten() {
+            let remaining_entries = MAX_DIRECTORY_ENTRIES - entries_seen;
+            let mut entries = entries;
+            for entry in (&mut entries).take(remaining_entries).flatten() {
                 if cancelled
                     .is_some_and(|active| !active.load(std::sync::atomic::Ordering::Acquire))
                 {
@@ -1192,9 +1224,16 @@ fn search_text_files_bounded(
                 entries_seen += 1;
                 pending.push((entry.path(), depth + 1));
             }
+            if entries_seen >= MAX_DIRECTORY_ENTRIES && entries.next().is_some() {
+                budget_exhausted = true;
+            }
             continue;
         }
-        if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES || visited >= MAX_FILES {
+        if !metadata.is_file() {
+            continue;
+        }
+        if metadata.len() > MAX_FILE_BYTES || visited >= MAX_FILES {
+            budget_exhausted = true;
             continue;
         }
         visited += 1;
@@ -1208,6 +1247,7 @@ fn search_text_files_bounded(
             continue;
         }
         bytes_read = bytes_read.saturating_add(bytes.len() as u64);
+        budget_exhausted |= (bytes.len() as u64) < allowance && metadata.len() > bytes.len() as u64;
         let content = String::from_utf8_lossy(&bytes);
         let Some(line) = matching_line(&content, query) else {
             continue;
@@ -1223,14 +1263,107 @@ fn search_text_files_bounded(
                 trailing_lines(&content, 5),
             )),
             bytes_read,
+            budget_exhausted,
         );
     }
-    (None, bytes_read)
+    (None, bytes_read, budget_exhausted)
 }
 
 #[cfg(test)]
 mod agent_search_tests {
     use super::*;
+
+    fn session_candidates(
+        root: &std::path::Path,
+        count: usize,
+    ) -> Vec<(crate::api::schema::AgentInfo, String)> {
+        (0..count)
+            .map(|index| {
+                let cwd = root.join(format!("agent-{index}"));
+                std::fs::create_dir_all(cwd.join(".local")).expect("create candidate folder");
+                if index + 1 == count {
+                    std::fs::write(cwd.join(".local/notes.md"), "laterneedle appears here")
+                        .expect("write later candidate match");
+                }
+                let pane_id = format!("pane-{index}");
+                let agent: crate::api::schema::AgentInfo =
+                    serde_json::from_value(serde_json::json!({
+                        "terminal_id": format!("terminal-{index}"),
+                        "agent_status": "working",
+                        "workspace_id": "workspace",
+                        "tab_id": "tab",
+                        "pane_id": pane_id,
+                        "focused": false,
+                        "revision": 1,
+                        "display_title": format!("unrelated task {index}"),
+                        "cwd": cwd,
+                    }))
+                    .expect("agent fixture deserializes");
+                (agent, format!("unrelated task {index}"))
+            })
+            .collect()
+    }
+
+    fn session_fixture_root(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "herdr-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn api_session_search_finds_a_match_after_twenty_candidates() {
+        let root = session_fixture_root("agent-api-search");
+        std::fs::create_dir_all(&root).expect("create API search fixture");
+        let (hits, partial) = search_agent_session_candidates(
+            session_candidates(&root, 121),
+            "laterneedle",
+            100,
+            MAX_AGENT_SEARCH_BYTES,
+            None,
+        );
+        assert!(!partial);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].target, "pane-120");
+        std::fs::remove_dir_all(root).expect("remove API search fixture");
+    }
+
+    #[test]
+    fn finder_session_search_finds_a_match_after_twenty_candidates() {
+        let root = session_fixture_root("agent-finder-search");
+        std::fs::create_dir_all(&root).expect("create finder search fixture");
+        let (hits, partial) = search_agent_session_candidates(
+            session_candidates(&root, 21),
+            "laterneedle",
+            100,
+            MAX_AGENT_SEARCH_BYTES,
+            None,
+        );
+        assert!(!partial);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].target, "pane-20");
+        std::fs::remove_dir_all(root).expect("remove finder search fixture");
+    }
+
+    #[test]
+    fn session_search_marks_exhausted_file_budget_as_partial() {
+        let root = session_fixture_root("agent-partial-search");
+        std::fs::create_dir_all(&root).expect("create partial search fixture");
+        let (hits, partial) = search_agent_session_candidates(
+            session_candidates(&root, 21),
+            "laterneedle",
+            100,
+            1,
+            None,
+        );
+        assert!(hits.is_empty());
+        assert!(partial);
+        std::fs::remove_dir_all(root).expect("remove partial search fixture");
+    }
 
     #[test]
     fn matching_context_returns_two_or_three_neighboring_lines() {

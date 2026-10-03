@@ -10930,6 +10930,12 @@ fn render_agent_finder_results(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(app.palette.overlay0),
         )));
     }
+    if app.agent_finder_partial {
+        lines.push(Line::from(Span::styled(
+            "Partial results",
+            Style::default().fg(app.palette.overlay0),
+        )));
+    }
     frame.render_widget(Paragraph::new(lines), body);
 }
 

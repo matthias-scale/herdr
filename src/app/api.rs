@@ -620,6 +620,7 @@ impl App {
                 generation,
                 query,
                 hits,
+                partial,
             } => {
                 if self.state.agent_finder_saved_query.is_none()
                     || generation != self.state.agent_finder_generation
@@ -629,6 +630,7 @@ impl App {
                 }
                 self.state.agent_finder_results.extend(hits);
                 self.state.agent_finder_results.truncate(100);
+                self.state.agent_finder_partial = partial;
                 self.state.agent_finder_selected = 0;
                 true
             }
