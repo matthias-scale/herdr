@@ -616,6 +616,22 @@ impl App {
                 self.refresh_board_remote_lines();
                 changed
             }
+            AppEvent::AgentFinderSearchCompleted {
+                generation,
+                query,
+                hits,
+            } => {
+                if self.state.agent_finder_saved_query.is_none()
+                    || generation != self.state.agent_finder_generation
+                    || query != self.state.sidebar_work_filter.query.trim().to_lowercase()
+                {
+                    return false;
+                }
+                self.state.agent_finder_results.extend(hits);
+                self.state.agent_finder_results.truncate(100);
+                self.state.agent_finder_selected = 0;
+                true
+            }
             AppEvent::BoardRemoteLinesFetched {
                 note_path,
                 fleet_generation,

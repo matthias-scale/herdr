@@ -421,7 +421,17 @@ impl App {
                         .get(self.state.agent_finder_selected)
                         .cloned()
                     {
-                        if self
+                        if let Some(agent_ref) = hit
+                            .agent
+                            .agent_ref
+                            .as_ref()
+                            .filter(|agent_ref| agent_ref.host != self.state.agent_host_name)
+                        {
+                            self.open_fleet_host_from_input(
+                                &agent_ref.host,
+                                Some(&agent_ref.agent),
+                            );
+                        } else if self
                             .state
                             .workspaces
                             .iter()
@@ -7074,6 +7084,59 @@ sidebar_visible = true
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[tokio::test]
+    async fn agent_finder_enter_routes_remote_ref_before_colliding_workspace_id() {
+        let mut app = test_app();
+        app.state.agent_host_name = "local-host".into();
+        let mut workspace = crate::workspace::Workspace::test_new("collision");
+        let first = workspace.tabs[0].root_pane;
+        let second = workspace.test_split(Direction::Vertical);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&first]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(
+                Some(crate::detect::Agent::Codex),
+                crate::detect::AgentState::Idle,
+            );
+        app.state.workspaces[0].tabs[0].layout.focus_pane(first);
+        let mut agent = app.agent_info(0, first).expect("local agent info");
+        agent.agent_ref = Some(
+            crate::api::schema::AgentRef::new("remote-host", "remote-pane").expect("remote ref"),
+        );
+        // This remote workspace id deliberately collides with the local workspace.
+        agent.workspace_id = app.state.workspaces[0].id.clone();
+        let colliding_target = app.public_pane_id(0, second).expect("local pane target");
+        app.state.agent_finder_saved_query = Some(String::new());
+        app.state.agent_finder_results = vec![crate::api::schema::AgentSearchHit {
+            target: colliding_target,
+            title: "remote agent".into(),
+            source: crate::api::schema::AgentSearchSource::Title,
+            path: None,
+            line: None,
+            context: vec!["remote agent".into()],
+            preview: Vec::new(),
+            agent,
+        }];
+
+        app.handle_key_for_input_owner(
+            TerminalKey::new(KeyCode::Enter, KeyModifiers::empty()),
+            InputOwner::Sidebar,
+        )
+        .await;
+
+        assert_ne!(
+            app.state.workspaces[0].focused_pane_id(),
+            Some(second),
+            "remote result must not focus the colliding local pane"
+        );
     }
 
     #[test]

@@ -90,6 +90,7 @@ impl AppState {
         self.agent_finder_results.clear();
         self.agent_finder_selected = 0;
         self.agent_finder_deadline = None;
+        self.agent_finder_generation = self.agent_finder_generation.wrapping_add(1);
         self.agent_finder_side_pane = false;
     }
 
@@ -103,6 +104,7 @@ impl AppState {
         self.agent_finder_history_index = None;
         self.agent_finder_deadline = None;
         self.agent_finder_results.clear();
+        self.agent_finder_generation = self.agent_finder_generation.wrapping_add(1);
         self.agent_finder_side_pane = false;
     }
 
@@ -125,6 +127,7 @@ impl AppState {
         self.agent_finder_history_index = None;
         self.sidebar_search_active = false;
         self.agent_finder_deadline = None;
+        self.agent_finder_generation = self.agent_finder_generation.wrapping_add(1);
         self.agent_finder_side_pane = false;
     }
 
@@ -464,6 +467,7 @@ impl AppState {
 
     fn schedule_agent_finder_search(&mut self) {
         if self.agent_finder_saved_query.is_some() {
+            self.agent_finder_generation = self.agent_finder_generation.wrapping_add(1);
             self.agent_finder_deadline =
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(180));
             self.agent_finder_results.clear();

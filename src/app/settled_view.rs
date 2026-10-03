@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 const MAX_TRANSCRIPT_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SESSION_SEARCH_ENTRIES: usize = 4_096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SettledTranscript {
@@ -75,7 +76,13 @@ fn session_path(
         if direct.is_file() {
             return Some(direct);
         }
-        return find_named_file(&root.join("projects"), &format!("{id}.jsonl"), 2);
+        let mut entries_seen = 0;
+        return find_named_file(
+            &root.join("projects"),
+            &format!("{id}.jsonl"),
+            2,
+            &mut entries_seen,
+        );
     }
     let root = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
@@ -84,14 +91,21 @@ fn session_path(
     find_codex_file(&root, id)
 }
 
-fn find_named_file(root: &Path, name: &str, max_depth: usize) -> Option<PathBuf> {
-    for entry in std::fs::read_dir(root).ok()?.flatten() {
+fn find_named_file(
+    root: &Path,
+    name: &str,
+    max_depth: usize,
+    entries_seen: &mut usize,
+) -> Option<PathBuf> {
+    let remaining = MAX_SESSION_SEARCH_ENTRIES.saturating_sub(*entries_seen);
+    for entry in std::fs::read_dir(root).ok()?.take(remaining).flatten() {
+        *entries_seen += 1;
         let path = entry.path();
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
         if file_type.is_dir() && max_depth > 0 {
-            if let Some(found) = find_named_file(&path, name, max_depth - 1) {
+            if let Some(found) = find_named_file(&path, name, max_depth - 1, entries_seen) {
                 return Some(found);
             }
         } else if file_type.is_file() && path.file_name().is_some_and(|file| file == name) {
@@ -102,17 +116,33 @@ fn find_named_file(root: &Path, name: &str, max_depth: usize) -> Option<PathBuf>
 }
 
 fn find_codex_file(root: &Path, id: &str) -> Option<PathBuf> {
-    for year in std::fs::read_dir(root).ok()?.flatten() {
+    let mut entries_seen = 0usize;
+    for year in std::fs::read_dir(root)
+        .ok()?
+        .take(MAX_SESSION_SEARCH_ENTRIES)
+        .flatten()
+    {
+        entries_seen += 1;
         let year_path = year.path();
         if !year_path.is_dir() {
             continue;
         }
-        for month in std::fs::read_dir(&year_path).ok()?.flatten() {
+        for month in std::fs::read_dir(&year_path)
+            .ok()?
+            .take(MAX_SESSION_SEARCH_ENTRIES.saturating_sub(entries_seen))
+            .flatten()
+        {
+            entries_seen += 1;
             let month_path = month.path();
             if !month_path.is_dir() {
                 continue;
             }
-            for day in std::fs::read_dir(month_path).ok()?.flatten() {
+            for day in std::fs::read_dir(month_path)
+                .ok()?
+                .take(MAX_SESSION_SEARCH_ENTRIES.saturating_sub(entries_seen))
+                .flatten()
+            {
+                entries_seen += 1;
                 let path = day.path();
                 let name = path.file_name()?.to_string_lossy();
                 if name.starts_with("rollout-") && name.ends_with(&format!("-{id}.jsonl")) {
@@ -241,7 +271,11 @@ mod tests {
         std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
         std::fs::write(&shallow, "").unwrap();
         std::fs::write(&deep, "").unwrap();
-        assert_eq!(find_named_file(&root, "session.jsonl", 2), Some(shallow));
+        let mut entries_seen = 0;
+        assert_eq!(
+            find_named_file(&root, "session.jsonl", 2, &mut entries_seen),
+            Some(shallow)
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

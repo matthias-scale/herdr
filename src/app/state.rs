@@ -1565,6 +1565,7 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) agent_finder_results: Vec<crate::api::schema::AgentSearchHit>,
     pub(crate) agent_finder_selected: usize,
     pub(crate) agent_finder_deadline: Option<std::time::Instant>,
+    pub(crate) agent_finder_generation: u64,
     pub(crate) agent_finder_side_pane: bool,
     pub(crate) new_menu: Option<SidebarNewMenuState>,
     pub(crate) new_thread: Option<SidebarNewThreadState>,
@@ -4626,6 +4627,7 @@ pub struct AppState {
     pub(crate) agent_finder_results: Vec<crate::api::schema::AgentSearchHit>,
     pub(crate) agent_finder_selected: usize,
     pub(crate) agent_finder_deadline: Option<std::time::Instant>,
+    pub(crate) agent_finder_generation: u64,
     pub(crate) agent_finder_side_pane: bool,
     /// Sidebar-only view gate: show just the starred sessions. Pure client
     /// presentation state — the star itself lives on the tab.
@@ -6416,6 +6418,10 @@ impl AppState {
             &mut other.agent_finder_deadline,
         );
         std::mem::swap(
+            &mut self.agent_finder_generation,
+            &mut other.agent_finder_generation,
+        );
+        std::mem::swap(
             &mut self.agent_finder_side_pane,
             &mut other.agent_finder_side_pane,
         );
@@ -7920,6 +7926,7 @@ impl AppState {
             agent_finder_results: Vec::new(),
             agent_finder_selected: 0,
             agent_finder_deadline: None,
+            agent_finder_generation: 0,
             agent_finder_side_pane: false,
             sidebar_starred_only: false,
             sidebar_new_menu: None,

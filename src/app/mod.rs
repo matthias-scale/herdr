@@ -975,6 +975,7 @@ impl App {
             agent_finder_results: Vec::new(),
             agent_finder_selected: 0,
             agent_finder_deadline: None,
+            agent_finder_generation: 0,
             agent_finder_side_pane: false,
             sidebar_starred_only: false,
             sidebar_new_menu: None,

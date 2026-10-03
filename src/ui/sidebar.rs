@@ -11093,7 +11093,12 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
         } else {
             "🔍"
         };
-        let text = if query.is_empty() && app.sidebar_search_active {
+        let text = if app.agent_finder_saved_query.is_some()
+            && app.sidebar_search_active
+            && !query.is_empty()
+        {
+            format!("{query}▏")
+        } else if query.is_empty() && app.sidebar_search_active {
             format!("{icon} ▏")
         } else if query.is_empty() {
             format!("{icon} Search")
@@ -12517,6 +12522,9 @@ pub(crate) fn sidebar_header_search_rect_for_app(app: &AppState, area: Rect) -> 
     if !app.sidebar_sections_layout {
         return sidebar_header_search_rect(area);
     }
+    let finder_query_active = app.agent_finder_saved_query.is_some()
+        && app.sidebar_search_active
+        && !app.sidebar_work_filter.query.is_empty();
     let goto = sidebar_prefixed_key_label(app, &app.keybinds.goto);
     let content_right = if sidebar_has_sky_band(app) {
         sidebar_separator_col(area).unwrap_or(area.right())
@@ -12530,12 +12538,22 @@ pub(crate) fn sidebar_header_search_rect_for_app(app: &AppState, area: Rect) -> 
         first_control.x.saturating_sub(1)
     };
     let start = area.x.saturating_add(1);
-    let reserved = u16::try_from(display_width(&goto).saturating_add(1)).unwrap_or(u16::MAX);
+    let reserved = if finder_query_active {
+        0
+    } else {
+        u16::try_from(display_width(&goto).saturating_add(1)).unwrap_or(u16::MAX)
+    };
     let width = content_right.saturating_sub(start).saturating_sub(reserved);
     Rect::new(start, sidebar_search_y(app, area), width, 1)
 }
 
 pub(crate) fn sidebar_header_goto_rect(app: &AppState, area: Rect) -> Rect {
+    if app.agent_finder_saved_query.is_some()
+        && app.sidebar_search_active
+        && !app.sidebar_work_filter.query.is_empty()
+    {
+        return Rect::default();
+    }
     if !app.sidebar_sections_layout {
         return Rect::default();
     }
@@ -31951,6 +31969,24 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             assert_ne!(sky.bg, app.palette.panel_bg, "sky band should stand out");
             assert!(matches!(sky.bg, Color::Rgb(_, _, _)));
         }
+    }
+
+    #[test]
+    fn compact_header_keeps_the_active_agent_finder_query_visible_at_64_columns() {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.sidebar_header_plain = true;
+        app.agent_finder_saved_query = Some(String::new());
+        app.sidebar_search_active = true;
+        app.sidebar_work_filter.query = "needle".into();
+        let area = Rect::new(0, 0, 64, 39);
+        let mut terminal = Terminal::new(TestBackend::new(64, 39)).expect("header terminal");
+        terminal
+            .draw(|frame| render_sidebar_header(&app, frame, area, &app.palette))
+            .expect("render compact finder header");
+        let row = row_text(terminal.backend().buffer(), 0, 64);
+        assert!(row.contains("needle"), "{row:?}");
+        assert!(!row.contains(&sidebar_prefixed_key_label(&app, &app.keybinds.goto)));
     }
 
     #[test]
