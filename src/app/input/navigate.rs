@@ -2443,10 +2443,7 @@ enum BlockedPaneTarget {
     Remote(crate::api::schema::AgentRef),
 }
 
-fn blocked_pane_cycle_in_order(
-    state: &AppState,
-    include_needs_you: bool,
-) -> Vec<(BlockedPaneTarget, bool)> {
+fn blocked_pane_cycle_in_order(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
     let rows = crate::ui::sidebar_rows(state);
     // A shown row stands for its whole tab: split panes share one row.
     let visible_tabs = rows
@@ -2457,13 +2454,6 @@ fn blocked_pane_cycle_in_order(
             _ => None,
         })
         .map(|target| (target.ws_idx, target.tab_idx))
-        .collect::<std::collections::HashSet<_>>();
-    let visible_remote = rows
-        .iter()
-        .filter_map(|row| match row {
-            crate::ui::SidebarRow::RemoteAgent { entry, .. } => Some(entry.agent_ref.clone()),
-            _ => None,
-        })
         .collect::<std::collections::HashSet<_>>();
     let mut local = crate::ui::all_agent_panel_entries(state)
         .into_iter()
@@ -2516,50 +2506,8 @@ fn blocked_pane_cycle_in_order(
         Vec::new()
     };
     let mut panes = Vec::with_capacity(local.len() + remote.len());
-    let rows = if include_needs_you {
-        crate::ui::sidebar::sidebar_navigation_rows(state)
-    } else {
-        rows
-    };
     for row in rows {
         match row {
-            crate::ui::SidebarRow::NeedsYou { target, .. } if include_needs_you => match target {
-                crate::ui::NeedsYouTarget::Local(entry_target) => {
-                    if state.skip_collapsed_cycle
-                        && !visible_tabs.contains(&(entry_target.ws_idx, entry_target.tab_idx))
-                    {
-                        continue;
-                    }
-                    if let Some(index) = local.iter().position(|(target, _)| {
-                        matches!(
-                            target,
-                            BlockedPaneTarget::Local { ws_idx, tab_idx, pane_id }
-                                if (*ws_idx, *tab_idx, *pane_id)
-                                    == (
-                                        entry_target.ws_idx,
-                                        entry_target.tab_idx,
-                                        entry_target.pane_id,
-                                    )
-                        )
-                    }) {
-                        panes.push(local.remove(index));
-                    }
-                }
-                crate::ui::NeedsYouTarget::Remote(entry_target) => {
-                    if state.skip_collapsed_cycle && !visible_remote.contains(&entry_target) {
-                        continue;
-                    }
-                    if let Some(index) = remote.iter().position(|(target, _)| {
-                        matches!(
-                            target,
-                            BlockedPaneTarget::Remote(agent_ref)
-                                if agent_ref == &entry_target
-                        )
-                    }) {
-                        panes.push(remote.remove(index));
-                    }
-                }
-            },
             crate::ui::SidebarRow::Tab { entry, .. } => {
                 let Some(entry_target) = entry.local_target() else {
                     continue;
@@ -2625,16 +2573,8 @@ fn blocked_pane_cycle_in_order(
     panes
 }
 
-fn blocked_pane_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
-    blocked_pane_cycle_in_order(state, true)
-}
-
-fn blocked_pane_body_cycle(state: &AppState) -> Vec<(BlockedPaneTarget, bool)> {
-    blocked_pane_cycle_in_order(state, false)
-}
-
 fn next_blocked_window_target(state: &AppState) -> Option<BlockedPaneTarget> {
-    let panes = blocked_pane_cycle(state);
+    let panes = blocked_pane_cycle_in_order(state);
     if panes.is_empty() {
         return None;
     }
@@ -2649,7 +2589,7 @@ fn next_blocked_window_target(state: &AppState) -> Option<BlockedPaneTarget> {
             .map(|pane_id| (ws_idx, pane_id))
     });
     let selected_remote = state.sidebar_selected_remote_agent.as_ref();
-    let current = selected_remote
+    let start = selected_remote
         .and_then(|selected| {
             panes.iter().position(|(target, _)| {
                 matches!(target, BlockedPaneTarget::Remote(agent_ref) if agent_ref == selected)
@@ -2665,81 +2605,17 @@ fn next_blocked_window_target(state: &AppState) -> Option<BlockedPaneTarget> {
                     )
                 })
             })
-        });
-    // A non-attention row remains the operator's starting point in the body.
-    // After the first stop, the hoisted strip owns the lap order.
-    if current.is_none_or(|index| !panes[index].1) {
-        let body = blocked_pane_body_cycle(state);
-        let body_anchor = selected_remote
-            .and_then(|selected| {
-                body.iter().position(|(target, _)| {
-                    matches!(target, BlockedPaneTarget::Remote(agent_ref) if agent_ref == selected)
-                })
-            })
-            .or_else(|| {
-                focused
-                    .and_then(|focused| {
-                        body.iter().position(|(target, _)| {
-                            matches!(
-                                target,
-                                BlockedPaneTarget::Local { ws_idx, pane_id, .. }
-                                    if (*ws_idx, *pane_id) == focused
-                            )
-                        })
-                    })
-                    .or_else(|| {
-                        active_window.and_then(|window| {
-                            body.iter().rposition(|(target, _)| {
-                                matches!(
-                                    target,
-                                    BlockedPaneTarget::Local { ws_idx, tab_idx, .. }
-                                        if (*ws_idx, *tab_idx) == window
-                                )
-                            })
-                        })
-                    })
-            });
-        if let Some(anchor) = body_anchor {
-            if let Some(target) = (1..=body.len()).find_map(|offset| {
-                let (target, needs_attention) = &body[(anchor + offset) % body.len()];
-                needs_attention.then(|| target.clone())
-            }) {
-                return Some(target);
-            }
-        }
-    }
-    // Walking forward from where the operator stands, rather than restarting at
-    // the first blocked pane, is what keeps every blocked pane reachable when
-    // one is skipped instead of answered. The active window is the fallback
-    // anchor: a pane that carries no agent panel entry still has a position.
-    let start = selected_remote
-        .and_then(|selected| {
-            panes.iter().position(|(target, _)| {
-                matches!(target, BlockedPaneTarget::Remote(agent_ref) if agent_ref == selected)
-            })
         })
         .or_else(|| {
-            focused
-                .and_then(|focused| {
-                    panes.iter().position(|(target, _)| {
-                        matches!(
-                            target,
-                            BlockedPaneTarget::Local { ws_idx, pane_id, .. }
-                                if (*ws_idx, *pane_id) == focused
-                        )
-                    })
+            active_window.and_then(|window| {
+                panes.iter().rposition(|(target, _)| {
+                    matches!(
+                        target,
+                        BlockedPaneTarget::Local { ws_idx, tab_idx, .. }
+                            if (*ws_idx, *tab_idx) == window
+                    )
                 })
-                .or_else(|| {
-                    active_window.and_then(|window| {
-                        panes.iter().rposition(|(target, _)| {
-                            matches!(
-                                target,
-                                BlockedPaneTarget::Local { ws_idx, tab_idx, .. }
-                                    if (*ws_idx, *tab_idx) == window
-                            )
-                        })
-                    })
-                })
+            })
         })
         .map_or(0, |current| current + 1);
     (0..panes.len()).find_map(|offset| {
@@ -4729,7 +4605,7 @@ mod tests {
 
         app.state.skip_collapsed_cycle = false;
         assert!(window_cycle_order(&app.state).contains(&(2, 0)));
-        assert!(blocked_pane_cycle(&app.state)
+        assert!(blocked_pane_cycle_in_order(&app.state)
             .iter()
             .any(|(target, _)| matches!(
                 target,
@@ -4762,7 +4638,7 @@ mod tests {
             "cycle membership follows visible rows: {order:?}"
         );
         assert_eq!(
-            blocked_pane_cycle(&app.state)
+            blocked_pane_cycle_in_order(&app.state)
                 .iter()
                 .any(|(target, _)| matches!(
                     target,
@@ -4938,7 +4814,7 @@ mod tests {
         }
         app.state.skip_collapsed_cycle = true;
         assert!(!window_navigation_order(&app.state).is_empty());
-        assert!(!blocked_pane_cycle(&app.state).is_empty());
+        assert!(!blocked_pane_cycle_in_order(&app.state).is_empty());
 
         let key = format!(
             "{}:{}",
@@ -4951,7 +4827,7 @@ mod tests {
             crate::ui::sidebar::SPACES_SECTION_TITLE
         ));
         assert!(window_navigation_order(&app.state).is_empty());
-        assert!(blocked_pane_cycle(&app.state).is_empty());
+        assert!(blocked_pane_cycle_in_order(&app.state).is_empty());
     }
 
     #[test]
@@ -5062,7 +4938,10 @@ mod tests {
             app.state.set_sidebar_group_mode(mode);
             app.state.skip_collapsed_cycle = true;
             assert!(!window_navigation_order(&app.state).is_empty(), "{mode:?}");
-            assert!(!blocked_pane_cycle(&app.state).is_empty(), "{mode:?}");
+            assert!(
+                !blocked_pane_cycle_in_order(&app.state).is_empty(),
+                "{mode:?}"
+            );
 
             // One agentless tab, then collapse every work-item group.
             if let Some(terminal) = app.state.terminals.values_mut().next() {
@@ -5560,7 +5439,7 @@ mod tests {
                     cycled, shown_rows,
                     "{mode:?} sections={sections}: cycle order must match the sidebar"
                 );
-                let blocked = blocked_pane_cycle(&app.state);
+                let blocked = blocked_pane_cycle_in_order(&app.state);
                 for row in crate::ui::sidebar_rows(&app.state) {
                     let (crate::ui::SidebarRow::Tab { entry, .. }
                     | crate::ui::SidebarRow::Agent { entry, .. }) = row
@@ -5658,7 +5537,7 @@ mod tests {
             }
             app.state.sidebar_sections_layout = sections;
             app.state.skip_collapsed_cycle = true;
-            let blocked = blocked_pane_cycle(&app.state)
+            let blocked = blocked_pane_cycle_in_order(&app.state)
                 .into_iter()
                 .filter_map(|(target, _)| match target {
                     BlockedPaneTarget::Local { pane_id, .. } => Some(pane_id),
@@ -5897,7 +5776,7 @@ mod tests {
             .into_iter()
             .map(|agent| agent.pane_id)
             .collect::<std::collections::HashSet<_>>();
-        let cycle_panes = blocked_pane_cycle(&app.state)
+        let cycle_panes = blocked_pane_cycle_in_order(&app.state)
             .into_iter()
             .filter_map(|(target, stops)| match (target, stops) {
                 (BlockedPaneTarget::Local { pane_id, .. }, true) => Some(pane_id),
@@ -5936,14 +5815,14 @@ mod tests {
             .expect("panel entry for test pane");
         assert!(entry.stale);
 
-        assert!(blocked_pane_cycle(&app.state).iter().any(|(target, stops)| {
+        assert!(blocked_pane_cycle_in_order(&app.state).iter().any(|(target, stops)| {
             matches!(target, BlockedPaneTarget::Local { pane_id: target_pane, .. } if *target_pane == pane_id)
                 && *stops
         }));
     }
 
     #[test]
-    fn next_blocked_window_follows_the_rendered_needs_you_order() {
+    fn next_blocked_window_follows_sidebar_body_order() {
         let mut app = app_with_test_workspaces(&["main", "other", "worktree"]);
         mark_worktree_space_member(&mut app.state, 0, "repo-key");
         mark_worktree_space_member(&mut app.state, 2, "repo-key");
@@ -5963,7 +5842,59 @@ mod tests {
         assert_tui_window_cycle(
             &mut app,
             NavigateAction::NextBlockedWindow,
-            &[(1, 0), (2, 0), (0, 0)],
+            &[(2, 0), (1, 0), (0, 0)],
+        );
+    }
+
+    #[test]
+    fn next_blocked_window_keeps_body_order_when_attention_clears() {
+        let mut app = app_with_test_workspaces(&["a", "b", "c"]);
+        app.state.ensure_test_terminals();
+        expand_all_workspaces_for_sidebar(&mut app.state);
+        for ws_idx in 0..3 {
+            set_tab_agent_state(
+                &mut app.state,
+                ws_idx,
+                0,
+                crate::detect::AgentState::Blocked,
+            );
+        }
+        let panes = app
+            .state
+            .workspaces
+            .iter()
+            .map(|workspace| workspace.tabs[0].root_pane)
+            .collect::<Vec<_>>();
+        app.state.active = Some(0);
+        assert_eq!(
+            next_blocked_window_target(&app.state),
+            Some(BlockedPaneTarget::Local {
+                ws_idx: 1,
+                tab_idx: 0,
+                pane_id: panes[1]
+            })
+        );
+
+        set_tab_agent_state(&mut app.state, 1, 0, crate::detect::AgentState::Idle);
+        app.state.active = Some(1);
+        assert_eq!(
+            next_blocked_window_target(&app.state),
+            Some(BlockedPaneTarget::Local {
+                ws_idx: 2,
+                tab_idx: 0,
+                pane_id: panes[2]
+            })
+        );
+
+        set_tab_agent_state(&mut app.state, 2, 0, crate::detect::AgentState::Idle);
+        app.state.active = Some(2);
+        assert_eq!(
+            next_blocked_window_target(&app.state),
+            Some(BlockedPaneTarget::Local {
+                ws_idx: 0,
+                tab_idx: 0,
+                pane_id: panes[0]
+            })
         );
     }
 
@@ -6009,7 +5940,7 @@ mod tests {
             sort: Vec::new(),
         });
 
-        let targets = blocked_pane_cycle(&app.state)
+        let targets = blocked_pane_cycle_in_order(&app.state)
             .into_iter()
             .filter_map(|(target, needs_attention)| needs_attention.then_some(target))
             .collect::<Vec<_>>();
@@ -6020,17 +5951,17 @@ mod tests {
                 BlockedPaneTarget::Local {
                     ws_idx: 0,
                     tab_idx: 0,
+                    pane_id: visible,
+                },
+                BlockedPaneTarget::Local {
+                    ws_idx: 0,
+                    tab_idx: 0,
                     pane_id: hidden,
                 },
                 BlockedPaneTarget::Local {
                     ws_idx: 1,
                     tab_idx: 0,
                     pane_id: later,
-                },
-                BlockedPaneTarget::Local {
-                    ws_idx: 0,
-                    tab_idx: 0,
-                    pane_id: visible,
                 },
             ]
         );
@@ -6069,7 +6000,7 @@ mod tests {
         app.state.sidebar_work_filter.query = "visible".into();
         app.state.assert_invariants_for_test();
 
-        let targets = blocked_pane_cycle(&app.state)
+        let targets = blocked_pane_cycle_in_order(&app.state)
             .into_iter()
             .filter_map(|(target, needs_attention)| needs_attention.then_some(target))
             .collect::<Vec<_>>();
@@ -6079,17 +6010,17 @@ mod tests {
                 BlockedPaneTarget::Local {
                     ws_idx: 0,
                     tab_idx: 0,
+                    pane_id: first,
+                },
+                BlockedPaneTarget::Local {
+                    ws_idx: 0,
+                    tab_idx: 0,
                     pane_id: hidden,
                 },
                 BlockedPaneTarget::Local {
                     ws_idx: 1,
                     tab_idx: 0,
                     pane_id: later,
-                },
-                BlockedPaneTarget::Local {
-                    ws_idx: 0,
-                    tab_idx: 0,
-                    pane_id: first,
                 },
             ]
         );
@@ -6117,7 +6048,7 @@ mod tests {
         app.state.sidebar_starred_only = true;
         app.state.assert_invariants_for_test();
 
-        let targets = blocked_pane_cycle(&app.state)
+        let targets = blocked_pane_cycle_in_order(&app.state)
             .into_iter()
             .filter_map(|(target, needs_attention)| needs_attention.then_some(target))
             .collect::<Vec<_>>();
@@ -6176,7 +6107,7 @@ mod tests {
         );
         app.state.assert_invariants_for_test();
 
-        let targets = blocked_pane_cycle(&app.state)
+        let targets = blocked_pane_cycle_in_order(&app.state)
             .into_iter()
             .filter_map(|(target, needs_attention)| needs_attention.then_some(target))
             .collect::<Vec<_>>();
@@ -6319,7 +6250,7 @@ mod tests {
         state.view_observed_unix_s = 100;
         state.collapsed_sidebar_groups.remove("repo:Fleet");
 
-        let targets = blocked_pane_cycle(&state)
+        let targets = blocked_pane_cycle_in_order(&state)
             .into_iter()
             .filter_map(|(target, needs_attention)| needs_attention.then_some(target))
             .collect::<Vec<_>>();
@@ -6519,7 +6450,7 @@ mod tests {
                 .into_iter()
                 .collect()
         );
-        let blocked_targets = blocked_pane_cycle(&app.state)
+        let blocked_targets = blocked_pane_cycle_in_order(&app.state)
             .into_iter()
             .filter_map(|(target, blocked)| blocked.then_some(target))
             .collect::<Vec<_>>();
@@ -6583,7 +6514,7 @@ mod tests {
             crate::ui::SidebarRow::RemoteAgent { entry, .. }
                 if entry.agent_ref == agent_ref
         )));
-        let targets = blocked_pane_cycle(&state)
+        let targets = blocked_pane_cycle_in_order(&state)
             .into_iter()
             .filter_map(|(target, needs_attention)| needs_attention.then_some(target))
             .collect::<Vec<_>>();
@@ -6691,7 +6622,7 @@ mod tests {
                 crate::ui::RemoteAgentPanelEntry::new(agent_ref.clone(), remote),
             )];
             let reaches_remote = |state: &AppState| {
-                blocked_pane_cycle(state).iter().any(|(target, _)| {
+                blocked_pane_cycle_in_order(state).iter().any(|(target, _)| {
                     matches!(target, BlockedPaneTarget::Remote(found) if *found == agent_ref)
                 })
             };

@@ -470,7 +470,7 @@ fn status_button_specs(app: &AppState) -> [StatusButtonSpec; 4] {
         (
             StatusButtonAction::Scratch,
             if app.nerd_font { " ✎ " } else { " S " }.to_string(),
-            app.dock_tab == Some(crate::app::DockSurface::Scratchpad) && !app.dock_collapsed,
+            app.scratch.open,
         ),
     ]
 }
