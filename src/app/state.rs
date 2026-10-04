@@ -1815,6 +1815,7 @@ pub(crate) enum SurfaceInputOwner {
     DockObjectPreview,
     Home,
     Inbox,
+    Scratch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2807,6 +2808,7 @@ pub(crate) enum StatusButtonAction {
     BlockedFilter,
     Attention,
     Dock,
+    Scratch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4333,6 +4335,7 @@ pub(crate) enum TerminalAreaSurface<'a> {
     DockObjectPreview,
     Home,
     Inbox(&'a crate::app::inbox::InboxState),
+    Scratch,
     Tab,
     Empty,
 }
@@ -4434,6 +4437,7 @@ pub struct AppState {
     /// Open inbox cursor. `Some` means the inbox overlay owns the screen and the
     /// keyboard, exactly like the Symphony and loop-history details above it.
     pub(crate) inbox: Option<crate::app::inbox::InboxState>,
+    pub(crate) scratch: crate::scratch::ScratchState,
     /// Open home view. `Some` means home owns the screen, the same way `inbox`
     /// does; the two are mutually exclusive because each wants the whole frame.
     pub(crate) home: Option<crate::app::home::HomeState>,
@@ -5440,6 +5444,7 @@ pub(crate) struct WorkViewState {
     pub(crate) board_rows: [usize; 5],
     pub(crate) board_scroll: [usize; 5],
     pub(crate) board_detail_open: bool,
+    pub(crate) board_mine_only: bool,
     pub(crate) board_last_click: Option<(WorkItemKey, std::time::Instant)>,
 }
 
@@ -5486,6 +5491,9 @@ pub(crate) enum ControlId {
     SidebarRowHover(u16),
     NotepadUsageRow(usize),
     NotepadUsageToggle,
+    TicketBoardFilter,
+    TicketBoardDone,
+    TicketBoardSpawn(usize),
     SidebarAnimationPause,
     DockTab(usize),
     DockClose,
@@ -5900,6 +5908,7 @@ impl WorkViewState {
             board_rows: [0; 5],
             board_scroll: [0; 5],
             board_detail_open: false,
+            board_mine_only: true,
             board_last_click: None,
         }
     }
@@ -6562,6 +6571,12 @@ impl AppState {
         if let Some(owner) = ClientInputOwnerState::from_app(self).resolve() {
             return InputOwner::Client(owner);
         }
+        if self.scratch.open
+            && self.popup_pane.is_none()
+            && matches!(self.server_mode(), Mode::Terminal | Mode::Navigate)
+        {
+            return InputOwner::Surface(SurfaceInputOwner::Scratch);
+        }
         // A focused note editor or read-only dock tab owns input ahead of
         // shared modes and underlying surfaces. Config reloads can hide Notes
         // without clearing focus, so use the panel's current visibility.
@@ -6618,6 +6633,7 @@ impl AppState {
             }
             TerminalAreaSurface::Home => return InputOwner::Surface(SurfaceInputOwner::Home),
             TerminalAreaSurface::Inbox(_) => return InputOwner::Surface(SurfaceInputOwner::Inbox),
+            TerminalAreaSurface::Scratch => return InputOwner::Surface(SurfaceInputOwner::Scratch),
             TerminalAreaSurface::Tab => {}
             TerminalAreaSurface::Empty => return InputOwner::None,
         }
@@ -7481,7 +7497,13 @@ impl AppState {
             .iter()
             .filter_map(|age| crate::activity_age::next_change_after_elapsed(*age, now))
             .min();
-        sidebar.into_iter().chain(notepad).min()
+        sidebar
+            .into_iter()
+            .chain(notepad)
+            .chain(crate::ui::work_view::ticket_board_next_age_change(
+                self, now,
+            ))
+            .min()
     }
 
     pub(crate) fn toggle_workspace_agent_disclosure(&mut self, ws_idx: usize) -> bool {
@@ -7583,6 +7605,9 @@ impl AppState {
     }
 
     pub(crate) fn terminal_area_surface(&self) -> TerminalAreaSurface<'_> {
+        if self.scratch.open {
+            return TerminalAreaSurface::Scratch;
+        }
         let preview_is_in_dock = !self.dock_collapsed && self.dock_tab == Some(DockSurface::Editor);
         if self.dock_editor_preview.is_some() && !preview_is_in_dock {
             TerminalAreaSurface::EditorPreview
@@ -7822,6 +7847,7 @@ impl AppState {
             usage_pricing: crate::config::UsageConfig::default(),
             request_usage_scan: false,
             inbox: None,
+            scratch: crate::scratch::ScratchState::default(),
             home: None,
             spawn_dock: None,
             home_agent_choices: Vec::new(),
