@@ -929,20 +929,6 @@ impl Config {
             }
         }
 
-        if keybinds.toggle_blocked_filter.bindings.is_empty()
-            && !self
-                .keys
-                .key_field_is_user_configured("toggle_blocked_filter")
-        {
-            keybinds.toggle_blocked_filter = parse_action_bindings(
-                "keys.toggle_blocked_filter",
-                &BindingConfig::one("prefix+m"),
-                &mut registry,
-                &mut diagnostics,
-                BindingSource::Default,
-            );
-        }
-
         // Keep the pre-picker field names usable for existing configurations;
         // canonical defaults and new configurations live under *_work_link.
         if !self.keys.key_field_is_user_configured("open_work_url")
@@ -2694,11 +2680,21 @@ switch_tab = "prefix+?"
     }
 
     #[test]
-    fn blocked_filter_falls_back_when_preferred_prefix_binding_is_taken() {
+    fn agent_finder_uses_prefix_f_and_blocked_filter_is_unbound_by_default() {
+        let defaults = Config::default().keybinds();
+        assert_eq!(
+            binding_triggers(&defaults.agent_finder),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('f'),
+                KeyModifiers::empty()
+            ))]
+        );
+        assert!(binding_triggers(&defaults.toggle_blocked_filter).is_empty());
+
         let config: Config = toml::from_str(
             r#"
 [keys]
-new_workspace = "prefix+f"
+toggle_blocked_filter = "prefix+shift+f"
 "#,
         )
         .unwrap();
@@ -2707,8 +2703,8 @@ new_workspace = "prefix+f"
         assert_eq!(
             binding_triggers(&kb.toggle_blocked_filter),
             vec![BindingTrigger::Prefix((
-                KeyCode::Char('m'),
-                KeyModifiers::empty()
+                KeyCode::Char('f'),
+                KeyModifiers::SHIFT
             ))]
         );
     }

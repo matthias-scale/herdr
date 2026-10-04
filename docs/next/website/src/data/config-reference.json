@@ -573,7 +573,7 @@
         {
           "key": "keys.agent_finder",
           "type": "keybinding",
-          "default": "\"prefix+/\"",
+          "default": "\"prefix+f\"",
           "description": "Search agents from the sidebar."
         },
         {
@@ -1053,8 +1053,8 @@
         {
           "key": "keys.toggle_blocked_filter",
           "type": "keybinding",
-          "default": "\"prefix+f\"",
-          "description": "Toggle the sidebar blocked filter."
+          "default": "unset",
+          "description": "Toggle the sidebar blocked filter. Unset by default."
         },
         {
           "key": "keys.toggle_dock",

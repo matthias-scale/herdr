@@ -18188,185 +18188,194 @@ next_tab = ""
             assert!(server.handle_server_event(event));
         }
 
-        let mut server = test_headless_server();
-        let mut workspace = crate::workspace::Workspace::test_new("finder");
-        let claude_pane = workspace.tabs[0].root_pane;
-        let codex_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
-        server.app.state.workspaces = vec![workspace];
-        server.app.state.ensure_test_terminals();
-        server.app.state.active = Some(0);
-        server.app.state.selected = 0;
-        server.app.state.sidebar_collapsed = true;
-        server.app.state.set_server_mode(crate::app::Mode::Terminal);
-        for (pane_id, agent) in [
-            (claude_pane, crate::detect::Agent::Claude),
-            (codex_pane, crate::detect::Agent::Codex),
-        ] {
-            let terminal_id = server.app.state.workspaces[0]
-                .terminal_id(pane_id)
-                .expect("agent terminal id")
-                .clone();
-            server
-                .app
-                .state
-                .terminals
-                .get_mut(&terminal_id)
-                .expect("test terminal")
-                .detected_agent = Some(agent);
-        }
+        for (width, height) in [(247, 91), (64, 39)] {
+            let mut server = test_headless_server();
+            let mut workspace = crate::workspace::Workspace::test_new("finder");
+            let claude_pane = workspace.tabs[0].root_pane;
+            let codex_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+            server.app.state.workspaces = vec![workspace];
+            server.app.state.ensure_test_terminals();
+            server.app.state.active = Some(0);
+            server.app.state.selected = 0;
+            server.app.state.sidebar_collapsed = true;
+            server.app.state.set_server_mode(crate::app::Mode::Terminal);
+            for (pane_id, agent) in [
+                (claude_pane, crate::detect::Agent::Claude),
+                (codex_pane, crate::detect::Agent::Codex),
+            ] {
+                let terminal_id = server.app.state.workspaces[0]
+                    .terminal_id(pane_id)
+                    .expect("agent terminal id")
+                    .clone();
+                server
+                    .app
+                    .state
+                    .terminals
+                    .get_mut(&terminal_id)
+                    .expect("test terminal")
+                    .detected_agent = Some(agent);
+            }
 
-        let (writer, control_rx, render_rx) = test_client_writer();
-        let mut client = ClientConnection::new(
-            (64, 39),
-            crate::kitty_graphics::HostCellSize::default(),
-            crate::terminal_theme::TerminalTheme::default(),
-            Some(true),
-            1,
-            RenderEncoding::SemanticFrame,
-            Some(writer),
-        );
-        client.sidebar_presentation.focus_intent = crate::app::state::ClientFocusIntent::Pane;
-        server.clients.insert(1, client);
-        server.foreground_client_id = Some(1);
-        server.sync_foreground_client_state();
-        server.resize_shared_runtime_to_effective_size();
-        while control_rx.try_recv().is_ok() {}
-        while render_rx.try_recv().is_ok() {}
-
-        let socket_path = std::env::temp_dir().join(format!(
-            "agent-finder-{}.sock",
-            crate::config::test_unique_suffix()
-        ));
-        let _ = std::fs::remove_file(&socket_path);
-        let listener = crate::ipc::bind_local_listener(&socket_path).expect("bind client socket");
-        let mut client_socket =
-            crate::ipc::connect_local_stream(&socket_path).expect("connect client socket");
-        let server_socket = listener.accept().expect("accept client socket");
-        let (server_event_tx, mut server_event_rx) = tokio::sync::mpsc::channel(16);
-        let should_quit = Arc::new(AtomicBool::new(false));
-        let read_quit = should_quit.clone();
-        let reader = std::thread::spawn(move || {
-            crate::server::client_transport::client_read_loop(
-                server_socket,
+            let (writer, control_rx, render_rx) = test_client_writer();
+            let mut client = ClientConnection::new(
+                (width, height),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
                 1,
-                &server_event_tx,
-                &read_quit,
+                RenderEncoding::SemanticFrame,
+                Some(writer),
+            );
+            client.sidebar_presentation.focus_intent = crate::app::state::ClientFocusIntent::Pane;
+            server.clients.insert(1, client);
+            server.foreground_client_id = Some(1);
+            server.sync_foreground_client_state();
+            server.resize_shared_runtime_to_effective_size();
+            while control_rx.try_recv().is_ok() {}
+            while render_rx.try_recv().is_ok() {}
+
+            let socket_path = std::env::temp_dir().join(format!(
+                "agent-finder-{}.sock",
+                crate::config::test_unique_suffix()
+            ));
+            let _ = std::fs::remove_file(&socket_path);
+            let listener =
+                crate::ipc::bind_local_listener(&socket_path).expect("bind client socket");
+            let mut client_socket =
+                crate::ipc::connect_local_stream(&socket_path).expect("connect client socket");
+            let server_socket = listener.accept().expect("accept client socket");
+            let (server_event_tx, mut server_event_rx) = tokio::sync::mpsc::channel(16);
+            let should_quit = Arc::new(AtomicBool::new(false));
+            let read_quit = should_quit.clone();
+            let reader = std::thread::spawn(move || {
+                crate::server::client_transport::client_read_loop(
+                    server_socket,
+                    1,
+                    &server_event_tx,
+                    &read_quit,
+                )
+            });
+
+            send(
+                &mut server,
+                &mut client_socket,
+                &mut server_event_rx,
+                vec![key(ClientKeyCode::Char('b'), KeyModifiers::CONTROL, None)],
             )
-        });
-
-        send(
-            &mut server,
-            &mut client_socket,
-            &mut server_event_rx,
-            vec![key(ClientKeyCode::Char('b'), KeyModifiers::CONTROL, None)],
-        )
-        .await;
-        send(
-            &mut server,
-            &mut client_socket,
-            &mut server_event_rx,
-            vec![key(
-                ClientKeyCode::Char('/'),
-                KeyModifiers::empty(),
-                Some("/".into()),
-            )],
-        )
-        .await;
-        assert_eq!(
-            server.clients[&1]
-                .sidebar_presentation
-                .agent_finder_saved_query
-                .as_deref(),
-            Some("")
-        );
-
-        for character in "claude".chars() {
+            .await;
             send(
                 &mut server,
                 &mut client_socket,
                 &mut server_event_rx,
                 vec![key(
-                    ClientKeyCode::Char(character),
+                    ClientKeyCode::Char('f'),
                     KeyModifiers::empty(),
-                    Some(character.to_string()),
+                    Some("f".into()),
                 )],
             )
             .await;
-        }
-        assert_eq!(
-            server.clients[&1].sidebar_presentation.work_filter.query,
-            "claude"
-        );
-        let finder_deadline = server.clients[&1]
-            .sidebar_presentation
-            .agent_finder_deadline
-            .expect("typing schedules a finder search");
-        assert!(server
-            .handle_scheduled_tasks_headless(finder_deadline + Duration::from_millis(1), false,));
-        assert_eq!(
-            server.clients[&1].sidebar_presentation.agent_finder_results[0]
-                .agent
-                .agent,
-            Some("claude".into()),
-            "the selected result is the detected Claude pane"
-        );
+            assert_eq!(
+                server.clients[&1]
+                    .sidebar_presentation
+                    .agent_finder_saved_query
+                    .as_deref(),
+                Some("")
+            );
 
-        server.render_and_stream();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut rendered = String::new();
-        while Instant::now() < deadline {
-            let Ok(bytes) = render_rx.recv_timeout(Duration::from_millis(100)) else {
-                continue;
-            };
-            if let ServerMessage::Frame(frame) = read_server_message(bytes) {
-                assert_eq!((frame.width, frame.height), (64, 39));
-                rendered = frame_text(&frame);
-                break;
+            for character in "claude".chars() {
+                send(
+                    &mut server,
+                    &mut client_socket,
+                    &mut server_event_rx,
+                    vec![key(
+                        ClientKeyCode::Char(character),
+                        KeyModifiers::empty(),
+                        Some(character.to_string()),
+                    )],
+                )
+                .await;
             }
-        }
-        assert!(
-            rendered.contains("claude"),
-            "compact finder frame:\n{rendered}"
-        );
-        assert!(
-            rendered.contains("› claude ·"),
-            "compact finder result row:\n{rendered}"
-        );
-        assert!(
-            rendered.contains("Search agents: claude"),
-            "compact finder query:\n{rendered}"
-        );
-        assert_eq!(
-            server.clients[&1]
+            assert_eq!(
+                server.clients[&1].sidebar_presentation.work_filter.query,
+                "claude"
+            );
+            let finder_deadline = server.clients[&1]
                 .sidebar_presentation
-                .agent_finder_saved_query
-                .as_deref(),
-            Some("")
-        );
+                .agent_finder_deadline
+                .expect("typing schedules a finder search");
+            assert!(server.handle_scheduled_tasks_headless(
+                finder_deadline + Duration::from_millis(1),
+                false,
+            ));
+            assert_eq!(
+                server.clients[&1].sidebar_presentation.agent_finder_results[0]
+                    .agent
+                    .agent,
+                Some("claude".into()),
+                "the selected result is the detected Claude pane"
+            );
 
-        send(
-            &mut server,
-            &mut client_socket,
-            &mut server_event_rx,
-            vec![key(ClientKeyCode::Enter, KeyModifiers::empty(), None)],
-        )
-        .await;
-        assert!(server.app.state.agent_finder_saved_query.is_none());
-        assert_eq!(
-            server.app.state.workspaces[0].focused_pane_id(),
-            Some(claude_pane),
-            "Enter focuses the matching detected agent pane"
-        );
+            server.render_and_stream();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut rendered = String::new();
+            while Instant::now() < deadline {
+                let Ok(bytes) = render_rx.recv_timeout(Duration::from_millis(100)) else {
+                    continue;
+                };
+                if let ServerMessage::Frame(frame) = read_server_message(bytes) {
+                    assert_eq!((frame.width, frame.height), (width, height));
+                    rendered = frame_text(&frame);
+                    break;
+                }
+            }
+            assert!(
+                rendered.contains("claude"),
+                "compact finder frame:\n{rendered}"
+            );
+            assert!(
+                rendered.contains("› claude ·"),
+                "compact finder result row:\n{rendered}"
+            );
+            assert!(
+                rendered.contains("Matched in title"),
+                "compact finder title match:\n{rendered}"
+            );
+            assert!(
+                rendered.contains("Search agents: claude"),
+                "compact finder query:\n{rendered}"
+            );
+            assert_eq!(
+                server.clients[&1]
+                    .sidebar_presentation
+                    .agent_finder_saved_query
+                    .as_deref(),
+                Some("")
+            );
 
-        should_quit.store(true, Ordering::Release);
-        drop(client_socket);
-        reader
-            .join()
-            .expect("client socket reader joins")
-            .expect("client socket reader exits cleanly");
-        drop(listener);
-        let _ = std::fs::remove_file(socket_path);
-        shutdown_test_runtimes(&mut server);
+            send(
+                &mut server,
+                &mut client_socket,
+                &mut server_event_rx,
+                vec![key(ClientKeyCode::Enter, KeyModifiers::empty(), None)],
+            )
+            .await;
+            assert!(server.app.state.agent_finder_saved_query.is_none());
+            assert_eq!(
+                server.app.state.workspaces[0].focused_pane_id(),
+                Some(claude_pane),
+                "Enter focuses the matching detected agent pane"
+            );
+
+            should_quit.store(true, Ordering::Release);
+            drop(client_socket);
+            reader
+                .join()
+                .expect("client socket reader joins")
+                .expect("client socket reader exits cleanly");
+            drop(listener);
+            let _ = std::fs::remove_file(socket_path);
+            shutdown_test_runtimes(&mut server);
+        }
     }
 
     #[tokio::test]
