@@ -434,10 +434,12 @@ fn status_button_specs(app: &AppState, blocked: usize, attention: usize) -> [Sta
         ),
         (
             StatusButtonAction::BlockedFilter,
-            if blocked > 0 {
-                format!(" blocked {blocked} ")
+            if app.sidebar_blocker_scope == crate::app::state::BlockerScope::ThisDevice {
+                format!(" ⛔ {blocked} · {} ", app.agent_host_name)
+            } else if blocked > 0 {
+                format!(" ⛔ {blocked} ")
             } else {
-                " blocked ".to_string()
+                " ⛔ 0 ".to_string()
             },
             app.blocked_filter,
         ),
@@ -477,7 +479,18 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
             let tier = crate::ui::sidebar::entry_attention_tier(&entry);
             let is_blocked = tier == crate::terminal::state::AttentionTier::Blocked;
             if is_blocked {
-                (blocked + 1, attention)
+                let on_this_device = entry.local_target().is_some_and(|target| {
+                    app.workspaces
+                        .get(target.ws_idx)
+                        .is_some_and(|workspace| !workspace.is_fleet)
+                });
+                if app.sidebar_blocker_scope == crate::app::state::BlockerScope::ThisDevice
+                    && !on_this_device
+                {
+                    (blocked, attention)
+                } else {
+                    (blocked + 1, attention)
+                }
             } else if tier == crate::terminal::state::AttentionTier::Attention {
                 (blocked, attention + 1)
             } else {
@@ -2508,7 +2521,7 @@ mod tests {
 
         assert_eq!(home.0, StatusButtonAction::Home);
         assert_eq!(work.0, StatusButtonAction::Work);
-        assert_eq!(blocked.1.trim(), "blocked 2");
+        assert_eq!(blocked.1.trim(), "⛔ 2");
         assert_eq!(attention.1.trim(), "attention 3");
         assert_eq!(dock.0, StatusButtonAction::Dock);
         assert_eq!(scratch.0, StatusButtonAction::Scratch);
@@ -2538,7 +2551,7 @@ mod tests {
 
         let idle = status_buttons(&app, Rect::new(0, 0, 120, 1));
         let idle = button_for(&idle, StatusButtonAction::BlockedFilter);
-        assert_eq!(idle.label.trim(), "blocked");
+        assert_eq!(idle.label.trim(), "⛔ 0");
         assert!(!idle.active, "the filter starts disabled");
 
         let pane_id = app.workspaces[0].focused_pane_id().expect("pane");
@@ -2569,7 +2582,7 @@ mod tests {
             button_for(&working_blocked, StatusButtonAction::BlockedFilter)
                 .label
                 .trim(),
-            "blocked 1"
+            "⛔ 1"
         );
 
         app.terminals
@@ -2579,7 +2592,7 @@ mod tests {
 
         let blocked = status_buttons(&app, Rect::new(0, 0, 120, 1));
         let blocked = button_for(&blocked, StatusButtonAction::BlockedFilter);
-        assert_eq!(blocked.label.trim(), "blocked 1");
+        assert_eq!(blocked.label.trim(), "⛔ 1");
         assert!(!blocked.active);
 
         let terminal = app.terminals.get_mut(&terminal_id).expect("terminal state");
@@ -2603,7 +2616,7 @@ mod tests {
             button_for(&attention, StatusButtonAction::BlockedFilter)
                 .label
                 .trim(),
-            "blocked 1"
+            "⛔ 1"
         );
         assert!(!attention
             .iter()
@@ -2622,6 +2635,42 @@ mod tests {
         app.blocked_filter = true;
         let filtered = status_buttons(&app, Rect::new(0, 0, 120, 1));
         assert!(button_for(&filtered, StatusButtonAction::BlockedFilter).active);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocker_status_count_follows_the_selected_scope() {
+        let mut app = AppState::test_new();
+        let local = crate::workspace::Workspace::test_new("local");
+        let mut fleet = crate::workspace::Workspace::test_new("fleet");
+        fleet.is_fleet = true;
+        app.workspaces = vec![local, {
+            fleet.is_fleet = true;
+            fleet
+        }];
+        app.agent_host_name = "ub1".into();
+        app.ensure_test_terminals();
+        for workspace in &app.workspaces {
+            let pane = workspace.tabs[0].root_pane;
+            let terminal_id = workspace.tabs[0].panes[&pane].attached_terminal_id.clone();
+            let terminal = app.terminals.get_mut(&terminal_id).expect("test terminal");
+            terminal.detected_agent = Some(crate::detect::Agent::Claude);
+            terminal.set_raw_agent_state_for_test(AgentState::Blocked);
+        }
+
+        let fleet_count = button_for(
+            &status_buttons(&app, Rect::new(0, 0, 120, 1)),
+            StatusButtonAction::BlockedFilter,
+        );
+        assert_eq!(fleet_count.label.trim(), "⛔ 2");
+        assert_eq!(app.agent_dot_counts(), (2, 2));
+
+        app.sidebar_blocker_scope = crate::app::state::BlockerScope::ThisDevice;
+        let local_count = button_for(
+            &status_buttons(&app, Rect::new(0, 0, 120, 1)),
+            StatusButtonAction::BlockedFilter,
+        );
+        assert_eq!(local_count.label.trim(), "⛔ 1 · ub1");
+        assert_eq!(app.agent_dot_counts(), (1, 1));
     }
 
     #[test]

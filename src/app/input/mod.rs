@@ -303,6 +303,9 @@ impl App {
                 ClientInputOwner::SidebarFilterMenu => {
                     self.state.handle_sidebar_filter_menu_key(key_event);
                 }
+                ClientInputOwner::SidebarBlockerScopeMenu => {
+                    self.state.handle_sidebar_blocker_scope_menu_key(key_event);
+                }
                 ClientInputOwner::SidebarNewMenu => {
                     self.state.handle_sidebar_new_menu_key(key_event);
                 }
@@ -5751,6 +5754,7 @@ impl App {
             | ClientInputOwner::AgentPicker
             | ClientInputOwner::SidebarGroupMenu
             | ClientInputOwner::SidebarFilterMenu
+            | ClientInputOwner::SidebarBlockerScopeMenu
             | ClientInputOwner::SidebarNewMenu
             | ClientInputOwner::SidebarNewThread
             | ClientInputOwner::SidebarProjectMenu

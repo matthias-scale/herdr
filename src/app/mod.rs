@@ -940,6 +940,10 @@ impl App {
         #[cfg(test)]
         let sidebar_work_filter = state::SidebarWorkFilter::default();
         #[cfg(not(test))]
+        let sidebar_blocker_scope = crate::client::presentation::load_sidebar_blocker_scope();
+        #[cfg(test)]
+        let sidebar_blocker_scope = state::BlockerScope::default();
+        #[cfg(not(test))]
         let sidebar_group_sorts = crate::client::presentation::load_sidebar_group_sorts();
         #[cfg(test)]
         let sidebar_group_sorts = std::collections::HashMap::new();
@@ -951,6 +955,7 @@ impl App {
         #[cfg(not(test))]
         let sidebar_presentation = state::SidebarPresentationState {
             spawn_dock_client_id: Some(crate::platform::client_presentation_identity()),
+            blocker_scope: sidebar_blocker_scope,
             ..Default::default()
         };
         #[cfg(test)]
@@ -969,6 +974,12 @@ impl App {
             sidebar_work_filter,
             sidebar_filter_menu_open: false,
             sidebar_filter_menu_selected: 0,
+            sidebar_blocker_scope,
+            sidebar_blocker_scope_menu_open: false,
+            sidebar_blocker_scope_menu_selected: state::BlockerScope::ALL
+                .iter()
+                .position(|scope| *scope == sidebar_blocker_scope)
+                .unwrap_or(1),
             sidebar_search_active: false,
             sidebar_starred_only: false,
             sidebar_new_menu: None,
@@ -1136,6 +1147,7 @@ impl App {
             sidebar_group_collapsed_persistence_request: None,
             sidebar_view_scan_request: false,
             sidebar_work_filter_persistence_request: None,
+            sidebar_blocker_scope_persistence_request: None,
             request_clipboard_write: None,
             creating_new_tab: false,
             requested_new_tab_name: None,
@@ -2393,6 +2405,9 @@ impl App {
             }
             if let Some(filter) = self.state.take_sidebar_work_filter_persistence_request() {
                 crate::client::presentation::save_sidebar_work_filter(filter);
+            }
+            if let Some(scope) = self.state.take_sidebar_blocker_scope_persistence_request() {
+                crate::client::presentation::save_sidebar_blocker_scope(scope);
             }
 
             if needs_render && self.can_render_now(now) {
@@ -3888,6 +3903,9 @@ impl App {
                 }
                 state::ClientInputOwner::SidebarFilterMenu => {
                     self.state.handle_sidebar_filter_menu_key(key_event);
+                }
+                state::ClientInputOwner::SidebarBlockerScopeMenu => {
+                    self.state.handle_sidebar_blocker_scope_menu_key(key_event);
                 }
                 state::ClientInputOwner::SidebarNewMenu => {
                     self.state.handle_sidebar_new_menu_key(key_event);
