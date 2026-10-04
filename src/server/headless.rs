@@ -18190,6 +18190,9 @@ next_tab = ""
 
         for (width, height) in [(120, 40), (64, 39)] {
             let mut server = test_headless_server();
+            // Keep the finder metadata row deterministic across CI hosts; some
+            // macOS runners expose a hostname longer than the sidebar column.
+            server.app.state.agent_host_name = "local".into();
             let mut workspace = crate::workspace::Workspace::test_new("finder");
             let claude_pane = workspace.tabs[0].root_pane;
             let codex_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
