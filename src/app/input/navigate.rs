@@ -205,6 +205,15 @@ impl App {
                 self.state.open_sidebar_new_thread();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::NewAgentDock => {
+                leave_navigate_mode(&mut self.state);
+                self.state.open_spawn_dock();
+                if let Some(dock) = self.state.spawn_dock.as_ref() {
+                    self.state
+                        .sidebar_presentation
+                        .save_spawn_dock_draft(Some(dock.draft()));
+                }
+            }
             NavigateAction::NewWorktree => {
                 if let Some(ws_idx) = workspace_action_target(&self.state, context).filter(|idx| {
                     workspace_can_start_worktree_action(&self.state, &self.terminal_runtimes, *idx)
@@ -2743,6 +2752,7 @@ fn next_blocked_window_target(state: &AppState) -> Option<BlockedPaneTarget> {
 pub(crate) enum NavigateAction {
     NewWorkspace,
     NewThread,
+    NewAgentDock,
     NewWorktree,
     OpenWorktree,
     RemoveWorktree,
@@ -3027,6 +3037,7 @@ macro_rules! non_indexed_action_bindings {
             (&kb.workspace_picker, NavigateAction::WorkspacePicker),
             (&kb.new_workspace, NavigateAction::NewWorkspace),
             (&kb.new_thread, NavigateAction::NewThread),
+            (&kb.new_agent_dock, NavigateAction::NewAgentDock),
             (&kb.new_worktree, NavigateAction::NewWorktree),
             (&kb.open_worktree, NavigateAction::OpenWorktree),
             (&kb.remove_worktree, NavigateAction::RemoveWorktree),
@@ -3233,6 +3244,10 @@ pub(super) fn execute_navigate_action_in_context(
             state.focus_client_on_sidebar();
             state.open_sidebar_new_thread();
             leave_navigate_mode(state);
+        }
+        NavigateAction::NewAgentDock => {
+            leave_navigate_mode(state);
+            state.open_spawn_dock();
         }
         NavigateAction::NewWorktree => {
             if let Some(ws_idx) = workspace_action_target(state, context)
@@ -3963,8 +3978,10 @@ mod tests {
     #[cfg(unix)]
     use std::time::Duration;
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, ModifierKeyCode};
-    use ratatui::layout::Direction;
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, ModifierKeyCode, MouseButton, MouseEvent, MouseEventKind,
+    };
+    use ratatui::layout::{Direction, Rect};
 
     use super::super::{state_with_workspaces, unique_temp_path};
     #[cfg(unix)]
@@ -4042,6 +4059,79 @@ mod tests {
         app.state.active = (!app.state.workspaces.is_empty()).then_some(0);
         app.state.selected = 0;
         app
+    }
+
+    #[tokio::test]
+    async fn spawn_dock_owns_prefix_keys_and_persists_prompt_when_closed() {
+        let mut app = app_with_test_workspaces(&["local"]);
+        app.state.sidebar_presentation.spawn_dock_client_id = Some("test-spawn-dock".into());
+        app.state.sidebar_presentation.save_spawn_dock_draft(None);
+        app.state.active = None;
+        app.state.set_server_mode(Mode::Prefix);
+
+        app.handle_key(TerminalKey::new(KeyCode::Char('y'), KeyModifiers::empty()))
+            .await;
+        assert!(app.state.spawn_dock.is_some());
+        assert_eq!(
+            app.state.input_owner(),
+            crate::app::state::InputOwner::SpawnDock
+        );
+
+        app.handle_key(TerminalKey::new(KeyCode::Tab, KeyModifiers::empty()))
+            .await;
+        assert_eq!(
+            app.state.spawn_dock.as_ref().map(|dock| dock.focus),
+            Some(crate::app::spawn_dock::SpawnDockField::Host)
+        );
+        for _ in 0..5 {
+            app.handle_key(TerminalKey::new(KeyCode::Tab, KeyModifiers::empty()))
+                .await;
+        }
+        assert_eq!(
+            app.state.spawn_dock.as_ref().map(|dock| dock.focus),
+            Some(crate::app::spawn_dock::SpawnDockField::Prompt)
+        );
+        for ch in "ship it".chars() {
+            app.handle_key(TerminalKey::new(KeyCode::Char(ch), KeyModifiers::empty()))
+                .await;
+        }
+        assert_eq!(
+            app.state
+                .spawn_dock
+                .as_ref()
+                .map(|dock| dock.home.prompt.as_str()),
+            Some("ship it")
+        );
+
+        app.handle_key(TerminalKey::new(KeyCode::Esc, KeyModifiers::empty()))
+            .await;
+        assert!(app.state.spawn_dock.is_none());
+        assert_eq!(
+            crate::client::presentation::saved_spawn_dock_draft_for_test("test-spawn-dock")
+                .map(|draft| draft.prompt),
+            Some("ship it".into())
+        );
+        app.state.sidebar_presentation.save_spawn_dock_draft(None);
+    }
+
+    #[test]
+    fn spawn_dock_mouse_click_focuses_prompt() {
+        let mut app = app_with_test_workspaces(&["local"]);
+        app.state.open_spawn_dock();
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.view.terminal_area = Rect::new(0, 0, 100, 30);
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 8,
+            row: 22,
+            modifiers: KeyModifiers::empty(),
+        });
+
+        assert_eq!(
+            app.state.spawn_dock.as_ref().map(|dock| dock.focus),
+            Some(crate::app::spawn_dock::SpawnDockField::Prompt)
+        );
     }
 
     fn app_with_remote_agent() -> (App, crate::api::schema::AgentRef) {
@@ -6139,7 +6229,7 @@ mod tests {
     }
 
     #[test]
-    fn next_blocked_window_skips_working_pane_with_blocker_and_stops_at_idle_blocked_pane() {
+    fn next_blocked_window_visits_working_pane_with_blocker_and_idle_blocked_pane() {
         let mut app = app_with_global_window_fixture();
         expand_all_workspaces_for_sidebar(&mut app.state);
         let working_blocker = app.state.workspaces[0].tabs[1].root_pane;
@@ -6154,7 +6244,7 @@ mod tests {
         assert_tui_window_cycle(
             &mut app,
             NavigateAction::NextBlockedWindow,
-            &[(1, 0), (0, 0)],
+            &[(0, 1), (1, 0), (0, 0)],
         );
 
         let mut state = app_with_global_window_fixture().state;
@@ -6171,7 +6261,7 @@ mod tests {
         assert_headless_window_cycle(
             &mut state,
             NavigateAction::NextBlockedWindow,
-            &[(1, 0), (0, 0)],
+            &[(0, 1), (1, 0), (0, 0)],
         );
     }
 
