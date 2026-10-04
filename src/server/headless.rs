@@ -18188,11 +18188,23 @@ next_tab = ""
             assert!(server.handle_server_event(event));
         }
 
-        for (width, height) in [(247, 91), (64, 39)] {
+        for (width, height) in [(120, 40), (64, 39)] {
             let mut server = test_headless_server();
             let mut workspace = crate::workspace::Workspace::test_new("finder");
             let claude_pane = workspace.tabs[0].root_pane;
             let codex_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
+            let (claude_runtime, mut claude_input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 8);
+            claude_runtime.test_process_pty_bytes(
+                b"Claude context line one\r\nClaude context line two\r\nCLAUDE PREVIEW BODY UNIQUE\r\n",
+            );
+            let (codex_runtime, mut codex_input_rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_capacity(80, 24, 8);
+            codex_runtime.test_process_pty_bytes(
+                b"Codex context line one\r\nCodex context line two\r\nCODEX PREVIEW BODY UNIQUE\r\n",
+            );
+            workspace.insert_test_runtime(claude_pane, claude_runtime);
+            workspace.insert_test_runtime(codex_pane, codex_runtime);
             server.app.state.workspaces = vec![workspace];
             server.app.state.ensure_test_terminals();
             server.app.state.active = Some(0);
@@ -18328,6 +18340,7 @@ next_tab = ""
                 .agent_ref
                 .as_ref()
                 .is_none_or(|agent_ref| agent_ref.host != "fleet-box")));
+            assert!(empty_results.iter().all(|hit| !hit.preview.is_empty()));
 
             server
                 .clients
@@ -18405,6 +18418,18 @@ next_tab = ""
                 Some("claude".into()),
                 "the selected result is the detected Claude pane"
             );
+            assert!(
+                server.clients[&1].sidebar_presentation.agent_finder_results[0]
+                    .context
+                    .iter()
+                    .any(|line| line.contains("Claude context line"))
+            );
+            assert!(
+                server.clients[&1].sidebar_presentation.agent_finder_results[0]
+                    .preview
+                    .iter()
+                    .any(|line| line.contains("CLAUDE PREVIEW BODY UNIQUE"))
+            );
 
             server.render_and_stream();
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -18424,17 +18449,37 @@ next_tab = ""
                 "compact finder frame:\n{rendered}"
             );
             assert!(
-                rendered.contains("› claude ·"),
-                "compact finder result row:\n{rendered}"
+                rendered.contains("local · title") || rendered.contains("title ·"),
+                "finder result metadata:\n{rendered}"
             );
             assert!(
-                rendered.contains("Matched in title"),
-                "compact finder title match:\n{rendered}"
-            );
-            assert!(
-                rendered.contains("Search agents: claude"),
+                rendered.contains("claude▌"),
                 "compact finder query:\n{rendered}"
             );
+            assert!(
+                rendered.contains("Enter focus") || rendered.contains("⏎ focus"),
+                "finder footer:\n{rendered}"
+            );
+            assert!(
+                rendered.contains("CLAUDE PREVIEW BODY UNIQUE"),
+                "selected result preview:\n{rendered}"
+            );
+            if width == 120 {
+                assert!(
+                    rendered.lines().any(|line| {
+                        line.split_once('│')
+                            .is_some_and(|(sidebar, _)| sidebar.contains("Claude context line"))
+                    }),
+                    "result context must render before the sidebar divider:\n{rendered}"
+                );
+                assert!(
+                    rendered.lines().any(|line| {
+                        line.split_once('│')
+                            .is_some_and(|(_, main)| main.contains("CLAUDE PREVIEW BODY UNIQUE"))
+                    }),
+                    "preview text must render in the main area after the sidebar divider:\n{rendered}"
+                );
+            }
             assert_eq!(
                 server.clients[&1]
                     .sidebar_presentation
@@ -18455,6 +18500,14 @@ next_tab = ""
                 server.app.state.workspaces[0].focused_pane_id(),
                 Some(claude_pane),
                 "Enter focuses the matching detected agent pane"
+            );
+            assert!(
+                claude_input_rx.try_recv().is_err(),
+                "finder input reached Claude PTY"
+            );
+            assert!(
+                codex_input_rx.try_recv().is_err(),
+                "finder input reached Codex PTY"
             );
 
             should_quit.store(true, Ordering::Release);

@@ -10970,6 +10970,7 @@ pub(super) fn render_sidebar(
     area: Rect,
 ) {
     let p = &app.palette;
+    let finder_open = app.agent_finder_saved_query.is_some();
     fill_sidebar_background(frame, area, p);
     let is_navigating = matches!(app.server_mode(), Mode::Navigate);
     let sep_style = if is_navigating {
@@ -10991,7 +10992,7 @@ pub(super) fn render_sidebar(
     // input paths do; its walkers subtract the separator, notepad and
     // animation reservations themselves. Passing the already-shrunk list rect
     // here takes them twice and clips rows compute_view considers visible.
-    if app.agent_finder_saved_query.is_some() {
+    if finder_open {
         render_agent_finder_results(app, frame, area);
     } else {
         render_workspace_list(app, terminal_runtimes, frame, area, is_navigating);
@@ -10999,6 +11000,10 @@ pub(super) fn render_sidebar(
         crate::ui::goals::render_goals(app, frame, sidebar_goals_rect(app, area));
     }
     render_sidebar_header(app, frame, area, p);
+    if finder_open {
+        render_agent_finder_footer(app, frame, area);
+        return;
+    }
     render_sidebar_hosts(app, frame, area);
     let settings = sidebar_footer_settings_hit_area(area);
     if settings.width > 0 {
@@ -11142,18 +11147,27 @@ pub(super) fn render_sidebar(
 }
 
 fn render_agent_finder_results(app: &AppState, frame: &mut Frame, area: Rect) {
+    let search = sidebar_search_y(app, area);
+    let body_y = search.saturating_add(1);
+    let footer_y = area.y.saturating_add(area.height).saturating_sub(2);
     let body = Rect::new(
         area.x,
-        area.y.saturating_add(2),
+        body_y,
         area.width.saturating_sub(1),
-        area.height.saturating_sub(3),
+        footer_y.saturating_sub(body_y),
     );
-    if body.is_empty() {
+    render_agent_finder_results_in_area(app, frame, body);
+}
+
+pub(super) fn render_agent_finder_results_in_area(app: &AppState, frame: &mut Frame, area: Rect) {
+    if area.is_empty() {
         return;
     }
     let query = app.sidebar_work_filter.query.to_lowercase();
     let mut lines = Vec::new();
+    let mut result_lines = Vec::with_capacity(app.agent_finder_results.len() + 1);
     for (index, hit) in app.agent_finder_results.iter().enumerate() {
+        result_lines.push(lines.len());
         let selected = index == app.agent_finder_selected;
         let background = if selected {
             app.palette.active_row_bg
@@ -11167,6 +11181,7 @@ fn render_agent_finder_results(app: &AppState, frame: &mut Frame, area: Rect) {
             crate::api::schema::AgentStatus::Done => "●",
             _ => "○",
         };
+        let status_color = crate::ui::agent_finder_status_color(app, hit.agent.agent_status);
         let host = hit
             .agent
             .agent_ref
@@ -11183,7 +11198,10 @@ fn render_agent_finder_results(app: &AppState, frame: &mut Frame, area: Rect) {
                 hit.line.unwrap_or_default()
             ),
         };
-        let mut title_spans = vec![Span::styled(format!("{status} "), style)];
+        let mut title_spans = vec![Span::styled(
+            format!("{status} "),
+            Style::default().fg(status_color).bg(background),
+        )];
         title_spans.extend(finder_highlight_spans(
             &hit.title,
             &query,
@@ -11205,8 +11223,18 @@ fn render_agent_finder_results(app: &AppState, frame: &mut Frame, area: Rect) {
                 source,
                 Style::default().fg(app.palette.overlay0).bg(background),
             ),
+            Span::styled(" · ", style),
+            Span::styled(
+                crate::ui::agent_finder_age(app, hit.agent.reported_at.as_deref()),
+                Style::default().fg(app.palette.overlay0).bg(background),
+            ),
         ]));
-        for context in hit.context.iter().take(2) {
+        let context_lines = if hit.context.is_empty() {
+            hit.preview.iter().take(3).collect::<Vec<_>>()
+        } else {
+            hit.context.iter().take(3).collect::<Vec<_>>()
+        };
+        for context in context_lines {
             let mut spans = vec![Span::styled("  ", style)];
             spans.extend(finder_highlight_spans(
                 context,
@@ -11218,9 +11246,6 @@ fn render_agent_finder_results(app: &AppState, frame: &mut Frame, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ));
             lines.push(Line::from(spans));
-        }
-        if lines.len() >= usize::from(body.height) {
-            break;
         }
     }
     if lines.is_empty() {
@@ -11235,7 +11260,68 @@ fn render_agent_finder_results(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(app.palette.overlay0),
         )));
     }
-    frame.render_widget(Paragraph::new(lines), body);
+    let selected = app
+        .agent_finder_selected
+        .min(result_lines.len().saturating_sub(1));
+    let selected_top = result_lines.get(selected).copied().unwrap_or_default();
+    let selected_bottom = result_lines
+        .get(selected.saturating_add(1))
+        .copied()
+        .unwrap_or(lines.len());
+    let max_scroll = lines.len().saturating_sub(usize::from(area.height));
+    let scroll = selected_top
+        .saturating_add(selected_bottom.saturating_sub(selected_top))
+        .saturating_sub(usize::from(area.height))
+        .min(max_scroll);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(app.palette.sidebar_bg.unwrap_or(app.palette.panel_bg)))
+            .scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        area,
+    );
+}
+
+fn render_agent_finder_footer(app: &AppState, frame: &mut Frame, area: Rect) {
+    if area.height < 2 || area.width <= 1 {
+        return;
+    }
+    let width = area.width.saturating_sub(1);
+    let top = area.y.saturating_add(area.height).saturating_sub(2);
+    let selected = if app.agent_finder_results.is_empty() {
+        "0 results".to_owned()
+    } else if width < 54 {
+        format!(
+            "{}/{} · ↑↓ results",
+            app.agent_finder_selected
+                .min(app.agent_finder_results.len().saturating_sub(1))
+                .saturating_add(1),
+            app.agent_finder_results.len()
+        )
+    } else {
+        format!(
+            "{} of {} results",
+            app.agent_finder_selected
+                .min(app.agent_finder_results.len().saturating_sub(1))
+                .saturating_add(1),
+            app.agent_finder_results.len()
+        )
+    };
+    let keys = if width >= 54 {
+        "↑/↓ results · Ctrl+↑/↓ history · Enter focus · Esc back"
+    } else {
+        "Ctrl↑↓ hist · ⏎ focus · Esc"
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            truncate_end(&selected, usize::from(width)),
+            Style::default().fg(app.palette.text),
+        )),
+        Line::from(Span::styled(
+            truncate_end(keys, usize::from(width)),
+            Style::default().fg(app.palette.overlay0),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines), Rect::new(area.x, top, width, 2));
 }
 
 fn finder_highlight_spans<'a>(
@@ -11360,6 +11446,7 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
     if area.width <= 1 || area.height == 0 {
         return;
     }
+    let finder_open = app.agent_finder_saved_query.is_some();
     render_sidebar_sky(app, frame, area);
     let toggle = expanded_sidebar_toggle_rect(area);
     let has_sky_band = sidebar_has_sky_band(app);
@@ -11368,7 +11455,16 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
     } else {
         Color::White
     };
-    let search = sidebar_header_search_rect_for_app(app, area);
+    let search = if finder_open {
+        Rect::new(
+            area.x.saturating_add(1),
+            sidebar_search_y(app, area),
+            area.width.saturating_sub(3),
+            1,
+        )
+    } else {
+        sidebar_header_search_rect_for_app(app, area)
+    };
     let new_thread = sidebar_header_new_thread_rect(area);
     let new_menu = sidebar_header_new_menu_rect(area);
     let star_filter = sidebar_header_star_filter_rect(area);
@@ -11380,7 +11476,7 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
         )),
         toggle,
     );
-    if has_sky_band && area.width > 12 {
+    if !finder_open && has_sky_band && area.width > 12 {
         frame.render_widget(
             Paragraph::new(Span::styled(
                 "herdr",
@@ -11391,7 +11487,7 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
     }
     if search.width > 0 {
         let query = app.sidebar_work_filter.query.as_str();
-        let icon = if app.agent_finder_saved_query.is_some() {
+        let icon = if finder_open {
             if app.nerd_font {
                 "⌕"
             } else {
@@ -11400,11 +11496,8 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
         } else {
             "🔍"
         };
-        let text = if app.agent_finder_saved_query.is_some()
-            && app.sidebar_search_active
-            && !query.is_empty()
-        {
-            format!("{query}▏")
+        let text = if finder_open {
+            format!("{icon} {query}▌")
         } else if query.is_empty() && app.sidebar_search_active {
             format!("{icon} ▏")
         } else if query.is_empty() {
@@ -11426,6 +11519,9 @@ fn render_sidebar_header(app: &AppState, frame: &mut Frame, area: Rect, p: &Pale
             )),
             search,
         );
+    }
+    if finder_open {
+        return;
     }
     if star_filter.width > 0 {
         // Filled glyph while the gate is on, hollow while it is off, so the

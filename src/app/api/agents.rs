@@ -40,6 +40,11 @@ impl App {
                 .or(agent.name.as_deref())
                 .unwrap_or("agent")
                 .to_owned();
+            let tail = self.agent_terminal_tail(&agent.pane_id);
+            let preview = tail
+                .as_deref()
+                .map(|text| trailing_lines(text, 40))
+                .unwrap_or_default();
             let title_match = agent_title_match(&agent, &query).map(str::to_owned);
             if query.is_empty() {
                 self.state
@@ -50,8 +55,11 @@ impl App {
                         source: crate::api::schema::AgentSearchSource::Title,
                         path: None,
                         line: None,
-                        context: Vec::new(),
-                        preview: Vec::new(),
+                        context: tail
+                            .as_deref()
+                            .map(|text| trailing_lines(text, 3))
+                            .unwrap_or_default(),
+                        preview,
                         agent,
                     });
                 continue;
@@ -65,11 +73,18 @@ impl App {
                         source: crate::api::schema::AgentSearchSource::Title,
                         path: None,
                         line: None,
-                        context: vec![matched],
-                        preview: Vec::new(),
+                        context: tail
+                            .as_deref()
+                            .map(|text| trailing_lines(text, 3))
+                            .filter(|lines| !lines.is_empty())
+                            .unwrap_or_else(|| vec![matched]),
+                        preview,
                         agent,
                     });
-            } else if let Some(context) = self.search_agent_tail(&agent.pane_id, &query) {
+            } else if let Some(context) = tail
+                .as_deref()
+                .and_then(|text| matching_context(text, &query))
+            {
                 self.state
                     .agent_finder_results
                     .push(crate::api::schema::AgentSearchHit {
@@ -78,7 +93,7 @@ impl App {
                         source: crate::api::schema::AgentSearchSource::Tail,
                         path: None,
                         line: None,
-                        preview: context.clone(),
+                        preview,
                         context,
                         agent,
                     });
@@ -214,6 +229,11 @@ impl App {
                 .or(agent.name.as_deref())
                 .unwrap_or("agent")
                 .to_owned();
+            let tail = self.agent_terminal_tail(&agent.pane_id);
+            let preview = tail
+                .as_deref()
+                .map(|text| trailing_lines(text, 40))
+                .unwrap_or_default();
             if let Some(value) = agent_title_match(&agent, &query).map(str::to_owned) {
                 if hits.len() < limit {
                     hits.push(agent_search_hit(
@@ -222,13 +242,19 @@ impl App {
                         crate::api::schema::AgentSearchSource::Title,
                         None,
                         None,
-                        vec![value],
-                        Vec::new(),
+                        tail.as_deref()
+                            .map(|text| trailing_lines(text, 3))
+                            .filter(|lines| !lines.is_empty())
+                            .unwrap_or_else(|| vec![value]),
+                        preview,
                     ));
                 } else {
                     partial = true;
                 }
-            } else if let Some(context) = self.search_agent_tail(&agent.pane_id, &query) {
+            } else if let Some(context) = tail
+                .as_deref()
+                .and_then(|text| matching_context(text, &query))
+            {
                 if hits.len() < limit {
                     hits.push(agent_search_hit(
                         agent,
@@ -237,7 +263,7 @@ impl App {
                         None,
                         None,
                         context.clone(),
-                        context,
+                        preview,
                     ));
                 } else {
                     partial = true;
@@ -350,6 +376,11 @@ impl App {
                 .or(agent.name.as_deref())
                 .unwrap_or("agent")
                 .to_owned();
+            let tail = self.agent_terminal_tail(&agent.pane_id);
+            let preview = tail
+                .as_deref()
+                .map(|text| trailing_lines(text, 40))
+                .unwrap_or_default();
             let title_match = agent_title_match(&agent, &query).map(str::to_owned);
             if let Some(value) = title_match {
                 hits.push(crate::api::schema::AgentSearchHit {
@@ -358,18 +389,25 @@ impl App {
                     source: crate::api::schema::AgentSearchSource::Title,
                     path: None,
                     line: None,
-                    context: vec![value],
-                    preview: Vec::new(),
+                    context: tail
+                        .as_deref()
+                        .map(|text| trailing_lines(text, 3))
+                        .filter(|lines| !lines.is_empty())
+                        .unwrap_or_else(|| vec![value]),
+                    preview,
                     agent,
                 });
-            } else if let Some(context) = self.search_agent_tail(&agent.pane_id, &query) {
+            } else if let Some(context) = tail
+                .as_deref()
+                .and_then(|text| matching_context(text, &query))
+            {
                 hits.push(crate::api::schema::AgentSearchHit {
                     target: agent.pane_id.clone(),
                     title,
                     source: crate::api::schema::AgentSearchSource::Tail,
                     path: None,
                     line: None,
-                    preview: context.clone(),
+                    preview,
                     context,
                     agent,
                 });
@@ -432,16 +470,16 @@ impl App {
         encode_success(id, ResponseResult::AgentSearch { hits, partial })
     }
 
-    fn search_agent_tail(&mut self, target: &str, query: &str) -> Option<Vec<String>> {
+    fn agent_terminal_tail(&mut self, target: &str) -> Option<String> {
         let resolved = self.resolve_agent_target(target).ok()?;
         let (pane, _) = self.lookup_runtime(resolved.ws_idx, resolved.pane_id)?;
         let snapshot = crate::app::api_helpers::read_terminal_snapshot(
             pane,
-            crate::api::schema::ReadSource::Detection,
+            crate::api::schema::ReadSource::Recent,
             crate::api::schema::ReadFormat::Text,
             Some(300),
         );
-        matching_context(&snapshot.text, query)
+        Some(snapshot.text)
     }
 
     fn search_agent_session(
@@ -1129,7 +1167,7 @@ fn matching_line(text: &str, query: &str) -> Option<u32> {
 }
 
 fn trailing_lines(text: &str, count: usize) -> Vec<String> {
-    let lines = text.lines().collect::<Vec<_>>();
+    let lines = text.trim_end().lines().collect::<Vec<_>>();
     lines
         .iter()
         .skip(lines.len().saturating_sub(count))
@@ -1393,6 +1431,15 @@ mod agent_search_tests {
             Some(vec!["Needle".into(), "two".into()])
         );
         assert_eq!(matching_context("one\ntwo", "missing"), None);
+    }
+
+    #[test]
+    fn trailing_lines_skips_blank_terminal_rows_after_recent_output() {
+        assert_eq!(
+            trailing_lines("first\nmiddle\nlatest\n\n \n", 2),
+            vec!["middle".to_owned(), "latest".to_owned()]
+        );
+        assert!(trailing_lines("\n  \n", 3).is_empty());
     }
 
     #[tokio::test]
