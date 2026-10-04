@@ -18215,6 +18215,36 @@ next_tab = ""
                     .expect("test terminal")
                     .detected_agent = Some(agent);
             }
+            let mut remote_agent = server
+                .app
+                .collect_agent_infos()
+                .into_iter()
+                .next()
+                .expect("test agent info");
+            remote_agent.agent_ref = Some(
+                crate::api::schema::AgentRef::new("fleet-box", "remote-agent")
+                    .expect("remote agent reference"),
+            );
+            remote_agent.pane_id = "remote-agent".into();
+            server.app.state.fleet_snapshot.hosts = vec![crate::fleet::HostSnapshot {
+                name: "fleet-box".into(),
+                target: "fleet-box".into(),
+                local: false,
+                session: None,
+                socket: None,
+                state: crate::fleet::HostState::Reachable,
+                version: None,
+                protocol: None,
+                error: None,
+                remote_identity: Some("fleet-box".into()),
+                sessions: None,
+                reachable: true,
+                last_seen_unix_ms: None,
+                entries: vec![crate::fleet::FleetRow::test_agent_info_row(
+                    "fleet-box",
+                    remote_agent,
+                )],
+            }];
 
             let (writer, control_rx, render_rx) = test_client_writer();
             let mut client = ClientConnection::new(
@@ -18281,6 +18311,67 @@ next_tab = ""
                     .as_deref(),
                 Some("")
             );
+            let empty_deadline = server.clients[&1]
+                .sidebar_presentation
+                .agent_finder_deadline
+                .expect("opening finder schedules empty-query results");
+            assert!(
+                server.handle_scheduled_tasks_headless(
+                    empty_deadline + Duration::from_millis(1),
+                    false,
+                )
+            );
+            let empty_results = &server.clients[&1].sidebar_presentation.agent_finder_results;
+            assert_eq!(empty_results.len(), 2, "only local agents show by default");
+            assert!(empty_results.iter().all(|hit| hit
+                .agent
+                .agent_ref
+                .as_ref()
+                .is_none_or(|agent_ref| agent_ref.host != "fleet-box")));
+
+            server
+                .clients
+                .get_mut(&1)
+                .expect("client")
+                .sidebar_presentation
+                .work_filter
+                .only_this_machine = false;
+            server
+                .clients
+                .get_mut(&1)
+                .expect("client")
+                .sidebar_presentation
+                .agent_finder_deadline = Some(Instant::now());
+            assert!(server
+                .handle_scheduled_tasks_headless(Instant::now() + Duration::from_millis(1), false));
+            assert!(
+                server.clients[&1]
+                    .sidebar_presentation
+                    .agent_finder_results
+                    .iter()
+                    .any(|hit| {
+                        hit.agent
+                            .agent_ref
+                            .as_ref()
+                            .is_some_and(|agent_ref| agent_ref.host == "fleet-box")
+                    }),
+                "turning the machine filter off includes remote agents"
+            );
+            server
+                .clients
+                .get_mut(&1)
+                .expect("client")
+                .sidebar_presentation
+                .work_filter
+                .only_this_machine = true;
+            server
+                .clients
+                .get_mut(&1)
+                .expect("client")
+                .sidebar_presentation
+                .agent_finder_deadline = Some(Instant::now());
+            assert!(server
+                .handle_scheduled_tasks_headless(Instant::now() + Duration::from_millis(1), false));
 
             for character in "claude".chars() {
                 send(

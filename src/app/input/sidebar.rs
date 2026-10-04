@@ -93,6 +93,7 @@ impl AppState {
         self.agent_finder_deadline = None;
         self.agent_finder_generation = self.agent_finder_generation.wrapping_add(1);
         self.agent_finder_side_pane = false;
+        self.schedule_agent_finder_search();
     }
 
     fn close_agent_finder(&mut self) {
@@ -786,6 +787,10 @@ impl AppState {
         let mut filter = self.sidebar_work_filter.clone();
         let mut keep_open = false;
         match option {
+            crate::ui::SidebarFilterOption::OnlyThisMachine(enabled) => {
+                filter.only_this_machine = !enabled;
+                keep_open = true;
+            }
             crate::ui::SidebarFilterOption::LinearTeam(team) => filter.team = team,
             crate::ui::SidebarFilterOption::LinearOwnership(ownership) => {
                 filter.linear_ownership = ownership;
@@ -826,6 +831,9 @@ impl AppState {
             }
         }
         self.set_sidebar_work_filter(filter);
+        if self.agent_finder_saved_query.is_some() {
+            self.schedule_agent_finder_search();
+        }
         if keep_open {
             self.sidebar_filter_menu_open = true;
             self.sidebar_filter_menu_selected = index;
@@ -5628,9 +5636,52 @@ mod tests {
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             layout.list_rect.x,
-            layout.list_rect.y,
+            layout.list_rect.y + 1,
         ));
         assert!(!app.state.sidebar_filter_menu_open);
+    }
+
+    #[test]
+    fn only_this_machine_filter_toggles_through_mouse_input_and_is_persisted() {
+        let mut app = app_for_mouse_test();
+        app.state
+            .set_sidebar_group_mode(crate::app::state::SidebarGroupMode::LinearTeam);
+        let area = Rect::new(0, 0, 106, 40);
+        crate::ui::compute_view(&mut app.state, area);
+        let anchor = app.state.sidebar_filter_anchor_rect();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            anchor.x,
+            anchor.y,
+        ));
+        let layout =
+            crate::ui::sidebar_filter_menu_layout(&app.state, area).expect("filter dropdown");
+        assert_eq!(
+            crate::ui::sidebar_filter_options(&app.state)[0].label(),
+            "[x] Only this machine"
+        );
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            layout.list_rect.x,
+            layout.list_rect.y,
+        ));
+        assert!(!app.state.sidebar_work_filter.only_this_machine);
+        assert!(app.state.sidebar_filter_menu_open);
+        assert!(
+            !app.state
+                .take_sidebar_work_filter_persistence_request()
+                .expect("toggle requests persistence")
+                .only_this_machine
+        );
+
+        let layout =
+            crate::ui::sidebar_filter_menu_layout(&app.state, area).expect("filter stays open");
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            layout.list_rect.x,
+            layout.list_rect.y,
+        ));
+        assert!(app.state.sidebar_work_filter.only_this_machine);
     }
 
     #[test]

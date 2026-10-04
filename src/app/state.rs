@@ -1075,6 +1075,8 @@ pub struct TabCardArea {
 pub(crate) struct SidebarWorkFilter {
     /// Persisted row-search query shared by every sidebar view.
     pub(crate) query: String,
+    /// Limit agent finder results to agents running on this machine.
+    pub(crate) only_this_machine: bool,
     /// Client presentation history for the sidebar agent finder.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) agent_finder_history: Vec<String>,
@@ -1265,6 +1267,7 @@ impl Default for SidebarWorkFilter {
     fn default() -> Self {
         Self {
             query: String::new(),
+            only_this_machine: true,
             agent_finder_history: Vec::new(),
             project: None,
             team: Some("SCA".into()),

@@ -7632,6 +7632,7 @@ fn unassigned_empty_text(app: &AppState) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SidebarFilterOption {
+    OnlyThisMachine(bool),
     LinearTeam(Option<String>),
     LinearOwnership(crate::app::state::WorkOwnershipFilter),
     LinearAssignee(Option<String>),
@@ -7648,6 +7649,9 @@ pub(crate) enum SidebarFilterOption {
 impl SidebarFilterOption {
     pub(crate) fn label(&self) -> String {
         match self {
+            Self::OnlyThisMachine(enabled) => {
+                format!("{} Only this machine", if *enabled { "[x]" } else { "[ ]" })
+            }
             Self::LinearTeam(None) => "team: all".into(),
             Self::LinearTeam(Some(team)) => format!("team: {team}"),
             Self::LinearOwnership(scope) => format!("me: {}", scope.label()),
@@ -7677,7 +7681,9 @@ impl SidebarFilterOption {
 }
 
 pub(crate) fn sidebar_filter_options(app: &AppState) -> Vec<SidebarFilterOption> {
-    let mut options = Vec::new();
+    let mut options = vec![SidebarFilterOption::OnlyThisMachine(
+        app.sidebar_work_filter.only_this_machine,
+    )];
     let mut view_options = match app.sidebar_group_mode {
         SidebarGroupMode::LinearTeam => {
             let mut teams = sidebar_linear_ticket_rows(app)
@@ -24504,8 +24510,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .map(|option| option.label())
             .collect::<Vec<_>>();
         assert_eq!(
-            &labels[..7],
+            &labels[..8],
             [
+                "[x] Only this machine",
                 "team: all",
                 "team: OPS",
                 "team: SCA",
@@ -24534,6 +24541,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .map(|option| option.label())
                 .collect::<Vec<_>>(),
             [
+                "[x] Only this machine",
                 "assignee: me",
                 "me: assigned",
                 "me: authored",
@@ -24556,6 +24564,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 .map(|option| option.label())
                 .collect::<Vec<_>>(),
             [
+                "[x] Only this machine",
                 "team: all",
                 "assignee: me",
                 "assignee: all",

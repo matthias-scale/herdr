@@ -25,11 +25,6 @@ impl App {
         }
         self.state.agent_finder_deadline = None;
         let query = self.state.sidebar_work_filter.query.trim().to_owned();
-        if query.is_empty() {
-            self.state.agent_finder_results.clear();
-            self.state.agent_finder_selected = 0;
-            return true;
-        }
         let query = query.to_lowercase();
         let generation = self.state.agent_finder_generation;
         self.state.agent_finder_results.clear();
@@ -46,6 +41,21 @@ impl App {
                 .unwrap_or("agent")
                 .to_owned();
             let title_match = agent_title_match(&agent, &query).map(str::to_owned);
+            if query.is_empty() {
+                self.state
+                    .agent_finder_results
+                    .push(crate::api::schema::AgentSearchHit {
+                        target: agent.pane_id.clone(),
+                        title,
+                        source: crate::api::schema::AgentSearchSource::Title,
+                        path: None,
+                        line: None,
+                        context: Vec::new(),
+                        preview: Vec::new(),
+                        agent,
+                    });
+                continue;
+            }
             if let Some(matched) = title_match {
                 self.state
                     .agent_finder_results
@@ -76,17 +86,13 @@ impl App {
                 candidates.push(agent);
             }
         }
-        if self.state.agent_finder_results.len() > 100 {
+        if !query.is_empty() && self.state.agent_finder_results.len() > 100 {
             self.state.agent_finder_results.truncate(100);
             self.state.agent_finder_partial = true;
         }
-        for host in self
-            .state
-            .fleet_snapshot
-            .hosts
-            .iter()
-            .filter(|host| !host.local && host.reachable)
-        {
+        for host in self.state.fleet_snapshot.hosts.iter().filter(|host| {
+            !host.local && host.reachable && !self.state.sidebar_work_filter.only_this_machine
+        }) {
             for row in &host.entries {
                 let Some(agent) = row.agent_info() else {
                     continue;
@@ -106,10 +112,12 @@ impl App {
                 .into_iter()
                 .flatten()
                 .find(|value| value.to_lowercase().contains(&query));
-                let Some(matched) = matched else {
-                    continue;
+                let matched = match matched {
+                    Some(matched) => matched,
+                    None if query.is_empty() => title,
+                    None => continue,
                 };
-                if self.state.agent_finder_results.len() < 100 {
+                if query.is_empty() || self.state.agent_finder_results.len() < 100 {
                     self.state
                         .agent_finder_results
                         .push(crate::api::schema::AgentSearchHit {
@@ -126,6 +134,15 @@ impl App {
                     self.state.agent_finder_partial = true;
                 }
             }
+        }
+        if query.is_empty() {
+            self.state.agent_finder_results.sort_by(|left, right| {
+                right
+                    .agent
+                    .last_turn_at
+                    .as_deref()
+                    .cmp(&left.agent.last_turn_at.as_deref())
+            });
         }
         if self.state.agent_finder_results.len() >= 100 && !candidates.is_empty() {
             self.state.agent_finder_partial = true;
