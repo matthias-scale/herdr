@@ -35,6 +35,28 @@ fn modified_url_click_modifier() -> KeyModifiers {
     KeyModifiers::CONTROL
 }
 
+fn spawn_dock_input_is_interrupted(owner: &InputOwner) -> bool {
+    matches!(
+        owner,
+        InputOwner::Pomodoro
+            | InputOwner::Client(_)
+            | InputOwner::AddProject
+            | InputOwner::Server(
+                ServerInputOwner::Onboarding
+                    | ServerInputOwner::ReleaseNotes
+                    | ServerInputOwner::ProductAnnouncement
+                    | ServerInputOwner::GitMenu
+                    | ServerInputOwner::AddAction
+                    | ServerInputOwner::Settings
+                    | ServerInputOwner::GlobalMenu
+                    | ServerInputOwner::KeybindHelp
+                    | ServerInputOwner::Navigator
+                    | ServerInputOwner::CommandPalette
+                    | ServerInputOwner::WorkLinkPicker
+            )
+    )
+}
+
 #[cfg(test)]
 #[test]
 fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
@@ -49,6 +71,7 @@ mod lease;
 mod modal;
 mod mouse;
 mod navigate;
+pub(crate) use navigate::{is_window_cycle_key, WindowCycleSnapshot};
 mod notepad;
 mod overlays;
 mod selection;
@@ -190,8 +213,14 @@ impl App {
         key: TerminalKey,
         owner: InputOwner,
     ) -> Option<super::TerminalInputTarget> {
+        let enters_prefix = self.state.server_mode() != crate::app::state::Mode::Prefix
+            && self.state.is_prefix_key(&key);
+        let preserves_window_cycle = is_window_cycle_key(&self.state, &key) || enters_prefix;
         self.state.clear_hovered_control();
         let target = self.handle_key_inner_for_input_owner(key, owner).await;
+        if !preserves_window_cycle {
+            self.invalidate_window_cycle_snapshot();
+        }
         // Every keyboard path that can enter a probed settings section runs
         // through here, so the probes start once from one place.
         self.start_requested_tool_probes();
@@ -222,6 +251,11 @@ impl App {
     ) -> Option<super::TerminalInputTarget> {
         let key_event = key.as_key_event();
         if self.handle_planning_lock_key(key_event) {
+            return None;
+        }
+        let interrupting_overlay = spawn_dock_input_is_interrupted(&owner);
+        if self.state.spawn_dock.is_some() && !interrupting_overlay {
+            self.handle_spawn_dock_key(key_event);
             return None;
         }
         if self.state.board_return.is_some()
@@ -300,6 +334,7 @@ impl App {
             InputOwner::AddProject | InputOwner::Surface(SurfaceInputOwner::Home) => {
                 self.handle_home_key_event(key_event);
             }
+            InputOwner::SpawnDock => self.handle_spawn_dock_key(key_event),
             InputOwner::Server(owner) => match owner {
                 ServerInputOwner::Onboarding => self.handle_onboarding_key(key_event),
                 ServerInputOwner::ReleaseNotes => self.handle_release_notes_key(key_event),
@@ -408,6 +443,87 @@ impl App {
             InputOwner::None => {}
         }
         None
+    }
+
+    pub(super) fn handle_spawn_dock_key(&mut self, event: KeyEvent) {
+        let auto_host = self.state.least_loaded_spawn_host();
+        let action = self
+            .state
+            .spawn_dock
+            .as_mut()
+            .map(|dock| dock.handle_key(event, auto_host.as_deref()));
+        self.apply_spawn_dock_action(action);
+    }
+
+    fn apply_spawn_dock_action(&mut self, action: Option<crate::app::spawn_dock::SpawnDockAction>) {
+        match action {
+            Some(crate::app::spawn_dock::SpawnDockAction::Close) => {
+                if let Some(dock) = self.state.spawn_dock.as_ref() {
+                    self.state
+                        .sidebar_presentation
+                        .save_spawn_dock_draft(Some(dock.draft()));
+                }
+                self.state.spawn_dock = None;
+            }
+            Some(crate::app::spawn_dock::SpawnDockAction::Clear) => {
+                self.state.spawn_dock = None;
+                self.state.sidebar_presentation.save_spawn_dock_draft(None);
+            }
+            Some(crate::app::spawn_dock::SpawnDockAction::Spawn) => {
+                if let Some(dock) = self.state.spawn_dock.as_ref() {
+                    self.state
+                        .sidebar_presentation
+                        .save_spawn_dock_draft(Some(dock.draft()));
+                    self.state.home = Some(dock.home.clone());
+                    self.dispatch_home_prompt();
+                    if let Some(home) = self.state.home.clone() {
+                        if home.pending_dispatch.is_some() {
+                            if let Some(dock) = self.state.spawn_dock.as_mut() {
+                                dock.home = home;
+                            }
+                        } else if let Some(dock) = self.state.spawn_dock.as_mut() {
+                            dock.home = home;
+                            self.state.home = None;
+                        }
+                    } else {
+                        self.state.spawn_dock = None;
+                        self.state.sidebar_presentation.save_spawn_dock_draft(None);
+                    }
+                }
+            }
+            Some(crate::app::spawn_dock::SpawnDockAction::Consumed) => {
+                if let Some(dock) = self.state.spawn_dock.as_ref() {
+                    self.state
+                        .sidebar_presentation
+                        .save_spawn_dock_draft(Some(dock.draft()));
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn handle_spawn_dock_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return false;
+        }
+        let Some(target) = crate::ui::spawn_dock_hit_test(&self.state, mouse.column, mouse.row)
+        else {
+            return false;
+        };
+        match target {
+            crate::ui::SpawnDockHitTarget::Field(field) => {
+                if let Some(dock) = self.state.spawn_dock.as_mut() {
+                    dock.focus = field;
+                    self.state
+                        .sidebar_presentation
+                        .save_spawn_dock_draft(Some(dock.draft()));
+                }
+            }
+            crate::ui::SpawnDockHitTarget::Spawn => {
+                self.apply_spawn_dock_action(Some(crate::app::spawn_dock::SpawnDockAction::Spawn));
+            }
+        }
+        true
     }
 
     pub(super) fn handle_client_overlay_key(
@@ -4838,6 +4954,15 @@ impl App {
                 self.handle_home_text_commit(text);
                 true
             }
+            InputOwner::SpawnDock => {
+                if let Some(dock) = self.state.spawn_dock.as_mut() {
+                    dock.insert_text(text);
+                    self.state
+                        .sidebar_presentation
+                        .save_spawn_dock_draft(Some(dock.draft()));
+                }
+                true
+            }
             InputOwner::Surface(SurfaceInputOwner::Board) => self.board_insert_text(text),
             InputOwner::Server(ServerInputOwner::Navigator) => {
                 if !self.state.navigator.search_focused {
@@ -5040,6 +5165,12 @@ impl App {
         }
         if let InputOwner::Client(owner) = owner {
             self.handle_client_mouse_for_input_owner(source_id, mouse, owner);
+            return;
+        }
+        if self.state.spawn_dock.is_some()
+            && !spawn_dock_input_is_interrupted(&owner)
+            && self.handle_spawn_dock_mouse(mouse)
+        {
             return;
         }
         match mouse.kind {

@@ -49,6 +49,8 @@ pub(crate) use dock::symphony::dashboard_url as dock_symphony_dashboard_url;
 /// canonical agent projection.
 #[cfg(test)]
 pub(crate) use sidebar::entry_is_blocked;
+mod spawn_dock;
+pub(crate) use spawn_dock::{hit_test as spawn_dock_hit_test, HitTarget as SpawnDockHitTarget};
 pub(crate) mod status;
 mod symphony;
 mod tab_surface;
@@ -1419,6 +1421,7 @@ fn render_with_runtime_registry_inner(
     // Ambient notifications sit above panes, but below interactive overlays.
     render_notifications(app, frame, terminal_area);
     render_popup_pane(app, terminal_runtimes, frame, terminal_area);
+    spawn_dock::render(app, frame, terminal_area);
 
     let mode_bar_area = if app.view.layout == ViewLayout::Desktop
         && app.tab_bar_position == crate::config::TabBarPositionConfig::Bottom
@@ -1518,6 +1521,7 @@ fn render_with_runtime_registry_inner(
         | InputOwner::Popup
         | InputOwner::Surface(_)
         | InputOwner::Notepad
+        | InputOwner::SpawnDock
         | InputOwner::Dock(_)
         | InputOwner::Sidebar
         | InputOwner::Pane
@@ -3462,8 +3466,8 @@ mod tests {
         let card = app.view.workspace_card_areas[0].rect;
         let line1 = buffer_row_text(buffer, card, card.y);
         assert_eq!(
-            line1.split_whitespace().take(2).collect::<Vec<_>>(),
-            ["▾", "one"],
+            line1.split_whitespace().take(3).collect::<Vec<_>>(),
+            ["▎", "▾", "one"],
             "{line1:?}"
         );
         assert!(!line1.contains("0/1"), "{line1:?}");
