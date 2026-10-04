@@ -1229,6 +1229,13 @@ impl HeadlessServer {
                 .fold(next_deadline, |deadline, hover| {
                     Some(deadline.map_or(hover, |current| current.min(hover)))
                 });
+            let next_deadline = self
+                .clients
+                .values()
+                .filter_map(|client| client.sidebar_presentation.agent_finder_deadline)
+                .fold(next_deadline, |deadline, finder| {
+                    Some(deadline.map_or(finder, |current| current.min(finder)))
+                });
             let event = {
                 tokio::select! {
                     maybe_api = self.app.api_rx.recv() => match maybe_api {
@@ -3965,6 +3972,32 @@ impl HeadlessServer {
             return self.handle_client_owned_worktree_event(client_id, ev);
         }
         match &ev {
+            AppEvent::AgentFinderSearchCompleted {
+                generation,
+                query,
+                hits,
+                partial,
+            } => {
+                let mut changed = false;
+                for client in self.clients.values_mut() {
+                    let presentation = &mut client.sidebar_presentation;
+                    if presentation.agent_finder_saved_query.is_none()
+                        || presentation.agent_finder_generation != *generation
+                        || query != &presentation.work_filter.query.trim().to_lowercase()
+                    {
+                        continue;
+                    }
+                    presentation
+                        .agent_finder_results
+                        .extend(hits.iter().cloned());
+                    presentation.agent_finder_results.truncate(100);
+                    presentation.agent_finder_partial = *partial;
+                    presentation.agent_finder_selected = 0;
+                    client.request_repaint();
+                    changed = true;
+                }
+                changed
+            }
             AppEvent::PlanningLockFileChanged(lock) => {
                 self.app.state.planning_lock = lock.clone();
                 self.app.state.mark_session_dirty();
@@ -7458,6 +7491,7 @@ impl HeadlessServer {
             self.app.agent_activity_refresh_deadline = None;
             false
         };
+        other_changed |= self.tick_client_agent_finders(now);
         let mut sidebar_animation_changed = false;
         for client in self.clients.values_mut() {
             if client.dock_presentation.reveal_hover_tooltip_at(now) {
@@ -7696,6 +7730,41 @@ impl HeadlessServer {
             changed: other_changed || sidebar_animation_changed,
             sidebar_animation_only: sidebar_animation_changed && !other_changed,
         }
+    }
+
+    fn tick_client_agent_finders(&mut self, now: Instant) -> bool {
+        let due_clients = self
+            .clients
+            .iter()
+            .filter_map(|(client_id, client)| {
+                client
+                    .sidebar_presentation
+                    .agent_finder_deadline
+                    .is_some_and(|deadline| now >= deadline)
+                    .then_some(*client_id)
+            })
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for client_id in due_clients {
+            let Some(mut presentation) = self
+                .clients
+                .get_mut(&client_id)
+                .map(|client| std::mem::take(&mut client.sidebar_presentation))
+            else {
+                continue;
+            };
+            self.app.state.swap_sidebar_presentation(&mut presentation);
+            let client_changed = self.app.tick_agent_finder(now);
+            self.app.state.swap_sidebar_presentation(&mut presentation);
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.sidebar_presentation = presentation;
+                if client_changed {
+                    client.request_repaint();
+                }
+            }
+            changed |= client_changed;
+        }
+        changed
     }
 
     fn start_foreground_dock_diff_refresh_if_needed(&mut self) -> bool {
@@ -17979,20 +18048,12 @@ next_tab = ""
             server.clients[&1].sidebar_presentation.work_filter.query,
             "claude"
         );
-        {
-            let client = server.clients.get_mut(&1).expect("test client");
-            server
-                .app
-                .state
-                .swap_sidebar_presentation(&mut client.sidebar_presentation);
-            server
-                .app
-                .tick_agent_finder(Instant::now() + Duration::from_secs(1));
-            server
-                .app
-                .state
-                .swap_sidebar_presentation(&mut client.sidebar_presentation);
-        }
+        let finder_deadline = server.clients[&1]
+            .sidebar_presentation
+            .agent_finder_deadline
+            .expect("typing schedules a finder search");
+        assert!(server
+            .handle_scheduled_tasks_headless(finder_deadline + Duration::from_millis(1), false,));
         assert_eq!(
             server.clients[&1].sidebar_presentation.agent_finder_results[0]
                 .agent
