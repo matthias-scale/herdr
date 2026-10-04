@@ -710,6 +710,9 @@ impl App {
                 if let Some(home) = self.state.home.as_mut() {
                     home.replace_provider_catalog(catalog);
                     true
+                } else if let Some(dock) = self.state.spawn_dock.as_mut() {
+                    dock.home.replace_provider_catalog(catalog);
+                    true
                 } else {
                     false
                 }
@@ -2356,6 +2359,7 @@ impl App {
             Method::TabRename(params) => return self.handle_tab_rename(request.id, params),
             Method::TabPrio(params) => return self.handle_tab_prio(request.id, params),
             Method::TabPin(params) => return self.handle_tab_pin(request.id, params),
+            Method::TabPark(params) => return self.handle_tab_park(request.id, params),
             Method::TabStar(params) => return self.handle_tab_star(request.id, params),
             Method::TabMove(params) => return self.handle_tab_move(request.id, params),
             Method::TabClose(target) => return self.handle_tab_close(request.id, target),

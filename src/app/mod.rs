@@ -56,6 +56,7 @@ pub(crate) mod settings_keybindings;
 pub(crate) mod settings_providers;
 pub(crate) mod settled;
 pub(crate) mod settled_view;
+pub(crate) mod spawn_dock;
 pub mod state;
 pub(crate) mod status_log;
 mod tab_bar_status;
@@ -198,6 +199,7 @@ pub struct App {
     /// API requests and transport events, never by render or pane loops.
     pub(crate) remote_focus_operations: remote_focus::RemoteFocusOperations,
     pub(crate) planning_lock_key_burst: std::collections::VecDeque<Instant>,
+    pub(crate) window_cycle_snapshot: Option<crate::app::input::WindowCycleSnapshot>,
     pub(crate) fleet_attach_agents:
         std::collections::HashMap<crate::layout::PaneId, crate::api::schema::AgentRef>,
     pub(crate) remote_focus_transport: Box<dyn remote_focus::RemoteFocusTransport>,
@@ -503,6 +505,13 @@ fn background_update_check_enabled(no_session: bool, check_enabled: bool) -> boo
     auto_updates_enabled(no_session) && check_enabled
 }
 
+fn window_cycle_mode_after_restore(
+    config_mode: crate::config::WindowCycleModeConfig,
+    _snapshot_mode: Option<crate::config::WindowCycleModeConfig>,
+) -> crate::config::WindowCycleModeConfig {
+    config_mode
+}
+
 fn load_plugin_registry(no_session: bool) -> crate::app::state::InstalledPluginRegistry {
     if no_session {
         return std::collections::HashMap::new();
@@ -802,8 +811,10 @@ impl App {
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
                     snap.prio_panel_collapsed,
-                    snap.window_cycle_mode
-                        .unwrap_or(config.ui.window_cycle_mode),
+                    window_cycle_mode_after_restore(
+                        config.ui.window_cycle_mode,
+                        snap.window_cycle_mode,
+                    ),
                     snap.skip_collapsed_cycle
                         .unwrap_or(config.ui.skip_collapsed_cycle),
                 )
@@ -824,8 +835,10 @@ impl App {
                     snap.sidebar_section_split.unwrap_or(0.5),
                     snap.collapsed_space_keys,
                     snap.prio_panel_collapsed,
-                    snap.window_cycle_mode
-                        .unwrap_or(config.ui.window_cycle_mode),
+                    window_cycle_mode_after_restore(
+                        config.ui.window_cycle_mode,
+                        snap.window_cycle_mode,
+                    ),
                     snap.skip_collapsed_cycle
                         .unwrap_or(config.ui.skip_collapsed_cycle),
                 )
@@ -934,6 +947,14 @@ impl App {
         #[cfg(test)]
         let sidebar_group_collapsed = std::collections::HashMap::new();
 
+        #[cfg(not(test))]
+        let sidebar_presentation = state::SidebarPresentationState {
+            spawn_dock_client_id: Some(crate::platform::client_presentation_identity()),
+            ..Default::default()
+        };
+        #[cfg(test)]
+        let sidebar_presentation = state::SidebarPresentationState::default();
+
         let mut state = AppState {
             agent_picker: None,
             collapsed_sidebar_groups: crate::ui::initial_collapsed_sidebar_groups(
@@ -1019,6 +1040,7 @@ impl App {
             request_usage_scan: false,
             inbox: None,
             home: None,
+            spawn_dock: None,
             home_agent_choices: Vec::new(),
             home_catalog: if cfg!(test) {
                 crate::app::home_catalog::HomeCatalog::fallback()
@@ -1145,7 +1167,7 @@ impl App {
             work_link_picker: None,
             add_action: None,
             copy_mode: None,
-            sidebar_presentation: state::SidebarPresentationState::default(),
+            sidebar_presentation,
             sidebar_projection_revision: 0,
             workspace_picker_forces_spaces_tree: false,
             workspace_scroll: 0,
@@ -1641,6 +1663,7 @@ impl App {
             status_log: crate::status_log::StatusLog::for_server(),
             remote_focus_operations: remote_focus::RemoteFocusOperations::default(),
             planning_lock_key_burst: std::collections::VecDeque::new(),
+            window_cycle_snapshot: None,
             fleet_attach_agents: std::collections::HashMap::new(),
             remote_focus_transport: Box::new(crate::remote::SshRemoteFocusTransport::new(
                 &config.remote.fleet,
@@ -3546,6 +3569,19 @@ impl App {
                                 );
                                 continue;
                             }
+                            // The headless client path has its own synchronous
+                            // router, so it must consume the shared spawn dock
+                            // before any pane forwarding can occur.
+                            if owner == state::InputOwner::SpawnDock
+                                && self.state.spawn_dock.is_some()
+                            {
+                                self.handle_spawn_dock_key(key.as_key_event());
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
                             if let state::InputOwner::Dock(dock_owner) = owner {
                                 if dock_owner != state::DockInputOwner::Editor
                                     && self.handle_dock_key_for_owner_headless(dock_owner, &key)
@@ -3811,6 +3847,7 @@ impl App {
         }
         match owner {
             state::InputOwner::Pomodoro | state::InputOwner::Popup | state::InputOwner::Pane => {}
+            state::InputOwner::SpawnDock => self.handle_spawn_dock_key(key_event),
             state::InputOwner::Client(owner) => match owner {
                 state::ClientInputOwner::Overlay(overlay) => {
                     self.handle_client_overlay_key(overlay, key_event);
@@ -3996,6 +4033,34 @@ mod tests {
     };
     use std::cell::Cell;
     use std::rc::Rc;
+
+    #[test]
+    fn saved_window_cycle_mode_wins_over_restored_session_snapshot() {
+        let saved_config = "[ui]\nwindow_cycle_mode = \"this-machine-and-fleet\"\n";
+        let restored_config: Config = toml::from_str(saved_config).expect("restore config");
+
+        let stale_snapshot = crate::persist::capture(
+            &[],
+            &std::collections::HashMap::new(),
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            None,
+            0,
+            24,
+            0.5,
+            std::collections::HashSet::new(),
+            false,
+            crate::config::WindowCycleModeConfig::ThisMachine,
+            false,
+        );
+
+        assert_eq!(
+            window_cycle_mode_after_restore(
+                restored_config.ui.window_cycle_mode,
+                stale_snapshot.window_cycle_mode,
+            ),
+            crate::config::WindowCycleModeConfig::ThisMachineAndFleet
+        );
+    }
 
     #[test]
     fn fresh_and_restored_clients_start_with_no_panel_tabs() {
