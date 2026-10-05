@@ -236,22 +236,38 @@ fn ordered_cards<'a>(
     cards
 }
 
-fn agent_label(app: &AppState, view: &BoardView, card: &crate::board::Card) -> String {
-    let Some(agent) = card
+fn card_agent_metadata(
+    app: &AppState,
+    view: &BoardView,
+    card: &crate::board::Card,
+    row: Rect,
+) -> Option<(usize, Rect, String)> {
+    if card.column != Column::InProgress {
+        return None;
+    }
+    let (index, agent) = card
         .agents
         .iter()
-        .min_by_key(|agent| app.board_agent(agent).lane)
-    else {
-        return String::new();
-    };
+        .enumerate()
+        .min_by_key(|(_, agent)| app.board_agent(agent).lane)?;
     let age = view
         .agent_activity
         .get(agent)
         .map(|at| crate::activity_age::coarse_label(Some(*at), app.view_observed_at));
-    match age {
+    let label = match age {
         Some(age) => format!("{} · {age}", agent.host),
         None => agent.host.clone(),
+    };
+    let width = super::text::display_width_u16(&label);
+    // Metadata yields first on narrow screens, preserving a readable title.
+    if width == 0 || row.width <= width.saturating_add(12) {
+        return None;
     }
+    Some((
+        index,
+        Rect::new(row.right() - width, row.y, width, 1),
+        label,
+    ))
 }
 
 fn render_columns(app: &AppState, view: &BoardView, area: Rect, frame: &mut Frame) {
@@ -307,18 +323,13 @@ fn render_columns(app: &AppState, view: &BoardView, area: Rect, frame: &mut Fram
                 String::new()
             };
             let suffix = if card.goal_id.is_some() { " ◎" } else { "" };
-            let metadata = if column == Column::InProgress {
-                agent_label(app, view, card)
-            } else {
-                String::new()
-            };
-            let metadata_width = super::text::display_width_u16(&metadata);
-            // Metadata yields first on narrow screens, preserving a readable title.
-            let show_metadata = metadata_width > 0 && inner.width > metadata_width + 12;
-            let text_width =
-                inner
-                    .width
-                    .saturating_sub(if show_metadata { metadata_width + 2 } else { 0 });
+            let y = inner.y + offset as u16;
+            let metadata =
+                card_agent_metadata(app, view, card, Rect::new(inner.x, y, inner.width, 1));
+            let text_width = metadata
+                .as_ref()
+                .map(|(_, rect, _)| rect.x.saturating_sub(inner.x + 2))
+                .unwrap_or(inner.width);
             let icon = card.area.icon(app.nerd_font);
             let reserved = super::text::display_width_u16(&format!(" {prefix}{icon} {suffix}"));
             let title = super::text::truncate_end(
@@ -330,7 +341,6 @@ fn render_columns(app: &AppState, view: &BoardView, area: Rect, frame: &mut Fram
                 Lane::Working => app.palette.green,
                 Lane::DoneAwaitingYou => app.palette.accent,
             };
-            let y = inner.y + offset as u16;
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::raw(" "),
@@ -352,10 +362,10 @@ fn render_columns(app: &AppState, view: &BoardView, area: Rect, frame: &mut Fram
                 ),
                 Rect::new(inner.x, y, text_width, 1),
             );
-            if show_metadata {
+            if let Some((_, rect, label)) = metadata {
                 frame.render_widget(
-                    Paragraph::new(metadata).style(Style::default().fg(app.palette.subtext0)),
-                    Rect::new(inner.right() - metadata_width, y, metadata_width, 1),
+                    Paragraph::new(label).style(Style::default().fg(app.palette.subtext0)),
+                    rect,
                 );
             }
         }
@@ -522,7 +532,13 @@ pub(crate) fn hit_at(app: &AppState, area: Rect, x: u16, y: u16) -> Option<Board
                 return Some(BoardHit::Card {
                     id: card.id.clone(),
                     spawn: false,
-                    agent: None,
+                    agent: card_agent_metadata(
+                        app,
+                        view,
+                        card,
+                        Rect::new(inner.x, y, inner.width, 1),
+                    )
+                    .and_then(|(index, rect, _)| contains(rect, x, y).then_some(index)),
                 });
             }
         }
@@ -988,6 +1004,39 @@ mod tests {
         assert!(
             matches!(hit_at(&app, area, progress.x + 2, progress.y + 1), Some(BoardHit::Card { id, .. }) if id == "working")
         );
+    }
+
+    #[test]
+    fn agent_metadata_hit_uses_the_displayed_worst_lane_link() {
+        let mut card = sample_card("linked", Column::InProgress);
+        card.agents = vec![
+            crate::board::AgentLink {
+                host: "ub1".into(),
+                pane_id: "working".into(),
+            },
+            crate::board::AgentLink {
+                host: "ub2".into(),
+                pane_id: "blocked".into(),
+            },
+        ];
+        let mut app = sample_app(vec![card]);
+        let view = app.board_view.as_mut().expect("view");
+        view.agent_lanes
+            .insert(view.board.cards[0].agents[1].clone(), Lane::Blocked);
+        let area = app.view.terminal_area;
+        let view = app.board_view.as_ref().expect("view");
+        let progress = column_rects(board_rect(area, view), view.column)[2].1;
+        assert!(rendered_text(&app).contains("ub2"));
+        assert!(matches!(
+            hit_at(&app, area, progress.right() - 2, progress.y + 1),
+            Some(BoardHit::Card { agent: Some(1), .. })
+        ));
+        assert!(matches!(
+            hit_at(&app, area, progress.x + 2, progress.y + 1),
+            Some(BoardHit::Card { agent: None, .. })
+        ));
+        let narrow = Rect::new(0, 0, 14, 1);
+        assert!(card_agent_metadata(&app, view, &view.board.cards[0], narrow).is_none());
     }
 
     #[test]
