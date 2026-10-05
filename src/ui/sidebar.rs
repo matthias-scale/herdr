@@ -12046,7 +12046,11 @@ fn render_section_header(
             };
             let label_width =
                 usize::from(header.rect.width).saturating_sub(prefix_width + count_width);
-            let label = format!("[{} ▾]", app.sidebar_blocker_scope.label());
+            let label = if app.sidebar_blocker_scope == crate::app::state::BlockerScope::ThisDevice {
+                "[Local ▾]"
+            } else {
+                "[Fleet ▾]"
+            };
             spans.push(Span::styled(
                 if display_width(&label) <= label_width {
                     label
@@ -32872,11 +32876,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             (crate::app::state::BlockerScope::Fleet, "[Fleet ▾]"),
             (
                 crate::app::state::BlockerScope::ThisDevice,
-                "[This device ▾]",
+                "[Local ▾]",
             ),
         ] {
             app.sidebar_blocker_scope = scope;
-            let width = app.default_sidebar_width;
+            let width = 26;
             let area = Rect::new(0, 0, width, 1);
             let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("header terminal");
             terminal
@@ -32915,11 +32919,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .get_mut(&terminal_id)
             .expect("terminal")
             .set_raw_agent_state_for_test(AgentState::Blocked);
-        let area = Rect::new(0, 0, 100, 30);
+        let area = Rect::new(0, 0, 26, 30);
         crate::ui::compute_view(&mut app, area);
         app.open_sidebar_blocker_scope_menu();
         let layout = sidebar_blocker_scope_menu_layout(&app, area).expect("scope layout");
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("popup terminal");
+        let mut terminal = Terminal::new(TestBackend::new(26, 30)).expect("popup terminal");
         terminal
             .draw(|frame| render_sidebar_blocker_scope_menu(&app, frame))
             .expect("render scope popup");
@@ -32927,9 +32931,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let has_border = buffer[(layout.rect.x, layout.rect.y)].symbol() == "┌";
         assert!(has_border, "selector should have a visible top border");
         assert!(
-            (0..30).any(|y| (0..100).any(|x| buffer[(x, y)].symbol() == "✓")),
+            (0..30).any(|y| (0..26).any(|x| buffer[(x, y)].symbol() == "✓")),
             "current scope should be marked"
         );
+        let popup = (layout.rect.y..layout.rect.bottom())
+            .map(|y| row_text(buffer, y, 26))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(popup.contains("This device"), "{popup:?}");
+        assert!(popup.contains("Fleet"), "{popup:?}");
     }
 
     #[test]
