@@ -8857,7 +8857,9 @@ fn needs_you_row_areas_from_rows(
         }
         if matches!(
             row,
-            SidebarRow::NeedsYou { .. } | SidebarRow::NeedsYouMore { .. }
+            SidebarRow::NeedsYou { .. }
+                | SidebarRow::NeedsYouMore { .. }
+                | SidebarRow::BlockersOtherDevices { .. }
         ) {
             out.push((idx, Rect::new(body.x, y, body.width, height)));
         }
@@ -17258,6 +17260,18 @@ pub(crate) mod tests {
         assert!(local_rows
             .iter()
             .any(|row| matches!(row, SidebarRow::BlockersOtherDevices { count: 1 })));
+        let other_devices_row = local_rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::BlockersOtherDevices { count: 1 }))
+            .expect("other-device blocker row");
+        assert!(needs_you_row_areas_from_rows(
+            &app,
+            &local_rows,
+            Rect::new(0, 0, 40, 12),
+            0,
+        )
+        .iter()
+        .any(|(row_idx, _)| *row_idx == other_devices_row));
     }
 
     #[test]
@@ -28836,6 +28850,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn narrow_group_headers_truncate_the_title_and_keep_the_glyph_and_id() {
         let mut app = linear_state_fixture(&[("OPS-3", "In Progress")]);
         app.dock_width = 26;
+        app.sidebar_width = 26;
 
         let headers = rendered_nested_headers(&mut app, 80, 24);
 
