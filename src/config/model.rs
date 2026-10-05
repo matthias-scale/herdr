@@ -2356,7 +2356,7 @@ pub struct UiIconsConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            sidebar_width: 32,
+            sidebar_width: 26,
             working_row_opacity_percent: 100,
             sidebar_animation: true,
             window_cycle_mode: WindowCycleModeConfig::default(),
