@@ -488,7 +488,7 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
     if area.width == 0 || area.height == 0 {
         return Vec::new();
     }
-    let blocked = crate::ui::sidebar::all_agent_panel_entries(app)
+    let mut blocked = crate::ui::sidebar::all_agent_panel_entries(app)
         .into_iter()
         .fold(0usize, |blocked, entry| {
             if crate::ui::sidebar::entry_attention_tier(&entry)
@@ -509,6 +509,15 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
                 blocked + 1
             }
         });
+    if app.sidebar_blocker_scope == crate::app::state::BlockerScope::Fleet {
+        for remote in &app.remote_agent_panel_entries {
+            if crate::ui::sidebar::entry_attention_tier(&remote.entry)
+                == crate::terminal::state::AttentionTier::Blocked
+            {
+                blocked = blocked.saturating_add(1);
+            }
+        }
+    }
     let specs = status_button_specs(app, blocked);
 
     // The right-aligned segments are load-bearing; buttons yield to them rather
@@ -2545,6 +2554,32 @@ mod tests {
             terminal.detected_agent = Some(crate::detect::Agent::Claude);
             terminal.set_raw_agent_state_for_test(AgentState::Blocked);
         }
+        let remote_host = crate::fleet::HostSnapshot {
+            name: "capture-remote".into(),
+            target: "capture-remote".into(),
+            local: false,
+            session: None,
+            socket: None,
+            state: crate::fleet::HostState::Reachable,
+            version: None,
+            protocol: None,
+            error: None,
+            remote_identity: None,
+            sessions: None,
+            reachable: true,
+            last_seen_unix_ms: Some(1),
+            entries: vec![crate::fleet::FleetRow::test_agent_row_with_state(
+                "capture-remote",
+                "remote-blocked",
+                "blocked",
+            )],
+        };
+        let remote_snapshot = crate::fleet::Snapshot {
+            hosts: vec![remote_host],
+            ..Default::default()
+        };
+        app.remote_agent_panel_entries =
+            crate::ui::sidebar::remote_agent_panel_entries_at(&remote_snapshot, 1, true);
         let fleet_buttons = status_buttons(&app, Rect::new(0, 0, 120, 1));
         let blocked_label = |buttons: &[StatusButton]| {
             buttons
@@ -2555,7 +2590,7 @@ mod tests {
                 .trim()
                 .to_string()
         };
-        assert_eq!(blocked_label(&fleet_buttons), "⛔ 2");
+        assert_eq!(blocked_label(&fleet_buttons), "⛔ 3");
         app.sidebar_blocker_scope = crate::app::state::BlockerScope::ThisDevice;
         let local_buttons = status_buttons(&app, Rect::new(0, 0, 120, 1));
         assert_eq!(blocked_label(&local_buttons), "⛔ 1 · ub1");
