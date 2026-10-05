@@ -214,6 +214,10 @@ impl App {
                         .save_spawn_dock_draft(Some(dock.draft()));
                 }
             }
+            NavigateAction::OpenAgentFinder => {
+                leave_navigate_mode(&mut self.state);
+                self.state.open_agent_finder();
+            }
             NavigateAction::NewWorktree => {
                 if let Some(ws_idx) = workspace_action_target(&self.state, context).filter(|idx| {
                     workspace_can_start_worktree_action(&self.state, &self.terminal_runtimes, *idx)
@@ -1029,6 +1033,16 @@ impl App {
             return;
         };
         if tab_idx >= workspace.tabs.len() {
+            return;
+        }
+        let tab = &workspace.tabs[tab_idx];
+        if tab.layout.pane_count() > 1 {
+            // A window close targets its selected pane. Closing the tab would
+            // also terminate every sibling agent in that window.
+            let selected_pane = tab.layout.focused();
+            if let Some(pane_id) = self.public_pane_id(ws_idx, selected_pane) {
+                self.runtime_pane_close("tui.pane.close", pane_id);
+            }
             return;
         }
         if workspace.tabs.len() == 1 {
@@ -2619,6 +2633,7 @@ pub(crate) enum NavigateAction {
     NewWorkspace,
     NewThread,
     NewAgentDock,
+    OpenAgentFinder,
     NewWorktree,
     OpenWorktree,
     RemoveWorktree,
@@ -2900,6 +2915,7 @@ macro_rules! non_indexed_action_bindings {
             (&kb.help, NavigateAction::Help),
             (&kb.settings, NavigateAction::Settings),
             (&kb.command_palette, NavigateAction::OpenCommandPalette),
+            (&kb.agent_finder, NavigateAction::OpenAgentFinder),
             (&kb.workspace_picker, NavigateAction::WorkspacePicker),
             (&kb.new_workspace, NavigateAction::NewWorkspace),
             (&kb.new_thread, NavigateAction::NewThread),
@@ -3115,6 +3131,7 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
             state.open_spawn_dock();
         }
+        NavigateAction::OpenAgentFinder => leave_navigate_mode(state),
         NavigateAction::NewWorktree => {
             if let Some(ws_idx) = workspace_action_target(state, context)
                 .filter(|idx| workspace_can_start_worktree_action(state, terminal_runtimes, *idx))
@@ -3862,6 +3879,45 @@ mod tests {
         workspace::Workspace,
     };
 
+    #[test]
+    fn freeze_closing_a_window_closes_only_its_selected_agent_pane() {
+        let mut app = app_with_test_workspaces(&["agents"]);
+        app.state.confirm_close = false;
+        let first = app.state.workspaces[0].tabs[0].root_pane;
+        let selected = app.state.workspaces[0].test_split(Direction::Horizontal);
+        let third = app.state.workspaces[0].test_split(Direction::Horizontal);
+        app.state.workspaces[0].tabs[0].layout.focus_pane(selected);
+        app.state.ensure_test_terminals();
+        let first_terminal = app.state.terminal_id_for_pane(0, first).unwrap().clone();
+        let third_terminal = app.state.terminal_id_for_pane(0, third).unwrap().clone();
+        app.state
+            .terminals
+            .get_mut(&first_terminal)
+            .unwrap()
+            .set_raw_agent_state_for_test(crate::detect::AgentState::Working);
+        app.state
+            .terminals
+            .get_mut(&third_terminal)
+            .unwrap()
+            .set_raw_agent_state_for_test(crate::detect::AgentState::Blocked);
+        app.close_tab_at_via_api(0, 0);
+        assert_eq!(app.state.workspaces.len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
+        assert!(app.state.workspaces[0].pane_state(selected).is_none());
+        assert!(app.state.workspaces[0].pane_state(first).is_some());
+        assert!(app.state.workspaces[0].pane_state(third).is_some());
+        assert_eq!(
+            app.state.terminals[&first_terminal].raw_agent_state(),
+            crate::detect::AgentState::Working
+        );
+        assert_eq!(
+            app.state.terminals[&third_terminal].raw_agent_state(),
+            crate::detect::AgentState::Blocked
+        );
+        app.state.assert_invariants_for_test();
+    }
+
     fn mark_worktree_space_member(state: &mut AppState, ws_idx: usize, key: &str) {
         state.workspaces[ws_idx].worktree_space = Some(crate::workspace::WorktreeSpaceMembership {
             key: key.into(),
@@ -4385,8 +4441,8 @@ mod tests {
         assert!(crate::ui::sidebar::section_is_collapsed(
             &app.state, working
         ));
-        assert_eq!(app.state.visible_workspace_order(), vec![0, 1]);
-        assert_eq!(app.state.workspace_at_visible_position(2), None);
+        assert_eq!(app.state.visible_workspace_order(), vec![0, 1, 2]);
+        assert_eq!(app.state.workspace_at_visible_position(2), Some(2));
         let third_workspace = navigate_reserved_action_for_key(
             &app.state,
             &TerminalKey::new(KeyCode::Char('3'), KeyModifiers::empty()),
@@ -4396,21 +4452,15 @@ mod tests {
         execute_navigate_action(&mut app.state, third_workspace);
         assert_eq!(
             app.state.active,
-            Some(0),
-            "hidden workspaces have no jump number"
+            Some(2),
+            "device rows have jump numbers even while Working is collapsed"
         );
         app.state.selected = 2;
         app.state.move_selected_workspace_by_visible_delta(-1);
-        assert_eq!(
-            app.state.selected, 1,
-            "up from a hidden row starts at the last visible row"
-        );
+        assert_eq!(app.state.selected, 1, "up follows the previous device row");
         app.state.selected = 2;
         app.state.move_selected_workspace_by_visible_delta(1);
-        assert_eq!(
-            app.state.selected, 0,
-            "down from a hidden row starts at the first visible row"
-        );
+        assert_eq!(app.state.selected, 2, "down stays at the final device row");
 
         app.state.toggle_sidebar_group(working);
         assert_eq!(app.state.visible_workspace_order(), vec![0, 1, 2]);
@@ -4423,7 +4473,7 @@ mod tests {
         assert_eq!(
             app.state.active,
             Some(2),
-            "expanded Working rows get jump numbers"
+            "expanded Working summary does not duplicate jump numbers"
         );
 
         app.state.sidebar_work_filter.query = "done".into();
