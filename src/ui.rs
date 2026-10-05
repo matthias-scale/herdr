@@ -2303,7 +2303,8 @@ mod tests {
 
         let body = Rect::new(0, 1, 80, 19);
         let [sidebar, old_main] =
-            Layout::horizontal([Constraint::Length(26), Constraint::Min(1)]).areas(body);
+            Layout::horizontal([Constraint::Length(app.sidebar_width), Constraint::Min(1)])
+                .areas(body);
         let [old_tab_bar, old_terminal] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(old_main);
 
@@ -2948,13 +2949,13 @@ mod tests {
         app.set_server_mode(Mode::Prefix);
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 53, 1));
-        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 53, 18));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(32, 1, 47, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(32, 2, 47, 18));
 
         app.tab_bar_position = crate::config::TabBarPositionConfig::Bottom;
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
-        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 53, 18));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 19, 53, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(32, 1, 47, 18));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(32, 19, 47, 1));
         assert!(app.view.tab_hit_areas.iter().all(|rect| rect.y == 19));
         assert_eq!(app.view.new_tab_hit_area.y, 19);
 
@@ -2982,7 +2983,7 @@ mod tests {
         // Full-width status bar occupies row 0; chrome starts at y=1.
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 80, 1));
         assert_eq!(app.view.tab_bar_rect, Rect::default());
-        assert_eq!(single_tab_terminal_area, Rect::new(26, 1, 53, 19));
+        assert_eq!(single_tab_terminal_area, Rect::new(32, 1, 47, 19));
         assert!(app.view.tab_hit_areas.is_empty());
         assert_eq!(app.view.new_tab_hit_area, Rect::default());
 
@@ -2990,8 +2991,8 @@ mod tests {
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
 
         assert_eq!(app.view.status_bar_rect, Rect::new(0, 0, 80, 1));
-        assert_eq!(app.view.tab_bar_rect, Rect::new(26, 1, 53, 1));
-        assert_eq!(app.view.terminal_area, Rect::new(26, 2, 53, 18));
+        assert_eq!(app.view.tab_bar_rect, Rect::new(32, 1, 47, 1));
+        assert_eq!(app.view.terminal_area, Rect::new(32, 2, 47, 18));
         assert_eq!(app.view.tab_hit_areas.len(), 2);
         assert!(app.view.tab_hit_areas.iter().all(|rect| rect.width > 0));
         assert!(app.view.new_tab_hit_area.width > 0);
@@ -3313,7 +3314,7 @@ mod tests {
         // pre-existing single-tab case.
         assert_eq!(app.workspaces[0].tabs.len(), 2);
         assert_eq!(app.view.tab_bar_rect, Rect::default());
-        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 53, 19));
+        assert_eq!(app.view.terminal_area, Rect::new(32, 1, 47, 19));
         assert!(app.view.tab_hit_areas.is_empty());
         assert_eq!(app.view.new_tab_hit_area, Rect::default());
 
@@ -3341,7 +3342,7 @@ mod tests {
 
         compute_view(&mut app, Rect::new(0, 0, 80, 20));
         assert_eq!(app.view.tab_bar_rect, Rect::default());
-        assert_eq!(app.view.terminal_area, Rect::new(26, 1, 53, 19));
+        assert_eq!(app.view.terminal_area, Rect::new(32, 1, 47, 19));
 
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
         terminal.draw(|frame| render(&app, frame)).unwrap();
