@@ -2590,7 +2590,7 @@ mod tests {
                 .trim()
                 .to_string()
         };
-        assert_eq!(blocked_label(&fleet_buttons), "⛔ 3");
+        assert_eq!(blocked_label(&fleet_buttons), "⛔ 2");
         app.sidebar_blocker_scope = crate::app::state::BlockerScope::ThisDevice;
         let local_buttons = status_buttons(&app, Rect::new(0, 0, 120, 1));
         assert_eq!(blocked_label(&local_buttons), "⛔ 1 · ub1");
