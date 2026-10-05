@@ -12047,9 +12047,9 @@ fn render_section_header(
             let label_width =
                 usize::from(header.rect.width).saturating_sub(prefix_width + count_width);
             let label = if app.sidebar_blocker_scope == crate::app::state::BlockerScope::ThisDevice {
-                "[Local ▾]"
+                "[Local ▾]".to_string()
             } else {
-                "[Fleet ▾]"
+                "[Fleet ▾]".to_string()
             };
             spans.push(Span::styled(
                 if display_width(&label) <= label_width {
