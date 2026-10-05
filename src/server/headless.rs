@@ -20001,7 +20001,7 @@ next_tab = ""
             .get(&terminal_id)
             .expect("runtime")
             .current_size();
-        assert_eq!(expected_app_size.1, 171);
+        assert_eq!(expected_app_size.1, 165);
 
         let (writer, _control_rx, _render_rx) = test_client_writer();
         assert!(server.handle_server_event(ServerEvent::ClientConnected {
