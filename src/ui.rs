@@ -1646,9 +1646,8 @@ pub(super) fn agent_finder_status_label(agent: &crate::api::schema::AgentInfo) -
         crate::api::schema::AgentStatus::Working => ("working", "working"),
         crate::api::schema::AgentStatus::Blocked => ("blocked", "blocked"),
         crate::api::schema::AgentStatus::Done => ("done", "done"),
-        crate::api::schema::AgentStatus::Stale | crate::api::schema::AgentStatus::Unknown => {
-            ("unknown", "?")
-        }
+        crate::api::schema::AgentStatus::Stale => ("unknown", "?"),
+        crate::api::schema::AgentStatus::Unknown => ("unknown", "idle"),
     };
     agent
         .state_labels
@@ -2022,7 +2021,7 @@ mod tests {
         .expect("minimal agent fixture deserializes");
         assert_eq!(agent_finder_status_label(&agent), "active");
         agent.agent_status = crate::api::schema::AgentStatus::Unknown;
-        assert_eq!(agent_finder_status_label(&agent), "?");
+        assert_eq!(agent_finder_status_label(&agent), "idle");
     }
 
     #[test]

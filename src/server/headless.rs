@@ -18193,9 +18193,10 @@ next_tab = ""
 
         for (width, height) in [(120, 40), (64, 39)] {
             let mut server = test_headless_server();
-            // Keep the finder metadata row deterministic across CI hosts; some
-            // macOS runners expose a hostname longer than the sidebar column.
-            server.app.state.agent_host_name = "local".into();
+            // Keep the finder fixture local and deterministic across CI hosts.
+            server.app.state.agent_host_name = "localhost".into();
+            server.app.remote_focus_transport =
+                Box::new(crate::app::remote_focus::StubRemoteFocusTransport);
             let mut workspace = crate::workspace::Workspace::test_new("finder");
             let claude_pane = workspace.tabs[0].root_pane;
             let codex_pane = workspace.test_split(ratatui::layout::Direction::Horizontal);
@@ -18212,6 +18213,7 @@ next_tab = ""
             workspace.insert_test_runtime(claude_pane, claude_runtime);
             workspace.insert_test_runtime(codex_pane, codex_runtime);
             server.app.state.workspaces = vec![workspace];
+            server.app.state.refresh_local_agent_panel_identities();
             server.app.state.ensure_test_terminals();
             server.app.state.active = Some(0);
             server.app.state.selected = 0;
@@ -18401,7 +18403,7 @@ next_tab = ""
             );
             let preview_header = codex_rendered
                 .lines()
-                .position(|line| line.to_lowercase().contains("local · codex"))
+                .position(|line| line.to_lowercase().contains("localhost · codex"))
                 .expect("preview header belongs to selected Codex result");
             let preview_body = codex_rendered
                 .lines()
@@ -18555,7 +18557,7 @@ next_tab = ""
                 "compact finder frame:\n{rendered}"
             );
             assert!(
-                rendered.contains("local · title") || rendered.contains("title ·"),
+                rendered.contains("localhost · title") || rendered.contains("title ·"),
                 "finder result metadata:\n{rendered}"
             );
             assert!(
