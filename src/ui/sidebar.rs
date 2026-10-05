@@ -12046,7 +12046,8 @@ fn render_section_header(
             };
             let label_width =
                 usize::from(header.rect.width).saturating_sub(prefix_width + count_width);
-            let label = if app.sidebar_blocker_scope == crate::app::state::BlockerScope::ThisDevice {
+            let label = if app.sidebar_blocker_scope == crate::app::state::BlockerScope::ThisDevice
+            {
                 "[Local ▾]".to_string()
             } else {
                 "[Fleet ▾]".to_string()
@@ -17268,14 +17269,11 @@ pub(crate) mod tests {
             .iter()
             .position(|row| matches!(row, SidebarRow::BlockersOtherDevices { count: 1 }))
             .expect("other-device blocker row");
-        assert!(needs_you_row_areas_from_rows(
-            &app,
-            &local_rows,
-            Rect::new(0, 0, 40, 12),
-            0,
-        )
-        .iter()
-        .any(|(row_idx, _)| *row_idx == other_devices_row));
+        assert!(
+            needs_you_row_areas_from_rows(&app, &local_rows, Rect::new(0, 0, 40, 12), 0,)
+                .iter()
+                .any(|(row_idx, _)| *row_idx == other_devices_row)
+        );
     }
 
     #[test]
@@ -32874,10 +32872,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_sections_layout = true;
         for (scope, expected) in [
             (crate::app::state::BlockerScope::Fleet, "[Fleet ▾]"),
-            (
-                crate::app::state::BlockerScope::ThisDevice,
-                "[Local ▾]",
-            ),
+            (crate::app::state::BlockerScope::ThisDevice, "[Local ▾]"),
         ] {
             app.sidebar_blocker_scope = scope;
             let width = 26;
