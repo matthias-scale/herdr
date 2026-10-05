@@ -453,6 +453,15 @@ type StatusButtonSpec = (StatusButtonAction, String, bool);
 fn status_button_specs(app: &AppState, blocked: usize) -> [StatusButtonSpec; 5] {
     [
         (
+            StatusButtonAction::BlockedFilter,
+            if app.sidebar_blocker_scope == crate::app::state::BlockerScope::ThisDevice {
+                format!(" ⛔ {blocked} · {} ", app.agent_host_name)
+            } else {
+                format!(" ⛔ {blocked} ")
+            },
+            app.blocked_filter,
+        ),
+        (
             StatusButtonAction::Home,
             if app.nerd_font { " ⌂ " } else { " H " }.to_string(),
             app.home.is_some(),
@@ -461,15 +470,6 @@ fn status_button_specs(app: &AppState, blocked: usize) -> [StatusButtonSpec; 5] 
             StatusButtonAction::NewSession,
             if app.nerd_font { " ＋ " } else { " + " }.to_string(),
             false,
-        ),
-        (
-            StatusButtonAction::BlockedFilter,
-            if app.sidebar_blocker_scope == crate::app::state::BlockerScope::ThisDevice {
-                format!(" ⛔ {blocked} · {} ", app.agent_host_name)
-            } else {
-                format!(" ⛔ {blocked} ")
-            },
-            app.blocked_filter,
         ),
         (
             StatusButtonAction::Board,
@@ -513,10 +513,15 @@ pub(crate) fn status_buttons(app: &AppState, area: Rect) -> Vec<StatusButton> {
 
     // The right-aligned segments are load-bearing; buttons yield to them rather
     // than overlapping, and drop whole rather than truncating to an unreadable stub.
-    let title_reserve = focused_pane_title_parts(app)
-        .map(|(repo, _)| display_width(&repo))
-        .unwrap_or(0)
-        .saturating_add(usize::from(focused_agent_dot_color(app).is_some()) * 2);
+    let title_reserve = if app.sidebar_blocker_scope == crate::app::state::BlockerScope::ThisDevice
+    {
+        0
+    } else {
+        focused_pane_title_parts(app)
+            .map(|(repo, _)| display_width(&repo))
+            .unwrap_or(0)
+            .saturating_add(usize::from(focused_agent_dot_color(app).is_some()) * 2)
+    };
     let content_width = area
         .width
         .saturating_sub(super::tabs::tab_action_status_bar_reserved_width(app, area));
@@ -2474,9 +2479,9 @@ mod tests {
         assert_eq!(
             actions,
             vec![
+                StatusButtonAction::BlockedFilter,
                 StatusButtonAction::Home,
                 StatusButtonAction::NewSession,
-                StatusButtonAction::BlockedFilter,
                 StatusButtonAction::Board,
                 StatusButtonAction::Scratch,
             ]
@@ -2503,7 +2508,7 @@ mod tests {
     #[test]
     fn status_button_specs_use_icon_fallbacks_and_only_the_approved_actions() {
         let app = AppState::test_new();
-        let [home, new_session, blocked, board, scratch] = status_button_specs(&app, 2);
+        let [blocked, home, new_session, board, scratch] = status_button_specs(&app, 2);
         assert_eq!(home.0, StatusButtonAction::Home);
         assert_eq!(home.1.trim(), "⌂");
         assert_eq!(new_session.0, StatusButtonAction::NewSession);
@@ -2516,7 +2521,7 @@ mod tests {
 
         let mut fallback = app;
         fallback.nerd_font = false;
-        let [home, new_session, blocked, board, scratch] = status_button_specs(&fallback, 0);
+        let [blocked, home, new_session, board, scratch] = status_button_specs(&fallback, 0);
         assert_eq!(home.1.trim(), "H");
         assert_eq!(new_session.1.trim(), "+");
         assert_eq!(blocked.1.trim(), "⛔ 0");
@@ -2540,7 +2545,7 @@ mod tests {
             terminal.detected_agent = Some(crate::detect::Agent::Claude);
             terminal.set_raw_agent_state_for_test(AgentState::Blocked);
         }
-        let fleet_buttons = status_buttons(&app, Rect::new(0, 0, 160, 1));
+        let fleet_buttons = status_buttons(&app, Rect::new(0, 0, 120, 1));
         let blocked_label = |buttons: &[StatusButton]| {
             buttons
                 .iter()
@@ -2552,7 +2557,7 @@ mod tests {
         };
         assert_eq!(blocked_label(&fleet_buttons), "⛔ 2");
         app.sidebar_blocker_scope = crate::app::state::BlockerScope::ThisDevice;
-        let local_buttons = status_buttons(&app, Rect::new(0, 0, 160, 1));
+        let local_buttons = status_buttons(&app, Rect::new(0, 0, 120, 1));
         assert_eq!(blocked_label(&local_buttons), "⛔ 1 · ub1");
     }
 
