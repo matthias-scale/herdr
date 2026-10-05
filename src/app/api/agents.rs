@@ -12,6 +12,7 @@ use crate::app::App;
 use super::responses::{encode_error, encode_error_body, encode_success};
 
 const AGENT_PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
+const AGENT_FINDER_PREVIEW_LINES: usize = 12;
 const MAX_AGENT_SEARCH_BYTES: u64 = 8 * 1024 * 1024;
 type AgentFileSearchMatch = (String, u32, Vec<String>, Vec<String>);
 
@@ -32,6 +33,7 @@ impl App {
         self.state.agent_finder_partial = false;
 
         let mut candidates = Vec::new();
+        let mut candidate_previews = std::collections::HashMap::new();
         for agent in self.collect_agent_infos() {
             let title = agent
                 .display_title
@@ -43,9 +45,9 @@ impl App {
             let tail = self.agent_terminal_tail(&agent.pane_id);
             let preview = tail
                 .as_deref()
-                .map(|text| trailing_lines(text, 40))
+                .map(|text| terminal_output_lines(text, AGENT_FINDER_PREVIEW_LINES))
                 .unwrap_or_default();
-            let title_match = agent_title_match(&agent, &query).map(str::to_owned);
+            let title_match = agent_title_match(&agent, &query).is_some();
             if query.is_empty() {
                 self.state
                     .agent_finder_results
@@ -55,16 +57,13 @@ impl App {
                         source: crate::api::schema::AgentSearchSource::Title,
                         path: None,
                         line: None,
-                        context: tail
-                            .as_deref()
-                            .map(|text| trailing_lines(text, 3))
-                            .unwrap_or_default(),
+                        context: preview.iter().rev().take(3).rev().cloned().collect(),
                         preview,
                         agent,
                     });
                 continue;
             }
-            if let Some(matched) = title_match {
+            if title_match {
                 self.state
                     .agent_finder_results
                     .push(crate::api::schema::AgentSearchHit {
@@ -73,17 +72,13 @@ impl App {
                         source: crate::api::schema::AgentSearchSource::Title,
                         path: None,
                         line: None,
-                        context: tail
-                            .as_deref()
-                            .map(|text| trailing_lines(text, 3))
-                            .filter(|lines| !lines.is_empty())
-                            .unwrap_or_else(|| vec![matched]),
+                        context: preview.iter().rev().take(3).rev().cloned().collect(),
                         preview,
                         agent,
                     });
             } else if let Some(context) = tail
                 .as_deref()
-                .and_then(|text| matching_context(text, &query))
+                .and_then(|text| matching_terminal_context(text, &query))
             {
                 self.state
                     .agent_finder_results
@@ -98,6 +93,7 @@ impl App {
                         agent,
                     });
             } else {
+                candidate_previews.insert(agent.pane_id.clone(), preview);
                 candidates.push(agent);
             }
         }
@@ -165,7 +161,7 @@ impl App {
             let remaining = 100 - self.state.agent_finder_results.len();
             let event_tx = self.event_tx.clone();
             tokio::task::spawn_blocking(move || {
-                let (hits, partial) = search_agent_session_candidates(
+                let (mut hits, partial) = search_agent_session_candidates(
                     candidates
                         .into_iter()
                         .map(|agent| {
@@ -184,6 +180,7 @@ impl App {
                     MAX_AGENT_SEARCH_BYTES,
                     None,
                 );
+                attach_terminal_previews(&mut hits, &candidate_previews);
                 let _ =
                     event_tx.blocking_send(crate::events::AppEvent::AgentFinderSearchCompleted {
                         generation,
@@ -232,9 +229,9 @@ impl App {
             let tail = self.agent_terminal_tail(&agent.pane_id);
             let preview = tail
                 .as_deref()
-                .map(|text| trailing_lines(text, 40))
+                .map(|text| terminal_output_lines(text, AGENT_FINDER_PREVIEW_LINES))
                 .unwrap_or_default();
-            if let Some(value) = agent_title_match(&agent, &query).map(str::to_owned) {
+            if agent_title_match(&agent, &query).is_some() {
                 if hits.len() < limit {
                     hits.push(agent_search_hit(
                         agent,
@@ -242,10 +239,7 @@ impl App {
                         crate::api::schema::AgentSearchSource::Title,
                         None,
                         None,
-                        tail.as_deref()
-                            .map(|text| trailing_lines(text, 3))
-                            .filter(|lines| !lines.is_empty())
-                            .unwrap_or_else(|| vec![value]),
+                        preview.iter().rev().take(3).rev().cloned().collect(),
                         preview,
                     ));
                 } else {
@@ -253,7 +247,7 @@ impl App {
                 }
             } else if let Some(context) = tail
                 .as_deref()
-                .and_then(|text| matching_context(text, &query))
+                .and_then(|text| matching_terminal_context(text, &query))
             {
                 if hits.len() < limit {
                     hits.push(agent_search_hit(
@@ -379,27 +373,23 @@ impl App {
             let tail = self.agent_terminal_tail(&agent.pane_id);
             let preview = tail
                 .as_deref()
-                .map(|text| trailing_lines(text, 40))
+                .map(|text| terminal_output_lines(text, AGENT_FINDER_PREVIEW_LINES))
                 .unwrap_or_default();
             let title_match = agent_title_match(&agent, &query).map(str::to_owned);
-            if let Some(value) = title_match {
+            if title_match.is_some() {
                 hits.push(crate::api::schema::AgentSearchHit {
                     target: agent.pane_id.clone(),
                     title,
                     source: crate::api::schema::AgentSearchSource::Title,
                     path: None,
                     line: None,
-                    context: tail
-                        .as_deref()
-                        .map(|text| trailing_lines(text, 3))
-                        .filter(|lines| !lines.is_empty())
-                        .unwrap_or_else(|| vec![value]),
+                    context: preview.iter().rev().take(3).rev().cloned().collect(),
                     preview,
                     agent,
                 });
             } else if let Some(context) = tail
                 .as_deref()
-                .and_then(|text| matching_context(text, &query))
+                .and_then(|text| matching_terminal_context(text, &query))
             {
                 hits.push(crate::api::schema::AgentSearchHit {
                     target: agent.pane_id.clone(),
@@ -1087,6 +1077,17 @@ fn agent_search_hit(
     }
 }
 
+fn attach_terminal_previews(
+    hits: &mut [crate::api::schema::AgentSearchHit],
+    previews: &std::collections::HashMap<String, Vec<String>>,
+) {
+    for hit in hits {
+        if let Some(preview) = previews.get(&hit.target) {
+            hit.preview.clone_from(preview);
+        }
+    }
+}
+
 fn load_agent_transcript_bounded(
     agent: &crate::api::schema::AgentInfo,
     max_bytes: u64,
@@ -1160,6 +1161,11 @@ fn matching_context(text: &str, query: &str) -> Option<Vec<String>> {
     )
 }
 
+fn matching_terminal_context(text: &str, query: &str) -> Option<Vec<String>> {
+    let lines = terminal_output_lines(text, usize::MAX);
+    matching_context(&lines.join("\n"), query)
+}
+
 fn matching_line(text: &str, query: &str) -> Option<u32> {
     text.lines()
         .position(|line| line.to_lowercase().contains(query))
@@ -1173,6 +1179,108 @@ fn trailing_lines(text: &str, count: usize) -> Vec<String> {
         .skip(lines.len().saturating_sub(count))
         .map(|line| (*line).to_owned())
         .collect()
+}
+
+fn terminal_output_lines(text: &str, count: usize) -> Vec<String> {
+    let mut output = Vec::new();
+    let mut in_prompt_box = false;
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        let trimmed = line.trim();
+        if in_prompt_box {
+            if matches!(trimmed.chars().next(), Some('╰' | '└' | '╚')) {
+                in_prompt_box = false;
+            }
+            continue;
+        }
+        if matches!(trimmed.chars().next(), Some('╭' | '┌' | '╔')) {
+            in_prompt_box = true;
+            continue;
+        }
+        if trimmed.is_empty() || is_agent_chrome_line(trimmed) {
+            continue;
+        }
+        output.push(line.to_owned());
+    }
+    let skip = output.len().saturating_sub(count);
+    output.into_iter().skip(skip).collect()
+}
+
+fn is_agent_chrome_line(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    let token_meter = line.contains('%')
+        && matches!(
+            line.chars().next(),
+            Some(
+                '░' | '▒'
+                    | '▓'
+                    | '█'
+                    | '▁'
+                    | '▂'
+                    | '▃'
+                    | '▄'
+                    | '▅'
+                    | '▆'
+                    | '▇'
+                    | '▉'
+                    | '▊'
+                    | '▋'
+            )
+        );
+    let banner_art = line
+        .chars()
+        .filter(|character| matches!(character, '▐' | '▛' | '▜' | '█' | '▀' | '▝'))
+        .count()
+        >= 3;
+    let version_badge = lower.strip_prefix('v').is_some_and(|version| {
+        version.contains('.')
+            && version
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '.')
+    });
+    let separator = line.chars().count() >= 3
+        && line
+            .chars()
+            .all(|character| character.is_whitespace() || matches!(character, '─' | '━' | '═'));
+    matches!(lower.as_str(), "›" | "❯")
+        || lower.contains("-- insert --")
+        || lower.starts_with("› ")
+        || lower.starts_with("❯ ")
+        || lower.contains("? for shortcuts")
+        || lower.contains("for shortcuts")
+        || lower.contains("thread-band:")
+        || lower.contains("closing-block-synth:")
+        || lower.contains("writing-pass:")
+        || lower.contains("remote control")
+        || lower.contains("remote control disconnected")
+        || lower.starts_with("disconnected —")
+        || lower.starts_with("claude.ai login")
+        || lower.starts_with("rejected — run")
+        || lower.starts_with("/login")
+        || lower.starts_with("/remote-control")
+        || lower == "claude code"
+        || lower.starts_with("claude max")
+        || lower.starts_with(">_ openai codex")
+        || version_badge
+        || banner_art
+        || token_meter
+        || separator
+        || line.contains('@') && lower.ends_with(" ago")
+        || lower.starts_with("tokens:")
+        || lower.starts_with("token usage")
+        || lower.starts_with("input tokens")
+        || lower.starts_with("output tokens")
+        || lower.contains("ctx ") && lower.contains('%')
+        || lower.contains("context ") && lower.contains("% left")
+        || lower.contains("⚓")
+        || lower.starts_with("✻ thinking")
+        || lower.starts_with("✻ worked for")
+        || lower.starts_with("✢ thinking")
+        || lower.starts_with("✽ thinking")
+        || lower.starts_with("worked for ")
+        || lower.starts_with("• worked for ")
+        || lower.starts_with("⏵⏵")
+        || lower.starts_with("⏵ ")
 }
 
 struct AgentTranscript {
@@ -1442,6 +1550,68 @@ mod agent_search_tests {
         assert!(trailing_lines("\n  \n", 3).is_empty());
     }
 
+    #[test]
+    fn terminal_output_lines_remove_agent_chrome_and_prompt_boxes() {
+        let output = terminal_output_lines(
+            "Useful line one\nTokens: 8,192\n╭──────────────╮\n│ › enter a prompt │\n╰──────────────╯\n-- INSERT -- ⏸ manual mode on\n? for shortcuts\n⏵⏵ bypass permissions on\n⚠ thread-band: wait for next cycle\n⚠ closing-block-synth: appended\n⚠ writing-pass: reply rewritten\n░░░░░░ 89% 22k\nHaik·med @scalable.so · 32m ago\n────────────────────────\nGPT-6-Luna medium · Context 97% left · 9.69K used\nRemote Control disconnected — login rejected\nUseful line two\n✻ Worked for 1s\nWorked for 1s • 12:51 AM\n",
+            3,
+        );
+        assert_eq!(output, ["Useful line one", "Useful line two"]);
+        let output = terminal_output_lines(
+            "Claude Code\nv2.1.289\n▐▛███▛█ Haiku 4.5\n▝▜██████▀ Claude Max\n● Remote Control\ndisconnected —\nClaude.ai login was\nrejected — run\n/login, then\n/remote-control\nplain text answer\n● Useful line three\n",
+            3,
+        );
+        assert_eq!(output, ["plain text answer", "● Useful line three"]);
+    }
+
+    #[test]
+    fn terminal_context_uses_neighboring_output_without_status_lines() {
+        assert_eq!(
+            matching_terminal_context(
+                "before\nTokens: 8,192\n? for shortcuts\nneedle hit\nafter\n-- INSERT --",
+                "needle"
+            ),
+            Some(vec!["before".into(), "needle hit".into(), "after".into()])
+        );
+        assert_eq!(
+            matching_terminal_context("? for shortcuts", "shortcuts"),
+            None
+        );
+    }
+
+    #[test]
+    fn file_match_keeps_the_terminal_preview_for_its_agent() {
+        let agent: crate::api::schema::AgentInfo = serde_json::from_value(serde_json::json!({
+            "terminal_id": "terminal",
+            "agent_status": "working",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "pane_id": "agent-pane",
+            "focused": false,
+            "revision": 1
+        }))
+        .expect("agent fixture deserializes");
+        let mut hits = vec![crate::api::schema::AgentSearchHit {
+            target: "agent-pane".into(),
+            title: "Report task".into(),
+            source: crate::api::schema::AgentSearchSource::Path,
+            path: Some("/worktree/out/report.md".into()),
+            line: Some(14),
+            context: vec!["file match".into()],
+            preview: vec!["file contents".into()],
+            agent,
+        }];
+        attach_terminal_previews(
+            &mut hits,
+            &std::collections::HashMap::from([(
+                "agent-pane".into(),
+                vec!["terminal output".into()],
+            )]),
+        );
+        assert_eq!(hits[0].context, ["file match"]);
+        assert_eq!(hits[0].preview, ["terminal output"]);
+    }
+
     #[tokio::test]
     async fn app_processes_an_api_request_while_agent_session_search_is_pending() {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1461,7 +1631,9 @@ mod agent_search_tests {
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             move |_| {
                 started_tx.send(()).expect("signal slow search start");
-                release_rx.recv().expect("release slow search");
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("release slow search within the bounded wait");
                 "deferred search response".into()
             },
         );
@@ -1515,7 +1687,9 @@ mod agent_search_tests {
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         defer_agent_search_response(app.event_tx.clone(), respond_to, active, move |_| {
             started_tx.send(()).expect("signal slow search start");
-            release_rx.recv().expect("release slow search");
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("release slow search within the bounded wait");
             done_tx.send(()).expect("signal search work complete");
             "stale response".into()
         });

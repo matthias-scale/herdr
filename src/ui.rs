@@ -1601,8 +1601,8 @@ fn render_agent_finder_preview(app: &AppState, frame: &mut Frame, area: Rect) {
         .as_deref()
         .or(hit.agent.agent.as_deref())
         .unwrap_or("agent");
-    let status = agent_finder_status_label(hit.agent.agent_status);
-    let age = agent_finder_age(app, hit.agent.reported_at.as_deref());
+    let status = agent_finder_status_label(&hit.agent);
+    let age = agent_finder_age_for_agent(app, &hit.agent);
     let mut lines = vec![Line::from(vec![
         Span::styled(
             "● ",
@@ -1619,11 +1619,7 @@ fn render_agent_finder_preview(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(app.palette.subtext0),
         ),
     ])];
-    let preview = if hit.preview.is_empty() {
-        &hit.context
-    } else {
-        &hit.preview
-    };
+    let preview = &hit.preview;
     lines.extend(preview.iter().take(40).map(|line| {
         Line::from(Span::styled(
             line.as_str(),
@@ -1644,15 +1640,21 @@ fn render_agent_finder_preview(app: &AppState, frame: &mut Frame, area: Rect) {
     );
 }
 
-pub(super) fn agent_finder_status_label(status: crate::api::schema::AgentStatus) -> &'static str {
-    match status {
-        crate::api::schema::AgentStatus::Idle => "idle",
-        crate::api::schema::AgentStatus::Working => "working",
-        crate::api::schema::AgentStatus::Blocked => "blocked",
-        crate::api::schema::AgentStatus::Done => "done",
-        crate::api::schema::AgentStatus::Stale => "stale",
-        crate::api::schema::AgentStatus::Unknown => "unknown",
-    }
+pub(super) fn agent_finder_status_label(agent: &crate::api::schema::AgentInfo) -> String {
+    let (key, fallback) = match agent.agent_status {
+        crate::api::schema::AgentStatus::Idle => ("idle", "idle"),
+        crate::api::schema::AgentStatus::Working => ("working", "working"),
+        crate::api::schema::AgentStatus::Blocked => ("blocked", "blocked"),
+        crate::api::schema::AgentStatus::Done => ("done", "done"),
+        crate::api::schema::AgentStatus::Stale | crate::api::schema::AgentStatus::Unknown => {
+            ("unknown", "?")
+        }
+    };
+    agent
+        .state_labels
+        .get(key)
+        .cloned()
+        .unwrap_or_else(|| fallback.to_owned())
 }
 
 pub(super) fn agent_finder_status_color(
@@ -1672,6 +1674,19 @@ pub(super) fn agent_finder_status_color(
 pub(super) fn agent_finder_age(app: &AppState, reported_at: Option<&str>) -> String {
     let age = agent_state_age(reported_at, app.view_observed_unix_s);
     age.strip_suffix(" ago").unwrap_or(&age).to_owned()
+}
+
+pub(super) fn agent_finder_age_for_agent(
+    app: &AppState,
+    agent: &crate::api::schema::AgentInfo,
+) -> String {
+    agent_finder_age(
+        app,
+        agent
+            .reported_at
+            .as_deref()
+            .or(agent.last_turn_at.as_deref()),
+    )
 }
 
 fn agent_state_age(reported_at: Option<&str>, observed_unix_s: u64) -> String {
@@ -1933,36 +1948,46 @@ mod tests {
             .join("\n");
         assert!(rendered.contains("pelican"), "{rendered}");
         assert!(rendered.contains("Pelican task"), "{rendered}");
-        assert!(rendered.contains("Enter focus"), "{rendered}");
+        assert!(rendered.contains("⏎ focus"), "{rendered}");
         assert!(rendered.contains("visible finder preview"), "{rendered}");
         assert!(!rendered.contains("switch workspace"), "{rendered}");
     }
 
     #[test]
-    fn agent_finder_preview_clears_underlying_pane_text() {
+    fn agent_finder_preview_tracks_selected_result_and_clears_underlying_pane_text() {
         let mut app = crate::app::state::AppState::test_new();
         app.agent_finder_saved_query = Some(String::new());
-        app.agent_finder_results = vec![crate::api::schema::AgentSearchHit {
-            target: "w1:p2".into(),
-            title: "Codex task".into(),
-            source: crate::api::schema::AgentSearchSource::Title,
-            path: None,
-            line: None,
-            context: Vec::new(),
-            preview: vec![String::new(), "Codex preview text".into()],
-            agent: serde_json::from_value(serde_json::json!({
-                "terminal_id": "terminal-2",
-                "agent_status": "idle",
-                "workspace_id": "w1",
-                "tab_id": "t2",
-                "pane_id": "p2",
-                "focused": false,
-                "revision": 1,
-                "agent": "codex",
-                "display_agent": "Codex"
-            }))
-            .expect("minimal agent fixture deserializes"),
-        }];
+        app.agent_finder_results = [
+            ("claude", "Claude task", "CLAUDE OUT FILE BODY"),
+            ("codex", "Codex task", "Codex preview text"),
+        ]
+        .into_iter()
+        .map(
+            |(provider, title, preview)| crate::api::schema::AgentSearchHit {
+                target: format!("w1:{provider}"),
+                title: title.into(),
+                source: crate::api::schema::AgentSearchSource::Path,
+                path: Some(format!("/worktree/out/{provider}.md")),
+                line: Some(14),
+                context: vec![format!("{provider} file match")],
+                preview: vec![preview.into()],
+                agent: serde_json::from_value(serde_json::json!({
+                    "terminal_id": format!("terminal-{provider}"),
+                    "agent_status": "idle",
+                    "workspace_id": "w1",
+                    "tab_id": "t2",
+                    "pane_id": provider,
+                    "focused": false,
+                    "revision": 1,
+                    "agent": provider,
+                    "display_agent": provider,
+                    "cwd": "/worktree"
+                }))
+                .expect("minimal agent fixture deserializes"),
+            },
+        )
+        .collect();
+        app.agent_finder_selected = 1;
 
         let mut terminal = Terminal::new(TestBackend::new(50, 6)).expect("test terminal");
         terminal
@@ -1978,7 +2003,51 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(rendered.contains("Codex preview text"), "{rendered}");
+        assert!(!rendered.contains("CLAUDE OUT FILE BODY"), "{rendered}");
         assert!(!rendered.contains("CLAUDE_UNDERLAY"), "{rendered}");
+    }
+
+    #[test]
+    fn agent_finder_status_uses_agent_state_label_overrides() {
+        let mut agent: crate::api::schema::AgentInfo = serde_json::from_value(serde_json::json!({
+            "terminal_id": "terminal",
+            "agent_status": "working",
+            "workspace_id": "w1",
+            "tab_id": "t1",
+            "pane_id": "p1",
+            "focused": false,
+            "revision": 1,
+            "state_labels": {"working": "active"}
+        }))
+        .expect("minimal agent fixture deserializes");
+        assert_eq!(agent_finder_status_label(&agent), "active");
+        agent.agent_status = crate::api::schema::AgentStatus::Unknown;
+        assert_eq!(agent_finder_status_label(&agent), "?");
+    }
+
+    #[test]
+    fn agent_finder_age_falls_back_to_last_turn_when_report_time_is_missing() {
+        let mut app = AppState::test_new();
+        let mut agent: crate::api::schema::AgentInfo = serde_json::from_value(serde_json::json!({
+            "terminal_id": "terminal",
+            "agent_status": "unknown",
+            "workspace_id": "w1",
+            "tab_id": "t1",
+            "pane_id": "p1",
+            "focused": false,
+            "revision": 1,
+            "last_turn_at": "2026-10-05T02:00:00Z"
+        }))
+        .expect("minimal agent fixture deserializes");
+        agent.reported_at = None;
+        app.view_observed_unix_s = time::OffsetDateTime::parse(
+            "2026-10-05T02:02:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .expect("fixed observation time parses")
+        .unix_timestamp() as u64;
+
+        assert_eq!(agent_finder_age_for_agent(&app, &agent), "2m");
     }
 
     /// A cell that only carries the right half of a double-width glyph is

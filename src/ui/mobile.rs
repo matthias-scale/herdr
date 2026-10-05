@@ -620,16 +620,24 @@ pub(crate) fn render_mobile_panel(
                     ),
                 );
             }
+            let selection = if app.agent_finder_results.is_empty() {
+                "0 of 0".to_owned()
+            } else {
+                format!(
+                    "{} of {}",
+                    app.agent_finder_selected
+                        .min(app.agent_finder_results.len().saturating_sub(1))
+                        .saturating_add(1),
+                    app.agent_finder_results.len()
+                )
+            };
             let footer_lines = vec![
                 Line::from(Span::styled(
-                    format!(
-                        "{} results · ↑/↓ select · Ctrl+↑/↓ history",
-                        app.agent_finder_results.len()
-                    ),
+                    format!("{selection} · ↑/↓ results · ctrl+↑/↓ history"),
                     Style::default().fg(p.overlay0).bg(p.panel_bg),
                 )),
                 Line::from(Span::styled(
-                    "Enter focus · Ctrl+Enter side pane · Esc back",
+                    "⏎ focus · ctrl+⏎ side pane · esc back",
                     Style::default().fg(p.overlay0).bg(p.panel_bg),
                 )),
             ];

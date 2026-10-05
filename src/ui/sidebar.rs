@@ -11149,7 +11149,11 @@ pub(super) fn render_sidebar(
 fn render_agent_finder_results(app: &AppState, frame: &mut Frame, area: Rect) {
     let search = sidebar_search_y(app, area);
     let body_y = search.saturating_add(1);
-    let footer_y = area.y.saturating_add(area.height).saturating_sub(2);
+    let footer_height = finder_footer_height(area);
+    let footer_y = area
+        .y
+        .saturating_add(area.height)
+        .saturating_sub(footer_height);
     let body = Rect::new(
         area.x,
         body_y,
@@ -11192,12 +11196,13 @@ pub(super) fn render_agent_finder_results_in_area(app: &AppState, frame: &mut Fr
             crate::api::schema::AgentSearchSource::Title => "title".to_owned(),
             crate::api::schema::AgentSearchSource::Tail => "tail".to_owned(),
             crate::api::schema::AgentSearchSource::Session => "session".to_owned(),
-            crate::api::schema::AgentSearchSource::Path => format!(
-                "{}:{}",
-                hit.path.as_deref().unwrap_or("path"),
-                hit.line.unwrap_or_default()
-            ),
+            crate::api::schema::AgentSearchSource::Path => finder_path_label(hit),
         };
+        let age = crate::ui::agent_finder_age_for_agent(app, &hit.agent);
+        let host_width = usize::from(area.width).saturating_sub(
+            8 + crate::ui::text::display_width(&source) + crate::ui::text::display_width(&age),
+        );
+        let host = finder_host_label(host, host_width);
         let mut title_spans = vec![Span::styled(
             format!("{status} "),
             Style::default().fg(status_color).bg(background),
@@ -11225,7 +11230,7 @@ pub(super) fn render_agent_finder_results_in_area(app: &AppState, frame: &mut Fr
             ),
             Span::styled(" · ", style),
             Span::styled(
-                crate::ui::agent_finder_age(app, hit.agent.reported_at.as_deref()),
+                age,
                 Style::default().fg(app.palette.overlay0).bg(background),
             ),
         ]));
@@ -11282,46 +11287,114 @@ pub(super) fn render_agent_finder_results_in_area(app: &AppState, frame: &mut Fr
 }
 
 fn render_agent_finder_footer(app: &AppState, frame: &mut Frame, area: Rect) {
-    if area.height < 2 || area.width <= 1 {
+    if area.width <= 1 {
         return;
     }
     let width = area.width.saturating_sub(1);
-    let top = area.y.saturating_add(area.height).saturating_sub(2);
+    let footer_height = finder_footer_height(area);
+    if area.height < footer_height {
+        return;
+    }
+    let top = area
+        .y
+        .saturating_add(area.height)
+        .saturating_sub(footer_height);
     let selected = if app.agent_finder_results.is_empty() {
-        "0 results".to_owned()
-    } else if width < 54 {
-        format!(
-            "{}/{} · ↑↓ results",
-            app.agent_finder_selected
-                .min(app.agent_finder_results.len().saturating_sub(1))
-                .saturating_add(1),
-            app.agent_finder_results.len()
-        )
+        "0 of 0".to_owned()
     } else {
         format!(
-            "{} of {} results",
+            "{} of {}",
             app.agent_finder_selected
                 .min(app.agent_finder_results.len().saturating_sub(1))
                 .saturating_add(1),
             app.agent_finder_results.len()
         )
     };
-    let keys = if width >= 54 {
-        "↑/↓ results · Ctrl+↑/↓ history · Enter focus · Esc back"
+    let one_line = format!("{selected} · ↑/↓ results · ctrl+↑/↓ history · ⏎ focus · esc back");
+    let lines = if footer_height >= 4 {
+        vec![
+            Line::from(Span::styled(
+                truncate_end(&format!("{selected} · ↑/↓ results"), usize::from(width)),
+                Style::default().fg(app.palette.text),
+            )),
+            Line::from(Span::styled(
+                truncate_end("ctrl+↑/↓ history", usize::from(width)),
+                Style::default().fg(app.palette.overlay0),
+            )),
+            Line::from(Span::styled(
+                truncate_end("⏎ focus", usize::from(width)),
+                Style::default().fg(app.palette.overlay0),
+            )),
+            Line::from(Span::styled(
+                truncate_end("esc back", usize::from(width)),
+                Style::default().fg(app.palette.overlay0),
+            )),
+        ]
+    } else if usize::from(width) >= crate::ui::text::display_width(&one_line) {
+        vec![
+            Line::from(Span::styled("", Style::default().fg(app.palette.text))),
+            Line::from(Span::styled(
+                one_line,
+                Style::default().fg(app.palette.overlay0),
+            )),
+        ]
+    } else if width >= 38 {
+        vec![
+            Line::from(Span::styled(
+                truncate_end(&format!("{selected} · ↑/↓ results"), usize::from(width)),
+                Style::default().fg(app.palette.text),
+            )),
+            Line::from(Span::styled(
+                truncate_end("ctrl+↑/↓ history · ⏎ focus · esc back", usize::from(width)),
+                Style::default().fg(app.palette.overlay0),
+            )),
+        ]
     } else {
-        "Ctrl↑↓ hist · ⏎ focus · Esc"
+        vec![
+            Line::from(Span::styled(
+                truncate_end(&format!("{selected} · ↑↓"), usize::from(width)),
+                Style::default().fg(app.palette.text),
+            )),
+            Line::from(Span::styled(
+                truncate_end("ctrl↑↓ hist · ⏎ focus · esc", usize::from(width)),
+                Style::default().fg(app.palette.overlay0),
+            )),
+        ]
     };
-    let lines = vec![
-        Line::from(Span::styled(
-            truncate_end(&selected, usize::from(width)),
-            Style::default().fg(app.palette.text),
-        )),
-        Line::from(Span::styled(
-            truncate_end(keys, usize::from(width)),
-            Style::default().fg(app.palette.overlay0),
-        )),
-    ];
-    frame.render_widget(Paragraph::new(lines), Rect::new(area.x, top, width, 2));
+    frame.render_widget(
+        Paragraph::new(lines),
+        Rect::new(area.x, top, width, footer_height),
+    );
+}
+
+fn finder_footer_height(area: Rect) -> u16 {
+    let width = area.width.saturating_sub(1);
+    if width < 38 && area.height >= 4 {
+        4
+    } else {
+        2
+    }
+}
+
+fn finder_host_label(host: &str, max_width: usize) -> String {
+    crate::ui::text::truncate_end(host.split('.').next().unwrap_or(host), max_width)
+}
+
+fn finder_path_label(hit: &crate::api::schema::AgentSearchHit) -> String {
+    let path = hit.path.as_deref().unwrap_or("path");
+    let relative = hit
+        .agent
+        .cwd
+        .as_deref()
+        .or(hit.agent.foreground_cwd.as_deref())
+        .and_then(|cwd| std::path::Path::new(path).strip_prefix(cwd).ok())
+        .map(std::path::Path::to_string_lossy)
+        .map(|path| path.into_owned())
+        .unwrap_or_else(|| path.to_owned());
+    match hit.line {
+        Some(line) => format!("{relative}:{line}"),
+        None => relative,
+    }
 }
 
 fn finder_highlight_spans<'a>(
@@ -32608,6 +32681,89 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let row = row_text(terminal.backend().buffer(), 0, 64);
         assert!(row.contains("needle"), "{row:?}");
         assert!(!row.contains(&sidebar_prefixed_key_label(&app, &app.keybinds.goto)));
+    }
+
+    #[test]
+    fn finder_path_source_is_relative_to_the_agent_worktree() {
+        let agent: crate::api::schema::AgentInfo = serde_json::from_value(serde_json::json!({
+            "terminal_id": "terminal",
+            "agent_status": "working",
+            "workspace_id": "workspace",
+            "tab_id": "tab",
+            "pane_id": "pane",
+            "focused": false,
+            "revision": 1,
+            "cwd": "/worktree"
+        }))
+        .expect("agent fixture deserializes");
+        let hit = crate::api::schema::AgentSearchHit {
+            target: "pane".into(),
+            title: "Report task".into(),
+            source: crate::api::schema::AgentSearchSource::Path,
+            path: Some("/worktree/out/report.md".into()),
+            line: Some(14),
+            context: vec!["Report line".into()],
+            preview: vec!["Session output".into()],
+            agent,
+        };
+        assert_eq!(finder_path_label(&hit), "out/report.md:14");
+    }
+
+    #[test]
+    fn finder_host_label_uses_first_hostname_label_and_column_width() {
+        assert_eq!(
+            finder_host_label("sjc22-be110-build.local", 20),
+            "sjc22-be110-build"
+        );
+        assert_eq!(
+            finder_host_label("sjc22-be110-build.local", 12),
+            "sjc22-be110…"
+        );
+    }
+
+    #[test]
+    fn finder_footer_renders_its_hints_on_the_bottom_sidebar_rows() {
+        for width in [27, 48, 64] {
+            let mut app = AppState::test_new();
+            let agent = serde_json::from_value(serde_json::json!({
+                "terminal_id": "terminal",
+                "agent_status": "idle",
+                "workspace_id": "workspace",
+                "tab_id": "tab",
+                "pane_id": "pane",
+                "focused": false,
+                "revision": 1
+            }))
+            .expect("footer agent fixture deserializes");
+            app.agent_finder_results
+                .push(crate::api::schema::AgentSearchHit {
+                    target: "pane".into(),
+                    title: "Footer result".into(),
+                    source: crate::api::schema::AgentSearchSource::Title,
+                    path: None,
+                    line: None,
+                    context: Vec::new(),
+                    preview: Vec::new(),
+                    agent,
+                });
+            let area = Rect::new(0, 0, width, 8);
+            let mut terminal = Terminal::new(TestBackend::new(width, 8)).expect("footer terminal");
+            terminal
+                .draw(|frame| render_agent_finder_footer(&app, frame, area))
+                .expect("render finder footer");
+            let buffer = terminal.backend().buffer();
+            let bottom = row_text(buffer, 7, width);
+            assert!(bottom.contains("esc back"), "width {width}: {bottom:?}");
+            let footer = (4..=7)
+                .map(|row| row_text(buffer, row, width))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(footer.contains("1 of 1"), "width {width}: {footer:?}");
+            assert!(
+                footer.contains("ctrl+↑/↓ history") && footer.contains("⏎ focus"),
+                "width {width}: {footer:?}"
+            );
+        }
     }
 
     #[test]
