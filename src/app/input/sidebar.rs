@@ -6913,6 +6913,7 @@ mod tests {
         app.state.selected = 0;
         app.state.tab_scroll = usize::MAX;
         app.state.tab_scroll_follow_active = false;
+        app.state.sidebar_width = 26;
         // 91 columns leaves the same tab strip as 65 did before the tab row
         // gained the action, git, and pane-toggle buttons at its right end.
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 91, 20));
