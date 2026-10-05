@@ -1005,6 +1005,7 @@ mod status_segments {
         let labels = [
             "Home: overview of all workspaces",
             "New session",
+            "Blocked agents",
             "Board",
             "Scratch: write notes",
         ];
