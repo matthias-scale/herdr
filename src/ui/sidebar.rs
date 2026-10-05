@@ -13247,18 +13247,21 @@ pub(crate) fn sidebar_blocker_scope_anchor_rect(app: &AppState, area: Rect) -> R
     else {
         return Rect::default();
     };
-    let width = u16::try_from(display_width(&format!(
-        "[{} ▾]",
-        app.sidebar_blocker_scope.label()
-    )))
-    .unwrap_or(u16::MAX)
-    .min(header.rect.width);
-    Rect::new(
-        header.rect.right().saturating_sub(width),
-        header.rect.y,
-        width,
-        1,
-    )
+    let glyph = section_header_glyph_for_app(app, BLOCKERS_SECTION_TITLE);
+    let prefix_width = 3
+        + display_width(glyph)
+        + usize::from(!glyph.is_empty())
+        + display_width(BLOCKERS_SECTION_TITLE)
+        + 2;
+    let label = format!("[{} ▾]", app.sidebar_blocker_scope.label());
+    let x = header
+        .rect
+        .x
+        .saturating_add(u16::try_from(prefix_width).unwrap_or(u16::MAX));
+    let width = u16::try_from(display_width(&label))
+        .unwrap_or(u16::MAX)
+        .min(header.rect.right().saturating_sub(x));
+    Rect::new(x, header.rect.y, width, 1)
 }
 
 pub(crate) fn sidebar_blocker_scope_menu_layout(
