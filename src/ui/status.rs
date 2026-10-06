@@ -2556,6 +2556,9 @@ mod tests {
             let terminal = app.terminals.get_mut(&terminal_id).expect("test terminal");
             terminal.detected_agent = Some(crate::detect::Agent::Claude);
             terminal.set_raw_agent_state_for_test(AgentState::Blocked);
+            if workspace.is_fleet {
+                terminal.remote_proxy_host = Some("capture-remote".into());
+            }
         }
         let remote_host = crate::fleet::HostSnapshot {
             name: "capture-remote".into(),
