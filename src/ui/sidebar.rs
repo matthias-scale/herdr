@@ -303,8 +303,8 @@ pub(crate) fn compact_dot_for_state(
         AgentState::Blocked => "○",
         AgentState::Idle if !seen => "◉",
         AgentState::Idle => "○",
-        // Unknown agent state: a solid grey dot, not an empty one.
-        _ => "●",
+        // Unknown agent state: a grey `?`, so it never reads as working.
+        _ => "?",
     }
 }
 
@@ -15314,7 +15314,7 @@ pub(crate) mod tests {
             compact_row_dot(&entry.entry)
         };
         assert_eq!(dot("pane/side"), "·");
-        assert_eq!(dot("pane/agent"), "●");
+        assert_eq!(dot("pane/agent"), "?");
     }
 
     #[test]
@@ -17278,7 +17278,7 @@ pub(crate) mod tests {
             let rendered = row_text(terminal.backend().buffer(), 0, 40);
             let dot_count = rendered
                 .chars()
-                .filter(|character| matches!(character, '●' | '○' | '◆' | '·'))
+                .filter(|character| matches!(character, '●' | '?' | '○' | '◆' | '·'))
                 .count();
             assert_eq!(
                 dot_count, 1,
@@ -24235,10 +24235,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(workspace_area.x, first_row)].symbol(), "1");
         assert_eq!(buffer[(workspace_area.x + 1, first_row)].symbol(), " ");
-        assert_eq!(buffer[(workspace_area.x + 2, first_row)].symbol(), "●");
+        assert_eq!(buffer[(workspace_area.x + 2, first_row)].symbol(), "?");
         assert_eq!(buffer[(workspace_area.x, tenth_row)].symbol(), "1");
         assert_eq!(buffer[(workspace_area.x + 1, tenth_row)].symbol(), "0");
-        assert_eq!(buffer[(workspace_area.x + 2, tenth_row)].symbol(), "●");
+        assert_eq!(buffer[(workspace_area.x + 2, tenth_row)].symbol(), "?");
     }
 
     #[test]
@@ -26986,9 +26986,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
             let child_text = row_text(terminal.backend().buffer(), child.rect.y, child.rect.width);
             if width == 18 {
-                assert!(child_text.contains('●'), "{child_text:?}");
+                assert!(child_text.contains('?'), "{child_text:?}");
                 let title = child_text
-                    .split_once('●')
+                    .split_once('?')
                     .and_then(|(_, rest)| rest.split_once("cx"))
                     .map(|(title, _)| title.trim())
                     .expect("title before Codex provider");
@@ -29908,10 +29908,10 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn agent_dot_unknown_state_is_a_solid_grey_dot_with_question_tooltip() {
+    fn agent_dot_unknown_state_is_a_grey_question_mark() {
         assert_eq!(
             compact_dot_for_state(AgentState::Unknown, false, true, false, false, false),
-            "●"
+            "?"
         );
         assert_eq!(
             state_label_color(AgentState::Unknown, false, &Palette::catppuccin()),
