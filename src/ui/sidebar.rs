@@ -4822,12 +4822,8 @@ fn append_shelf_space_rows(
     });
     if !collapsed {
         let show_local_device = app.sidebar_sections_layout || !remote.is_empty();
-        let local_collapsed = if local.is_empty() {
-            true
-        } else {
-            show_local_device
-                && devices::group_is_collapsed(app, section, &app.agent_host_name, true, true)
-        };
+        let local_collapsed = show_local_device
+            && devices::group_is_collapsed(app, section, &app.agent_host_name, true, true);
         if show_local_device && (app.sidebar_sections_layout || !local.is_empty()) {
             let has_done_or_blocked = local.iter().any(|entry| {
                 entry_is_blocked(entry)
@@ -10039,8 +10035,12 @@ pub(crate) fn sidebar_nested_header_at(app: &AppState, row: u16) -> Option<Strin
     compute_sidebar_nested_header_areas(app, app.view.sidebar_rect)
         .into_iter()
         .find(|header| row >= header.rect.y && row < header.rect.bottom())
-        .filter(|header| !header.dim)
+        .filter(nested_header_is_toggleable)
         .map(|header| header.key)
+}
+
+fn nested_header_is_toggleable(header: &NestedHeaderArea) -> bool {
+    !header.dim || header.key.starts_with("device:")
 }
 
 /// Canonical provider object on a nested-header row, independent of its
@@ -12376,7 +12376,7 @@ fn device_count_label(key: &str, count: usize) -> String {
 }
 
 fn nested_header_prefix(header: &NestedHeaderArea) -> &'static str {
-    if header.dim && !header.key.starts_with("device:") {
+    if !nested_header_is_toggleable(header) {
         "   "
     } else if header.collapsed {
         "  ▸ "
@@ -32573,6 +32573,121 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(render(true).contains("▸ Working (16)"));
         assert!(render(false).contains("▾ Working"));
         assert!(!render(false).contains("(16)"));
+    }
+
+    #[test]
+    fn disclosure_icons_match_toggleable_header_state() {
+        let section_cases = [
+            WORKING_SECTION_TITLE,
+            SNOOZED_SECTION_TITLE,
+            SETTLED_SECTION_TITLE,
+            NEEDS_YOU_SECTION_TITLE,
+            BLOCKERS_SECTION_TITLE,
+            RUNS_SECTION_TITLE,
+            ALOOPS_SECTION_TITLE,
+            PINNED_SECTION_TITLE,
+        ];
+        for title in section_cases {
+            let mut app = AppState::test_new();
+            app.sidebar_sections_layout = true;
+            let collapsed = section_is_collapsed(&app, title);
+            let area = Rect::new(0, 0, 40, 1);
+            let header = SectionHeaderArea { title, rect: area };
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_section_header(&app, frame, &header, 0, &[], collapsed))
+                .unwrap();
+            let text = row_text(terminal.backend().buffer(), 0, area.width);
+            assert!(text.contains(if collapsed { "▸" } else { "▾" }), "{title}");
+
+            app.toggle_sidebar_group(title);
+            assert_ne!(collapsed, section_is_collapsed(&app, title), "{title}");
+        }
+
+        let nested_cases = [
+            ("device:loops/ub1", true, true),
+            ("repo:owner/project", false, true),
+            ("object:unassigned", true, false),
+        ];
+        for (key, dim, has_disclosure) in nested_cases {
+            let mut app = AppState::test_new();
+            let header = NestedHeaderArea {
+                key: key.to_string(),
+                action_key: None,
+                sort_key: None,
+                sort_mode: SidebarSortMode::Default,
+                title: "group".to_string(),
+                count: 0,
+                activity_count: None,
+                collapsed: true,
+                dim,
+                status: None,
+                spawn: false,
+                rect: Rect::new(0, 0, 40, 1),
+            };
+            assert_eq!(
+                nested_header_is_toggleable(&header),
+                has_disclosure,
+                "{key}"
+            );
+            assert_eq!(
+                nested_header_prefix(&header).contains('▸'),
+                has_disclosure,
+                "{key} disclosure glyph"
+            );
+            let before = if key.starts_with("device:") {
+                devices::group_is_collapsed(&app, "loops", "ub1", false, false)
+            } else {
+                section_is_collapsed(&app, key)
+            };
+            if has_disclosure {
+                app.toggle_sidebar_group(key);
+                let after = if key.starts_with("device:") {
+                    devices::group_is_collapsed(&app, "loops", "ub1", false, false)
+                } else {
+                    section_is_collapsed(&app, key)
+                };
+                assert_ne!(before, after, "{key} visible disclosure toggles");
+            } else {
+                app.sidebar_selected_work_group = Some(format!("group:{key}"));
+                let _ = app.handle_sidebar_work_group_key(crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char(' '),
+                    crossterm::event::KeyModifiers::empty(),
+                ));
+                assert_eq!(
+                    before,
+                    section_is_collapsed(&app, key),
+                    "{key} without a disclosure has no keyboard toggle"
+                );
+            }
+        }
+
+        let mut app = app_with_agents(&["working device row"]);
+        app.sidebar_sections_layout = true;
+        let device_key = sidebar_rows(&app)
+            .iter()
+            .find_map(|row| match row {
+                SidebarRow::NestedHeader { key, .. } if key.starts_with("device:main/") => {
+                    Some(key.clone())
+                }
+                _ => None,
+            })
+            .expect("working fixture has a local device header");
+        let (section, host) = device_key
+            .strip_prefix("device:")
+            .and_then(|key| key.split_once('/'))
+            .expect("device header key has section and host");
+        app.sidebar_selected_work_group = Some(format!("group:{device_key}"));
+        let before = devices::group_is_collapsed(&app, section, host, true, true);
+        let _ = app.handle_sidebar_work_group_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        assert_ne!(
+            before,
+            devices::group_is_collapsed(&app, section, host, true, true),
+            "nested device disclosure should toggle by keyboard"
+        );
     }
 
     #[test]
