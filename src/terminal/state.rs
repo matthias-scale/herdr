@@ -804,6 +804,7 @@ pub struct TerminalState {
     pub usage_limited: bool,
     fallback_visible_working: bool,
     fallback_visible_working_observed_at: Option<Instant>,
+    fallback_visible_idle_observed_at: Option<SystemTime>,
     fallback_working_observed_at: Option<Instant>,
     fallback_observed_at: Option<Instant>,
     pub hook_authority: Option<HookAuthority>,
@@ -818,6 +819,7 @@ pub struct TerminalState {
     /// API; the accepted session id remains the resume identity.
     pub(crate) claude_transcript_session_id: Option<String>,
     transcript_turn_state: Option<AgentState>,
+    transcript_turn_last_at: Option<SystemTime>,
     codex_completion_since: Option<Instant>,
     transcript_turn_sequence: u64,
     pub(crate) transcript_turn_flips: Vec<serde_json::Value>,
@@ -932,6 +934,7 @@ impl TerminalState {
             usage_limited: false,
             fallback_visible_working: false,
             fallback_visible_working_observed_at: None,
+            fallback_visible_idle_observed_at: None,
             fallback_working_observed_at: None,
             fallback_observed_at: None,
             hook_authority: None,
@@ -944,6 +947,7 @@ impl TerminalState {
             persisted_agent_session: None,
             claude_transcript_session_id: None,
             transcript_turn_state: None,
+            transcript_turn_last_at: None,
             codex_completion_since: None,
             transcript_turn_sequence: 0,
             transcript_turn_flips: Vec::new(),
@@ -2365,6 +2369,7 @@ impl TerminalState {
             self.transcript_turn_flips.clear();
         }
         self.transcript_turn_state = state;
+        self.transcript_turn_last_at = last_at;
         if state == Some(AgentState::Idle) && last_at.is_none() {
             // An empty-session reset is not a completed model turn.
             self.agent_process_acquisition_pending = true;
@@ -2395,6 +2400,7 @@ impl TerminalState {
         if self.claude_transcript_session_id != session_id || self.claude_transcript_path != path {
             self.clear_claude_subagent_transcript_activity();
             self.transcript_turn_state = None;
+            self.transcript_turn_last_at = None;
             self.transcript_turn_flips.clear();
             self.transcript_turn_sequence = 0;
             if self
@@ -2614,7 +2620,7 @@ impl TerminalState {
         agent: Option<Agent>,
         fallback_state: AgentState,
         visible_blocker: bool,
-        _visible_idle: bool,
+        visible_idle: bool,
         visible_working: bool,
         usage_limited: bool,
         process_exited: bool,
@@ -2644,6 +2650,8 @@ impl TerminalState {
         let visible_working_signal = visible_working && fallback_state == AgentState::Working;
         self.fallback_visible_working = visible_working_signal;
         self.fallback_visible_working_observed_at = visible_working_signal.then_some(now);
+        self.fallback_visible_idle_observed_at =
+            (visible_idle && fallback_state == AgentState::Idle).then(SystemTime::now);
         self.fallback_working_observed_at = (fallback_state == AgentState::Working).then_some(now);
         let sidebar_projection_changed = self.reconcile_new_turn_or_stale_screen_resolution(
             fallback_state,
@@ -2770,6 +2778,7 @@ impl TerminalState {
             self.claude_transcript_session_id = None;
             self.claude_transcript_path = None;
             self.transcript_turn_state = None;
+            self.transcript_turn_last_at = None;
             self.session_name_write_target = None;
             self.set_active_subagents(None);
             let mut reset_sources = Vec::new();
@@ -5395,6 +5404,14 @@ impl TerminalState {
 
     fn effective_state_and_arbitration(&self) -> (AgentState, &'static str) {
         if let Some(state) = self.transcript_turn_state {
+            if state == AgentState::Working
+                && self
+                    .fallback_visible_idle_observed_at
+                    .zip(self.transcript_turn_last_at)
+                    .is_some_and(|(idle_at, turn_at)| idle_at >= turn_at)
+            {
+                return (AgentState::Idle, "screen_idle_over_transcript");
+            }
             let notification = self.hook_authority.as_ref().is_some_and(|authority| {
                 authority.source == "herdr:claude"
                     && authority.state == AgentState::Blocked
@@ -5771,6 +5788,7 @@ impl TerminalState {
         self.claude_transcript_session_id = None;
         self.claude_transcript_path = None;
         self.transcript_turn_state = None;
+        self.transcript_turn_last_at = None;
         self.session_name_write_target = None;
         self.set_active_subagents(None);
         self.agent_metadata.clear();
@@ -15174,6 +15192,46 @@ mod transcript_turn_tests {
             Instant::now(),
         );
         assert_eq!(terminal.raw_agent_state(), AgentState::Working);
+    }
+
+    #[test]
+    fn newer_visible_idle_resolves_replayed_transcript_work_without_hiding_new_work() {
+        let mut terminal = terminal();
+        let now = Instant::now();
+        let idle_observed_at = SystemTime::now();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_claude_transcript_target(Some("one".into()), Some("/tmp/one.jsonl".into()));
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Working),
+            Some(idle_observed_at - Duration::from_secs(1)),
+            1,
+            now,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            true,
+            false,
+            false,
+            false,
+            now + Duration::from_millis(1),
+        );
+
+        assert_eq!(terminal.raw_agent_state(), AgentState::Idle);
+        assert_eq!(
+            terminal.effective_state_arbitration(),
+            "screen_idle_over_transcript"
+        );
+
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Working),
+            Some(idle_observed_at + Duration::from_secs(1)),
+            2,
+            now + Duration::from_secs(1),
+        );
+        assert_eq!(terminal.raw_agent_state(), AgentState::Working);
+        assert_eq!(terminal.effective_state_arbitration(), "transcript");
     }
 
     #[test]
