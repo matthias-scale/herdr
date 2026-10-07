@@ -1080,6 +1080,7 @@ fn direct_graphics_profile_values(
     supported && !blocked_transport && terminals
 }
 
+#[cfg(any(unix, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DirectGraphicsOverride {
     Unset,
@@ -1087,6 +1088,7 @@ enum DirectGraphicsOverride {
     Off,
 }
 
+#[cfg(any(unix, test))]
 fn parse_direct_graphics_override(value: Option<&str>) -> DirectGraphicsOverride {
     match value {
         Some("on") => DirectGraphicsOverride::On,
@@ -1095,6 +1097,7 @@ fn parse_direct_graphics_override(value: Option<&str>) -> DirectGraphicsOverride
     }
 }
 
+#[cfg(unix)]
 fn terminal_profile_is_known(term_program: &str, term: &str, kitty_window: bool) -> bool {
     term_program.eq_ignore_ascii_case("ghostty")
         || term_program.eq_ignore_ascii_case("wezterm")
