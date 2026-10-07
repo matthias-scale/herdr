@@ -4987,7 +4987,7 @@ fn compact_sidebar_rows_inner(
             rows.push(SidebarRow::Divider);
         }
         let workspace_activity = sidebar_workspace_activity(&space_entries);
-        let local_main_agent_count = space_entries.len();
+        let local_main_agent_count = ordered_tab_entries(app, &space_entries).len();
         if local_main_agent_count > 0 {
             let key = devices::group_key("main", &app.agent_host_name);
             let collapsed =
@@ -16422,6 +16422,43 @@ pub(crate) mod tests {
                 if entry.local_target().is_some_and(|target| target.pane_id == pane_id)
                     && entry.primary_tab_label.as_deref().is_some_and(|label| label.contains("remote_focus_proxy"))
         )));
+    }
+
+    #[test]
+    fn local_device_header_counts_tabs_when_a_tab_has_two_panes() {
+        let mut app = app_with_agents(&["multi-pane"]);
+        let root_pane = app.workspaces[0].tabs[0].root_pane;
+        let split_pane = app.workspaces[0].test_split(Direction::Horizontal);
+        app.sidebar_sections_layout = true;
+        set_sections_group_collapsed(&mut app, WORKING_SECTION_TITLE, true);
+        app.ensure_test_terminals();
+        for pane_id in [root_pane, split_pane] {
+            app.workspaces[0]
+                .tabs[0]
+                .panes
+                .get_mut(&pane_id)
+                .expect("split pane")
+                .seen = true;
+        }
+
+        let rows = sidebar_rows(&app);
+        let main_key = devices::group_key("main", &app.agent_host_name);
+        let header_idx = rows
+            .iter()
+            .position(|row| matches!(row, SidebarRow::NestedHeader { key, .. } if key == &main_key))
+            .expect("local device header");
+        let header_count = match &rows[header_idx] {
+            SidebarRow::NestedHeader { count, .. } => *count,
+            _ => unreachable!(),
+        };
+        let visible_rows = rows[header_idx + 1..]
+            .iter()
+            .take_while(|row| !matches!(row, SidebarRow::NestedHeader { .. }))
+            .filter(|row| matches!(row, SidebarRow::Tab { .. } | SidebarRow::Agent { .. }))
+            .count();
+
+        assert_eq!(header_count, visible_rows);
+        assert_eq!(visible_rows, 1, "one tab renders one session row");
     }
 
     #[test]
