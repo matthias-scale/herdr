@@ -4036,10 +4036,6 @@ fn compact_sidebar_rows_inner(
             (entry, lifecycle)
         })
         .collect::<Vec<_>>();
-    let local_device_agent_count = classified
-        .iter()
-        .filter(|(entry, _)| entry.has_agent)
-        .count();
     let active_pane_targets = classified
         .iter()
         .filter(|(_, lifecycle)| *lifecycle == SidebarEntryLifecycle::Active)
@@ -4073,7 +4069,6 @@ fn compact_sidebar_rows_inner(
             SidebarEntryLifecycle::Settled => settled_panes.push(entry),
         }
     }
-    let workspace_activity = sections_layout.then(|| sidebar_workspace_activity(&active_panes));
     let active_entries =
         ordered_tab_entries_preferring(app, &active_panes, Some(&active_pane_targets));
     // Keep the shelf's working projection separate from blocked-filtered tab rows.
@@ -4128,13 +4123,12 @@ fn compact_sidebar_rows_inner(
         let remote_activity = sidebar_remote_activity(app, &remote_entries);
         let mut space_entries = Vec::new();
         let mut remote_main_entries = Vec::new();
-        // Keep every active pane in the device tree so collapsed lifecycle
-        // summaries do not remove its workspace from navigation. The Working
-        // shelf is a separate summary and workspace navigation deduplicates it.
+        // Keep active idle and unknown panes in the device tree. Working panes
+        // live only in the Working shelf, so each local pane has one row.
         for entry in visible_entries.iter().cloned() {
             if entry.remote_entry.is_some() {
                 remote_main_entries.push(entry);
-            } else {
+            } else if !sidebar_entry_has_working_state(&entry) {
                 space_entries.push(entry);
             }
         }
@@ -4167,7 +4161,8 @@ fn compact_sidebar_rows_inner(
             }
             rows.push(SidebarRow::Divider);
         }
-        let local_main_agent_count = local_device_agent_count;
+        let workspace_activity = sidebar_workspace_activity(&space_entries);
+        let local_main_agent_count = space_entries.len();
         if local_main_agent_count > 0 {
             let key = devices::group_key("main", &app.agent_host_name);
             let collapsed =
@@ -4198,16 +4193,17 @@ fn compact_sidebar_rows_inner(
                 SidebarGroupMode::Repo,
                 false,
                 true,
-                workspace_activity.as_ref(),
+                Some(&workspace_activity),
                 Some(&remote_activity),
                 None,
             );
         }
         devices::append_remote_entry_groups(app, &mut rows, "main", remote_main_entries);
         let working_collapsed = section_is_collapsed(app, WORKING_SECTION_TITLE);
+        let working_count = working_entries.len();
         rows.push(SidebarRow::SectionHeader {
             title: WORKING_SECTION_TITLE,
-            count: working_entries.len(),
+            count: working_count,
             host_counts: Vec::new(),
             collapsed: working_collapsed,
         });
@@ -4215,6 +4211,7 @@ fn compact_sidebar_rows_inner(
             let (remote_working, local_working): (Vec<_>, Vec<_>) = working_entries
                 .into_iter()
                 .partition(|entry| entry.remote_entry.is_some());
+            let working_activity = sidebar_workspace_activity(&local_working);
             let local_collapsed = if local_working.is_empty() {
                 true
             } else {
@@ -4252,7 +4249,7 @@ fn compact_sidebar_rows_inner(
                     SidebarGroupMode::Repo,
                     false,
                     true,
-                    workspace_activity.as_ref(),
+                    Some(&working_activity),
                     Some(&remote_activity),
                     Some("working"),
                 );
@@ -4585,22 +4582,20 @@ fn sidebar_workspace_activity(
         workspaces: &mut std::collections::HashMap<usize, SidebarActivityCount>,
         tab: Option<(usize, usize)>,
         has_agent: bool,
-        priority: u8,
+        is_working: bool,
     ) {
         let Some((ws_idx, _)) = tab.filter(|_| has_agent) else {
             return;
         };
         let count = workspaces.entry(ws_idx).or_default();
         count.total = count.total.saturating_add(1);
-        count.working = count.working.saturating_add(usize::from(
-            priority == tab_lifecycle_priority(AgentState::Working, false),
-        ));
+        count.working = count.working.saturating_add(usize::from(is_working));
     }
 
     let mut workspaces = std::collections::HashMap::<usize, SidebarActivityCount>::new();
     let mut current_tab: Option<(usize, usize)> = None;
     let mut current_has_agent = false;
-    let mut current_priority = 0_u8;
+    let mut current_working = false;
     for entry in entries {
         let Some(target) = entry.local_target() else {
             continue;
@@ -4611,23 +4606,20 @@ fn sidebar_workspace_activity(
                 &mut workspaces,
                 current_tab,
                 current_has_agent,
-                current_priority,
+                current_working,
             );
             current_tab = Some(tab);
             current_has_agent = false;
-            current_priority = 0;
+            current_working = false;
         }
         current_has_agent |= entry.has_agent;
-        if entry.has_agent {
-            current_priority =
-                current_priority.max(tab_lifecycle_priority(entry.state, entry.seen));
-        }
+        current_working |= sidebar_entry_has_working_state(entry);
     }
     flush_tab(
         &mut workspaces,
         current_tab,
         current_has_agent,
-        current_priority,
+        current_working,
     );
     workspaces
 }
@@ -31522,6 +31514,201 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn sections_layout_preserves_every_local_pane_and_counts_collapsed_rows() {
+        let states = [
+            AgentState::Working,
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::Idle,
+            AgentState::Idle,
+            AgentState::Idle,
+            AgentState::Unknown,
+            AgentState::Working,
+            AgentState::Working,
+        ];
+        let mut first = Workspace::test_new("~");
+        let second = Workspace::test_new("~");
+        let mut repo = Workspace::test_new("inbox-brain");
+        for _ in 0..5 {
+            first.test_add_tab(None);
+        }
+        repo.test_add_tab(None);
+        repo.repo_binding = Some("scalable-so/scalablev2".into());
+        let mut app = AppState::test_new();
+        app.workspaces = vec![first, second, repo];
+        app.workspaces[0].identity_cwd = "/home/ubuntu2".into();
+        app.workspaces[1].identity_cwd = "/home/ubuntu2".into();
+        app.workspaces[0].repo_binding = Some("owner/home".into());
+        app.workspaces[1].repo_binding = Some("owner/home".into());
+        app.workspaces[1].is_fleet = true;
+        app.agent_host_name = "ub2".into();
+        app.sidebar_sections_layout = true;
+        app.ensure_test_terminals();
+        let observed_at = std::time::Instant::now();
+        app.view_observed_at = observed_at;
+
+        let mut pane_ids = Vec::new();
+        let mut state_index = 0;
+        for (ws_idx, workspace) in app.workspaces.iter_mut().enumerate() {
+            for (tab_idx, tab) in workspace.tabs.iter_mut().enumerate() {
+                let pane_id = tab.root_pane;
+                pane_ids.push((ws_idx, pane_id));
+                let pane = tab.panes.get_mut(&pane_id).expect("root pane");
+                pane.seen = (ws_idx, tab_idx) != (0, 2);
+                if (ws_idx, tab_idx) == (0, 2) {
+                    pane.done_since = Some(observed_at);
+                }
+                if (ws_idx, tab_idx) == (0, 3) {
+                    pane.set_snoozed_until(Some(u64::MAX));
+                }
+                if (ws_idx, tab_idx) == (0, 4) {
+                    pane.settled_at = Some(1_725_000_000);
+                }
+                let terminal = app
+                    .terminals
+                    .get_mut(&pane.attached_terminal_id)
+                    .expect("fixture terminal");
+                terminal.detected_agent = Some(Agent::Claude);
+                terminal.set_raw_agent_state_for_test(states[state_index]);
+                state_index += 1;
+            }
+        }
+        app.active = Some(0);
+        app.selected = 0;
+        app.collapsed_sidebar_groups.clear();
+        app.collapsed_space_keys.clear();
+        for section in [
+            WORKING_SECTION_TITLE,
+            SNOOZED_SECTION_TITLE,
+            SETTLED_SECTION_TITLE,
+        ] {
+            set_sections_group_collapsed(&mut app, section, false);
+        }
+        app.reconcile_sidebar_presentation();
+        for workspace in &app.workspaces {
+            app.sidebar_presentation
+                .expanded_workspace_ids
+                .insert(workspace.id.clone());
+        }
+
+        let rows = sidebar_rows(&app);
+        let mut actual = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. } => entry
+                    .local_target()
+                    .map(|target| (target.ws_idx, target.pane_id)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        pane_ids.sort_unstable();
+        assert_eq!(actual, pane_ids);
+
+        let section_row_count = |rows: &[SidebarRow], title: &str| {
+            let Some(start) = rows.iter().position(|row| {
+                matches!(row, SidebarRow::SectionHeader { title: row_title, .. } if *row_title == title)
+            }) else {
+                return 0;
+            };
+            rows[start + 1..]
+                .iter()
+                .take_while(|row| {
+                    !matches!(
+                        row,
+                        SidebarRow::SectionHeader { .. } | SidebarRow::ShelfDivider
+                    )
+                })
+                .filter(|row| matches!(row, SidebarRow::Tab { .. } | SidebarRow::Agent { .. }))
+                .count()
+        };
+
+        let working_header = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: WORKING_SECTION_TITLE,
+                        ..
+                    }
+                )
+            })
+            .expect("Working section header");
+        let main_row_count = rows[..working_header]
+            .iter()
+            .filter(|row| matches!(row, SidebarRow::Tab { .. } | SidebarRow::Agent { .. }))
+            .count();
+        assert_eq!(
+            rows.iter().find_map(|row| match row {
+                SidebarRow::NestedHeader { key, count, .. } if key == "device:main/ub2" =>
+                    Some(*count),
+                _ => None,
+            }),
+            Some(main_row_count)
+        );
+        app.collapsed_sidebar_groups
+            .insert("device:main/ub2".into());
+        let collapsed_main = sidebar_rows(&app);
+        assert!(collapsed_main.iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader { key, count, collapsed: true, .. }
+                if key == "device:main/ub2" && *count == main_row_count
+        )));
+        app.collapsed_sidebar_groups.remove("device:main/ub2");
+
+        for (section, key) in [
+            (WORKING_SECTION_TITLE, "device:working/ub2"),
+            (SNOOZED_SECTION_TITLE, "device:snoozed/ub2"),
+            (SETTLED_SECTION_TITLE, "device:settled/ub2"),
+        ] {
+            let section_count = rows.iter().find_map(|row| match row {
+                SidebarRow::SectionHeader { title, count, .. } if *title == section => Some(*count),
+                _ => None,
+            });
+            let device_count = rows.iter().find_map(|row| match row {
+                SidebarRow::NestedHeader {
+                    key: row_key,
+                    count,
+                    ..
+                } if row_key == key => Some(*count),
+                _ => None,
+            });
+            let visible_count = section_row_count(&rows, section);
+            assert_eq!(section_count, Some(visible_count), "{section} section");
+            assert_eq!(device_count, Some(visible_count), "{section} device {key}");
+
+            set_sections_group_collapsed(&mut app, section, true);
+            let collapsed_section_rows = sidebar_rows(&app);
+            set_sections_group_collapsed(&mut app, section, false);
+            assert_eq!(
+                collapsed_section_rows.iter().find_map(|row| match row {
+                    SidebarRow::SectionHeader { title, count, .. } if *title == section =>
+                        Some(*count),
+                    _ => None,
+                }),
+                Some(visible_count),
+                "collapsed {section} section count"
+            );
+            app.collapsed_sidebar_groups.insert(key.into());
+            let collapsed_group_rows = sidebar_rows(&app);
+            app.collapsed_sidebar_groups.remove(key);
+            assert_eq!(
+                collapsed_group_rows.iter().find_map(|row| match row {
+                    SidebarRow::NestedHeader {
+                        key: row_key,
+                        count,
+                        ..
+                    } if row_key == key => Some(*count),
+                    _ => None,
+                }),
+                Some(visible_count),
+                "collapsed {section} device count"
+            );
+        }
+    }
+
+    #[test]
     fn focus_sidebar_keeps_seen_idle_tabs_in_spaces() {
         let mut app = sort_app(&[
             sort_tab("read", "owner/herdr", AgentState::Idle, 1),
@@ -31723,7 +31910,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn device_tree_keeps_all_tabs_and_expands_the_working_summary() {
+    fn device_tree_and_working_summary_partition_tabs() {
         let mut app = sort_app(&[
             sort_tab("review", "owner/herdr", AgentState::Blocked, 1),
             sort_tab("done", "owner/herdr", AgentState::Idle, 2),
@@ -31762,7 +31949,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(rows.iter().any(|row| matches!(
             row,
             SidebarRow::Workspace {
-                activity_count: Some((1, 3)),
+                activity_count: Some((0, 2)),
                 ..
             }
         )));
@@ -31770,7 +31957,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             rows.iter()
                 .filter(|row| matches!(row, SidebarRow::Tab { .. }))
                 .count(),
-            3
+            2
         );
         assert!(rows.iter().any(|row| matches!(
             row,
@@ -31804,9 +31991,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let rows = sidebar_rows(&app);
         assert_eq!(
             rows.iter()
-                .filter(|row| matches!(row, SidebarRow::Tab { .. }))
+                .filter(|row| matches!(row, SidebarRow::Tab { .. } | SidebarRow::Agent { .. }))
                 .count(),
-            4
+            3
         );
         let working = rows
             .iter()
@@ -32053,7 +32240,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn focus_sidebar_groups_spaces_with_one_repo_and_counts_hidden_work() {
+    fn focus_sidebar_groups_spaces_and_counts_only_device_tree_rows() {
         let mut app = app_with_agents(&["main", "worktree"]);
         app.sidebar_sections_layout = true;
         for workspace in &mut app.workspaces {
@@ -32080,12 +32267,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(groups, [(0, Some((1, 2)))]);
+        assert_eq!(groups, [(0, Some((0, 1)))]);
         assert_eq!(
             rows.iter()
                 .filter(|row| matches!(row, SidebarRow::Tab { .. }))
                 .count(),
-            2
+            1
         );
     }
 
