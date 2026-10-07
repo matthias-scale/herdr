@@ -1988,6 +1988,9 @@ pub(crate) struct AgentPanelEntry {
     pub(crate) pending_ask: Option<String>,
     /// The Working shelf suppresses the working dot and fades the entire row.
     pub(crate) working_shelf: bool,
+    /// True when the pane's own reported state is Working, before subagent
+    /// activity projects an idle parent as Working.
+    pub(crate) own_state_working: bool,
     /// Read-only membership token projected once for a canonical pane row.
     pub(crate) pod: Option<PodToken>,
 }
@@ -2082,6 +2085,7 @@ impl AgentPanelEntry {
             remote_show_host_identity: false,
             pending_ask: None,
             working_shelf: false,
+            own_state_working: false,
             pod: None,
         }
     }
@@ -2832,6 +2836,8 @@ fn collect_agent_panel_entries_with_runtimes(
                             remote_host,
                         },
                     );
+                    entry.own_state_working = terminal
+                        .is_some_and(|terminal| terminal.raw_agent_state() == AgentState::Working);
                     entry.last_turn_at = terminal.and_then(|terminal| {
                         cached_reply_timestamp(
                             terminal.last_turn_at_instant(),
@@ -3239,6 +3245,7 @@ fn aggregate_tab_entries(
                     };
                     tab_entry.holds_shell |= entry.holds_shell;
                     tab_entry.working_while_blocked |= entry.working_while_blocked;
+                    tab_entry.own_state_working |= entry.own_state_working;
                     // Like a mixed provider, a machine name only labels a tab
                     // whose panes all sit on that machine.
                     if tab_entry.remote_host != entry.remote_host {
@@ -5522,7 +5529,8 @@ fn sidebar_entry_has_working_state(entry: &AgentPanelEntry) -> bool {
     // from its active subagents. An agent reported as Working stays visible
     // here even when it also has an attention item.
     entry.has_agent
-        && ((entry.state == AgentState::Working && !has_active_subagents)
+        && ((entry.state == AgentState::Working
+            && (!has_active_subagents || entry.own_state_working))
             || (entry_attention_tier(entry) == AttentionTier::None && has_active_subagents))
 }
 
@@ -33252,6 +33260,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 Vec::new(),
             );
         working_and_gated.reconcile_sidebar_presentation();
+        set_active_subagents(&mut working_and_gated, 0, Some(2));
         let working_gated_entry = sidebar_thread_entries(&working_and_gated)
             .into_iter()
             .next()
@@ -33261,6 +33270,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             entry_attention_tier(&working_gated_entry),
             AttentionTier::None
         );
+        assert_eq!(working_gated_entry.active_subagents, Some(2));
         assert!(sidebar_entry_has_working_state(&working_gated_entry));
         working_and_gated.toggle_sidebar_group(WORKING_SECTION_TITLE);
         let working_rows = sidebar_rows(&working_and_gated);
