@@ -4135,10 +4135,6 @@ fn compact_sidebar_rows_inner(
             .map(|(entry, _)| entry.clone())
             .collect::<Vec<_>>(),
     );
-    let local_device_agent_count = classified
-        .iter()
-        .filter(|(entry, _)| entry.has_agent)
-        .count();
     let active_pane_targets = classified
         .iter()
         .filter(|(_, lifecycle)| *lifecycle == SidebarEntryLifecycle::Active)
@@ -4282,7 +4278,7 @@ fn compact_sidebar_rows_inner(
             }
             rows.push(SidebarRow::Divider);
         }
-        let local_main_agent_count = local_device_agent_count;
+        let local_main_agent_count = space_entries.iter().filter(|entry| entry.has_agent).count();
         if local_main_agent_count > 0 {
             let key = devices::group_key("main", &app.agent_host_name);
             let collapsed =
@@ -4335,7 +4331,7 @@ fn compact_sidebar_rows_inner(
             } else {
                 devices::group_is_collapsed(app, "working", &app.agent_host_name, true, true)
             };
-            if app.sidebar_sections_layout || !local_working.is_empty() {
+            if !local_working.is_empty() {
                 rows.push(SidebarRow::NestedHeader {
                     key: devices::group_key("working", &app.agent_host_name),
                     action_key: None,
@@ -4791,10 +4787,13 @@ fn append_legacy_space_rows(
 }
 
 fn sidebar_entry_has_working_state(entry: &AgentPanelEntry) -> bool {
+    let has_active_subagents = entry.active_subagents.is_some_and(|count| count > 0);
+    // A parent's attention state still wins when Working is projected only
+    // from its active subagents. An agent reported as Working stays visible
+    // here even when it also has an attention item.
     entry.has_agent
-        && entry_attention_tier(entry) == AttentionTier::None
-        && (entry.state == AgentState::Working
-            || entry.active_subagents.is_some_and(|count| count > 0))
+        && ((entry.state == AgentState::Working && !has_active_subagents)
+            || (entry_attention_tier(entry) == AttentionTier::None && has_active_subagents))
 }
 
 fn append_shelf_space_rows(
@@ -31879,6 +31878,39 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn working_shelf_omits_empty_local_device_header() {
+        let snapshot = crate::fleet::Snapshot {
+            hosts: vec![fleet_host_snapshot(
+                "ub1",
+                false,
+                vec![remote_fleet_agent("ub1", "worker")],
+            )],
+            ..crate::fleet::Snapshot::default()
+        };
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = true;
+        app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
+        let rows = sidebar_rows(&app);
+
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: WORKING_SECTION_TITLE,
+                count: 1,
+                ..
+            }
+        )));
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader {
+                key,
+                count: 0,
+                ..
+            } if key == &devices::group_key("working", &app.agent_host_name)
+        )));
+    }
+
+    #[test]
     fn active_subagents_do_not_override_attention_and_zero_count_restores_idle_or_done() {
         let mut blocked = sort_app(&[sort_tab(
             "blocked parent",
@@ -31931,6 +31963,82 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             gated_entry.active_subagents
         );
         assert!(entry_needs_human_attention(&gated_entry));
+
+        let mut working_and_gated = sort_app(&[sort_tab(
+            "working with gate",
+            "owner/herdr",
+            AgentState::Working,
+            1,
+        )]);
+        working_and_gated.sidebar_sections_layout = true;
+        let pane_id = working_and_gated.workspaces[0].tabs[0].root_pane;
+        let terminal_id = working_and_gated.workspaces[0].tabs[0]
+            .terminal_id(pane_id)
+            .unwrap()
+            .clone();
+        working_and_gated
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .apply_closing_block_payload(
+                vec![crate::api::schema::ClosingBlockItem {
+                    blocking: true,
+                    n: 1,
+                    label: "Gate".into(),
+                    text: "Approve this work".into(),
+                    pr: None,
+                    ticket: None,
+                    url: None,
+                    default: None,
+                    default_at: None,
+                }],
+                Vec::new(),
+                Vec::new(),
+            );
+        working_and_gated.reconcile_sidebar_presentation();
+        let working_gated_entry = sidebar_thread_entries(&working_and_gated)
+            .into_iter()
+            .next()
+            .expect("working agent entry");
+        assert_eq!(working_gated_entry.state, AgentState::Working);
+        assert_ne!(
+            entry_attention_tier(&working_gated_entry),
+            AttentionTier::None
+        );
+        assert!(sidebar_entry_has_working_state(&working_gated_entry));
+        working_and_gated.toggle_sidebar_group(WORKING_SECTION_TITLE);
+        let working_rows = sidebar_rows(&working_and_gated);
+        assert!(working_rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: WORKING_SECTION_TITLE,
+                count: 1,
+                ..
+            }
+        )));
+        assert!(working_rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. }
+                if entry.working_shelf && entry.state == AgentState::Working
+        )));
+        let device_group = format!("device:working/{}", working_and_gated.agent_host_name);
+        working_and_gated.toggle_sidebar_group(&device_group);
+        let collapsed_rows = sidebar_rows(&working_and_gated);
+        assert!(collapsed_rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader { key, count: 1, collapsed: true, .. }
+                if key == &devices::group_key("working", &working_and_gated.agent_host_name)
+        )));
+        assert!(!collapsed_rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. } if entry.working_shelf
+        )));
+        working_and_gated.toggle_sidebar_group(&device_group);
+        assert!(sidebar_rows(&working_and_gated).iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. }
+                if entry.working_shelf && entry.state == AgentState::Working
+        )));
 
         let mut idle = sort_app(&[sort_tab("idle parent", "owner/herdr", AgentState::Idle, 1)]);
         idle.sidebar_sections_layout = true;
@@ -32841,6 +32949,22 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(rows
             .iter()
             .any(|row| matches!(row, SidebarRow::Workspace { ws_idx: 0 | 1, .. })));
+    }
+
+    #[test]
+    fn main_device_count_excludes_agents_moved_to_lifecycle_shelves() {
+        let mut app = app_with_agents(&["active", "settled"]);
+        app.sidebar_sections_layout = true;
+        let settled = app.workspaces[1].tabs[0].root_pane;
+        assert!(app.settle_pane_at(1, settled, app.view_observed_unix_s));
+
+        let main_key = devices::group_key("main", &app.agent_host_name);
+        let rows = sidebar_rows(&app);
+        let main_count = rows.iter().find_map(|row| match row {
+            SidebarRow::NestedHeader { key, count, .. } if key == &main_key => Some(*count),
+            _ => None,
+        });
+        assert_eq!(main_count, Some(1));
     }
 
     #[test]
