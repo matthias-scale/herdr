@@ -33,6 +33,15 @@ pub(super) fn command() -> Command {
         .subcommand(update_command())
         .subcommand(status_command())
         .subcommand(status_log_command())
+        .subcommand(
+            Command::new("turns")
+                .about("Inspect transcript turn evidence")
+                .subcommand(
+                    Command::new("report")
+                        .about("Print turn status misses")
+                        .arg(option("since", "YYYY-MM-DD")),
+                ),
+        )
         .subcommand(config_command())
         .subcommand(fleet_command())
         .subcommand(work_index_command())

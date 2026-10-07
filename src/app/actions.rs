@@ -60,7 +60,7 @@ pub fn active_tab_suppresses_notifications(
     is_active_tab: bool,
     outer_terminal_focus: Option<bool>,
 ) -> bool {
-    is_active_tab && outer_terminal_focus != Some(false)
+    is_active_tab && outer_terminal_focus == Some(true)
 }
 
 #[cfg(test)]
@@ -3661,7 +3661,8 @@ impl AppState {
                 let claude_transcript_session_id = claude_transcript_path
                     .as_ref()
                     .and_then(|_| session_ref.as_ref().map(|session| session.value.clone()));
-                self.update_terminal_state(pane_id, |terminal| {
+                let mut accepted_transcript_session = None;
+                let effects = self.update_terminal_state(pane_id, |terminal| {
                     let mutation = terminal.set_agent_session_ref_for_session_start(
                         source,
                         agent_label,
@@ -3670,6 +3671,7 @@ impl AppState {
                         session_start_source,
                     );
                     if mutation.is_some() {
+                        accepted_transcript_session = claude_transcript_session_id.clone();
                         let session_replaced = mutation
                             .as_ref()
                             .is_some_and(|mutation| mutation.session_replaced);
@@ -3693,9 +3695,12 @@ impl AppState {
                         }
                     }
                     mutation
-                })
-                .into_iter()
-                .collect()
+                });
+                if let Some(session_id) = accepted_transcript_session {
+                    self.agent_states
+                        .begin_transcript_session(pane_id, &session_id);
+                }
+                effects.into_iter().collect()
             }
             AppEvent::HookMetadataReported {
                 pane_id,
@@ -7085,6 +7090,7 @@ mod tests {
     #[test]
     fn delayed_background_waiting_is_suppressed_if_pane_becomes_active() {
         let mut state = app_with_workspaces(&["active", "background"]);
+        state.outer_terminal_focus = Some(true);
         state.active = Some(0);
         state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
         state.toast_config.delay_seconds = 1;
@@ -7944,8 +7950,8 @@ mod tests {
     }
 
     #[test]
-    fn active_tab_suppression_preserves_unknown_focus_behavior() {
-        assert!(active_tab_suppresses_notifications(true, None));
+    fn active_tab_suppression_requires_known_outer_focus() {
+        assert!(!active_tab_suppresses_notifications(true, None));
         assert!(active_tab_suppresses_notifications(true, Some(true)));
         assert!(!active_tab_suppresses_notifications(true, Some(false)));
         assert!(!active_tab_suppresses_notifications(false, None));
