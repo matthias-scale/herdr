@@ -439,8 +439,10 @@ fn compact_age(
     let instant = entry
         .last_turn_at
         .map(|timestamp| timestamp.instant)
-        .or(entry.reported_at)
-        .or(entry.activity_at);
+        .into_iter()
+        .chain(entry.reported_at)
+        .chain(entry.activity_at)
+        .max();
     let age = instant
         .and_then(|instant| status_report_age_compact_label(Some(instant), now))
         .unwrap_or_else(|| "—".to_string());
@@ -1359,6 +1361,8 @@ fn render_compact_agent_row_with_prefix(
         + widths.age
         + display_width(&layout.done_marker);
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
+    let pin_width = sidebar_pin_width(app, entry, rect, title_width);
+    let title_width = title_width.saturating_sub(pin_width);
     let control_pane = row_control_pane(app, entry, tab);
     let show_controls = control_pane.as_ref().is_some_and(|control| control.snoozed)
         || selected_local_row_pane(app, entry, tab).is_some()
@@ -1447,6 +1451,18 @@ fn render_compact_agent_row_with_prefix(
             row_style(Style::default().fg(p.overlay0)),
         ),
     ]);
+    if pin_width > 0 {
+        spans.push(Span::styled(
+            if !app.nerd_font {
+                "P "
+            } else if entry.pinned {
+                "󰐃 "
+            } else {
+                "󰐄 "
+            },
+            row_style(Style::default().fg(p.mauve)),
+        ));
+    }
     let provider_style = row_style(provider_style);
     match row_model_letter(entry, app.nerd_font).and_then(|letter| {
         provider.find(letter).map(|at| {
@@ -1492,6 +1508,65 @@ fn selected_local_row_pane(
     }
     app.is_active_pane(target.ws_idx, target.tab_idx, target.pane_id)
         .then_some(target.pane_id)
+}
+
+const SIDEBAR_PIN_CONTROL_WIDTH: usize = 2;
+
+fn sidebar_pin_width(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    row: Rect,
+    title_width: usize,
+) -> usize {
+    if entry.local_target().is_some()
+        && (entry.pinned || sidebar_row_is_hovered(app, row.y))
+        && title_width >= SIDEBAR_SELECTED_MIN_TITLE_WIDTH + SIDEBAR_PIN_CONTROL_WIDTH
+    {
+        SIDEBAR_PIN_CONTROL_WIDTH
+    } else {
+        0
+    }
+}
+
+fn sidebar_pin_rect(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    row: Rect,
+    prefix: usize,
+    tab: bool,
+) -> Option<Rect> {
+    if !entry.pinned && !sidebar_row_is_hovered(app, row.y) {
+        return None;
+    }
+    let provider = compact_provider(entry, app.nerd_font);
+    let title = compact_row_title_for_width(
+        compact_row_title(entry, tab),
+        &provider,
+        usize::from(row.width),
+        prefix,
+    );
+    let widths = compact_row_widths(title, &provider, usize::from(row.width), prefix);
+    let title_width = usize::from(row.width).saturating_sub(
+        widths.prefix
+            + SIDEBAR_DOT_FIELD_WIDTH
+            + widths.provider
+            + SIDEBAR_MACHINE_FIELD_WIDTH
+            + widths.age
+            + if entry_has_unread_done_marker(entry) && widths.age > 0 {
+                2
+            } else {
+                0
+            },
+    );
+    let pin_width = sidebar_pin_width(app, entry, row, title_width);
+    (pin_width > 0).then(|| {
+        Rect::new(
+            row.x + (widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - pin_width) as u16,
+            row.y,
+            pin_width as u16,
+            1,
+        )
+    })
 }
 
 fn sidebar_row_is_hovered(app: &AppState, row_y: u16) -> bool {
@@ -1583,6 +1658,15 @@ pub(crate) fn selected_row_control_at(
     tab: bool,
     column: u16,
 ) -> Option<crate::app::state::SidebarHoverAction> {
+    if sidebar_pin_rect(app, entry, rect, usize::from(depth) * 3 + 1, tab)
+        .is_some_and(|pin| column >= pin.x && column < pin.right())
+    {
+        let target = entry.local_target()?;
+        return Some(crate::app::state::SidebarHoverAction::Pin {
+            ws_idx: target.ws_idx,
+            tab_idx: target.tab_idx,
+        });
+    }
     let requested_prefix = usize::from(depth) * 3 + 1;
     let provider = compact_provider(entry, app.nerd_font);
     let title = compact_row_title_for_width(
@@ -1596,8 +1680,14 @@ pub(crate) fn selected_row_control_at(
         + SIDEBAR_DOT_FIELD_WIDTH
         + widths.provider
         + SIDEBAR_MACHINE_FIELD_WIDTH
-        + widths.age;
+        + widths.age
+        + if entry_has_unread_done_marker(entry) && widths.age > 0 {
+            2
+        } else {
+            0
+        };
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
+    let title_width = title_width.saturating_sub(sidebar_pin_width(app, entry, rect, title_width));
     let selected = selected_local_row_pane(app, entry, tab).is_some();
     let mobile = app.view.layout == crate::app::state::ViewLayout::Mobile;
     let control_pane =
@@ -3611,6 +3701,7 @@ pub(super) fn section_header_glyph(title: &str) -> &'static str {
 pub(super) fn section_header_glyph_for_app(app: &AppState, title: &str) -> &'static str {
     if !app.nerd_font {
         match title {
+            PINNED_SECTION_TITLE => return "P",
             SNOOZED_SECTION_TITLE => return "z",
             SETTLED_SECTION_TITLE => return "v",
             _ => {}
@@ -4036,6 +4127,14 @@ fn compact_sidebar_rows_inner(
             (entry, lifecycle)
         })
         .collect::<Vec<_>>();
+    let pinned_entries = ordered_tab_entries(
+        app,
+        &classified
+            .iter()
+            .filter(|(entry, _)| entry.pinned && (!app.blocked_filter || entry_has_red_dot(entry)))
+            .map(|(entry, _)| entry.clone())
+            .collect::<Vec<_>>(),
+    );
     let active_pane_targets = classified
         .iter()
         .filter(|(_, lifecycle)| *lifecycle == SidebarEntryLifecycle::Active)
@@ -4124,9 +4223,14 @@ fn compact_sidebar_rows_inner(
         let working_collapsed = section_is_collapsed(app, WORKING_SECTION_TITLE);
         let mut space_entries = Vec::new();
         let mut remote_main_entries = Vec::new();
-        // Keep active idle and unknown panes in the device tree. Working panes
-        // live only in the Working shelf, so each local pane has one row.
-        for entry in visible_entries.iter().cloned() {
+        // Pinned panes have their own shelf. Active unpinned panes stay in the
+        // device tree when Working is collapsed; otherwise working panes live
+        // only in the Working shelf so each local pane has one row.
+        for entry in visible_entries
+            .iter()
+            .filter(|entry| !entry.pinned)
+            .cloned()
+        {
             if entry.remote_entry.is_some() {
                 remote_main_entries.push(entry);
             } else if working_collapsed || !sidebar_entry_has_working_state(&entry) {
@@ -4149,7 +4253,19 @@ fn compact_sidebar_rows_inner(
         for entry in &mut working_entries {
             entry.working_shelf = true;
         }
+        snoozed_entries.retain(|entry| !entry.pinned);
+        settled_entries.retain(|entry| !entry.pinned);
         let mut rows = Vec::new();
+        if !pinned_entries.is_empty() {
+            append_shelf_space_rows(
+                app,
+                &mut rows,
+                PINNED_SECTION_TITLE,
+                pinned_entries,
+                terminal_runtimes,
+            );
+            rows.push(SidebarRow::Divider);
+        }
         if !blockers.is_empty() {
             rows.push(SidebarRow::SectionHeader {
                 title: BLOCKERS_SECTION_TITLE,
@@ -4304,7 +4420,11 @@ fn compact_sidebar_rows_inner(
     }
 
     let mut rows = Vec::new();
-    if sidebar_rows_are_filtered(app)
+    projected_active.retain(|entry| !entry.pinned);
+    projected_snoozed.retain(|entry| !entry.pinned);
+    projected_settled.retain(|entry| !entry.pinned);
+    if pinned_entries.is_empty()
+        && sidebar_rows_are_filtered(app)
         && projected_active.is_empty()
         && projected_snoozed.is_empty()
         && projected_settled.is_empty()
@@ -4375,6 +4495,21 @@ fn compact_sidebar_rows_inner(
         }
         strip.append(&mut rows);
         rows = strip;
+    }
+    if !pinned_entries.is_empty() {
+        let mut pinned_rows = Vec::new();
+        append_shelf_space_rows(
+            app,
+            &mut pinned_rows,
+            PINNED_SECTION_TITLE,
+            pinned_entries,
+            terminal_runtimes,
+        );
+        if !rows.is_empty() {
+            pinned_rows.push(SidebarRow::Divider);
+        }
+        pinned_rows.append(&mut rows);
+        rows = pinned_rows;
     }
     let row_width = sidebar_row_render_width(app, &rows, expand_worktrees);
     mark_ambiguous_remote_titles(&mut rows, row_width, app.nerd_font);
@@ -4663,6 +4798,7 @@ fn append_shelf_space_rows(
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
 ) {
     let section = match title {
+        PINNED_SECTION_TITLE => "pinned",
         SNOOZED_SECTION_TITLE => "snoozed",
         SETTLED_SECTION_TITLE => "settled",
         _ => "main",
@@ -9409,7 +9545,10 @@ pub(crate) fn compute_sidebar_hover_targets(
         match row {
             SidebarRow::SectionHeader { title, .. }
                 if app.sidebar_sections_layout
-                    && matches!(*title, SNOOZED_SECTION_TITLE | SETTLED_SECTION_TITLE) =>
+                    && matches!(
+                        *title,
+                        PINNED_SECTION_TITLE | SNOOZED_SECTION_TITLE | SETTLED_SECTION_TITLE
+                    ) =>
             {
                 let width = display_width(section_header_glyph_for_app(app, title));
                 if let Some(rect) = clamp_row_cells(body, row_y, 3, width) {
@@ -9488,7 +9627,12 @@ pub(crate) fn compute_sidebar_hover_targets(
                     + SIDEBAR_DOT_FIELD_WIDTH
                     + widths.provider
                     + SIDEBAR_MACHINE_FIELD_WIDTH
-                    + widths.age;
+                    + widths.age
+                    + if entry_has_unread_done_marker(entry) && widths.age > 0 {
+                        2
+                    } else {
+                        0
+                    };
                 if let Some(rect) = clamp_row_cells(
                     body,
                     row_y,
@@ -9555,6 +9699,31 @@ pub(crate) fn compute_sidebar_hover_targets(
                         });
                     }
                 }
+                let pin_width = sidebar_pin_width(
+                    app,
+                    entry,
+                    Rect::new(body.x, row_y, body.width, 1),
+                    title_width,
+                );
+                if pin_width > 0 {
+                    if let Some(rect) = clamp_row_cells(
+                        body,
+                        row_y,
+                        prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - pin_width,
+                        pin_width,
+                    ) {
+                        targets.push(crate::app::state::SidebarHoverTarget {
+                            rect,
+                            label: if entry.pinned { "Unpin" } else { "Pin" }.into(),
+                            action: Some(crate::app::state::SidebarHoverAction::Pin {
+                                ws_idx: target.ws_idx,
+                                tab_idx: target.tab_idx,
+                            }),
+                            row_hover: false,
+                        });
+                    }
+                }
+                let title_width = title_width.saturating_sub(pin_width);
                 let control_pane = row_control_pane(app, entry, tab);
                 let available_width =
                     selected_row_controls_width(control_pane.as_ref(), title_width, body.width);
@@ -12100,7 +12269,10 @@ fn render_section_header(
     let count_label = if app.sidebar_sections_layout
         && matches!(
             header.title,
-            ACTIVE_SECTION_TITLE | SNOOZED_SECTION_TITLE | SETTLED_SECTION_TITLE
+            PINNED_SECTION_TITLE
+                | ACTIVE_SECTION_TITLE
+                | SNOOZED_SECTION_TITLE
+                | SETTLED_SECTION_TITLE
         ) {
         format!(" {count}")
     } else {
@@ -21679,7 +21851,7 @@ row_gap = 1
     }
 
     #[test]
-    fn agent_sidebar_age_prefers_last_turn_and_tooltip_explains_fallback() {
+    fn agent_sidebar_age_uses_latest_activity_and_tooltip_explains_reply() {
         let now = std::time::Instant::now();
         let entry = AgentPanelEntry::new(
             AgentPanelIdentity::Local(AgentPanelLocalTarget {
@@ -21720,9 +21892,9 @@ row_gap = 1
                 seen: true,
                 done_since: None,
                 stale: false,
-                reported_at: Some(now),
+                reported_at: Some(now - std::time::Duration::from_secs(4 * 60)),
                 last_agent_state_change_seq: None,
-                activity_at: Some(now),
+                activity_at: Some(now - std::time::Duration::from_secs(60)),
                 state_labels: Default::default(),
                 tokens: Default::default(),
                 tab_first_pane: false,
@@ -21736,7 +21908,7 @@ row_gap = 1
             instant: reply_instant,
             unix_seconds: reply_unix_seconds,
         });
-        assert_eq!(compact_age(&entry, now).0, "1h");
+        assert_eq!(compact_age(&entry, now).0, "1m");
         let local = crate::platform::local_datetime_at(reply_unix_seconds).expect("local time");
         assert_eq!(
             age_tooltip(entry.last_turn_at, entry.reported_at, now),
@@ -23318,7 +23490,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             })
             .expect("pinned tab row");
         assert!(active_space < pinned_tab);
-        assert!(!pinned_rows.iter().any(|row| matches!(
+        assert!(pinned_rows.iter().any(|row| matches!(
             row,
             SidebarRow::SectionHeader {
                 title: PINNED_SECTION_TITLE,
@@ -23521,44 +23693,116 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn pinned_tabs_do_not_create_a_sidebar_section() {
-        let mut app =
-            priority_app_with_states(&[AgentState::Working, AgentState::Blocked, AgentState::Idle]);
-        // ws0 is merely pinned; ws1 is pinned *and* blocked.
-        app.workspaces[0].tabs[0].pinned = true;
-        app.workspaces[1].tabs[0].pinned = true;
-
-        let shape = priority_row_shape(&app);
-        assert_eq!(shape[0], ("section", SPACES_SECTION_TITLE.to_string()));
-        assert_eq!(
-            shape.iter().filter(|(kind, _)| *kind == "section").count(),
-            1
-        );
-        assert!(!shape.iter().any(|(_, title)| title == "Pinned"));
+    fn pin_icon_hover_and_persistent_hit_targets_preserve_narrow_titles() {
+        for width in [18, 60] {
+            for mobile in [false, true] {
+                let mut app = app_with_agents(&["pin-target"]);
+                app.view.layout = if mobile {
+                    crate::app::state::ViewLayout::Mobile
+                } else {
+                    crate::app::state::ViewLayout::Desktop
+                };
+                let entry = agent_panel_entries(&app).into_iter().next().unwrap();
+                let rect = Rect::new(0, 0, width, 1);
+                assert!(sidebar_pin_rect(&app, &entry, rect, 1, true).is_none());
+                app.hovered_control = Some(crate::app::state::ControlId::SidebarRowHover(0));
+                let pin = sidebar_pin_rect(&app, &entry, rect, 1, true).expect("hover pin");
+                assert!(matches!(
+                    selected_row_control_at(&app, &entry, rect, 0, true, pin.x),
+                    Some(crate::app::state::SidebarHoverAction::Pin {
+                        ws_idx: 0,
+                        tab_idx: 0
+                    })
+                ));
+                let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_compact_agent_row_with_prefix(
+                            &app, frame, &entry, rect, 0, true, None, None,
+                        )
+                    })
+                    .unwrap();
+                let text = row_text(terminal.backend().buffer(), 0, width);
+                assert!(text.contains("pi"), "{text:?}");
+                assert_eq!(
+                    terminal.backend().buffer()[(pin.x, 0)].symbol(),
+                    if app.nerd_font { "󰐄" } else { "P" }
+                );
+                app.hovered_control = None;
+                let mut pinned = entry;
+                pinned.pinned = true;
+                assert!(sidebar_pin_rect(&app, &pinned, rect, 1, true).is_some());
+                terminal
+                    .draw(|frame| {
+                        render_compact_agent_row_with_prefix(
+                            &app, frame, &pinned, rect, 0, true, None, None,
+                        )
+                    })
+                    .unwrap();
+                assert_eq!(
+                    terminal.backend().buffer()[(pin.x, 0)].symbol(),
+                    if app.nerd_font { "󰐃" } else { "P" }
+                );
+            }
+        }
     }
 
     #[test]
-    fn pin_changes_do_not_change_sidebar_sections() {
-        let mut app = priority_app_with_states(&[AgentState::Working, AgentState::Idle]);
-        app.workspaces[0].tabs[0].pinned = true;
-        assert_eq!(
-            priority_row_shape(&app)
+    fn pinned_tabs_create_a_top_section_and_unpin_hides_it() {
+        for sections in [false, true] {
+            let mut app = priority_app_with_states(&[
+                AgentState::Working,
+                AgentState::Blocked,
+                AgentState::Idle,
+            ]);
+            app.sidebar_sections_layout = sections;
+            app.workspaces[0].tabs[0].pinned = true;
+            app.workspaces[1].tabs[0].pinned = true;
+            app.sidebar_presentation
+                .expanded_workspace_ids
+                .insert(app.workspaces[1].id.clone());
+            let rows = sidebar_rows(&app);
+            assert!(matches!(
+                rows.first(),
+                Some(SidebarRow::SectionHeader {
+                    title: PINNED_SECTION_TITLE,
+                    count: 2,
+                    ..
+                })
+            ));
+            let pinned_end = rows
                 .iter()
-                .filter(|(kind, _)| *kind == "section")
-                .count(),
-            1,
-            "a pin does not open a separate sidebar group"
-        );
-        app.workspaces[0].tabs[0].pinned = false;
-        // Unpinning leaves the single Spaces header unchanged.
-        assert_eq!(
-            priority_row_shape(&app)
-                .into_iter()
-                .filter_map(|(kind, title)| (kind == "section").then_some(title))
-                .collect::<Vec<_>>(),
-            vec![SPACES_SECTION_TITLE.to_string()],
-            "with nothing pinned only the Spaces header remains"
-        );
+                .position(|row| matches!(row, SidebarRow::Divider))
+                .unwrap();
+            let pinned_tabs = rows[..pinned_end]
+                .iter()
+                .filter(|row| matches!(row, SidebarRow::Tab { .. }))
+                .count();
+            assert_eq!(pinned_tabs, 2);
+            app.collapsed_sidebar_groups.insert(if sections {
+                "sections:Pinned".into()
+            } else {
+                format!("{}:Pinned", app.sidebar_group_mode.collapse_namespace())
+            });
+            let folded = sidebar_rows(&app);
+            assert!(matches!(
+                folded.first(),
+                Some(SidebarRow::SectionHeader {
+                    collapsed: true,
+                    ..
+                })
+            ));
+            assert!(matches!(folded.get(1), Some(SidebarRow::Divider)));
+            app.workspaces[0].tabs[0].pinned = false;
+            app.workspaces[1].tabs[0].pinned = false;
+            assert!(!sidebar_rows(&app).iter().any(|row| matches!(
+                row,
+                SidebarRow::SectionHeader {
+                    title: PINNED_SECTION_TITLE,
+                    ..
+                }
+            )));
+        }
     }
 
     #[test]
@@ -28316,7 +28560,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let area = Rect::new(0, 0, 48, 24);
         let headers = compute_sidebar_section_header_areas(&app, area);
-        assert!(!headers.iter().any(|header| header.title == "Pinned"));
+        assert!(headers.iter().any(|header| header.title == "Pinned"));
         assert!(headers
             .iter()
             .any(|header| header.title == SPACES_SECTION_TITLE));
@@ -31201,6 +31445,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.sidebar_selected_remote_agent = Some(agent_ref);
         let rect = Rect::new(0, 0, 60, 1);
         let action_kind = |action: crate::app::state::SidebarHoverAction| match action {
+            crate::app::state::SidebarHoverAction::Pin { .. } => "pin",
             crate::app::state::SidebarHoverAction::Snooze { .. } => "snooze",
             crate::app::state::SidebarHoverAction::Settle { .. } => "settle",
             crate::app::state::SidebarHoverAction::Unsettle { .. } => "unsettle",
@@ -32787,7 +33032,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn pin_state_does_not_move_a_tab_out_of_active() {
+    fn pin_state_moves_a_tab_into_the_pinned_section() {
         let mut app = app_with_agents(&["herdr", "scalablev2"]);
         make_agents_blocked(&mut app);
         app.sidebar_sections_layout = true;
@@ -32795,13 +33040,16 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         for pinned in [true, false] {
             app.workspaces[0].tabs[0].pinned = pinned;
             let rows = sidebar_rows(&app);
-            assert!(!rows.iter().any(|row| matches!(
-                row,
-                SidebarRow::SectionHeader {
-                    title: PINNED_SECTION_TITLE,
-                    ..
-                }
-            )));
+            assert_eq!(
+                rows.iter().any(|row| matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: PINNED_SECTION_TITLE,
+                        ..
+                    }
+                )),
+                pinned
+            );
             assert!(!rows.iter().any(|row| matches!(
                 row,
                 SidebarRow::SectionHeader {
