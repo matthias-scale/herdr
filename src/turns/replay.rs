@@ -18,11 +18,19 @@ fn files(path: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
     }
     Ok(())
 }
-fn rows(path: &Path) -> io::Result<Vec<Value>> {
-    std::io::BufReader::new(std::fs::File::open(path)?)
-        .lines()
-        .map(|line| serde_json::from_str(&line?).map_err(io::Error::other))
-        .collect()
+fn rows(path: &Path) -> io::Result<(Vec<Value>, usize)> {
+    let mut rows = Vec::new();
+    let mut skipped = 0;
+    for line in std::io::BufReader::new(std::fs::File::open(path)?).lines() {
+        match serde_json::from_str(&line?) {
+            Ok(row) => rows.push(row),
+            Err(_) => skipped += 1,
+        }
+    }
+    if skipped > 0 {
+        eprintln!("skipped {skipped} malformed line(s) in {}", path.display());
+    }
+    Ok((rows, skipped))
 }
 fn timestamp(row: &Value) -> Option<SystemTime> {
     row["timestamp"]
@@ -91,7 +99,7 @@ pub(super) fn run(args: &[String]) -> io::Result<i32> {
             "no JSONL transcripts",
         ));
     }
-    let mut history = rows(Path::new(&option("--status-log")?))?;
+    let (mut history, mut skipped) = rows(Path::new(&option("--status-log")?))?;
     history.sort_by_key(timestamp);
     let mut counts = [(0usize, 0usize, 0usize); 2];
     let mut records = Vec::new();
@@ -103,7 +111,8 @@ pub(super) fn run(args: &[String]) -> io::Result<i32> {
             .and_then(|s| s.to_str())
             .unwrap_or_default();
         sessions.insert(fallback.to_owned());
-        let input = rows(&path)?;
+        let (input, file_skipped) = rows(&path)?;
+        skipped += file_skipped;
         for row in &input {
             if let Some(id) = row["sessionId"].as_str().or_else(|| {
                 (row["type"] == "session_meta")
@@ -174,6 +183,7 @@ pub(super) fn run(args: &[String]) -> io::Result<i32> {
         };
         println!("{kind}: turns={total} labelled={labelled} correct={correct} accuracy={accuracy}");
     }
+    println!("skipped {skipped} malformed line(s) total");
     Ok(0)
 }
 
@@ -181,6 +191,23 @@ pub(super) fn run(args: &[String]) -> io::Result<i32> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn malformed_middle_and_truncated_final_lines_preserve_settle_records() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/turns/codex-malformed.jsonl");
+        let (input, skipped) = rows(&path).unwrap();
+        assert_eq!(skipped, 2);
+        assert_eq!(input.len(), 3);
+        let records = replay(&input, "codex-done");
+        let valid = include_str!("../../tests/fixtures/turns/codex-done.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect::<Vec<Value>>();
+        assert_eq!(records, replay(&valid, "codex-done"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["record"], "settle");
+        assert_eq!(records[0]["detected_kind"], "done");
+    }
     #[test]
     fn fixture_replays_codex_and_clear_without_phantom_turns() {
         let input = |text: &str| {
