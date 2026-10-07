@@ -16433,8 +16433,7 @@ pub(crate) mod tests {
         set_sections_group_collapsed(&mut app, WORKING_SECTION_TITLE, true);
         app.ensure_test_terminals();
         for pane_id in [root_pane, split_pane] {
-            app.workspaces[0]
-                .tabs[0]
+            app.workspaces[0].tabs[0]
                 .panes
                 .get_mut(&pane_id)
                 .expect("split pane")
