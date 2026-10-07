@@ -16425,6 +16425,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn sidebar_coverage_reports_query_drops_and_renders_guard_when_all_local_panes_are_filtered() {
+        let mut app = app_with_agents(&["alpha", "beta"]);
+        app.sidebar_sections_layout = true;
+        app.sidebar_work_filter.query = "f".into();
+        for workspace in &mut app.workspaces {
+            workspace.identity_cwd = "/tmp/alpha".into();
+            workspace.cached_identity_cwd = workspace.identity_cwd.clone();
+            for tab in &workspace.tabs {
+                for pane in tab.panes.values() {
+                    if let Some(terminal) = app.terminals.get_mut(&pane.attached_terminal_id) {
+                        terminal.cwd = "/tmp/alpha".into();
+                    }
+                }
+            }
+        }
+
+        let coverage = sidebar_coverage(&app, &TerminalRuntimeRegistry::new());
+        assert_eq!(coverage.len(), 2);
+        for pane in &coverage {
+            assert_eq!(pane.dropped_by.as_deref(), Some("query"));
+            assert!(pane.placement.is_none());
+        }
+
+        let rows = super::sidebar_rows(&app);
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader { title, count: 2, .. }
+                if title == "⚠ 2 sessions hidden"
+        )));
+        assert_sidebar_coverage_complete(&app);
+    }
+
+    #[test]
     fn sidebar_coverage_keeps_a_pane_with_missing_terminal_state_reachable() {
         let mut app = app_with_agents(&["unknown"]);
         app.sidebar_sections_layout = true;
