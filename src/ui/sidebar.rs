@@ -4121,6 +4121,7 @@ fn compact_sidebar_rows_inner(
             .filter(|row| matches!(row, SidebarRow::NeedsYou { .. }))
             .count();
         let remote_activity = sidebar_remote_activity(app, &remote_entries);
+        let working_collapsed = section_is_collapsed(app, WORKING_SECTION_TITLE);
         let mut space_entries = Vec::new();
         let mut remote_main_entries = Vec::new();
         // Keep active idle and unknown panes in the device tree. Working panes
@@ -4128,7 +4129,7 @@ fn compact_sidebar_rows_inner(
         for entry in visible_entries.iter().cloned() {
             if entry.remote_entry.is_some() {
                 remote_main_entries.push(entry);
-            } else if !sidebar_entry_has_working_state(&entry) {
+            } else if working_collapsed || !sidebar_entry_has_working_state(&entry) {
                 space_entries.push(entry);
             }
         }
@@ -4199,7 +4200,6 @@ fn compact_sidebar_rows_inner(
             );
         }
         devices::append_remote_entry_groups(app, &mut rows, "main", remote_main_entries);
-        let working_collapsed = section_is_collapsed(app, WORKING_SECTION_TITLE);
         let working_count = working_entries.len();
         rows.push(SidebarRow::SectionHeader {
             title: WORKING_SECTION_TITLE,
@@ -31949,7 +31949,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(rows.iter().any(|row| matches!(
             row,
             SidebarRow::Workspace {
-                activity_count: Some((0, 2)),
+                activity_count: Some((1, 3)),
                 ..
             }
         )));
@@ -31957,7 +31957,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             rows.iter()
                 .filter(|row| matches!(row, SidebarRow::Tab { .. }))
                 .count(),
-            2
+            3
         );
         assert!(rows.iter().any(|row| matches!(
             row,
@@ -32267,12 +32267,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(groups, [(0, Some((0, 1)))]);
+        assert_eq!(groups, [(0, Some((1, 2)))]);
         assert_eq!(
             rows.iter()
                 .filter(|row| matches!(row, SidebarRow::Tab { .. }))
                 .count(),
-            1
+            2
         );
     }
 
