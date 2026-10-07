@@ -53,6 +53,23 @@ pub(crate) fn exe_replaced(
         || matches!((startup, current), (Some(startup), Some(current)) if startup != current)
 }
 
+fn monitor_step(
+    running: &str,
+    proc_deleted: bool,
+    baseline: Option<ExeStamp>,
+    current: Option<ExeStamp>,
+    installed: Option<&str>,
+) -> (Option<ExeStamp>, Option<String>) {
+    if !exe_replaced(proc_deleted, baseline, current) {
+        return (baseline, None);
+    }
+
+    match drift_badge(running, true, installed) {
+        Some(badge) => (baseline, Some(badge)),
+        None => (current, None),
+    }
+}
+
 fn build_id(version: &str) -> &str {
     version
         .split_once("+fork.")
@@ -81,21 +98,32 @@ pub(crate) fn start_monitor(running: String, notice: DriftNotice) {
 
     let _ = thread::Builder::new()
         .name("herdr-binary-drift".to_owned())
-        .spawn(move || loop {
-            thread::sleep(CHECK_INTERVAL);
-            let current = exe_stamp(&executable);
-            if !exe_replaced(proc_deleted, startup, current) {
-                continue;
-            }
+        .spawn(move || {
+            let mut startup = startup;
+            loop {
+                thread::sleep(CHECK_INTERVAL);
+                let current = exe_stamp(&executable);
+                if !exe_replaced(proc_deleted, startup, current) {
+                    continue;
+                }
 
-            let installed = installed_version(&installed_path);
-            warn_binary_replaced(&running, installed.as_deref());
-            if let Some(badge) = drift_badge(&running, true, installed.as_deref()) {
-                if let Ok(mut shared) = notice.lock() {
-                    *shared = Some(badge);
+                let installed = installed_version(&installed_path);
+                let (next_startup, badge) = monitor_step(
+                    &running,
+                    proc_deleted,
+                    startup,
+                    current,
+                    installed.as_deref(),
+                );
+                startup = next_startup;
+                if let Some(badge) = badge {
+                    warn_binary_replaced(&running, installed.as_deref());
+                    if let Ok(mut shared) = notice.lock() {
+                        *shared = Some(badge);
+                    }
+                    break;
                 }
             }
-            break;
         });
 }
 
@@ -183,7 +211,7 @@ pub(crate) fn overlay_badge(frame: &mut FrameData, badge: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{drift_badge, exe_replaced, overlay_badge, ExeStamp};
+    use super::{drift_badge, exe_replaced, monitor_step, overlay_badge, ExeStamp};
     use crate::protocol::{CellData, FrameData};
     use std::time::UNIX_EPOCH;
 
@@ -257,6 +285,36 @@ mod tests {
                 "case: {name}"
             );
         }
+    }
+
+    #[test]
+    fn same_build_reinstall_rebaselines_then_detects_different_build() {
+        let original = stamp(1);
+        let identical_reinstall = stamp(2);
+        let different_reinstall = stamp(3);
+
+        let (baseline, badge) = monitor_step(
+            "0.9.1+fork.running",
+            false,
+            Some(original),
+            Some(identical_reinstall),
+            Some("0.9.1+fork.running"),
+        );
+        assert_eq!(baseline, Some(identical_reinstall));
+        assert_eq!(badge, None);
+
+        let (baseline, badge) = monitor_step(
+            "0.9.1+fork.running",
+            false,
+            baseline,
+            Some(different_reinstall),
+            Some("0.9.1+fork.newbuild"),
+        );
+        assert_eq!(baseline, Some(identical_reinstall));
+        assert_eq!(
+            badge.as_deref(),
+            Some("⚠ restart Herdr: installed newbuild ≠ running running")
+        );
     }
 
     #[test]
