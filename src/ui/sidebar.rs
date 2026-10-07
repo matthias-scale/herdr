@@ -4211,21 +4211,31 @@ fn sidebar_rows_inner(
 }
 
 fn sidebar_coverage_guard_might_be_needed(app: &AppState) -> bool {
-    let projected_pane_count = app
-        .workspaces
-        .iter()
-        .flat_map(|workspace| &workspace.tabs)
-        .map(|tab| tab.layout.pane_count())
-        .sum::<usize>();
-    !app.remote_focus_proxy_panes.is_empty()
+    if !app.remote_focus_proxy_panes.is_empty()
         || sidebar_rows_are_filtered(app)
         || app.blocked_filter
-        || app.terminals.len() < projected_pane_count
-        || app
-            .workspaces
-            .iter()
-            .enumerate()
-            .any(|(ws_idx, _)| app.hidden_fleet_workspace(ws_idx))
+    {
+        return true;
+    }
+    app.workspaces
+        .iter()
+        .enumerate()
+        .any(|(ws_idx, workspace)| {
+            if app.hidden_fleet_workspace(ws_idx) {
+                return true;
+            }
+            workspace.tabs.iter().any(|tab| {
+                tab.panes.iter().any(|(pane_id, pane)| {
+                    !app.terminals.contains_key(&pane.attached_terminal_id)
+                        || workspace.public_pane_number(*pane_id).is_none()
+                        || pane.done_since.is_some_and(|done_since| {
+                            !pane.seen
+                                && app.view_observed_at.saturating_duration_since(done_since)
+                                    > app.hide_done_after
+                        })
+                })
+            })
+        })
 }
 
 fn sidebar_filtered_agent_entries_from(
@@ -15370,6 +15380,17 @@ pub(crate) mod tests {
         }
     }
 
+    fn sidebar_rows_with_coverage_for_test(
+        app: &AppState,
+    ) -> (Vec<SidebarRow>, Vec<crate::api::schema::PaneCoverage>) {
+        let mut coverage = SidebarCoverageRecorder::new(app);
+        let mut rows =
+            compact_sidebar_rows_inner(app, None, false, true, true, Some(&mut coverage));
+        coverage.finish(app, &rows);
+        coverage.append_guard_rows(app, &mut rows);
+        (rows, coverage.into_records())
+    }
+
     fn remote_fleet_agent(host: &str, name: &str) -> crate::fleet::FleetRow {
         crate::fleet::FleetRow::test_agent_info_row(
             host,
@@ -16077,7 +16098,7 @@ pub(crate) mod tests {
 
     #[test]
     fn sidebar_coverage_keeps_a_pane_with_missing_terminal_state_reachable() {
-        let mut app = app_with_agents(&["unknown"]);
+        let mut app = app_with_agents(&["unknown", "unrelated"]);
         app.sidebar_sections_layout = true;
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
@@ -16106,6 +16127,56 @@ pub(crate) mod tests {
             SidebarRow::Tab { entry, .. }
                 if entry.local_target().is_some_and(|target| target.pane_id == pane_id)
                     && entry.primary_tab_label.as_deref().is_some_and(|label| label.contains("no_terminal_state"))
+        )));
+    }
+
+    #[test]
+    fn sidebar_coverage_guard_includes_pane_without_public_id() {
+        let mut app = app_with_agents(&["unknown"]);
+        app.sidebar_sections_layout = true;
+        app.sidebar_work_filter.query = "no matching pane".into();
+        app.collapsed_sidebar_groups.insert(format!(
+            "expanded:{}",
+            sidebar_coverage_group_key(&app.agent_host_name)
+        ));
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        app.workspaces[0].public_pane_numbers.remove(&pane_id);
+
+        let (rows, report) = sidebar_rows_with_coverage_for_test(&app);
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].dropped_by.as_deref(), Some("missing_public_id"));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. }
+                if entry.local_target().is_some_and(|target| target.pane_id == pane_id)
+                    && entry.primary_tab_label.as_deref().is_some_and(|label| label.contains("missing_public_id"))
+        )));
+    }
+
+    #[test]
+    fn sidebar_coverage_guard_includes_unseen_pane_hidden_after_done_threshold() {
+        let done_since = std::time::Instant::now();
+        let mut app = priority_app_with_states(&[AgentState::Idle]);
+        app.collapsed_sidebar_groups.insert(format!(
+            "expanded:{}",
+            sidebar_coverage_group_key(&app.agent_host_name)
+        ));
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let pane = app.workspaces[0].tabs[0].panes.get_mut(&pane_id).unwrap();
+        pane.seen = false;
+        pane.done_since = Some(done_since);
+        app.view_observed_at = done_since + app.hide_done_after + std::time::Duration::from_secs(1);
+        assert!(sidebar_coverage_guard_might_be_needed(&app));
+        app.sidebar_work_filter.query = "no matching pane".into();
+
+        let (rows, report) = sidebar_rows_with_coverage_for_test(&app);
+        assert_eq!(report.len(), 1);
+        assert!(report[0].placement.is_none());
+        assert!(report[0].dropped_by.is_some());
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Tab { entry, .. }
+                if entry.local_target().is_some_and(|target| target.pane_id == pane_id)
         )));
     }
 
