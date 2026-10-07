@@ -4235,10 +4235,35 @@ impl SidebarCoverageRecorder {
             }
         }
 
+        let mut tab_status = std::collections::HashMap::new();
+        for record in &self.records {
+            if record.report.placement.is_some() {
+                tab_status.insert(
+                    (record.key.ws_idx, record.key.tab_idx),
+                    (record.report.placement.clone(), None),
+                );
+            }
+        }
+        for record in &self.records {
+            if record.report.dropped_by.is_some() {
+                tab_status
+                    .entry((record.key.ws_idx, record.key.tab_idx))
+                    .or_insert_with(|| (None, record.report.dropped_by.clone()));
+            }
+        }
+
         for index in 0..self.records.len() {
             if self.records[index].report.placement.is_some()
                 || self.records[index].report.dropped_by.is_some()
             {
+                continue;
+            }
+            if let Some((placement, dropped_by)) = tab_status.get(&(
+                self.records[index].key.ws_idx,
+                self.records[index].key.tab_idx,
+            )) {
+                self.records[index].report.placement.clone_from(placement);
+                self.records[index].report.dropped_by.clone_from(dropped_by);
                 continue;
             }
             let Some(entry) = self.records[index].entry.clone() else {
@@ -16458,11 +16483,24 @@ pub(crate) mod tests {
 
         assert_eq!(header_count, visible_rows);
         assert_eq!(visible_rows, 1, "one tab renders one session row");
+
+        let coverage = sidebar_coverage(&app, &TerminalRuntimeRegistry::new());
+        assert_eq!(coverage.len(), 2);
+        assert!(coverage.iter().all(|pane| pane.placement.is_some()));
+        assert!(coverage.iter().all(|pane| pane.dropped_by.is_none()));
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::NestedHeader { title, .. }
+                if title.contains("sessions hidden")
+        )));
     }
 
     #[test]
     fn sidebar_coverage_reports_query_drops_and_renders_guard_when_all_local_panes_are_filtered() {
         let mut app = app_with_agents(&["alpha", "beta"]);
+        let split_tab_id = app.workspaces[0].id.clone();
+        app.workspaces[0].test_split(Direction::Horizontal);
+        app.ensure_test_terminals();
         app.sidebar_sections_layout = true;
         app.sidebar_work_filter.query = "f".into();
         for workspace in &mut app.workspaces {
@@ -16478,17 +16516,25 @@ pub(crate) mod tests {
         }
 
         let coverage = sidebar_coverage(&app, &TerminalRuntimeRegistry::new());
-        assert_eq!(coverage.len(), 2);
+        assert_eq!(coverage.len(), 3);
         for pane in &coverage {
             assert_eq!(pane.dropped_by.as_deref(), Some("query"));
             assert!(pane.placement.is_none());
         }
+        let split_tab_panes = coverage
+            .iter()
+            .filter(|pane| pane.workspace_id == split_tab_id)
+            .collect::<Vec<_>>();
+        assert_eq!(split_tab_panes.len(), 2);
+        assert!(split_tab_panes
+            .iter()
+            .all(|pane| pane.dropped_by.as_deref() == Some("query")));
 
         let rows = super::sidebar_rows(&app);
         assert!(rows.iter().any(|row| matches!(
             row,
-            SidebarRow::NestedHeader { title, count: 2, .. }
-                if title == "⚠ 2 sessions hidden"
+            SidebarRow::NestedHeader { title, count: 3, .. }
+                if title == "⚠ 3 sessions hidden"
         )));
         assert_sidebar_coverage_complete(&app);
     }
