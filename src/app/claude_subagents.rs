@@ -857,7 +857,12 @@ impl crate::app::App {
             .filter_map(|(terminal_id, terminal)| {
                 Some((
                     terminal_id.clone(),
-                    "herdr:claude".to_string(),
+                    if terminal.effective_known_agent() == Some(crate::detect::Agent::Codex) {
+                        "herdr:codex"
+                    } else {
+                        "herdr:claude"
+                    }
+                    .to_string(),
                     terminal.claude_transcript_session_id.clone()?,
                     terminal.claude_transcript_path.clone()?,
                     terminal.agent_turn_generation(),
@@ -972,9 +977,11 @@ impl crate::app::App {
                 .terminals
                 .get(&observation.target.terminal_id)
                 .is_some_and(|terminal| {
-                    observation.target.source == "herdr:claude"
-                        && terminal.claude_transcript_session_id.as_deref()
-                            == Some(observation.target.session_id.as_str())
+                    matches!(
+                        observation.target.source.as_str(),
+                        "herdr:claude" | "herdr:codex"
+                    ) && terminal.claude_transcript_session_id.as_deref()
+                        == Some(observation.target.session_id.as_str())
                         && terminal.claude_transcript_path.as_ref()
                             == Some(&observation.target.path)
                         && terminal.agent_turn_generation() == observation.target.turn_generation
@@ -1208,10 +1215,24 @@ impl crate::app::App {
             if let Some((_, pane_id, _)) = location {
                 if let Some(session_id) = transcript_session_id.as_deref() {
                     for mut record in turn_record.into_iter().chain(next_action) {
-                        record["state_at_settle"] =
-                            serde_json::json!(self.state.terminals.get(&terminal_id).map(|t| {
-                                crate::detect::manifest::agent_state_label(t.raw_agent_state())
-                            }));
+                        if record["record"] == "settle" {
+                            if let Some(tracker) =
+                                self.claude_subagent_trackers.get_mut(&terminal_id)
+                            {
+                                tracker.cursor.turn.state_at_settle = self
+                                    .state
+                                    .terminals
+                                    .get(&terminal_id)
+                                    .map(|t| t.raw_agent_state());
+                            }
+                            record["state_at_settle"] = serde_json::json!(self
+                                .state
+                                .terminals
+                                .get(&terminal_id)
+                                .map(|t| {
+                                    crate::detect::manifest::agent_state_label(t.raw_agent_state())
+                                }));
+                        }
                         if record["record"] == "next_action" {
                             record["state_at_next_action"] =
                                 serde_json::json!(state_at_next_action);
@@ -1237,7 +1258,19 @@ impl crate::app::App {
                             record,
                             &pane_id.raw().to_string(),
                             session_id,
-                            "claude",
+                            if self
+                                .state
+                                .terminals
+                                .get(&terminal_id)
+                                .is_some_and(|terminal| {
+                                    terminal.effective_known_agent()
+                                        == Some(crate::detect::Agent::Codex)
+                                })
+                            {
+                                "codex"
+                            } else {
+                                "claude"
+                            },
                         );
                     }
                 }
@@ -1371,7 +1404,10 @@ pub(crate) fn validated_transcript_path(
     session_ref: Option<&AgentSessionRef>,
     raw_path: Option<&str>,
 ) -> Option<PathBuf> {
-    if source != "herdr:claude" || agent_label != "claude" {
+    if !matches!(
+        (source, agent_label),
+        ("herdr:claude", "claude") | ("herdr:codex", "codex")
+    ) {
         return None;
     }
     let session_ref = session_ref?;
@@ -1393,6 +1429,14 @@ pub(crate) fn validated_transcript_path(
             .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
     {
         return None;
+    }
+    if source == "herdr:codex" {
+        let suffix = format!("-{}.jsonl", session_ref.value);
+        return path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|name| name.starts_with("rollout-") && name.ends_with(&suffix))
+            .map(|_| path.to_path_buf());
     }
     let expected_file = format!("{}.jsonl", session_ref.value);
     let mut components = path.components().rev();
@@ -2276,6 +2320,30 @@ mod tests {
         assert_eq!(cursor.count(), None);
         cursor.ingest(&launch[launch.len() - 1..], true);
         assert_eq!(cursor.count(), Some(1));
+    }
+
+    #[test]
+    fn codex_rollout_binding_rejects_other_sessions_and_indexes() {
+        let session = AgentSessionRef::id("thread").unwrap();
+        let root = std::env::temp_dir();
+        let path = root.join("sessions").join("rollout-date-thread.jsonl");
+        assert_eq!(
+            validated_transcript_path("herdr:codex", "codex", Some(&session), path.to_str()),
+            Some(path)
+        );
+        for path in [
+            root.join("sessions").join("rollout-date-other.jsonl"),
+            root.join("session_index.jsonl"),
+            root.join("..").join("rollout-date-thread.jsonl"),
+        ] {
+            assert!(validated_transcript_path(
+                "herdr:codex",
+                "codex",
+                Some(&session),
+                path.to_str()
+            )
+            .is_none());
+        }
     }
 
     #[test]

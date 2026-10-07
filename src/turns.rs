@@ -1,4 +1,5 @@
 //! Server-owned transcript turn lifecycle. Never consulted from render loops.
+mod replay;
 use std::collections::HashSet;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -62,6 +63,7 @@ pub(crate) struct Turn {
     blocked: bool,
     pub next_action: Option<Value>,
     pub settled_at: Option<SystemTime>,
+    pub state_at_settle: Option<AgentState>,
     pub sequence: u64,
     pub recorded: bool,
     pub projected: Option<AgentState>,
@@ -109,6 +111,34 @@ pub(crate) fn real_user(value: &Value) -> bool {
 impl Turn {
     /// Replay and runtime use the same state machine; `observed` is receipt time.
     pub(crate) fn ingest(&mut self, value: &Value, at: Option<SystemTime>, observed: SystemTime) {
+        // Rollout events are normalized at this boundary so replay and runtime agree.
+        if value["type"] == "response_item" && value["payload"]["role"] == "assistant" {
+            if let Some(items) = value["payload"]["content"].as_array() {
+                self.text = items
+                    .iter()
+                    .filter_map(|i| i["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+            return;
+        }
+        if value["type"] == "event_msg" {
+            let payload = &value["payload"];
+            let row = match payload["type"].as_str() {
+                Some("user_message") => {
+                    serde_json::json!({"type":"user", "message":{"content":payload["message"]}})
+                }
+                Some("task_started") => {
+                    serde_json::json!({"type":"user", "isMeta":true, "message":{"content":""}})
+                }
+                Some("task_complete") => {
+                    serde_json::json!({"type":"assistant", "message":{"stop_reason":"end_turn", "content":payload["last_agent_message"].as_str().unwrap_or(&self.text)}})
+                }
+                _ => return,
+            };
+            self.ingest(&row, at, observed);
+            return;
+        }
         if value["isSidechain"] == true
             || !matches!(value["type"].as_str(), Some("assistant" | "user"))
         {
@@ -116,6 +146,13 @@ impl Turn {
         }
         let at = at.unwrap_or(observed);
         let text = message_text(value);
+        if value["type"] == "user"
+            && ["<local-command", "<command-"]
+                .iter()
+                .any(|prefix| text.trim_start().starts_with(prefix))
+        {
+            return;
+        }
         let question_answer = value["message"]["content"].as_array().is_some_and(|items| {
             items.iter().any(|item| {
                 item["type"] == "tool_result"
@@ -131,6 +168,7 @@ impl Turn {
                 "latency_seconds": at.duration_since(end).unwrap_or_default().as_secs_f64(),
                 "answer_like": answer_like(&text),
                 "state_at_next_action": if self.blocked { "blocked" } else { "idle" },
+                "state_at_settle": crate::detect::manifest::agent_state_label(self.state_at_settle.unwrap_or(if self.blocked { AgentState::Blocked } else { AgentState::Idle })),
             }));
             let sequence = self.sequence.saturating_add(1);
             *self = Self {
@@ -216,7 +254,9 @@ impl Turn {
     }
 
     pub(crate) fn state(&mut self, now: SystemTime) -> Option<AgentState> {
-        self.last_at?;
+        if self.last_at.is_none() {
+            return Some(AgentState::Idle);
+        }
         if self.blocked {
             return Some(AgentState::Blocked);
         }
@@ -237,6 +277,11 @@ impl Turn {
             self.closing = Some(closing);
             self.settled = true;
             self.settled_at = Some(now);
+            self.state_at_settle = Some(if self.blocked {
+                AgentState::Blocked
+            } else {
+                AgentState::Idle
+            });
             return Some(if self.blocked {
                 AgentState::Blocked
             } else {
@@ -361,6 +406,9 @@ fn append_record(path: &std::path::Path, record: &Value) -> io::Result<()> {
 }
 
 pub(crate) fn report(args: &[String]) -> io::Result<i32> {
+    if args.first().is_some_and(|a| a == "replay") {
+        return replay::run(&args[1..]);
+    }
     if args.first().map(String::as_str) != Some("report") {
         eprintln!("usage: herdr turns report [--since YYYY-MM-DD]");
         return Ok(2);
@@ -473,6 +521,32 @@ mod tests {
     }
     fn state(turn: &mut Turn, second: u64) -> Option<AgentState> {
         turn.state(BASE + Duration::from_secs(second))
+    }
+    #[test]
+    fn local_commands_leave_a_new_session_idle() {
+        let mut turn = Turn::default();
+        feed(&mut turn, user("<command-name>/clear</command-name>"), 0);
+        feed(
+            &mut turn,
+            user("<local-command-stdout>Cleared</local-command-stdout>"),
+            1,
+        );
+        assert_eq!(state(&mut turn, 200), Some(AgentState::Idle));
+        assert!(turn.record().is_none());
+    }
+    #[test]
+    fn codex_completion_uses_quiet_window_and_closing_latch() {
+        for (text, expected) in [("Done", AgentState::Idle), ("**Needs you (1):**\n1. **Decide** Pick.\n   a) A\n   b) B\nReply 1a / 1b. Silence holds.", AgentState::Blocked)] {
+            let mut turn = Turn::default();
+            feed(&mut turn, json!({"type":"event_msg","payload":{"type":"user_message","message":"work"}}), 0);
+            feed(&mut turn, json!({"type":"event_msg","payload":{"type":"task_complete","last_agent_message":text}}), 1);
+            assert_eq!(state(&mut turn, 3), Some(AgentState::Working));
+            assert_eq!(state(&mut turn, 4), Some(expected));
+            assert_eq!(state(&mut turn, 60), Some(expected));
+            feed(&mut turn, json!({"type":"event_msg","payload":{"type":"user_message","message":"1a"}}), 61);
+            assert_eq!(state(&mut turn, 62), Some(AgentState::Working));
+            assert_eq!(turn.next_action.as_ref().unwrap()["state_at_settle"], if expected == AgentState::Blocked { "blocked" } else { "idle" });
+        }
     }
     #[test]
     fn plain_done_settles_once_after_three_seconds() {
@@ -592,7 +666,7 @@ mod tests {
         feed(&mut turn, side, 3);
         assert_eq!(state(&mut turn, 4), Some(AgentState::Idle));
         turn = Turn::default();
-        assert_eq!(state(&mut turn, 100), None);
+        assert_eq!(state(&mut turn, 100), Some(AgentState::Idle));
         assert!(turn.last_at.is_none());
     }
     #[test]

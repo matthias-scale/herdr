@@ -3663,7 +3663,7 @@ impl AppState {
                     .and_then(|_| session_ref.as_ref().map(|session| session.value.clone()));
                 let mut accepted_transcript_session = None;
                 let effects = self.update_terminal_state(pane_id, |terminal| {
-                    let mutation = terminal.set_agent_session_ref_for_session_start(
+                    let mut mutation = terminal.set_agent_session_ref_for_session_start(
                         source,
                         agent_label,
                         session_ref,
@@ -3684,11 +3684,29 @@ impl AppState {
                         {
                             terminal.set_active_subagents(None);
                         }
-                        if claude_transcript_path.is_some() || session_replaced {
+                        if session_replaced
+                            || claude_transcript_path.as_ref().is_some_and(|path| {
+                                terminal.claude_transcript_path.as_ref() != Some(path)
+                                    || terminal.claude_transcript_session_id
+                                        != claude_transcript_session_id
+                            })
+                        {
                             terminal.set_claude_transcript_target(
-                                claude_transcript_session_id,
+                                claude_transcript_session_id.clone(),
                                 claude_transcript_path,
                             );
+                            if let Some(reset) = terminal.set_transcript_turn_state(
+                                claude_transcript_session_id
+                                    .as_ref()
+                                    .map(|_| crate::detect::AgentState::Idle),
+                                None,
+                                0,
+                                std::time::Instant::now(),
+                            ) {
+                                if let Some(mutation) = mutation.as_mut() {
+                                    mutation.effective_state_change = reset.effective_state_change;
+                                }
+                            }
                         }
                         if session_name_target_evaluated || session_replaced {
                             terminal.set_session_name_write_target(session_name_write_target);
@@ -4034,7 +4052,12 @@ impl AppState {
             if let Some(tab_idx) = self.workspaces[ws_idx].find_tab_index_for_pane(pane_id) {
                 self.workspaces[ws_idx].tabs[tab_idx].expire_agent_scoped_name();
             }
-            if retired_scoped_closing_report {
+            if retired_scoped_closing_report
+                || self.terminals.get(&terminal_id).is_some_and(|terminal| {
+                    terminal.claude_transcript_session_id.is_some()
+                        && terminal.last_turn_at().is_none()
+                })
+            {
                 if let Some(pane) = self.workspaces[ws_idx].pane_state_mut(pane_id) {
                     pane.seen = true;
                     pane.done_since = None;
@@ -6659,6 +6682,59 @@ mod tests {
                 .is_some(),
             "transition into working records agent activity"
         );
+    }
+
+    #[test]
+    fn transcript_session_start_clears_prior_turn_immediately_without_completion() {
+        for (agent, label) in [(Agent::Claude, "claude"), (Agent::Codex, "codex")] {
+            let mut state = app_with_workspaces(&["test"]);
+            let pane_id = *state.workspaces[0].panes.keys().next().unwrap();
+            state.active = None;
+            state.handle_app_event(AppEvent::StateChanged {
+                pane_id,
+                agent: Some(agent),
+                state: AgentState::Idle,
+                visible_blocker: false,
+                visible_working: false,
+                usage_limited: false,
+                process_exited: false,
+                observed_at: Instant::now(),
+            });
+            let report = |id: &str, seq| AppEvent::AgentSessionReported {
+                pane_id,
+                source: format!("herdr:{label}"),
+                agent_label: label.into(),
+                seq: Some(seq),
+                session_ref: crate::agent_resume::AgentSessionRef::id(id),
+                claude_transcript_path: Some(std::path::PathBuf::from(format!("/tmp/{id}.jsonl"))),
+                session_name_write_target: None,
+                session_name_target_evaluated: false,
+                session_start_source: Some(if seq == 1 { "startup" } else { "clear" }.into()),
+            };
+            state.handle_app_event(report("one", 1));
+            let terminal_id = state.workspaces[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_transcript_turn_state(
+                    Some(AgentState::Working),
+                    Some(std::time::SystemTime::now()),
+                    1,
+                    Instant::now(),
+                );
+            state.workspaces[0].panes.get_mut(&pane_id).unwrap().seen = false;
+            state.handle_app_event(report("two", 2));
+            assert_eq!(
+                state.terminals[&terminal_id].raw_agent_state(),
+                AgentState::Idle
+            );
+            assert!(state.terminals[&terminal_id].last_turn_at().is_none());
+            assert!(state.workspaces[0].panes[&pane_id].seen, "{label}");
+            assert!(state.toast.is_none());
+        }
     }
 
     #[test]

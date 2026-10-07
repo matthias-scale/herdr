@@ -2365,6 +2365,12 @@ impl TerminalState {
             self.transcript_turn_flips.clear();
         }
         self.transcript_turn_state = state;
+        if state == Some(AgentState::Idle) && last_at.is_none() {
+            // An empty-session reset is not a completed model turn.
+            self.agent_process_acquisition_pending = true;
+        } else if state == Some(AgentState::Working) {
+            self.agent_process_acquisition_pending = false;
+        }
         if let Some(at) = last_at.and_then(crate::agent_state::format_rfc3339) {
             self.set_last_turn_at(Some(at));
         }
@@ -5399,7 +5405,8 @@ impl TerminalState {
                     && authority.retired_at.is_none()
             });
             if notification
-                || (self.visible_blocker_overrides_hook() && state == AgentState::Working)
+                || (self.visible_blocker_overrides_hook()
+                    && (state == AgentState::Working || self.last_turn_at().is_none()))
             {
                 return (AgentState::Blocked, "transcript_permission");
             }
