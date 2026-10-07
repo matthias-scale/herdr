@@ -31954,6 +31954,131 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn default_sections_layout_keeps_local_sessions_in_tree_or_collapsed_section_counts() {
+        let mut home = Workspace::test_new("~");
+        for _ in 0..6 {
+            home.test_add_tab(None);
+        }
+        let same_cwd = Workspace::test_new("~");
+        let mut repo_bound = Workspace::test_new("inbox-brain");
+        repo_bound.test_add_tab(None);
+        repo_bound.repo_binding = Some("scalable-so/scalablev2".into());
+
+        let mut app = AppState::test_new();
+        app.workspaces = vec![home, same_cwd, repo_bound];
+        app.workspaces[0].identity_cwd = "/home/ubuntu2".into();
+        app.workspaces[1].identity_cwd = "/home/ubuntu2".into();
+        app.workspaces[2].identity_cwd = "/home/ubuntu2/Repos/scalablev2".into();
+        app.active = Some(0);
+        app.selected = 0;
+        app.agent_host_name = "ub2".into();
+        app.sidebar_sections_layout = true;
+        app.ensure_test_terminals();
+
+        let states = [
+            AgentState::Working,
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::Working,
+            AgentState::Unknown,
+            AgentState::Idle,
+            AgentState::Working,
+            AgentState::Idle,
+        ];
+        let mut expected_tabs = Vec::new();
+        let mut settled_tabs = Vec::new();
+        let mut working_tabs = 0;
+        let observed_at = std::time::Instant::now();
+        app.view_observed_at = observed_at;
+        let mut state_index = 0;
+        for (ws_idx, workspace) in app.workspaces.iter_mut().enumerate() {
+            for (tab_idx, tab) in workspace.tabs.iter_mut().enumerate() {
+                let pane_id = tab.root_pane;
+                let pane = tab.panes.get_mut(&pane_id).expect("root pane");
+                pane.seen = true;
+                if (ws_idx, tab_idx) == (2, 1) {
+                    pane.settled_at = Some(1_725_000_000);
+                    settled_tabs.push((ws_idx, tab_idx));
+                } else {
+                    expected_tabs.push((ws_idx, tab_idx));
+                }
+                let state = states[state_index];
+                working_tabs += usize::from(state == AgentState::Working);
+                let terminal = app
+                    .terminals
+                    .get_mut(&pane.attached_terminal_id)
+                    .expect("fixture terminal");
+                terminal.detected_agent = Some(Agent::Claude);
+                terminal.set_raw_agent_state_for_test(state);
+                state_index += 1;
+            }
+        }
+
+        // Match a first attach. Leave both workspace and section disclosures at
+        // their normal presentation defaults.
+        app.reconcile_sidebar_presentation();
+        let rows = sidebar_rows(&app);
+        let mut workspace_headers = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Workspace {
+                    ws_idx,
+                    indented: false,
+                    ..
+                } => Some(*ws_idx),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        workspace_headers.sort_unstable();
+        assert_eq!(workspace_headers, [0, 1, 2]);
+
+        let mut actual_tabs = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Tab { entry, .. } | SidebarRow::Agent { entry, .. } => entry
+                    .local_target()
+                    .map(|target| (target.ws_idx, target.tab_idx)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        actual_tabs.sort_unstable();
+        expected_tabs.sort_unstable();
+        assert_eq!(
+            actual_tabs, expected_tabs,
+            "every active local tab must appear once in the default tree"
+        );
+        assert_eq!(
+            rows.iter().find_map(|row| match row {
+                SidebarRow::NestedHeader { key, count, .. } if key == "device:main/ub2" => {
+                    Some(*count)
+                }
+                _ => None,
+            }),
+            Some(expected_tabs.len()),
+            "the main device count must exclude tabs moved into Settled"
+        );
+
+        let section = |title| {
+            rows.iter().find_map(|row| match row {
+                SidebarRow::SectionHeader {
+                    title: row_title,
+                    count,
+                    collapsed,
+                    ..
+                } if *row_title == title => Some((*count, *collapsed)),
+                _ => None,
+            })
+        };
+        assert_eq!(section(WORKING_SECTION_TITLE), Some((working_tabs, true)));
+        assert_eq!(
+            section(SETTLED_SECTION_TITLE),
+            Some((settled_tabs.len(), true))
+        );
+    }
+
+    #[test]
     fn focus_sidebar_keeps_seen_idle_tabs_in_spaces() {
         let mut app = sort_app(&[
             sort_tab("read", "owner/herdr", AgentState::Idle, 1),
