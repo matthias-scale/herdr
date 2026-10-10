@@ -2721,6 +2721,7 @@ pub struct ViewState {
     /// Maximum attach-local agent-tab offset for the last computed geometry.
     pub(crate) notepad_agent_max_scroll: usize,
     /// Visible Usage-tab rows, materialized with their click actions.
+    pub(crate) notepad_usage_content_rows: usize,
     pub(crate) notepad_usage_rows: Vec<crate::ui::notepad_usage::NotepadUsageRow>,
     /// Per-row hover targets derived from the same visible rows as rendering.
     pub(crate) notepad_usage_hit_areas: Vec<Rect>,
@@ -5545,6 +5546,7 @@ pub(crate) enum ControlId {
     SidebarRowHover(u16),
     NotepadUsageRow(usize),
     NotepadUsageToggle,
+    NotepadUsageTitle,
     FocusBoardNewCard,
     FocusBoardNewGoal,
     FocusBoardDone,
@@ -8127,6 +8129,7 @@ impl AppState {
                 notepad_tab_hit_areas: Vec::new(),
                 notepad_agent_rows: Vec::new(),
                 notepad_agent_max_scroll: 0,
+                notepad_usage_content_rows: 0,
                 notepad_usage_rows: Vec::new(),
                 notepad_usage_hit_areas: Vec::new(),
                 notepad_usage_max_scroll: 0,

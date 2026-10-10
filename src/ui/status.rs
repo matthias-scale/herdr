@@ -694,21 +694,6 @@ fn load_color(percent: u8, p: &Palette) -> Color {
     }
 }
 
-pub(crate) fn provider_style(
-    usage: &crate::provider_usage::AccountUsage,
-    color: Color,
-    p: &Palette,
-) -> Style {
-    if usage.stale {
-        return Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
-    }
-    match usage.peak_percent() {
-        Some(percent) if percent >= CRITICAL_PERCENT => Style::default().fg(p.red),
-        Some(percent) if percent >= WARN_PERCENT => Style::default().fg(p.yellow),
-        _ => Style::default().fg(color),
-    }
-}
-
 use crate::ui::icons::Metric;
 
 pub(crate) fn fleet_device_text(
