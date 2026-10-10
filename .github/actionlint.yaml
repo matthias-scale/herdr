@@ -1,0 +1,5 @@
+# actionlint treats managed Ubicloud labels as custom self-hosted runner labels.
+self-hosted-runner:
+  labels:
+    - ubicloud-standard-2
+    - ubicloud-standard-4

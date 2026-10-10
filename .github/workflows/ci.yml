@@ -25,7 +25,7 @@ concurrency:
 jobs:
   conventional-commits:
     if: github.event_name != 'push' || github.ref_name == 'master'
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -45,12 +45,14 @@ jobs:
         run: python3 scripts/conventional_commits.py "$PR_TITLE"
 
   check:
-    name: check (${{ matrix.os }})
+    name: check (${{ matrix.label || matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubicloud-standard-4
+            # Keep the check name stable for branch rules and merge grants.
+            label: ubuntu-latest
             kind: unix
             nextest_filter: not binary(live_handoff)
             timeout_minutes: 25

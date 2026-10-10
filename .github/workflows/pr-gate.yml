@@ -14,7 +14,7 @@ jobs:
     # entire job on forks before actions/github-script resolves the maintainer
     # token, which intentionally exists only in the canonical repository.
     if: ${{ github.repository == 'ogulcancelik/herdr' }}
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     permissions:
       contents: read
       issues: write
