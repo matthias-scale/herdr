@@ -635,10 +635,11 @@ fn account_row(
             if needed <= usize::from(width) {
                 break;
             }
-            if show_reset {
-                show_reset = false;
-            } else if percent {
+            // The `%` sign is redundant next to a labelled bar; the reset is not.
+            if percent {
                 percent = false;
+            } else if show_reset {
+                show_reset = false;
             } else if bw > 1 {
                 bw -= 1;
             } else {
