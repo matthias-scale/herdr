@@ -326,7 +326,7 @@ fn render_mobile_ask_subtitle(
     let Some(ask) = visible_pending_ask(app, entry) else {
         return;
     };
-    let subtitle = format!("{}↳ {ask}", " ".repeat(usize::from(depth) * 3 + 1));
+    let subtitle = format!("{}↳ {ask}", " ".repeat(usize::from(depth)));
     render_one_line_item(
         frame,
         viewport,
@@ -2888,7 +2888,7 @@ mod tests {
                 .expect("workspace row")
                 .start as u16
             + 1;
-        let row_col = content.x + 4;
+        let row_col = content.x + 1;
         assert_ne!(
             terminal.backend().buffer()[(row_col, tab_row)].symbol(),
             " "
@@ -3176,7 +3176,7 @@ mod tests {
                             .collect::<String>(),
                     )
                 })
-                .find(|(_, row)| row.contains("pi"))
+                .find(|(_, row)| crate::ui::sidebar::has_tag(row, "p"))
                 .unwrap_or_else(|| panic!("width {width} omitted provider"));
             assert!(
                 !_row.contains("pi+3"),
@@ -3714,7 +3714,7 @@ mod tests {
             .position(|row| row.contains("Second task") && row.contains('●'))
             .unwrap_or_else(|| panic!("missing status-first Second task row: {rows:?}"));
         for row in [&rows[first], &rows[second]] {
-            assert!(row.find('●').unwrap() < row.find("cx").unwrap(), "{row:?}");
+            assert!(row.find('●').unwrap() < row.rfind(" x").unwrap(), "{row:?}");
             assert!(!row.contains("working") && !row.contains("ago"), "{row:?}");
         }
         assert_eq!(
@@ -3782,12 +3782,12 @@ mod tests {
                 .collect::<Vec<_>>();
             let rendered = rows
                 .iter()
-                .find(|row| row.contains("cx"))
+                .find(|row| crate::ui::sidebar::has_tag(row, "x"))
                 .unwrap_or_else(|| panic!("missing provider row at {width}: {rows:?}"));
 
             assert!(rendered.contains('●'), "{width}: {rendered:?}");
             let dot = rendered.find('●').unwrap();
-            let suffix = rendered.find("cx").unwrap();
+            let suffix = rendered.rfind(" x").unwrap() + 1;
             assert!(suffix > dot + '●'.len_utf8() + 1, "{width}: {rendered:?}");
             assert!(
                 !rendered.contains("working") && !rendered.contains("ago"),
