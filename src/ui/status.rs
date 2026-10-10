@@ -1267,19 +1267,22 @@ pub(super) fn status_report_age_label(
     })
 }
 
-pub(super) fn status_report_age_compact_label(
-    reported_at: Option<std::time::Instant>,
+/// Three-column sidebar age: `40s`, `3m`, `12m`, `1h`, `2d`. Days cap at `99d`
+/// so the label never outgrows its field.
+pub(super) fn status_report_age_micro_label(
+    reported_at: std::time::Instant,
     now: std::time::Instant,
-) -> Option<String> {
-    let age = now.checked_duration_since(reported_at?)?;
-    (age >= std::time::Duration::from_secs(60)).then(|| {
-        let minutes = age.as_secs() / 60;
-        if minutes >= 60 {
-            format!("{}h", minutes / 60)
-        } else {
-            format!("{minutes}m")
-        }
-    })
+) -> String {
+    let seconds = now.saturating_duration_since(reported_at).as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3_600 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h", seconds / 3_600)
+    } else {
+        format!("{}d", (seconds / 86_400).min(99))
+    }
 }
 
 #[cfg(test)]
@@ -1361,8 +1364,8 @@ mod tests {
             Some("reported 1m ago")
         );
         assert_eq!(
-            status_report_age_compact_label(Some(reported_at), old).as_deref(),
-            Some("1h")
+            status_report_age_micro_label(reported_at, old).as_str(),
+            "1h"
         );
         let (stale_symbol, stale_style) = state_icon_with_stale(
             AgentState::Working,

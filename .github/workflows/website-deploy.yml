@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   trigger:
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     timeout-minutes: 5
     steps:
       - name: Trigger Cloudflare Pages build

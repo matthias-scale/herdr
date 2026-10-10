@@ -79,6 +79,18 @@ pub(crate) fn agent_icon(agent: Agent) -> Option<&'static str> {
     }
 }
 
+/// Single-letter provider tag for the compact sidebar when Nerd Font glyphs
+/// are off: one column, coloured in the provider colour.
+pub(crate) fn agent_letter_tag(agent: Agent) -> Option<&'static str> {
+    match agent {
+        Agent::Claude => Some("c"),
+        Agent::Codex => Some("x"),
+        Agent::Kimi => Some("k"),
+        Agent::Pi => Some("p"),
+        _ => None,
+    }
+}
+
 pub(crate) fn agent_label(agent: Agent, nerd_font: bool) -> Option<&'static str> {
     if nerd_font {
         agent_icon(agent)
