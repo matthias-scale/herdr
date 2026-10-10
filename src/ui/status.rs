@@ -686,7 +686,7 @@ pub(crate) fn fill_glyph(percent: u8) -> char {
     FILL_LEVELS[index.min(FILL_LEVELS.len() - 1)]
 }
 
-fn load_color(percent: u8, p: &Palette) -> Color {
+pub(crate) fn load_color(percent: u8, p: &Palette) -> Color {
     match percent {
         percent if percent >= CRITICAL_PERCENT => p.red,
         percent if percent >= WARN_PERCENT => p.yellow,

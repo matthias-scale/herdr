@@ -125,9 +125,8 @@ fn usage_sources(app: &AppState) -> Vec<UsageRowSource<'_>> {
             continue;
         }
         let accounts = groups.remove(&provider).unwrap_or_default();
-        if provider != QuotaProvider::OpenCode
-            && !active.contains_key(&provider)
-            && accounts.iter().all(|a| a.usage.unavailable.is_some())
+        // OpenCode follows the same rule: listed only while a pane uses it.
+        if !active.contains_key(&provider) && accounts.iter().all(|a| a.usage.unavailable.is_some())
         {
             continue;
         }
@@ -391,8 +390,7 @@ pub(crate) fn title_tooltip(app: &AppState) -> String {
         .collect();
 
     for provider in PROVIDERS {
-        if provider != QuotaProvider::OpenCode
-            && !active.contains_key(&provider)
+        if !active.contains_key(&provider)
             && app
                 .provider_usage
                 .accounts
@@ -664,26 +662,24 @@ fn account_row(
     }
 }
 /// Cells per usage bar. Fixed per width (not per row) so every row's bars line
-/// up; room for the trailing `⊘` is always kept and, when wide, a reset label.
+/// up. Four cells still hold a centred `100%`.
 fn pair_bar_width(width: usize, prefix: usize) -> usize {
-    let reserve = 2 + if width >= 32 { 6 } else { 0 };
-    // prefix + "5h" + bar + " " + "7d" + bar + reserve
-    let room = width.saturating_sub(prefix + reserve + 5);
-    (room / 2).clamp(3, 12)
+    let preferred = if width >= 32 { 6 } else { 4 };
+    // prefix + "5h" + bar + " " + "7d" + bar + " ⊘"
+    let room = width.saturating_sub(prefix + 7) / 2;
+    preferred.min(room).max(3)
 }
 
 /// A solid block bar: the used share is the threshold colour, the rest a dim
 /// track, with the bold percent centred across both.
 fn pair_bar_spans(app: &AppState, percent: u8, bw: usize, stale: bool) -> Vec<Span<'static>> {
     let palette = &app.palette;
+    // Same colour source and 80/90 thresholds as the status bar's usage
+    // segments (`status::load_color`), so a level reads the same everywhere.
     let fill = if stale {
         palette.overlay0
-    } else if percent >= 90 {
-        palette.red
-    } else if percent >= 80 {
-        palette.yellow
     } else {
-        palette.green
+        super::status::load_color(percent, palette)
     };
     let track = palette.surface1;
     let filled = (usize::from(percent.min(100)) * bw + 50) / 100;
@@ -903,11 +899,11 @@ mod tests {
             super::super::sidebar::workspace_list_rect_for_app(&app, app.view.sidebar_rect);
         app.notepad.usage_collapsed = false;
         crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
-        assert_eq!(app.view.notepad_usage_content_rows, 6);
-        assert_eq!(app.view.notepad_rect.height, 7);
+        assert_eq!(app.view.notepad_usage_content_rows, 5);
+        assert_eq!(app.view.notepad_rect.height, 6);
         let expanded_list =
             super::super::sidebar::workspace_list_rect_for_app(&app, app.view.sidebar_rect);
-        assert_eq!(folded_list.height, expanded_list.height + 2);
+        assert_eq!(folded_list.height, expanded_list.height + 1);
     }
     #[test]
     fn usage_account_code_padding_uses_terminal_cells() {
@@ -925,6 +921,15 @@ mod tests {
         app.provider_usage
             .accounts
             .push(app.provider_usage.accounts[3].clone());
+        let (rows, _) = usage_rows_window(&app, 40, 0, 30);
+        // OpenCode has no quota source, so it stays hidden until a pane uses it.
+        assert_eq!(rows.len(), 5);
+        assert!(!rows.iter().any(|r| text(r).contains("no quota source")));
+        let id = app.workspaces[0].tabs[0]
+            .terminal_id(app.workspaces[0].tabs[0].root_pane)
+            .unwrap()
+            .clone();
+        app.terminals.get_mut(&id).unwrap().detected_agent = Some(crate::detect::Agent::OpenCode);
         let (rows, _) = usage_rows_window(&app, 40, 0, 30);
         assert_eq!(rows.len(), 6);
         assert!(text(&rows[0]).starts_with(super::super::icons::usage_label(
@@ -957,13 +962,7 @@ mod tests {
                     if percent == 100 {
                         assert!(line.contains('⊘'));
                     }
-                    let expected = if percent >= 90 {
-                        app.palette.red
-                    } else if percent >= 80 {
-                        app.palette.yellow
-                    } else {
-                        app.palette.green
-                    };
+                    let expected = super::super::status::load_color(percent, &app.palette);
                     assert!(rows[0]
                         .line
                         .spans
