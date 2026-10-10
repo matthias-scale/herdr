@@ -615,97 +615,43 @@ fn account_row(
         let reset = hot
             .and_then(|(_, w)| w.resets_at)
             .and_then(|at| crate::provider_usage::reset_label(at, now(app)));
-        let mut bw = if width >= 32 { 8 } else { 4 };
-        let mut percent = width >= 32;
-        let mut show_reset = width >= 32 && reset.is_some();
         let prefix = spans
             .iter()
             .map(|s| display_width(&s.content))
             .sum::<usize>();
-        loop {
-            let needed = prefix
-                + windows.len() * (2 + bw + 3 + usize::from(percent))
-                + windows.len().saturating_sub(1)
-                + if show_reset {
-                    1 + display_width(reset.as_deref().unwrap_or(""))
-                } else {
-                    0
-                }
-                + if exhausted { 2 } else { 0 };
-            if needed <= usize::from(width) {
-                break;
-            }
-            // The `%` sign is redundant next to a labelled bar; the reset is not.
-            if percent {
-                percent = false;
-            } else if show_reset {
-                show_reset = false;
-            } else if bw > 1 {
-                bw -= 1;
-            } else {
-                break;
-            }
-        }
-        for (i, (name, w)) in windows.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::raw(" "));
-            }
-            spans.push(Span::styled(
-                *name,
-                Style::default().fg(app.palette.subtext0),
-            ));
-            let color = if w.used_percent >= 90 {
-                app.palette.red
-            } else if w.used_percent >= 80 {
-                app.palette.yellow
-            } else {
-                app.palette.green
-            };
-            let fill_style = if account.usage.stale {
-                Style::default()
-                    .fg(app.palette.overlay0)
-                    .add_modifier(Modifier::DIM)
-            } else {
-                Style::default().fg(color)
-            };
-            let eighths = usize::from(w.used_percent) * bw * 8 / 100;
-            let full = eighths / 8;
-            let partial = eighths % 8;
-            if full > 0 {
-                spans.push(Span::styled("█".repeat(full), fill_style));
-            }
-            if partial > 0 {
-                spans.push(Span::styled(
-                    ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"][partial],
-                    fill_style,
-                ));
-            }
-            spans.push(Span::styled(
-                "─".repeat(bw.saturating_sub(full + usize::from(partial > 0))),
-                Style::default().fg(app.palette.surface1),
-            ));
-            let number_style = if account.usage.stale {
-                fill_style
-            } else {
-                Style::default().fg(if w.used_percent >= 80 {
-                    color
-                } else {
-                    app.palette.text
-                })
-            };
-            spans.push(Span::styled(
-                format!("{:>3}{}", w.used_percent, if percent { "%" } else { "" }),
-                number_style,
-            ));
-        }
+        let bw = pair_bar_width(usize::from(width), prefix);
         if windows.is_empty() {
             spans.push(Span::styled("-", Style::default().fg(app.palette.overlay0)));
+        } else {
+            // Both slots are always laid out, so every row's 7d bar starts in
+            // the same column; an absent window is blank space, never a shift.
+            for (i, name) in ["5h", "7d"].into_iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                let Some((_, w)) = windows.iter().find(|(n, _)| *n == name) else {
+                    spans.push(Span::raw(" ".repeat(2 + bw)));
+                    continue;
+                };
+                spans.push(Span::styled(
+                    name,
+                    Style::default().fg(app.palette.subtext0),
+                ));
+                spans.extend(pair_bar_spans(app, w.used_percent, bw, account.usage.stale));
+            }
         }
-        if show_reset {
-            spans.push(Span::styled(
-                format!(" {}", reset.unwrap_or_default()),
-                Style::default().fg(app.palette.subtext0),
-            ));
+        let used = spans
+            .iter()
+            .map(|s| display_width(&s.content))
+            .sum::<usize>();
+        let tail = if exhausted { 2 } else { 0 };
+        if let Some(reset) = reset.filter(|_| width >= 32) {
+            if used + 1 + display_width(&reset) + tail <= usize::from(width) {
+                spans.push(Span::styled(
+                    format!(" {reset}"),
+                    Style::default().fg(app.palette.subtext0),
+                ));
+            }
         }
         if exhausted {
             spans.push(Span::styled(" ⊘", Style::default().fg(app.palette.red)));
@@ -717,6 +663,64 @@ fn account_row(
         tooltip: Some(account_tooltip(app, account, active)),
     }
 }
+/// Cells per usage bar. Fixed per width (not per row) so every row's bars line
+/// up; room for the trailing `⊘` is always kept and, when wide, a reset label.
+fn pair_bar_width(width: usize, prefix: usize) -> usize {
+    let reserve = 2 + if width >= 32 { 6 } else { 0 };
+    // prefix + "5h" + bar + " " + "7d" + bar + reserve
+    let room = width.saturating_sub(prefix + reserve + 5);
+    (room / 2).clamp(3, 12)
+}
+
+/// A solid block bar: the used share is the threshold colour, the rest a dim
+/// track, with the bold percent centred across both.
+fn pair_bar_spans(app: &AppState, percent: u8, bw: usize, stale: bool) -> Vec<Span<'static>> {
+    let palette = &app.palette;
+    let fill = if stale {
+        palette.overlay0
+    } else if percent >= 90 {
+        palette.red
+    } else if percent >= 80 {
+        palette.yellow
+    } else {
+        palette.green
+    };
+    let track = palette.surface1;
+    let filled = (usize::from(percent.min(100)) * bw + 50) / 100;
+    let mut label = format!("{percent}%");
+    if display_width(&label) > bw {
+        label = percent.to_string();
+    }
+    let label: Vec<char> = label.chars().collect();
+    let start = bw.saturating_sub(label.len()) / 2;
+    let on = |bg: Color| {
+        // Highest contrast per cell, so the label reads on fill and track alike.
+        let fg = [palette.text, palette.panel_bg]
+            .into_iter()
+            .max_by(|a, b| {
+                let ratio = |c| super::widgets::contrast_ratio(c, bg).unwrap_or(0.0);
+                ratio(*a).total_cmp(&ratio(*b))
+            })
+            .unwrap_or(palette.text);
+        let style = Style::default().bg(bg).fg(fg).add_modifier(Modifier::BOLD);
+        if stale {
+            style.add_modifier(Modifier::DIM)
+        } else {
+            style
+        }
+    };
+    (0..bw)
+        .map(|cell| {
+            let ch = cell
+                .checked_sub(start)
+                .and_then(|i| label.get(i))
+                .copied()
+                .unwrap_or(' ');
+            Span::styled(ch.to_string(), on(if cell < filled { fill } else { track }))
+        })
+        .collect()
+}
+
 pub(crate) fn usage_rows_window(
     app: &AppState,
     width: u16,
@@ -964,19 +968,31 @@ mod tests {
                         .line
                         .spans
                         .iter()
-                        .any(|s| s.style.fg == Some(expected) && s.content.contains('█')));
+                        .any(|s| s.style.bg == Some(expected)
+                            && s.style.add_modifier.contains(Modifier::BOLD)));
+                    let label = format!("{percent}");
+                    assert!(line.contains(&label), "{line}");
                 }
                 let (rows, _) = usage_rows_window(&app, width, 0, 30);
                 assert!(!text(&rows[2]).contains("5h"));
                 assert!(text(&rows[2]).contains("7d"));
                 assert!(text(&rows[3]).contains("5h"));
                 assert!(!text(&rows[3]).contains("7d"));
+                // The 7d bar sits in the same column whether or not 5h exists.
+                let col = |row: &NotepadUsageRow| {
+                    let line = text(row);
+                    display_width(&line[..line.find("7d").unwrap()])
+                };
+                assert_eq!(col(&rows[0]), col(&rows[2]));
                 app.provider_usage.accounts[0].usage.stale = true;
                 let (rows, _) = usage_rows_window(&app, width, 0, 30);
                 assert!(text(&rows[0]).contains('~'));
-                assert!(rows[0].line.spans.iter().any(|s| s.content.contains('█')
-                    && s.style.fg == Some(app.palette.overlay0)
-                    && s.style.add_modifier.contains(Modifier::DIM)));
+                assert!(rows[0]
+                    .line
+                    .spans
+                    .iter()
+                    .any(|s| s.style.bg == Some(app.palette.overlay0)
+                        && s.style.add_modifier.contains(Modifier::DIM)));
             }
         }
     }
