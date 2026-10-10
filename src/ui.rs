@@ -378,7 +378,12 @@ fn compute_view_internal_at(
     observed_at: std::time::Instant,
     observed_unix_s: u64,
 ) {
-    let notepad_usage_content_rows = notepad_usage::usage_row_count(app);
+    // Pane-scaled count: only pay for it while the Usage tab can show.
+    let notepad_usage_content_rows = if app.notepad.usage_tab && !app.sidebar_collapsed {
+        notepad_usage::usage_row_count(app)
+    } else {
+        0
+    };
     app.view.notepad_usage_content_rows = notepad_usage_content_rows;
     app.view_observed_at = observed_at;
     app.refresh_board_agent_lines(terminal_runtimes, observed_unix_s);
