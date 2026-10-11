@@ -9978,6 +9978,7 @@ esac
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
         let mut server = test_headless_server();
+        server.app.state.tab_bar_position = crate::config::TabBarPositionConfig::Top;
         let mut workspace = crate::workspace::Workspace::test_new("pin-click");
         workspace.test_add_tab(None);
         server.app.state.workspaces = vec![workspace];
