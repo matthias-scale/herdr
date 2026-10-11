@@ -3611,13 +3611,10 @@ mod tests {
             "{row0:?}"
         );
         assert!(row0.trim_end().ends_with("..."), "{row0:?}");
-        // A healthy machine shows no metric, and the indicators the bar used
-        // to carry sit behind the `...` control.
+        // Metrics stay on the bar; the indicators that no longer fit there sit
+        // behind the `...` control.
         for hidden in [
             "TESTHOST",
-            "CPU",
-            "MEM",
-            "DSK",
             "feature/native-stat",
             "/repo",
             "Herdr v",
@@ -3626,6 +3623,9 @@ mod tests {
         ] {
             assert!(!row0.contains(hidden), "{hidden}: {row0:?}");
         }
+        assert!(row0.contains("CPU 12%"), "{row0:?}");
+        assert!(row0.contains("MEM 8.0/16G"), "{row0:?}");
+        assert!(row0.contains("DSK 41%"), "{row0:?}");
     }
 
     #[test]
@@ -3656,9 +3656,9 @@ mod tests {
             app.view.status_bar_rect,
             app.view.status_bar_rect.y,
         );
-        assert!(row0.contains("CPU \u{2588}"), "{row0:?}");
-        assert!(row0.contains("MEM \u{2587}"), "{row0:?}");
-        assert!(!row0.contains("DSK"), "disk at 41% stays hidden: {row0:?}");
+        assert!(row0.contains("CPU 92%"), "{row0:?}");
+        assert!(row0.contains("MEM 13.0/16G"), "{row0:?}");
+        assert!(row0.contains("DSK 41%"), "{row0:?}");
         assert!(row0.starts_with(" H  F  O  S  M "), "{row0:?}");
     }
 
@@ -3687,7 +3687,9 @@ mod tests {
                 app.view.status_bar_rect.y,
             );
             assert!(row0.contains("Home"), "{row0:?}");
-            assert!(!row0.contains("CPU"), "{row0:?}");
+            assert!(row0.contains("CPU 12%"), "{row0:?}");
+            assert!(row0.contains("MEM 8.0/16G"), "{row0:?}");
+            assert!(row0.contains("DSK 41%"), "{row0:?}");
             assert!(!row0.contains("Herdr v"), "{row0:?}");
             rendered.push((
                 "sampled metrics",
@@ -3709,8 +3711,9 @@ mod tests {
             app.view.status_bar_rect,
             app.view.status_bar_rect.y,
         );
-        assert!(!row0.contains("MEM"), "{row0:?}");
-        assert!(!row0.contains("CPU"), "{row0:?}");
+        assert!(row0.contains("MEM --"), "{row0:?}");
+        assert!(row0.contains("CPU --"), "{row0:?}");
+        assert!(row0.contains("DSK --"), "{row0:?}");
         assert!(row0.trim_end().ends_with("..."), "{row0:?}");
         rendered.push((
             "unavailable fallback",

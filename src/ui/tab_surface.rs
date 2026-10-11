@@ -335,10 +335,12 @@ mod tests {
         let status = frame_rect_text(&frame, app.view.status_bar_rect);
         assert!(status.starts_with(" H  F  O  S  M "), "{status:?}");
         assert!(status.contains("Home"), "{status:?}");
+        assert!(status.contains("CPU 12%"), "CPU stays visible: {status:?}");
         assert!(
-            !status.contains("CPU"),
-            "metrics below 80% stay hidden: {status:?}"
+            status.contains("MEM 8.0/16G"),
+            "memory stays visible: {status:?}"
         );
+        assert!(status.contains("DSK 41%"), "disk stays visible: {status:?}");
         assert!(status.trim_end().ends_with("..."), "{status:?}");
         let text = frame_text(&frame);
         assert!(text.lines().any(|line| line.contains("Spaces")));
