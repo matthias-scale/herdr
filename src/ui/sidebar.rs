@@ -18170,6 +18170,7 @@ pub(crate) mod tests {
     #[test]
     fn blocker_scope_limits_the_blocker_strip_and_marks_remote_remainder() {
         let mut app = AppState::test_new();
+        app.sidebar_blocker_scope = crate::app::state::BlockerScope::Fleet;
         app.agent_host_name = "ub1".into();
         app.sidebar_sections_layout = true;
         app.workspaces = vec![Workspace::test_new("local")];
