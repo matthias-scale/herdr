@@ -1371,6 +1371,12 @@ impl HeadlessServer {
             crate::render_prof::event("full_render_cause.deferred_new_workspace");
         }
 
+        if let Some((ws_idx, tab_idx)) = self.app.state.request_pin_toggle.take() {
+            self.app.toggle_pin_tab_via_api(ws_idx, tab_idx);
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_tab_pin");
+        }
+
         if self.app.apply_pane_toggle_request() {
             needs_render = true;
             crate::render_prof::event("full_render_cause.deferred_pane_toggle");
@@ -9968,6 +9974,118 @@ esac
     }
 
     #[tokio::test]
+    async fn headless_tab_pin_click_dispatches_and_rebuilds_pinned_section() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let mut server = test_headless_server();
+        server.app.state.tab_bar_position = crate::config::TabBarPositionConfig::Top;
+        let mut workspace = crate::workspace::Workspace::test_new("pin-click");
+        workspace.test_add_tab(None);
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.sidebar_width = 40;
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        let mut client = test_app_client(Some(true), 1);
+        client.writer = Some(writer);
+        server.clients.insert(1, client);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        // The attached client's sidebar presentation is swapped in only while
+        // rendering. Rebuild its hover targets through that same path.
+        server.render_and_stream();
+        let tab = server.app.state.view.tab_hit_areas[1];
+        let click = |column, row| {
+            crate::raw_input::RawInputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::empty(),
+            })
+        };
+        assert!(server.handle_client_input_events(1, vec![click(tab.x, tab.y)]));
+        assert_eq!(server.app.state.request_pin_toggle, Some((0, 1)));
+        assert!(!server.app.state.workspaces[0].tabs[1].pinned);
+        assert!(server.handle_deferred_requests_headless());
+        assert_eq!(server.app.state.request_pin_toggle, None);
+        assert!(server.app.state.workspaces[0].tabs[1].pinned);
+        assert!(crate::ui::sidebar::sidebar_rows(&server.app.state)
+            .iter()
+            .any(|row| matches!(
+                row,
+                crate::ui::sidebar::SidebarRow::SectionHeader {
+                    title: "Pinned",
+                    ..
+                }
+            )));
+        assert_eq!(server.app.state.workspaces[0].active_tab, 0);
+
+        // A second click on the same tab pin removes the section again.
+        assert!(server.handle_client_input_events(1, vec![click(tab.x, tab.y)]));
+        assert!(server.handle_deferred_requests_headless());
+        assert!(!server.app.state.workspaces[0].tabs[1].pinned);
+        assert!(!crate::ui::sidebar::sidebar_rows(&server.app.state)
+            .iter()
+            .any(|row| matches!(
+                row,
+                crate::ui::sidebar::SidebarRow::SectionHeader {
+                    title: "Pinned",
+                    ..
+                }
+            )));
+
+        let sidebar_row = crate::ui::sidebar::compute_tab_card_areas(
+            &server.app.state,
+            server.app.state.view.sidebar_rect,
+        )
+        .into_iter()
+        .find(|row| row.tab_idx == 0)
+        .expect("sidebar tab row")
+        .rect;
+        server.handle_client_input_events(
+            1,
+            vec![crate::raw_input::RawInputEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: sidebar_row.x + 3,
+                row: sidebar_row.y,
+                modifiers: KeyModifiers::empty(),
+            })],
+        );
+        server.render_and_stream();
+        let sidebar_pin = server
+            .app
+            .state
+            .view
+            .sidebar_hover_targets
+            .iter()
+            .find(|target| {
+                matches!(
+                    target.action,
+                    Some(crate::app::state::SidebarHoverAction::Pin {
+                        ws_idx: 0,
+                        tab_idx: 0
+                    })
+                )
+            })
+            .expect("hover reveals sidebar pin")
+            .rect;
+        assert!(server.handle_client_input_events(1, vec![click(sidebar_pin.x, sidebar_pin.y)]));
+        assert!(server.handle_deferred_requests_headless());
+        assert!(server.app.state.workspaces[0].tabs[0].pinned);
+        assert!(crate::ui::sidebar::sidebar_rows(&server.app.state)
+            .iter()
+            .any(|row| matches!(
+                row,
+                crate::ui::sidebar::SidebarRow::SectionHeader {
+                    title: "Pinned",
+                    ..
+                }
+            )));
+    }
+
+    #[tokio::test]
     async fn headless_deferred_workspace_create_uses_runtime_events() {
         let event_hub = api::EventHub::default();
         let mut server = test_headless_server_with_event_hub(event_hub.clone());
@@ -10009,17 +10127,6 @@ esac
         assert!(!server.app.state.request_new_tab);
         assert_eq!(server.app.state.requested_new_tab_name, None);
         let events = event_hub.events_after(after_setup);
-        assert_eq!(
-            events
-                .iter()
-                .map(|(_, event)| event.event)
-                .collect::<Vec<_>>(),
-            vec![
-                api::schema::EventKind::TabCreated,
-                api::schema::EventKind::PaneCreated,
-                api::schema::EventKind::LayoutUpdated,
-            ]
-        );
         let tab_created = events
             .iter()
             .find_map(|(_, event)| match &event.data {
@@ -10028,6 +10135,26 @@ esac
             })
             .expect("tab created event");
         assert_eq!(tab_created.label, "ops");
+        // The setup pane's shell may publish its OSC title at any moment; the
+        // tab-create request syncs titles first, so that pane.updated for the
+        // setup tab can legitimately land in this window. Only the new tab's
+        // events are under test.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(_, event)| !matches!(
+                    &event.data,
+                    api::schema::EventData::PaneUpdated { pane }
+                        if pane.tab_id != tab_created.tab_id
+                ))
+                .map(|(_, event)| event.event)
+                .collect::<Vec<_>>(),
+            vec![
+                api::schema::EventKind::TabCreated,
+                api::schema::EventKind::PaneCreated,
+                api::schema::EventKind::LayoutUpdated,
+            ]
+        );
         shutdown_test_runtimes(&mut server);
     }
 

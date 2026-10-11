@@ -92,11 +92,7 @@ pub(super) fn append_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
                 action_key: None,
                 sort_key: None,
                 sort_mode: crate::app::state::SidebarSortMode::Default,
-                title: if group.local {
-                    format!("{} · this device", host.name)
-                } else {
-                    host.name.clone()
-                },
+                title: super::devices::device_title(app, &host.name, group.local),
                 count: host.active_count,
                 activity_count: None,
                 collapsed,
@@ -235,7 +231,7 @@ pub(super) fn render(app: &AppState, frame: &mut Frame, area: &Area, now: std::t
         Modifier::empty()
     };
     let width = usize::from(area.rect.width);
-    let widths = compact_row_widths(title, &status, width, ROW_DEPTH * 3 + 1);
+    let widths = compact_row_widths(title, &status, None, width, ROW_DEPTH);
     let fixed = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + widths.provider + widths.age;
     let title_width = width.saturating_sub(fixed);
     let age = if widths.age == SIDEBAR_AGE_FIELD_WIDTH {

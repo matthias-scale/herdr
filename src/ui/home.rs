@@ -1953,7 +1953,7 @@ mod tests {
         let row = row_text(&buffer, area, 2);
 
         assert!(row.contains("Critical action links"), "{row}");
-        assert!(row.contains(" cc "), "{row}");
+        assert!(row.contains(" c "), "{row}");
         assert!(!row.contains("claude"), "{row}");
         assert_eq!(buffer[(1, 2)].symbol(), "○");
         assert_eq!(buffer[(1, 2)].fg, app.palette.red);
@@ -1979,7 +1979,10 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
         assert_eq!(display_width(&text), 18, "{text:?}");
-        assert!(text.contains('界') && text.contains("cc"), "{text:?}");
+        assert!(
+            text.contains('界') && crate::ui::sidebar::has_tag(&text, "c"),
+            "{text:?}"
+        );
         let decorated = crate::ui::sidebar::AgentRowCells {
             provider: "cc+2 >_".into(),
             title: "#159 · sample-pr".into(),

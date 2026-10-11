@@ -697,11 +697,19 @@ impl App {
                     .status_metric_refresh
                     .finish_and_should_repaint(snapshot.as_ref().map(|value| value.sampled_at));
                 if let Some(snapshot) = snapshot {
-                    self.state.status_disk_visible =
-                        crate::platform::status_metrics::disk_segment_visible(
-                            snapshot.metrics.disk_percent,
-                            self.state.status_disk_visible,
-                        );
+                    use crate::platform::status_metrics::metric_segment_visible;
+                    self.state.status_disk_visible = metric_segment_visible(
+                        snapshot.metrics.disk_percent,
+                        self.state.status_disk_visible,
+                    );
+                    self.state.status_cpu_visible = metric_segment_visible(
+                        snapshot.metrics.cpu_percent,
+                        self.state.status_cpu_visible,
+                    );
+                    self.state.status_mem_visible = metric_segment_visible(
+                        crate::ui::status::memory_percent(&snapshot.metrics),
+                        self.state.status_mem_visible,
+                    );
                     self.state.status_metrics = Some(*snapshot);
                 }
                 self.state.status_now_unix = crate::provider_usage::now_unix();
@@ -5043,6 +5051,8 @@ mod tests {
     #[tokio::test]
     async fn pane_process_info_reports_new_tty_after_runtime_respawn() {
         use std::path::Path;
+        use std::thread;
+        use std::time::{Duration, Instant};
 
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
@@ -5100,10 +5110,19 @@ mod tests {
             .map(Path::to_path_buf)
             .expect("respawned pane tty");
         assert_ne!(new_tty, old_tty, "respawn must allocate a fresh PTY");
-        assert_eq!(
-            std::fs::read_link(format!("/proc/{shell_pid}/fd/0")).expect("respawned shell stdin"),
-            new_tty
-        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let stdin_path = format!("/proc/{shell_pid}/fd/0");
+        loop {
+            let observed = std::fs::read_link(&stdin_path);
+            if observed.as_ref().is_ok_and(|path| path == &new_tty) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "respawned shell stdin did not become {new_tty:?}; last observed: {observed:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
 
         let target = app.public_pane_id(0, pane_id).expect("public pane id");
         let response =

@@ -1067,6 +1067,7 @@ pub struct TabCardArea {
     pub ws_idx: usize,
     pub tab_idx: usize,
     pub pane_id: PaneId,
+    pub pin_allowed: bool,
     pub depth: u16,
     pub rect: Rect,
 }
@@ -1521,8 +1522,8 @@ pub(crate) enum SidebarSortMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BlockerScope {
-    ThisDevice,
     #[default]
+    ThisDevice,
     Fleet,
 }
 
@@ -1832,6 +1833,7 @@ impl ServerInputOwner {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SurfaceInputOwner {
+    Focus,
     Board,
     Symphony,
     LoopRunHistory,
@@ -2812,29 +2814,59 @@ pub struct ViewState {
     pub(crate) dock_host_row_hit_areas: Vec<DockHostRowHitArea>,
     pub dock_body_rect: Rect,
     pub scratchpad_link_rows: Vec<ScratchpadLinkRow>,
-    /// Left-aligned status-bar buttons, computed once per frame so the rendered
-    /// label and the clickable rect can never disagree.
+    /// Left-aligned status-bar view icons, computed once per frame so the
+    /// rendered label and the clickable rect can never disagree.
     pub status_buttons: Vec<StatusButton>,
-    /// Ticket and pull-request links of the focused pane, drawn after the
-    /// status-row title. Clicking one opens it in the dock.
-    pub(crate) status_work_links: Vec<StatusWorkLink>,
     /// The status row's right-aligned segments, fitted once per frame so the
-    /// title and the links can be laid out beside what will actually be drawn.
+    /// view icons and the view name are laid out beside what will be drawn.
     pub(crate) status_segments: Vec<crate::ui::status::Segment>,
     /// Where each fitted status segment is drawn, for hover tooltips.
     pub(crate) status_segment_hit_areas: Vec<(StatusSegmentKind, Rect)>,
+    /// Bordered rect of the open "more" popover; empty while it is closed.
+    pub(crate) status_more_rect: Rect,
     /// Remote host of the focused pane, resolved once during view computation.
     /// Status layout and render only read this projection.
     pub(crate) focused_remote_host: Option<String>,
 }
 
+/// The view the top bar's left icon cluster switches to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TopBarView {
+    /// The default panes-and-tabs screen; every other view returns here.
+    Home,
+    /// Full-screen in-memory notepad.
+    Focus,
+    /// The agent board.
+    Orchestration,
+    /// The scratch notes writer.
+    Scratch,
+    /// The blocked-agent inbox.
+    Mailbox,
+}
+
+impl TopBarView {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Home => "Home",
+            Self::Focus => "Focus",
+            Self::Orchestration => "Orchestration",
+            Self::Scratch => "Scratch",
+            Self::Mailbox => "Mailbox",
+        }
+    }
+
+    pub(crate) const ALL: [TopBarView; 5] = [
+        Self::Home,
+        Self::Focus,
+        Self::Orchestration,
+        Self::Scratch,
+        Self::Mailbox,
+    ];
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusButtonAction {
-    Home,
-    NewSession,
-    BlockedFilter,
-    Board,
-    Scratch,
+    View(TopBarView),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2842,19 +2874,9 @@ pub(crate) struct StatusButton {
     pub rect: Rect,
     pub label: String,
     pub action: StatusButtonAction,
-    /// Drawn with the accent instead of the dim overlay: the inbox has work in
-    /// it, or the surface this button opens is already showing.
+    /// Drawn in the accent on a raised background instead of the muted
+    /// overlay: the view this button opens is the one on screen.
     pub active: bool,
-}
-
-/// A work link the focused pane carries, named in the status row beside the
-/// title. Computed once per frame with the label it renders, so the clickable
-/// rect and the drawn text can never disagree.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StatusWorkLink {
-    pub rect: Rect,
-    pub label: String,
-    pub object: DockObjectRef,
 }
 
 /// A work link rendered in the dock's Context tab.
@@ -3656,6 +3678,11 @@ pub enum ContextMenuKind {
         /// Snapshot of the tab's star at open time, so the entry can read
         /// "Star" or "Unstar" without the menu reaching back into state.
         starred: bool,
+        /// Snapshot for the Pin/Unpin context-menu label.
+        pinned: bool,
+        /// Only a window row or top tab may offer Pin/Unpin; pane rows use
+        /// this menu for their existing lifecycle actions.
+        pin_allowed: bool,
         /// Snapshot of the tab's subgroup membership at open time, so the menu
         /// offers "Remove from subgroup" exactly when there is one to remove.
         has_subgroup: bool,
@@ -3991,6 +4018,8 @@ pub enum ContextMenuAction {
     RenameTab,
     StarTab,
     UnstarTab,
+    PinTab,
+    UnpinTab,
     MoveToSubgroup,
     RemoveFromSubgroup,
     Snooze,
@@ -4031,6 +4060,8 @@ impl ContextMenuAction {
             Self::NewTab => "New tab",
             Self::StarTab => STAR_ITEM,
             Self::UnstarTab => UNSTAR_ITEM,
+            Self::PinTab => "Pin",
+            Self::UnpinTab => "Unpin",
             Self::MoveToSubgroup => MOVE_TO_SUBGROUP_ITEM,
             Self::RemoveFromSubgroup => REMOVE_FROM_SUBGROUP_ITEM,
             Self::Snooze => SNOOZE_ITEM,
@@ -4134,6 +4165,8 @@ impl ContextMenuState {
             ],
             ContextMenuKind::Tab {
                 starred,
+                pinned,
+                pin_allowed,
                 has_subgroup,
                 settle_pane_id,
                 snooze_target,
@@ -4149,6 +4182,16 @@ impl ContextMenuState {
                     },
                     ContextMenuAction::MoveToSubgroup,
                 ];
+                if *pin_allowed {
+                    items.insert(
+                        3,
+                        if *pinned {
+                            ContextMenuAction::UnpinTab
+                        } else {
+                            ContextMenuAction::PinTab
+                        },
+                    );
+                }
                 if *has_subgroup {
                     items.push(ContextMenuAction::RemoveFromSubgroup);
                 }
@@ -4351,6 +4394,7 @@ pub(crate) struct PaneSnoozeChange {
 
 /// Renderer selected for the full terminal area before overlays are applied.
 pub(crate) enum TerminalAreaSurface<'a> {
+    Focus,
     Board,
     EditorPreview,
     Symphony(&'a SymphonyDetail),
@@ -4464,6 +4508,12 @@ pub struct AppState {
     /// keyboard, exactly like the Symphony and loop-history details above it.
     pub(crate) inbox: Option<crate::app::inbox::InboxState>,
     pub(crate) scratch: crate::scratch::ScratchState,
+    /// Whether the Focus view, a full-screen in-memory notepad, owns the
+    /// screen and the keyboard. Client-local and never saved.
+    pub(crate) focus_open: bool,
+    /// The Focus notepad's text. Kept while the view is closed, so leaving
+    /// Focus and coming back does not lose what was written.
+    pub(crate) focus_editor: Option<crate::scratch::Editor>,
     /// Open home view. `Some` means home owns the screen, the same way `inbox`
     /// does; the two are mutually exclusive because each wants the whole frame.
     pub(crate) home: Option<crate::app::home::HomeState>,
@@ -4534,6 +4584,12 @@ pub struct AppState {
     /// Whether the disk segment was visible last frame, which is what gives the
     /// show/hide threshold its hysteresis.
     pub(crate) status_disk_visible: bool,
+    /// Same hysteresis state for the CPU and memory segments.
+    pub(crate) status_cpu_visible: bool,
+    pub(crate) status_mem_visible: bool,
+    /// The top bar's "more" popover, holding the link, agent, host and fleet
+    /// indicators the bar hides by default.
+    pub(crate) status_more_open: bool,
     pub(crate) full_lifecycle_hook_authority_timeout: std::time::Duration,
     pub(crate) hide_done_after: std::time::Duration,
     pub(crate) reap_done_after: std::time::Duration,
@@ -5560,6 +5616,7 @@ pub(crate) enum ControlId {
     TopBarScrollLeft,
     TopBarScrollRight,
     TopBarNewTab,
+    TopBarTabPin(usize),
     TopBarRepoEditor,
     TopBarAddAction,
     TopBarUserAction(usize),
@@ -5590,6 +5647,24 @@ pub(crate) enum StatusSegmentKind {
     Cpu,
     Memory,
     Disk,
+    /// The `⋯` control that opens the popover holding the hidden indicators.
+    More,
+}
+
+impl StatusSegmentKind {
+    /// Whether a click on this segment does something of its own. The rest are
+    /// read-only indicators whose clicks fall through to whatever lies below.
+    pub(crate) fn is_actionable(self) -> bool {
+        matches!(
+            self,
+            Self::StatusDetail
+                | Self::FleetLabel
+                | Self::FleetDevice(_)
+                | Self::FleetHost(_)
+                | Self::FleetUseMachine(_)
+                | Self::More
+        )
+    }
 }
 
 impl AppState {
@@ -6659,6 +6734,12 @@ impl AppState {
         if let Some(owner) = ClientInputOwnerState::from_app(self).resolve() {
             return InputOwner::Client(owner);
         }
+        if self.focus_open
+            && self.popup_pane.is_none()
+            && matches!(self.server_mode(), Mode::Terminal | Mode::Navigate)
+        {
+            return InputOwner::Surface(SurfaceInputOwner::Focus);
+        }
         if self.scratch.open
             && self.popup_pane.is_none()
             && matches!(self.server_mode(), Mode::Terminal | Mode::Navigate)
@@ -6700,6 +6781,7 @@ impl AppState {
             return InputOwner::Popup;
         }
         match self.terminal_area_surface() {
+            TerminalAreaSurface::Focus => return InputOwner::Surface(SurfaceInputOwner::Focus),
             TerminalAreaSurface::Board => return InputOwner::Surface(SurfaceInputOwner::Board),
             TerminalAreaSurface::EditorPreview => {
                 return InputOwner::Surface(SurfaceInputOwner::EditorPreview)
@@ -7699,6 +7781,9 @@ impl AppState {
     }
 
     pub(crate) fn terminal_area_surface(&self) -> TerminalAreaSurface<'_> {
+        if self.focus_open {
+            return TerminalAreaSurface::Focus;
+        }
         if self.scratch.open {
             return TerminalAreaSurface::Scratch;
         }
@@ -7736,6 +7821,53 @@ impl AppState {
         } else {
             TerminalAreaSurface::Empty
         }
+    }
+
+    /// The view the top bar names and highlights. Derived from the surface
+    /// that actually owns the terminal area, never stored, so the bar cannot
+    /// name one view while another is drawn.
+    pub(crate) fn top_bar_view(&self) -> TopBarView {
+        match self.terminal_area_surface() {
+            TerminalAreaSurface::Focus => TopBarView::Focus,
+            TerminalAreaSurface::Board => TopBarView::Orchestration,
+            TerminalAreaSurface::Scratch => TopBarView::Scratch,
+            TerminalAreaSurface::Inbox(_) => TopBarView::Mailbox,
+            _ => TopBarView::Home,
+        }
+    }
+
+    /// A full-screen view or the top bar's popover is in front of the panes:
+    /// pane and tab cycling behind it would move UI the human cannot see, so
+    /// those keys stay inert until it closes.
+    pub(crate) fn pane_cycling_suppressed(&self) -> bool {
+        self.status_more_open || self.top_bar_view() != TopBarView::Home
+    }
+
+    /// Return to Home: close every full-screen top-bar view, the other
+    /// full-screen surfaces that would otherwise stay in front of the panes,
+    /// and the popover. The Focus text and any scratch draft survive; only
+    /// the views close.
+    pub(crate) fn close_top_bar_views(&mut self) {
+        self.focus_open = false;
+        self.board_view = None;
+        self.scratch.open = false;
+        self.inbox = None;
+        self.clear_home();
+        self.clear_usage_view();
+        self.symphony_detail = None;
+        self.loop_run_history_detail = None;
+        self.aloop_run_detail = None;
+        self.work_view = None;
+        self.status_more_open = false;
+    }
+
+    /// Open the Focus notepad over the panes, creating its in-memory text on
+    /// first use.
+    pub(crate) fn open_focus_view(&mut self) {
+        self.close_top_bar_views();
+        self.focus_editor
+            .get_or_insert_with(crate::scratch::Editor::ephemeral);
+        self.focus_open = true;
     }
 
     /// True when the terminal-area renderer does not display the active tab.
@@ -7941,6 +8073,8 @@ impl AppState {
             usage_pricing: crate::config::UsageConfig::default(),
             request_usage_scan: false,
             inbox: None,
+            focus_open: false,
+            focus_editor: None,
             scratch: crate::scratch::ScratchState::default(),
             home: None,
             spawn_dock: None,
@@ -7974,6 +8108,9 @@ impl AppState {
             status_bar_expanded: false,
             fleet_status: true,
             status_disk_visible: false,
+            status_cpu_visible: false,
+            status_mem_visible: false,
+            status_more_open: false,
             full_lifecycle_hook_authority_timeout: std::time::Duration::from_secs(
                 crate::config::Config::default()
                     .agent_detection
@@ -8054,7 +8191,7 @@ impl AppState {
             sidebar_filter_menu_selected: 0,
             sidebar_blocker_scope: BlockerScope::default(),
             sidebar_blocker_scope_menu_open: false,
-            sidebar_blocker_scope_menu_selected: 1,
+            sidebar_blocker_scope_menu_selected: 0,
             sidebar_search_active: false,
             agent_finder_saved_query: None,
             agent_finder_history: Vec::new(),
@@ -8198,7 +8335,7 @@ impl AppState {
                 dock_body_rect: Rect::default(),
                 scratchpad_link_rows: Vec::new(),
                 status_buttons: Vec::new(),
-                status_work_links: Vec::new(),
+                status_more_rect: ratatui::layout::Rect::default(),
                 status_segments: Vec::new(),
                 status_segment_hit_areas: Vec::new(),
                 focused_remote_host: None,
@@ -9447,6 +9584,8 @@ mod tests {
                 settle_pane_id: Some(pane_id),
                 snooze_target: Some(pane_id),
                 starred: false,
+                pinned: false,
+                pin_allowed: true,
                 has_subgroup: false,
             },
             x: 7,
@@ -9476,6 +9615,8 @@ mod tests {
                 settle_pane_id: Some(pane_id),
                 snooze_target: Some(pane_id),
                 starred: false,
+                pinned: false,
+                pin_allowed: true,
                 has_subgroup: false,
             }
         );
@@ -9519,6 +9660,8 @@ mod tests {
                 settle_pane_id: None,
                 snooze_target: None,
                 starred: false,
+                pinned: false,
+                pin_allowed: true,
                 has_subgroup: false,
             },
             x: 2,
