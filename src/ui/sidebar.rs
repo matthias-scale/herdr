@@ -22300,7 +22300,10 @@ row_gap = 1
         let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
         let busy_text = row_text(busy.backend().buffer(), tab_row, 49);
         assert!(busy_text.contains("●"), "{busy_text:?}");
-        assert!(busy_text.ends_with("42s"), "{busy_text:?}");
+        assert!(
+            !busy_text.contains("42s"),
+            "sub-minute age stays blank: {busy_text:?}"
+        );
         assert!(!busy_text.contains(" · one"), "{busy_text:?}");
         let dot_x = find_symbol_x(busy.backend().buffer(), tab_row, 49, "●");
         assert_eq!(

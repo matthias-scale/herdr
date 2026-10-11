@@ -2522,7 +2522,8 @@ mod tests {
 
     #[test]
     fn status_button_specs_use_icon_fallbacks_and_only_the_approved_actions() {
-        let app = AppState::test_new();
+        let mut app = AppState::test_new();
+        app.sidebar_blocker_scope = crate::app::state::BlockerScope::Fleet;
         let [blocked, home, new_session, board, scratch] = status_button_specs(&app, 2);
         assert_eq!(home.0, StatusButtonAction::Home);
         assert_eq!(home.1.trim(), "⌂");
@@ -2589,6 +2590,7 @@ mod tests {
         };
         app.remote_agent_panel_entries =
             crate::ui::sidebar::remote_agent_panel_entries_at(&remote_snapshot, 1, true);
+        app.sidebar_blocker_scope = crate::app::state::BlockerScope::Fleet;
         let fleet_buttons = status_buttons(&app, Rect::new(0, 0, 120, 1));
         let blocked_label = |buttons: &[StatusButton]| {
             buttons
