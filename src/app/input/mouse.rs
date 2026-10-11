@@ -7098,6 +7098,108 @@ mod tests {
     }
 
     #[test]
+    fn tab_pin_click_keeps_focus_and_populates_pinned_sidebar_section() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        ws.test_add_tab(None);
+        app.state.workspaces = vec![ws];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.sidebar_width = 60;
+        app.state.set_server_mode(Mode::Terminal);
+        let area = Rect::new(0, 0, 120, 40);
+        crate::ui::compute_view(&mut app.state, area);
+        let tab = app.state.view.tab_hit_areas[1];
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(MouseEventKind::Down(MouseButton::Left), tab.x, tab.y),
+        );
+        assert_eq!(app.state.request_pin_toggle.take(), Some((0, 1)));
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+        assert!(app.state.tab_presses.is_empty());
+        app.toggle_pin_tab_via_api(0, 1);
+        crate::ui::compute_view(&mut app.state, area);
+        assert!(app.state.workspaces[0].tabs[1].pinned);
+        assert!(crate::ui::sidebar::sidebar_rows(&app.state)
+            .iter()
+            .any(|row| matches!(
+                row,
+                crate::ui::sidebar::SidebarRow::SectionHeader {
+                    title: "Pinned",
+                    ..
+                }
+            )));
+        app.toggle_pin_tab_via_api(0, 1);
+        crate::ui::compute_view(&mut app.state, area);
+        assert!(!app.state.workspaces[0].tabs[1].pinned);
+        assert!(!crate::ui::sidebar::sidebar_rows(&app.state)
+            .iter()
+            .any(|row| matches!(
+                row,
+                crate::ui::sidebar::SidebarRow::SectionHeader {
+                    title: "Pinned",
+                    ..
+                }
+            )));
+    }
+
+    #[test]
+    fn hovering_sidebar_row_then_clicking_pin_adds_pinned_section() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.sidebar_width = 60;
+        app.state.set_server_mode(Mode::Terminal);
+        let area = Rect::new(0, 0, 120, 40);
+        crate::ui::compute_view(&mut app.state, area);
+        let row =
+            crate::ui::sidebar::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)[0]
+                .rect;
+        let hover =
+            crate::ui::hovered_control_at(&app.state, row.x + 3, row.y).expect("sidebar row hover");
+        app.state
+            .set_hovered_control_at(Some(hover), std::time::Instant::now());
+        crate::ui::compute_view(&mut app.state, area);
+        let pin = app
+            .state
+            .view
+            .sidebar_hover_targets
+            .iter()
+            .find(|target| {
+                matches!(
+                    target.action,
+                    Some(crate::app::state::SidebarHoverAction::Pin {
+                        ws_idx: 0,
+                        tab_idx: 0
+                    })
+                )
+            })
+            .expect("hover exposes pin")
+            .rect;
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(MouseEventKind::Down(MouseButton::Left), pin.x, pin.y),
+        );
+        assert_eq!(app.state.request_pin_toggle.take(), Some((0, 0)));
+        app.toggle_pin_tab_via_api(0, 0);
+        crate::ui::compute_view(&mut app.state, area);
+        assert!(crate::ui::sidebar::sidebar_rows(&app.state)
+            .iter()
+            .any(|row| matches!(
+                row,
+                crate::ui::sidebar::SidebarRow::SectionHeader {
+                    title: "Pinned",
+                    ..
+                }
+            )));
+    }
+
+    #[test]
     fn sidebar_pin_click_requests_the_rows_tab_without_changing_focus() {
         let mut app = app_for_mouse_test();
         app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];

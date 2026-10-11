@@ -19018,9 +19018,10 @@ pub(crate) mod tests {
     fn compact_age_labels_fit_three_columns() {
         let now = std::time::Instant::now();
         for (seconds, label) in [
-            (40, "40s"),
-            (180, "3m"),
-            (720, "12m"),
+            (0, ""),
+            (59, ""),
+            (60, "1m"),
+            (3_599, "59m"),
             (3_600, "1h"),
             (2 * 86_400, "2d"),
             (500 * 86_400, "99d"),
@@ -19029,6 +19030,51 @@ pub(crate) mod tests {
             let rendered = crate::ui::status::status_report_age_micro_label(reported, now);
             assert_eq!(rendered, label);
             assert!(display_width(&rendered) <= 3);
+        }
+    }
+
+    #[test]
+    fn compact_age_boundaries_match_desktop_and_mobile_rows() {
+        let now = std::time::Instant::now();
+        let app = app_with_agents(&["one"]);
+        let mut entry = compact_test_entry("age boundary", Some(Agent::Pi));
+        for (seconds, expected) in [(0, ""), (59, ""), (60, "1m"), (3_599, "59m"), (3_600, "1h")] {
+            entry.activity_at = Some(now - std::time::Duration::from_secs(seconds));
+            for width in [18, 36] {
+                let desktop = tab_row_layout(
+                    &entry,
+                    now,
+                    width,
+                    0,
+                    &app.palette,
+                    app.status_indicators,
+                    false,
+                );
+                let mobile = mobile_tab_row_layout(
+                    &entry,
+                    now,
+                    width,
+                    0,
+                    &app.palette,
+                    app.status_indicators,
+                    false,
+                );
+                let expected_age = (width >= SIDEBAR_AGE_MIN_ROW_WIDTH).then_some(expected);
+                assert_eq!(
+                    desktop.activity_age.as_deref(),
+                    expected_age,
+                    "desktop {seconds}s at width {width}"
+                );
+                assert_eq!(
+                    mobile.activity_age, desktop.activity_age,
+                    "mobile {seconds}s at width {width}"
+                );
+                assert_eq!(
+                    mobile.activity_instant,
+                    (width >= SIDEBAR_AGE_MIN_ROW_WIDTH).then_some(entry.activity_at.unwrap())
+                );
+                assert_eq!(desktop.activity_instant, mobile.activity_instant);
+            }
         }
     }
 

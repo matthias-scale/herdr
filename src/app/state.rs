@@ -1521,8 +1521,8 @@ pub(crate) enum SidebarSortMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BlockerScope {
-    ThisDevice,
     #[default]
+    ThisDevice,
     Fleet,
 }
 
@@ -8054,7 +8054,7 @@ impl AppState {
             sidebar_filter_menu_selected: 0,
             sidebar_blocker_scope: BlockerScope::default(),
             sidebar_blocker_scope_menu_open: false,
-            sidebar_blocker_scope_menu_selected: 1,
+            sidebar_blocker_scope_menu_selected: 0,
             sidebar_search_active: false,
             agent_finder_saved_query: None,
             agent_finder_history: Vec::new(),
