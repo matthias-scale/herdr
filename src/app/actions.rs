@@ -2051,7 +2051,7 @@ impl AppState {
         // Mirrors `compute_view`: a hidden or too-narrow tab row hands the
         // toggles to the status row instead of dropping them.
         let (editor, add, actions, menu, below, right) =
-            if layout.add_action_button_hit_area.width > 0 {
+            if layout.git_menu_button_hit_area.width > 0 {
                 (
                     layout.repo_editor_button_hit_area,
                     layout.add_action_button_hit_area,
@@ -3187,8 +3187,8 @@ impl AppState {
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
         results: Vec<WorkspaceGitStatus>,
     ) -> bool {
-        let focused_git_projection =
-            self.status_bar_enabled || self.view.git_menu_button_hit_area.width > 0;
+        let focused_git_projection = self.status_bar_enabled
+            || (self.show_pull_button && self.view.git_menu_button_hit_area.width > 0);
         let mut changed = focused_git_projection && self.sync_status_focused_cwd(terminal_runtimes);
         for result in results {
             let Some(ws_idx) = self

@@ -153,8 +153,6 @@ const SITEMAP_OUTLINE: &str = "\u{F199C}"; // md-sitemap_outline
 const PENCIL_OUTLINE: &str = "\u{F0CB6}"; // md-pencil_outline
 const INBOX_OUTLINE: &str = "\u{F1274}"; // md-inbox_outline
 const DOTS_HORIZONTAL: &str = "\u{F01D8}"; // md-dots_horizontal
-const FOLDER_OPEN: &str = "\u{F07C}"; // fa-folder_open
-const LIGHTBULB_ON_OUTLINE: &str = "\u{F0A00}"; // md-lightbulb_on_outline
 
 /// Host metrics shown in the status row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,24 +196,6 @@ pub(crate) fn more_label(nerd_font: bool) -> &'static str {
         DOTS_HORIZONTAL
     } else {
         "..."
-    }
-}
-
-/// Tab-row "open repo in editor" button label, padded one cell each side.
-pub(crate) fn repo_editor_button_label(nerd_font: bool) -> String {
-    if nerd_font {
-        format!(" {FOLDER_OPEN} ")
-    } else {
-        " nvim ".to_string()
-    }
-}
-
-/// Tab-row "add action" button label, padded one cell each side.
-pub(crate) fn add_action_button_label(nerd_font: bool) -> String {
-    if nerd_font {
-        format!(" {LIGHTBULB_ON_OUTLINE} ")
-    } else {
-        " + Action ".to_string()
     }
 }
 

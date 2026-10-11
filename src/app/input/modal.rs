@@ -106,18 +106,43 @@ pub(super) fn open_global_menu(state: &mut AppState) {
 }
 
 pub(crate) fn handle_git_menu_key(state: &mut AppState, key: KeyEvent) {
-    let in_git_repo = crate::ui::dock::chooser::focused_in_git_repo(state);
     match key.code {
         KeyCode::Esc => state.set_server_mode(Mode::Terminal),
-        KeyCode::Up | KeyCode::Char('k') if in_git_repo => state.git_menu.move_prev(),
-        KeyCode::Down | KeyCode::Char('j') if in_git_repo => state
-            .git_menu
-            .move_next(crate::app::state::GitAction::ALL.len()),
-        KeyCode::Enter if in_git_repo => {
-            state.request_git_action = crate::app::state::GitAction::ALL
-                .get(state.git_menu.highlighted)
-                .copied();
-            state.set_server_mode(Mode::Terminal);
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.git_menu.highlighted =
+                crate::ui::step_top_action_menu(state, state.git_menu.highlighted, false);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.git_menu.highlighted =
+                crate::ui::step_top_action_menu(state, state.git_menu.highlighted, true);
+        }
+        KeyCode::Enter => {
+            let items = crate::ui::top_action_menu_items(state);
+            use crate::ui::TopActionMenuItem as Item;
+            match items.get(state.git_menu.highlighted).copied() {
+                Some(Item::AddAction) => {
+                    state.add_action = Some(crate::app::state::AddActionState::default());
+                    state.set_server_mode(Mode::AddAction);
+                }
+                Some(Item::UserAction(index)) => {
+                    state.request_user_action = Some(index);
+                    state.set_server_mode(Mode::Terminal);
+                }
+                Some(Item::Git(action)) if crate::ui::dock::chooser::focused_in_git_repo(state) => {
+                    state.request_git_action = Some(action);
+                    state.set_server_mode(Mode::Terminal);
+                }
+                Some(Item::RepoEditor) if state.repo_editor_available() => {
+                    state.request_open_repo_editor = true;
+                    state.set_server_mode(Mode::Terminal);
+                }
+                Some(Item::Pane(direction)) => {
+                    state.request_pane_toggle = Some(direction);
+                    state.set_server_mode(Mode::Terminal);
+                }
+                Some(Item::GroupHeader(_) | Item::Git(_) | Item::GitStatus | Item::RepoEditor)
+                | None => {}
+            }
         }
         _ => {}
     }

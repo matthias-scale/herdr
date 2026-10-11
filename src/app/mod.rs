@@ -3036,11 +3036,6 @@ impl App {
                 self.state.pane_borders = config.ui.pane_borders;
                 self.state.pane_scrollbars = config.ui.pane_scrollbars;
                 self.state.show_pull_button = config.ui.show_pull_button;
-                // The button is the Git menu's only anchor and entry point.
-                // Close it at the config transition, never during view computation.
-                if self.state.server_mode() == Mode::GitMenu && !self.state.show_pull_button {
-                    self.state.set_server_mode(Mode::Terminal);
-                }
                 self.state.open_dock_on_work_link = config.ui.open_dock_on_work_link;
                 self.state.show_pane_toggle_buttons = config.ui.show_pane_toggle_buttons;
                 self.state.pane_gaps = config.ui.pane_gaps;

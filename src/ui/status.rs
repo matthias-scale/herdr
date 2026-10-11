@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
 };
 
-use super::text::{display_width, display_width_u16};
+use super::text::{display_width, display_width_u16, truncate_end};
 use super::widgets::panel_contrast_fg;
 use crate::{
     app::state::{
@@ -47,9 +47,6 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     // hidden, so the segments must stop short of them instead of underlapping.
     let reserved = super::tabs::tab_action_status_bar_reserved_width(app, area);
     let content_width = area.width.saturating_sub(reserved);
-    if usize::from(content_width) < minimum_required_status_width(app) {
-        return;
-    }
     // The fitted row normally arrives on the view. A render that never went
     // through view computation, which the unit tests and any future direct
     // draw do, fits it here instead of drawing an empty row.
@@ -90,7 +87,7 @@ pub(crate) fn render_status_bar(app: &AppState, frame: &mut Frame, area: Rect) {
     if let Some(rect) = view_title_rect(app, area, buttons, used + usize::from(reserved)) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                app.top_bar_view().name(),
+                truncate_end(app.top_bar_view().name(), usize::from(rect.width)),
                 Style::default().fg(p.overlay1).bg(p.panel_bg),
             ))),
             rect,
@@ -164,9 +161,11 @@ fn view_title_rect(
         .saturating_add(area.width)
         .saturating_sub(u16::try_from(segments_used).unwrap_or(u16::MAX))
         .saturating_sub(1);
-    if right.saturating_sub(left) < width {
+    let available = right.saturating_sub(left);
+    if available == 0 {
         return None;
     }
+    let width = width.min(available);
     let centred = area.x.saturating_add(area.width.saturating_sub(width) / 2);
     let x = centred.clamp(left, right.saturating_sub(width));
     Some(Rect::new(x, area.y, width, 1))
@@ -179,13 +178,30 @@ pub(crate) fn fitted_status_segments(app: &AppState, area: Rect) -> Vec<Segment>
     }
     let reserved = super::tabs::tab_action_status_bar_reserved_width(app, area);
     let content_width = area.width.saturating_sub(reserved);
-    if usize::from(content_width) < minimum_required_status_width(app) {
-        return Vec::new();
-    }
-    fitted_segments(
+    fit_status_segments(
         status_segments(app, metrics_or_unavailable(app), &app.palette),
         usize::from(content_width),
     )
+}
+
+fn fit_status_segments(mut segments: Vec<Segment>, width: usize) -> Vec<Segment> {
+    // Keep CPU, memory and the more button. Disk yields first, then metric
+    // labels; the centered title yields independently in `view_title_rect`.
+    if segment_width(&segments) > width {
+        segments.retain(|segment| segment.kind != StatusSegmentKind::Disk);
+    }
+    if segment_width(&segments) > width {
+        for segment in &mut segments {
+            if matches!(
+                segment.kind,
+                StatusSegmentKind::Cpu | StatusSegmentKind::Memory
+            ) {
+                let glyph = segment.text.chars().nth_back(2).unwrap_or(' ');
+                segment.text = format!(" {glyph} ");
+            }
+        }
+    }
+    segments
 }
 
 /// What a view icon's tooltip says: its name, what a click does, and the
@@ -1671,6 +1687,21 @@ mod tests {
         let rendered = render_status_row(&app, 80);
         assert!(rendered.contains("Focus"), "{rendered:?}");
         assert!(!rendered.contains("Home"), "{rendered:?}");
+    }
+
+    #[test]
+    fn cpu_memory_title_and_more_survive_a_fallback_kebab_at_supported_widths() {
+        for width in [80u16, 120] {
+            let mut app = app_with_metrics(metrics(95, 15.0, 95));
+            app.status_cpu_visible = true;
+            app.status_mem_visible = true;
+            app.status_disk_visible = true;
+            app.view.git_menu_button_hit_area = Rect::new(width - 3, 0, 3, 1);
+            let rendered = render_status_row(&app, width);
+            for required in ["CPU", "MEM", "Home", "..."] {
+                assert!(rendered.contains(required), "{width}: {rendered:?}");
+            }
+        }
     }
 
     #[test]

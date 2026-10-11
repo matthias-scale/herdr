@@ -117,7 +117,8 @@ impl App {
             return;
         }
 
-        let git_menu_visible = self.state.view.git_menu_button_hit_area.width > 0;
+        let git_menu_visible =
+            self.state.show_pull_button && self.state.view.git_menu_button_hit_area.width > 0;
         if (self.state.status_bar_enabled || git_menu_visible)
             && self.sync_status_focused_runtime_cwd()
         {
@@ -222,7 +223,8 @@ impl App {
     fn git_refresh_demand(&self) -> GitStatusRefreshDemand {
         let mut demand = self.sidebar_git_refresh_demand();
         demand.branch |= self.state.status_bar_enabled;
-        demand.ahead_behind |= self.state.view.git_menu_button_hit_area.width > 0;
+        demand.ahead_behind |=
+            self.state.show_pull_button && self.state.view.git_menu_button_hit_area.width > 0;
         demand.branch |= !self.state.dock_collapsed
             && self.state.dock_tab == Some(crate::app::DockSurface::Files);
         demand.branch |= self.dock_files_refresh_demand;
@@ -247,7 +249,8 @@ impl App {
     ) -> Vec<WorkspaceGitRefreshItem> {
         let mut workspace_demand = self.sidebar_git_refresh_demand();
         workspace_demand.branch |= self.git_identity_refresh_requested;
-        let git_menu_visible = self.state.view.git_menu_button_hit_area.width > 0;
+        let git_menu_visible =
+            self.state.show_pull_button && self.state.view.git_menu_button_hit_area.width > 0;
         workspace_demand.ahead_behind |= git_menu_visible;
         workspace_demand.branch |= !self.state.dock_collapsed
             && self.state.dock_tab == Some(crate::app::DockSurface::Files);
@@ -921,7 +924,8 @@ mod tests {
         config.ui.sidebar.spaces.rows = vec![vec![crate::config::SpaceSidebarToken::Workspace]];
         let mut app = test_app(&config);
         app.state.workspaces.push(Workspace::test_new("test"));
-        app.state.view.git_menu_button_hit_area = ratatui::layout::Rect::new(1, 1, 10, 1);
+        app.state.show_pull_button = true;
+        app.state.view.git_menu_button_hit_area = ratatui::layout::Rect::new(1, 1, 3, 1);
 
         assert_eq!(
             app.git_refresh_demand(),

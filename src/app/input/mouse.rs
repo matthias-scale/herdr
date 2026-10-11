@@ -838,36 +838,60 @@ impl AppState {
                 self.effective_interaction_mode(),
                 Mode::Terminal | Mode::Navigate
             ) {
-                self.git_menu = MenuListState::new(0);
+                self.git_menu = MenuListState::new(1);
                 self.set_server_mode(Mode::GitMenu);
             }
             return None;
         }
 
         if self.effective_interaction_mode() == Mode::GitMenu {
-            let in_git_repo = crate::ui::dock::chooser::focused_in_git_repo(self);
+            let items = crate::ui::top_action_menu_items(self);
             match mouse.kind {
                 MouseEventKind::Moved => {
                     let hovered = self
                         .git_menu_row_at(mouse.column, mouse.row)
                         .filter(|index| {
-                            in_git_repo && *index < crate::app::state::GitAction::ALL.len()
+                            items.get(*index).is_some_and(|item| {
+                                crate::ui::top_action_menu_item_selectable(self, *item)
+                            })
                         });
                     self.git_menu.hover(hovered);
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if in_git_repo {
-                        if let Some(index) = self.git_menu_row_at(mouse.column, mouse.row) {
-                            if let Some(action) =
-                                crate::app::state::GitAction::ALL.get(index).copied()
+                    if let Some(item) = self
+                        .git_menu_row_at(mouse.column, mouse.row)
+                        .and_then(|index| items.get(index).copied())
+                    {
+                        use crate::ui::TopActionMenuItem as Item;
+                        match item {
+                            Item::AddAction => {
+                                self.add_action = Some(AddActionState::default());
+                                self.set_server_mode(Mode::AddAction);
+                            }
+                            Item::UserAction(index) => {
+                                self.request_user_action = Some(index);
+                                self.set_server_mode(Mode::Terminal);
+                            }
+                            Item::Git(action)
+                                if crate::ui::dock::chooser::focused_in_git_repo(self) =>
                             {
                                 self.request_git_action = Some(action);
                                 self.set_server_mode(Mode::Terminal);
                             }
-                        } else {
-                            self.set_server_mode(Mode::Terminal);
+                            Item::RepoEditor if self.repo_editor_available() => {
+                                self.request_open_repo_editor = true;
+                                self.set_server_mode(Mode::Terminal);
+                            }
+                            Item::Pane(direction) => {
+                                self.request_pane_toggle = Some(direction);
+                                self.set_server_mode(Mode::Terminal);
+                            }
+                            Item::GroupHeader(_)
+                            | Item::Git(_)
+                            | Item::GitStatus
+                            | Item::RepoEditor => {}
                         }
-                    } else if self.git_menu_row_at(mouse.column, mouse.row).is_none() {
+                    } else {
                         self.set_server_mode(Mode::Terminal);
                     }
                 }
@@ -12203,16 +12227,18 @@ mod tests {
             app.state.ensure_test_terminals();
 
             crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
-            let area = match direction {
-                crate::app::state::PaneToggleDirection::Below => {
-                    app.state.view.pane_toggle_below_hit_area
-                }
-                crate::app::state::PaneToggleDirection::Right => {
-                    app.state.view.pane_toggle_right_hit_area
-                }
+            let button = app.state.view.git_menu_button_hit_area;
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                button.x + 1,
+                button.y,
+            ));
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+            let menu_index = match direction {
+                crate::app::state::PaneToggleDirection::Below => 4,
+                crate::app::state::PaneToggleDirection::Right => 5,
             };
-            assert!(area.width > 0, "{direction:?} button should be visible");
-
+            let area = app.state.view.git_menu_row_hit_areas[menu_index];
             app.handle_mouse(mouse(
                 MouseEventKind::Down(MouseButton::Left),
                 area.x + 1,
@@ -12237,22 +12263,101 @@ mod tests {
         app.state.repo_editor_argv = None;
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
-        let button = app.state.view.repo_editor_button_hit_area;
-        assert_eq!(button.width, crate::ui::REPO_EDITOR_BUTTON_WIDTH);
+        let button = app.state.view.git_menu_button_hit_area;
+        assert_eq!(button.width, 3);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             button.x + 1,
             button.y,
+        ));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let editor = app.state.view.git_menu_row_hit_areas[3];
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            editor.x + 1,
+            editor.y,
         ));
         assert!(!app.state.request_open_repo_editor);
 
         app.state.repo_editor_argv = Some(vec!["nvim".into()]);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let button = app.state.view.git_menu_button_hit_area;
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             button.x + 1,
             button.y,
         ));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let editor = app.state.view.git_menu_row_hit_areas[3];
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            editor.x + 1,
+            editor.y,
+        ));
         assert!(app.state.request_open_repo_editor);
+    }
+
+    #[test]
+    fn user_action_routes_through_the_kebab_menu_to_its_existing_request() {
+        let mut app = app_for_mouse_test();
+        app.state
+            .keybinds
+            .user_actions
+            .push(crate::config::UserAction {
+                name: "Run checks".into(),
+                command: "just check".into(),
+                bindings: Default::default(),
+                run_on_worktree_create: false,
+                open_in_bottom_pane: false,
+                repo: None,
+            });
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+
+        let button = app.state.view.git_menu_button_hit_area;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x + 1,
+            button.y,
+        ));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let add_action_index = crate::ui::top_action_menu_items(&app.state)
+            .iter()
+            .position(|item| *item == crate::ui::TopActionMenuItem::AddAction)
+            .expect("add-action menu row");
+        let add_action = app.state.view.git_menu_row_hit_areas[add_action_index];
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            add_action.x + 1,
+            add_action.y,
+        ));
+        assert_eq!(app.state.server_mode(), Mode::AddAction);
+
+        app.state.set_server_mode(Mode::Terminal);
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let button = app.state.view.git_menu_button_hit_area;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x + 1,
+            button.y,
+        ));
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let index = crate::ui::top_action_menu_items(&app.state)
+            .iter()
+            .position(|item| *item == crate::ui::TopActionMenuItem::UserAction(0))
+            .expect("user action menu row");
+        let row = app.state.view.git_menu_row_hit_areas[index];
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            row.x + 1,
+            row.y,
+        ));
+
+        assert_eq!(app.state.request_user_action, Some(0));
+        assert_eq!(app.state.server_mode(), Mode::Terminal);
     }
 
     #[test]
@@ -12284,7 +12389,7 @@ mod tests {
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
         let button = app.state.view.git_menu_button_hit_area;
-        assert_eq!(button.width, 10);
+        assert_eq!(button.width, 3);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             button.x + 1,
@@ -12293,7 +12398,7 @@ mod tests {
         assert_eq!(app.state.server_mode(), Mode::GitMenu);
 
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
-        let commit = app.state.view.git_menu_row_hit_areas[1];
+        let commit = app.state.view.git_menu_row_hit_areas[4];
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             commit.x + 1,
@@ -12310,7 +12415,7 @@ mod tests {
         app.state.status_git_ahead_behind = Some((0, 1));
         app.state.set_server_mode(Mode::GitMenu);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
-        let status = app.state.view.git_menu_row_hit_areas[4];
+        let status = app.state.view.git_menu_row_hit_areas[7];
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             status.x + 1,
@@ -12321,8 +12426,8 @@ mod tests {
 
         app.state.git_root_for_cwd.insert(cwd, None);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
-        assert_eq!(app.state.view.git_menu_row_hit_areas.len(), 1);
-        let info = app.state.view.git_menu_row_hit_areas[0];
+        assert_eq!(app.state.view.git_menu_row_hit_areas.len(), 10);
+        let info = app.state.view.git_menu_row_hit_areas[3];
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             info.x + 1,
@@ -12357,16 +12462,19 @@ mod tests {
             app.state.ensure_test_terminals();
 
             crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
-            let area = match direction {
-                crate::app::state::PaneToggleDirection::Below => {
-                    app.state.view.pane_toggle_below_hit_area
-                }
-                crate::app::state::PaneToggleDirection::Right => {
-                    app.state.view.pane_toggle_right_hit_area
-                }
-            };
             assert_eq!(app.state.pane_toggle_sibling(direction), Some(sibling));
-
+            let button = app.state.view.git_menu_button_hit_area;
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                button.x + 1,
+                button.y,
+            ));
+            crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+            let menu_index = match direction {
+                crate::app::state::PaneToggleDirection::Below => 4,
+                crate::app::state::PaneToggleDirection::Right => 5,
+            };
+            let area = app.state.view.git_menu_row_hit_areas[menu_index];
             app.handle_mouse(mouse(
                 MouseEventKind::Down(MouseButton::Left),
                 area.x + 1,

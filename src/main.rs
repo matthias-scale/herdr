@@ -475,9 +475,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # New tabs can still be created with the configured keybinding.
 # hide_tab_bar_when_single_tab = false
 
-# Show the pull button in the top-right action row.
-# Off by default. It is the only entry point to the git menu, so turn it on if
-# you want that menu.
+# Include Git actions in the top-right `⋯` menu.
+# Off by default; the other action groups remain available.
 # show_pull_button = false
 
 # Open the dock automatically when the focused pane carries a pull request,
@@ -486,8 +485,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # click on that name opens it in the dock.
 # open_dock_on_work_link = false
 
-# Show the split-below and split-right buttons in the top-right action row.
-# Off by default: both splits have keybindings, and the buttons crowd the tab titles.
+# Include split-below and split-right actions in the top-right `⋯` menu.
+# Off by default; both splits remain available through their keybindings.
 # show_pane_toggle_buttons = false
 
 # Open the home view on launch. Esc dismisses it. Off by default: the launch

@@ -17,26 +17,120 @@ pub(crate) const PIN_GLYPH_ON: char = '󰐃';
 pub(crate) const PIN_GLYPH_OFF: char = '󰐄';
 
 const MIN_TAB_WIDTH: u16 = 8;
-/// One cell of padding on each side of the glyph, matching `+` and the scroll
-/// arrows so the whole trailing control group has the same click rhythm.
-pub(crate) const PANE_TOGGLE_BUTTON_WIDTH: u16 = 3;
-pub(crate) const PANE_TOGGLE_BELOW_GLYPH: char = '\u{25ad}';
-pub(crate) const PANE_TOGGLE_RIGHT_GLYPH: char = '\u{25af}';
-pub(crate) const GIT_MENU_BUTTON_WIDTH: u16 = 10;
-#[cfg(test)]
-pub(crate) const REPO_EDITOR_BUTTON_WIDTH: u16 = 6;
-#[cfg(test)]
-pub(crate) const ADD_ACTION_BUTTON_WIDTH: u16 = 10;
-pub(crate) const GIT_MENU_STATUS: &str = "⚠ Behind upstream. Pull first.";
-pub(crate) const GIT_MENU_UNAVAILABLE: &str = "Not a git repository";
+pub(crate) const GIT_MENU_BUTTON_WIDTH: u16 = 3;
 const NEW_TAB_WIDTH: u16 = 3;
 const TAB_SCROLL_BUTTON_WIDTH: u16 = 3;
-const ACTION_ROW_LEFT_BUDGET: u16 = 24;
 const ZOOM_INDICATOR: &str = "ZOOM";
 // The narrowest overflowing tab strip worth keeping interactive: one
 // minimum-width tab, both scroll controls, and the new-tab control.
 const MIN_TAB_STRIP_WIDTH: u16 =
     MIN_TAB_WIDTH + NEW_TAB_WIDTH + TAB_SCROLL_BUTTON_WIDTH.saturating_mul(2);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TopActionMenuItem {
+    GroupHeader(&'static str),
+    AddAction,
+    UserAction(usize),
+    Git(crate::app::state::GitAction),
+    GitStatus,
+    RepoEditor,
+    Pane(crate::app::state::PaneToggleDirection),
+}
+
+pub(crate) fn top_action_menu_items(app: &AppState) -> Vec<TopActionMenuItem> {
+    let mut items = vec![
+        TopActionMenuItem::GroupHeader("Actions"),
+        TopActionMenuItem::AddAction,
+    ];
+    items.extend(
+        visible_user_actions(app)
+            .into_iter()
+            .map(|(index, _)| TopActionMenuItem::UserAction(index)),
+    );
+    if app.show_pull_button {
+        items.push(TopActionMenuItem::GroupHeader("Git"));
+        items.extend(
+            crate::app::state::GitAction::ALL
+                .iter()
+                .copied()
+                .map(TopActionMenuItem::Git),
+        );
+        if git_menu_status_visible(app.status_git_ahead_behind) {
+            items.push(TopActionMenuItem::GitStatus);
+        }
+    }
+    items.push(TopActionMenuItem::GroupHeader("Panes"));
+    items.push(TopActionMenuItem::RepoEditor);
+    if app.show_pane_toggle_buttons {
+        items.push(TopActionMenuItem::Pane(
+            crate::app::state::PaneToggleDirection::Below,
+        ));
+        items.push(TopActionMenuItem::Pane(
+            crate::app::state::PaneToggleDirection::Right,
+        ));
+    }
+    items
+}
+
+pub(crate) fn top_action_menu_label(app: &AppState, item: TopActionMenuItem) -> String {
+    match item {
+        TopActionMenuItem::GroupHeader(label) => label.into(),
+        TopActionMenuItem::AddAction => "Add action".into(),
+        TopActionMenuItem::UserAction(index) => app
+            .keybinds
+            .user_actions
+            .get(index)
+            .map(|action| action.name.clone())
+            .unwrap_or_default(),
+        TopActionMenuItem::Git(action) => action.label().into(),
+        TopActionMenuItem::GitStatus => app
+            .status_git_ahead_behind
+            .map(|(ahead, behind)| format!("Ahead {ahead} · Behind {behind}"))
+            .unwrap_or_else(|| "Ahead/behind unavailable".into()),
+        TopActionMenuItem::RepoEditor => "Repository editor".into(),
+        TopActionMenuItem::Pane(crate::app::state::PaneToggleDirection::Below) => {
+            "Split below / close".into()
+        }
+        TopActionMenuItem::Pane(crate::app::state::PaneToggleDirection::Right) => {
+            "Split right / close".into()
+        }
+    }
+}
+
+pub(crate) fn top_action_menu_item_selectable(app: &AppState, item: TopActionMenuItem) -> bool {
+    match item {
+        TopActionMenuItem::GroupHeader(_) | TopActionMenuItem::GitStatus => false,
+        TopActionMenuItem::Git(_) => crate::ui::dock::chooser::focused_in_git_repo(app),
+        _ => true,
+    }
+}
+
+pub(crate) fn step_top_action_menu(app: &AppState, current: usize, forward: bool) -> usize {
+    let items = top_action_menu_items(app);
+    let candidates: Box<dyn Iterator<Item = usize>> = if forward {
+        Box::new(current.saturating_add(1)..items.len())
+    } else {
+        Box::new((0..current.min(items.len())).rev())
+    };
+    candidates
+        .find(|index| {
+            items
+                .get(*index)
+                .is_some_and(|item| top_action_menu_item_selectable(app, *item))
+        })
+        .or_else(|| {
+            items
+                .get(current)
+                .filter(|item| top_action_menu_item_selectable(app, **item))
+                .map(|_| current)
+        })
+        .or_else(|| {
+            items
+                .iter()
+                .position(|item| top_action_menu_item_selectable(app, *item))
+        })
+        .unwrap_or(current)
+}
 
 #[cfg(test)]
 fn active_session_machine_label(app: &AppState) -> Option<String> {
@@ -504,10 +598,7 @@ fn active_tab_cell_width(ws: &crate::workspace::Workspace, view: &TabBarView) ->
 
 /// Which optional top-right controls the operator asked for.
 ///
-/// Both are off by default, because they crowd the tab titles they sit beside.
-/// The pane toggles duplicate the split keybindings. The pull button does not
-/// duplicate anything: it is the only entry point to the git menu, so hiding it
-/// hides that menu too.
+/// Which optional groups appear in the top-right actions menu.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TabActionVisibility {
     pub git_menu: bool,
@@ -523,30 +614,6 @@ impl TabActionVisibility {
             git_menu: app.show_pull_button,
             pane_toggles: app.show_pane_toggle_buttons,
             nerd_font: app.nerd_font,
-        }
-    }
-
-    pub(crate) fn editor_width(self) -> u16 {
-        display_width_u16(&crate::ui::icons::repo_editor_button_label(self.nerd_font))
-    }
-
-    pub(crate) fn add_action_width(self) -> u16 {
-        display_width_u16(&crate::ui::icons::add_action_button_label(self.nerd_font))
-    }
-
-    fn git_menu_width(self) -> u16 {
-        if self.git_menu {
-            GIT_MENU_BUTTON_WIDTH
-        } else {
-            0
-        }
-    }
-
-    fn pane_toggles_width(self) -> u16 {
-        if self.pane_toggles {
-            PANE_TOGGLE_BUTTON_WIDTH.saturating_mul(2)
-        } else {
-            0
         }
     }
 }
@@ -607,8 +674,7 @@ pub(crate) fn compute_tab_bar_view_with_icons(
     // The buttons are the rightmost content, so they are paid for out of the
     // tab strip's width. When that would truncate the active tab title they are
     // dropped entirely rather than shown over a clipped label.
-    let user_widths = action_button_widths(user_actions, area.width, visibility);
-    let actions_width = action_controls_width(&user_widths, visibility);
+    let actions_width = action_controls_width(user_actions, visibility);
     if area.width > actions_width {
         let tabs_area = Rect::new(
             area.x,
@@ -643,37 +709,8 @@ pub(crate) fn compute_tab_bar_view_with_icons(
             nerd_font,
         ));
         if budget > 0 && active_tab_cell_width(ws, &view) >= budget {
-            let editor_x = area.x + area.width - actions_width;
-            view.repo_editor_button_hit_area =
-                Rect::new(editor_x, area.y, visibility.editor_width(), 1);
-            let add_x = editor_x + visibility.editor_width();
-            view.add_action_button_hit_area =
-                Rect::new(add_x, area.y, visibility.add_action_width(), 1);
-            let mut action_x = add_x + visibility.add_action_width();
-            view.user_action_hit_areas = user_actions
-                .iter()
-                .zip(user_widths.iter().copied())
-                .map(|((index, _), width)| {
-                    let rect = Rect::new(action_x, area.y, width, 1);
-                    action_x = action_x.saturating_add(width);
-                    (*index, rect)
-                })
-                .collect();
-            let menu_x = action_x;
-            if visibility.git_menu {
-                view.git_menu_button_hit_area = Rect::new(menu_x, area.y, GIT_MENU_BUTTON_WIDTH, 1);
-            }
-            let below_x = menu_x + visibility.git_menu_width();
-            if visibility.pane_toggles {
-                view.pane_toggle_below_hit_area =
-                    Rect::new(below_x, area.y, PANE_TOGGLE_BUTTON_WIDTH, 1);
-                view.pane_toggle_right_hit_area = Rect::new(
-                    below_x + PANE_TOGGLE_BUTTON_WIDTH,
-                    area.y,
-                    PANE_TOGGLE_BUTTON_WIDTH,
-                    1,
-                );
-            }
+            let menu_x = area.x + area.width - actions_width;
+            view.git_menu_button_hit_area = Rect::new(menu_x, area.y, actions_width, 1);
             return view;
         }
     }
@@ -703,8 +740,7 @@ pub(crate) fn tab_action_fallback_hit_areas(
     user_actions: &[(usize, String)],
     visibility: TabActionVisibility,
 ) -> (Rect, Rect, Vec<(usize, Rect)>, Rect, Rect, Rect) {
-    let user_widths = action_button_widths(user_actions, status_bar_rect.width, visibility);
-    let actions_width = action_controls_width(&user_widths, visibility);
+    let actions_width = action_controls_width(user_actions, visibility);
     if !mouse_chrome || status_bar_rect.height == 0 || status_bar_rect.width <= actions_width {
         return (
             Rect::default(),
@@ -715,129 +751,49 @@ pub(crate) fn tab_action_fallback_hit_areas(
             Rect::default(),
         );
     }
-    let editor_x = status_bar_rect.x + status_bar_rect.width - actions_width;
-    let add_x = editor_x + visibility.editor_width();
-    let mut action_x = add_x + visibility.add_action_width();
-    let action_rects = user_actions
-        .iter()
-        .zip(user_widths.iter().copied())
-        .map(|((index, _), width)| {
-            let rect = Rect::new(action_x, status_bar_rect.y, width, 1);
-            action_x = action_x.saturating_add(width);
-            (*index, rect)
-        })
-        .collect();
-    let menu_x = action_x;
-    let below_x = menu_x + visibility.git_menu_width();
-    let toggle = |x: u16| {
-        if visibility.pane_toggles {
-            Rect::new(x, status_bar_rect.y, PANE_TOGGLE_BUTTON_WIDTH, 1)
-        } else {
-            Rect::default()
-        }
-    };
+    let menu_x = status_bar_rect.x + status_bar_rect.width - actions_width;
     (
-        Rect::new(editor_x, status_bar_rect.y, visibility.editor_width(), 1),
-        Rect::new(add_x, status_bar_rect.y, visibility.add_action_width(), 1),
-        action_rects,
-        if visibility.git_menu {
-            Rect::new(menu_x, status_bar_rect.y, GIT_MENU_BUTTON_WIDTH, 1)
-        } else {
-            Rect::default()
-        },
-        toggle(below_x),
-        toggle(below_x + PANE_TOGGLE_BUTTON_WIDTH),
+        Rect::default(),
+        Rect::default(),
+        Vec::new(),
+        Rect::new(menu_x, status_bar_rect.y, actions_width, 1),
+        Rect::default(),
+        Rect::default(),
     )
 }
 
-fn action_button_widths(
-    user_actions: &[(usize, String)],
-    row_width: u16,
-    visibility: TabActionVisibility,
-) -> Vec<u16> {
-    let fixed = visibility
-        .editor_width()
-        .saturating_add(visibility.add_action_width())
-        .saturating_add(visibility.git_menu_width())
-        .saturating_add(visibility.pane_toggles_width());
-    let mut widths = user_actions
-        .iter()
-        .map(|(_, name)| display_width_u16(name).saturating_add(2).max(3))
-        .collect::<Vec<_>>();
-    let available = row_width.saturating_sub(fixed.saturating_add(ACTION_ROW_LEFT_BUDGET));
-    while widths.iter().copied().sum::<u16>() > available {
-        let Some(width) = widths.iter_mut().max() else {
-            break;
-        };
-        if *width <= 3 {
-            break;
-        }
-        *width -= 1;
-    }
-    widths
-}
-
-fn action_controls_width(user_widths: &[u16], visibility: TabActionVisibility) -> u16 {
-    visibility
-        .editor_width()
-        .saturating_add(visibility.add_action_width())
-        .saturating_add(user_widths.iter().copied().sum::<u16>())
-        .saturating_add(visibility.git_menu_width())
-        .saturating_add(visibility.pane_toggles_width())
+fn action_controls_width(
+    _user_actions: &[(usize, String)],
+    _visibility: TabActionVisibility,
+) -> u16 {
+    GIT_MENU_BUTTON_WIDTH
 }
 
 /// The width the status row must keep clear when it hosts the toggles.
 pub(crate) fn tab_action_status_bar_reserved_width(app: &AppState, status_bar_rect: Rect) -> u16 {
     let menu = app.view.git_menu_button_hit_area;
-    let editor = app.view.repo_editor_button_hit_area;
-    let add = app.view.add_action_button_hit_area;
-    let below = app.view.pane_toggle_below_hit_area;
-    let right = app.view.pane_toggle_right_hit_area;
-    // `add` is the sentinel, not `menu`: the pull button and the pane toggles
-    // are optional, so an absent one says nothing about where the row lives.
-    if add.width == 0 || add.y != status_bar_rect.y || status_bar_rect.height == 0 {
+    if menu.width == 0 || menu.y != status_bar_rect.y || status_bar_rect.height == 0 {
         return 0;
     }
-    editor
-        .width
-        .saturating_add(add.width)
-        .saturating_add(
-            app.view
-                .user_action_hit_areas
-                .iter()
-                .map(|(_, rect)| rect.width)
-                .sum::<u16>(),
-        )
-        .saturating_add(menu.width)
-        .saturating_add(below.width)
-        .saturating_add(right.width)
+    menu.width
 }
 
 pub(crate) fn git_menu_status_visible(ahead_behind: Option<(usize, usize)>) -> bool {
     ahead_behind.is_some_and(|(_, behind)| behind > 0)
 }
 
-pub(crate) fn git_menu_dropdown_layout(
+pub(crate) fn action_menu_dropdown_layout(
     anchor: Rect,
     area: Rect,
     selected: usize,
-    ahead_behind: Option<(usize, usize)>,
-    in_git_repo: bool,
+    app: &AppState,
 ) -> Option<crate::ui::dropdown::DropdownLayout> {
-    let item_count = if in_git_repo {
-        crate::app::state::GitAction::ALL.len() + usize::from(git_menu_status_visible(ahead_behind))
-    } else {
-        1
-    };
+    let item_count = top_action_menu_items(app).len();
     crate::ui::dropdown::layout_dropdown(
         &crate::ui::dropdown::DropdownSpec {
             anchor,
             item_count,
-            selected: if in_git_repo {
-                selected.min(crate::app::state::GitAction::ALL.len() - 1)
-            } else {
-                0
-            },
+            selected: selected.min(item_count.saturating_sub(1)),
             has_filter: false,
             max_rows: item_count,
             min_width: 34,
@@ -1013,70 +969,10 @@ fn tab_drop_indicator_x(
 /// status row whenever the tab row is hidden.
 pub(super) fn render_tab_action_buttons(app: &AppState, frame: &mut Frame) {
     let p = &app.palette;
-    let icons = TabActionVisibility::from_state(app).nerd_font;
-    let editor_rect = app.view.repo_editor_button_hit_area;
-    if app.mouse_capture && editor_rect.width > 0 {
-        let mut style = Style::default()
-            .fg(readable_fg_on(p.surface0, &[p.overlay1, p.text]))
-            .bg(p.surface0);
-        if !app.repo_editor_available() {
-            style = style.add_modifier(Modifier::DIM);
-        }
-        frame.render_widget(
-            Paragraph::new(crate::ui::icons::repo_editor_button_label(icons)).style(style),
-            editor_rect,
-        );
-    }
-
-    let add_rect = app.view.add_action_button_hit_area;
-    if app.mouse_capture && add_rect.width > 0 {
-        let style = if app.server_mode() == crate::app::Mode::AddAction {
-            Style::default()
-                .fg(panel_contrast_fg(p))
-                .bg(p.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(readable_fg_on(p.surface0, &[p.overlay1, p.text]))
-                .bg(p.surface0)
-        };
-        frame.render_widget(
-            Paragraph::new(crate::ui::icons::add_action_button_label(icons)).style(style),
-            add_rect,
-        );
-    }
-
-    for (index, rect) in &app.view.user_action_hit_areas {
-        let Some(action) = app.keybinds.user_actions.get(*index) else {
-            continue;
-        };
-        let label_width = rect.width.saturating_sub(2) as usize;
-        let label = format!(" {} ", truncate_end(&action.name, label_width));
-        frame.render_widget(
-            Paragraph::new(label).style(
-                Style::default()
-                    .fg(readable_fg_on(p.surface0, &[p.overlay1, p.text]))
-                    .bg(p.surface0),
-            ),
-            *rect,
-        );
-    }
-
     let menu_rect = app.view.git_menu_button_hit_area;
     if app.mouse_capture && menu_rect.width > 0 {
-        let in_git_repo = crate::ui::dock::chooser::focused_in_git_repo(app);
         let open = app.server_mode() == crate::app::Mode::GitMenu;
-        let label = if open && app.view.git_menu_popup_rect.width == 0 {
-            " no room "
-        } else {
-            " ⇣ Pull ▾ "
-        };
-        let style = if !in_git_repo {
-            Style::default()
-                .fg(readable_fg_on(p.surface0, &[p.overlay1, p.text]))
-                .bg(p.surface0)
-                .add_modifier(Modifier::DIM)
-        } else if open {
+        let style = if open {
             Style::default()
                 .fg(panel_contrast_fg(p))
                 .bg(p.accent)
@@ -1086,31 +982,7 @@ pub(super) fn render_tab_action_buttons(app: &AppState, frame: &mut Frame) {
                 .fg(readable_fg_on(p.surface0, &[p.overlay1, p.text]))
                 .bg(p.surface0)
         };
-        frame.render_widget(Paragraph::new(label).style(style), menu_rect);
-    }
-
-    for (rect, glyph, direction) in [
-        (
-            app.view.pane_toggle_below_hit_area,
-            PANE_TOGGLE_BELOW_GLYPH,
-            crate::app::state::PaneToggleDirection::Below,
-        ),
-        (
-            app.view.pane_toggle_right_hit_area,
-            PANE_TOGGLE_RIGHT_GLYPH,
-            crate::app::state::PaneToggleDirection::Right,
-        ),
-    ] {
-        if !app.mouse_capture || rect.width == 0 {
-            continue;
-        }
-        // Accent means "a pane is already there", so the same click closes it.
-        let style = if app.pane_toggle_sibling(direction).is_some() {
-            Style::default().fg(p.accent)
-        } else {
-            Style::default().fg(p.overlay1)
-        };
-        frame.render_widget(Paragraph::new(format!(" {glyph} ")).style(style), rect);
+        frame.render_widget(Paragraph::new(" ⋯ ").style(style), menu_rect);
     }
 }
 
@@ -1120,27 +992,29 @@ pub(super) fn render_git_menu(app: &AppState, frame: &mut Frame) {
     }
 
     frame.render_widget(Clear, app.view.git_menu_popup_rect);
-    if !crate::ui::dock::chooser::focused_in_git_repo(app) {
-        if let Some(rect) = app.view.git_menu_row_hit_areas.first().copied() {
-            let style = Style::default()
-                .fg(app.palette.overlay0)
-                .bg(app.palette.panel_bg);
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    format!(" {GIT_MENU_UNAVAILABLE}"),
-                    style,
-                )))
-                .style(Style::default().bg(app.palette.panel_bg)),
-                rect,
-            );
-        }
-        return;
-    }
-    let action_count = crate::app::state::GitAction::ALL.len();
+    let items = top_action_menu_items(app);
     for (offset, rect) in app.view.git_menu_row_hit_areas.iter().copied().enumerate() {
         let index = app.view.git_menu_first_visible + offset;
-        let (label, style) = if let Some(action) = crate::app::state::GitAction::ALL.get(index) {
-            let style = if index == app.git_menu.highlighted {
+        let Some(item) = items.get(index).copied() else {
+            continue;
+        };
+        let enabled = !matches!(
+            item,
+            TopActionMenuItem::Git(_) | TopActionMenuItem::GitStatus
+        ) || crate::ui::dock::chooser::focused_in_git_repo(app);
+        let header = matches!(item, TopActionMenuItem::GroupHeader(_));
+        let selected =
+            index == app.git_menu.highlighted && top_action_menu_item_selectable(app, item);
+        let (label, style) = if header {
+            (
+                top_action_menu_label(app, item),
+                Style::default()
+                    .fg(app.palette.overlay1)
+                    .bg(app.palette.panel_bg)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else if enabled {
+            let style = if selected {
                 Style::default()
                     .fg(panel_contrast_fg(&app.palette))
                     .bg(app.palette.accent)
@@ -1150,13 +1024,12 @@ pub(super) fn render_git_menu(app: &AppState, frame: &mut Frame) {
                     .fg(app.palette.text)
                     .bg(app.palette.panel_bg)
             };
-            (action.label(), style)
+            (top_action_menu_label(app, item), style)
         } else {
-            debug_assert_eq!(index, action_count);
             (
-                GIT_MENU_STATUS,
+                top_action_menu_label(app, item),
                 Style::default()
-                    .fg(app.palette.yellow)
+                    .fg(app.palette.overlay0)
                     .bg(app.palette.panel_bg),
             )
         };
@@ -1440,25 +1313,6 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_string()
-    }
-
-    fn set_focused_git_availability(app: &mut AppState, in_git_repo: bool) {
-        if app.workspaces.is_empty() {
-            app.workspaces = vec![Workspace::test_new("git-menu")];
-            app.active = Some(0);
-            app.ensure_test_terminals();
-        }
-        let workspace = &app.workspaces[app.active.expect("active workspace")];
-        let pane_id = workspace.focused_pane_id().expect("focused pane");
-        let terminal_id = workspace.terminal_id(pane_id).expect("terminal").clone();
-        let cwd = app
-            .terminals
-            .get(&terminal_id)
-            .expect("terminal state")
-            .cwd
-            .clone();
-        app.git_root_for_cwd
-            .insert(cwd.clone(), in_git_repo.then_some(cwd));
     }
 
     #[test]
@@ -2095,396 +1949,63 @@ mod tests {
     }
 
     #[test]
-    fn pane_toggle_buttons_sit_at_the_right_end_of_the_tab_row() {
+    fn top_right_controls_share_one_three_cell_button() {
         for width in [80u16, 120] {
             let (_, view) = tab_bar_view_at(width, "test");
-            assert_eq!(
-                view.git_menu_button_hit_area,
-                Rect::new(width - 16, 0, GIT_MENU_BUTTON_WIDTH, 1),
-                "width {width}"
-            );
-            assert_eq!(
-                view.repo_editor_button_hit_area.right(),
-                view.add_action_button_hit_area.x,
-                "width {width}"
-            );
-            assert_eq!(
-                view.repo_editor_button_hit_area.width, REPO_EDITOR_BUTTON_WIDTH,
-                "width {width}"
-            );
-            assert_eq!(
-                view.pane_toggle_below_hit_area,
-                Rect::new(width - 6, 0, 3, 1),
-                "width {width}"
-            );
-            assert_eq!(
-                view.pane_toggle_right_hit_area,
-                Rect::new(width - 3, 0, 3, 1),
-                "width {width}"
-            );
-            // The tab strip and the `+` button stay left of every action.
-            assert!(view.new_tab_hit_area.x + view.new_tab_hit_area.width <= width - 16);
+            assert_eq!(view.git_menu_button_hit_area, Rect::new(width - 3, 0, 3, 1));
+            assert_eq!(view.repo_editor_button_hit_area, Rect::default());
+            assert_eq!(view.add_action_button_hit_area, Rect::default());
+            assert!(view.user_action_hit_areas.is_empty());
+            assert_eq!(view.pane_toggle_below_hit_area, Rect::default());
+            assert_eq!(view.pane_toggle_right_hit_area, Rect::default());
             assert!(view
                 .tab_hit_areas
                 .iter()
-                .all(|rect| rect.x + rect.width <= width - 16));
+                .all(|rect| rect.right() <= width - 3));
         }
     }
 
     #[test]
-    fn pane_toggle_buttons_are_hidden_when_the_row_cannot_spare_the_width() {
-        let app = AppState::test_new();
-        let mut ws = Workspace::test_new("test");
-        let long_tab = ws.test_add_tab(Some("a-very-long-tab-title-here"));
-        ws.active_tab = long_tab;
-        let narrow = compute_tab_bar_view(
-            &ws,
-            &app.terminals,
-            Rect::new(0, 0, 20, 1),
-            0,
-            true,
-            true,
-            &[],
-            all_tab_actions_visible(),
-        );
-        assert_eq!(narrow.pane_toggle_below_hit_area, Rect::default());
-        assert_eq!(narrow.pane_toggle_right_hit_area, Rect::default());
-        assert_eq!(narrow.git_menu_button_hit_area, Rect::default());
-        assert_eq!(narrow.repo_editor_button_hit_area, Rect::default());
-
-        // The same long title with room to spare keeps the buttons.
-        let wide = compute_tab_bar_view(
-            &ws,
-            &app.terminals,
-            Rect::new(0, 0, 120, 1),
-            0,
-            true,
-            true,
-            &[],
-            all_tab_actions_visible(),
-        );
-        assert_eq!(wide.pane_toggle_below_hit_area, Rect::new(114, 0, 3, 1));
-        assert_eq!(wide.git_menu_button_hit_area, Rect::new(104, 0, 10, 1));
-
-        // Without mouse chrome there are no clickable controls at all.
-        let app = AppState::test_new();
-        let ws = Workspace::test_new("test");
-        let view = compute_tab_bar_view(
-            &ws,
-            &app.terminals,
-            Rect::new(0, 0, 120, 1),
-            0,
-            true,
-            false,
-            &[],
-            all_tab_actions_visible(),
-        );
-        assert_eq!(view.pane_toggle_below_hit_area, Rect::default());
-        assert_eq!(view.pane_toggle_right_hit_area, Rect::default());
-        assert_eq!(view.git_menu_button_hit_area, Rect::default());
-        assert_eq!(view.repo_editor_button_hit_area, Rect::default());
-    }
-
-    #[test]
-    fn pane_toggle_buttons_render_their_glyphs_and_accent_the_close_side() {
+    fn actions_menu_omits_empty_optional_groups_and_exposes_group_labels() {
         let mut app = AppState::test_new();
-        let mut ws = Workspace::test_new("test");
-        ws.test_split(ratatui::layout::Direction::Vertical);
-        let root = ws.tabs[0].root_pane;
-        ws.tabs[0].layout.focus_pane(root);
-        app.workspaces = vec![ws];
-        app.active = Some(0);
-        app.mouse_capture = true;
-        app.view.tab_bar_rect = Rect::new(0, 0, 50, 1);
-        let view = compute_tab_bar_view(
-            &app.workspaces[0],
-            &app.terminals,
-            app.view.tab_bar_rect,
-            0,
-            true,
-            true,
-            &[],
-            all_tab_actions_visible(),
+        let base = top_action_menu_items(&app);
+        assert_eq!(
+            base,
+            vec![
+                TopActionMenuItem::GroupHeader("Actions"),
+                TopActionMenuItem::AddAction,
+                TopActionMenuItem::GroupHeader("Panes"),
+                TopActionMenuItem::RepoEditor
+            ]
         );
-        app.view.tab_hit_areas = view.tab_hit_areas;
-        app.view.new_tab_hit_area = view.new_tab_hit_area;
-        app.view.pane_toggle_below_hit_area = view.pane_toggle_below_hit_area;
-        app.view.pane_toggle_right_hit_area = view.pane_toggle_right_hit_area;
 
-        let backend = TestBackend::new(50, 1);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                render_tab_bar(&app, frame, app.view.tab_bar_rect);
-                render_tab_action_buttons(&app, frame);
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let row = buffer_row_text(buffer, app.view.tab_bar_rect, 0);
-        assert!(row.contains(PANE_TOGGLE_BELOW_GLYPH), "tab row: {row:?}");
-        assert!(row.contains(PANE_TOGGLE_RIGHT_GLYPH), "tab row: {row:?}");
-
-        let below_style = buffer[(app.view.pane_toggle_below_hit_area.x + 1, 0)].style();
-        let right_style = buffer[(app.view.pane_toggle_right_hit_area.x + 1, 0)].style();
-        assert_eq!(below_style.fg, Some(app.palette.accent));
-        assert_ne!(right_style.fg, Some(app.palette.accent));
-    }
-
-    #[test]
-    fn git_menu_layout_opens_downward_and_adds_only_the_behind_status_row() {
-        let anchor = Rect::new(70, 2, GIT_MENU_BUTTON_WIDTH, 1);
-        let area = Rect::new(0, 0, 120, 40);
-
-        for (ahead_behind, expected_rows) in [
-            (None, 4),
-            (Some((2, 0)), 4),
-            (Some((0, 1)), 5),
-            (Some((2, 3)), 5),
-        ] {
-            assert_eq!(
-                git_menu_status_visible(ahead_behind),
-                ahead_behind.is_some_and(|(_, behind)| behind > 0)
-            );
-            let layout = git_menu_dropdown_layout(anchor, area, 0, ahead_behind, true)
-                .expect("menu fits below the tab row");
-            assert_eq!(layout.rect.y, anchor.y + anchor.height);
-            assert_eq!(layout.visible_rows, expected_rows);
-        }
-
-        let unavailable = git_menu_dropdown_layout(anchor, area, 3, Some((2, 3)), false)
-            .expect("info row fits below the tab row");
-        assert_eq!(unavailable.rect.y, anchor.y + anchor.height);
-        assert_eq!(unavailable.visible_rows, 1);
-    }
-
-    #[test]
-    fn git_menu_renders_actions_in_order_then_nonselectable_status() {
-        let mut app = AppState::test_new();
-        set_focused_git_availability(&mut app, true);
-        app.set_server_mode(crate::app::Mode::GitMenu);
-        app.view.git_menu_popup_rect = Rect::new(0, 1, 34, 5);
-        app.view.git_menu_row_hit_areas = (1..=5).map(|y| Rect::new(0, y, 34, 1)).collect();
-        app.status_git_ahead_behind = Some((0, 1));
-
-        let backend = TestBackend::new(40, 8);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render_git_menu(&app, frame)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let rows = (1..=5)
-            .map(|y| buffer_row_text(buffer, Rect::new(0, y, 34, 1), y))
+        app.show_pull_button = true;
+        app.show_pane_toggle_buttons = true;
+        app.status_git_ahead_behind = Some((2, 1));
+        let items = top_action_menu_items(&app);
+        let labels = items
+            .iter()
+            .map(|item| top_action_menu_label(&app, *item))
             .collect::<Vec<_>>();
-        assert!(rows[0].contains("Pull"), "{rows:?}");
-        assert!(rows[1].contains("Commit"), "{rows:?}");
-        assert!(rows[2].contains("Push"), "{rows:?}");
-        assert!(rows[3].contains("Create PR"), "{rows:?}");
-        assert!(rows[4].contains(GIT_MENU_STATUS), "{rows:?}");
-        assert_ne!(buffer[(1, 5)].style().bg, Some(app.palette.accent));
+        assert!(labels.iter().any(|label| label == "Actions"));
+        assert!(labels.iter().any(|label| label == "Git"));
+        assert!(labels
+            .iter()
+            .any(|label| label.contains("Ahead 2 · Behind 1")));
+        assert!(labels.iter().any(|label| label == "Panes"));
     }
 
     #[test]
-    fn git_menu_dims_button_and_renders_only_info_outside_repository() {
+    fn actions_button_renders_as_three_cell_kebab() {
         let mut app = AppState::test_new();
-        set_focused_git_availability(&mut app, false);
         app.mouse_capture = true;
-        app.set_server_mode(crate::app::Mode::GitMenu);
-        app.view.git_menu_button_hit_area = Rect::new(0, 0, GIT_MENU_BUTTON_WIDTH, 1);
-        app.view.git_menu_popup_rect = Rect::new(0, 1, 34, 1);
-        app.view.git_menu_row_hit_areas = vec![Rect::new(0, 1, 34, 1)];
-
-        let backend = TestBackend::new(40, 3);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                render_tab_action_buttons(&app, frame);
-                render_git_menu(&app, frame);
-            })
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let button_style = buffer[(1, 0)].style();
-        assert_eq!(
-            button_style.fg,
-            Some(readable_fg_on(
-                app.palette.surface0,
-                &[app.palette.overlay1, app.palette.text]
-            ))
-        );
-        assert!(button_style.add_modifier.contains(Modifier::DIM));
-        let row = buffer_row_text(buffer, Rect::new(0, 1, 34, 1), 1);
-        assert!(row.contains(GIT_MENU_UNAVAILABLE), "menu row: {row:?}");
-        assert!(!row.contains("Pull"), "menu row: {row:?}");
-    }
-
-    #[test]
-    fn repo_editor_button_renders_before_add_action_and_dims_without_an_editor() {
-        let mut app = AppState::test_new();
-        app.nerd_font = false;
-        app.mouse_capture = true;
-        let ws = Workspace::test_new("test");
-        let view = compute_tab_bar_view(
-            &ws,
-            &app.terminals,
-            Rect::new(0, 0, 80, 1),
-            0,
-            true,
-            true,
-            &[],
-            all_tab_actions_visible(),
-        );
-        app.view.repo_editor_button_hit_area = view.repo_editor_button_hit_area;
-        app.view.add_action_button_hit_area = view.add_action_button_hit_area;
-        assert_eq!(
-            app.view.repo_editor_button_hit_area.right(),
-            app.view.add_action_button_hit_area.x
-        );
-
-        let backend = TestBackend::new(80, 1);
-        let mut terminal = Terminal::new(backend).expect("test terminal");
-        terminal
-            .draw(|frame| render_tab_action_buttons(&app, frame))
-            .expect("draw disabled button");
-        let cell = &terminal.backend().buffer()[(
-            app.view.repo_editor_button_hit_area.x + 1,
-            app.view.repo_editor_button_hit_area.y,
-        )];
-        assert_eq!(cell.symbol(), "n");
-        assert!(cell.style().add_modifier.contains(Modifier::DIM));
-
-        app.repo_editor_argv = Some(vec!["nvim".into()]);
-        terminal
-            .draw(|frame| render_tab_action_buttons(&app, frame))
-            .expect("draw enabled button");
-        let cell = &terminal.backend().buffer()[(
-            app.view.repo_editor_button_hit_area.x + 1,
-            app.view.repo_editor_button_hit_area.y,
-        )];
-        assert!(!cell.style().add_modifier.contains(Modifier::DIM));
-    }
-
-    #[test]
-    fn user_action_buttons_have_ordered_hit_areas_at_required_widths() {
-        let app = AppState::test_new();
-        let ws = Workspace::test_new("test");
-        let actions = vec![
-            (0, "test".to_string()),
-            (1, "a very long action name that must truncate".to_string()),
-        ];
-
-        for width in [80, 120] {
-            let view = compute_tab_bar_view(
-                &ws,
-                &app.terminals,
-                Rect::new(0, 0, width, 1),
-                0,
-                true,
-                true,
-                &actions,
-                all_tab_actions_visible(),
-            );
-            assert_eq!(
-                view.add_action_button_hit_area.width,
-                ADD_ACTION_BUTTON_WIDTH
-            );
-            assert_eq!(
-                view.repo_editor_button_hit_area.right(),
-                view.add_action_button_hit_area.x
-            );
-            assert_eq!(view.user_action_hit_areas.len(), 2);
-            assert_eq!(
-                view.user_action_hit_areas[0].1.x,
-                view.add_action_button_hit_area.right()
-            );
-            assert_eq!(
-                view.user_action_hit_areas[1].1.right(),
-                view.git_menu_button_hit_area.x
-            );
-            assert_eq!(view.pane_toggle_right_hit_area.right(), width);
-            if width == 80 {
-                assert!(
-                    view.user_action_hit_areas[1].1.width
-                        < display_width_u16(&actions[1].1).saturating_add(2)
-                );
-            } else {
-                assert_eq!(
-                    view.user_action_hit_areas[1].1.width,
-                    display_width_u16(&actions[1].1).saturating_add(2)
-                );
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod action_icons {
-    use super::*;
-    use crate::app::state::AppState;
-    use crate::workspace::Workspace;
-    use ratatui::{backend::TestBackend, Terminal};
-
-    /// Renders the tab row and returns the editor and add-action cells, each as
-    /// the text inside its hit area plus that hit area's width.
-    fn rendered_buttons(nerd_font: bool) -> [(String, u16, u16); 2] {
-        let mut app = AppState::test_new();
-        app.nerd_font = nerd_font;
-        app.mouse_capture = true;
-        app.workspaces = vec![Workspace::test_new("test")];
-        app.active = Some(0);
-        let area = Rect::new(0, 0, 80, 1);
-        app.view.tab_bar_rect = area;
-        let visibility = TabActionVisibility::from_state(&app);
-        let view = compute_tab_bar_view_with_icons(
-            &app.workspaces[0],
-            &app.terminals,
-            area,
-            0,
-            true,
-            true,
-            &[],
-            visibility,
-            nerd_font,
-        );
-        app.view.repo_editor_button_hit_area = view.repo_editor_button_hit_area;
-        app.view.add_action_button_hit_area = view.add_action_button_hit_area;
-
-        let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
+        app.view.git_menu_button_hit_area = Rect::new(5, 0, 3, 1);
+        let mut terminal = Terminal::new(TestBackend::new(12, 1)).unwrap();
         terminal
             .draw(|frame| render_tab_action_buttons(&app, frame))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let cell_text = |rect: Rect| -> (String, u16, u16) {
-            let text: String = (rect.x..rect.right())
-                .map(|x| buffer[(x, 0)].symbol())
-                .collect();
-            (
-                text.clone(),
-                rect.width,
-                crate::ui::text::display_width_u16(&text),
-            )
-        };
-        [
-            cell_text(view.repo_editor_button_hit_area),
-            cell_text(view.add_action_button_hit_area),
-        ]
-    }
-
-    #[test]
-    fn nerd_font_on_renders_glyphs_with_matching_hit_areas() {
-        let [editor, add] = rendered_buttons(true);
-        assert_eq!(editor.0, " \u{F07C} ");
-        assert_eq!(add.0, " \u{F0A00} ");
-        assert_eq!(editor.1, editor.2);
-        assert_eq!(add.1, add.2);
-    }
-
-    #[test]
-    fn nerd_font_off_keeps_text_with_matching_hit_areas() {
-        let [editor, add] = rendered_buttons(false);
-        assert_eq!(editor.0, " nvim ");
-        assert_eq!(add.0, " + Action ");
-        assert_eq!(
-            (editor.1, add.1),
-            (REPO_EDITOR_BUTTON_WIDTH, ADD_ACTION_BUTTON_WIDTH)
-        );
-        assert_eq!(editor.1, editor.2);
-        assert_eq!(add.1, add.2);
+        let text = (5..8).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+        assert_eq!(text, " ⋯ ");
     }
 }

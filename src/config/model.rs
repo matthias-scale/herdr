@@ -1951,16 +1951,15 @@ pub struct UiConfig {
     pub show_agent_labels_on_pane_borders: bool,
     /// Hide the tab row when the workspace has one tab. Default: false.
     pub hide_tab_bar_when_single_tab: bool,
-    /// Show the pull button in the top-right action row. It is the only entry
-    /// point to the git menu, so turn it on to reach that menu. Default: false.
+    /// Include Git actions in the top-right `⋯` menu. Default: false.
     pub show_pull_button: bool,
     /// Open the dock automatically when the focused pane carries a pull
     /// request, ticket, or conversation. Off by default: the status row names
     /// the link beside the title instead, and clicking that name opens it. The
     /// dock tab strip's `◧` toggle writes this setting too. Default: false.
     pub open_dock_on_work_link: bool,
-    /// Show the split-below and split-right buttons in the top-right action
-    /// row. Default: false.
+    /// Include split-below and split-right actions in the top-right `⋯` menu.
+    /// Default: false.
     pub show_pane_toggle_buttons: bool,
     /// Expand the top status row from bars alone to percentages and reset
     /// times. Toggled at runtime; this is only the starting state. Default: false.

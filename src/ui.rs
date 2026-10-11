@@ -56,6 +56,9 @@ pub(crate) mod status;
 mod symphony;
 mod tab_surface;
 mod tabs;
+pub(crate) use tabs::{
+    step_top_action_menu, top_action_menu_item_selectable, top_action_menu_items, TopActionMenuItem,
+};
 mod tooltip;
 pub(crate) use tooltip::hovered_control_at;
 pub(crate) mod agent_picker;
@@ -191,8 +194,6 @@ pub(crate) use self::{
 pub(crate) use self::sidebar::compute_remote_agent_row_areas;
 #[cfg(test)]
 pub(crate) use self::sidebar::{sidebar_group_mode_anchor_rect, sidebar_header_search_rect};
-#[cfg(test)]
-pub(crate) use self::tabs::REPO_EDITOR_BUTTON_WIDTH;
 pub(crate) use self::{
     keybind_help::keybind_help_lines,
     mobile::{
@@ -528,9 +529,8 @@ fn compute_view_internal_at(
         git_menu_button_hit_area,
         pane_toggle_below_hit_area,
         pane_toggle_right_hit_area,
-        // `+ Action` is always present when the row is drawn, so it is the sentinel
-        // for "the tab row hosts the buttons"; the other controls are optional.
-    ) = if tab_bar_view.add_action_button_hit_area.width > 0 {
+        // The single kebab anchor indicates that the tab row hosts the menu.
+    ) = if tab_bar_view.git_menu_button_hit_area.width > 0 {
         (
             tab_bar_view.repo_editor_button_hit_area,
             tab_bar_view.add_action_button_hit_area,
@@ -558,13 +558,11 @@ fn compute_view_internal_at(
     };
 
     let git_menu_layout = (app.server_mode() == Mode::GitMenu).then(|| {
-        let in_git_repo = dock::chooser::focused_in_git_repo(app);
-        tabs::git_menu_dropdown_layout(
+        tabs::action_menu_dropdown_layout(
             git_menu_button_hit_area,
             area,
             app.git_menu.highlighted,
-            app.status_git_ahead_behind,
-            in_git_repo,
+            app,
         )
     });
     let git_menu_layout = git_menu_layout.flatten();
@@ -3021,226 +3019,100 @@ mod tests {
         assert_eq!(app.view.new_tab_hit_area, Rect::default());
     }
 
-    /// The pull button and the two pane toggles duplicate keybindings and eat
-    /// tab-title width, so they are opt-in. Their hit areas must collapse, not
-    /// merely go undrawn, or the row still reserves their columns.
     #[test]
-    fn the_optional_top_right_controls_are_absent_by_default() {
-        let defaults = crate::config::Config::default();
-        assert!(!defaults.ui.show_pull_button);
-        assert!(!defaults.ui.show_pane_toggle_buttons);
-
-        let mut app = crate::app::state::AppState::test_new();
-        app.tab_bar_position = crate::config::TabBarPositionConfig::Top;
-        app.mouse_capture = true;
-        app.workspaces = vec![Workspace::test_new("one")];
-        app.active = Some(0);
-        app.selected = 0;
-        app.set_server_mode(Mode::Terminal);
-        app.ensure_test_terminals();
-
-        compute_view(&mut app, Rect::new(0, 0, 120, 40));
-
-        assert_eq!(app.view.git_menu_button_hit_area, Rect::default());
-        assert_eq!(app.view.pane_toggle_below_hit_area, Rect::default());
-        assert_eq!(app.view.pane_toggle_right_hit_area, Rect::default());
-        // `+ Action` is not optional and still anchors the row.
-        assert!(app.view.add_action_button_hit_area.width > 0);
-    }
-
-    /// Each control is independent, so the mixed combinations have to place the
-    /// remaining ones correctly too, on the tab row and on the status row.
-    #[test]
-    fn each_optional_control_hides_independently_on_both_host_rows() {
-        for on_tab_row in [true, false] {
-            for (pull, toggles) in [(true, false), (false, true)] {
+    fn top_right_actions_use_one_three_cell_anchor_on_both_rows_and_widths() {
+        for width in [80u16, 120] {
+            for position in [
+                crate::config::TabBarPositionConfig::Top,
+                crate::config::TabBarPositionConfig::Hidden,
+            ] {
                 let mut app = crate::app::state::AppState::test_new();
-                app.tab_bar_position = if on_tab_row {
-                    crate::config::TabBarPositionConfig::Top
-                } else {
-                    crate::config::TabBarPositionConfig::Hidden
-                };
+                app.tab_bar_position = position;
                 app.mouse_capture = true;
-                app.show_pull_button = pull;
-                app.show_pane_toggle_buttons = toggles;
+                app.show_pull_button = true;
+                app.show_pane_toggle_buttons = true;
                 app.workspaces = vec![Workspace::test_new("one")];
                 app.active = Some(0);
                 app.selected = 0;
-                app.set_server_mode(Mode::Terminal);
                 app.ensure_test_terminals();
 
-                compute_view(&mut app, Rect::new(0, 0, 120, 40));
-
-                let label = format!("tab_row={on_tab_row} pull={pull} toggles={toggles}");
+                compute_view(&mut app, Rect::new(0, 0, width, 40));
                 let menu = app.view.git_menu_button_hit_area;
-                let below = app.view.pane_toggle_below_hit_area;
-                let right = app.view.pane_toggle_right_hit_area;
-                let add = app.view.add_action_button_hit_area;
-                assert!(add.width > 0, "{label}");
-                assert_eq!(menu.width > 0, pull, "{label}");
-                assert_eq!(below.width > 0, toggles, "{label}");
-                assert_eq!(right.width > 0, toggles, "{label}");
-                // Every drawn control shares the row and never overlaps.
-                let mut spans: Vec<(u16, u16)> = [add, menu, below, right]
-                    .into_iter()
-                    .filter(|rect| rect.width > 0)
-                    .map(|rect| {
-                        assert_eq!(rect.y, add.y, "{label}");
-                        (rect.x, rect.x + rect.width)
-                    })
-                    .collect();
-                spans.sort_unstable();
-                for pair in spans.windows(2) {
-                    assert!(pair[0].1 <= pair[1].0, "{label} overlapping {spans:?}");
+                assert_eq!(menu.width, 3, "{width} columns, {position:?}");
+                assert!(app.view.repo_editor_button_hit_area.width == 0);
+                assert!(app.view.add_action_button_hit_area.width == 0);
+                assert!(app.view.user_action_hit_areas.is_empty());
+                assert_eq!(
+                    crate::ui::tabs::tab_action_status_bar_reserved_width(
+                        &app,
+                        app.view.status_bar_rect
+                    ),
+                    if menu.y == app.view.status_bar_rect.y {
+                        3
+                    } else {
+                        0
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn status_title_and_cpu_memory_render_with_actions_on_either_row() {
+        for width in [80u16, 120] {
+            for position in [
+                crate::config::TabBarPositionConfig::Top,
+                crate::config::TabBarPositionConfig::Hidden,
+            ] {
+                let mut app = crate::app::state::AppState::test_new();
+                app.tab_bar_position = position;
+                app.mouse_capture = true;
+                app.show_pull_button = true;
+                app.show_pane_toggle_buttons = true;
+                app.status_cpu_visible = true;
+                app.status_mem_visible = true;
+                app.workspaces = vec![Workspace::test_new("one")];
+                app.active = Some(0);
+                app.ensure_test_terminals();
+                compute_view(&mut app, Rect::new(0, 0, width, 30));
+
+                let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+                terminal.draw(|frame| render(&app, frame)).unwrap();
+                let status = app.view.status_bar_rect;
+                let row = buffer_row_text(terminal.backend().buffer(), status, status.y);
+                for required in ["Home", "CPU", "MEM"] {
+                    assert!(row.contains(required), "{width} {position:?}: {row:?}");
+                }
+                let button = app.view.git_menu_button_hit_area;
+                assert_eq!(button.width, 3, "{width} {position:?}");
+                if button.y == status.y {
+                    assert!(row.contains('⋯'), "{width} {position:?}: {row:?}");
                 }
             }
         }
     }
 
-    /// Rendering a hidden pull button must not repair its now-invalid menu.
-    /// Config application owns that transition before the next frame.
     #[test]
-    fn losing_the_pull_button_does_not_close_an_open_git_menu_during_render() {
+    fn action_menu_geometry_covers_every_configured_group() {
         let mut app = crate::app::state::AppState::test_new();
-        app.tab_bar_position = crate::config::TabBarPositionConfig::Top;
-        app.mouse_capture = true;
         app.show_pull_button = true;
-        app.workspaces = vec![Workspace::test_new("one")];
-        app.active = Some(0);
-        app.selected = 0;
-        app.set_server_mode(Mode::Terminal);
-        app.ensure_test_terminals();
-        compute_view(&mut app, Rect::new(0, 0, 120, 40));
-
-        app.set_server_mode(Mode::GitMenu);
-        compute_view(&mut app, Rect::new(0, 0, 120, 40));
-        assert_eq!(app.server_mode(), Mode::GitMenu);
-        assert!(app.view.git_menu_popup_rect.width > 0);
-
-        app.show_pull_button = false;
-        compute_view(&mut app, Rect::new(0, 0, 120, 40));
-
-        assert_eq!(app.server_mode(), Mode::GitMenu);
-    }
-
-    /// A narrow client that cannot fit the button must not close a menu another
-    /// client is looking at, and the mobile layout must not skip the close.
-    #[test]
-    fn client_geometry_does_not_decide_whether_the_git_menu_closes() {
-        let mut app = crate::app::state::AppState::test_new();
-        app.tab_bar_position = crate::config::TabBarPositionConfig::Top;
-        app.mouse_capture = true;
-        app.show_pull_button = true;
-        app.workspaces = vec![Workspace::test_new("one")];
-        app.active = Some(0);
-        app.selected = 0;
-        app.set_server_mode(Mode::GitMenu);
-        app.ensure_test_terminals();
-
-        // Too narrow for the action row, and narrow enough for mobile layout.
-        compute_view(&mut app, Rect::new(0, 0, 40, 20));
-        assert_eq!(app.view.git_menu_button_hit_area, Rect::default());
-        assert_eq!(
-            app.server_mode(),
-            Mode::GitMenu,
-            "geometry alone must not close it"
-        );
-
-        app.show_pull_button = false;
-        compute_view(&mut app, Rect::new(0, 0, 40, 20));
-        assert_eq!(app.server_mode(), Mode::GitMenu);
-    }
-
-    /// Hiding the two controls must give their columns back to the tabs rather
-    /// than leave a gap at the right edge.
-    #[test]
-    fn hiding_the_optional_controls_reclaims_their_columns() {
-        let build = |show: bool| {
-            let mut app = crate::app::state::AppState::test_new();
-            app.tab_bar_position = crate::config::TabBarPositionConfig::Top;
-            app.mouse_capture = true;
-            app.show_pull_button = show;
-            app.show_pane_toggle_buttons = show;
-            app.workspaces = vec![Workspace::test_new("one")];
-            app.active = Some(0);
-            app.selected = 0;
-            app.set_server_mode(Mode::Terminal);
-            app.ensure_test_terminals();
-            compute_view(&mut app, Rect::new(0, 0, 120, 40));
-            app
-        };
-
-        let shown = build(true);
-        let hidden = build(false);
-        let right_edge = |app: &crate::app::state::AppState| {
-            app.view.add_action_button_hit_area.x + app.view.add_action_button_hit_area.width
-        };
-        assert!(
-            right_edge(&hidden) > right_edge(&shown),
-            "hidden {} vs shown {}",
-            right_edge(&hidden),
-            right_edge(&shown)
-        );
-    }
-
-    /// The buttons were only ever computed for the tab row, which the shipped
-    /// default config does not draw: `tab_bar_position` defaults to `hidden`.
-    /// Every unit test used `AppState::test_new()`, whose tab row is `Top`, so
-    /// the whole feature was invisible at runtime while the tests were green.
-    #[test]
-    fn opted_in_pane_toggles_fall_back_to_the_status_row_under_the_default_config() {
-        assert_eq!(
-            crate::config::Config::default().ui.tab_bar_position,
-            crate::config::TabBarPositionConfig::Hidden,
-            "the default config hides the tab row; the toggles must survive that"
-        );
-
-        for (width, height) in [(120u16, 40u16), (80, 24)] {
-            let mut app = crate::app::state::AppState::test_new();
-            let defaults = crate::config::Config::default();
-            app.tab_bar_position = defaults.ui.tab_bar_position;
-            app.hide_tab_bar_when_single_tab = defaults.ui.hide_tab_bar_when_single_tab;
-            app.mouse_capture = defaults.ui.mouse_capture;
-            app.show_pull_button = true;
-            app.show_pane_toggle_buttons = true;
-            app.workspaces = vec![Workspace::test_new("one")];
-            app.active = Some(0);
-            app.selected = 0;
-            app.set_server_mode(Mode::Terminal);
-
-            compute_view(&mut app, Rect::new(0, 0, width, height));
-
-            assert_eq!(app.view.tab_bar_rect, Rect::default(), "{width}x{height}");
-            let status = app.view.status_bar_rect;
-            let git = app.view.git_menu_button_hit_area;
-            let below = app.view.pane_toggle_below_hit_area;
-            let right = app.view.pane_toggle_right_hit_area;
-            assert_eq!(
-                git,
-                Rect::new(status.x + status.width - 16, status.y, 10, 1)
-            );
-            assert_eq!(
-                below,
-                Rect::new(status.x + status.width - 6, status.y, 3, 1)
-            );
-            assert_eq!(right, Rect::new(below.x + 3, status.y, 3, 1));
-
-            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal.draw(|frame| render(&app, frame)).unwrap();
-            let row = buffer_row_text(terminal.backend().buffer(), status, status.y);
-            assert!(
-                row.contains(tabs::PANE_TOGGLE_BELOW_GLYPH),
-                "{width}x{height} status row: {row:?}"
-            );
-            assert!(
-                row.contains(tabs::PANE_TOGGLE_RIGHT_GLYPH),
-                "{width}x{height} status row: {row:?}"
-            );
-            assert!(
-                row.contains("⇣ Pull ▾"),
-                "{width}x{height} status row: {row:?}"
-            );
-        }
+        app.show_pane_toggle_buttons = true;
+        app.status_git_ahead_behind = Some((2, 1));
+        let items = top_action_menu_items(&app);
+        assert!(items
+            .iter()
+            .any(|item| tabs::top_action_menu_label(&app, *item) == "Actions"));
+        assert!(items
+            .iter()
+            .any(|item| tabs::top_action_menu_label(&app, *item) == "Git"));
+        assert!(items
+            .iter()
+            .any(|item| tabs::top_action_menu_label(&app, *item) == "Panes"));
+        let anchor = Rect::new(77, 1, 3, 1);
+        let layout = tabs::action_menu_dropdown_layout(anchor, Rect::new(0, 0, 80, 20), 0, &app)
+            .expect("action menu fits");
+        assert_eq!(layout.visible_rows, items.len());
+        assert_eq!(layout.rect.y, anchor.bottom());
     }
 
     #[test]
@@ -3274,12 +3146,15 @@ mod tests {
 
             compute_view(&mut app, Rect::new(0, 0, width, height));
 
-            assert_eq!(app.view.git_menu_button_hit_area.width, 10);
+            assert_eq!(app.view.git_menu_button_hit_area.width, 3);
             assert_eq!(
                 app.view.git_menu_popup_rect.y,
                 app.view.git_menu_button_hit_area.y + 1
             );
-            assert_eq!(app.view.git_menu_row_hit_areas.len(), 5);
+            assert_eq!(
+                app.view.git_menu_row_hit_areas.len(),
+                top_action_menu_items(&app).len()
+            );
             assert!(app
                 .view
                 .git_menu_row_hit_areas
@@ -3309,8 +3184,7 @@ mod tests {
         terminal.draw(|frame| render(&app, frame)).unwrap();
         let status = app.view.status_bar_rect;
         let row = buffer_row_text(terminal.backend().buffer(), status, status.y);
-        assert!(!row.contains(tabs::PANE_TOGGLE_BELOW_GLYPH), "{row:?}");
-        assert!(!row.contains(tabs::PANE_TOGGLE_RIGHT_GLYPH), "{row:?}");
+        assert!(!row.contains('⋯'), "mouse capture is off: {row:?}");
     }
 
     #[test]
