@@ -1692,7 +1692,7 @@ mod tests {
     #[test]
     fn cpu_memory_title_and_more_survive_a_fallback_kebab_at_supported_widths() {
         for width in [80u16, 120] {
-            let mut app = app_with_metrics(metrics(95, 15.0, 95));
+            let mut app = app_with_metrics(metrics(95, 30.4, 95));
             app.status_cpu_visible = true;
             app.status_mem_visible = true;
             app.status_disk_visible = true;

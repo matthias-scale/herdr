@@ -3065,12 +3065,22 @@ mod tests {
                 crate::config::TabBarPositionConfig::Hidden,
             ] {
                 let mut app = crate::app::state::AppState::test_new();
+                app.nerd_font = false;
                 app.tab_bar_position = position;
                 app.mouse_capture = true;
                 app.show_pull_button = true;
                 app.show_pane_toggle_buttons = true;
                 app.status_cpu_visible = true;
                 app.status_mem_visible = true;
+                app.status_metrics = Some(crate::platform::status_metrics::StatusMetricsSnapshot {
+                    metrics: crate::platform::status_metrics::StatusMetrics {
+                        cpu_percent: Some(95),
+                        mem_used_gib: Some(30.4),
+                        mem_total_gib: Some(32.0),
+                        ..Default::default()
+                    },
+                    sampled_at: std::time::Instant::now(),
+                });
                 app.workspaces = vec![Workspace::test_new("one")];
                 app.active = Some(0);
                 app.ensure_test_terminals();

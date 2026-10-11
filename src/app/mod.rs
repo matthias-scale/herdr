@@ -5998,7 +5998,7 @@ mod tests {
     }
 
     #[test]
-    fn config_reload_closes_a_git_menu_when_its_button_is_hidden() {
+    fn config_reload_keeps_the_action_menu_open_when_other_groups_remain() {
         let (mut config, mut app) = app_with_auto_switch_theme_config();
         config.ui.show_pull_button = false;
         app.state.show_pull_button = true;
@@ -6006,7 +6006,10 @@ mod tests {
 
         app.apply_live_config(&config, &[], &[], false);
 
-        assert_eq!(app.state.server_mode(), Mode::Terminal);
+        assert_eq!(app.state.server_mode(), Mode::GitMenu);
+        assert!(!crate::ui::top_action_menu_items(&app.state)
+            .iter()
+            .any(|item| matches!(item, crate::ui::TopActionMenuItem::Git(_))));
     }
 
     #[test]

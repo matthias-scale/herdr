@@ -12281,13 +12281,6 @@ mod tests {
 
         app.state.repo_editor_argv = Some(vec!["nvim".into()]);
         crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
-        let button = app.state.view.git_menu_button_hit_area;
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            button.x + 1,
-            button.y,
-        ));
-        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
         let editor = app.state.view.git_menu_row_hit_areas[3];
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
