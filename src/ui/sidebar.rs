@@ -447,6 +447,7 @@ fn compact_age(
         entry
             .activity_at
             .into_iter()
+            .chain(entry.agent_activity_at)
             .chain(entry.last_turn_at.map(|timestamp| timestamp.instant))
             .chain(entry.human_activity_at)
             .max()
@@ -455,6 +456,7 @@ fn compact_age(
             .last_turn_at
             .map(|timestamp| timestamp.instant)
             .into_iter()
+            .chain(entry.agent_activity_at)
             .chain(entry.human_activity_at)
             .max()
     }
@@ -2084,6 +2086,7 @@ pub(crate) struct AgentPanelEntryData {
     pub reported_at: Option<std::time::Instant>,
     pub last_agent_state_change_seq: Option<u64>,
     pub activity_at: Option<std::time::Instant>,
+    pub agent_activity_at: Option<std::time::Instant>,
     pub human_activity_at: Option<std::time::Instant>,
     pub state_labels: std::collections::HashMap<String, String>,
     pub tokens: std::collections::HashMap<String, String>,
@@ -2854,6 +2857,7 @@ fn collect_agent_panel_entries_with_runtimes(
                             reported_at: detail.reported_at,
                             last_agent_state_change_seq: detail.last_agent_state_change_seq,
                             activity_at: detail.activity_at,
+                            agent_activity_at: detail.agent_activity_at,
                             human_activity_at: detail.human_activity_at,
                             state_labels: detail.state_labels,
                             tokens: detail.tokens,
@@ -3055,6 +3059,7 @@ pub(crate) fn remote_agent_panel_entries_at(
                     reported_at,
                     last_agent_state_change_seq: state_change_seq,
                     activity_at: reported_at,
+                    agent_activity_at: None,
                     human_activity_at: None,
                     state_labels,
                     tokens,
@@ -3273,6 +3278,11 @@ fn aggregate_tab_entries(
                     };
                     tab_entry.human_activity_at =
                         match (tab_entry.human_activity_at, entry.human_activity_at) {
+                            (Some(current), Some(candidate)) => Some(current.max(candidate)),
+                            (current, candidate) => current.or(candidate),
+                        };
+                    tab_entry.agent_activity_at =
+                        match (tab_entry.agent_activity_at, entry.agent_activity_at) {
                             (Some(current), Some(candidate)) => Some(current.max(candidate)),
                             (current, candidate) => current.or(candidate),
                         };
@@ -18109,10 +18119,16 @@ pub(crate) mod tests {
             ("idle title", AgentState::Idle, true, Some(Agent::Kimi)),
             ("shell title", AgentState::Unknown, true, None),
         ] {
+            let has_agent = agent.is_some();
             let mut entry = compact_test_entry(title, agent);
             entry.state = state;
             entry.seen = seen;
-            entry.activity_at = Some(now - std::time::Duration::from_secs(125));
+            let activity_at = now - std::time::Duration::from_secs(125);
+            if has_agent && state != AgentState::Working {
+                entry.agent_activity_at = Some(activity_at);
+            } else {
+                entry.activity_at = Some(activity_at);
+            }
             let layout = tab_row_layout(
                 &entry,
                 now,
@@ -19073,6 +19089,26 @@ pub(crate) mod tests {
 
         assert_eq!(compact_age(&entry, now), ("2h".into(), Some(activity)));
         let app = app_with_agents(&["one"]);
+        let desktop = tab_row_layout(
+            &entry,
+            now,
+            36,
+            0,
+            &app.palette,
+            app.status_indicators,
+            false,
+        );
+        let mobile = mobile_tab_row_layout(
+            &entry,
+            now,
+            36,
+            0,
+            &app.palette,
+            app.status_indicators,
+            false,
+        );
+        assert_eq!(desktop.activity_age.as_deref(), Some("2h"));
+        assert_eq!(mobile.activity_age.as_deref(), Some("2h"));
         assert_eq!(
             compact_age_color(&entry, now, &app.palette),
             app.palette.yellow
@@ -20382,6 +20418,7 @@ pub(crate) mod tests {
                 reported_at: None,
                 last_agent_state_change_seq: None,
                 activity_at: None,
+                agent_activity_at: None,
                 human_activity_at: None,
                 state_labels,
                 tokens: std::collections::HashMap::new(),
@@ -22754,6 +22791,7 @@ row_gap = 1
                 reported_at: Some(now - std::time::Duration::from_secs(4 * 60)),
                 last_agent_state_change_seq: None,
                 activity_at: Some(now - std::time::Duration::from_secs(60)),
+                agent_activity_at: None,
                 human_activity_at: None,
                 state_labels: Default::default(),
                 tokens: Default::default(),
