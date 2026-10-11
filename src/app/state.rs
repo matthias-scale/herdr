@@ -1067,6 +1067,7 @@ pub struct TabCardArea {
     pub ws_idx: usize,
     pub tab_idx: usize,
     pub pane_id: PaneId,
+    pub pin_allowed: bool,
     pub depth: u16,
     pub rect: Rect,
 }

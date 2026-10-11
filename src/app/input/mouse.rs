@@ -2229,7 +2229,13 @@ impl AppState {
                             snooze_target,
                             starred: self.tab_starred(ws_idx, tab_idx),
                             pinned: self.workspaces[ws_idx].tabs[tab_idx].pinned,
-                            pin_allowed: window_row_target.is_some(),
+                            pin_allowed: crate::ui::compute_tab_card_areas(
+                                self,
+                                self.view.sidebar_rect,
+                            )
+                            .into_iter()
+                            .find(|card| mouse.row >= card.rect.y && mouse.row < card.rect.bottom())
+                            .is_some_and(|card| card.pin_allowed),
                             has_subgroup: self
                                 .workspaces
                                 .get(ws_idx)
@@ -6934,6 +6940,56 @@ mod tests {
         );
         assert!(menu.items().contains(&"Rename"));
         assert!(menu.items().contains(&crate::app::state::SETTLE_ITEM));
+    }
+
+    #[test]
+    fn right_clicking_split_snoozed_pane_has_no_window_pin_action() {
+        let mut app = app_for_mouse_test();
+        let mut workspace = Workspace::test_new("split window");
+        let snoozed_pane = workspace.tabs[0].root_pane;
+        workspace.test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.detected_agent = Some(Agent::Pi);
+            terminal.set_raw_agent_state_for_test(AgentState::Working);
+        }
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.sidebar_sections_layout = true;
+        app.state.sidebar_width = 44;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.reconcile_sidebar_presentation();
+        let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
+        assert!(app.state.snooze_pane_at(0, snoozed_pane, deadline));
+        app.state
+            .collapsed_sidebar_groups
+            .insert("sections:Snoozed".into());
+        let sidebar = Rect::new(0, 0, 44, 40);
+        app.state.view.sidebar_rect = sidebar;
+        let tab_cards = crate::ui::compute_tab_card_areas(&app.state, sidebar);
+        let child_row = tab_cards
+            .iter()
+            .find(|card| card.pane_id == snoozed_pane)
+            .map(|card| {
+                assert!(!card.pin_allowed);
+                card.rect.y
+            })
+            .or_else(|| {
+                crate::ui::compute_agent_card_areas(&app.state, sidebar)
+                    .into_iter()
+                    .find(|card| card.pane_id == snoozed_pane)
+                    .map(|card| card.rect.y)
+            })
+            .expect("visible snoozed child row");
+        app.state.handle_mouse(
+            &mut app.terminal_runtimes,
+            crate::app::LOCAL_INPUT_SOURCE,
+            mouse(MouseEventKind::Down(MouseButton::Right), 9, child_row),
+        );
+        let menu = app.state.context_menu.as_ref().expect("child row menu");
+        assert!(!menu.items().contains(&"Pin"));
+        assert!(!menu.items().contains(&"Unpin"));
     }
 
     #[test]
