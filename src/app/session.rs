@@ -97,7 +97,11 @@ impl App {
 
         self.state.mark_session_dirty();
         if self.session_save_retry_deadline.is_none() {
-            self.session_save_deadline = Some(Instant::now() + SESSION_SAVE_DEBOUNCE);
+            let now = Instant::now();
+            let first_dirty_at = *self.session_save_first_dirty_at.get_or_insert(now);
+            self.session_save_deadline = Some(
+                (now + SESSION_SAVE_DEBOUNCE).min(first_dirty_at + super::SESSION_SAVE_MAX_WAIT),
+            );
             self.session_save_scheduled_revision = Some(self.state.session_dirty_revision);
         }
     }
@@ -162,6 +166,7 @@ impl App {
                 if self.state.session_dirty_revision == result.revision {
                     self.state.session_dirty = false;
                     self.session_save_deadline = None;
+                    self.session_save_first_dirty_at = None;
                     self.session_dirty_since = None;
                     self.session_save_stall_warning_at = None;
                 }
@@ -218,6 +223,7 @@ impl App {
     pub(crate) fn start_background_session_save(&mut self) {
         if self.no_session {
             self.session_save_deadline = None;
+            self.session_save_first_dirty_at = None;
             self.session_save_scheduled_revision = None;
             self.session_save_retry_deadline = None;
             return;
@@ -237,6 +243,7 @@ impl App {
         }
         if !self.state.session_dirty {
             self.session_save_deadline = None;
+            self.session_save_first_dirty_at = None;
             self.session_dirty_since = None;
             self.session_save_stall_warning_at = None;
             return;
@@ -280,6 +287,7 @@ impl App {
 
         if self.no_session {
             self.session_save_deadline = None;
+            self.session_save_first_dirty_at = None;
             self.session_save_scheduled_revision = None;
             self.session_save_retry_deadline = None;
             return;
@@ -307,6 +315,7 @@ impl App {
         if self.pane_exit_checkpoint_pending {
             self.state.session_dirty = false;
             self.session_save_deadline = None;
+            self.session_save_first_dirty_at = None;
             self.session_save_scheduled_revision = None;
             self.session_save_retry_deadline = None;
         }
@@ -315,6 +324,7 @@ impl App {
     pub(crate) fn save_session_on_shutdown(&mut self) {
         if self.pane_exit_checkpoint_pending && !self.state.session_dirty {
             self.session_save_deadline = None;
+            self.session_save_first_dirty_at = None;
             return;
         }
         self.save_session_now();
