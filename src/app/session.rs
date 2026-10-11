@@ -252,6 +252,8 @@ impl App {
         self.session_dirty_since.get_or_insert_with(Instant::now);
 
         self.pane_exit_checkpoint_pending = false;
+        // The next dirty mark after this snapshot needs its own max-wait window.
+        self.session_save_first_dirty_at = None;
         let job = self.capture_session_save_job();
         let revision = self.state.session_dirty_revision;
         self.session_save_scheduled_revision = Some(revision);
@@ -294,6 +296,7 @@ impl App {
         }
 
         let revision = self.state.session_dirty_revision;
+        self.session_save_first_dirty_at = None;
         let writer = self.session_writer.clone();
         let job = self.capture_session_save_job();
         let result = run_session_save_job(job, revision, &writer);

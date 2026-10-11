@@ -8763,6 +8763,45 @@ mod tests {
     }
 
     #[test]
+    fn stale_save_completion_opens_a_fresh_max_wait_window() {
+        let mut env = crate::config::TestConfigEnvGuard::acquire();
+        let config_home = unique_temp_path("stale-session-save-max-wait");
+        env.set("XDG_CONFIG_HOME", &config_home);
+        env.remove(crate::session::SESSION_ENV_VAR);
+
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.workspaces = vec![Workspace::test_new("autosave")];
+        app.state.ensure_test_terminals();
+        app.state.mark_session_dirty();
+        app.session_save_first_dirty_at =
+            Some(Instant::now() - SESSION_SAVE_MAX_WAIT - Duration::from_secs(1));
+
+        app.start_background_session_save();
+        assert!(app.session_save_thread.is_some());
+        app.state.mark_session_dirty();
+        let result = app
+            .session_save_thread
+            .take()
+            .expect("save thread")
+            .join()
+            .expect("save result");
+        assert_ne!(result.revision, app.state.session_dirty_revision);
+        app.apply_session_save_result(result);
+
+        app.session_save_deadline = None;
+        app.schedule_session_save();
+        let now = Instant::now();
+        let first_dirty_at = app.session_save_first_dirty_at.expect("fresh first dirty");
+        let deadline = app.session_save_deadline.expect("next deadline");
+        assert!(deadline > now, "deadline should not already be due");
+        assert!(deadline <= first_dirty_at + SESSION_SAVE_MAX_WAIT);
+
+        env.remove("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(config_home);
+    }
+
+    #[test]
     fn ac1_5_explicit_save_schedule_records_dirty_revision() {
         let mut app = test_app();
         app.no_session = false;
