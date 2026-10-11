@@ -9990,10 +9990,9 @@ esac
         server.clients.insert(1, test_app_client(Some(true), 1));
         server.foreground_client_id = Some(1);
         server.sync_foreground_client_state();
-        crate::ui::compute_view(
-            &mut server.app.state,
-            ratatui::layout::Rect::new(0, 0, 80, 24),
-        );
+        // The attached client's sidebar presentation is swapped in only while
+        // rendering. Rebuild its hover targets through that same path.
+        server.render_and_stream();
         let tab = server.app.state.view.tab_hit_areas[1];
         let click = |column, row| {
             crate::raw_input::RawInputEvent::Mouse(MouseEvent {
@@ -10051,10 +10050,7 @@ esac
                 modifiers: KeyModifiers::empty(),
             })],
         );
-        crate::ui::compute_view(
-            &mut server.app.state,
-            ratatui::layout::Rect::new(0, 0, 80, 24),
-        );
+        server.render_and_stream();
         let sidebar_pin = server
             .app
             .state
