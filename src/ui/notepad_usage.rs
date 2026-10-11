@@ -121,12 +121,12 @@ fn usage_sources(app: &AppState) -> Vec<UsageRowSource<'_>> {
         groups.entry(account.provider).or_default().push(account);
     }
     for provider in PROVIDERS {
-        if app.notepad.usage_collapsed && provider == QuotaProvider::OpenCode {
-            continue;
-        }
         let accounts = groups.remove(&provider).unwrap_or_default();
-        // OpenCode follows the same rule: listed only while a pane uses it.
-        if !active.contains_key(&provider) && accounts.iter().all(|a| a.usage.unavailable.is_some())
+        // OpenCode is always listed (folded and expanded) so a broken source
+        // stays visible; other providers hide when unused and disconnected.
+        if provider != QuotaProvider::OpenCode
+            && !active.contains_key(&provider)
+            && accounts.iter().all(|a| a.usage.unavailable.is_some())
         {
             continue;
         }
@@ -390,7 +390,8 @@ pub(crate) fn title_tooltip(app: &AppState) -> String {
         .collect();
 
     for provider in PROVIDERS {
-        if !active.contains_key(&provider)
+        if provider != QuotaProvider::OpenCode
+            && !active.contains_key(&provider)
             && app
                 .provider_usage
                 .accounts
@@ -398,9 +399,6 @@ pub(crate) fn title_tooltip(app: &AppState) -> String {
                 .filter(|a| a.provider == provider)
                 .all(|a| a.usage.unavailable.is_some())
         {
-            continue;
-        }
-        if app.notepad.usage_collapsed && provider == QuotaProvider::OpenCode {
             continue;
         }
         if !app
@@ -889,18 +887,20 @@ mod tests {
     fn usage_collapsed_selected_accounts_and_dynamic_height() {
         let mut app = fixture();
         let (rows, _) = usage_rows_window(&app, 40, 0, 30);
-        assert_eq!(rows.len(), 4);
+        // OpenCode is always listed, folded too, even with no pane using it.
+        assert_eq!(rows.len(), 5);
         assert!(text(&rows[0]).contains("SHQ"));
+        assert!(text(&rows[4]).contains("no quota source"));
         assert!(!rows.iter().any(|r| text(r).contains("SSO")));
         crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
-        assert_eq!(app.view.notepad_usage_content_rows, 4);
-        assert_eq!(app.view.notepad_rect.height, 5);
+        assert_eq!(app.view.notepad_usage_content_rows, 5);
+        assert_eq!(app.view.notepad_rect.height, 6);
         let folded_list =
             super::super::sidebar::workspace_list_rect_for_app(&app, app.view.sidebar_rect);
         app.notepad.usage_collapsed = false;
         crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
-        assert_eq!(app.view.notepad_usage_content_rows, 5);
-        assert_eq!(app.view.notepad_rect.height, 6);
+        assert_eq!(app.view.notepad_usage_content_rows, 6);
+        assert_eq!(app.view.notepad_rect.height, 7);
         let expanded_list =
             super::super::sidebar::workspace_list_rect_for_app(&app, app.view.sidebar_rect);
         assert_eq!(folded_list.height, expanded_list.height + 1);
@@ -922,15 +922,7 @@ mod tests {
             .accounts
             .push(app.provider_usage.accounts[3].clone());
         let (rows, _) = usage_rows_window(&app, 40, 0, 30);
-        // OpenCode has no quota source, so it stays hidden until a pane uses it.
-        assert_eq!(rows.len(), 5);
-        assert!(!rows.iter().any(|r| text(r).contains("no quota source")));
-        let id = app.workspaces[0].tabs[0]
-            .terminal_id(app.workspaces[0].tabs[0].root_pane)
-            .unwrap()
-            .clone();
-        app.terminals.get_mut(&id).unwrap().detected_agent = Some(crate::detect::Agent::OpenCode);
-        let (rows, _) = usage_rows_window(&app, 40, 0, 30);
+        // OpenCode is listed even though no pane uses it.
         assert_eq!(rows.len(), 6);
         assert!(text(&rows[0]).starts_with(super::super::icons::usage_label(
             QuotaProvider::Claude,
@@ -1022,7 +1014,8 @@ mod tests {
             }
         }
         app.provider_usage.accounts[1].usage.unavailable = Some(UsageUnavailable::NoSessionData);
-        assert_eq!(usage_row_count(&app), 3);
+        // Codex hides (disconnected, unused); OpenCode stays listed.
+        assert_eq!(usage_row_count(&app), 4);
         app.provider_usage.accounts[0].usage.unavailable = Some(UsageUnavailable::AuthExpired);
         app.nerd_font = false;
         let (rows, _) = usage_rows_window(&app, 26, 0, 20);
