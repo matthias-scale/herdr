@@ -2227,6 +2227,7 @@ impl AppState {
                             settle_pane_id,
                             snooze_target,
                             starred: self.tab_starred(ws_idx, tab_idx),
+                            pinned: self.workspaces[ws_idx].tabs[tab_idx].pinned,
                             has_subgroup: self
                                 .workspaces
                                 .get(ws_idx)
@@ -2309,6 +2310,7 @@ impl AppState {
                             settle_pane_id: None,
                             snooze_target: None,
                             starred: self.tab_starred(ws_idx, tab_idx),
+                            pinned: self.workspaces[ws_idx].tabs[tab_idx].pinned,
                             has_subgroup: self
                                 .workspaces
                                 .get(ws_idx)
@@ -3204,6 +3206,7 @@ impl AppState {
             Some(tab_idx),
             ContextMenuKind::Tab {
                 starred,
+                pinned,
                 has_subgroup,
                 ..
             },
@@ -3211,6 +3214,7 @@ impl AppState {
         {
             if let Some(tab) = self.workspaces[ws_idx].tabs.get(tab_idx) {
                 *starred = tab.starred;
+                *pinned = tab.pinned;
                 *has_subgroup = tab.subgroup().is_some();
             }
         }
@@ -6912,6 +6916,7 @@ mod tests {
                 ws_idx: 1,
                 tab_idx: 0,
                 starred: false,
+                pinned: false,
                 has_subgroup: false,
                 settle_pane_id: Some(target.pane_id),
                 snooze_target: Some(target.pane_id),
@@ -6925,6 +6930,64 @@ mod tests {
         );
         assert!(menu.items().contains(&"Rename"));
         assert!(menu.items().contains(&crate::app::state::SETTLE_ITEM));
+    }
+
+    #[test]
+    fn sidebar_session_menu_pins_and_unpins_without_focusing_the_target() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.sidebar_width = 40;
+        app.state.set_server_mode(Mode::Terminal);
+        app.state.toggle_workspace_agent_disclosure(1);
+        let area = Rect::new(0, 0, 120, 40);
+
+        for (action, pinned) in [
+            (ContextMenuAction::PinTab, true),
+            (ContextMenuAction::UnpinTab, false),
+        ] {
+            crate::ui::compute_view(&mut app.state, area);
+            let row = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
+                .into_iter()
+                .find(|card| card.ws_idx == 1)
+                .expect("second workspace session row");
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Right),
+                row.rect.x + 2,
+                row.rect.y,
+            ));
+            let menu = app.state.context_menu.as_ref().expect("session menu");
+            let index = app
+                .state
+                .context_menu_actions(menu)
+                .iter()
+                .position(|candidate| *candidate == action)
+                .expect("pin action reflects current state");
+            let menu_rect = app.state.context_menu_rect().expect("menu rect");
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                menu_rect.x + 2,
+                menu_rect.y + 1 + index as u16,
+            ));
+            crate::ui::compute_view(&mut app.state, area);
+            assert_eq!(app.state.workspaces[1].tabs[0].pinned, pinned);
+            assert_eq!(app.state.active, Some(0));
+            assert_eq!(app.state.workspaces[0].active_tab, 0);
+            assert_eq!(
+                crate::ui::sidebar::sidebar_rows(&app.state)
+                    .iter()
+                    .any(|row| matches!(
+                        row,
+                        crate::ui::sidebar::SidebarRow::SectionHeader {
+                            title: "Pinned",
+                            ..
+                        }
+                    )),
+                pinned,
+            );
+        }
     }
 
     #[test]
@@ -10729,6 +10792,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 1,
                 starred: false,
+                pinned: false,
                 has_subgroup: false,
                 settle_pane_id: None,
                 snooze_target: None,

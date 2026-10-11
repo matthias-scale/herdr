@@ -4030,6 +4030,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
+                pinned: false,
                 has_subgroup: false,
                 settle_pane_id: Some(root_pane),
                 snooze_target: Some(root_pane),

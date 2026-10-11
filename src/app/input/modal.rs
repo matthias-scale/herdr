@@ -1894,6 +1894,15 @@ impl App {
                 ContextMenuKind::Tab {
                     ws_idx, tab_idx, ..
                 },
+                Some("Pin" | "Unpin"),
+            ) => {
+                self.toggle_pin_tab_via_api(ws_idx, tab_idx);
+                self.state.close_client_overlay();
+            }
+            (
+                ContextMenuKind::Tab {
+                    ws_idx, tab_idx, ..
+                },
                 Some(crate::app::state::MOVE_TO_SUBGROUP_ITEM),
             ) => {
                 // The picker hangs off the menu cell the operator just chose,
@@ -3501,6 +3510,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
+                pinned: false,
                 has_subgroup: false,
                 settle_pane_id: None,
                 snooze_target: None,
@@ -3538,6 +3548,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
+                pinned: false,
                 has_subgroup: false,
                 settle_pane_id: None,
                 snooze_target: None,
@@ -3566,6 +3577,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
+                pinned: false,
                 has_subgroup: false,
                 settle_pane_id: None,
                 snooze_target: None,
@@ -3592,6 +3604,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
+                pinned: false,
                 has_subgroup: true,
                 settle_pane_id: None,
                 snooze_target: None,
@@ -3628,6 +3641,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
+                pinned: false,
                 has_subgroup: false,
                 settle_pane_id: Some(pane_id),
                 snooze_target: None,
@@ -3657,6 +3671,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
+                pinned: false,
                 has_subgroup: false,
                 settle_pane_id: Some(pane_id),
                 snooze_target: None,
@@ -3688,6 +3703,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
+                pinned: false,
                 has_subgroup: false,
                 settle_pane_id: Some(pane_id),
                 snooze_target: None,
@@ -3714,6 +3730,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
+                pinned: false,
                 has_subgroup: false,
                 settle_pane_id: None,
                 snooze_target: None,
@@ -3745,6 +3762,7 @@ mod tests {
                 ws_idx: 0,
                 tab_idx: 0,
                 starred: false,
+                pinned: false,
                 has_subgroup: true,
                 settle_pane_id: None,
                 snooze_target: None,
@@ -3832,6 +3850,7 @@ mod tests {
                     settle_pane_id: Some(pane_id),
                     snooze_target: Some(pane_id),
                     starred: false,
+                    pinned: false,
                     has_subgroup: false,
                 },
                 x: 0,
@@ -3894,6 +3913,7 @@ mod tests {
                 settle_pane_id: Some(pane_id),
                 snooze_target: Some(pane_id),
                 starred: false,
+                pinned: false,
                 has_subgroup: false,
             },
             x: 3,
@@ -3967,6 +3987,7 @@ mod tests {
                 settle_pane_id: Some(pane_id),
                 snooze_target: Some(pane_id),
                 starred: false,
+                pinned: false,
                 has_subgroup: false,
             },
             x: 3,

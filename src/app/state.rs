@@ -3656,6 +3656,8 @@ pub enum ContextMenuKind {
         /// Snapshot of the tab's star at open time, so the entry can read
         /// "Star" or "Unstar" without the menu reaching back into state.
         starred: bool,
+        /// Snapshot for the Pin/Unpin context-menu label.
+        pinned: bool,
         /// Snapshot of the tab's subgroup membership at open time, so the menu
         /// offers "Remove from subgroup" exactly when there is one to remove.
         has_subgroup: bool,
@@ -3991,6 +3993,8 @@ pub enum ContextMenuAction {
     RenameTab,
     StarTab,
     UnstarTab,
+    PinTab,
+    UnpinTab,
     MoveToSubgroup,
     RemoveFromSubgroup,
     Snooze,
@@ -4031,6 +4035,8 @@ impl ContextMenuAction {
             Self::NewTab => "New tab",
             Self::StarTab => STAR_ITEM,
             Self::UnstarTab => UNSTAR_ITEM,
+            Self::PinTab => "Pin",
+            Self::UnpinTab => "Unpin",
             Self::MoveToSubgroup => MOVE_TO_SUBGROUP_ITEM,
             Self::RemoveFromSubgroup => REMOVE_FROM_SUBGROUP_ITEM,
             Self::Snooze => SNOOZE_ITEM,
@@ -4134,6 +4140,7 @@ impl ContextMenuState {
             ],
             ContextMenuKind::Tab {
                 starred,
+                pinned,
                 has_subgroup,
                 settle_pane_id,
                 snooze_target,
@@ -4146,6 +4153,11 @@ impl ContextMenuState {
                         ContextMenuAction::UnstarTab
                     } else {
                         ContextMenuAction::StarTab
+                    },
+                    if *pinned {
+                        ContextMenuAction::UnpinTab
+                    } else {
+                        ContextMenuAction::PinTab
                     },
                     ContextMenuAction::MoveToSubgroup,
                 ];
@@ -9448,6 +9460,7 @@ mod tests {
                 settle_pane_id: Some(pane_id),
                 snooze_target: Some(pane_id),
                 starred: false,
+                pinned: false,
                 has_subgroup: false,
             },
             x: 7,
@@ -9477,6 +9490,7 @@ mod tests {
                 settle_pane_id: Some(pane_id),
                 snooze_target: Some(pane_id),
                 starred: false,
+                pinned: false,
                 has_subgroup: false,
             }
         );
@@ -9520,6 +9534,7 @@ mod tests {
                 settle_pane_id: None,
                 snooze_target: None,
                 starred: false,
+                pinned: false,
                 has_subgroup: false,
             },
             x: 2,
