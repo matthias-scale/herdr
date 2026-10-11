@@ -5672,6 +5672,17 @@ pub(crate) enum StatusSegmentKind {
     Disk,
     /// The `⋯` control that opens the popover holding the hidden indicators.
     More,
+    MoreGroup,
+    MoreAction(TopBarAction),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TopBarAction {
+    RepoEditor,
+    AddAction,
+    PaneToggle(PaneToggleDirection),
+    UserAction(usize),
+    GitMenu,
 }
 
 impl StatusSegmentKind {
@@ -5686,6 +5697,7 @@ impl StatusSegmentKind {
                 | Self::FleetHost(_)
                 | Self::FleetUseMachine(_)
                 | Self::More
+                | Self::MoreAction(_)
         )
     }
 }
