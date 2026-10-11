@@ -48,6 +48,8 @@ const MAX_CLAUDE_REMAINING_MINUTES: u64 = 24 * 60;
 const MAX_PROVIDER_PROFILES: usize = 32;
 const MAX_PROFILE_METADATA_BYTES: u64 = 64 * 1024;
 const MAX_CODEX_QUOTA_CACHE_ENTRIES: usize = MAX_PROVIDER_PROFILES * MAX_USAGE_FILES * 2;
+const OPENCODE_USAGE_FILE: &str = "opencode-usage.jsonl";
+const OPENCODE_USAGE_MAX_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 struct CodexRateLimits {
@@ -524,10 +526,35 @@ pub(crate) enum UsageUnavailable {
     HelperTimedOut,
     HelperFailed,
     HelperUnreadable,
-    NoQuotaSource,
+    NoOpenCodeUsageLog,
+    OpenCodeNotInstalled,
+    OpenCodeGoLimitsNotExposed,
     UnknownProfile,
     UnknownAccount,
     AuthExpired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenCodeRouteKind {
+    Kimi,
+    Codex,
+    Claude,
+    Go,
+    PayPerToken,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OpenCodeUsage {
+    pub provider_id: String,
+    pub model_id: String,
+    pub kind: OpenCodeRouteKind,
+    pub spend_5h: f64,
+    pub spend_7d: f64,
+    pub input_5h: u64,
+    pub output_5h: u64,
+    pub input_7d: u64,
+    pub output_7d: u64,
+    pub providers: Vec<String>,
 }
 
 fn unavailable(reason: UsageUnavailable) -> AccountUsage {
@@ -595,6 +622,7 @@ pub(crate) struct ProviderAccountUsage {
 pub(crate) struct ProviderUsageSnapshot {
     pub collected_unix: Option<i64>,
     pub accounts: Vec<ProviderAccountUsage>,
+    pub opencode: Option<OpenCodeUsage>,
     primary_claude: String,
     primary_codex: String,
     primary_kimi: String,
@@ -630,6 +658,7 @@ impl ProviderUsageSnapshot {
                     usage: kimi,
                 },
             ],
+            opencode: None,
             collected_unix: None,
             primary_claude: "default".into(),
             primary_codex: "default".into(),
@@ -702,13 +731,21 @@ pub(crate) fn collect(now_unix: Option<i64>, now: Instant) -> ProviderUsageSnaps
     let mut accounts = claude;
     accounts.extend(codex);
     accounts.push(kimi);
-    // OpenCode has no account quota cache contract. Keep it visible without
-    // borrowing another provider's limits or inventing usage percentages.
+    let opencode = load_opencode_usage(now_unix);
+    let opencode_usage = match opencode.as_ref().map(|usage| usage.kind) {
+        None if !opencode_installed() => unavailable(UsageUnavailable::OpenCodeNotInstalled),
+        None => unavailable(UsageUnavailable::NoOpenCodeUsageLog),
+        Some(OpenCodeRouteKind::Go) => unavailable(UsageUnavailable::OpenCodeGoLimitsNotExposed),
+        Some(OpenCodeRouteKind::Kimi) => routed_usage(&accounts, QuotaProvider::Kimi),
+        Some(OpenCodeRouteKind::Codex) => routed_usage(&accounts, QuotaProvider::Codex),
+        Some(OpenCodeRouteKind::Claude) => routed_usage(&accounts, QuotaProvider::Claude),
+        Some(OpenCodeRouteKind::PayPerToken) => AccountUsage::default(),
+    };
     accounts.push(ProviderAccountUsage {
         provider: QuotaProvider::OpenCode,
         profile_id: "default".into(),
         label: "default".into(),
-        usage: unavailable(UsageUnavailable::NoQuotaSource),
+        usage: opencode_usage,
     });
     {
         accounts.push(ProviderAccountUsage {
@@ -721,12 +758,134 @@ pub(crate) fn collect(now_unix: Option<i64>, now: Instant) -> ProviderUsageSnaps
     ProviderUsageSnapshot {
         collected_unix: now_unix,
         accounts,
+        opencode,
         primary_claude,
         primary_codex,
         primary_kimi: "default".into(),
         primary_agy: "default".into(),
         primary_opencode: "default".into(),
     }
+}
+
+#[derive(Debug, Clone)]
+struct OpenCodeUsageRecord {
+    ts: i64,
+    provider_id: String,
+    model_id: String,
+    cost: f64,
+    input: u64,
+    output: u64,
+}
+
+fn opencode_installed() -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|directory| {
+            let executable = directory.join(if cfg!(windows) {
+                "opencode.exe"
+            } else {
+                "opencode"
+            });
+            executable.is_file()
+        })
+    })
+}
+
+fn read_opencode_records(now: i64) -> Vec<OpenCodeUsageRecord> {
+    let path = crate::config::state_dir().join(OPENCODE_USAGE_FILE);
+    let Ok(metadata) = fs::metadata(&path) else {
+        return Vec::new();
+    };
+    if metadata.len() > OPENCODE_USAGE_MAX_BYTES {
+        return Vec::new();
+    }
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    parse_opencode_records(&contents, now)
+}
+
+fn parse_opencode_records(contents: &str, now: i64) -> Vec<OpenCodeUsageRecord> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            let ts = value.get("ts")?.as_i64()? / 1000;
+            let provider_id = value.get("providerID")?.as_str()?.to_owned();
+            let model_id = value.get("modelID")?.as_str()?.to_owned();
+            let cost = value.get("cost")?.as_f64()?;
+            let input = value.get("input")?.as_u64()?;
+            let output = value.get("output")?.as_u64()?;
+            (ts <= now && ts >= now - SEVEN_DAY_MINUTES as i64 * 60 && cost.is_finite()).then_some(
+                OpenCodeUsageRecord {
+                    ts,
+                    provider_id,
+                    model_id,
+                    cost,
+                    input,
+                    output,
+                },
+            )
+        })
+        .collect()
+}
+
+fn classify_opencode_provider(provider: &str) -> OpenCodeRouteKind {
+    if provider.starts_with("kimi-code-plan-") || provider == "kimi-for-coding" {
+        OpenCodeRouteKind::Kimi
+    } else if provider == "cliproxy-codex" || provider == "openai" {
+        OpenCodeRouteKind::Codex
+    } else if provider == "anthropic" {
+        OpenCodeRouteKind::Claude
+    } else if provider == "opencode-go" {
+        OpenCodeRouteKind::Go
+    } else {
+        OpenCodeRouteKind::PayPerToken
+    }
+}
+
+fn load_opencode_usage(now: Option<i64>) -> Option<OpenCodeUsage> {
+    let now = now?;
+    let records = read_opencode_records(now);
+    summarize_opencode_usage(records, now)
+}
+
+fn summarize_opencode_usage(records: Vec<OpenCodeUsageRecord>, now: i64) -> Option<OpenCodeUsage> {
+    let latest = records.iter().max_by_key(|record| record.ts)?;
+    let kind = classify_opencode_provider(&latest.provider_id);
+    let mut usage = OpenCodeUsage {
+        provider_id: latest.provider_id.clone(),
+        model_id: latest.model_id.clone(),
+        kind,
+        spend_5h: 0.0,
+        spend_7d: 0.0,
+        input_5h: 0,
+        output_5h: 0,
+        input_7d: 0,
+        output_7d: 0,
+        providers: Vec::new(),
+    };
+    for record in records {
+        if !usage.providers.contains(&record.provider_id) {
+            usage.providers.push(record.provider_id.clone());
+        }
+        usage.spend_7d += record.cost;
+        usage.input_7d = usage.input_7d.saturating_add(record.input);
+        usage.output_7d = usage.output_7d.saturating_add(record.output);
+        if record.ts >= now - 5 * 60 * 60 {
+            usage.spend_5h += record.cost;
+            usage.input_5h = usage.input_5h.saturating_add(record.input);
+            usage.output_5h = usage.output_5h.saturating_add(record.output);
+        }
+    }
+    Some(usage)
+}
+
+fn routed_usage(accounts: &[ProviderAccountUsage], provider: QuotaProvider) -> AccountUsage {
+    accounts
+        .iter()
+        .find(|account| account.provider == provider)
+        .map(|account| account.usage.clone())
+        .unwrap_or_else(|| unavailable(UsageUnavailable::UnknownAccount))
 }
 
 /// Loads the last complete scan without touching provider logs, so opening the
@@ -2016,6 +2175,43 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn opencode_provider_mapping_covers_subscription_and_spend_routes() {
+        for (provider, expected) in [
+            ("kimi-code-plan-global", OpenCodeRouteKind::Kimi),
+            ("kimi-code-plan-cn", OpenCodeRouteKind::Kimi),
+            ("kimi-for-coding", OpenCodeRouteKind::Kimi),
+            ("cliproxy-codex", OpenCodeRouteKind::Codex),
+            ("openai", OpenCodeRouteKind::Codex),
+            ("anthropic", OpenCodeRouteKind::Claude),
+            ("opencode-go", OpenCodeRouteKind::Go),
+            ("openrouter", OpenCodeRouteKind::PayPerToken),
+        ] {
+            assert_eq!(classify_opencode_provider(provider), expected, "{provider}");
+        }
+    }
+
+    #[test]
+    fn opencode_jsonl_is_windowed_and_sums_cost_and_tokens() {
+        let now = 2_000_000_000_i64;
+        let jsonl = format!(
+            "{{\"ts\":{},\"providerID\":\"openrouter\",\"modelID\":\"m1\",\"cost\":0.42,\"input\":10,\"output\":4}}\n{{\"ts\":{},\"providerID\":\"deepseek\",\"modelID\":\"m2\",\"cost\":3.1,\"input\":20,\"output\":8}}\n{{\"ts\":{},\"providerID\":\"old\",\"modelID\":\"m3\",\"cost\":9.0,\"input\":100,\"output\":100}}\ninvalid\n",
+            (now - 60) * 1000,
+            (now - 6 * 60 * 60) * 1000,
+            (now - 8 * 24 * 60 * 60) * 1000,
+        );
+        let records = parse_opencode_records(&jsonl, now);
+        assert_eq!(records.len(), 2);
+        let usage = summarize_opencode_usage(records, now).unwrap();
+        assert_eq!(usage.provider_id, "openrouter");
+        assert_eq!(usage.model_id, "m1");
+        assert!((usage.spend_5h - 0.42).abs() < 0.001);
+        assert!((usage.spend_7d - 3.52).abs() < 0.001);
+        assert_eq!((usage.input_5h, usage.output_5h), (10, 4));
+        assert_eq!((usage.input_7d, usage.output_7d), (30, 12));
+        assert_eq!(usage.providers, ["openrouter", "deepseek"]);
+    }
 
     // Fixed wall clock shared by quota parser fixtures.
     const NOW: i64 = 1_787_992_841;

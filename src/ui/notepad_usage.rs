@@ -204,7 +204,9 @@ fn reason(account: &ProviderAccountUsage, reason: UsageUnavailable) -> String {
         UsageUnavailable::HelperTimedOut => format!("{helper} timed out"),
         UsageUnavailable::HelperFailed => format!("{helper} failed"),
         UsageUnavailable::HelperUnreadable => format!("{helper} unreadable"),
-        UsageUnavailable::NoQuotaSource => "no quota source".into(),
+        UsageUnavailable::NoOpenCodeUsageLog => "no OpenCode usage log yet".into(),
+        UsageUnavailable::OpenCodeNotInstalled => "OpenCode not installed".into(),
+        UsageUnavailable::OpenCodeGoLimitsNotExposed => "Go limits not exposed".into(),
         UsageUnavailable::UnknownProfile => format!("unknown profile {}", account.profile_id),
         UsageUnavailable::UnknownAccount => format!("unknown account {}", account.profile_id),
         UsageUnavailable::AuthExpired => {
@@ -224,9 +226,9 @@ fn long_reason(account: &ProviderAccountUsage, unavailable: UsageUnavailable) ->
         UsageUnavailable::HelperUnreadable => {
             "helper output is oversized, invalid, or has no current quota windows"
         }
-        UsageUnavailable::NoQuotaSource => {
-            "OpenCode does not expose a supported account quota source"
-        }
+        UsageUnavailable::NoOpenCodeUsageLog => "the updated OpenCode integration has not written a usage log yet",
+        UsageUnavailable::OpenCodeNotInstalled => "the OpenCode executable is not available on PATH",
+        UsageUnavailable::OpenCodeGoLimitsNotExposed => "OpenCode Go reports its limit only when hit; usage is available on the opencode.ai console",
         UsageUnavailable::UnknownProfile | UsageUnavailable::UnknownAccount => {
             "no matching collected quota account"
         }
@@ -278,6 +280,29 @@ fn account_tooltip(
             format!(" · {}", flags.join(" · "))
         }
     ));
+    if account.provider == QuotaProvider::OpenCode {
+        if let Some(usage) = &app.provider_usage.opencode {
+            let provider = match usage.kind {
+                crate::provider_usage::OpenCodeRouteKind::Kimi => "Kimi plan",
+                crate::provider_usage::OpenCodeRouteKind::Codex => "Codex",
+                crate::provider_usage::OpenCodeRouteKind::Claude => "Claude",
+                crate::provider_usage::OpenCodeRouteKind::Go => "OpenCode Go",
+                crate::provider_usage::OpenCodeRouteKind::PayPerToken => &usage.provider_id,
+            };
+            lines.push(format!("via {provider} · {}", usage.model_id));
+            if usage.kind == crate::provider_usage::OpenCodeRouteKind::PayPerToken {
+                lines.push(format!(
+                    "5h {} input / {} output tokens",
+                    usage.input_5h, usage.output_5h
+                ));
+                lines.push(format!(
+                    "7d {} input / {} output tokens",
+                    usage.input_7d, usage.output_7d
+                ));
+                lines.push(format!("providers: {}", usage.providers.join(", ")));
+            }
+        }
+    }
     for (name, w) in windows(&account.usage) {
         let reset = w
             .resets_at
@@ -604,6 +629,29 @@ fn account_row(
             Style::default().fg(app.palette.overlay0),
         ));
         let windows: Vec<_> = windows(&account.usage).collect();
+        if account.provider == QuotaProvider::OpenCode {
+            if let Some(usage) = app.provider_usage.opencode.as_ref() {
+                if usage.kind == crate::provider_usage::OpenCodeRouteKind::PayPerToken {
+                    spans.push(Span::styled(
+                        truncate_end(
+                            &format!("5h ${:.2}  7d ${:.2}", usage.spend_5h, usage.spend_7d),
+                            usize::from(width).saturating_sub(
+                                spans
+                                    .iter()
+                                    .map(|span| display_width(&span.content))
+                                    .sum::<usize>(),
+                            ),
+                        ),
+                        Style::default().fg(app.palette.subtext0),
+                    ));
+                    return NotepadUsageRow {
+                        line: Line::from(spans),
+                        action: NotepadUsageAction::OpenDashboard,
+                        tooltip: Some(account_tooltip(app, account, active)),
+                    };
+                }
+            }
+        }
         let exhausted = windows.iter().any(|(_, w)| w.used_percent >= 100);
         let hot = windows
             .iter()
@@ -865,7 +913,15 @@ mod tests {
             profile_id: "default".into(),
             label: "OpenCode".into(),
             usage: AccountUsage {
-                unavailable: Some(UsageUnavailable::NoQuotaSource),
+                unavailable: Some(UsageUnavailable::NoOpenCodeUsageLog),
+                ..AccountUsage::default()
+            },
+        });
+        app.provider_usage.accounts.push(ProviderAccountUsage {
+            provider: QuotaProvider::OpenCode,
+            profile_id: "default".into(),
+            label: "OpenCode".into(),
+            usage: AccountUsage {
                 ..AccountUsage::default()
             },
         });
@@ -890,7 +946,7 @@ mod tests {
         // OpenCode is always listed, folded too, even with no pane using it.
         assert_eq!(rows.len(), 5);
         assert!(text(&rows[0]).contains("SHQ"));
-        assert!(text(&rows[4]).contains("no quota source"));
+        assert!(text(&rows[4]).contains("no OpenCode usage log yet"));
         assert!(!rows.iter().any(|r| text(r).contains("SSO")));
         crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
         assert_eq!(app.view.notepad_usage_content_rows, 5);
@@ -929,10 +985,84 @@ mod tests {
             app.nerd_font
         )));
         assert!(text(&rows[1]).starts_with("  SSO"));
-        assert!(text(&rows[5]).contains("no quota source"));
+        assert!(text(&rows[5]).contains("no OpenCode usage log yet"));
         assert!(rows
             .iter()
             .all(|r| r.action == NotepadUsageAction::OpenDashboard));
+    }
+
+    #[test]
+    fn opencode_kimi_route_uses_kimi_windows_and_names_model_in_tooltip() {
+        let mut app = fixture();
+        app.provider_usage.opencode = Some(crate::provider_usage::OpenCodeUsage {
+            provider_id: "kimi-code-plan-global".into(),
+            model_id: "k3".into(),
+            kind: crate::provider_usage::OpenCodeRouteKind::Kimi,
+            spend_5h: 0.0,
+            spend_7d: 0.0,
+            input_5h: 10,
+            output_5h: 5,
+            input_7d: 20,
+            output_7d: 8,
+            providers: vec!["kimi-code-plan-global".into()],
+        });
+        let kimi = app.provider_usage.accounts[2].usage.clone();
+        let opencode_index = app
+            .provider_usage
+            .accounts
+            .iter()
+            .position(|account| account.provider == QuotaProvider::OpenCode)
+            .expect("OpenCode account");
+        app.provider_usage.accounts[opencode_index].usage = kimi;
+        let (rows, _) = usage_rows_window(&app, 40, 0, 20);
+        let row = rows
+            .iter()
+            .find(|row| {
+                row.tooltip
+                    .as_deref()
+                    .is_some_and(|tip| tip.starts_with("OpenCode"))
+            })
+            .expect("OpenCode row");
+        let tooltip = row.tooltip.as_deref().unwrap_or_default();
+        assert!(tooltip.contains("via Kimi plan · k3"), "{tooltip}");
+        assert!(tooltip.contains("7d 18% used"), "{tooltip}");
+    }
+
+    #[test]
+    fn opencode_pay_per_token_route_shows_window_spend_and_provider_tokens() {
+        let mut app = fixture();
+        app.provider_usage.opencode = Some(crate::provider_usage::OpenCodeUsage {
+            provider_id: "openrouter".into(),
+            model_id: "m1".into(),
+            kind: crate::provider_usage::OpenCodeRouteKind::PayPerToken,
+            spend_5h: 0.42,
+            spend_7d: 3.10,
+            input_5h: 120,
+            output_5h: 24,
+            input_7d: 900,
+            output_7d: 180,
+            providers: vec!["openrouter".into(), "deepseek".into()],
+        });
+        let opencode_index = app
+            .provider_usage
+            .accounts
+            .iter()
+            .position(|account| account.provider == QuotaProvider::OpenCode)
+            .expect("OpenCode account");
+        app.provider_usage.accounts[opencode_index].usage = AccountUsage::default();
+        let (rows, _) = usage_rows_window(&app, 40, 0, 20);
+        let row = rows
+            .iter()
+            .find(|row| {
+                row.tooltip
+                    .as_deref()
+                    .is_some_and(|tip| tip.starts_with("OpenCode"))
+            })
+            .expect("OpenCode row");
+        assert!(text(row).contains("5h $0.42  7d $3.10"), "{}", text(row));
+        let tooltip = row.tooltip.as_deref().unwrap_or_default();
+        assert!(tooltip.contains("120 input / 24 output tokens"));
+        assert!(tooltip.contains("providers: openrouter, deepseek"));
     }
     #[test]
     fn usage_pair_widths_windows_exhaustion_thresholds_and_stale() {
@@ -998,7 +1128,9 @@ mod tests {
             UsageUnavailable::HelperTimedOut,
             UsageUnavailable::HelperFailed,
             UsageUnavailable::HelperUnreadable,
-            UsageUnavailable::NoQuotaSource,
+            UsageUnavailable::NoOpenCodeUsageLog,
+            UsageUnavailable::OpenCodeNotInstalled,
+            UsageUnavailable::OpenCodeGoLimitsNotExposed,
             UsageUnavailable::UnknownProfile,
             UsageUnavailable::UnknownAccount,
             UsageUnavailable::AuthExpired,

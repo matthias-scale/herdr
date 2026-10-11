@@ -2,15 +2,76 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=opencode
-// HERDR_INTEGRATION_VERSION=12
+// HERDR_INTEGRATION_VERSION=13
 
 import net from "node:net";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 const SOURCE = "herdr:opencode";
 const AGENT = "opencode";
 let reportSeq = Date.now() * 1000;
 let requestChain = Promise.resolve();
 let reportedRootSessionID;
+let usageWriteChain = Promise.resolve();
+const reportedMessages = new Set();
+const USAGE_LOG_LIMIT = 1024 * 1024;
+const USAGE_RETENTION_MS = 8 * 24 * 60 * 60 * 1000;
+
+function usageLogPath() {
+  const stateRoot = process.env.XDG_STATE_HOME ||
+    (process.platform === "win32"
+      ? (process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || "", "AppData", "Local"))
+      : path.join(process.env.HOME || "", ".local", "state"));
+  return path.join(stateRoot, "herdr", "opencode-usage.jsonl");
+}
+
+function usageRecord(info) {
+  const tokens = info?.tokens;
+  const record = {
+    ts: info?.time?.completed ?? info?.time?.created,
+    providerID: info?.providerID,
+    modelID: info?.modelID,
+    cost: info?.cost,
+    input: tokens?.input,
+    output: tokens?.output,
+  };
+  if (!Number.isSafeInteger(record.ts) || record.ts <= 0 ||
+      typeof record.providerID !== "string" || typeof record.modelID !== "string" ||
+      !Number.isFinite(record.cost) || !Number.isFinite(record.input) || !Number.isFinite(record.output)) {
+    return undefined;
+  }
+  return record;
+}
+
+function recordUsage(info) {
+  const record = usageRecord(info);
+  if (!record || reportedMessages.has(info.id)) return;
+  reportedMessages.add(info.id);
+  if (reportedMessages.size > 4096) reportedMessages.clear();
+  const file = usageLogPath();
+  const write = async () => {
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    let lines = [];
+    try {
+      lines = (await fs.readFile(file, "utf8")).split("\n").filter((line) => {
+        if (!line) return false;
+        try { return JSON.parse(line).ts >= Date.now() - USAGE_RETENTION_MS; }
+        catch { return false; }
+      });
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    lines.push(JSON.stringify(record));
+    let content = `${lines.join("\n")}\n`;
+    while (Buffer.byteLength(content) > USAGE_LOG_LIMIT && lines.length > 1) {
+      lines.shift();
+      content = `${lines.join("\n")}\n`;
+    }
+    await fs.writeFile(file, content, { mode: 0o600 });
+  };
+  usageWriteChain = usageWriteChain.then(write).catch(() => {});
+}
 
 // Track child sessions so their events cannot replace the pane's root session.
 // User prompts carry the root id to preserve its identity and cross-talk guard.
@@ -140,6 +201,10 @@ export const HerdrAgentStatePlugin = async () => {
       const sessionID = sessionIDFromProperties(properties);
 
       const info = properties.info;
+      if (type === "message.updated" && info?.role === "assistant" && info?.time?.completed) {
+        recordUsage(info);
+        await usageWriteChain;
+      }
       if (info?.id && info.parentID) {
         childSessions.set(info.id, info.parentID);
       }

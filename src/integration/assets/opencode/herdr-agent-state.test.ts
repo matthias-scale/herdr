@@ -1,4 +1,7 @@
 import { beforeEach, expect, mock, test } from "bun:test";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 const requests: unknown[] = [];
 const clients: FakeClient[] = [];
@@ -89,6 +92,36 @@ test("serializes lifecycle reports", async () => {
   const sequences = requests.map(requestSeq);
   expect(sequences[0]).toEqual(expect.any(Number));
   expect(sequences[1]).toBe((sequences[0] as number) + 1);
+});
+
+test("records completed assistant usage once in Herdr state", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "herdr-opencode-usage-"));
+  const oldStateHome = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = root;
+  try {
+    const plugin = await loadPlugin();
+    const event = {
+      type: "message.updated",
+      properties: {
+        info: {
+          id: "message-1", role: "assistant", providerID: "openrouter", modelID: "m1",
+          cost: 0.42, tokens: { input: 10, output: 4 }, time: { created: 1_900_000_000_000, completed: 1_900_000_001_000 },
+        },
+      },
+    };
+    await plugin.event({ event });
+    await plugin.event({ event });
+    const file = path.join(root, "herdr", "opencode-usage.jsonl");
+    const rows = (await fs.readFile(file, "utf8")).trim().split("\n").map((row) => JSON.parse(row));
+    expect(rows).toEqual([{
+      ts: 1_900_000_001_000, providerID: "openrouter", modelID: "m1",
+      cost: 0.42, input: 10, output: 4,
+    }]);
+  } finally {
+    if (oldStateHome === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = oldStateHome;
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test("suppresses redundant same-session updates", async () => {
