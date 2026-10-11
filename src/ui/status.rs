@@ -1057,15 +1057,15 @@ pub(super) fn status_report_age_label(
     })
 }
 
-/// Three-column sidebar age: `40s`, `3m`, `12m`, `1h`, `2d`. Days cap at `99d`
-/// so the label never outgrows its field.
+/// Three-column sidebar age: blank under one minute, then `3m`, `12m`, `1h`,
+/// `2d`. Days cap at `99d` so the label never outgrows its field.
 pub(super) fn status_report_age_micro_label(
     reported_at: std::time::Instant,
     now: std::time::Instant,
 ) -> String {
     let seconds = now.saturating_duration_since(reported_at).as_secs();
     if seconds < 60 {
-        format!("{seconds}s")
+        String::new()
     } else if seconds < 3_600 {
         format!("{}m", seconds / 60)
     } else if seconds < 86_400 {
