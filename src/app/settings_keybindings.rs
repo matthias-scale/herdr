@@ -418,6 +418,11 @@ mod tests {
             Some(KeybindTarget::BuiltIn { field: "settings" })
         );
         assert!(!settings_row.key.is_empty());
+        let capture_row = rows
+            .iter()
+            .find(|row| row.label == "capture to focus list")
+            .expect("capture row");
+        assert_eq!(capture_row.key, "prefix+t");
         assert!(rows
             .iter()
             .any(|row| row.heading && row.label == "user actions"));

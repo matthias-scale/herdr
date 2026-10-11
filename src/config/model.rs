@@ -965,7 +965,7 @@ pub struct KeysConfig {
     pub new_thread: BindingConfig,
     /// Open the spawn dock at the bottom of the pane area. Default: "prefix+y"
     pub new_agent_dock: BindingConfig,
-    /// Capture a thought to the local focus list. Unset by default.
+    /// Capture a thought to the local focus list. Default: "prefix+t".
     pub capture: BindingConfig,
     /// Create a Git worktree from the selected workspace. Default: "prefix+shift+g"
     pub new_worktree: BindingConfig,
@@ -2282,7 +2282,7 @@ impl Default for KeysConfig {
             new_workspace: BindingConfig::one("prefix+alt+n"),
             new_thread: BindingConfig::one("prefix+c"),
             new_agent_dock: BindingConfig::one("prefix+y"),
-            capture: BindingConfig::empty(),
+            capture: BindingConfig::one("prefix+t"),
             new_worktree: BindingConfig::one("prefix+shift+g"),
             open_worktree: BindingConfig::empty(),
             remove_worktree: BindingConfig::empty(),

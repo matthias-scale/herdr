@@ -10147,8 +10147,8 @@ navigate_pane_down = "ctrl+j"
             release_path.display(),
         );
         app.state.keybinds.custom_commands = vec![crate::config::CustomCommandKeybind {
-            bindings: crate::config::ActionKeybinds::prefix("t"),
-            label: "prefix+t".into(),
+            bindings: crate::config::ActionKeybinds::prefix("alt+t"),
+            label: "prefix+alt+t".into(),
             command,
             action: crate::config::CustomCommandAction::Shell,
             description: None,
@@ -10164,7 +10164,7 @@ navigate_pane_down = "ctrl+j"
         assert_eq!(app.state.server_mode(), Mode::Prefix);
 
         let launch_started = std::time::Instant::now();
-        app.handle_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()))
+        app.handle_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::ALT))
             .await;
         assert!(launch_started.elapsed() < Duration::from_secs(2));
 
@@ -10236,8 +10236,8 @@ navigate_pane_down = "ctrl+j"
         let output_path = unique_temp_path("custom-pane-command");
         let command = format!("printf done > '{}'", output_path.display());
         app.state.keybinds.custom_commands = vec![crate::config::CustomCommandKeybind {
-            bindings: crate::config::ActionKeybinds::prefix("t"),
-            label: "prefix+t".into(),
+            bindings: crate::config::ActionKeybinds::prefix("alt+t"),
+            label: "prefix+alt+t".into(),
             command,
             action: crate::config::CustomCommandAction::Pane,
             description: None,
@@ -10250,7 +10250,7 @@ navigate_pane_down = "ctrl+j"
             app.state.prefix_mods,
         ))
         .await;
-        app.handle_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()))
+        app.handle_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::ALT))
             .await;
 
         assert_eq!(app.state.workspaces[0].tabs[0].layout.pane_count(), 2);
@@ -10460,6 +10460,22 @@ navigate_pane_down = "ctrl+j"
             user_action_for_key(&state, &key, BindingDispatch::Prefix),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn default_capture_binding_opens_composer_from_a_pane() {
+        let mut app = app_with_test_workspaces(&["local"]);
+        let config = crate::config::Config::default();
+        app.state.keybinds = config.keybinds();
+        app.state.active = Some(0);
+        let pane_before = app.state.workspaces[0].focused_pane_id();
+
+        app.state.set_server_mode(Mode::Prefix);
+        app.handle_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()))
+            .await;
+
+        assert!(app.state.capture.is_some());
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), pane_before);
     }
 
     #[tokio::test]

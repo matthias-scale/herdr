@@ -1161,9 +1161,12 @@ resume_agents_on_restore = true
     }
 
     #[test]
-    fn focus_capture_binding_is_unset_and_user_can_move_inbox_binding() {
+    fn focus_capture_binding_defaults_to_prefix_t_and_inbox_defaults_are_unchanged() {
         let defaults = Config::default();
-        assert_eq!(defaults.keys.capture, super::super::BindingConfig::empty());
+        assert_eq!(
+            defaults.keys.capture,
+            super::super::BindingConfig::one("prefix+t")
+        );
         assert_eq!(
             defaults.keys.inbox,
             super::super::BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()])

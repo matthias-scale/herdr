@@ -2941,6 +2941,9 @@ width = "80%"
     fn user_actions_parse_in_order_with_physical_prefix_syntax() {
         let config: Config = toml::from_str(
             r#"
+[keys]
+capture = ""
+
 [[actions]]
 name = "test"
 command = "just test"

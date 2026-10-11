@@ -597,8 +597,8 @@
         {
           "key": "keys.capture",
           "type": "keybinding",
-          "default": "unset",
-          "description": "Capture a thought to the local focus list. Unset by default."
+          "default": "\"prefix+t\"",
+          "description": "Capture a thought to the local focus list."
         },
         {
           "key": "keys.new_worktree",
