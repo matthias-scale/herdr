@@ -9987,7 +9987,10 @@ esac
         server.app.state.selected = 0;
         server.app.state.sidebar_width = 40;
         server.app.state.set_server_mode(crate::app::Mode::Terminal);
-        server.clients.insert(1, test_app_client(Some(true), 1));
+        let (writer, _control_rx, _render_rx) = test_client_writer();
+        let mut client = test_app_client(Some(true), 1);
+        client.writer = Some(writer);
+        server.clients.insert(1, client);
         server.foreground_client_id = Some(1);
         server.sync_foreground_client_state();
         // The attached client's sidebar presentation is swapped in only while
