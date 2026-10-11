@@ -1555,11 +1555,12 @@ impl App {
     }
 
     /// The top bar's "more" popover is modal while open: Esc or q closes it
-    /// and every other key is swallowed, so nothing behind it moves.
+    /// and every other key is swallowed, so nothing behind it moves. Client
+    /// menus and overlays sit underneath it, so it owns their keys too. Only
+    /// the pomodoro break prompt outranks it: that prompt appears on a timer
+    /// and is drawn above everything, the popover included.
     pub(crate) fn handle_status_more_menu_key(&mut self, key: KeyEvent, owner: InputOwner) -> bool {
-        if !self.state.status_more_open
-            || matches!(owner, InputOwner::Client(_) | InputOwner::Pomodoro)
-        {
+        if !self.state.status_more_open || owner == InputOwner::Pomodoro {
             return false;
         }
         if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
@@ -1573,7 +1574,7 @@ impl App {
     /// popover closes. A click on the bar itself still reaches its target.
     fn handle_status_more_menu_mouse(&mut self, mouse: MouseEvent, owner: InputOwner) -> bool {
         if !self.state.status_more_open
-            || matches!(owner, InputOwner::Client(_) | InputOwner::Pomodoro)
+            || owner == InputOwner::Pomodoro
             || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
             return false;
@@ -7576,6 +7577,53 @@ sidebar_visible = true
             KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
             owner
         ));
+    }
+
+    #[test]
+    fn the_more_popover_swallows_keys_over_client_menus() {
+        let mut app = test_app();
+        app.state = crate::app::state::AppState::test_new();
+        app.state.status_more_open = true;
+        let owner = InputOwner::Client(crate::app::state::ClientInputOwner::SidebarSortMenu);
+        assert!(app.handle_status_more_menu_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            owner
+        ));
+        assert!(app.state.status_more_open);
+        assert!(
+            app.handle_status_more_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), owner)
+        );
+        assert!(!app.state.status_more_open);
+    }
+
+    #[test]
+    fn a_click_outside_the_more_popover_over_a_client_menu_only_closes_it() {
+        let mut app = test_app();
+        app.state = crate::app::state::AppState::test_new();
+        app.state.status_more_open = true;
+        app.state.view.status_bar_rect = ratatui::layout::Rect::new(0, 0, 80, 1);
+        let owner = InputOwner::Client(crate::app::state::ClientInputOwner::SidebarSortMenu);
+        assert!(app.handle_status_more_menu_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 5,
+                row: 10,
+                modifiers: KeyModifiers::NONE,
+            },
+            owner
+        ));
+        assert!(!app.state.status_more_open);
+    }
+
+    #[test]
+    fn the_pomodoro_break_prompt_outranks_the_more_popover() {
+        let mut app = test_app();
+        app.state = crate::app::state::AppState::test_new();
+        app.state.status_more_open = true;
+        let owner = InputOwner::Pomodoro;
+        assert!(!app
+            .handle_status_more_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), owner));
+        assert!(app.state.status_more_open);
     }
 
     #[test]
