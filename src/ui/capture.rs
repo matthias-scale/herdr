@@ -276,8 +276,15 @@ pub(crate) fn render_ack(app: &AppState, frame: &mut Frame) {
     } else {
         available
     };
+    if app.status_bar_enabled && app.view.status_bar_rect.height > 0 {
+        frame.render_widget(
+            Paragraph::new(" ".repeat(usize::from(area.width)))
+                .style(Style::default().bg(app.palette.panel_bg)),
+            area,
+        );
+    }
     let x = if app.status_bar_enabled && app.view.status_bar_rect.height > 0 {
-        area.x
+        area.x + area.width.saturating_sub(width) / 2
     } else {
         area.x + (area.width - width) / 2
     };
