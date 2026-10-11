@@ -626,6 +626,7 @@ impl App {
             self.state.copy_feedback = None;
             changed = true;
         }
+        changed |= self.clear_capture_ack_if_due(now);
 
         if self
             .selection_autoscroll_deadline
@@ -741,6 +742,19 @@ impl App {
         changed |= self.tick_resume_nudges(now);
         changed |= self.tick_auto_nudges(now);
         changed
+    }
+
+    pub(crate) fn clear_capture_ack_if_due(&mut self, now: Instant) -> bool {
+        if self
+            .capture_ack_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.capture_ack_deadline = None;
+            self.state.capture_ack = None;
+            true
+        } else {
+            false
+        }
     }
 
     pub(crate) fn handle_loop_receipt_fallback(&mut self, now: Instant) -> bool {
@@ -1295,6 +1309,7 @@ impl App {
                 super::settled::unix_seconds(std::time::SystemTime::now()),
             ),
             self.copy_feedback_deadline,
+            self.capture_ack_deadline,
             // Presentation only: an unattached headless server draws no
             // sidebar, so client-specific animation deadlines are handled by
             // the headless server instead of this shared App scheduler.
@@ -1409,6 +1424,18 @@ mod tests {
         let interrupted = std::io::Error::new(std::io::ErrorKind::Interrupted, "test interrupt");
 
         assert!(retain_detached_process_after_wait(42, Err(interrupted)));
+    }
+
+    #[test]
+    fn capture_ack_clears_at_its_deadline() {
+        let mut app = test_app_with_pane().0;
+        let now = Instant::now();
+        app.state.capture_ack = Some("saved to focus list".into());
+        app.capture_ack_deadline = Some(now + Duration::from_secs(2));
+        assert!(!app.clear_capture_ack_if_due(now));
+        assert!(app.clear_capture_ack_if_due(now + Duration::from_secs(2)));
+        assert!(app.capture_ack_deadline.is_none());
+        assert!(app.state.capture_ack.is_none());
     }
 
     #[tokio::test]

@@ -7700,6 +7700,7 @@ impl HeadlessServer {
             self.app.state.copy_feedback = None;
             other_changed = true;
         }
+        other_changed |= self.app.clear_capture_ack_if_due(now);
 
         if self
             .app

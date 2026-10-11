@@ -172,6 +172,30 @@ fn view_title_rect(
     Some(Rect::new(x, area.y, width, 1))
 }
 
+pub(crate) fn capture_ack_rect(app: &AppState, area: Rect, desired_width: u16) -> Option<Rect> {
+    let reserved = super::tabs::tab_action_status_bar_reserved_width(app, area);
+    let segments_used = if app.view.status_segments.is_empty() {
+        let fitted = fitted_status_segments(app, area);
+        segment_width(&fitted)
+    } else {
+        segment_width(&app.view.status_segments)
+    };
+    let fallback_buttons;
+    let buttons = if app.view.status_buttons.is_empty() {
+        fallback_buttons = status_buttons(app, area);
+        &fallback_buttons
+    } else {
+        &app.view.status_buttons
+    };
+    let title = view_title_rect(app, area, buttons, segments_used + usize::from(reserved))?;
+    let width = desired_width.min(area.width);
+    let center = title.x.saturating_add(title.width / 2);
+    let x = center
+        .saturating_sub(width / 2)
+        .clamp(area.x, area.right().saturating_sub(width));
+    Some(Rect::new(x, area.y, width, 1))
+}
+
 /// The right-aligned segments this frame will draw, fitted to the bar.
 pub(crate) fn fitted_status_segments(app: &AppState, area: Rect) -> Vec<Segment> {
     if area.width == 0 || area.height == 0 {
