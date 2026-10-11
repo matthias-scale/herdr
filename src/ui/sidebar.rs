@@ -33971,11 +33971,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn sections_layout_lists_each_tab_once() {
+    fn sections_layout_lists_pinned_tabs_in_both_sections_and_others_once() {
         let mut app = app_with_unlinked_tab_directories(&[None, None]);
         make_agents_blocked(&mut app);
         app.sidebar_sections_layout = true;
         app.workspaces[0].tabs[1].pinned = true;
+        let pinned_pane_id = app.workspaces[0].tabs[1].root_pane;
 
         let rows = sidebar_rows(&app);
         let local_pane_ids = app
@@ -33993,7 +33994,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                         if entry.local_target().is_some_and(|target| target.pane_id == pane_id))
                 })
                 .count();
-            assert_eq!(tab_row_count, 1, "pane {pane_id:?} should have one tab row");
+            let expected_count = if pane_id == pinned_pane_id { 2 } else { 1 };
+            assert_eq!(
+                tab_row_count, expected_count,
+                "pane {pane_id:?} should appear once per applicable section"
+            );
         }
     }
 
