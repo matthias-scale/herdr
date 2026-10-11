@@ -10513,7 +10513,11 @@ navigate_pane_down = "ctrl+j"
             .await;
         assert!(app.state.capture.is_none());
         assert!(app.state.capture_ack.is_some());
-        assert!(app.capture_ack_deadline.is_some());
+        assert!(app
+            .state
+            .capture_ack
+            .as_ref()
+            .is_some_and(|ack| ack.deadline > std::time::Instant::now()));
         assert!(crate::client::presentation::saved_capture_draft_for_test(&client).is_none());
         assert_eq!(
             crate::client::presentation::saved_spawn_dock_draft_for_test(&client),
@@ -10531,7 +10535,7 @@ navigate_pane_down = "ctrl+j"
         app.handle_key(TerminalKey::new(KeyCode::Enter, KeyModifiers::CONTROL))
             .await;
         assert_eq!(
-            app.state.capture_ack.as_deref(),
+            app.state.capture_ack.as_ref().map(|ack| ack.text.as_str()),
             Some("saved · research queued")
         );
         let research = std::fs::read_to_string(root.join("research-this.md")).unwrap();

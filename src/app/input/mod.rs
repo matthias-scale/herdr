@@ -544,13 +544,14 @@ impl App {
                     Ok(_) => {
                         self.state.sidebar_presentation.save_capture_draft(None);
                         self.state.capture = None;
-                        self.state.capture_ack = Some(if research {
-                            "saved · research queued".into()
-                        } else {
-                            "saved to focus list".into()
+                        self.state.capture_ack = Some(crate::app::capture::CaptureAck {
+                            text: if research {
+                                "saved · research queued".into()
+                            } else {
+                                "saved to focus list".into()
+                            },
+                            deadline: std::time::Instant::now() + std::time::Duration::from_secs(2),
                         });
-                        self.capture_ack_deadline =
-                            Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
                     }
                     Err(crate::focus_capture::AddError::Empty) => {}
                     Err(crate::focus_capture::AddError::Io(error)) => {

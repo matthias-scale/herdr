@@ -746,10 +746,11 @@ impl App {
 
     pub(crate) fn clear_capture_ack_if_due(&mut self, now: Instant) -> bool {
         if self
-            .capture_ack_deadline
-            .is_some_and(|deadline| now >= deadline)
+            .state
+            .capture_ack
+            .as_ref()
+            .is_some_and(|ack| now >= ack.deadline)
         {
-            self.capture_ack_deadline = None;
             self.state.capture_ack = None;
             true
         } else {
@@ -1309,7 +1310,7 @@ impl App {
                 super::settled::unix_seconds(std::time::SystemTime::now()),
             ),
             self.copy_feedback_deadline,
-            self.capture_ack_deadline,
+            self.state.capture_ack.as_ref().map(|ack| ack.deadline),
             // Presentation only: an unattached headless server draws no
             // sidebar, so client-specific animation deadlines are handled by
             // the headless server instead of this shared App scheduler.
@@ -1430,11 +1431,12 @@ mod tests {
     fn capture_ack_clears_at_its_deadline() {
         let mut app = test_app_with_pane().0;
         let now = Instant::now();
-        app.state.capture_ack = Some("saved to focus list".into());
-        app.capture_ack_deadline = Some(now + Duration::from_secs(2));
+        app.state.capture_ack = Some(crate::app::capture::CaptureAck {
+            text: "saved to focus list".into(),
+            deadline: now + Duration::from_secs(2),
+        });
         assert!(!app.clear_capture_ack_if_due(now));
         assert!(app.clear_capture_ack_if_due(now + Duration::from_secs(2)));
-        assert!(app.capture_ack_deadline.is_none());
         assert!(app.state.capture_ack.is_none());
     }
 

@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
 
@@ -56,6 +56,7 @@ pub(crate) fn render(app: &AppState, frame: &mut Frame, screen: Rect) {
         }
     }
     let panel = Style::default().bg(app.palette.panel_bg);
+    frame.render_widget(Clear, rect);
     frame.render_widget(
         Block::default()
             .borders(Borders::ALL)
@@ -137,11 +138,17 @@ pub(crate) fn render(app: &AppState, frame: &mut Frame, screen: Rect) {
         text_area,
     );
     let divider_y = rect.y.saturating_add(rect.height.saturating_sub(4));
+    let divider_rect = Rect::new(
+        rect.x.saturating_add(1),
+        divider_y,
+        rect.width.saturating_sub(2),
+        1,
+    );
     line(
         frame,
-        Rect::new(rect.x, divider_y, rect.width, 1),
+        divider_rect,
         vec![Span::styled(
-            crate::ui::home::divider_line(rect.width),
+            "─".repeat(divider_rect.width as usize),
             Style::default()
                 .fg(app.palette.surface_dim)
                 .bg(app.palette.panel_bg),
@@ -245,9 +252,10 @@ fn line(frame: &mut Frame, rect: Rect, spans: Vec<Span<'static>>) {
 }
 
 pub(crate) fn render_ack(app: &AppState, frame: &mut Frame) {
-    let Some(text) = app.capture_ack.as_deref() else {
+    let Some(ack) = app.capture_ack.as_ref() else {
         return;
     };
+    let text = ack.text.as_str();
     let available = if app.status_bar_enabled && app.view.status_bar_rect.height > 0 {
         app.view.status_bar_rect
     } else {
@@ -355,5 +363,48 @@ mod tests {
             .unwrap();
         assert!(row(&empty, 0).contains("original"));
         closed.capture = None;
+    }
+
+    #[test]
+    fn render_clears_underlay_inside_composer() {
+        let mut app = AppState::test_new();
+        app.capture = Some(crate::app::capture::CaptureState {
+            text: "hello".into(),
+            restored_age: None,
+            error: None,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                frame.render_widget(Paragraph::new("  󰄻│M↵ save\n".repeat(20)), area);
+                render(&app, frame, area);
+            })
+            .unwrap();
+        let rect = capture_rect(&app, terminal.backend().buffer().area).unwrap();
+        let blank_y = rect.y + 1;
+        for x in rect.x + 1..rect.right() - 1 {
+            assert_eq!(terminal.backend().buffer()[(x, blank_y)].symbol(), " ");
+        }
+        let text_y = rect.y + 2;
+        assert_eq!(
+            terminal.backend().buffer()[(rect.x + 2, text_y)].symbol(),
+            "h"
+        );
+        let cursor_x = rect.x + 2 + 5;
+        assert_eq!(
+            terminal.backend().buffer()[(cursor_x, text_y)].symbol(),
+            "█"
+        );
+        for x in cursor_x + 1..rect.right() - 2 {
+            assert_eq!(terminal.backend().buffer()[(x, text_y)].symbol(), " ");
+        }
+        for y in rect.y + 1..rect.bottom() - 1 {
+            assert_eq!(terminal.backend().buffer()[(rect.x, y)].symbol(), "│");
+            assert_eq!(
+                terminal.backend().buffer()[(rect.right() - 1, y)].symbol(),
+                "│"
+            );
+        }
     }
 }

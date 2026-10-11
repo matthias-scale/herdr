@@ -1600,7 +1600,7 @@ pub(crate) struct SidebarPresentationState {
     /// TUI-only spawn draft. Swapped with this attach and never projected by the server API.
     pub(crate) spawn_dock: Option<crate::app::spawn_dock::SpawnDockState>,
     pub(crate) capture: Option<crate::app::capture::CaptureState>,
-    pub(crate) capture_ack: Option<String>,
+    pub(crate) capture_ack: Option<crate::app::capture::CaptureAck>,
     pub(crate) project_menu: Option<SidebarProjectMenuState>,
     pub(crate) selected_work_group: Option<String>,
     pub(crate) object_menu: Option<SidebarObjectMenuState>,
@@ -4539,7 +4539,7 @@ pub struct AppState {
     /// Bottom-docked spawn composer, presented over panes without replacing them.
     pub(crate) spawn_dock: Option<crate::app::spawn_dock::SpawnDockState>,
     pub(crate) capture: Option<crate::app::capture::CaptureState>,
-    pub(crate) capture_ack: Option<String>,
+    pub(crate) capture_ack: Option<crate::app::capture::CaptureAck>,
     pub(crate) focus_dir: std::path::PathBuf,
     /// Client-local provider choices retained when Home closes.
     pub(crate) home_agent_choices: Vec<crate::app::home::HomeAgentChoice>,

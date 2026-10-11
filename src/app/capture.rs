@@ -1,5 +1,12 @@
 //! Pure state and key handling for the local focus capture composer.
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::time::Instant;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CaptureAck {
+    pub(crate) text: String,
+    pub(crate) deadline: Instant,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CaptureState {
