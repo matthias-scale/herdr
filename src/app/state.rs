@@ -5560,6 +5560,7 @@ pub(crate) enum ControlId {
     TopBarScrollLeft,
     TopBarScrollRight,
     TopBarNewTab,
+    TopBarTabPin(usize),
     TopBarRepoEditor,
     TopBarAddAction,
     TopBarUserAction(usize),
