@@ -107,7 +107,7 @@ pub(crate) fn top_action_menu_item_selectable(app: &AppState, item: TopActionMen
 
 pub(crate) fn step_top_action_menu(app: &AppState, current: usize, forward: bool) -> usize {
     let items = top_action_menu_items(app);
-    let candidates: Box<dyn Iterator<Item = usize>> = if forward {
+    let mut candidates: Box<dyn Iterator<Item = usize>> = if forward {
         Box::new(current.saturating_add(1)..items.len())
     } else {
         Box::new((0..current.min(items.len())).rev())
