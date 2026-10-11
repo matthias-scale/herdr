@@ -2715,7 +2715,8 @@ pub(crate) fn relative_agent_navigation_entry(
         .map(|entry| (next_idx, entry))
 }
 
-#[cfg(test)]
+// Only the unix-gated live-cwd test below calls this helper.
+#[cfg(all(test, unix))]
 pub(crate) fn agent_panel_entries_from(
     app: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
