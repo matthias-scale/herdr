@@ -5670,7 +5670,8 @@ mod tests {
     fn apply_workspace_git_statuses_projects_menu_ahead_behind_for_focused_cwd() {
         let mut state = app_with_workspaces(&["one"]);
         state.status_bar_enabled = false;
-        state.view.git_menu_button_hit_area = ratatui::layout::Rect::new(1, 1, 10, 1);
+        state.show_pull_button = true;
+        state.view.git_menu_button_hit_area = ratatui::layout::Rect::new(1, 1, 3, 1);
         let workspace_id = state.workspaces[0].id.clone();
         let cwd = state.workspaces[0].resolved_identity_cwd().unwrap();
         let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
