@@ -6953,10 +6953,12 @@ mod tests {
             (ContextMenuAction::UnpinTab, false),
         ] {
             crate::ui::compute_view(&mut app.state, area);
-            let row = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
+            let rows = crate::ui::compute_tab_card_areas(&app.state, app.state.view.sidebar_rect)
                 .into_iter()
-                .find(|card| card.ws_idx == 1)
-                .expect("second workspace session row");
+                .filter(|card| card.ws_idx == 1)
+                .collect::<Vec<_>>();
+            assert_eq!(rows.len(), if pinned { 1 } else { 2 });
+            let row = if pinned { &rows[0] } else { &rows[1] };
             app.handle_mouse(mouse(
                 MouseEventKind::Down(MouseButton::Right),
                 row.rect.x + 2,
