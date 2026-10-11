@@ -1469,7 +1469,7 @@ fn render_compact_agent_row_body(
         + widths.age
         + display_width(&layout.done_marker);
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
-    let pin_width = sidebar_pin_width(app, entry, rect, title_width);
+    let pin_width = sidebar_pin_width(app, entry, rect, title_width, tab);
     let title_width = title_width.saturating_sub(pin_width);
     let control_pane = row_control_pane(app, entry, tab);
     let show_controls = control_pane.as_ref().is_some_and(|control| control.snoozed)
@@ -1640,8 +1640,10 @@ fn sidebar_pin_width(
     entry: &AgentPanelEntry,
     row: Rect,
     title_width: usize,
+    tab: bool,
 ) -> usize {
-    if entry.local_target().is_some()
+    if tab
+        && entry.local_target().is_some()
         && (entry.pinned || sidebar_row_is_hovered(app, row.y))
         && title_width >= SIDEBAR_SELECTED_MIN_TITLE_WIDTH + SIDEBAR_PIN_CONTROL_WIDTH
     {
@@ -1658,7 +1660,7 @@ fn sidebar_pin_rect(
     prefix: usize,
     tab: bool,
 ) -> Option<Rect> {
-    if !entry.pinned && !sidebar_row_is_hovered(app, row.y) {
+    if !tab || (!entry.pinned && !sidebar_row_is_hovered(app, row.y)) {
         return None;
     }
     let provider = compact_provider(entry, app.nerd_font);
@@ -1682,7 +1684,7 @@ fn sidebar_pin_rect(
                 0
             },
     );
-    let pin_width = sidebar_pin_width(app, entry, row, title_width);
+    let pin_width = sidebar_pin_width(app, entry, row, title_width, tab);
     (pin_width > 0).then(|| {
         Rect::new(
             row.x + (widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - pin_width) as u16,
@@ -1818,7 +1820,8 @@ pub(crate) fn selected_row_control_at(
             0
         };
     let title_width = usize::from(rect.width).saturating_sub(fixed_width);
-    let title_width = title_width.saturating_sub(sidebar_pin_width(app, entry, rect, title_width));
+    let title_width =
+        title_width.saturating_sub(sidebar_pin_width(app, entry, rect, title_width, tab));
     let selected = selected_local_row_pane(app, entry, tab).is_some();
     let mobile = app.view.layout == crate::app::state::ViewLayout::Mobile;
     let hovered = sidebar_row_is_hovered(app, rect.y);
@@ -4526,7 +4529,7 @@ fn compact_sidebar_rows_inner(
         let working_collapsed = section_is_collapsed(app, WORKING_SECTION_TITLE);
         let mut space_entries = Vec::new();
         let mut remote_main_entries = Vec::new();
-        // Pinned panes have their own shelf. Active unpinned panes stay in the
+        // Pinned windows have their own shelf. Active unpinned panes stay in the
         // device tree when Working is collapsed; otherwise working panes live
         // only in the Working shelf so each local pane has one row.
         for entry in visible_entries
@@ -10015,6 +10018,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                     entry,
                     Rect::new(body.x, row_y, body.width, 1),
                     title_width,
+                    tab,
                 );
                 if pin_width > 0 {
                     if let Some(rect) = clamp_row_cells(
@@ -24239,6 +24243,50 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
+    fn pinning_a_split_window_creates_one_pinned_row_for_the_whole_tab() {
+        let mut app = app_for_real_sidebar_fixtures(&["split"]);
+        app.sidebar_sections_layout = true;
+        let second_pane = app.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.ensure_test_terminals();
+        assert_eq!(app.workspaces[0].tabs[0].panes.len(), 2);
+
+        app.workspaces[0].tabs[0].pinned = true;
+        let rows = sidebar_rows(&app);
+        let pinned = rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    SidebarRow::SectionHeader {
+                        title: PINNED_SECTION_TITLE,
+                        count: 1,
+                        ..
+                    }
+                )
+            })
+            .expect("one pinned window");
+        let pinned_rows = rows[pinned + 1..]
+            .iter()
+            .take_while(|row| !matches!(row, SidebarRow::Divider))
+            .filter(|row| matches!(row, SidebarRow::Tab { entry, .. }
+                if entry.local_target().is_some_and(|target| target.ws_idx == 0 && target.tab_idx == 0)))
+            .count();
+        assert_eq!(pinned_rows, 1, "split panes share one pinned window row");
+        assert!(app.workspaces[0].tabs[0].panes.contains_key(&second_pane));
+
+        app.workspaces[0].tabs[0].pinned = false;
+        let rows = sidebar_rows(&app);
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::SectionHeader {
+                title: PINNED_SECTION_TITLE,
+                ..
+            }
+        )));
+        assert_eq!(app.workspaces[0].tabs[0].panes.len(), 2);
+    }
+
+    #[test]
     fn sections_pinned_done_tab_stays_pinned_after_done_hide_threshold() {
         let done_since = std::time::Instant::now();
         let mut app = priority_app_with_states(&[AgentState::Idle]);
@@ -24483,6 +24531,11 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 assert!(sidebar_pin_rect(&app, &entry, rect, 1, true).is_none());
                 app.hovered_control = Some(crate::app::state::ControlId::SidebarRowHover(0));
                 let pin = sidebar_pin_rect(&app, &entry, rect, 1, true).expect("hover pin");
+                assert!(sidebar_pin_rect(&app, &entry, rect, 1, false).is_none());
+                assert!(!matches!(
+                    selected_row_control_at(&app, &entry, rect, 0, false, pin.x),
+                    Some(crate::app::state::SidebarHoverAction::Pin { .. })
+                ));
                 assert!(matches!(
                     selected_row_control_at(&app, &entry, rect, 0, true, pin.x),
                     Some(crate::app::state::SidebarHoverAction::Pin {
@@ -24508,6 +24561,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 let mut pinned = entry;
                 pinned.pinned = true;
                 assert!(sidebar_pin_rect(&app, &pinned, rect, 1, true).is_some());
+                assert!(sidebar_pin_rect(&app, &pinned, rect, 1, false).is_none());
                 terminal
                     .draw(|frame| {
                         render_compact_agent_row_with_prefix(

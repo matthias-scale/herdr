@@ -3658,6 +3658,9 @@ pub enum ContextMenuKind {
         starred: bool,
         /// Snapshot for the Pin/Unpin context-menu label.
         pinned: bool,
+        /// Only a window row or top tab may offer Pin/Unpin; pane rows use
+        /// this menu for their existing lifecycle actions.
+        pin_allowed: bool,
         /// Snapshot of the tab's subgroup membership at open time, so the menu
         /// offers "Remove from subgroup" exactly when there is one to remove.
         has_subgroup: bool,
@@ -4141,6 +4144,7 @@ impl ContextMenuState {
             ContextMenuKind::Tab {
                 starred,
                 pinned,
+                pin_allowed,
                 has_subgroup,
                 settle_pane_id,
                 snooze_target,
@@ -4154,13 +4158,18 @@ impl ContextMenuState {
                     } else {
                         ContextMenuAction::StarTab
                     },
-                    if *pinned {
-                        ContextMenuAction::UnpinTab
-                    } else {
-                        ContextMenuAction::PinTab
-                    },
                     ContextMenuAction::MoveToSubgroup,
                 ];
+                if *pin_allowed {
+                    items.insert(
+                        3,
+                        if *pinned {
+                            ContextMenuAction::UnpinTab
+                        } else {
+                            ContextMenuAction::PinTab
+                        },
+                    );
+                }
                 if *has_subgroup {
                     items.push(ContextMenuAction::RemoveFromSubgroup);
                 }
@@ -9461,6 +9470,7 @@ mod tests {
                 snooze_target: Some(pane_id),
                 starred: false,
                 pinned: false,
+                pin_allowed: true,
                 has_subgroup: false,
             },
             x: 7,
@@ -9491,6 +9501,7 @@ mod tests {
                 snooze_target: Some(pane_id),
                 starred: false,
                 pinned: false,
+                pin_allowed: true,
                 has_subgroup: false,
             }
         );
@@ -9535,6 +9546,7 @@ mod tests {
                 snooze_target: None,
                 starred: false,
                 pinned: false,
+                pin_allowed: true,
                 has_subgroup: false,
             },
             x: 2,

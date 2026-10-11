@@ -2202,7 +2202,8 @@ impl AppState {
                 // Session rows sit inside the same sidebar rect as workspace
                 // header rows but `workspace_at_row` never matches them, so
                 // without this branch a right-click on a session did nothing.
-                if let Some((ws_idx, tab_idx)) = self.tab_target_at(mouse.row).or_else(|| {
+                let window_row_target = self.tab_target_at(mouse.row);
+                if let Some((ws_idx, tab_idx)) = window_row_target.or_else(|| {
                     self.agent_detail_target_at(mouse.row)
                         .map(|(w, t, _)| (w, t))
                 }) {
@@ -2228,6 +2229,7 @@ impl AppState {
                             snooze_target,
                             starred: self.tab_starred(ws_idx, tab_idx),
                             pinned: self.workspaces[ws_idx].tabs[tab_idx].pinned,
+                            pin_allowed: window_row_target.is_some(),
                             has_subgroup: self
                                 .workspaces
                                 .get(ws_idx)
@@ -2311,6 +2313,7 @@ impl AppState {
                             snooze_target: None,
                             starred: self.tab_starred(ws_idx, tab_idx),
                             pinned: self.workspaces[ws_idx].tabs[tab_idx].pinned,
+                            pin_allowed: true,
                             has_subgroup: self
                                 .workspaces
                                 .get(ws_idx)
@@ -6917,6 +6920,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 pinned: false,
+                pin_allowed: true,
                 has_subgroup: false,
                 settle_pane_id: Some(target.pane_id),
                 snooze_target: Some(target.pane_id),
@@ -7068,10 +7072,24 @@ mod tests {
             let menu = app.state.context_menu.as_ref().expect("row context menu");
             let items = app.state.context_menu_items(menu);
             assert_eq!(
+                items.contains(&"Pin"),
+                pane_id == active_pane,
+                "only the window row offers Pin"
+            );
+            assert_eq!(
                 items.contains(&crate::app::state::SETTLE_ITEM),
                 pane_id == active_pane,
                 "snoozed rows must not offer Settle"
             );
+            if pane_id == snoozed_pane {
+                app.state.workspaces[0].tabs[0].pinned = true;
+                let menu = app.state.context_menu.as_ref().expect("pane row menu");
+                let items = app.state.context_menu_items(menu);
+                assert!(
+                    !items.contains(&"Unpin"),
+                    "pane row must not offer {items:?}"
+                );
+            }
         }
     }
 
@@ -10793,6 +10811,7 @@ mod tests {
                 tab_idx: 1,
                 starred: false,
                 pinned: false,
+                pin_allowed: true,
                 has_subgroup: false,
                 settle_pane_id: None,
                 snooze_target: None,

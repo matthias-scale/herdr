@@ -4031,6 +4031,7 @@ mod tests {
                 tab_idx: 0,
                 starred: false,
                 pinned: false,
+                pin_allowed: true,
                 has_subgroup: false,
                 settle_pane_id: Some(root_pane),
                 snooze_target: Some(root_pane),
