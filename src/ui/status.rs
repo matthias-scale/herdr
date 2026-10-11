@@ -789,12 +789,18 @@ fn compact_metric_segment(
     was_visible: bool,
     p: &Palette,
 ) -> Segment {
+    let healthy =
+        percent.is_some_and(|value| value < WARN_PERCENT && !(was_visible && value >= 78));
     Segment {
-        text: format!(" {label} {} ", value.unwrap_or("--")),
+        text: if healthy {
+            format!(" {DOT} ")
+        } else {
+            format!(" {label} {} ", value.unwrap_or("--"))
+        },
         style: Style::default().fg(match percent {
             Some(value) if value >= CRITICAL_PERCENT => p.red,
             Some(value) if value >= WARN_PERCENT || (was_visible && value >= 78) => p.yellow,
-            _ => p.overlay0,
+            _ => p.green,
         }),
         preserve_bg: false,
         kind,
@@ -1583,7 +1589,7 @@ mod tests {
     }
 
     #[test]
-    fn healthy_machine_keeps_all_metrics_visible_and_muted() {
+    fn healthy_machine_shows_only_green_metric_icons() {
         let app = app_with_metrics(metrics(31, 19.8, 41));
         let segments = status_segments(&app, metrics_or_unavailable(&app), &app.palette);
         assert_eq!(
@@ -1598,15 +1604,15 @@ mod tests {
                 StatusSegmentKind::More
             ]
         );
-        assert_eq!(segment_text(&app), " CPU 31%  MEM 19.8/32G  DSK 41%  ... ");
+        assert_eq!(segment_text(&app), " ●  ●  ●  ... ");
         assert!(segments[..3]
             .iter()
-            .all(|segment| segment.style.fg == Some(app.palette.overlay0)));
+            .all(|segment| segment.style.fg == Some(app.palette.green)));
     }
 
     #[test]
     fn each_metric_appears_amber_at_80_and_red_at_90() {
-        // Disk at 84% is amber; healthy metrics stay muted.
+        // Disk at 84% is amber; healthy metrics stay as green icons.
         let app = app_with_metrics(metrics(31, 19.8, 84));
         let segments = status_segments(&app, metrics_or_unavailable(&app), &app.palette);
         let kinds = segments
@@ -1634,7 +1640,7 @@ mod tests {
                 .map(|segment| (segment.kind, segment.style.fg))
                 .collect::<Vec<_>>(),
             vec![
-                (StatusSegmentKind::Cpu, Some(app.palette.overlay0)),
+                (StatusSegmentKind::Cpu, Some(app.palette.green)),
                 (StatusSegmentKind::Memory, Some(app.palette.red)),
                 (StatusSegmentKind::Disk, Some(app.palette.yellow)),
                 (StatusSegmentKind::More, Some(app.palette.overlay1)),
@@ -1651,7 +1657,7 @@ mod tests {
     }
 
     #[test]
-    fn metrics_remain_visible_while_hysteresis_controls_alert_colors() {
+    fn threshold_hysteresis_does_not_expand_green_range_metrics() {
         assert!(!metric_segment_visible(Some(79), false));
         assert!(metric_segment_visible(Some(80), false));
         // Between 78 and 80 the segment keeps whatever state it had, so a
@@ -1662,7 +1668,14 @@ mod tests {
         assert!(!metric_segment_visible(None, true));
 
         let mut app = app_with_metrics(metrics(79, 25.0, 79));
-        assert!(segment_text(&app).contains("CPU 79%"));
+        assert!(!segment_text(&app).contains("CPU 79%"));
+        assert_eq!(
+            app.palette.green,
+            status_segments(&app, metrics_or_unavailable(&app), &app.palette)[0]
+                .style
+                .fg
+                .unwrap()
+        );
         app.status_cpu_visible = true;
         app.status_mem_visible = true;
         app.status_disk_visible = true;
@@ -1670,7 +1683,7 @@ mod tests {
     }
 
     #[test]
-    fn unsampled_metrics_stay_visible_as_muted_placeholders() {
+    fn unsampled_metrics_keep_placeholders() {
         let mut app = AppState::test_new();
         app.nerd_font = false;
         app.status_cpu_visible = true;
@@ -1795,9 +1808,7 @@ mod tests {
             let rendered = render_status_row(&app, width);
             assert!(rendered.starts_with(" H  F  O  S  M "), "{rendered:?}");
             assert!(rendered.contains("Home"), "{rendered:?}");
-            assert!(rendered.contains("CPU 31%"), "{rendered:?}");
-            assert!(rendered.contains("MEM 19.8/32G"), "{rendered:?}");
-            assert!(rendered.contains("DSK 41%"), "{rendered:?}");
+            assert!(rendered.matches('\u{25cf}').count() >= 3, "{rendered:?}");
         }
 
         app.open_focus_view();
@@ -1805,7 +1816,7 @@ mod tests {
             let rendered = render_status_row(&app, width);
             assert!(rendered.contains("Focus"), "{rendered:?}");
             assert!(!rendered.contains("Home"), "{rendered:?}");
-            assert!(rendered.contains("CPU 31%"), "{rendered:?}");
+            assert!(rendered.matches('\u{25cf}').count() >= 3, "{rendered:?}");
         }
     }
 
@@ -1952,9 +1963,10 @@ mod tests {
 
         // The bar itself carries none of them.
         let rendered = render_status_row(&app, 120);
-        for hidden in ["TESTHOST", "workbox", "\u{25cf}"] {
+        for hidden in ["TESTHOST", "workbox"] {
             assert!(!rendered.contains(hidden), "{hidden}: {rendered:?}");
         }
+        assert_eq!(rendered.matches('\u{25cf}').count(), 3, "{rendered:?}");
     }
 
     #[test]

@@ -3228,18 +3228,9 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|frame| render(&app, frame)).unwrap();
             let row = buffer_row_text(terminal.backend().buffer(), status, status.y);
-            assert!(
-                row.contains(tabs::PANE_TOGGLE_BELOW_GLYPH),
-                "{width}x{height} status row: {row:?}"
-            );
-            assert!(
-                row.contains(tabs::PANE_TOGGLE_RIGHT_GLYPH),
-                "{width}x{height} status row: {row:?}"
-            );
-            assert!(
-                row.contains("⇣ Pull ▾"),
-                "{width}x{height} status row: {row:?}"
-            );
+            assert!(!row.contains(tabs::PANE_TOGGLE_BELOW_GLYPH), "{row:?}");
+            assert!(!row.contains(tabs::PANE_TOGGLE_RIGHT_GLYPH), "{row:?}");
+            assert!(!row.contains("⇣ Pull ▾"), "{row:?}");
         }
     }
 
@@ -3618,14 +3609,14 @@ mod tests {
             "feature/native-stat",
             "/repo",
             "Herdr v",
-            "\u{25cf}",
             "\u{25b8}",
         ] {
             assert!(!row0.contains(hidden), "{hidden}: {row0:?}");
         }
-        assert!(row0.contains("CPU 12%"), "{row0:?}");
-        assert!(row0.contains("MEM 8.0/16G"), "{row0:?}");
-        assert!(row0.contains("DSK 41%"), "{row0:?}");
+        assert_eq!(row0.matches('\u{25cf}').count(), 3, "{row0:?}");
+        for hidden_value in ["CPU 12%", "MEM 8.0/16G", "DSK 41%"] {
+            assert!(!row0.contains(hidden_value), "{row0:?}");
+        }
     }
 
     #[test]
@@ -3658,7 +3649,7 @@ mod tests {
         );
         assert!(row0.contains("CPU 92%"), "{row0:?}");
         assert!(row0.contains("MEM 13.0/16G"), "{row0:?}");
-        assert!(row0.contains("DSK 41%"), "{row0:?}");
+        assert_eq!(row0.matches('\u{25cf}').count(), 1, "{row0:?}");
         assert!(row0.starts_with(" H  F  O  S  M "), "{row0:?}");
     }
 
@@ -3687,9 +3678,10 @@ mod tests {
                 app.view.status_bar_rect.y,
             );
             assert!(row0.contains("Home"), "{row0:?}");
-            assert!(row0.contains("CPU 12%"), "{row0:?}");
-            assert!(row0.contains("MEM 8.0/16G"), "{row0:?}");
-            assert!(row0.contains("DSK 41%"), "{row0:?}");
+            assert_eq!(row0.matches('\u{25cf}').count(), 3, "{row0:?}");
+            for hidden_value in ["CPU 12%", "MEM 8.0/16G", "DSK 41%"] {
+                assert!(!row0.contains(hidden_value), "{row0:?}");
+            }
             assert!(!row0.contains("Herdr v"), "{row0:?}");
             rendered.push((
                 "sampled metrics",
