@@ -30,10 +30,34 @@ pub(crate) fn parse_header(raw: &str) -> Option<ItemHeader> {
         .lines()
         .filter_map(|line| {
             let (key, value) = line.split_once(':')?;
-            Some((key.trim().to_string(), value.trim().to_string()))
+            let value = value.trim().to_string();
+            let value = unquote_yaml_string(&value).unwrap_or(value);
+            Some((key.trim().to_string(), value))
         })
         .collect();
     Some(ItemHeader { fields })
+}
+
+fn unquote_yaml_string(value: &str) -> Option<String> {
+    let inner = value.strip_prefix('"')?.strip_suffix('"')?;
+    let mut unescaped = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('\\') => unescaped.push('\\'),
+                Some('"') => unescaped.push('"'),
+                Some(other) => {
+                    unescaped.push('\\');
+                    unescaped.push(other);
+                }
+                None => unescaped.push('\\'),
+            }
+        } else {
+            unescaped.push(c);
+        }
+    }
+    Some(unescaped)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +97,12 @@ pub(crate) fn split_capture(text: &str) -> (String, String) {
     let title_end = sentence_end.min(first_line_end);
     let raw_title = trimmed[..title_end].trim();
     let title = raw_title.strip_suffix('.').unwrap_or(raw_title);
-    let title: String = title.chars().take(80).collect();
+    let title: String = title
+        .chars()
+        .take(80)
+        .collect::<String>()
+        .trim_end()
+        .to_string();
     let body = if raw_title.chars().count() > 80 {
         trimmed.to_string()
     } else {
@@ -230,7 +259,14 @@ pub(crate) fn add_item(dir: &Path, text: &str, research: bool) -> Result<SavedIt
 
 fn markdown_item(title: &str, body: &str, order: u64, research: bool, created: &str) -> String {
     let tags = if research { "[research]" } else { "[]" };
-    format!("---\ntitle: {title}\ntags: {tags}\nstage: dumped\norder: {order}\nresearch: {research}\ncreated: {created}\n---\n\n# {title}{}", if body.is_empty() { String::new() } else { format!("\n\n{body}") })
+    let mut escaped_title = String::with_capacity(title.len());
+    for c in title.chars().filter(|c| !c.is_control()) {
+        if matches!(c, '\\' | '"') {
+            escaped_title.push('\\');
+        }
+        escaped_title.push(c);
+    }
+    format!("---\ntitle: \"{escaped_title}\"\ntags: {tags}\nstage: dumped\norder: {order}\nresearch: {research}\ncreated: {created}\n---\n\n# {title}{}", if body.is_empty() { String::new() } else { format!("\n\n{body}") })
 }
 
 #[cfg(test)]
@@ -273,9 +309,14 @@ mod tests {
             split_capture("first\r\nsecond\rthird"),
             ("first".into(), "second\nthird".into())
         );
-        let (title, body) = split_capture(&format!("{}. tail", "a".repeat(90)));
-        assert_eq!(title.len(), 80);
-        assert_eq!(body, format!("{}. tail", "a".repeat(90)));
+        let no_space_capture = format!("{}. tail", "a".repeat(90));
+        let (title, body) = split_capture(&no_space_capture);
+        assert_eq!(title, "a".repeat(80));
+        assert_eq!(body, no_space_capture);
+        let space_at_cut_capture = format!("{} tail", "a".repeat(79));
+        let (title, body) = split_capture(&space_at_cut_capture);
+        assert_eq!(title, "a".repeat(79));
+        assert_eq!(body, space_at_cut_capture);
         assert_eq!(slugify(" Héllo / World! "), "h-llo-world");
         assert_eq!(slugify("!!!"), "item");
         assert_eq!(slugify(&"a".repeat(80)).len(), 60);
@@ -293,8 +334,32 @@ mod tests {
 
     #[test]
     fn markdown_bytes_are_exact_for_plain_and_research_items() {
-        assert_eq!(markdown_item("Plan", "body", 7, false, "2026-10-11T19:02"), "---\ntitle: Plan\ntags: []\nstage: dumped\norder: 7\nresearch: false\ncreated: 2026-10-11T19:02\n---\n\n# Plan\n\nbody");
-        assert_eq!(markdown_item("Read", "", 1, true, "2026-10-11T19:02"), "---\ntitle: Read\ntags: [research]\nstage: dumped\norder: 1\nresearch: true\ncreated: 2026-10-11T19:02\n---\n\n# Read");
+        assert_eq!(markdown_item("Plan", "body", 7, false, "2026-10-11T19:02"), "---\ntitle: \"Plan\"\ntags: []\nstage: dumped\norder: 7\nresearch: false\ncreated: 2026-10-11T19:02\n---\n\n# Plan\n\nbody");
+        assert_eq!(markdown_item("Read", "", 1, true, "2026-10-11T19:02"), "---\ntitle: \"Read\"\ntags: [research]\nstage: dumped\norder: 1\nresearch: true\ncreated: 2026-10-11T19:02\n---\n\n# Read");
+    }
+
+    #[test]
+    fn markdown_titles_are_quoted_and_round_trip() {
+        let titles = [
+            "herdr sidebar: break and done state broken",
+            "fix #42 now",
+            "say \"hi\" \\ bye",
+            "- dash first",
+            "[bracket] first",
+            "&anchor first",
+        ];
+        for title in titles {
+            let raw = markdown_item(title, "", 1, false, "2026-10-11T19:02");
+            let frontmatter_title = format!(
+                "title: \"{}\"",
+                title.replace('\\', "\\\\").replace('"', "\\\"")
+            );
+            assert_eq!(raw.lines().nth(1), Some(frontmatter_title.as_str()));
+            assert_eq!(
+                parse_header(&raw).unwrap().fields[0],
+                ("title".into(), title.into())
+            );
+        }
     }
 
     #[test]
@@ -322,7 +387,7 @@ mod tests {
         assert!(!first.research && second.research);
         let raw = std::fs::read_to_string(first.path).unwrap();
         assert!(raw.starts_with(
-            "---\ntitle: Do this\ntags: []\nstage: dumped\norder: 1\nresearch: false\ncreated: "
+            "---\ntitle: \"Do this\"\ntags: []\nstage: dumped\norder: 1\nresearch: false\ncreated: "
         ));
         assert!(raw.ends_with("---\n\n# Do this\n\nBody"));
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3);
