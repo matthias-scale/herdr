@@ -14,7 +14,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 # HERDR_INTEGRATION_VERSION=6
-from closing_block_record import extract as extract_record, validate as validate_record
+try:
+    from closing_block_record import extract as extract_record, validate as validate_record
+except ImportError:  # embedded standalone (herdr src/turns.rs include_str!): legacy prose only
+    def extract_record(text):  # type: ignore[misc]
+        return None, text
+
+    def validate_record(record):  # type: ignore[misc]
+        return ["closing_block_record unavailable"]
 HUMAN_INPUT_LABELS = ("Gate", "Answer", "Verify", "Approve", "Decide")
 GATE_LABELS = ("Gate", "Approve")
 # Label for a human-input item whose own label word is unknown or missing.
