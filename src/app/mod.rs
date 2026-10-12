@@ -42,6 +42,7 @@ mod pane_lifecycle;
 mod scratch;
 pub(crate) use pane_lifecycle::pane_is_quiet;
 pub(crate) mod capture;
+pub(crate) mod focus_room;
 mod pane_send;
 mod popup;
 pub(crate) mod probes;
@@ -759,6 +760,11 @@ impl App {
         let session_writer = Arc::new(std::sync::Mutex::new(crate::persist::SessionWriter::new(
             !no_session && restored_snapshot.is_none(),
         )));
+        let restored_focus_room = restored_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.focus_room.clone())
+            .map(crate::focus_room::FocusRoom::from)
+            .unwrap_or_default();
         let (
             workspaces,
             active,
@@ -1073,7 +1079,9 @@ impl App {
             spawn_dock: None,
             capture: None,
             capture_ack: None,
+            focus_room_ui: crate::app::focus_room::FocusRoomUiState::default(),
             focus_dir: crate::worktree::expand_tilde_path(&config.focus.dir),
+            focus_vellum: config.focus.vellum.clone(),
             home_agent_choices: Vec::new(),
             home_catalog: if cfg!(test) {
                 crate::app::home_catalog::HomeCatalog::fallback()
@@ -1440,6 +1448,7 @@ impl App {
                 }
                 lock
             },
+            focus_room: restored_focus_room,
             planning_lock_dialog: None,
             hyperspace: crate::hyperspace::HyperspaceState::new(
                 config.ui.sidebar_animation,
@@ -1893,6 +1902,7 @@ impl App {
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
         app.rebuild_group_membership_projection();
+        app.restore_focus_room();
         if let Some(authority) = config.planning_lock.authority.clone() {
             app.state.planning_lock.fail_closed_remote();
             crate::planning_lock_sync::start_polling(authority, app.event_tx.clone());
@@ -2548,6 +2558,9 @@ impl App {
                     if self.tick_agent_finder(Instant::now()) {
                         needs_render = true;
                     }
+                    if self.state.focus_room.active && self.refresh_focus_room_drawer() {
+                        needs_render = true;
+                    }
                 }
                 LoopEvent::Internal(ev) => {
                     if self.handle_internal_event_with_prefix_sync(ev) {
@@ -3140,6 +3153,7 @@ impl App {
         }
         if !invalid_section("focus") {
             self.state.focus_dir = crate::worktree::expand_tilde_path(&config.focus.dir);
+            self.state.focus_vellum = config.focus.vellum.clone();
         }
         if !invalid_section("notepad") {
             self.apply_notepad_config(&config.notepad);
@@ -7777,6 +7791,12 @@ mod tests {
                 crate::api::schema::WorktreeListParams::default(),
             ),
         };
+        let focus_enter = crate::api::schema::Request {
+            id: "req_focus_enter".into(),
+            method: crate::api::schema::Method::FocusEnter(
+                crate::api::schema::EmptyParams::default(),
+            ),
+        };
         let worktree_create = crate::api::schema::Request {
             id: "req_5".into(),
             method: crate::api::schema::Method::WorktreeCreate(
@@ -7817,6 +7837,7 @@ mod tests {
 
         assert!(!crate::api::request_changes_ui(&read_only));
         assert!(!crate::api::request_changes_ui(&worktree_list));
+        assert!(crate::api::request_changes_ui(&focus_enter));
         assert!(crate::api::request_changes_ui(&mutating));
         assert!(crate::api::request_changes_ui(&pane_rename));
         assert!(crate::api::request_changes_ui(&worktree_create));

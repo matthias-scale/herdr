@@ -1272,6 +1272,25 @@ impl HeadlessServer {
                     Some(deadline.map_or(finder, |current| current.min(finder)))
                 });
             let next_deadline = self
+                .clients
+                .values()
+                .filter_map(|client| {
+                    client
+                        .sidebar_presentation
+                        .focus_room_ui
+                        .drawer
+                        .as_ref()
+                        .filter(|drawer| self.app.state.focus_room.active && !drawer.remote)
+                        .map(|drawer| {
+                            drawer
+                                .refreshed_at
+                                .map_or(now, |at| at + Duration::from_millis(250))
+                        })
+                })
+                .fold(next_deadline, |deadline, drawer| {
+                    Some(deadline.map_or(drawer, |current| current.min(drawer)))
+                });
+            let next_deadline = self
                 .next_capture_ack_deadline()
                 .into_iter()
                 .fold(next_deadline, |deadline, ack| {
@@ -3791,6 +3810,9 @@ impl HeadlessServer {
         message: impl Into<String>,
         body: Option<String>,
     ) -> bool {
+        if kind == protocol::NotifyKind::Sound && self.app.state.focus_room.active {
+            return false;
+        }
         self.send_to_foreground_client(ServerMessage::Notify {
             kind,
             message: message.into(),
@@ -7576,6 +7598,7 @@ impl HeadlessServer {
             false
         };
         other_changed |= self.tick_client_agent_finders(now);
+        other_changed |= self.tick_client_focus_room_drawers(now);
         let mut sidebar_animation_changed = false;
         for client in self.clients.values_mut() {
             if client.dock_presentation.reveal_hover_tooltip_at(now) {
@@ -7872,6 +7895,51 @@ impl HeadlessServer {
             };
             self.app.state.swap_sidebar_presentation(&mut presentation);
             let client_changed = self.app.tick_agent_finder(now);
+            self.app.state.swap_sidebar_presentation(&mut presentation);
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.sidebar_presentation = presentation;
+                if client_changed {
+                    client.request_repaint();
+                }
+            }
+            changed |= client_changed;
+        }
+        changed
+    }
+
+    fn tick_client_focus_room_drawers(&mut self, now: Instant) -> bool {
+        if !self.app.state.focus_room.active {
+            return false;
+        }
+        let due_clients = self
+            .clients
+            .iter()
+            .filter_map(|(client_id, client)| {
+                client
+                    .sidebar_presentation
+                    .focus_room_ui
+                    .drawer
+                    .as_ref()
+                    .filter(|drawer| !drawer.remote)
+                    .is_some_and(|drawer| {
+                        drawer.refreshed_at.is_none_or(|at| {
+                            now.saturating_duration_since(at) >= Duration::from_millis(250)
+                        })
+                    })
+                    .then_some(*client_id)
+            })
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for client_id in due_clients {
+            let Some(mut presentation) = self
+                .clients
+                .get_mut(&client_id)
+                .map(|client| std::mem::take(&mut client.sidebar_presentation))
+            else {
+                continue;
+            };
+            self.app.state.swap_sidebar_presentation(&mut presentation);
+            let client_changed = self.app.refresh_focus_room_drawer();
             self.app.state.swap_sidebar_presentation(&mut presentation);
             if let Some(client) = self.clients.get_mut(&client_id) {
                 client.sidebar_presentation = presentation;
