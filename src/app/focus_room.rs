@@ -698,6 +698,14 @@ impl crate::app::App {
     }
 
     pub(crate) fn restore_focus_room(&mut self) {
+        self.restore_focus_room_inner(true);
+    }
+
+    pub(crate) fn restore_focus_room_without_relaunch(&mut self) {
+        self.restore_focus_room_inner(false);
+    }
+
+    fn restore_focus_room_inner(&mut self, recreate_missing: bool) {
         if !self.state.focus_room.active {
             let stale_tab_id = self
                 .state
@@ -743,10 +751,14 @@ impl crate::app::App {
             }
         } else {
             self.state.focus_room.tab_id = None;
-            if let Err(error) = self.enter_focus_room() {
-                tracing::warn!(%error, "could not recreate restored focus room");
+            if recreate_missing {
+                if let Err(error) = self.enter_focus_room() {
+                    tracing::warn!(%error, "could not recreate restored focus room");
+                    self.state.focus_room.tab_disappeared();
+                    self.state.mark_session_dirty();
+                }
+            } else {
                 self.state.focus_room.tab_disappeared();
-                self.state.mark_session_dirty();
             }
         }
     }

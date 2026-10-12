@@ -2033,6 +2033,11 @@ impl App {
         app.state.refresh_local_agent_panel_identities();
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
+        app.state.focus_room = snapshot
+            .focus_room
+            .clone()
+            .map(crate::focus_room::FocusRoom::from)
+            .unwrap_or_default();
         app.restore_stall_nudge_episodes(imported_stall_nudges, &pane_id_aliases, now);
         app.restore_handoff_human_drafts(imported_human_drafts, &pane_id_aliases);
         app.state.pane_id_aliases = pane_id_aliases;
@@ -2064,6 +2069,7 @@ impl App {
         });
         app.restore_handoff_dock_editors(config, editor_imports);
         app.rebuild_group_membership_projection();
+        app.restore_focus_room_without_relaunch();
         app.sync_agent_metadata_deadline();
         app.sync_agent_activity_refresh_deadline(now);
         Ok(app)
@@ -4315,6 +4321,18 @@ mod tests {
             source.window_cycle_mode,
             source.skip_collapsed_cycle,
         );
+        let manifest = crate::server::handoff::manifest_for(
+            snapshot,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        let manifest: crate::server::handoff::HandoffManifest = serde_json::from_slice(
+            &serde_json::to_vec(&manifest).expect("serialize legacy-compatible manifest"),
+        )
+        .expect("deserialize handoff manifest without Focus metadata");
         let mut imports = std::collections::HashMap::new();
 
         let app = App::new_from_handoff(
@@ -4322,7 +4340,7 @@ mod tests {
             None,
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
-            &snapshot,
+            &manifest.snapshot,
             &mut imports,
             &[],
         )
@@ -4339,6 +4357,84 @@ mod tests {
         assert_eq!(cached.local_target.ws_idx, 0);
         assert_eq!(cached.local_target.tab_idx, 0);
         assert_eq!(cached.local_target.pane_id, pane_id);
+        assert!(!app.state.focus_room.active);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handoff_restores_active_focus_room_without_relaunching_its_pane() {
+        let mut source = state::AppState::test_new();
+        source.workspaces = vec![Workspace::test_new("handoff-focus")];
+        source.ensure_test_terminals();
+        source.active = Some(0);
+        source.selected = 0;
+        let pane_id = source.workspaces[0].tabs[0].root_pane;
+        let tab_id = crate::workspace::public_tab_id_for_number(
+            &source.workspaces[0].id,
+            source.workspaces[0].tabs[0].number,
+        );
+        let mut snapshot = crate::persist::capture(
+            &source.workspaces,
+            &source.terminals,
+            &crate::terminal::TerminalRuntimeRegistry::new(),
+            source.active,
+            source.selected,
+            source.sidebar_width,
+            source.sidebar_section_split,
+            source.collapsed_space_keys.clone(),
+            source.prio_panel_collapsed,
+            source.window_cycle_mode,
+            source.skip_collapsed_cycle,
+        );
+        snapshot.focus_room = Some(crate::focus_room::FocusRoomSnapshot {
+            tab_id: Some(tab_id.clone()),
+            active: true,
+            return_to: None,
+        });
+        let manifest = crate::server::handoff::manifest_for(
+            snapshot,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+        let manifest: crate::server::handoff::HandoffManifest = serde_json::from_slice(
+            &serde_json::to_vec(&manifest).expect("serialize handoff manifest"),
+        )
+        .expect("deserialize handoff manifest");
+        let (source_runtime, imported) = imported_editor_runtime(pane_id);
+        let child_pid = source_runtime.child_pid().expect("room process");
+        let mut imports = std::collections::HashMap::from([(pane_id.raw(), imported)]);
+
+        let app = App::new_from_handoff(
+            &Config::default(),
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+            &manifest.snapshot,
+            &mut imports,
+            &[],
+        )
+        .expect("restore handoff");
+
+        assert!(app.state.focus_room.active);
+        assert_eq!(
+            app.state.focus_room.tab_id.as_deref(),
+            Some(tab_id.as_str())
+        );
+        let restored_pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(restored_pane_id)
+            .expect("room pane state")
+            .attached_terminal_id
+            .clone();
+        let imported_runtime = app
+            .terminal_runtimes
+            .get(&terminal_id)
+            .expect("handed-off room runtime");
+        assert_eq!(imported_runtime.child_pid(), Some(child_pid));
+        drop(source_runtime);
     }
 
     #[cfg(unix)]
