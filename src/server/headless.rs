@@ -8780,6 +8780,269 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn headless_focus_room_prefix_o_opens_leave_dialog_without_pty_input() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"");
+        server.app.state.focus_room.active = true;
+        server.app.state.keybinds = crate::config::Config::default().keybinds();
+        server.clients.insert(1, test_app_client(Some(true), 1));
+        server.foreground_client_id = Some(1);
+
+        server.handle_client_input_events(
+            1,
+            vec![test_key(
+                crossterm::event::KeyCode::Char('b'),
+                crossterm::event::KeyModifiers::CONTROL,
+            )],
+        );
+        server.handle_client_input_events(
+            1,
+            vec![test_key(
+                crossterm::event::KeyCode::Char('o'),
+                crossterm::event::KeyModifiers::empty(),
+            )],
+        );
+
+        let mut presentation =
+            std::mem::take(&mut server.clients.get_mut(&1).unwrap().sidebar_presentation);
+        server
+            .app
+            .state
+            .swap_sidebar_presentation(&mut presentation);
+        assert!(server.app.state.focus_room_ui.leave_dialog_open);
+        server
+            .app
+            .state
+            .swap_sidebar_presentation(&mut presentation);
+        server.clients.get_mut(&1).unwrap().sidebar_presentation = presentation;
+        assert!(!server.app.input_leases.is_empty());
+        assert!(
+            input_rx.try_recv().is_err(),
+            "room shortcut must not reach the pane"
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_focus_room_dialog_owns_choice_escape_and_arrow_keys() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"");
+        server.app.state.focus_room.active = true;
+        let mut client = test_app_client(Some(true), 1);
+        client.sidebar_presentation.focus_room_ui.leave_dialog_open = true;
+        client.sidebar_presentation.focus_room_ui.leave_selection = 2;
+        server.clients.insert(1, client);
+        server.foreground_client_id = Some(1);
+
+        server.handle_client_input_events(
+            1,
+            vec![test_key(
+                crossterm::event::KeyCode::Up,
+                crossterm::event::KeyModifiers::empty(),
+            )],
+        );
+        assert_eq!(
+            server.clients[&1]
+                .sidebar_presentation
+                .focus_room_ui
+                .leave_selection,
+            1
+        );
+        server.handle_client_input_events(
+            1,
+            vec![test_key(
+                crossterm::event::KeyCode::Down,
+                crossterm::event::KeyModifiers::empty(),
+            )],
+        );
+        assert_eq!(
+            server.clients[&1]
+                .sidebar_presentation
+                .focus_room_ui
+                .leave_selection,
+            2
+        );
+        server.handle_client_input_events(
+            1,
+            vec![test_key(
+                crossterm::event::KeyCode::Char('c'),
+                crossterm::event::KeyModifiers::empty(),
+            )],
+        );
+        assert!(server.clients[&1].sidebar_presentation.capture.is_some());
+        assert!(server.app.state.focus_room.active);
+        server.handle_client_input_events(
+            1,
+            vec![test_key(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::empty(),
+            )],
+        );
+        assert!(server.clients[&1].sidebar_presentation.capture.is_none());
+
+        server
+            .clients
+            .get_mut(&1)
+            .unwrap()
+            .sidebar_presentation
+            .focus_room_ui
+            .leave_dialog_open = true;
+        server.handle_client_input_events(
+            1,
+            vec![test_key(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::empty(),
+            )],
+        );
+        assert!(
+            !server.clients[&1]
+                .sidebar_presentation
+                .focus_room_ui
+                .leave_dialog_open
+        );
+        assert!(server.app.state.focus_room.active);
+        assert!(
+            input_rx.try_recv().is_err(),
+            "dialog keys must not reach the pane"
+        );
+    }
+
+    #[tokio::test]
+    async fn headless_focus_room_o_and_enter_leave_without_pty_input() {
+        for key in [
+            test_key(
+                crossterm::event::KeyCode::Char('o'),
+                crossterm::event::KeyModifiers::empty(),
+            ),
+            test_key(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::empty(),
+            ),
+        ] {
+            let mut server = test_headless_server();
+            let mut input_rx = install_focused_test_runtime(&mut server, b"");
+            server.app.state.focus_room.active = true;
+            let mut client = test_app_client(Some(true), 1);
+            client.sidebar_presentation.focus_room_ui.leave_dialog_open = true;
+            client.sidebar_presentation.focus_room_ui.leave_selection = 2;
+            server.clients.insert(1, client);
+            server.foreground_client_id = Some(1);
+
+            server.handle_client_input_events(1, vec![key]);
+
+            assert!(!server.app.state.focus_room.active);
+            assert!(
+                !server.clients[&1]
+                    .sidebar_presentation
+                    .focus_room_ui
+                    .leave_dialog_open
+            );
+            assert!(
+                input_rx.try_recv().is_err(),
+                "leave choice must not reach the pane"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn headless_focus_room_finder_opens_persistent_local_drawer() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"agent output\r\n");
+        server.app.state.keybinds = crate::config::Config::default().keybinds();
+        let pane = server.app.state.workspaces[0].tabs[0].root_pane;
+        let public_pane_id = server.app.public_pane_id(0, pane).expect("public pane ID");
+        let workspace_id = server.app.state.workspaces[0].id.clone();
+        let agent: crate::api::schema::AgentInfo = serde_json::from_value(serde_json::json!({
+            "terminal_id": "terminal-1",
+            "agent_status": "working",
+            "workspace_id": workspace_id,
+            "tab_id": "tab-1",
+            "pane_id": public_pane_id,
+            "focused": true,
+            "revision": 1,
+            "display_agent": "Claude",
+            "display_title": "local agent"
+        }))
+        .expect("agent fixture");
+        let hit = crate::api::schema::AgentSearchHit {
+            target: public_pane_id.clone(),
+            title: "local agent".into(),
+            source: crate::api::schema::AgentSearchSource::Session,
+            path: None,
+            line: None,
+            context: vec!["local agent".into()],
+            preview: Vec::new(),
+            agent,
+        };
+        server.app.state.focus_room.active = true;
+        server.clients.insert(1, test_app_client(Some(true), 1));
+        server.foreground_client_id = Some(1);
+
+        for key in [
+            test_key(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            test_key(KeyCode::Char('f'), KeyModifiers::empty()),
+        ] {
+            server.handle_client_input_events(1, vec![key]);
+        }
+        assert!(server.clients[&1]
+            .sidebar_presentation
+            .agent_finder_saved_query
+            .is_some());
+        server
+            .clients
+            .get_mut(&1)
+            .unwrap()
+            .sidebar_presentation
+            .agent_finder_results = vec![hit];
+        server.handle_client_input_events(1, vec![test_key(KeyCode::Enter, KeyModifiers::empty())]);
+        assert!(server.clients[&1]
+            .sidebar_presentation
+            .agent_finder_saved_query
+            .is_none());
+        assert!(server.clients[&1]
+            .sidebar_presentation
+            .focus_room_ui
+            .drawer
+            .as_ref()
+            .is_some_and(|drawer| drawer.pane_id.as_deref() == Some(public_pane_id.as_str())));
+
+        server.tick_client_focus_room_drawers(Instant::now());
+        assert!(
+            server.clients[&1]
+                .sidebar_presentation
+                .focus_room_ui
+                .drawer
+                .is_some(),
+            "a local drawer must survive its first refresh tick"
+        );
+        server.handle_client_input_events(
+            1,
+            vec![test_key(KeyCode::Char('x'), KeyModifiers::empty())],
+        );
+        assert_eq!(
+            server.clients[&1]
+                .sidebar_presentation
+                .focus_room_ui
+                .drawer
+                .as_ref()
+                .map(|drawer| drawer.input.as_str()),
+            Some("x")
+        );
+        assert!(
+            input_rx.try_recv().is_err(),
+            "drawer typing must not reach Vellum"
+        );
+        server.handle_client_input_events(1, vec![test_key(KeyCode::Esc, KeyModifiers::empty())]);
+        assert!(server.clients[&1]
+            .sidebar_presentation
+            .focus_room_ui
+            .drawer
+            .is_none());
+        assert!(server.app.state.focus_room.active);
+    }
+
+    #[tokio::test]
     async fn capture_ack_deadline_wakes_and_repaints_its_client() {
         let (mut server, _, _) = retained_test_server(b"capture ack");
         let now = Instant::now();

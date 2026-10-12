@@ -765,6 +765,38 @@ impl App {
             .and_then(|snapshot| snapshot.focus_room.clone())
             .map(crate::focus_room::FocusRoom::from)
             .unwrap_or_default();
+        let focus_dir = crate::worktree::expand_tilde_path(&config.focus.dir);
+        let mut focus_room_restore_launch_argv = if restored_focus_room.active {
+            let argv = crate::app::focus_room::restore_focus_room_launch_argv(
+                &config.focus.vellum,
+                &focus_dir,
+            );
+            if argv.is_none() {
+                tracing::warn!(
+                    vellum = %config.focus.vellum,
+                    "could not resolve Vellum while restoring active Focus Room; keeping its shell"
+                );
+            }
+            argv
+        } else {
+            None
+        };
+        let focus_room_restore_cwd = if restored_focus_room.active {
+            match crate::platform::create_private_dir_all(&focus_dir) {
+                Ok(()) => Some(focus_dir.as_path()),
+                Err(error) => {
+                    tracing::warn!(
+                        path = %focus_dir.display(),
+                        %error,
+                        "could not create Focus Room directory while restoring; using the saved room directory"
+                    );
+                    focus_room_restore_launch_argv = None;
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let (
             workspaces,
             active,
@@ -795,7 +827,18 @@ impl App {
                 .pane_history
                 .then(crate::persist::load_history)
                 .flatten();
-            let (ws, terminals, terminal_runtimes) = crate::persist::restore(
+            let focus_room_tab_id = snap
+                .focus_room
+                .as_ref()
+                .filter(|room| room.active)
+                .and_then(|room| room.tab_id.as_deref());
+            let focus_room_restore =
+                focus_room_tab_id.map(|tab_id| crate::persist::FocusRoomRestore {
+                    tab_id,
+                    cwd: focus_room_restore_cwd,
+                    launch_argv: focus_room_restore_launch_argv.as_deref(),
+                });
+            let (ws, terminals, terminal_runtimes) = crate::persist::restore_with_focus_room(
                 &snap,
                 history.as_ref(),
                 24,
@@ -804,6 +847,7 @@ impl App {
                 &config.terminal.default_shell,
                 config.terminal.shell_mode,
                 config.session.resume_agents_on_restore,
+                focus_room_restore,
                 event_tx.clone(),
                 render_notify.clone(),
                 render_dirty.clone(),
@@ -1080,7 +1124,7 @@ impl App {
             capture: None,
             capture_ack: None,
             focus_room_ui: crate::app::focus_room::FocusRoomUiState::default(),
-            focus_dir: crate::worktree::expand_tilde_path(&config.focus.dir),
+            focus_dir,
             focus_vellum: config.focus.vellum.clone(),
             home_agent_choices: Vec::new(),
             home_catalog: if cfg!(test) {
@@ -3663,6 +3707,20 @@ impl App {
                             // before any pane forwarding can occur.
                             if owner == state::InputOwner::Capture && self.state.capture.is_some() {
                                 self.handle_capture_key(key.as_key_event());
+                                self.input_leases.insert_consumed(
+                                    lease_key,
+                                    input::ConsumedInputLease::SuppressRepeats,
+                                );
+                                continue;
+                            }
+                            // Focus Room overlays and keybindings must claim input
+                            // before the active pane, just as they do in the async
+                            // monolithic input path. The caller has installed this
+                            // client's sidebar presentation, including focus_room_ui.
+                            if self.state.focus_room.active
+                                && owner != state::InputOwner::Pomodoro
+                                && self.handle_focus_room_key(key.clone())
+                            {
                                 self.input_leases.insert_consumed(
                                     lease_key,
                                     input::ConsumedInputLease::SuppressRepeats,

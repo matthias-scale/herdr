@@ -303,7 +303,12 @@ fn render_leave_dialog(app: &AppState, frame: &mut Frame, rect: Rect) {
         return;
     };
     let p = &app.palette;
-    let title = Rect::new(inner.x, inner.y, inner.width, 1);
+    let title = Rect::new(
+        inner.x.saturating_add(1),
+        inner.y,
+        inner.width.saturating_sub(1),
+        1,
+    );
     frame.render_widget(
         Paragraph::new("leave focus?").style(
             Style::default()
@@ -330,36 +335,51 @@ fn render_leave_dialog(app: &AppState, frame: &mut Frame, rect: Rect) {
         } else {
             Modifier::empty()
         };
+        let row = Rect::new(inner.x, y, inner.width, 1);
+        frame.render_widget(Paragraph::new("").style(Style::default().bg(bg)), row);
+        let text_x = inner.x.saturating_add(1);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
-                    format!(" {key}  "),
+                    format!("{key}  "),
                     Style::default()
                         .fg(p.accent)
                         .bg(bg)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("{label:<28}"),
+                    label.to_string(),
                     Style::default().fg(p.text).bg(bg).add_modifier(bold),
                 ),
-                Span::styled(*note, Style::default().fg(p.overlay0).bg(bg)),
             ])),
-            Rect::new(inner.x, y, inner.width, 1),
+            Rect::new(text_x, y, inner.width.saturating_sub(1), 1),
         );
+        if !note.is_empty() {
+            let note_width = u16::try_from(note.chars().count()).unwrap_or(u16::MAX);
+            let note_x = inner.right().saturating_sub(1).saturating_sub(note_width);
+            frame.render_widget(
+                Paragraph::new(*note).style(Style::default().fg(p.overlay0).bg(bg)),
+                Rect::new(note_x, y, note_width, 1),
+            );
+        }
     }
     if inner.height >= 6 {
         frame.render_widget(
-            Paragraph::new("  ends this focus block · nothing is discarded")
+            Paragraph::new("ends this focus block · nothing is discarded")
                 .style(Style::default().fg(p.overlay1).bg(p.panel_bg)),
-            Rect::new(inner.x, inner.y.saturating_add(5), inner.width, 1),
+            Rect::new(
+                inner.x.saturating_add(4),
+                inner.y.saturating_add(5),
+                inner.width.saturating_sub(4),
+                1,
+            ),
         );
     }
     if inner.height >= 7 {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
-                    " esc",
+                    "esc",
                     Style::default()
                         .fg(p.accent)
                         .bg(p.panel_bg)
@@ -370,7 +390,12 @@ fn render_leave_dialog(app: &AppState, frame: &mut Frame, rect: Rect) {
                     Style::default().fg(p.overlay0).bg(p.panel_bg),
                 ),
             ])),
-            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+            Rect::new(
+                inner.x.saturating_add(1),
+                inner.bottom().saturating_sub(1),
+                inner.width.saturating_sub(1),
+                1,
+            ),
         );
     }
 }
@@ -736,9 +761,14 @@ mod tests {
             .draw(|frame| render_leave_dialog(&app, frame, rect))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(53, 19)].symbol(), "l");
+        assert_eq!(buffer[(54, 19)].symbol(), "l");
         assert_eq!(buffer[(57, 23)].symbol(), "o");
         assert_eq!(buffer[(57, 23)].style().bg, Some(app.palette.selection_bg));
+        assert_eq!(buffer[(53, 23)].style().bg, Some(app.palette.selection_bg));
+        assert_eq!(buffer[(106, 23)].style().bg, Some(app.palette.selection_bg));
+        assert_eq!(buffer[(105, 21)].symbol(), "s");
+        assert_eq!(buffer[(102, 21)].symbol(), "o");
+        assert_eq!(buffer[(57, 24)].symbol(), "e");
     }
 
     #[test]

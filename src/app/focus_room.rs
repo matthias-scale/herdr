@@ -69,6 +69,20 @@ fn resolve_vellum(value: &str) -> Option<PathBuf> {
     })
 }
 
+pub(crate) fn restore_focus_room_launch_argv(
+    vellum: &str,
+    focus_dir: &std::path::Path,
+) -> Option<Vec<String>> {
+    let vellum = resolve_vellum(vellum)?;
+    Some(vec![
+        vellum.to_string_lossy().into_owned(),
+        "--focus".into(),
+        "--theme".into(),
+        "auto".into(),
+        focus_dir.to_string_lossy().into_owned(),
+    ])
+}
+
 fn current_public_tab_id(state: &crate::app::state::AppState) -> Option<String> {
     let workspace = state.workspaces.get(state.active?)?;
     let tab = workspace.tabs.get(workspace.active_tab_index())?;
@@ -844,6 +858,36 @@ mod tests {
                 .as_slice()
             )
         );
+        let expected_argv = terminal.launch_argv.clone().expect("Vellum argv");
+        assert_eq!(
+            restore_focus_room_launch_argv(&app.state.focus_vellum, &app.state.focus_dir),
+            Some(expected_argv.clone()),
+            "cold restore argv must follow the current Focus config"
+        );
+        let mut snapshot = crate::persist::capture(
+            &app.state.workspaces,
+            &app.state.terminals,
+            &app.terminal_runtimes,
+            app.state.active,
+            app.state.selected,
+            app.state.sidebar_width,
+            app.state.sidebar_section_split,
+            app.state.collapsed_space_keys.clone(),
+            app.state.prio_panel_collapsed,
+            app.state.window_cycle_mode,
+            app.state.skip_collapsed_cycle,
+        );
+        snapshot.focus_room = app.state.focus_room.snapshot();
+        let saved_room_tab = snapshot.workspaces[first_ws].tabs[0]
+            .root_pane
+            .expect("focus room snapshot root pane");
+        assert_eq!(
+            snapshot.workspaces[first_ws].tabs[0].panes[&saved_room_tab]
+                .launch_argv
+                .as_deref(),
+            Some(expected_argv.as_slice()),
+            "session snapshot must retain the room pane launch command"
+        );
 
         app.leave_focus_room();
         let second = app.enter_focus_room().unwrap();
@@ -862,7 +906,78 @@ mod tests {
             .expect("reused Vellum process ID");
         assert_eq!(second_pid, first_pid);
 
+        let restore_events = app.event_tx.clone();
+        let restore_notify = app.render_notify.clone();
+        let restore_dirty = app.render_dirty.clone();
+        let fallback_events = restore_events.clone();
+        let fallback_notify = restore_notify.clone();
+        let fallback_dirty = restore_dirty.clone();
+        let restore_focus_dir = app.state.focus_dir.clone();
         drop(app);
+
+        let (_, restored_terminals, restored_runtimes) = crate::persist::restore_with_focus_room(
+            &snapshot,
+            None,
+            24,
+            80,
+            1024 * 1024,
+            "sh",
+            crate::config::ShellModeConfig::default(),
+            false,
+            Some(crate::persist::FocusRoomRestore {
+                tab_id: &first.tab_id,
+                cwd: Some(&restore_focus_dir),
+                launch_argv: Some(&expected_argv),
+            }),
+            restore_events,
+            restore_notify,
+            restore_dirty,
+        );
+        let restored_terminal = restored_terminals
+            .values()
+            .next()
+            .expect("restored room pane");
+        assert_eq!(
+            restored_terminal.launch_argv.as_deref(),
+            Some(expected_argv.as_slice())
+        );
+        assert!(
+            restored_runtimes
+                .get(&restored_terminal.id)
+                .and_then(|runtime| runtime.child_pid())
+                .is_some(),
+            "cold restore must spawn the configured Vellum process"
+        );
+        drop(restored_runtimes);
+
+        let (_, shell_terminals, shell_runtimes) = crate::persist::restore_with_focus_room(
+            &snapshot,
+            None,
+            24,
+            80,
+            1024 * 1024,
+            "sh",
+            crate::config::ShellModeConfig::default(),
+            false,
+            Some(crate::persist::FocusRoomRestore {
+                tab_id: &first.tab_id,
+                cwd: Some(&restore_focus_dir),
+                launch_argv: None,
+            }),
+            fallback_events,
+            fallback_notify,
+            fallback_dirty,
+        );
+        let shell_terminal = shell_terminals.values().next().expect("room shell");
+        assert!(shell_terminal.launch_argv.is_none());
+        assert!(
+            shell_runtimes
+                .get(&shell_terminal.id)
+                .and_then(|runtime| runtime.child_pid())
+                .is_some(),
+            "unresolved Vellum must leave a running room shell"
+        );
+        drop(shell_runtimes);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
