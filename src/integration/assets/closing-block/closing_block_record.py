@@ -7,13 +7,13 @@ import re
 from datetime import datetime
 from typing import Any
 
-_TRAILER = re.compile(r"(?:\r?\n)?```herdr-state[ \t]*\r?\n(?P<body>[^\r\n]*)\r?\n```[ \t]*\r?\n?\Z")
+_TRAILER = re.compile(r"(?:\r?\n)?```closing-state[ \t]*\r?\n(?P<body>[^\r\n]*)\r?\n```[ \t]*\r?\n?\Z")
 
 
 def extract(text: str) -> tuple[dict[str, Any] | None, str]:
     match = _TRAILER.search(text)
     if not match:
-        marker = re.search(r"(?:\r?\n)?```herdr-state[ \t]*\r?\n", text)
+        marker = re.search(r"(?:\r?\n)?```closing-state[ \t]*\r?\n", text)
         return (None, text[:marker.start()]) if marker else (None, text)
     try:
         value = json.loads(match.group("body"))

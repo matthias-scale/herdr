@@ -799,7 +799,7 @@ def parse(text: str) -> ClosingBlock:
     if body != text:
         fallback = parse(body)
         fallback.source = "record"
-        fallback.record_errors = ["invalid JSON in herdr-state trailer"]
+        fallback.record_errors = ["invalid JSON in closing-state trailer"]
         return fallback
     block = ClosingBlock()
 

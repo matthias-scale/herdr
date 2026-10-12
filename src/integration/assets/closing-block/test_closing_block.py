@@ -3534,7 +3534,7 @@ class ClosingBlockRecordTests(unittest.TestCase):
     @staticmethod
     def trailer(record):
         import json
-        return "Visible prose.\n\n**Now:** waiting on you\n```herdr-state\n" + json.dumps(record) + "\n```\n"
+        return "Visible prose.\n\n**Now:** waiting on you\n```closing-state\n" + json.dumps(record) + "\n```\n"
 
     def test_record_drives_items_defaults_decisions_and_lifecycle(self):
         record = {"v": 3, "state": "unknown", "completion": "incomplete", "items": [
@@ -3567,7 +3567,7 @@ class ClosingBlockRecordTests(unittest.TestCase):
     def test_invalid_record_is_malformed_and_uses_visible_prose(self):
         import json
         record = {"v": 2, "state": "broken", "completion": "incomplete", "items": [], "decisions": [], "workers": [], "wait": None, "now": {"kind": "done_here"}}
-        text = "**Critical action points (1 blocking)**\n1. **Approve** — Continue?\n```herdr-state\n" + json.dumps(record) + "\n```\n"
+        text = "**Critical action points (1 blocking)**\n1. **Approve** — Continue?\n```closing-state\n" + json.dumps(record) + "\n```\n"
         block = closing_block.parse(text)
         self.assertEqual(block.parse_status, "malformed")
         self.assertTrue(block.record_errors)
