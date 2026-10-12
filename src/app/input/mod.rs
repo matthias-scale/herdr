@@ -433,9 +433,6 @@ impl App {
             InputOwner::Surface(SurfaceInputOwner::Scratch) => {
                 self.handle_scratch_key(key_event);
             }
-            InputOwner::Surface(SurfaceInputOwner::Inbox) => {
-                return self.handle_inbox_key(key).await;
-            }
             InputOwner::Surface(SurfaceInputOwner::EditorPreview) => {}
             InputOwner::Notepad => {
                 self.intercept_notepad_key_with_prompt_visibility(&key, false);
@@ -1387,7 +1384,6 @@ impl App {
         home.ticket = plan.ticket.clone();
         home.target = plan.target.clone();
         self.state.home = Some(home);
-        self.state.inbox = None;
         let dispatch = self.dispatch_home_plan(plan);
         if dispatch.is_ok() {
             self.state.dock_object_preview = None;
@@ -1471,85 +1467,6 @@ impl App {
         true
     }
 
-    /// Inbox keys go to the blocked agent on screen, never to the focused pane.
-    /// Only Esc and the defer key are the inbox's own; everything else is the
-    /// operator answering the agent, which is the entire point of the mode.
-    pub(crate) async fn handle_inbox_key(
-        &mut self,
-        key: crate::input::TerminalKey,
-    ) -> Option<super::TerminalInputTarget> {
-        let event = key.as_key_event();
-        if event.code == KeyCode::Esc && event.modifiers.is_empty() {
-            self.state.clear_inbox();
-            self.state.set_server_mode(Mode::Terminal);
-            return None;
-        }
-        // The prefix reaches Herdr's shortcuts rather than the agent, so the
-        // top bar's view keys work from the Mailbox like from any other view.
-        if self.state.is_prefix_key(&key) {
-            self.state.set_server_mode(Mode::Prefix);
-            return None;
-        }
-        let queue = self.state.blocked_agents();
-        if event.code == KeyCode::Tab && event.modifiers.is_empty() {
-            self.defer_current_inbox_agent(&queue);
-            return None;
-        }
-        let target = super::TerminalInputTarget::new(self.inbox_target(&queue)?);
-        self.forward_terminal_key_to_target(&target, key).await;
-        Some(target)
-    }
-
-    /// Headless mirror. Returns whether the inbox consumed the key.
-    pub(crate) fn handle_inbox_key_headless(&mut self, key: KeyEvent) -> bool {
-        if self.state.inbox.is_none() {
-            return false;
-        }
-        if key.code == KeyCode::Esc && key.modifiers.is_empty() {
-            self.state.clear_inbox();
-            self.state.set_server_mode(Mode::Terminal);
-            return true;
-        }
-        if self
-            .state
-            .is_prefix_key(&crate::input::TerminalKey::from(key))
-        {
-            self.state.set_server_mode(Mode::Prefix);
-            return true;
-        }
-        let queue = self.state.blocked_agents();
-        if key.code == KeyCode::Tab && key.modifiers.is_empty() {
-            self.defer_current_inbox_agent(&queue);
-        }
-        true
-    }
-
-    fn inbox_target(
-        &self,
-        queue: &[crate::app::inbox::BlockedAgent],
-    ) -> Option<crate::terminal::TerminalId> {
-        self.state
-            .inbox
-            .as_ref()?
-            .current(queue)
-            .map(|agent| agent.terminal_id.clone())
-    }
-
-    fn defer_current_inbox_agent(&mut self, queue: &[crate::app::inbox::BlockedAgent]) {
-        let Some(pane_id) = self
-            .state
-            .inbox
-            .as_ref()
-            .and_then(|inbox| inbox.current(queue))
-            .map(|agent| agent.pane_id)
-        else {
-            return;
-        };
-        if let Some(inbox) = self.state.inbox.as_mut() {
-            inbox.defer(pane_id, queue);
-        }
-    }
-
     /// A status-bar button does exactly what its keybinding does, so the two
     /// affordances can never drift into meaning different things.
     fn activate_status_button(&mut self, action: crate::app::state::StatusButtonAction) {
@@ -1580,7 +1497,6 @@ impl App {
                 self.tick_scratch(std::time::Instant::now(), true);
                 self.state.scratch.open_writer();
             }
-            TopBarView::Mailbox => self.state.toggle_inbox(),
         }
     }
 
@@ -1803,7 +1719,6 @@ impl App {
             }
         });
         self.state.symphony_detail = None;
-        self.state.inbox = None;
         self.state.clear_home();
         if self.state.work_view.is_some() && enabled {
             self.next_work_index_refresh = std::time::Instant::now();
@@ -3214,7 +3129,6 @@ impl App {
             subject: conversation.subject,
         });
         self.state.work_view = None;
-        self.state.inbox = None;
         self.state.home = Some(home);
     }
 
@@ -3324,7 +3238,6 @@ impl App {
         });
         home.prompt = prompt;
         self.state.work_view = None;
-        self.state.inbox = None;
         self.state.home = Some(home);
     }
 
@@ -3763,7 +3676,6 @@ impl App {
         home.pr = Some(pr);
         home.prompt = prompt;
         self.state.work_view = None;
-        self.state.inbox = None;
         self.state.home = Some(home);
     }
 
@@ -6978,11 +6890,11 @@ sidebar_visible = true
     #[test]
     fn hidden_sidebar_config_toggles_through_raw_key_and_mouse_input() {
         let key_encodings = [
-            (vec![0x01], b"B".to_vec()),
-            (b"\x1b[97;5u".to_vec(), b"\x1b[98;2u".to_vec()),
-            (b"\x1b[97;5u".to_vec(), b"\x1b[98:66;2u".to_vec()),
-            (b"\x1b[97;5u".to_vec(), b"\x1b[66;1u".to_vec()),
-            (b"\x1b[97;5u".to_vec(), b"\x1b[66;2u".to_vec()),
+            (vec![0x01], b"Q".to_vec()),
+            (b"\x1b[97;5u".to_vec(), b"\x1b[113;2u".to_vec()),
+            (b"\x1b[97;5u".to_vec(), b"\x1b[113:81;2u".to_vec()),
+            (b"\x1b[97;5u".to_vec(), b"\x1b[81;1u".to_vec()),
+            (b"\x1b[97;5u".to_vec(), b"\x1b[81;2u".to_vec()),
         ];
 
         for (prefix, rhs) in key_encodings {
@@ -7031,7 +6943,7 @@ sidebar_visible = true
         assert_eq!(app.state.view.sidebar_rect.width, 0);
 
         app.route_client_input(vec![0x01]);
-        app.route_client_input(b"B".to_vec());
+        app.route_client_input(b"Q".to_vec());
         compute_hidden_sidebar(&mut app);
         assert!(!app.state.sidebar_collapsed);
         assert_eq!(app.state.view.sidebar_rect.width, 42);
@@ -7050,7 +6962,7 @@ sidebar_visible = true
         );
 
         app.route_client_input(vec![0x01]);
-        app.route_client_input(b"B".to_vec());
+        app.route_client_input(b"Q".to_vec());
         compute_hidden_sidebar(&mut app);
         assert!(app.state.sidebar_collapsed);
         assert_eq!(app.state.view.sidebar_rect.width, 0);
@@ -7061,7 +6973,7 @@ sidebar_visible = true
         assert!(app.state.pomodoro.prompt.is_some());
 
         app.route_client_input(vec![0x01]);
-        app.route_client_input(b"B".to_vec());
+        app.route_client_input(b"Q".to_vec());
         compute_hidden_sidebar(&mut app);
         assert!(
             app.state.sidebar_collapsed,
@@ -7095,7 +7007,7 @@ sidebar_visible = true
             .dismiss_send_off_at(std::time::Instant::now());
 
         app.route_client_input(vec![0x01]);
-        app.route_client_input(b"B".to_vec());
+        app.route_client_input(b"Q".to_vec());
         compute_hidden_sidebar(&mut app);
         assert!(
             !app.state.sidebar_collapsed,
@@ -7516,7 +7428,7 @@ sidebar_visible = true
     }
 
     #[test]
-    fn topbar_view_buttons_dispatch_to_focus_board_scratch_mailbox_and_home() {
+    fn topbar_view_buttons_dispatch_to_focus_board_scratch_and_home() {
         use crate::app::state::{StatusButtonAction, TopBarView};
 
         let mut app = test_app();
@@ -7530,10 +7442,8 @@ sidebar_visible = true
         assert!(!app.state.focus_open);
         assert!(app.state.scratch.open);
         assert!(app.state.scratch.editor.is_some());
-
-        app.activate_status_button(StatusButtonAction::View(TopBarView::Mailbox));
+        app.activate_status_button(StatusButtonAction::View(TopBarView::Home));
         assert!(!app.state.scratch.open);
-        assert!(app.state.inbox.is_some());
 
         let date = time::Date::from_calendar_date(2026, time::Month::September, 28)
             .expect("fixed board date");
@@ -7543,7 +7453,6 @@ sidebar_visible = true
             note,
             crate::board::Board::default(),
         ));
-        app.state.inbox = None;
         assert_eq!(app.state.top_bar_view(), TopBarView::Orchestration);
         app.activate_status_button(StatusButtonAction::View(TopBarView::Orchestration));
         assert!(
@@ -7609,7 +7518,7 @@ sidebar_visible = true
         let next_tab = TerminalKey::from(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
         let next_window = TerminalKey::from(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
 
-        for view in [TopBarView::Focus, TopBarView::Scratch, TopBarView::Mailbox] {
+        for view in [TopBarView::Focus, TopBarView::Scratch] {
             app.activate_top_bar_view(view);
             for key in [next_tab.clone(), next_window.clone()] {
                 app.state.set_server_mode(Mode::Prefix);
@@ -7645,33 +7554,18 @@ sidebar_visible = true
             NavigateAction::CyclePaneNext,
             NavigateAction::FocusPaneLeft,
             NavigateAction::NextWorkspace,
+            NavigateAction::NextInboxItem,
         ] {
             assert!(action.switches_pane(), "{action:?}");
         }
         for action in [
             NavigateAction::OpenFocusView,
             NavigateAction::OpenHomeView,
-            NavigateAction::OpenInbox,
             NavigateAction::Help,
             NavigateAction::SplitVertical,
         ] {
             assert!(!action.switches_pane(), "{action:?}");
         }
-    }
-
-    #[tokio::test]
-    async fn the_prefix_reaches_herdr_shortcuts_from_the_mailbox() {
-        let mut app = test_app();
-        app.state = crate::app::state::AppState::test_new();
-        app.activate_top_bar_view(crate::app::state::TopBarView::Mailbox);
-        let prefix = TerminalKey::new(app.state.prefix_code, app.state.prefix_mods);
-        assert!(app.handle_inbox_key(prefix.clone()).await.is_none());
-        assert_eq!(app.state.server_mode(), Mode::Prefix);
-
-        app.state.set_server_mode(Mode::Terminal);
-        assert!(app.handle_inbox_key_headless(prefix.as_key_event()));
-        assert_eq!(app.state.server_mode(), Mode::Prefix);
-        assert!(app.state.inbox.is_some(), "the prefix alone closes nothing");
     }
 
     #[test]
@@ -10874,20 +10768,6 @@ navigate_workspace_down = "ctrl+j"
 
         assert!(app.state.view.home_row_hit_areas.is_empty());
         assert_eq!(app.state.home_row_at(30, 3), None);
-    }
-
-    #[test]
-    fn opening_home_and_inbox_closes_the_other_overlay() {
-        let mut app = test_app();
-
-        app.state.toggle_inbox();
-        app.state.toggle_home();
-        assert!(app.state.home.is_some());
-        assert!(app.state.inbox.is_none());
-
-        app.state.toggle_inbox();
-        assert!(app.state.home.is_none());
-        assert!(app.state.inbox.is_some());
     }
 
     #[tokio::test(flavor = "current_thread")]

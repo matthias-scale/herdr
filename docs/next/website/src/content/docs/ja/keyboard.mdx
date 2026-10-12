@@ -60,7 +60,7 @@ Herdr はマウスネイティブです。キーバインドをひとつも覚�
 | ワークスペースの名前を変更 | `prefix+shift+w` |
 | ワークスペースを閉じる | `prefix+shift+d` |
 | Goto ピッカー | `prefix+g` |
-| サイドバーの表示切り替え | `prefix+shift+b` |
+| サイドバーの表示切り替え | `prefix+shift+q` |
 | ループ実行履歴を開く | `prefix+ctrl+h` |
 | 読み取り専用の Symphony ダッシュボードを開く | `prefix+shift+s` |
 | フリートの Runs セクションを表示 | `prefix+alt+r` |
@@ -128,7 +128,8 @@ previous_window = "prefix+p" # 全 Space の前の要対応タブ
 next_window = "prefix+n" # 全 Space の次の要対応タブ
 previous_any_window = "prefix+shift+p" # 全 Space の前のタブ
 next_any_window = "prefix+shift+n" # 全 Space の次のタブ
-next_blocked_window = "prefix+b" # 全 Space の次の blocked タブ
+next_blocked_window = "prefix+b" # 全 Space の次の blocked ペイン
+next_inbox_item = "prefix+shift+b" # サイドバー順の次の agent-inbox 項目
 previous_tab = ["prefix+ctrl+p", "ctrl+alt+["]
 next_tab = ["prefix+ctrl+n", "ctrl+alt+]"]
 new_tab = ["prefix+c", "ctrl+alt+c"]
@@ -137,12 +138,12 @@ split_left = "prefix+shift+v"
 split_up = "prefix+shift+minus"
 split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
 zoom = ["prefix+z", "ctrl+alt+z"]
-toggle_sidebar = "prefix+shift+b"
+toggle_sidebar = "prefix+shift+q"
 ```
 
 `next_window` と `previous_window` は、未読の Done タブとブロッカーや未回答の質問があるタブだけを循環します。作業中や既読・settled のタブはスキップします。`next_any_window` と `previous_any_window` は、エージェントのないタブも含めてすべてのタブを循環します。両方のサイクルはサイドバー順を使い、短時間に続けて操作している間は順序を固定し、両端でラップします。`next_tab` と `previous_tab` はアクティブな Space 内だけを移動します。新しい Space とペイン名変更のデフォルトは `prefix+alt+n` と `prefix+alt+p` です。
 
-`next_blocked_window` は同じグローバル順序を前に進み、ペイン状態が `blocked` に集約されるタブだけで停止します。最後の一致の後は先頭に戻ります。blocked なタブがなければ、フォーカスは移動しません。デフォルトは `prefix+b` です。`toggle_sidebar` は `prefix+shift+b` を使います。
+`next_blocked_window` はサイドバー順に進み、agent-inbox ペインを飛ばして実際のブロッカーで停止します。`next_inbox_item` はサイドバー順に agent-inbox ペインを巡回します。判定マーカーは、ワークスペースの cwd が `~/.local/state/agent-inbox/inbox` 配下にあることです。デフォルトはそれぞれ `prefix+b` と `prefix+shift+b` です。`toggle_sidebar` は `prefix+shift+q` を使います。
 
 キーバインドなしでも、`herdr window next` と `herdr window previous` で同じグローバル循環を使えます。どちらも両端でラップします。
 

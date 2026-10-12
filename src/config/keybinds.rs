@@ -379,6 +379,7 @@ pub struct Keybinds {
     pub previous_any_window: ActionKeybinds,
     pub next_any_window: ActionKeybinds,
     pub next_blocked_window: ActionKeybinds,
+    pub next_inbox_item: ActionKeybinds,
     pub switch_tab: Vec<IndexedKeybind>,
     pub switch_workspace: Vec<IndexedKeybind>,
     pub close_tab: ActionKeybinds,
@@ -429,13 +430,11 @@ pub struct Keybinds {
     pub usage: ActionKeybinds,
     pub tickets: ActionKeybinds,
     pub missive: ActionKeybinds,
-    pub inbox: ActionKeybinds,
     pub home: ActionKeybinds,
     pub home_view: ActionKeybinds,
     pub focus_view: ActionKeybinds,
     pub orchestration_view: ActionKeybinds,
     pub scratch_view: ActionKeybinds,
-    pub mailbox_view: ActionKeybinds,
     pub git_pull: ActionKeybinds,
     pub git_commit: ActionKeybinds,
     pub git_push: ActionKeybinds,
@@ -535,6 +534,7 @@ impl BindingRegistry {
 impl Config {
     pub(super) fn validated_keybinds(&self) -> (Option<String>, KeyCombo, Vec<String>, Keybinds) {
         let mut diagnostics = Vec::new();
+        diagnostics.extend(self.keys.deprecated_keybinding_diagnostics());
         let (prefix, prefix_diag) = parse_key_combo_with_diagnostic(
             &self.keys.prefix,
             "keys.prefix",
@@ -615,6 +615,7 @@ impl Config {
             previous_any_window: empty_action!(),
             next_any_window: empty_action!(),
             next_blocked_window: empty_action!(),
+            next_inbox_item: empty_action!(),
             switch_tab: Vec::new(),
             switch_workspace: Vec::new(),
             close_tab: empty_action!(),
@@ -665,13 +666,11 @@ impl Config {
             usage: empty_action!(),
             tickets: empty_action!(),
             missive: empty_action!(),
-            inbox: empty_action!(),
             home: empty_action!(),
             home_view: empty_action!(),
             focus_view: empty_action!(),
             orchestration_view: empty_action!(),
             scratch_view: empty_action!(),
-            mailbox_view: empty_action!(),
             git_pull: empty_action!(),
             git_commit: empty_action!(),
             git_push: empty_action!(),
@@ -820,6 +819,7 @@ impl Config {
             apply_action!(keybinds.previous_any_window, previous_any_window, source);
             apply_action!(keybinds.next_any_window, next_any_window, source);
             apply_action!(keybinds.next_blocked_window, next_blocked_window, source);
+            apply_action!(keybinds.next_inbox_item, next_inbox_item, source);
             apply_indexed!(
                 keybinds.switch_tab,
                 switch_tab,
@@ -892,13 +892,11 @@ impl Config {
             apply_action!(keybinds.usage, usage, source);
             apply_action!(keybinds.tickets, tickets, source);
             apply_action!(keybinds.missive, missive, source);
-            apply_action!(keybinds.inbox, inbox, source);
             apply_action!(keybinds.home, home, source);
             apply_action!(keybinds.home_view, home_view, source);
             apply_action!(keybinds.focus_view, focus_view, source);
             apply_action!(keybinds.orchestration_view, orchestration_view, source);
             apply_action!(keybinds.scratch_view, scratch_view, source);
-            apply_action!(keybinds.mailbox_view, mailbox_view, source);
             apply_action!(keybinds.git_pull, git_pull, source);
             apply_action!(keybinds.git_commit, git_commit, source);
             apply_action!(keybinds.git_push, git_push, source);
@@ -2745,10 +2743,35 @@ switch_tab = "prefix+?"
         assert_eq!(
             binding_triggers(&kb.toggle_sidebar),
             vec![BindingTrigger::Prefix((
+                KeyCode::Char('q'),
+                KeyModifiers::SHIFT
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.next_inbox_item),
+            vec![BindingTrigger::Prefix((
                 KeyCode::Char('b'),
                 KeyModifiers::SHIFT
             ))]
         );
+    }
+
+    #[test]
+    fn deprecated_inbox_keybinds_parse_warn_and_are_ignored() {
+        let config: Config = toml::from_str(
+            "[keys]\ninbox = [\"prefix+shift+i\", \"ctrl+alt+i\"]\nmailbox_view = \"prefix+m\"",
+        )
+        .expect("legacy keybind fields remain parseable");
+        let diagnostics = config.collect_diagnostics();
+        assert!(diagnostics
+            .iter()
+            .any(|message| message.contains("keys.inbox is deprecated and ignored")));
+        assert!(diagnostics
+            .iter()
+            .any(|message| message.contains("keys.mailbox_view is deprecated and ignored")));
+        let keybinds = config.keybinds();
+        assert!(!keybinds.next_inbox_item.bindings.is_empty());
+        assert!(!keybinds.next_blocked_window.bindings.is_empty());
     }
 
     #[test]

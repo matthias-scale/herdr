@@ -161,8 +161,9 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         ),
         help_entry(
             keybind_label(&kb.next_blocked_window),
-            "next blocked tab across all Spaces",
+            "next blocked pane across all Spaces",
         ),
+        help_entry(keybind_label(&kb.next_inbox_item), "next inbox item"),
         help_entry(
             keybind_label(&kb.previous_tab),
             "previous tab in this Space",
@@ -216,7 +217,6 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.usage), "open usage view"),
         help_entry(keybind_label(&kb.tickets), "open Linear tickets"),
         help_entry(keybind_label(&kb.missive), "open Missive conversations"),
-        help_entry(keybind_label(&kb.inbox), "open blocked inbox"),
         help_entry(keybind_label(&kb.home_view), "back to Home, closing views"),
         help_entry(keybind_label(&kb.focus_view), "toggle Focus notepad"),
         help_entry(
@@ -224,7 +224,6 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
             "toggle Orchestration board",
         ),
         help_entry(keybind_label(&kb.scratch_view), "toggle Scratch writer"),
-        help_entry(keybind_label(&kb.mailbox_view), "toggle Mailbox inbox"),
         help_entry(keybind_label(&kb.focus_pane_left), "focus pane left"),
         help_entry(keybind_label(&kb.focus_pane_down), "focus pane down"),
         help_entry(keybind_label(&kb.focus_pane_up), "focus pane up"),

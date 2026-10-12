@@ -485,6 +485,7 @@ fn load_live_config_from_str(content: &str) -> Result<LoadedConfig, Vec<String>>
         |section| config.missive = section,
     );
 
+    diagnostics.extend(config.keys.deprecated_keybinding_diagnostics());
     diagnostics.extend(config.theme.diagnostics());
     config.clamp_safety_bounds();
 
@@ -1161,21 +1162,21 @@ resume_agents_on_restore = true
     }
 
     #[test]
-    fn focus_capture_binding_defaults_to_prefix_t_and_inbox_defaults_are_unchanged() {
+    fn focus_capture_binding_defaults_to_prefix_t_and_legacy_inbox_binding_is_ignored() {
         let defaults = Config::default();
         assert_eq!(
             defaults.keys.capture,
             super::super::BindingConfig::one("prefix+t")
         );
-        assert_eq!(
-            defaults.keys.inbox,
-            super::super::BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()])
-        );
+        assert_eq!(defaults.keys.inbox, super::super::BindingConfig::empty());
         let loaded = load_live_config_from_str(
             "[keys]\ncapture = \"prefix+shift+i\"\ninbox = \"ctrl+alt+i\"\n",
         )
         .expect("focus keybinding config");
-        assert!(loaded.diagnostics.is_empty(), "{:?}", loaded.diagnostics);
+        assert!(loaded
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("keys.inbox is deprecated and ignored")));
         assert!(loaded.invalid_sections.is_empty());
         assert_eq!(
             loaded.config.keys.capture,
@@ -1479,7 +1480,8 @@ mouse_capture = false
             .local_keybindings_profile_toml()
             .expect("reset key profile");
         assert!(profile.contains("next_blocked_window = \"prefix+b\""));
-        assert!(profile.contains("toggle_sidebar = \"prefix+shift+b\""));
+        assert!(profile.contains("next_inbox_item = \"prefix+shift+b\""));
+        assert!(profile.contains("toggle_sidebar = \"prefix+shift+q\""));
     }
 
     #[test]

@@ -326,7 +326,6 @@ impl ClientConnection {
             || self.work_view.is_some()
             || (dock.collapsed && dock.object_preview.is_some())
             || app_state.home.is_some()
-            || app_state.inbox.is_some()
             || app_state
                 .active
                 .and_then(|ws_idx| app_state.workspaces.get(ws_idx))

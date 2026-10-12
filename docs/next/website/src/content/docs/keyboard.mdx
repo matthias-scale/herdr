@@ -81,7 +81,7 @@ Workspaces and session:
 | Rename workspace | `prefix+shift+w` |
 | Close workspace | `prefix+shift+d` |
 | Goto picker | `prefix+g` |
-| Toggle sidebar | `prefix+shift+b` |
+| Toggle sidebar | `prefix+shift+q` |
 | Open loop run history | `prefix+ctrl+h` |
 | Open read-only Symphony dashboard | `prefix+shift+s` |
 | Show fleet Runs section | `prefix+alt+r` |
@@ -169,7 +169,8 @@ previous_window = "prefix+p" # previous tab needing attention across all Spaces
 next_window = "prefix+n" # next tab needing attention across all Spaces
 previous_any_window = "prefix+shift+p" # previous tab across all Spaces
 next_any_window = "prefix+shift+n" # next tab across all Spaces
-next_blocked_window = "prefix+b" # next blocked tab across all Spaces
+next_blocked_window = "prefix+b" # next blocked pane across all Spaces
+next_inbox_item = "prefix+shift+b" # next agent-inbox item in sidebar order
 previous_tab = ["prefix+ctrl+p", "ctrl+alt+["]
 next_tab = ["prefix+ctrl+n", "ctrl+alt+]"]
 new_tab = ["prefix+c", "ctrl+alt+c"]
@@ -178,12 +179,12 @@ split_left = "prefix+shift+v"
 split_up = "prefix+shift+minus"
 split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
 zoom = ["prefix+z", "ctrl+alt+z"]
-toggle_sidebar = "prefix+shift+b"
+toggle_sidebar = "prefix+shift+q"
 ```
 
 `next_window` and `previous_window` cycle only through tabs that need attention: unread Done tabs and tabs with blockers or unanswered questions. Working and settled/read tabs are skipped. `next_any_window` and `previous_any_window` cycle every tab, including tabs without agents. Both cycles follow the sidebar order, freeze that order during a quick burst, and wrap at both ends. `next_tab` and `previous_tab` stay within the active Space. The new workspace and rename pane defaults are `prefix+alt+n` and `prefix+alt+p`.
 
-`next_blocked_window` moves forward through that same global order and stops only on a tab whose pane state rolls up to `blocked`. It wraps after the last match. If no tab is blocked, focus stays where it is. The default is `prefix+b`; `toggle_sidebar` uses `prefix+shift+b`.
+`next_blocked_window` moves forward through the sidebar order and skips agent-inbox panes, stopping on real blockers. `next_inbox_item` cycles agent-inbox panes in sidebar order; its marker is the workspace cwd under `~/.local/state/agent-inbox/inbox`. The defaults are `prefix+b` and `prefix+shift+b`, respectively. `toggle_sidebar` now uses `prefix+shift+q`.
 
 The all-tab cycle is also available without a keybinding: `herdr window next` and `herdr window previous`. Both use the existing tab list/focus API and wrap at either end.
 

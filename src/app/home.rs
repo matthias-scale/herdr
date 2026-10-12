@@ -1,20 +1,15 @@
 //! Home: the fleet at a glance, and one keystroke to whatever is waiting.
 //!
-//! The inbox next door answers "deal with these one at a time" and deliberately
-//! shows a single agent, because clearing a queue is a loop. Home answers the
-//! question you ask *before* that loop — is there anything worth entering it
-//! for, and if so, which one — so it shows the whole queue and jumps.
-//!
-//! Like the inbox, the queue is derived on every read rather than cached, so an
-//! agent that answers its own gate simply stops appearing. The only thing held
-//! here is the cursor plus the draft dispatch settings, which cannot be
-//! re-derived.
+//! The attention queue is derived on every read rather than cached, so an agent
+//! that answers its own gate simply stops appearing. Home shows the whole queue
+//! and jumps to the selected pane. The only thing held here is the cursor plus
+//! the draft dispatch settings, which cannot be re-derived.
 
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
-use crate::{app::inbox::BlockedAgent, detect::Agent, ui::dropdown::DropdownFilterState};
+use crate::{app::attention::BlockedAgent, detect::Agent, ui::dropdown::DropdownFilterState};
 
 use super::home_catalog::{
     ClaudeContextWindowForm, HomeCatalog, HomeProviderCatalog, AUTO_EFFORT, DEFAULT_CONTEXT_WINDOW,
@@ -1864,9 +1859,7 @@ impl crate::app::state::AppState {
         if self.home.is_some() {
             self.clear_home();
         } else {
-            // Home and the inbox both want the whole frame; opening one puts
-            // the other away rather than stacking two overlays.
-            self.inbox = None;
+            // Home and Orchestration both own the whole frame.
             self.board_view = None;
             self.home = Some(self.new_home_state());
         }
@@ -1986,7 +1979,6 @@ impl crate::app::state::AppState {
     pub(crate) fn open_home_on_launch(&mut self, config: &crate::config::Config) {
         if config.ui.show_home_on_start {
             self.home = Some(self.new_home_state());
-            self.inbox = None;
             self.reset_home_ref_context(false);
         }
     }
@@ -2046,7 +2038,6 @@ impl crate::app::state::AppState {
         }
         home.focus = Some(HomeFocus::Prompt);
         home.picker = None;
-        self.inbox = None;
         self.home = Some(home);
         self.reset_home_ref_context(false);
     }
@@ -2059,7 +2050,6 @@ impl crate::app::state::AppState {
         home.browse = None;
         home.directory_filter.set_query("");
         home.add_project = Some(AddProjectState::starting_at(&start));
-        self.inbox = None;
         self.home = Some(home);
         self.reset_home_ref_context(false);
     }
@@ -2072,7 +2062,6 @@ impl crate::app::state::AppState {
         home.browse = Some(HomeBrowse::starting_at(&start));
         home.directory_filter.set_query("");
         home.add_project = None;
-        self.inbox = None;
         self.home = Some(home);
         self.reset_home_ref_context(false);
     }

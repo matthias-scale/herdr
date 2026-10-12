@@ -159,7 +159,6 @@ impl AppState {
         self.forwarded_pane_input = None;
         if self.effective_interaction_mode() != Mode::Terminal
             || self.symphony_detail.is_some()
-            || self.inbox.is_some()
             || self.work_view.is_some()
             || self.dock_object_preview.is_some()
         {
@@ -4721,11 +4720,10 @@ mod tests {
 
         click(&mut app, TopBarView::Focus);
         assert_eq!(app.state.top_bar_view(), TopBarView::Focus);
-        click(&mut app, TopBarView::Mailbox);
-        assert_eq!(app.state.top_bar_view(), TopBarView::Mailbox);
+        assert!(app.state.focus_open);
+        click(&mut app, TopBarView::Scratch);
+        assert_eq!(app.state.top_bar_view(), TopBarView::Scratch);
         assert!(!app.state.focus_open, "views replace each other");
-        click(&mut app, TopBarView::Mailbox);
-        assert_eq!(app.state.top_bar_view(), TopBarView::Home);
         click(&mut app, TopBarView::Focus);
         click(&mut app, TopBarView::Home);
         assert_eq!(app.state.top_bar_view(), TopBarView::Home);

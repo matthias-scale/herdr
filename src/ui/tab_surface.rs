@@ -333,7 +333,7 @@ mod tests {
         assert!(frame.cursor.is_some());
         assert_eq!(frame.hyperlinks, vec![uri.to_owned()]);
         let status = frame_rect_text(&frame, app.view.status_bar_rect);
-        assert!(status.starts_with(" H  F  O  S  M "), "{status:?}");
+        assert!(status.starts_with(" H  F  O  S "), "{status:?}");
         assert!(status.contains("Home"), "{status:?}");
         assert_eq!(status.matches('\u{25cf}').count(), 3, "{status:?}");
         for hidden_value in ["CPU 12%", "MEM 8.0/16G", "DSK 41%"] {

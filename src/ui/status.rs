@@ -27,7 +27,7 @@ use crate::platform::status_metrics::metric_segment_visible;
 
 /// Full-width top bar.
 ///
-/// Left: one icon per view (Home, Focus, Orchestration, Scratch, Mailbox), the
+/// Left: one icon per view (Home, Focus, Orchestration, Scratch), the
 /// one on screen highlighted. Centre: view name and focused pane title. Right:
 /// CPU, memory, disk and `⋯`; host details and actions live in the popover.
 ///
@@ -263,10 +263,6 @@ pub(crate) fn view_button_tooltip(app: &AppState, view: TopBarView) -> String {
         TopBarView::Scratch => (
             "Your scratch pad, full screen. Opens the scratch notes writer.",
             &app.keybinds.scratch_view,
-        ),
-        TopBarView::Mailbox => (
-            "Agent requests waiting for you. Opens the blocked inbox.",
-            &app.keybinds.mailbox_view,
         ),
     };
     let shortcut = binding
@@ -1782,7 +1778,6 @@ mod tests {
                 (3, " F ", false),
                 (6, " O ", false),
                 (9, " S ", false),
-                (12, " M ", false),
             ]
         );
         assert_eq!(
@@ -1814,13 +1809,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             labels,
-            [
-                " \u{F06A1} ",
-                " \u{F04FE} ",
-                " \u{F199C} ",
-                " \u{F0CB6} ",
-                " \u{F1274} "
-            ]
+            [" \u{F06A1} ", " \u{F04FE} ", " \u{F199C} ", " \u{F0CB6} ",]
         );
     }
 
@@ -1832,7 +1821,7 @@ mod tests {
         app.ensure_test_terminals();
         for width in [80, 120, 200] {
             let rendered = render_status_row(&app, width);
-            assert!(rendered.starts_with(" H  F  O  S  M "), "{rendered:?}");
+            assert!(rendered.starts_with(" H  F  O  S "), "{rendered:?}");
             assert!(rendered.contains("Home"), "{rendered:?}");
             assert!(rendered.matches('\u{25cf}').count() >= 3, "{rendered:?}");
         }
@@ -1926,13 +1915,10 @@ mod tests {
         app.scratch.open_writer();
         assert_eq!(app.top_bar_view(), TopBarView::Scratch);
         app.close_top_bar_views();
-        app.toggle_inbox();
-        assert_eq!(app.top_bar_view(), TopBarView::Mailbox);
-        app.close_top_bar_views();
         assert_eq!(app.top_bar_view(), TopBarView::Home);
         assert_eq!(
             TopBarView::ALL.map(TopBarView::name),
-            ["Home", "Focus", "Orchestration", "Scratch", "Mailbox"]
+            ["Home", "Focus", "Orchestration", "Scratch"]
         );
     }
 
@@ -1948,7 +1934,6 @@ mod tests {
             ("Focus", "prefix+ctrl+f"),
             ("Orchestration", "prefix+ctrl+o"),
             ("Scratch", "prefix+ctrl+s"),
-            ("Mailbox", "prefix+m"),
         ]) {
             let lines = tooltip.lines().collect::<Vec<_>>();
             assert_eq!(lines.len(), 3, "{tooltip}");

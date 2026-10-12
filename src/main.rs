@@ -307,7 +307,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # next_window = "prefix+n"       # next visible sidebar row across all workspaces
 # previous_any_window = "prefix+shift+p" # previous tab across all workspaces
 # next_any_window = "prefix+shift+n"     # next tab across all workspaces
-# next_blocked_window = "prefix+b" # next blocked tab across all workspaces
+# next_blocked_window = "prefix+b" # next blocked pane across all workspaces
+# next_inbox_item = "prefix+shift+b" # next agent-inbox item in sidebar order
 # switch_tab = "prefix+1..9"
 # switch_workspace = ""   # optional indexed binding, e.g. "prefix+shift+1..9"
 # close_tab = "prefix+shift+x"
@@ -325,7 +326,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # close_pane = "prefix+x"
 # zoom = "prefix+z"       # legacy alias: fullscreen
 # resize_mode = "prefix+r"
-# toggle_sidebar = "prefix+shift+b"
+# toggle_sidebar = "prefix+shift+q"
 # sidebar_cycle_group_mode = ""
 # sidebar_refresh = ""
 # toggle_blocked_filter = "" # optional, unset by default
@@ -338,7 +339,6 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # focus_view = "prefix+ctrl+f"   # top bar Focus: full-screen notepad
 # orchestration_view = "prefix+ctrl+o" # top bar Orchestration: the board
 # scratch_view = "prefix+ctrl+s" # top bar Scratch: the notes writer
-# mailbox_view = "prefix+m"      # top bar Mailbox: the blocked inbox
 
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.
 # They are independent from focus_pane_*. Do not include prefix+, esc, enter, tab, or 1..9 here.
@@ -684,7 +684,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # heartbeat_stale_ms = 1800000
 # symphony_host = "server" # optional fleet host running Temporal; default is local
 # aloop_host = "ub2"      # producer for the Aloops and, by default, Inbox sections
-# inbox_host = "ub2"       # optional Inbox healthcheck host; defaults to aloop_host
+# inbox_host = "ub2"       # optional agent-inbox health data host; defaults to aloop_host
 # [[remote.fleet.hosts]]
 # name = "local"
 # local = true
@@ -1330,7 +1330,8 @@ mod tests {
         assert!(DEFAULT_CONFIG.contains("# previous_any_window = \"prefix+shift+p\""));
         assert!(DEFAULT_CONFIG.contains("# next_any_window = \"prefix+shift+n\""));
         assert!(DEFAULT_CONFIG.contains("# next_blocked_window = \"prefix+b\""));
-        assert!(DEFAULT_CONFIG.contains("# toggle_sidebar = \"prefix+shift+b\""));
+        assert!(DEFAULT_CONFIG.contains("# next_inbox_item = \"prefix+shift+b\""));
+        assert!(DEFAULT_CONFIG.contains("# toggle_sidebar = \"prefix+shift+q\""));
     }
 
     #[cfg(unix)]

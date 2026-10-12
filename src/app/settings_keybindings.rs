@@ -167,6 +167,9 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
             built_in("next_blocked_window", "next blocked window", |kb| {
                 &kb.next_blocked_window
             }),
+            built_in("next_inbox_item", "next inbox item", |kb| {
+                &kb.next_inbox_item
+            }),
         ],
     ),
     (
@@ -269,14 +272,12 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
             built_in("work", "work", |kb| &kb.work),
             built_in("usage", "usage", |kb| &kb.usage),
             built_in("tickets", "tickets", |kb| &kb.tickets),
-            built_in("inbox", "inbox", |kb| &kb.inbox),
             built_in("home_view", "home view", |kb| &kb.home_view),
             built_in("focus_view", "focus view", |kb| &kb.focus_view),
             built_in("orchestration_view", "orchestration view", |kb| {
                 &kb.orchestration_view
             }),
             built_in("scratch_view", "scratch view", |kb| &kb.scratch_view),
-            built_in("mailbox_view", "mailbox view", |kb| &kb.mailbox_view),
             built_in("missive", "missive", |kb| &kb.missive),
             built_in("symphony", "symphony", |kb| &kb.symphony),
             built_in("runs", "fleet runs", |kb| &kb.runs),

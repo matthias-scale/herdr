@@ -60,7 +60,7 @@ Herdr 是鼠标原生的。你可以点击窗格、标签页、工作区和智�
 | 重命名工作区 | `prefix+shift+w` |
 | 关闭工作区 | `prefix+shift+d` |
 | Goto 选择器 | `prefix+g` |
-| 切换侧边栏 | `prefix+shift+b` |
+| 切换侧边栏 | `prefix+shift+q` |
 | 打开循环运行历史 | `prefix+ctrl+h` |
 | 打开只读 Symphony 仪表板 | `prefix+shift+s` |
 | 显示舰队 Runs 分区 | `prefix+alt+r` |
@@ -128,7 +128,8 @@ previous_window = "prefix+p" # 所有 Space 中上一个需要关注的标签页
 next_window = "prefix+n" # 所有 Space 中下一个需要关注的标签页
 previous_any_window = "prefix+shift+p" # 所有 Space 中的上一个标签页
 next_any_window = "prefix+shift+n" # 所有 Space 中的下一个标签页
-next_blocked_window = "prefix+b" # 所有 Space 中的下一个 blocked 标签页
+next_blocked_window = "prefix+b" # 所有 Space 中的下一个 blocked 窗格
+next_inbox_item = "prefix+shift+b" # 侧边栏顺序中的下一个 agent-inbox 项目
 previous_tab = ["prefix+ctrl+p", "ctrl+alt+["]
 next_tab = ["prefix+ctrl+n", "ctrl+alt+]"]
 new_tab = ["prefix+c", "ctrl+alt+c"]
@@ -137,12 +138,12 @@ split_left = "prefix+shift+v"
 split_up = "prefix+shift+minus"
 split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
 zoom = ["prefix+z", "ctrl+alt+z"]
-toggle_sidebar = "prefix+shift+b"
+toggle_sidebar = "prefix+shift+q"
 ```
 
 `next_window` 和 `previous_window` 只循环需要关注的标签页：未读 Done 标签页，以及有阻塞项或未回答问题的标签页。工作中和已读/已结算的标签页会被跳过。`next_any_window` 和 `previous_any_window` 会循环所有标签页，包括没有智能体的标签页。两种循环都按侧边栏顺序移动，在快速连续操作期间固定顺序，并在两端循环。`next_tab` 和 `previous_tab` 只在当前 Space 中移动。新建 Space 和重命名窗格的默认键位分别是 `prefix+alt+n` 和 `prefix+alt+p`。
 
-`next_blocked_window` 按相同的全局顺序向前移动,只停在窗格状态汇总为 `blocked` 的标签页。到达最后一个匹配项后会回到开头。如果没有 blocked 标签页,焦点保持不变。默认键位是 `prefix+b`;`toggle_sidebar` 使用 `prefix+shift+b`。
+`next_blocked_window` 按侧边栏顺序移动并跳过 agent-inbox 窗格,只停在真实阻塞项上。`next_inbox_item` 按侧边栏顺序循环 agent-inbox 窗格;其标记是工作区 cwd 位于 `~/.local/state/agent-inbox/inbox` 下。默认键位分别是 `prefix+b` 和 `prefix+shift+b`。`toggle_sidebar` 现在使用 `prefix+shift+q`。
 
 无需键位绑定也可使用相同的全局循环:`herdr window next` 和 `herdr window previous`。两者都会在两端循环。
 

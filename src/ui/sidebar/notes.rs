@@ -135,19 +135,11 @@ pub(crate) fn render(app: &AppState, frame: &mut Frame, line: &NotesLine, rect: 
 mod tests {
     use super::*;
     #[test]
-    fn scratch_notes_precede_inbox_and_header_has_fallback() {
+    fn scratch_notes_header_has_fallback() {
         let mut app = AppState::test_new();
         app.nerd_font = false;
-        app.fleet_snapshot.polled = true;
-        app.fleet_snapshot.inbox = Some(std::sync::Arc::new(crate::inbox::ProducerSnapshot::read(
-            "test".into(),
-            crate::inbox::Healthcheck::default(),
-            std::time::SystemTime::now(),
-        )));
         let mut rows = Vec::new();
         append_rows(&app, &mut rows);
-        super::super::inbox::append_rows(&app, &mut rows);
-        assert!(matches!(rows.last(), Some(SidebarRow::Inbox(_))));
         assert!(matches!(rows[0], SidebarRow::Notes(NotesLine::Header)));
         let backend = ratatui::backend::TestBackend::new(18, 2);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");

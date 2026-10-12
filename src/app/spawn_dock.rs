@@ -578,7 +578,6 @@ impl AppState {
             }
         }
         self.home = None;
-        self.inbox = None;
     }
 
     pub(crate) fn least_loaded_spawn_host(&self) -> Option<String> {

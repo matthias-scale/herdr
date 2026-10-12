@@ -964,7 +964,13 @@
           "key": "keys.next_blocked_window",
           "type": "keybinding",
           "default": "\"prefix+b\"",
-          "description": "Focus the next blocked tab across all workspaces in canonical order."
+          "description": "Focus the next blocked pane across all workspaces in sidebar order, skipping agent-inbox panes."
+        },
+        {
+          "key": "keys.next_inbox_item",
+          "type": "keybinding",
+          "default": "\"prefix+shift+b\"",
+          "description": "Focus the next agent-inbox pane in sidebar order."
         },
         {
           "key": "keys.split_vertical",
@@ -1035,7 +1041,7 @@
         {
           "key": "keys.toggle_sidebar",
           "type": "keybinding",
-          "default": "\"prefix+shift+b\"",
+          "default": "\"prefix+shift+q\"",
           "description": "Toggle sidebar collapse."
         },
         {
@@ -1233,8 +1239,8 @@
         {
           "key": "keys.inbox",
           "type": "keybinding",
-          "default": "[\"prefix+shift+i\", \"ctrl+alt+i\"]",
-          "description": "Open the blocked-agent inbox."
+          "default": "unset",
+          "description": "Deprecated keybinding. Accepted for compatibility, ignored, and reported as a warning."
         },
         {
           "key": "keys.home",
@@ -1269,8 +1275,8 @@
         {
           "key": "keys.mailbox_view",
           "type": "keybinding",
-          "default": "\"prefix+m\"",
-          "description": "Toggle the top bar's Mailbox view, the blocked inbox."
+          "default": "unset",
+          "description": "Deprecated keybinding. Accepted for compatibility, ignored, and reported as a warning."
         },
         {
           "key": "keys.git_pull",
@@ -2433,7 +2439,7 @@
           "key": "remote.fleet.inbox_host",
           "type": "string",
           "default": "remote.fleet.aloop_host",
-          "description": "Fleet host that runs `agent-inbox healthcheck --json` for the Inbox sidebar section."
+          "description": "Fleet host that provides agent-inbox health data through `agent-inbox healthcheck --json`."
         }
       ]
     },

@@ -1845,7 +1845,6 @@ pub(crate) enum SurfaceInputOwner {
     EditorPreview,
     DockObjectPreview,
     Home,
-    Inbox,
     Scratch,
 }
 
@@ -2859,8 +2858,6 @@ pub(crate) enum TopBarView {
     Orchestration,
     /// The scratch notes writer.
     Scratch,
-    /// The blocked-agent inbox.
-    Mailbox,
 }
 
 impl TopBarView {
@@ -2870,17 +2867,11 @@ impl TopBarView {
             Self::Focus => "Focus",
             Self::Orchestration => "Orchestration",
             Self::Scratch => "Scratch",
-            Self::Mailbox => "Mailbox",
         }
     }
 
-    pub(crate) const ALL: [TopBarView; 5] = [
-        Self::Home,
-        Self::Focus,
-        Self::Orchestration,
-        Self::Scratch,
-        Self::Mailbox,
-    ];
+    pub(crate) const ALL: [TopBarView; 4] =
+        [Self::Home, Self::Focus, Self::Orchestration, Self::Scratch];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4423,7 +4414,6 @@ pub(crate) enum TerminalAreaSurface<'a> {
     Work,
     DockObjectPreview,
     Home,
-    Inbox(&'a crate::app::inbox::InboxState),
     Scratch,
     Tab,
     Empty,
@@ -4523,9 +4513,6 @@ pub struct AppState {
     pub(crate) usage_pricing: crate::config::UsageConfig,
     /// Set by client-local input and drained into the background scan job.
     pub(crate) request_usage_scan: bool,
-    /// Open inbox cursor. `Some` means the inbox overlay owns the screen and the
-    /// keyboard, exactly like the Symphony and loop-history details above it.
-    pub(crate) inbox: Option<crate::app::inbox::InboxState>,
     pub(crate) scratch: crate::scratch::ScratchState,
     /// Whether the Focus view, a full-screen in-memory notepad, owns the
     /// screen and the keyboard. Client-local and never saved.
@@ -4533,8 +4520,7 @@ pub struct AppState {
     /// The Focus notepad's text. Kept while the view is closed, so leaving
     /// Focus and coming back does not lose what was written.
     pub(crate) focus_editor: Option<crate::scratch::Editor>,
-    /// Open home view. `Some` means home owns the screen, the same way `inbox`
-    /// does; the two are mutually exclusive because each wants the whole frame.
+    /// Open home view. `Some` means Home owns the whole frame.
     pub(crate) home: Option<crate::app::home::HomeState>,
     /// Bottom-docked spawn composer, presented over panes without replacing them.
     pub(crate) spawn_dock: Option<crate::app::spawn_dock::SpawnDockState>,
@@ -6841,7 +6827,6 @@ impl AppState {
                 return InputOwner::Surface(SurfaceInputOwner::DockObjectPreview)
             }
             TerminalAreaSurface::Home => return InputOwner::Surface(SurfaceInputOwner::Home),
-            TerminalAreaSurface::Inbox(_) => return InputOwner::Surface(SurfaceInputOwner::Inbox),
             TerminalAreaSurface::Scratch => return InputOwner::Surface(SurfaceInputOwner::Scratch),
             TerminalAreaSurface::Tab => {}
             TerminalAreaSurface::Empty => return InputOwner::None,
@@ -7850,8 +7835,6 @@ impl AppState {
             .is_some_and(|home| home.pending_dispatch.is_none())
         {
             TerminalAreaSurface::Home
-        } else if let Some(inbox) = self.inbox.as_ref() {
-            TerminalAreaSurface::Inbox(inbox)
         } else if self
             .active
             .and_then(|ws_idx| self.workspaces.get(ws_idx))
@@ -7871,7 +7854,6 @@ impl AppState {
             TerminalAreaSurface::Focus => TopBarView::Focus,
             TerminalAreaSurface::Board => TopBarView::Orchestration,
             TerminalAreaSurface::Scratch => TopBarView::Scratch,
-            TerminalAreaSurface::Inbox(_) => TopBarView::Mailbox,
             _ => TopBarView::Home,
         }
     }
@@ -7891,7 +7873,6 @@ impl AppState {
         self.focus_open = false;
         self.board_view = None;
         self.scratch.open = false;
-        self.inbox = None;
         self.clear_home();
         self.clear_usage_view();
         self.symphony_detail = None;
@@ -8112,7 +8093,6 @@ impl AppState {
             usage_snapshot: None,
             usage_pricing: crate::config::UsageConfig::default(),
             request_usage_scan: false,
-            inbox: None,
             focus_open: false,
             focus_editor: None,
             scratch: crate::scratch::ScratchState::default(),
@@ -9062,10 +9042,6 @@ mod tests {
         state.home = Some(crate::app::home::HomeState::default());
     }
 
-    fn show_inbox(state: &mut AppState) {
-        state.inbox = Some(crate::app::inbox::InboxState::default());
-    }
-
     fn show_popup(state: &mut AppState) {
         state.popup_pane = Some(PopupPaneState {
             pane_id: PaneId::alloc(),
@@ -9180,7 +9156,7 @@ mod tests {
         }
     }
 
-    fn replacing_surface_setups() -> [SurfaceSetup; 9] {
+    fn replacing_surface_setups() -> [SurfaceSetup; 8] {
         [
             ("editor preview", show_editor_preview),
             ("symphony", show_symphony),
@@ -9190,7 +9166,6 @@ mod tests {
             ("work", show_work),
             ("dock object preview", show_dock_object_preview),
             ("home", show_home),
-            ("inbox", show_inbox),
         ]
     }
 

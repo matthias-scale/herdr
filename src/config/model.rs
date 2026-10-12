@@ -1057,8 +1057,10 @@ pub struct KeysConfig {
     pub previous_any_window: BindingConfig,
     /// Focus the next tab across all workspaces. Default: "prefix+shift+n".
     pub next_any_window: BindingConfig,
-    /// Focus the next blocked tab across all workspaces. Default: "prefix+b".
+    /// Focus the next blocked pane across all workspaces. Default: "prefix+b".
     pub next_blocked_window: BindingConfig,
+    /// Focus the next agent-inbox item in sidebar order. Default: "prefix+shift+b".
+    pub next_inbox_item: BindingConfig,
     /// Switch to tab 1-9. Default: "prefix+1..9".
     pub switch_tab: BindingConfig,
     /// Switch to workspace 1-9 from prefix mode. Unset by default.
@@ -1119,7 +1121,7 @@ pub struct KeysConfig {
     pub resize_pane_up: BindingConfig,
     /// Resize the focused pane toward the right. Unset by default.
     pub resize_pane_right: BindingConfig,
-    /// Toggle sidebar collapse. Default: "prefix+shift+b"
+    /// Toggle sidebar collapse. Default: "prefix+shift+q"
     pub toggle_sidebar: BindingConfig,
     /// Focus the sidebar and expand it if collapsed. Unset by default.
     pub focus_sidebar: BindingConfig,
@@ -1161,7 +1163,7 @@ pub struct KeysConfig {
     pub tickets: BindingConfig,
     /// Open the read-only Missive conversation view. Unset by default.
     pub missive: BindingConfig,
-    /// Open the blocked-agent inbox. Default: ["prefix+shift+i", "ctrl+alt+i"]
+    /// Deprecated. Accepted for compatibility and ignored.
     pub inbox: BindingConfig,
     /// Open the home overview. Default: "ctrl+alt+h"
     pub home: BindingConfig,
@@ -1174,7 +1176,7 @@ pub struct KeysConfig {
     pub orchestration_view: BindingConfig,
     /// Toggle the top bar's Scratch view, the notes writer. Default: "prefix+ctrl+s"
     pub scratch_view: BindingConfig,
-    /// Toggle the top bar's Mailbox view, the blocked inbox. Default: "prefix+m"
+    /// Deprecated. Accepted for compatibility and ignored.
     pub mailbox_view: BindingConfig,
     /// Run `git pull --rebase` for the focused repository. Unset by default.
     pub git_pull: BindingConfig,
@@ -1325,6 +1327,7 @@ pub(crate) struct KeysConfigOverlay {
     next_any_window: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next_blocked_window: Option<BindingConfig>,
+    next_inbox_item: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     switch_tab: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1532,6 +1535,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(previous_any_window);
         apply_field!(next_any_window);
         apply_field!(next_blocked_window);
+        apply_field!(next_inbox_item);
         apply_field!(switch_tab);
         apply_field!(switch_workspace);
         apply_field!(close_tab);
@@ -1615,6 +1619,18 @@ impl<'de> Deserialize<'de> for KeysConfig {
 impl KeysConfig {
     pub(crate) fn key_field_is_user_configured(&self, field: &str) -> bool {
         self.user_fields.contains(field)
+    }
+
+    pub(crate) fn deprecated_keybinding_diagnostics(&self) -> Vec<String> {
+        ["inbox", "mailbox_view"]
+            .into_iter()
+            .filter(|name| self.key_field_is_user_configured(name))
+            .map(|name| {
+                format!(
+                    "keys.{name} is deprecated and ignored; use next_inbox_item to cycle agent-inbox items"
+                )
+            })
+            .collect()
     }
 
     pub(crate) fn local_profile(&self, keybinds: &Keybinds) -> KeysConfigOverlay {
@@ -1703,6 +1719,7 @@ impl KeysConfig {
         copy_effective_action_field!(previous_any_window, keybinds.previous_any_window);
         copy_effective_action_field!(next_any_window, keybinds.next_any_window);
         copy_effective_action_field!(next_blocked_window, keybinds.next_blocked_window);
+        copy_effective_action_field!(next_inbox_item, keybinds.next_inbox_item);
         copy_effective_indexed_field!(switch_tab, keybinds.switch_tab);
         copy_effective_indexed_field!(switch_workspace, keybinds.switch_workspace);
         copy_effective_action_field!(close_tab, keybinds.close_tab);
@@ -1753,13 +1770,11 @@ impl KeysConfig {
         copy_effective_action_field!(usage, keybinds.usage);
         copy_effective_action_field!(tickets, keybinds.tickets);
         copy_effective_action_field!(missive, keybinds.missive);
-        copy_effective_action_field!(inbox, keybinds.inbox);
         copy_effective_action_field!(home, keybinds.home);
         copy_effective_action_field!(home_view, keybinds.home_view);
         copy_effective_action_field!(focus_view, keybinds.focus_view);
         copy_effective_action_field!(orchestration_view, keybinds.orchestration_view);
         copy_effective_action_field!(scratch_view, keybinds.scratch_view);
-        copy_effective_action_field!(mailbox_view, keybinds.mailbox_view);
         copy_effective_action_field!(git_pull, keybinds.git_pull);
         copy_effective_action_field!(git_commit, keybinds.git_commit);
         copy_effective_action_field!(git_push, keybinds.git_push);
@@ -2329,6 +2344,7 @@ impl Default for KeysConfig {
             previous_any_window: BindingConfig::one("prefix+shift+p"),
             next_any_window: BindingConfig::one("prefix+shift+n"),
             next_blocked_window: BindingConfig::one("prefix+b"),
+            next_inbox_item: BindingConfig::one("prefix+shift+b"),
             switch_tab: BindingConfig::one("prefix+1..9"),
             switch_workspace: BindingConfig::empty(),
             close_tab: BindingConfig::one("prefix+shift+x"),
@@ -2358,7 +2374,7 @@ impl Default for KeysConfig {
             resize_pane_down: BindingConfig::empty(),
             resize_pane_up: BindingConfig::empty(),
             resize_pane_right: BindingConfig::empty(),
-            toggle_sidebar: BindingConfig::one("prefix+shift+b"),
+            toggle_sidebar: BindingConfig::one("prefix+shift+q"),
             focus_sidebar: BindingConfig::empty(),
             assign_pane_to_pod: BindingConfig::empty(),
             focus_owning_repo_group: BindingConfig::one("prefix+i"),
@@ -2379,13 +2395,13 @@ impl Default for KeysConfig {
             usage: BindingConfig::one("prefix+ctrl+y"),
             tickets: BindingConfig::one("prefix+ctrl+t"),
             missive: BindingConfig::empty(),
-            inbox: BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()]),
+            inbox: BindingConfig::empty(),
             home: BindingConfig::one("ctrl+alt+h"),
             home_view: BindingConfig::one("prefix+a"),
             focus_view: BindingConfig::one("prefix+ctrl+f"),
             orchestration_view: BindingConfig::one("prefix+ctrl+o"),
             scratch_view: BindingConfig::one("prefix+ctrl+s"),
-            mailbox_view: BindingConfig::one("prefix+m"),
+            mailbox_view: BindingConfig::empty(),
             git_pull: BindingConfig::empty(),
             git_commit: BindingConfig::empty(),
             git_push: BindingConfig::empty(),

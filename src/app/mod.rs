@@ -18,6 +18,7 @@ pub(crate) use api_helpers::{pane_agent_status_with_stale, read_terminal_snapsho
 pub(crate) mod claude_subagents;
 mod command_palette;
 pub(crate) use command_palette::PaletteEntry;
+pub(crate) mod attention;
 mod config_io;
 mod creation;
 pub(crate) mod diff;
@@ -30,7 +31,6 @@ pub(crate) mod home;
 pub(crate) mod home_catalog;
 pub(crate) mod home_refs;
 mod ids;
-pub(crate) mod inbox;
 mod input;
 pub(crate) mod launch_profiles;
 pub(crate) mod machines;
@@ -1066,7 +1066,6 @@ impl App {
             },
             usage_pricing: config.usage.clone(),
             request_usage_scan: false,
-            inbox: None,
             focus_open: false,
             focus_editor: None,
             home: None,
@@ -3356,14 +3355,13 @@ impl App {
 
 impl App {
     pub(crate) fn terminal_input_context(&self) -> Option<TerminalInputContext> {
-        // Full-frame overlays bypass ordinary pane context. The inbox routes keys
-        // to a selected pane, while Symphony and home consume them themselves.
+        // Full-frame overlays bypass ordinary pane context. Symphony and home
+        // consume their keys themselves.
         if self.state.symphony_detail.is_some()
             || self.state.loop_run_history_detail.is_some()
             || self.state.aloop_run_detail.is_some()
             || self.state.work_view.is_some()
             || self.state.usage_view.is_some()
-            || self.state.inbox.is_some()
             || self.state.home.is_some()
         {
             None
@@ -4065,9 +4063,6 @@ impl App {
             }
             state::InputOwner::Surface(state::SurfaceInputOwner::Scratch) => {
                 self.handle_scratch_key(key_event);
-            }
-            state::InputOwner::Surface(state::SurfaceInputOwner::Inbox) => {
-                self.handle_inbox_key_headless(key_event);
             }
             state::InputOwner::Surface(state::SurfaceInputOwner::EditorPreview) => {}
             state::InputOwner::Notepad => {
@@ -10210,14 +10205,7 @@ last_pane = "prefix+tab"
 
     #[tokio::test]
     async fn headless_subgroup_picker_takes_keys_before_full_frame_surfaces() {
-        for overlay in [
-            "Symphony",
-            "Loop History",
-            "Usage",
-            "Work",
-            "dock preview",
-            "Inbox",
-        ] {
+        for overlay in ["Symphony", "Loop History", "Usage", "Work", "dock preview"] {
             let mut app = test_app();
             let mut workspace = Workspace::test_new("test");
             let focused = workspace.focused_pane_id().unwrap();
@@ -10247,7 +10235,6 @@ last_pane = "prefix+tab"
                         key: "SCA-1".into(),
                     });
                 }
-                "Inbox" => app.state.toggle_inbox(),
                 _ => unreachable!(),
             }
 

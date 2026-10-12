@@ -7,8 +7,8 @@ use ratatui::{
 };
 
 use crate::app::{
+    attention::BlockedAgent,
     home::{HomeCounts, HomeFocus, HomePicker, HomeState, HomeTarget},
-    inbox::BlockedAgent,
     state::{HomeHitArea, HomeHitTarget},
     AppState,
 };

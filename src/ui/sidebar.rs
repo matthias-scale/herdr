@@ -1,7 +1,6 @@
 pub(crate) mod aloops;
 mod coverage;
 pub(crate) mod devices;
-pub(crate) mod inbox;
 pub(crate) mod notes;
 mod runs;
 #[cfg(test)]
@@ -146,6 +145,9 @@ pub(super) fn tab_lifecycle_visible(entry: &AgentPanelEntry) -> bool {
 /// A blocked attention tier remains actionable while lifecycle state still
 /// reports working; the row can show both facts at once.
 pub(crate) fn entry_attention_tier(entry: &AgentPanelEntry) -> AttentionTier {
+    if entry.agent_inbox {
+        return AttentionTier::None;
+    }
     entry.attention_tier.unwrap_or_else(|| {
         crate::terminal::state::attention_tier(
             entry.state,
@@ -223,6 +225,9 @@ pub(super) fn agent_panel_label_color(
     entry: &AgentPanelEntry,
     p: &Palette,
 ) -> ratatui::style::Color {
+    if entry.agent_inbox {
+        return p.overlay0;
+    }
     if entry_is_blocked(entry) {
         return p.red;
     }
@@ -269,6 +274,9 @@ fn entry_has_gate(entry: &AgentPanelEntry) -> bool {
 }
 
 fn compact_row_dot(entry: &AgentPanelEntry) -> &'static str {
+    if entry.agent_inbox {
+        return "○";
+    }
     if entry_is_blocked(entry) {
         return "○";
     }
@@ -838,6 +846,9 @@ fn entry_is_done_unread(entry: &AgentPanelEntry) -> bool {
 }
 
 fn compact_row_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
+    if entry.agent_inbox {
+        return p.overlay0;
+    }
     if entry_is_blocked(entry) {
         return p.red;
     }
@@ -860,6 +871,9 @@ fn compact_row_color(entry: &AgentPanelEntry, p: &Palette) -> Color {
 }
 
 pub(crate) fn sidebar_entry_display_state(entry: &AgentPanelEntry) -> AgentState {
+    if entry.agent_inbox && entry.state == AgentState::Blocked {
+        return AgentState::Idle;
+    }
     if sidebar_entry_has_working_state(entry) {
         AgentState::Working
     } else {
@@ -2016,6 +2030,7 @@ pub(crate) struct AgentPanelEntry {
     /// True when the pane's own reported state is Working, before subagent
     /// activity projects an idle parent as Working.
     pub(crate) own_state_working: bool,
+    pub(crate) agent_inbox: bool,
     /// Read-only membership token projected once for a canonical pane row.
     pub(crate) pod: Option<PodToken>,
 }
@@ -2114,6 +2129,7 @@ impl AgentPanelEntry {
             pending_ask: None,
             working_shelf: false,
             own_state_working: false,
+            agent_inbox: false,
             pod: None,
         }
     }
@@ -2209,6 +2225,10 @@ pub(crate) struct RemoteAgentPanelEntry {
 }
 
 impl RemoteAgentPanelEntry {
+    pub(crate) fn is_agent_inbox(&self) -> bool {
+        self.entry.agent_inbox || self.cwd.as_deref().is_some_and(agent_inbox_cwd)
+    }
+
     pub(crate) fn work_context(&self) -> &crate::work_context::PaneWorkContext {
         &self.work_context
     }
@@ -2270,6 +2290,28 @@ impl RemoteAgentPanelEntry {
             entry,
         }
     }
+}
+
+/// Agent-inbox sessions use their private state directory as the workspace cwd.
+/// Keep the path check component-aware so similarly named directories do not match.
+pub(crate) fn agent_inbox_cwd(cwd: &str) -> bool {
+    agent_inbox_cwd_path(std::path::Path::new(cwd))
+}
+
+pub(crate) fn agent_inbox_cwd_path(cwd: &std::path::Path) -> bool {
+    let state_root = std::env::var_os("AGENT_INBOX_STATE_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("XDG_STATE_HOME")
+                .map(std::path::PathBuf::from)
+                .map(|root| root.join("agent-inbox"))
+        })
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .map(|home| home.join(".local/state/agent-inbox"))
+        });
+    state_root.is_some_and(|root| cwd.starts_with(root.join("inbox")))
 }
 
 fn narrow_host_tokens<'a, I>(hosts: I) -> std::collections::HashMap<String, String>
@@ -2867,6 +2909,7 @@ fn collect_agent_panel_entries_with_runtimes(
                             remote_host,
                         },
                     );
+                    entry.agent_inbox = agent_inbox_cwd_path(&ws.identity_cwd);
                     entry.own_state_working = terminal
                         .is_some_and(|terminal| terminal.raw_agent_state() == AgentState::Working);
                     entry.last_turn_at = terminal.and_then(|terminal| {
@@ -3067,6 +3110,7 @@ pub(crate) fn remote_agent_panel_entries_at(
                     remote_host: None,
                 },
             );
+            panel_entry.agent_inbox = cwd.as_deref().is_some_and(agent_inbox_cwd);
             panel_entry.last_turn_at =
                 reply_timestamp(row.last_turn_at.as_deref(), std::time::Instant::now());
             panel_entry.pending_ask = row
@@ -3746,7 +3790,6 @@ pub(crate) enum SidebarRow {
     },
     /// The producer answered and no finding is pending (AC6).
     AloopEmpty,
-    Inbox(inbox::InboxLine),
     Notes(notes::NotesLine),
 }
 
@@ -3769,7 +3812,6 @@ pub(crate) const RUNS_SECTION_TITLE: &str = "Runs";
 /// the number of pending findings.
 pub(crate) const ALOOPS_SECTION_TITLE: &str = "Aloops";
 pub(crate) const INBOX_NEW_SECTION_TITLE: &str = "Inbox · new";
-pub(crate) const INBOX_SECTION_TITLE: &str = "Inbox";
 
 pub(crate) const NO_REPO_YET_SECTION_TITLE: &str = "No repo yet";
 pub(crate) const UNASSIGNED_PRS_SECTION_TITLE: &str = "Unassigned PRs";
@@ -3794,7 +3836,7 @@ pub(crate) fn sidebar_area_is_visible(app: &AppState, area: crate::config::Sideb
     !app.sidebar_sections_layout || app.sidebar_areas.is_visible(area)
 }
 
-const INITIAL_COLLAPSED_SHARED_GROUP_TITLES: [&str; 10] = [
+const INITIAL_COLLAPSED_SHARED_GROUP_TITLES: [&str; 9] = [
     WORKING_SECTION_TITLE,
     NEEDS_YOU_SECTION_TITLE,
     SNOOZED_SECTION_TITLE,
@@ -3803,7 +3845,6 @@ const INITIAL_COLLAPSED_SHARED_GROUP_TITLES: [&str; 10] = [
     RUNS_SECTION_TITLE,
     ALOOPS_SECTION_TITLE,
     INBOX_NEW_SECTION_TITLE,
-    INBOX_SECTION_TITLE,
     SYMPHONY_SECTION_TITLE,
 ];
 
@@ -6226,7 +6267,6 @@ fn append_ordered_sidebar_blocks(
                 }
                 notes::append_rows(app, &mut block_rows);
                 append_inbox_new_rows(app, &mut block_rows, inbox_new_entries);
-                inbox::append_rows(app, &mut block_rows);
                 if sidebar_area_is_visible(app, crate::config::SidebarArea::Symphony) {
                     append_symphony_rows(app, &mut block_rows);
                 }
@@ -8762,7 +8802,6 @@ fn sidebar_row_height(app: &AppState, row: &SidebarRow, body_height: u16) -> u16
         | SidebarRow::AloopUnreachable { .. }
         | SidebarRow::AloopEmpty
         | SidebarRow::Notes(_)
-        | SidebarRow::Inbox(_)
         | SidebarRow::AgentRun { .. } => 1,
     }
 }
@@ -8836,8 +8875,7 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
             | SidebarRow::AloopCleanRun { .. }
             | SidebarRow::AloopUnreachable { .. }
             | SidebarRow::AloopEmpty
-            | SidebarRow::Notes(_)
-            | SidebarRow::Inbox(_),
+            | SidebarRow::Notes(_),
             _,
         )
         | (
@@ -8850,8 +8888,7 @@ fn sidebar_row_gap(app: &AppState, rows: &[SidebarRow], row_idx: usize) -> u16 {
             | SidebarRow::AloopCleanRun { .. }
             | SidebarRow::AloopUnreachable { .. }
             | SidebarRow::AloopEmpty
-            | SidebarRow::Notes(_)
-            | SidebarRow::Inbox(_),
+            | SidebarRow::Notes(_),
         ) => 0,
         // Strip rows hug each other and the divider that closes the strip.
         (
@@ -8946,7 +8983,6 @@ pub(crate) fn sidebar_row_belongs_to_workspace(row: &SidebarRow, ws_idx: usize) 
         | SidebarRow::AloopUnreachable { .. }
         | SidebarRow::AloopEmpty
         | SidebarRow::Notes(_)
-        | SidebarRow::Inbox(_)
         | SidebarRow::AgentRun { .. } => false,
     }
 }
@@ -9104,7 +9140,6 @@ pub(crate) fn compute_sidebar_row_areas(
             | SidebarRow::AloopUnreachable { .. }
             | SidebarRow::AloopEmpty
             | SidebarRow::Notes(_)
-            | SidebarRow::Inbox(_)
             | SidebarRow::AgentRun { .. } => {}
         }
         row_y = row_y
@@ -9844,27 +9879,6 @@ pub(crate) fn compute_sidebar_hover_targets(
                 false,
             ),
             SidebarRow::Notes(line) => (notes::hover(app, line), false),
-            SidebarRow::Inbox(inbox::InboxLine::Source(index)) => {
-                let label = inbox::hover_detail(
-                    app,
-                    &inbox::InboxLine::Source(*index),
-                    std::time::SystemTime::now(),
-                );
-                let Some(label) = label else { continue };
-                (label, false)
-            }
-            SidebarRow::Inbox(line @ inbox::InboxLine::Header { .. }) => {
-                let Some(label) = inbox::hover_detail(app, line, std::time::SystemTime::now())
-                else {
-                    continue;
-                };
-                (label, false)
-            }
-            SidebarRow::Inbox(line @ inbox::InboxLine::Fault(label)) => (
-                inbox::hover_detail(app, line, std::time::SystemTime::now())
-                    .unwrap_or_else(|| label.clone()),
-                false,
-            ),
             _ => continue,
         };
         if let Some(rect) = clamp_row_cells(body, *row_y, 0, usize::from(body.width)) {
@@ -10927,11 +10941,6 @@ pub(crate) fn compute_sidebar_section_header_areas(
                 title,
                 rect: Rect::new(body.x, y, body.width, height),
             });
-        } else if matches!(row, SidebarRow::Inbox(inbox::InboxLine::Header { .. })) {
-            out.push(SectionHeaderArea {
-                title: INBOX_SECTION_TITLE,
-                rect: Rect::new(body.x, y, body.width, height),
-            });
         }
         y = y
             .saturating_add(height)
@@ -11441,7 +11450,6 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             | SidebarRow::AloopUnreachable { .. }
             | SidebarRow::AloopEmpty
             | SidebarRow::Notes(_)
-            | SidebarRow::Inbox(_)
             | SidebarRow::AgentRun { .. } => {}
             // The rail keeps the strip's one fact: something needs you.
             SidebarRow::NeedsYou { blocked, .. } => {
@@ -13262,9 +13270,6 @@ fn render_workspace_list(
     }
     for (line, rect) in notes::areas(app, sidebar_area) {
         notes::render(app, frame, &line, rect);
-    }
-    for area in inbox::areas(app, sidebar_area) {
-        inbox::render(app, frame, &area, symphony_now);
     }
     for card in tab_cards {
         render_tab_card(app, frame, &card, narrow_prefix, &row_entries);
@@ -18264,6 +18269,19 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn agent_inbox_blocked_rows_use_neutral_sidebar_state() {
+        let mut entry = compact_test_entry("inbox item", Some(Agent::Codex));
+        entry.state = AgentState::Blocked;
+        entry.agent_inbox = true;
+        let palette = Palette::catppuccin();
+
+        assert!(!entry_is_blocked(&entry));
+        assert_eq!(sidebar_entry_display_state(&entry), AgentState::Idle);
+        assert_eq!(compact_row_dot(&entry), "○");
+        assert_eq!(compact_row_color(&entry, &palette), palette.overlay0);
+    }
+
+    #[test]
     fn blocked_filter_keeps_spaces_and_only_red_rows_including_snoozed_entries() {
         let mut app = AppState::test_new();
         app.workspaces = vec![
@@ -20461,8 +20479,7 @@ pub(crate) mod tests {
                 | SidebarRow::AloopCleanRun { .. }
                 | SidebarRow::AloopUnreachable { .. }
                 | SidebarRow::AloopEmpty
-                | SidebarRow::Notes(_)
-                | SidebarRow::Inbox(_) => None,
+                | SidebarRow::Notes(_) => None,
             })
             .collect()
     }
@@ -21897,7 +21914,6 @@ pub(crate) mod tests {
                 | SidebarRow::AloopUnreachable { .. }
                 | SidebarRow::AloopEmpty
                 | SidebarRow::Notes(_)
-                | SidebarRow::Inbox(_)
                 | SidebarRow::AgentRun { .. } => None,
             })
             .collect::<Vec<_>>();
@@ -21964,7 +21980,6 @@ pub(crate) mod tests {
                     | SidebarRow::AloopCleanRun { .. }
                     | SidebarRow::AloopUnreachable { .. }
                     | SidebarRow::AloopEmpty => ("aloop", 0, None, None),
-                    SidebarRow::Inbox(_) => ("inbox", 0, None, None),
                     SidebarRow::Notes(_) => ("notes", 0, None, None),
                 })
                 .collect::<Vec<_>>()
@@ -24239,8 +24254,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 | SidebarRow::AloopCleanRun { .. }
                 | SidebarRow::AloopUnreachable { .. }
                 | SidebarRow::AloopEmpty
-                | SidebarRow::Notes(_)
-                | SidebarRow::Inbox(_) => None,
+                | SidebarRow::Notes(_) => None,
             })
             .collect()
     }
@@ -31921,8 +31935,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 | SidebarRow::AloopCleanRun { .. }
                 | SidebarRow::AloopUnreachable { .. }
                 | SidebarRow::AloopEmpty
-                | SidebarRow::Notes(_)
-                | SidebarRow::Inbox(_) => None,
+                | SidebarRow::Notes(_) => None,
             })
             .collect()
     }
@@ -34032,7 +34045,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert!(section_is_collapsed(&app, WORKING_SECTION_TITLE));
         assert!(section_is_collapsed(&app, SNOOZED_SECTION_TITLE));
         assert!(section_is_collapsed(&app, SETTLED_SECTION_TITLE));
-        assert!(section_is_collapsed(&app, INBOX_SECTION_TITLE));
 
         app.toggle_sidebar_group(RUNS_SECTION_TITLE);
         assert!(!section_is_collapsed(&app, RUNS_SECTION_TITLE));
@@ -35169,40 +35181,6 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             "v"
         );
         assert!(sidebar_header_mode_label(&app).starts_with("GitHub"));
-    }
-
-    #[test]
-    fn inbox_fault_row_hover_target_carries_the_producer_error() {
-        let mut app = AppState::test_new();
-        app.fleet_snapshot.polled = true;
-        app.fleet_snapshot.inbox = Some(std::sync::Arc::new(crate::inbox::ProducerSnapshot {
-            host: "ub2".into(),
-            state: crate::inbox::ProducerState::Unreachable("connection refused".into()),
-            data: crate::inbox::Healthcheck::default(),
-            refreshed_at: Some(std::time::SystemTime::now()),
-        }));
-        app.toggle_sidebar_group(INBOX_SECTION_TITLE);
-        let rows = sidebar_rows(&app);
-        assert!(
-            rows.iter()
-                .any(|row| matches!(row, SidebarRow::Inbox(inbox::InboxLine::Fault(_)))),
-            "inbox fault row missing"
-        );
-
-        let area = Rect::new(0, 0, 60, 40);
-        let fault_rect = inbox::areas(&app, area)
-            .into_iter()
-            .find(|row| matches!(row.line, inbox::InboxLine::Fault(_)))
-            .expect("visible inbox fault row")
-            .rect;
-        let targets = compute_sidebar_hover_targets(&app, area);
-        assert!(
-            targets
-                .iter()
-                .any(|target| target.rect == fault_rect
-                    && target.label.contains("connection refused")),
-            "fault row hover target should carry producer error; targets: {targets:?}"
-        );
     }
 
     #[test]

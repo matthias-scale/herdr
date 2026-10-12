@@ -492,7 +492,6 @@ impl App {
                 self.state.dock_object_preview = None;
                 self.state.work_view = None;
                 self.state.home = None;
-                self.state.inbox = None;
                 self.state
                     .set_server_mode(crate::app::state::Mode::Terminal);
                 self.state.board_view = Some(view);

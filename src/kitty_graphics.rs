@@ -1247,7 +1247,7 @@ fn active_view_key(app: &AppState) -> Option<HostViewKey> {
     Some(HostViewKey {
         workspace_index: ws_idx,
         tab_index: ws.active_tab_index(),
-        overlay_open: app.home.is_some() || app.inbox.is_some(),
+        overlay_open: app.home.is_some(),
     })
 }
 

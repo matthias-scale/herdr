@@ -1,15 +1,8 @@
-//! Inbox mode: one blocked agent at a time, oldest first.
+//! Shared agent attention calculations used by Home and sidebar projections.
 //!
-//! The overview sidebar answers "what is the fleet doing". This answers the
-//! narrower question the operator actually returns to herdr with — "what is
-//! waiting on me" — and it answers it one item at a time so that clearing the
-//! queue is a loop rather than a scan.
-//!
-//! The queue is derived fresh on every read rather than cached. An agent that
-//! answers its own gate, dies, or is closed leaves the queue without anything
-//! having to invalidate it, and the count the operator sees is never stale.
+//! The queues are derived fresh on every read rather than cached, so agent
+//! transitions cannot leave a stale count or item behind.
 
-use std::collections::HashSet;
 use std::time::Instant;
 
 use crate::layout::PaneId;
@@ -48,60 +41,11 @@ fn by_longest_wait(a: &BlockedAgent, b: &BlockedAgent) -> std::cmp::Ordering {
     .then_with(|| a.pane_id.cmp(&b.pane_id))
 }
 
-/// Cursor state for an open inbox. Holds only what cannot be re-derived: which
-/// agents the operator chose to defer.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct InboxState {
-    deferred: HashSet<PaneId>,
-}
-
-impl InboxState {
-    /// The agent to show. Deferred agents are skipped, but a queue whose every
-    /// entry has been deferred wraps to the front rather than stranding the
-    /// operator on an empty screen with work still outstanding.
-    ///
-    /// Pure, because the renderer holds `AppState` immutably; `defer` owns the
-    /// only state change.
-    pub(crate) fn current<'a>(&self, queue: &'a [BlockedAgent]) -> Option<&'a BlockedAgent> {
-        queue
-            .iter()
-            .find(|agent| !self.deferred.contains(&agent.pane_id))
-            .or_else(|| queue.first())
-    }
-
-    /// Defer the agent currently shown and move to the next one. Deferring the
-    /// last undeferred entry resets the set, so the wrap `current` performs is
-    /// reflected in the count the operator sees rather than contradicting it.
-    pub(crate) fn defer(&mut self, pane_id: PaneId, queue: &[BlockedAgent]) {
-        self.deferred.insert(pane_id);
-        if queue
-            .iter()
-            .all(|agent| self.deferred.contains(&agent.pane_id))
-        {
-            self.deferred.clear();
-        }
-    }
-
-    pub(crate) fn deferred_count(&self, queue: &[BlockedAgent]) -> usize {
-        queue
-            .iter()
-            .filter(|agent| self.deferred.contains(&agent.pane_id))
-            .count()
-    }
-}
-
 impl crate::app::AppState {
-    /// Every blocked pane across every workspace, oldest wait first.
-    ///
-    /// A pane with no `blocked_since` sorts after those that have one: it is a
-    /// pane that was already blocked before the field existed, or whose
-    /// transition was never observed, and guessing it is the oldest would put
-    /// the least trustworthy row at the top of the queue.
     /// Agents on this machine, split into the two numbers the status dot shows.
     ///
-    /// Working and blocked are counted from the same pass over the same panes
-    /// the inbox uses, so the dot and the inbox can never disagree about how
-    /// many agents are waiting on the human.
+    /// Working and blocked are counted from the same pass over the same panes,
+    /// so the status dot has one consistent source for both counts.
     pub(crate) fn agent_dot_counts(&self) -> (usize, usize) {
         let mut working = 0usize;
         let mut blocked = 0usize;
@@ -172,25 +116,13 @@ impl crate::app::AppState {
         queue
     }
 
+    #[cfg(test)]
     pub(crate) fn blocked_agents(&self) -> Vec<BlockedAgent> {
         self.human_attention_agents(false)
     }
 
     pub(crate) fn home_attention_agents(&self) -> Vec<BlockedAgent> {
         self.human_attention_agents(true)
-    }
-
-    pub(crate) fn toggle_inbox(&mut self) {
-        if self.inbox.take().is_some() {
-            return;
-        }
-        self.clear_home();
-        self.board_view = None;
-        self.inbox = Some(InboxState::default());
-    }
-
-    pub(crate) fn clear_inbox(&mut self) {
-        self.inbox = None;
     }
 }
 
@@ -501,61 +433,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn opening_and_closing_the_inbox_is_one_toggle() {
-        let mut app = crate::app::state::AppState::test_new();
-        assert!(app.inbox.is_none());
-        app.toggle_inbox();
-        assert!(app.inbox.is_some());
-        app.toggle_inbox();
-        assert!(app.inbox.is_none());
-    }
-
-    #[test]
-    fn the_queue_shows_its_first_entry_until_it_is_deferred() {
-        let first = PaneId::alloc();
-        let second = PaneId::alloc();
-        let first_since = Instant::now();
-        let queue = vec![
-            agent(first, Some(first_since), Some(1)),
-            agent(
-                second,
-                Some(first_since + Duration::from_secs(540)),
-                Some(2),
-            ),
-        ];
-        let mut inbox = InboxState::default();
-
-        assert_eq!(inbox.current(&queue).map(|a| a.pane_id), Some(first));
-        inbox.defer(first, &queue);
-        assert_eq!(inbox.current(&queue).map(|a| a.pane_id), Some(second));
-    }
-
-    #[test]
-    fn deferring_everything_cycles_rather_than_showing_an_empty_queue() {
-        let first = PaneId::alloc();
-        let second = PaneId::alloc();
-        let queue = vec![agent(first, None, Some(1)), agent(second, None, Some(2))];
-        let mut inbox = InboxState::default();
-
-        inbox.defer(first, &queue);
-        inbox.defer(second, &queue);
-
-        // Work is still outstanding, so the queue wraps instead of claiming empty.
-        assert_eq!(inbox.current(&queue).map(|a| a.pane_id), Some(first));
-        assert_eq!(inbox.deferred_count(&queue), 0);
-    }
-
-    #[test]
-    fn an_empty_queue_forgets_what_was_deferred() {
-        let stale = PaneId::alloc();
-        let mut inbox = InboxState::default();
-        inbox.defer(stale, &[]);
-
-        assert_eq!(inbox.current(&[]), None);
-        assert_eq!(inbox.deferred_count(&[]), 0);
     }
 
     #[test]

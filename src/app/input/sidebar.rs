@@ -974,14 +974,6 @@ impl AppState {
                 return SidebarWorkGroupKeyAction::Consumed;
             }
         }
-        if (selected == "inbox"
-            || selected == format!("section:{}", crate::ui::sidebar::INBOX_SECTION_TITLE))
-            && key.code == KeyCode::Enter
-            && key.modifiers.is_empty()
-        {
-            self.toggle_sidebar_group(crate::ui::sidebar::INBOX_SECTION_TITLE);
-            return SidebarWorkGroupKeyAction::Consumed;
-        }
         if selected == crate::ui::sidebar::PODS_SECTION_TITLE {
             if key.code == KeyCode::Enter && key.modifiers.is_empty() {
                 self.toggle_sidebar_group(crate::ui::sidebar::PODS_SECTION_TITLE);
@@ -1518,7 +1510,6 @@ impl AppState {
                 | crate::ui::SidebarRow::AloopUnreachable { .. }
                 | crate::ui::SidebarRow::AloopEmpty
                 | crate::ui::SidebarRow::Notes(_)
-                | crate::ui::SidebarRow::Inbox(_)
                 | crate::ui::SidebarRow::NeedsYou { .. }
                 | crate::ui::SidebarRow::NeedsYouMore { .. }
                 | crate::ui::SidebarRow::BlockersOtherDevices { .. }
@@ -1565,7 +1556,6 @@ impl AppState {
                 | crate::ui::SidebarRow::AloopUnreachable { .. }
                 | crate::ui::SidebarRow::AloopEmpty
                 | crate::ui::SidebarRow::Notes(_)
-                | crate::ui::SidebarRow::Inbox(_)
                 | crate::ui::SidebarRow::NeedsYou { .. }
                 | crate::ui::SidebarRow::NeedsYouMore { .. }
                 | crate::ui::SidebarRow::BlockersOtherDevices { .. }
@@ -3761,7 +3751,6 @@ mod tests {
                 | crate::ui::SidebarRow::AloopCleanRun { key, .. } => format!("aloop:row:{key}"),
                 crate::ui::SidebarRow::AloopUnreachable { .. } => "aloop:unreachable".to_string(),
                 crate::ui::SidebarRow::AloopEmpty => "aloop:empty".to_string(),
-                crate::ui::SidebarRow::Inbox(_) => "inbox".to_string(),
                 crate::ui::SidebarRow::Notes(_) => "notes".to_string(),
             })
             .collect()
@@ -4060,7 +4049,6 @@ mod tests {
 
         let owners = [
             crate::app::state::InputOwner::Surface(crate::app::state::SurfaceInputOwner::Home),
-            crate::app::state::InputOwner::Surface(crate::app::state::SurfaceInputOwner::Inbox),
             crate::app::state::InputOwner::Surface(crate::app::state::SurfaceInputOwner::Work),
             crate::app::state::InputOwner::Surface(crate::app::state::SurfaceInputOwner::Usage),
             crate::app::state::InputOwner::Dock(crate::app::state::DockInputOwner::Home),

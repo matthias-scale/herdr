@@ -426,6 +426,10 @@ impl App {
                 self.focus_next_blocked_window();
                 leave_navigate_mode(&mut self.state);
             }
+            NavigateAction::NextInboxItem => {
+                self.focus_next_inbox_item();
+                leave_navigate_mode(&mut self.state);
+            }
             NavigateAction::CloseTab => {
                 self.close_active_tab_via_api();
                 leave_navigate_mode(&mut self.state);
@@ -768,10 +772,6 @@ impl App {
                 self.toggle_missive_view();
                 leave_navigate_mode(&mut self.state);
             }
-            NavigateAction::OpenInbox | NavigateAction::OpenMailboxView => {
-                self.activate_top_bar_view(TopBarView::Mailbox);
-                leave_navigate_mode(&mut self.state);
-            }
             NavigateAction::OpenHome => {
                 self.state.toggle_home();
                 leave_navigate_mode(&mut self.state);
@@ -1024,6 +1024,32 @@ impl App {
 
     fn focus_next_blocked_window(&mut self) {
         let Some(target) = next_blocked_window_target(&self.state) else {
+            return;
+        };
+        match target {
+            BlockedPaneTarget::Local {
+                ws_idx, pane_id, ..
+            } => {
+                self.state.sidebar_selected_remote_agent = None;
+                self.focus_pane_internal_via_api(ws_idx, pane_id);
+            }
+            BlockedPaneTarget::Remote(agent_ref) => {
+                let host_reachable = self
+                    .state
+                    .fleet_snapshot
+                    .hosts
+                    .iter()
+                    .any(|host| host.name == agent_ref.host && host.reachable);
+                if host_reachable {
+                    self.open_fleet_host_from_input(&agent_ref.host, Some(&agent_ref.agent));
+                }
+                self.state.select_remote_agent_row(agent_ref);
+            }
+        }
+    }
+
+    fn focus_next_inbox_item(&mut self) {
+        let Some(target) = next_inbox_item_target(&self.state) else {
             return;
         };
         match target {
@@ -2535,6 +2561,9 @@ fn blocked_pane_cycle_in_order(state: &AppState) -> Vec<(BlockedPaneTarget, bool
         .into_iter()
         .filter_map(|entry| {
             let target = entry.local_target()?;
+            if entry.agent_inbox {
+                return None;
+            }
             if state
                 .workspaces
                 .get(target.ws_idx)
@@ -2570,7 +2599,7 @@ fn blocked_pane_cycle_in_order(state: &AppState) -> Vec<(BlockedPaneTarget, bool
         state
             .remote_agent_panel_entries
             .iter()
-            .filter(|entry| entry.snoozed_until.is_none())
+            .filter(|entry| entry.snoozed_until.is_none() && !entry.is_agent_inbox())
             .map(|entry| {
                 (
                     BlockedPaneTarget::Remote(entry.agent_ref.clone()),
@@ -2647,6 +2676,98 @@ fn blocked_pane_cycle_in_order(state: &AppState) -> Vec<(BlockedPaneTarget, bool
         panes.extend(remote);
     }
     panes
+}
+
+fn inbox_pane_cycle_in_order(state: &AppState) -> Vec<BlockedPaneTarget> {
+    let rows = crate::ui::sidebar_rows(state);
+    let entries = crate::ui::all_agent_panel_entries(state);
+    let mut ordered = Vec::new();
+    for row in &rows {
+        match row {
+            crate::ui::SidebarRow::Tab { entry, .. } => {
+                let Some(tab) = entry
+                    .local_target()
+                    .map(|target| (target.ws_idx, target.tab_idx))
+                else {
+                    continue;
+                };
+                for candidate in &entries {
+                    if candidate.agent_inbox
+                        && candidate
+                            .local_target()
+                            .is_some_and(|target| (target.ws_idx, target.tab_idx) == tab)
+                    {
+                        if let Some(target) = candidate.local_target() {
+                            let target = BlockedPaneTarget::Local {
+                                ws_idx: target.ws_idx,
+                                tab_idx: target.tab_idx,
+                                pane_id: target.pane_id,
+                            };
+                            if !ordered.contains(&target) {
+                                ordered.push(target);
+                            }
+                        }
+                    }
+                }
+            }
+            crate::ui::SidebarRow::Agent { entry, .. } => {
+                if entry.agent_inbox {
+                    if let Some(target) = entry.local_target() {
+                        let target = BlockedPaneTarget::Local {
+                            ws_idx: target.ws_idx,
+                            tab_idx: target.tab_idx,
+                            pane_id: target.pane_id,
+                        };
+                        if !ordered.contains(&target) {
+                            ordered.push(target);
+                        }
+                    }
+                }
+            }
+            crate::ui::SidebarRow::RemoteAgent { entry, .. } if entry.is_agent_inbox() => {
+                let target = BlockedPaneTarget::Remote(entry.agent_ref.clone());
+                if !ordered.contains(&target) {
+                    ordered.push(target);
+                }
+            }
+            _ => {}
+        }
+    }
+    ordered
+}
+
+fn next_inbox_item_target(state: &AppState) -> Option<BlockedPaneTarget> {
+    let panes = inbox_pane_cycle_in_order(state);
+    if panes.is_empty() {
+        return None;
+    }
+    let focused = state.active.and_then(|ws_idx| {
+        state
+            .workspaces
+            .get(ws_idx)?
+            .focused_pane_id()
+            .map(|pane_id| (ws_idx, pane_id))
+    });
+    let current = state
+        .sidebar_selected_remote_agent
+        .as_ref()
+        .and_then(|selected| {
+            panes.iter().position(|target| {
+            matches!(target, BlockedPaneTarget::Remote(agent_ref) if agent_ref == selected)
+        })
+        })
+        .or_else(|| {
+            focused.and_then(|focused| {
+                panes.iter().position(|target| {
+                    matches!(
+                        target,
+                        BlockedPaneTarget::Local { ws_idx, pane_id, .. }
+                            if (*ws_idx, *pane_id) == focused
+                    )
+                })
+            })
+        });
+    Some(panes[(current.map_or(0, |index| index + 1)) % panes.len()].clone())
 }
 
 fn next_blocked_window_target(state: &AppState) -> Option<BlockedPaneTarget> {
@@ -2735,6 +2856,7 @@ pub(crate) enum NavigateAction {
     PreviousAnyWindow,
     NextAnyWindow,
     NextBlockedWindow,
+    NextInboxItem,
     CloseTab,
     RenamePane,
     FocusPaneLeft,
@@ -2781,13 +2903,11 @@ pub(crate) enum NavigateAction {
     OpenDockShortcuts,
     OpenDockContext,
     OpenDockSymphony,
-    OpenInbox,
     OpenHome,
     OpenHomeView,
     OpenFocusView,
     OpenOrchestrationView,
     OpenScratchView,
-    OpenMailboxView,
     EditScratchpad,
     ShowScratchpad,
     ToggleNotepad,
@@ -2854,6 +2974,7 @@ fn copy_mode_survives_prefix_action(action: NavigateAction) -> bool {
             | NavigateAction::PreviousAnyWindow
             | NavigateAction::NextAnyWindow
             | NavigateAction::NextBlockedWindow
+            | NavigateAction::NextInboxItem
             | NavigateAction::FocusPaneLeft
             | NavigateAction::FocusPaneDown
             | NavigateAction::FocusPaneUp
@@ -3030,6 +3151,7 @@ macro_rules! non_indexed_action_bindings {
             (&kb.previous_any_window, NavigateAction::PreviousAnyWindow),
             (&kb.next_any_window, NavigateAction::NextAnyWindow),
             (&kb.next_blocked_window, NavigateAction::NextBlockedWindow),
+            (&kb.next_inbox_item, NavigateAction::NextInboxItem),
             (&kb.close_tab, NavigateAction::CloseTab),
             (&kb.rename_pane, NavigateAction::RenamePane),
             (&kb.edit_scrollback, NavigateAction::EditScrollback),
@@ -3095,7 +3217,6 @@ macro_rules! non_indexed_action_bindings {
             (&kb.usage, NavigateAction::OpenUsageView),
             (&kb.tickets, NavigateAction::OpenTicketView),
             (&kb.missive, NavigateAction::OpenMissiveView),
-            (&kb.inbox, NavigateAction::OpenInbox),
             (&kb.home, NavigateAction::OpenHome),
             (&kb.home_view, NavigateAction::OpenHomeView),
             (&kb.focus_view, NavigateAction::OpenFocusView),
@@ -3104,7 +3225,6 @@ macro_rules! non_indexed_action_bindings {
                 NavigateAction::OpenOrchestrationView,
             ),
             (&kb.scratch_view, NavigateAction::OpenScratchView),
-            (&kb.mailbox_view, NavigateAction::OpenMailboxView),
             (&kb.reload_config, NavigateAction::ReloadConfig),
             (
                 &kb.open_notification_target,
@@ -3411,6 +3531,22 @@ pub(super) fn execute_navigate_action_in_context(
                     }
                     BlockedPaneTarget::Remote(agent_ref) => {
                         state.select_remote_agent_row(agent_ref);
+                    }
+                }
+            }
+            leave_navigate_mode(state);
+        }
+        NavigateAction::NextInboxItem => {
+            if let Some(target) = next_inbox_item_target(state) {
+                match target {
+                    BlockedPaneTarget::Local {
+                        ws_idx, pane_id, ..
+                    } => {
+                        state.sidebar_selected_remote_agent = None;
+                        state.focus_pane_in_workspace(ws_idx, pane_id);
+                    }
+                    BlockedPaneTarget::Remote(agent_ref) => {
+                        state.select_remote_agent_row(agent_ref)
                     }
                 }
             }
@@ -3732,14 +3868,6 @@ pub(super) fn execute_navigate_action_in_context(
             state.toggle_usage_view();
             leave_navigate_mode(state);
         }
-        NavigateAction::OpenInbox | NavigateAction::OpenMailboxView => {
-            let was_open = state.inbox.is_some();
-            state.close_top_bar_views();
-            if !was_open {
-                state.toggle_inbox();
-            }
-            leave_navigate_mode(state);
-        }
         NavigateAction::OpenHome => {
             state.toggle_home();
             leave_navigate_mode(state);
@@ -3911,6 +4039,7 @@ impl NavigateAction {
                 | Self::PreviousAnyWindow
                 | Self::NextAnyWindow
                 | Self::NextBlockedWindow
+                | Self::NextInboxItem
                 | Self::FocusPaneLeft
                 | Self::FocusPaneDown
                 | Self::FocusPaneUp
@@ -6307,9 +6436,12 @@ mod tests {
     }
 
     #[test]
-    fn next_blocked_window_visits_every_inbox_pane() {
+    fn next_blocked_window_excludes_inbox_panes() {
         let mut app = app_with_global_window_fixture();
         expand_all_workspaces_for_sidebar(&mut app.state);
+        let inbox_root = std::path::PathBuf::from(std::env::var_os("HOME").expect("home"))
+            .join(".local/state/agent-inbox/inbox");
+        app.state.workspaces[0].identity_cwd = inbox_root;
         for ws_idx in 0..app.state.workspaces.len() {
             for tab_idx in 0..app.state.workspaces[ws_idx].tabs.len() {
                 set_tab_agent_state(
@@ -6321,11 +6453,10 @@ mod tests {
             }
         }
 
-        let inbox_panes = app
-            .state
-            .blocked_agents()
-            .into_iter()
-            .map(|agent| agent.pane_id)
+        let inbox_panes = app.state.workspaces[0]
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.keys().copied())
             .collect::<std::collections::HashSet<_>>();
         let cycle_panes = blocked_pane_cycle_in_order(&app.state)
             .into_iter()
@@ -6336,7 +6467,50 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
 
         assert!(!inbox_panes.is_empty());
-        assert!(inbox_panes.is_subset(&cycle_panes));
+        assert!(inbox_panes.is_disjoint(&cycle_panes));
+        assert!(
+            !cycle_panes.is_empty(),
+            "ordinary blockers remain reachable"
+        );
+        assert!(crate::ui::all_agent_panel_entries(&app.state)
+            .iter()
+            .filter(|entry| entry.agent_inbox)
+            .all(|entry| !crate::ui::entry_is_blocked(entry)));
+    }
+
+    #[test]
+    fn next_inbox_item_cycles_only_inbox_rows_in_sidebar_order() {
+        let mut app = app_with_global_window_fixture();
+        expand_all_workspaces_for_sidebar(&mut app.state);
+        let inbox_root = std::path::PathBuf::from(std::env::var_os("HOME").expect("home"))
+            .join(".local/state/agent-inbox/inbox");
+        app.state.workspaces[0].identity_cwd = inbox_root.clone();
+        app.state.workspaces[1].identity_cwd = inbox_root.join("item-two");
+        let expected = inbox_pane_cycle_in_order(&app.state);
+        assert!(!expected.is_empty());
+        assert!(expected.iter().all(|target| match target {
+            BlockedPaneTarget::Local { ws_idx, .. } => *ws_idx < 2,
+            BlockedPaneTarget::Remote(_) => true,
+        }));
+        if let Some(BlockedPaneTarget::Local {
+            ws_idx, pane_id, ..
+        }) = expected.last()
+        {
+            app.state.focus_pane_in_workspace(*ws_idx, *pane_id);
+        }
+        let visited = (0..expected.len())
+            .map(|_| {
+                let target = next_inbox_item_target(&app.state).expect("inbox target");
+                if let BlockedPaneTarget::Local {
+                    ws_idx, pane_id, ..
+                } = target.clone()
+                {
+                    app.state.focus_pane_in_workspace(ws_idx, pane_id);
+                }
+                target
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(visited, expected);
     }
 
     #[test]
@@ -7187,6 +7361,21 @@ mod tests {
     }
 
     #[test]
+    fn next_blocked_window_excludes_remote_agent_inbox_rows() {
+        let mut state = AppState::test_new();
+        state.window_cycle_mode = crate::config::WindowCycleModeConfig::ThisMachineAndFleet;
+        let mut remote = remote_blocker("ub2", "inbox-item");
+        std::sync::Arc::make_mut(&mut remote).entry.agent_inbox = true;
+        let agent_ref = remote.agent_ref.clone();
+        state.remote_agent_panel_entries = vec![remote];
+        assert!(!blocked_pane_cycle_in_order(&state)
+            .iter()
+            .any(|(target, _)| {
+                matches!(target, BlockedPaneTarget::Remote(found) if found == &agent_ref)
+            }));
+    }
+
+    #[test]
     fn next_blocked_window_default_binding_dispatches_action() {
         let state = state_with_workspaces(&["test"]);
 
@@ -7202,6 +7391,14 @@ mod tests {
             action_for_key(
                 &state,
                 TerminalKey::new(KeyCode::Char('b'), KeyModifiers::SHIFT),
+                BindingDispatch::Prefix,
+            ),
+            Some(NavigateAction::NextInboxItem)
+        );
+        assert_eq!(
+            action_for_key(
+                &state,
+                TerminalKey::new(KeyCode::Char('q'), KeyModifiers::SHIFT),
                 BindingDispatch::Prefix,
             ),
             Some(NavigateAction::ToggleSidebar)
@@ -10490,7 +10687,6 @@ navigate_pane_down = "ctrl+j"
         app.state.focus_dir = root.clone();
         let mut config = crate::config::Config::default();
         config.keys.capture = crate::config::BindingConfig::one("prefix+shift+i");
-        config.keys.inbox = crate::config::BindingConfig::one("ctrl+alt+i");
         app.state.keybinds = config.keybinds();
         app.state.active = Some(0);
         let active_before = app.state.active;

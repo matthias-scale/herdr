@@ -1143,7 +1143,6 @@ mod status_segments {
             ("Focus", "prefix+ctrl+f"),
             ("Orchestration", "prefix+ctrl+o"),
             ("Scratch", "prefix+ctrl+s"),
-            ("Mailbox", "prefix+m"),
         ];
         for (index, (name, shortcut)) in expected.iter().enumerate() {
             let (rect, text) =

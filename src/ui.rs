@@ -23,7 +23,6 @@ pub(crate) mod goals;
 mod home;
 pub(crate) mod hyperspace;
 mod icons;
-mod inbox;
 mod keybind_help;
 pub(crate) mod loop_runs;
 mod markdown;
@@ -46,9 +45,7 @@ mod settings;
 pub(crate) mod sidebar;
 pub(crate) use dock::symphony::dashboard_link_rect as dock_symphony_dashboard_link_rect;
 pub(crate) use dock::symphony::dashboard_url as dock_symphony_dashboard_url;
-/// Exposed so the inbox tests can assert the queue and the sidebar answer the
-/// blocked question identically. Both production paths consume the pane's
-/// canonical agent projection.
+/// Exposed so home tests can assert the queue and the sidebar answer identically.
 #[cfg(test)]
 pub(crate) use sidebar::entry_is_blocked;
 mod spawn_dock;
@@ -442,7 +439,6 @@ fn compute_view_internal_at(
         || app.work_view.is_some()
         || app.dock_object_preview.is_some()
         || app.home.is_some()
-        || app.inbox.is_some()
         || app.scratch.open;
     let dock_w = if app.scratch.open {
         0
@@ -1416,18 +1412,6 @@ fn render_with_runtime_registry_inner(
             let counts = app.home_counts(&queue);
             home::render_home(app, terminal_runtimes, &queue, counts, terminal_area, frame);
         }
-        crate::app::state::TerminalAreaSurface::Inbox(inbox) => {
-            let queue = app.blocked_agents();
-            inbox::render_inbox(
-                app,
-                terminal_runtimes,
-                inbox.current(&queue),
-                queue.len(),
-                inbox.deferred_count(&queue),
-                terminal_area,
-                frame,
-            );
-        }
         crate::app::state::TerminalAreaSurface::Tab => {
             render_tab_surface(app, terminal_runtimes, app.view.tab_surface(), frame);
         }
@@ -2289,28 +2273,6 @@ mod tests {
 
         assert!(screen.contains("new workspace"), "{screen}");
         assert!(screen.contains("project"), "{screen}");
-    }
-
-    #[test]
-    fn home_render_dispatch_wins_over_an_inbox_that_is_also_open() {
-        let mut app = crate::app::state::AppState::test_new();
-        app.home = Some(crate::app::home::HomeState::default());
-        app.inbox = Some(crate::app::inbox::InboxState::default());
-
-        let area = Rect::new(0, 0, 80, 20);
-        compute_view(&mut app, area);
-        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
-        terminal.draw(|frame| render(&app, frame)).unwrap();
-        let screen = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(screen.contains("nothing is waiting on you"), "{screen}");
-        assert!(!screen.contains("nothing is blocked"), "{screen}");
     }
 
     #[test]
@@ -3601,7 +3563,7 @@ mod tests {
             app.view.status_bar_rect,
             app.view.status_bar_rect.y,
         );
-        assert!(row0.starts_with(" H  F  O  S  M "), "{row0:?}");
+        assert!(row0.starts_with(" H  F  O  S "), "{row0:?}");
         assert_eq!(
             row0.find("Home"),
             Some((usize::from(width) - 4) / 2),
@@ -3656,7 +3618,7 @@ mod tests {
         assert!(row0.contains("CPU 92%"), "{row0:?}");
         assert!(row0.contains("MEM 13.0/16G"), "{row0:?}");
         assert_eq!(row0.matches('\u{25cf}').count(), 1, "{row0:?}");
-        assert!(row0.starts_with(" H  F  O  S  M "), "{row0:?}");
+        assert!(row0.starts_with(" H  F  O  S "), "{row0:?}");
     }
 
     #[test]
