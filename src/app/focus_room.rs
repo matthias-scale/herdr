@@ -701,6 +701,7 @@ impl crate::app::App {
         self.restore_focus_room_inner(true);
     }
 
+    #[cfg(unix)]
     pub(crate) fn restore_focus_room_without_relaunch(&mut self) {
         self.restore_focus_room_inner(false);
     }
