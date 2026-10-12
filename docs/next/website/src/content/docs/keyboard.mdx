@@ -94,6 +94,10 @@ Workspaces and session:
 
 `prefix+t` opens the focus capture composer. Enter saves, Ctrl+Enter saves with the research tag, Shift+Enter inserts a line break, and Esc keeps the draft. A brief acknowledgement appears after saving. Override or unbind it with `capture` in `[keys]`.
 
+### Focus Room
+
+`prefix+shift+z` enters the persistent Focus Room and returns to the same Vellum session when you leave. You can also choose `focus: enter` in the command palette or click `← focus` in the status bar. Inside the room, `prefix+o` opens its leave menu; choose capture, find an agent, or open operations. The agent finder opens results in a read-only drawer for agents on another host; local agent prompts can be sent from the drawer. Configure the executable with `[focus] vellum`.
+
 `prefix+f` opens the sidebar agent finder. Local search matches agent titles, terminal tails, session transcripts, and files under `.local/` and `out/`; each result shows its match source and context. Remote fleet entries currently match synchronized titles only. Use Up and Down to select, Ctrl+Up and Ctrl+Down to revisit recent queries, Enter to focus, and Esc to restore the normal sidebar. The blocked filter has no default key; bind `toggle_blocked_filter` in `[keys]` if you want a shortcut.
 
 The loop run-history view lists receipt-backed runs across all loops with outcome, gates, human touches, and duration. It refreshes when the receipt file changes. Press Esc or `prefix+ctrl+h` again to close it.
