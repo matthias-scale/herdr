@@ -622,4 +622,19 @@ mod tests {
             vec![("prefix+t".into(), Cow::Owned("test".into()))]
         );
     }
+
+    #[test]
+    fn capture_default_appears_in_help() {
+        let mut app = AppState::test_new();
+        app.keybinds = crate::config::Config::default().keybinds();
+
+        let entries = keybind_help_groups(&app)
+            .into_iter()
+            .flat_map(|(_, entries)| entries)
+            .collect::<Vec<_>>();
+
+        assert!(entries
+            .iter()
+            .any(|(key, label)| key == "ctrl+alt+r" && label == "capture to focus list"));
+    }
 }

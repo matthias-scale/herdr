@@ -1161,12 +1161,13 @@ resume_agents_on_restore = true
     }
 
     #[test]
-    fn focus_capture_binding_defaults_to_prefix_t_and_inbox_defaults_are_unchanged() {
+    fn focus_capture_binding_defaults_to_ctrl_alt_r_and_inbox_defaults_are_unchanged() {
         let defaults = Config::default();
         assert_eq!(
             defaults.keys.capture,
-            super::super::BindingConfig::one("prefix+t")
+            super::super::BindingConfig::one("ctrl+alt+r")
         );
+        assert!(defaults.collect_diagnostics().is_empty());
         assert_eq!(
             defaults.keys.inbox,
             super::super::BindingConfig::Many(vec!["prefix+shift+i".into(), "ctrl+alt+i".into()])

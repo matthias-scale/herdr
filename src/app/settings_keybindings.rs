@@ -424,7 +424,7 @@ mod tests {
             .iter()
             .find(|row| row.label == "capture to focus list")
             .expect("capture row");
-        assert_eq!(capture_row.key, "prefix+t");
+        assert_eq!(capture_row.key, "ctrl+alt+r");
         assert!(rows
             .iter()
             .any(|row| row.heading && row.label == "user actions"));

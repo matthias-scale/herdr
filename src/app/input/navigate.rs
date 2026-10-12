@@ -10572,14 +10572,30 @@ navigate_pane_down = "ctrl+j"
         let config = crate::config::Config::default();
         app.state.keybinds = config.keybinds();
         app.state.active = Some(0);
+        app.state.set_server_mode(Mode::Terminal);
         let pane_before = app.state.workspaces[0].focused_pane_id();
 
-        app.state.set_server_mode(Mode::Prefix);
-        app.handle_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()))
-            .await;
+        app.handle_key(TerminalKey::new(
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ))
+        .await;
 
         assert!(app.state.capture.is_some());
         assert_eq!(app.state.workspaces[0].focused_pane_id(), pane_before);
+    }
+
+    #[tokio::test]
+    async fn prefix_t_does_not_open_capture_by_default() {
+        let mut app = app_with_test_workspaces(&["local"]);
+        app.state.keybinds = crate::config::Config::default().keybinds();
+        app.state.active = Some(0);
+        app.state.set_server_mode(Mode::Prefix);
+
+        app.handle_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()))
+            .await;
+
+        assert!(app.state.capture.is_none());
     }
 
     #[tokio::test]

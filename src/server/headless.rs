@@ -8741,6 +8741,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn headless_focus_room_direct_capture_shortcut_works_over_drawer() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("focus-room")];
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.keybinds = crate::config::Config::default().keybinds();
+        server.app.state.set_server_mode(crate::app::Mode::Terminal);
+        server.app.state.focus_room.active = true;
+        server.app.state.focus_room_ui.drawer =
+            Some(crate::app::focus_room::FocusRoomDrawerState {
+                pane_id: None,
+                agent_ref: None,
+                title: "agent".into(),
+                agent_label: "agent".into(),
+                host: "local".into(),
+                remote: false,
+                lines: Vec::new(),
+                input: String::new(),
+                cursor: 0,
+                output_revision: 0,
+                refreshed_at: None,
+            });
+
+        server.route_full_app_human_events(
+            1,
+            vec![crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('r'),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT,
+                ),
+            )],
+            false,
+        );
+
+        assert!(server.app.state.capture.is_some());
+        assert!(server.app.state.focus_room_ui.drawer.is_some());
+    }
+
+    #[tokio::test]
     async fn capture_ack_deadline_wakes_and_repaints_its_client() {
         let (mut server, _, _) = retained_test_server(b"capture ack");
         let now = Instant::now();

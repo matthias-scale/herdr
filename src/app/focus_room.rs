@@ -200,6 +200,18 @@ impl crate::app::App {
             return true;
         }
 
+        let direct_action =
+            crate::app::input::terminal_direct_non_indexed_navigation_action(&self.state, &raw)
+                .or_else(|| {
+                    crate::app::input::terminal_direct_indexed_navigation_action(&self.state, &raw)
+                });
+        if let Some(action) =
+            direct_action.filter(|action| crate::app::input::focus_room_action_allowed(*action))
+        {
+            self.execute_tui_navigate_action(action, crate::app::input::ActionContext::Direct);
+            return true;
+        }
+
         if self.state.focus_room_ui.drawer.is_some() {
             match key.code {
                 KeyCode::Esc if key.modifiers.is_empty() => {
@@ -967,6 +979,7 @@ mod tests {
 
         let mut app = test_app();
         app.state.focus_room.active = true;
+        app.state.keybinds.capture = crate::config::ActionKeybinds::prefix("t");
         app.state.focus_room_ui.drawer = Some(drawer(false));
 
         assert!(
@@ -978,6 +991,28 @@ mod tests {
 
         assert!(app.state.capture.is_some());
         assert!(app.state.focus_room_ui.drawer.is_some());
+    }
+
+    #[test]
+    fn direct_capture_binding_opens_in_focus_room_and_over_drawer() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        for drawer_open in [false, true] {
+            let mut app = test_app();
+            app.state.keybinds = crate::config::Config::default().keybinds();
+            app.state.focus_room.active = true;
+            if drawer_open {
+                app.state.focus_room_ui.drawer = Some(drawer(false));
+            }
+
+            assert!(app.handle_focus_room_key(crate::input::TerminalKey::new(
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )));
+
+            assert!(app.state.capture.is_some());
+            assert_eq!(app.state.focus_room_ui.drawer.is_some(), drawer_open);
+        }
     }
 
     #[test]
