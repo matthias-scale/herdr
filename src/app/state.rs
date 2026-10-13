@@ -6783,6 +6783,9 @@ impl AppState {
         {
             return InputOwner::Surface(SurfaceInputOwner::Scratch);
         }
+        if self.capture.is_some() {
+            return InputOwner::Capture;
+        }
         if matches!(self.terminal_area_surface(), TerminalAreaSurface::Home)
             && self.popup_pane.is_none()
             && matches!(self.server_mode(), Mode::Terminal | Mode::Navigate)
@@ -6802,9 +6805,6 @@ impl AppState {
         }
         if self.add_project_active() {
             return InputOwner::AddProject;
-        }
-        if self.capture.is_some() {
-            return InputOwner::Capture;
         }
         if self.spawn_dock.is_some() {
             return InputOwner::SpawnDock;

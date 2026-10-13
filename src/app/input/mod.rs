@@ -1171,7 +1171,7 @@ impl App {
             return true;
         }
 
-        if event.code == KeyCode::Esc {
+        if event.code == KeyCode::Esc && !self.state.home_browse_active() {
             self.activate_top_bar_view(crate::app::state::TopBarView::Orchestration);
             return true;
         }
@@ -7667,6 +7667,32 @@ sidebar_visible = true
         );
         assert_eq!(app.state.server_mode(), Mode::Prefix);
         app.handle_prefix_key(TerminalKey::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(app.state.top_bar_view(), TopBarView::Orchestration);
+    }
+
+    #[test]
+    fn home_escape_cancels_directory_browsing_before_closing_home() {
+        use crate::app::state::TopBarView;
+
+        let mut app = test_app();
+        app.state = crate::app::state::AppState::test_new();
+        let mut home = app.state.new_home_state();
+        home.picker = Some(crate::app::home::HomePicker::Directory);
+        home.browse = Some(crate::app::home::HomeBrowse::default());
+        app.state.home = Some(home);
+
+        assert!(app.handle_home_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        let home = app
+            .state
+            .home
+            .as_ref()
+            .expect("Home stays open while browsing");
+        assert_eq!(app.state.top_bar_view(), TopBarView::Home);
+        assert_eq!(home.picker, Some(crate::app::home::HomePicker::Directory));
+        assert!(home.browse.is_none(), "Esc exits the directory path input");
+
+        assert!(app.handle_home_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.state.home.is_none(), "a second Esc closes Home");
         assert_eq!(app.state.top_bar_view(), TopBarView::Orchestration);
     }
 
