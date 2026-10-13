@@ -5613,11 +5613,6 @@ impl App {
                         == crate::provider_usage::QuotaProvider::Codex)
                         .then_some(usage.codex_reset_credits)
                         .flatten();
-                    if !accounts.is_empty()
-                        && !crate::app::input::modal::usage_profile_cli_available(provider)
-                    {
-                        return;
-                    }
                     if !accounts.is_empty() || codex_reset_credits.is_some_and(|n| n > 0) {
                         let selected = accounts
                             .iter()

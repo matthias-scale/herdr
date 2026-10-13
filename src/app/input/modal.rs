@@ -38,26 +38,6 @@ pub(super) fn usage_profile_switch_command(
     }
 }
 
-pub(super) fn usage_profile_cli_available(provider: crate::provider_usage::QuotaProvider) -> bool {
-    let Some((program, _, _)) = usage_profile_switch_command(provider, "profile") else {
-        return false;
-    };
-    let in_path = std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
-    });
-    let home_candidate = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .is_some_and(|home| {
-            home.join(".local/bin").join(program).is_file()
-                || (provider == crate::provider_usage::QuotaProvider::Codex
-                    && home
-                        .join(".local/share/codex-profile-manager/bin")
-                        .join(program)
-                        .is_file())
-        });
-    in_path || home_candidate
-}
-
 fn remote_profile_switch_args(
     host: &str,
     program: &str,
