@@ -277,8 +277,8 @@ const BUILT_IN_GROUPS: &[(&str, &[BuiltIn])] = &[
             built_in("orchestration_view", "orchestration view", |kb| {
                 &kb.orchestration_view
             }),
+            built_in("board_view", "board view", |kb| &kb.board_view),
             built_in("scratch_view", "scratch view", |kb| &kb.scratch_view),
-            built_in("mailbox_view", "mailbox view", |kb| &kb.mailbox_view),
             built_in("missive", "missive", |kb| &kb.missive),
             built_in("symphony", "symphony", |kb| &kb.symphony),
             built_in("runs", "fleet runs", |kb| &kb.runs),

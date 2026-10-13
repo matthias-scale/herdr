@@ -8907,6 +8907,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn headless_focus_room_escape_stays_in_focus_and_reaches_vellum() {
+        let mut server = test_headless_server();
+        let mut input_rx = install_focused_test_runtime(&mut server, b"");
+        server.app.state.focus_room.active = true;
+        server.clients.insert(1, test_app_client(Some(true), 1));
+        server.foreground_client_id = Some(1);
+
+        server.handle_client_input_events(
+            1,
+            vec![test_key(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::empty(),
+            )],
+        );
+
+        assert!(server.app.state.focus_room.active);
+        assert_eq!(
+            input_rx
+                .try_recv()
+                .expect("Esc should reach Vellum")
+                .as_ref(),
+            b"\x1b"
+        );
+    }
+
+    #[tokio::test]
     async fn headless_focus_room_o_and_enter_leave_without_pty_input() {
         for key in [
             test_key(
@@ -9040,6 +9066,124 @@ mod tests {
             .drawer
             .is_none());
         assert!(server.app.state.focus_room.active);
+    }
+
+    #[tokio::test]
+    async fn full_app_input_routes_home_keys_through_headless_ingress() {
+        let mut server = test_headless_server();
+        server.app.state.keybinds = crate::config::Config::default().keybinds();
+        server
+            .app
+            .state
+            .open_home_on_launch(&crate::config::Config::default());
+        let (client_tx, _control_rx, _render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (100, 30),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+
+        assert_eq!(
+            server.app.state.input_owner(),
+            crate::app::state::InputOwner::Surface(crate::app::state::SurfaceInputOwner::Home)
+        );
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: vec![0x1b],
+        }));
+        assert_eq!(
+            server.app.state.top_bar_view(),
+            crate::app::state::TopBarView::Orchestration
+        );
+        assert!(server.app.state.home.is_none());
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[tokio::test]
+    async fn capture_owns_input_over_home_through_headless_ingress() {
+        let mut server = test_headless_server();
+        server.app.state.keybinds = crate::config::Config::default().keybinds();
+        server
+            .app
+            .state
+            .open_home_on_launch(&crate::config::Config::default());
+        let focus_dir =
+            std::env::temp_dir().join(format!("herdr-home-capture-ingress-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&focus_dir);
+        server.app.state.focus_dir = focus_dir.clone();
+        let keybindings = crate::config::Config::default()
+            .live_keybinds()
+            .expect("default client keybindings");
+        let (client_tx, _control_rx, _render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new_with_mode(
+                ClientConnectionMode::App,
+                Some(Box::new(keybindings)),
+                (100, 30),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                false,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        assert!(server.app.state.keybinds.capture.matches_direct_key(
+            &crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Char('r'),
+                crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
+            )
+        ));
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[114;7u".to_vec(),
+        }));
+        assert!(server.clients[&1].sidebar_presentation.capture.is_some());
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"xyz from home".to_vec(),
+        }));
+        assert_eq!(
+            server.app.state.top_bar_view(),
+            crate::app::state::TopBarView::Home,
+            "the f in ‘from’ must not activate Home's Focus shortcut"
+        );
+        assert_eq!(
+            server.clients[&1]
+                .sidebar_presentation
+                .capture
+                .as_ref()
+                .map(|capture| capture.text.as_str()),
+            Some("xyz from home")
+        );
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\r".to_vec(),
+        }));
+        assert_eq!(
+            server.clients[&1]
+                .sidebar_presentation
+                .capture_ack
+                .as_ref()
+                .map(|ack| ack.text.as_str()),
+            Some("saved to focus list")
+        );
+        assert!(focus_dir.join("xyz-from-home.md").is_file());
+        std::fs::remove_dir_all(focus_dir).expect("remove temporary focus directory");
+        shutdown_test_runtimes(&mut server);
     }
 
     #[tokio::test]

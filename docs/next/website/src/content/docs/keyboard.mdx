@@ -77,6 +77,11 @@ Workspaces and session:
 | New thread, picking its project first | `prefix+c` |
 | Open bottom-docked agent launcher | `prefix+y` |
 | Capture a thought to the focus list | `ctrl+alt+r` |
+| Open Home launcher | `ctrl+alt+h` or `prefix+a` |
+| Open Focus | `ctrl+alt+f` or `prefix+ctrl+f` |
+| Show Orchestration panes | `ctrl+alt+o` or `prefix+ctrl+o` |
+| Open weekly Board | `ctrl+alt+w` |
+| Open Scratch | `ctrl+alt+s` or `prefix+ctrl+s` |
 | Search agents from the sidebar | `prefix+f` |
 | Rename workspace | `prefix+shift+w` |
 | Close workspace | `prefix+shift+d` |
@@ -97,6 +102,7 @@ Workspaces and session:
 ### Focus Room
 
 `prefix+shift+z` enters the persistent Focus Room and returns to the same Vellum session when you leave. You can also choose `focus: enter` in the command palette or click `← focus` in the status bar. Inside the room, `prefix+o` opens its leave menu; choose capture, find an agent, or open operations. `ctrl+alt+r` opens capture directly, including while the agent drawer is open. The agent finder opens results in a read-only drawer for agents on another host; local agent prompts can be sent from the drawer. Configure the executable with `[focus] vellum`.
+Press Esc in Board or Scratch to return to Orchestration.
 
 `prefix+f` opens the sidebar agent finder. Local search matches agent titles, terminal tails, session transcripts, and files under `.local/` and `out/`; each result shows its match source and context. Remote fleet entries currently match synchronized titles only. Use Up and Down to select, Ctrl+Up and Ctrl+Down to revisit recent queries, Enter to focus, and Esc to restore the normal sidebar. The blocked filter has no default key; bind `toggle_blocked_filter` in `[keys]` if you want a shortcut.
 
@@ -165,7 +171,7 @@ This setup keeps the prefix bindings working and adds direct chords on top:
 
 ```toml
 [keys]
-focus_pane_left = ["prefix+h", "ctrl+alt+h"]
+focus_pane_left = "prefix+h"
 focus_pane_down = ["prefix+j", "ctrl+alt+j"]
 focus_pane_up = ["prefix+k", "ctrl+alt+k"]
 focus_pane_right = ["prefix+l", "ctrl+alt+l"]
