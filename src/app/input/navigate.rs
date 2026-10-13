@@ -768,12 +768,16 @@ impl App {
                 self.toggle_missive_view();
                 leave_navigate_mode(&mut self.state);
             }
-            NavigateAction::OpenInbox | NavigateAction::OpenMailboxView => {
-                self.activate_top_bar_view(TopBarView::Mailbox);
+            NavigateAction::OpenInbox => {
+                let was_open = self.state.inbox.is_some();
+                self.state.close_top_bar_views();
+                if !was_open {
+                    self.state.toggle_inbox();
+                }
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::OpenHome => {
-                self.state.toggle_home();
+                self.activate_top_bar_view(TopBarView::Home);
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::OpenHomeView => {
@@ -786,6 +790,10 @@ impl App {
             }
             NavigateAction::OpenOrchestrationView => {
                 self.activate_top_bar_view(TopBarView::Orchestration);
+                leave_navigate_mode(&mut self.state);
+            }
+            NavigateAction::OpenBoardView => {
+                self.activate_top_bar_view(TopBarView::Board);
                 leave_navigate_mode(&mut self.state);
             }
             NavigateAction::OpenScratchView => {
@@ -2786,8 +2794,8 @@ pub(crate) enum NavigateAction {
     OpenHomeView,
     OpenFocusView,
     OpenOrchestrationView,
+    OpenBoardView,
     OpenScratchView,
-    OpenMailboxView,
     EditScratchpad,
     ShowScratchpad,
     ToggleNotepad,
@@ -2971,7 +2979,6 @@ fn action_matches(
     }
 }
 
-#[cfg(test)]
 fn action_for_key(
     state: &AppState,
     key: TerminalKey,
@@ -2979,6 +2986,25 @@ fn action_for_key(
 ) -> Option<NavigateAction> {
     non_indexed_action_for_key(state, &key, dispatch)
         .or_else(|| indexed_navigation_action(state, &key, dispatch))
+}
+
+pub(super) fn direct_screen_action_for_key(
+    state: &AppState,
+    key: &TerminalKey,
+) -> Option<NavigateAction> {
+    let action = action_for_key(state, key.clone(), BindingDispatch::Direct)?;
+    matches!(
+        action,
+        NavigateAction::Capture
+            | NavigateAction::OpenInbox
+            | NavigateAction::OpenHome
+            | NavigateAction::OpenHomeView
+            | NavigateAction::OpenFocusView
+            | NavigateAction::OpenOrchestrationView
+            | NavigateAction::OpenBoardView
+            | NavigateAction::OpenScratchView
+    )
+    .then_some(action)
 }
 
 #[cfg(test)]
@@ -3103,8 +3129,8 @@ macro_rules! non_indexed_action_bindings {
                 &kb.orchestration_view,
                 NavigateAction::OpenOrchestrationView,
             ),
+            (&kb.board_view, NavigateAction::OpenBoardView),
             (&kb.scratch_view, NavigateAction::OpenScratchView),
-            (&kb.mailbox_view, NavigateAction::OpenMailboxView),
             (&kb.reload_config, NavigateAction::ReloadConfig),
             (
                 &kb.open_notification_target,
@@ -3732,7 +3758,7 @@ pub(super) fn execute_navigate_action_in_context(
             state.toggle_usage_view();
             leave_navigate_mode(state);
         }
-        NavigateAction::OpenInbox | NavigateAction::OpenMailboxView => {
+        NavigateAction::OpenInbox => {
             let was_open = state.inbox.is_some();
             state.close_top_bar_views();
             if !was_open {
@@ -3741,11 +3767,13 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::OpenHome => {
+            state.close_top_bar_views();
             state.toggle_home();
             leave_navigate_mode(state);
         }
         NavigateAction::OpenHomeView => {
             state.close_top_bar_views();
+            state.toggle_home();
             leave_navigate_mode(state);
         }
         NavigateAction::OpenFocusView => {
@@ -3756,9 +3784,11 @@ pub(super) fn execute_navigate_action_in_context(
             }
             leave_navigate_mode(state);
         }
-        // Opening the board reads the vault, which this state-only executor
-        // cannot do; it can still close the board.
         NavigateAction::OpenOrchestrationView => {
+            state.close_top_bar_views();
+            leave_navigate_mode(state);
+        }
+        NavigateAction::OpenBoardView => {
             state.board_view = None;
             leave_navigate_mode(state);
         }
@@ -10470,9 +10500,11 @@ navigate_pane_down = "ctrl+j"
         app.state.active = Some(0);
         let pane_before = app.state.workspaces[0].focused_pane_id();
 
-        app.state.set_server_mode(Mode::Prefix);
-        app.handle_key(TerminalKey::new(KeyCode::Char('t'), KeyModifiers::empty()))
-            .await;
+        app.handle_key(TerminalKey::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ))
+        .await;
 
         assert!(app.state.capture.is_some());
         assert_eq!(app.state.workspaces[0].focused_pane_id(), pane_before);

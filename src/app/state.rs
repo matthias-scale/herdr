@@ -2851,16 +2851,16 @@ pub struct ViewState {
 /// The view the top bar's left icon cluster switches to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TopBarView {
-    /// The default panes-and-tabs screen; every other view returns here.
+    /// The chrome-less launcher.
     Home,
     /// Full-screen in-memory notepad.
     Focus,
-    /// The agent board.
+    /// The panes-and-tabs screen.
     Orchestration,
+    /// The weekly agent board.
+    Board,
     /// The scratch notes writer.
     Scratch,
-    /// The blocked-agent inbox.
-    Mailbox,
 }
 
 impl TopBarView {
@@ -2869,8 +2869,8 @@ impl TopBarView {
             Self::Home => "Home",
             Self::Focus => "Focus",
             Self::Orchestration => "Orchestration",
+            Self::Board => "Board",
             Self::Scratch => "Scratch",
-            Self::Mailbox => "Mailbox",
         }
     }
 
@@ -2878,8 +2878,8 @@ impl TopBarView {
         Self::Home,
         Self::Focus,
         Self::Orchestration,
+        Self::Board,
         Self::Scratch,
-        Self::Mailbox,
     ];
 }
 
@@ -6783,6 +6783,12 @@ impl AppState {
         {
             return InputOwner::Surface(SurfaceInputOwner::Scratch);
         }
+        if matches!(self.terminal_area_surface(), TerminalAreaSurface::Home)
+            && self.popup_pane.is_none()
+            && matches!(self.server_mode(), Mode::Terminal | Mode::Navigate)
+        {
+            return InputOwner::Surface(SurfaceInputOwner::Home);
+        }
         // A focused note editor or read-only dock tab owns input ahead of
         // shared modes and underlying surfaces. Config reloads can hide Notes
         // without clearing focus, so use the panel's current visibility.
@@ -7847,7 +7853,7 @@ impl AppState {
         } else if self
             .home
             .as_ref()
-            .is_some_and(|home| home.pending_dispatch.is_none())
+            .is_some_and(|home| home.pending_dispatch.is_none() && home.add_project.is_none())
         {
             TerminalAreaSurface::Home
         } else if let Some(inbox) = self.inbox.as_ref() {
@@ -7869,10 +7875,11 @@ impl AppState {
     pub(crate) fn top_bar_view(&self) -> TopBarView {
         match self.terminal_area_surface() {
             TerminalAreaSurface::Focus => TopBarView::Focus,
-            TerminalAreaSurface::Board => TopBarView::Orchestration,
+            TerminalAreaSurface::Board => TopBarView::Board,
             TerminalAreaSurface::Scratch => TopBarView::Scratch,
-            TerminalAreaSurface::Inbox(_) => TopBarView::Mailbox,
-            _ => TopBarView::Home,
+            TerminalAreaSurface::Home => TopBarView::Home,
+            TerminalAreaSurface::Inbox(_) => TopBarView::Home,
+            _ => TopBarView::Orchestration,
         }
     }
 
@@ -7880,10 +7887,10 @@ impl AppState {
     /// pane and tab cycling behind it would move UI the human cannot see, so
     /// those keys stay inert until it closes.
     pub(crate) fn pane_cycling_suppressed(&self) -> bool {
-        self.status_more_open || self.top_bar_view() != TopBarView::Home
+        self.status_more_open || self.top_bar_view() != TopBarView::Orchestration
     }
 
-    /// Return to Home: close every full-screen top-bar view, the other
+    /// Return to the panes: close every full-screen top-bar view, the other
     /// full-screen surfaces that would otherwise stay in front of the panes,
     /// and the popover. The Focus text and any scratch draft survive; only
     /// the views close.
@@ -9351,6 +9358,20 @@ mod tests {
         state.swap_sidebar_presentation(&mut client_a);
         assert_eq!(state.input_owner(), InputOwner::Pane);
         state.swap_sidebar_presentation(&mut client_a);
+    }
+
+    #[test]
+    fn home_surface_takes_input_ownership_ahead_of_remembered_pane_focus() {
+        let mut state = AppState::test_new();
+        state.workspaces = vec![crate::workspace::Workspace::test_new("pane")];
+        state.active = Some(0);
+        show_home(&mut state);
+        state.focus_client_on_pane();
+
+        assert_eq!(
+            state.input_owner(),
+            InputOwner::Surface(SurfaceInputOwner::Home)
+        );
     }
 
     #[test]
