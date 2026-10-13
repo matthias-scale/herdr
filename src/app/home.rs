@@ -1863,6 +1863,9 @@ impl crate::app::state::AppState {
             // Resolve the directory's repository once, here: the headline names
             // it on every frame and the render path must not run `git`.
             self.reset_home_ref_context(false);
+            // Home replaces startup onboarding and must own keyboard input as
+            // well as the rendered terminal area.
+            self.set_server_mode(crate::app::Mode::Terminal);
         }
     }
 
@@ -1979,6 +1982,10 @@ impl crate::app::state::AppState {
             self.home = Some(home);
             self.inbox = None;
             self.reset_home_ref_context(false);
+            // A fresh install starts in onboarding mode. Home is the launch
+            // surface, so clear that modal input owner before the first client
+            // attaches.
+            self.set_server_mode(crate::app::Mode::Terminal);
         }
     }
 

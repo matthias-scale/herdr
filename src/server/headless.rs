@@ -8673,6 +8673,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn full_app_input_routes_home_keys_through_headless_ingress() {
+        let mut server = test_headless_server();
+        server.app.state.keybinds = crate::config::Config::default().keybinds();
+        server
+            .app
+            .state
+            .open_home_on_launch(&crate::config::Config::default());
+        let (client_tx, _control_rx, _render_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (100, 30),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+
+        assert_eq!(
+            server.app.state.input_owner(),
+            crate::app::state::InputOwner::Surface(crate::app::state::SurfaceInputOwner::Home)
+        );
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: vec![0x1b],
+        }));
+        assert_eq!(
+            server.app.state.top_bar_view(),
+            crate::app::state::TopBarView::Orchestration
+        );
+        assert!(server.app.state.home.is_none());
+        shutdown_test_runtimes(&mut server);
+    }
+
+    #[tokio::test]
     async fn capture_ack_deadline_wakes_and_repaints_its_client() {
         let (mut server, _, _) = retained_test_server(b"capture ack");
         let now = Instant::now();
