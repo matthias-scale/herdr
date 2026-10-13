@@ -4927,7 +4927,7 @@ mod tests {
         app.handle_non_terminal_key_headless(
             state::InputOwner::Surface(state::SurfaceInputOwner::Focus),
             crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Char('u'),
+                crossterm::event::KeyCode::Char('r'),
                 KeyModifiers::CONTROL | KeyModifiers::ALT,
             ),
         );

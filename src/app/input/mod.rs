@@ -7841,7 +7841,7 @@ sidebar_visible = true
             }
             app.state.set_server_mode(Mode::Terminal);
             app.handle_key(TerminalKey::new(
-                KeyCode::Char('u'),
+                KeyCode::Char('r'),
                 KeyModifiers::CONTROL | KeyModifiers::ALT,
             ))
             .await;
