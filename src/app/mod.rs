@@ -42,7 +42,6 @@ mod pane_lifecycle;
 mod scratch;
 pub(crate) use pane_lifecycle::pane_is_quiet;
 pub(crate) mod capture;
-pub(crate) mod focus_room;
 mod pane_send;
 mod popup;
 pub(crate) mod probes;
@@ -760,43 +759,6 @@ impl App {
         let session_writer = Arc::new(std::sync::Mutex::new(crate::persist::SessionWriter::new(
             !no_session && restored_snapshot.is_none(),
         )));
-        let restored_focus_room = restored_snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.focus_room.clone())
-            .map(crate::focus_room::FocusRoom::from)
-            .unwrap_or_default();
-        let focus_dir = crate::worktree::expand_tilde_path(&config.focus.dir);
-        let mut focus_room_restore_launch_argv = if restored_focus_room.active {
-            let argv = crate::app::focus_room::restore_focus_room_launch_argv(
-                &config.focus.vellum,
-                &focus_dir,
-            );
-            if argv.is_none() {
-                tracing::warn!(
-                    vellum = %config.focus.vellum,
-                    "could not resolve Vellum while restoring active Focus Room; keeping its shell"
-                );
-            }
-            argv
-        } else {
-            None
-        };
-        let focus_room_restore_cwd = if restored_focus_room.active {
-            match crate::platform::create_private_dir_all(&focus_dir) {
-                Ok(()) => Some(focus_dir.as_path()),
-                Err(error) => {
-                    tracing::warn!(
-                        path = %focus_dir.display(),
-                        %error,
-                        "could not create Focus Room directory while restoring; using the saved room directory"
-                    );
-                    focus_room_restore_launch_argv = None;
-                    None
-                }
-            }
-        } else {
-            None
-        };
         let (
             workspaces,
             active,
@@ -827,18 +789,7 @@ impl App {
                 .pane_history
                 .then(crate::persist::load_history)
                 .flatten();
-            let focus_room_tab_id = snap
-                .focus_room
-                .as_ref()
-                .filter(|room| room.active)
-                .and_then(|room| room.tab_id.as_deref());
-            let focus_room_restore =
-                focus_room_tab_id.map(|tab_id| crate::persist::FocusRoomRestore {
-                    tab_id,
-                    cwd: focus_room_restore_cwd,
-                    launch_argv: focus_room_restore_launch_argv.as_deref(),
-                });
-            let (ws, terminals, terminal_runtimes) = crate::persist::restore_with_focus_room(
+            let (ws, terminals, terminal_runtimes) = crate::persist::restore(
                 &snap,
                 history.as_ref(),
                 24,
@@ -847,7 +798,6 @@ impl App {
                 &config.terminal.default_shell,
                 config.terminal.shell_mode,
                 config.session.resume_agents_on_restore,
-                focus_room_restore,
                 event_tx.clone(),
                 render_notify.clone(),
                 render_dirty.clone(),
@@ -1123,9 +1073,7 @@ impl App {
             spawn_dock: None,
             capture: None,
             capture_ack: None,
-            focus_room_ui: crate::app::focus_room::FocusRoomUiState::default(),
-            focus_dir,
-            focus_vellum: config.focus.vellum.clone(),
+            focus_dir: crate::worktree::expand_tilde_path(&config.focus.dir),
             home_agent_choices: Vec::new(),
             home_catalog: if cfg!(test) {
                 crate::app::home_catalog::HomeCatalog::fallback()
@@ -1492,7 +1440,6 @@ impl App {
                 }
                 lock
             },
-            focus_room: restored_focus_room,
             planning_lock_dialog: None,
             hyperspace: crate::hyperspace::HyperspaceState::new(
                 config.ui.sidebar_animation,
@@ -1946,7 +1893,6 @@ impl App {
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
         app.rebuild_group_membership_projection();
-        app.restore_focus_room();
         if let Some(authority) = config.planning_lock.authority.clone() {
             app.state.planning_lock.fail_closed_remote();
             crate::planning_lock_sync::start_polling(authority, app.event_tx.clone());
@@ -2033,11 +1979,6 @@ impl App {
         app.state.refresh_local_agent_panel_identities();
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
-        app.state.focus_room = snapshot
-            .focus_room
-            .clone()
-            .map(crate::focus_room::FocusRoom::from)
-            .unwrap_or_default();
         app.restore_stall_nudge_episodes(imported_stall_nudges, &pane_id_aliases, now);
         app.restore_handoff_human_drafts(imported_human_drafts, &pane_id_aliases);
         app.state.pane_id_aliases = pane_id_aliases;
@@ -2069,7 +2010,6 @@ impl App {
         });
         app.restore_handoff_dock_editors(config, editor_imports);
         app.rebuild_group_membership_projection();
-        app.restore_focus_room_without_relaunch();
         app.sync_agent_metadata_deadline();
         app.sync_agent_activity_refresh_deadline(now);
         Ok(app)
@@ -2606,9 +2546,6 @@ impl App {
             match event {
                 LoopEvent::Timer => {
                     if self.tick_agent_finder(Instant::now()) {
-                        needs_render = true;
-                    }
-                    if self.state.focus_room.active && self.refresh_focus_room_drawer() {
                         needs_render = true;
                     }
                 }
@@ -3203,7 +3140,6 @@ impl App {
         }
         if !invalid_section("focus") {
             self.state.focus_dir = crate::worktree::expand_tilde_path(&config.focus.dir);
-            self.state.focus_vellum = config.focus.vellum.clone();
         }
         if !invalid_section("notepad") {
             self.apply_notepad_config(&config.notepad);
@@ -3713,20 +3649,6 @@ impl App {
                             // before any pane forwarding can occur.
                             if owner == state::InputOwner::Capture && self.state.capture.is_some() {
                                 self.handle_capture_key(key.as_key_event());
-                                self.input_leases.insert_consumed(
-                                    lease_key,
-                                    input::ConsumedInputLease::SuppressRepeats,
-                                );
-                                continue;
-                            }
-                            // Focus Room overlays and keybindings must claim input
-                            // before the active pane, just as they do in the async
-                            // monolithic input path. The caller has installed this
-                            // client's sidebar presentation, including focus_room_ui.
-                            if self.state.focus_room.active
-                                && owner != state::InputOwner::Pomodoro
-                                && self.handle_focus_room_key(key.clone())
-                            {
                                 self.input_leases.insert_consumed(
                                     lease_key,
                                     input::ConsumedInputLease::SuppressRepeats,
@@ -4330,18 +4252,6 @@ mod tests {
             source.window_cycle_mode,
             source.skip_collapsed_cycle,
         );
-        let manifest = crate::server::handoff::manifest_for(
-            snapshot,
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            None,
-        );
-        let manifest: crate::server::handoff::HandoffManifest = serde_json::from_slice(
-            &serde_json::to_vec(&manifest).expect("serialize legacy-compatible manifest"),
-        )
-        .expect("deserialize handoff manifest without Focus metadata");
         let mut imports = std::collections::HashMap::new();
 
         let app = App::new_from_handoff(
@@ -4349,7 +4259,7 @@ mod tests {
             None,
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
-            &manifest.snapshot,
+            &snapshot,
             &mut imports,
             &[],
         )
@@ -4366,84 +4276,6 @@ mod tests {
         assert_eq!(cached.local_target.ws_idx, 0);
         assert_eq!(cached.local_target.tab_idx, 0);
         assert_eq!(cached.local_target.pane_id, pane_id);
-        assert!(!app.state.focus_room.active);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn handoff_restores_active_focus_room_without_relaunching_its_pane() {
-        let mut source = state::AppState::test_new();
-        source.workspaces = vec![Workspace::test_new("handoff-focus")];
-        source.ensure_test_terminals();
-        source.active = Some(0);
-        source.selected = 0;
-        let pane_id = source.workspaces[0].tabs[0].root_pane;
-        let tab_id = crate::workspace::public_tab_id_for_number(
-            &source.workspaces[0].id,
-            source.workspaces[0].tabs[0].number,
-        );
-        let mut snapshot = crate::persist::capture(
-            &source.workspaces,
-            &source.terminals,
-            &crate::terminal::TerminalRuntimeRegistry::new(),
-            source.active,
-            source.selected,
-            source.sidebar_width,
-            source.sidebar_section_split,
-            source.collapsed_space_keys.clone(),
-            source.prio_panel_collapsed,
-            source.window_cycle_mode,
-            source.skip_collapsed_cycle,
-        );
-        snapshot.focus_room = Some(crate::focus_room::FocusRoomSnapshot {
-            tab_id: Some(tab_id.clone()),
-            active: true,
-            return_to: None,
-        });
-        let manifest = crate::server::handoff::manifest_for(
-            snapshot,
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            None,
-        );
-        let manifest: crate::server::handoff::HandoffManifest = serde_json::from_slice(
-            &serde_json::to_vec(&manifest).expect("serialize handoff manifest"),
-        )
-        .expect("deserialize handoff manifest");
-        let (source_runtime, imported) = imported_editor_runtime(pane_id);
-        let child_pid = source_runtime.child_pid().expect("room process");
-        let mut imports = std::collections::HashMap::from([(pane_id.raw(), imported)]);
-
-        let app = App::new_from_handoff(
-            &Config::default(),
-            None,
-            tokio::sync::mpsc::unbounded_channel().1,
-            crate::api::EventHub::default(),
-            &manifest.snapshot,
-            &mut imports,
-            &[],
-        )
-        .expect("restore handoff");
-
-        assert!(app.state.focus_room.active);
-        assert_eq!(
-            app.state.focus_room.tab_id.as_deref(),
-            Some(tab_id.as_str())
-        );
-        let restored_pane_id = app.state.workspaces[0].tabs[0].root_pane;
-        let terminal_id = app.state.workspaces[0]
-            .pane_state(restored_pane_id)
-            .expect("room pane state")
-            .attached_terminal_id
-            .clone();
-        let imported_runtime = app
-            .terminal_runtimes
-            .get(&terminal_id)
-            .expect("handed-off room runtime");
-        assert_eq!(imported_runtime.child_pid(), Some(child_pid));
-        drop(source_runtime);
     }
 
     #[cfg(unix)]
@@ -4894,17 +4726,6 @@ mod tests {
     }
 
     #[test]
-    fn restored_focus_room_takes_precedence_over_home_on_start() {
-        let mut app = test_app();
-        app.state.focus_room.active = true;
-
-        app.state.open_home_on_launch(&Config::default());
-
-        assert!(app.state.focus_room.active);
-        assert!(app.state.home.is_none());
-    }
-
-    #[test]
     fn headless_home_routes_direct_screen_and_capture_shortcuts() {
         let mut app = test_app();
         app.state = state::AppState::test_new();
@@ -4927,7 +4748,7 @@ mod tests {
         app.handle_non_terminal_key_headless(
             state::InputOwner::Surface(state::SurfaceInputOwner::Focus),
             crate::input::TerminalKey::new(
-                crossterm::event::KeyCode::Char('r'),
+                crossterm::event::KeyCode::Char('u'),
                 KeyModifiers::CONTROL | KeyModifiers::ALT,
             ),
         );
@@ -8010,12 +7831,6 @@ mod tests {
                 crate::api::schema::WorktreeListParams::default(),
             ),
         };
-        let focus_enter = crate::api::schema::Request {
-            id: "req_focus_enter".into(),
-            method: crate::api::schema::Method::FocusEnter(
-                crate::api::schema::EmptyParams::default(),
-            ),
-        };
         let worktree_create = crate::api::schema::Request {
             id: "req_5".into(),
             method: crate::api::schema::Method::WorktreeCreate(
@@ -8056,7 +7871,6 @@ mod tests {
 
         assert!(!crate::api::request_changes_ui(&read_only));
         assert!(!crate::api::request_changes_ui(&worktree_list));
-        assert!(crate::api::request_changes_ui(&focus_enter));
         assert!(crate::api::request_changes_ui(&mutating));
         assert!(crate::api::request_changes_ui(&pane_rename));
         assert!(crate::api::request_changes_ui(&worktree_create));

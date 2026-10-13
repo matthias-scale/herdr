@@ -548,7 +548,6 @@ mod tests {
             workspaces: Vec::new(),
             active: None,
             selected: 0,
-            focus_room: None,
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),

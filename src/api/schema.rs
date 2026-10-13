@@ -177,8 +177,6 @@ pub enum Method {
     DayDone(DayItemTarget),
     #[serde(rename = "day.dismiss")]
     DayDismiss(DayItemTarget),
-    #[serde(rename = "focus.enter")]
-    FocusEnter(EmptyParams),
     #[serde(rename = "agent.read")]
     AgentRead(AgentReadParams),
     #[serde(rename = "agent.explain")]

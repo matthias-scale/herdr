@@ -140,11 +140,6 @@ pub enum ResponseResult {
         tab: TabInfo,
         root_pane: PaneInfo,
     },
-    FocusEntered {
-        tab_id: String,
-        pane_id: String,
-        created: bool,
-    },
     TabList {
         tabs: Vec<TabInfo>,
     },

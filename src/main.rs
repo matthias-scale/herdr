@@ -75,7 +75,6 @@ mod events;
 mod files;
 mod fleet;
 mod focus_capture;
-mod focus_room;
 mod ghostty;
 mod goals;
 mod groups;
@@ -285,9 +284,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # workspace_picker = "prefix+w"
 # goto = "prefix+g"
 # agent_finder = "prefix+f"
-# capture = "ctrl+alt+r" # captures a thought to the local focus list
-# focus_enter = "prefix+shift+z" # enter the Focus Room; only active outside it
-# focus_leave = "prefix+o" # leave the Focus Room; only active inside it
+# capture = "ctrl+alt+u" # captures a thought to the local focus list
 # new_workspace = "prefix+alt+n"
 # new_worktree = "prefix+shift+g"
 # open_worktree = ""    # optional, unset by default
@@ -703,10 +700,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # stale_after = 600
 
 # [focus]
-# Local Markdown focus list used by `herdr focus add`, the capture composer, and Focus Room.
+# Local Markdown focus list used by `herdr focus add` and the capture composer.
 # dir = "~/workspaces/obsidian/focus"
-# Vellum executable used by Focus Room. ~ expands to the home directory.
-# vellum = "vellum"
 
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.
