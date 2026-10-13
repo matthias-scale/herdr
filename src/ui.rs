@@ -65,6 +65,7 @@ mod bar;
 pub(crate) mod board;
 pub(crate) mod text;
 pub(crate) mod ticket_actions;
+pub(crate) mod transcript_view;
 pub(crate) mod usage;
 mod user_actions;
 mod widgets;

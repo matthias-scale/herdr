@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use tracing::{debug, warn};
 
 use crate::{
@@ -63,6 +63,83 @@ impl App {
         }
 
         let key_event = key.as_key_event();
+        if let Some(ws_idx) = self.state.active {
+            if let Some(pane_id) = self
+                .state
+                .workspaces
+                .get(ws_idx)
+                .and_then(|ws| ws.focused_pane_id())
+            {
+                let chat_open = self
+                    .state
+                    .transcript_views
+                    .get(&pane_id)
+                    .is_some_and(|view| view.open);
+                if chat_open {
+                    if key_event.kind == KeyEventKind::Release
+                        && matches!(
+                            key_event.code,
+                            KeyCode::Char('G' | 'g' | 'o') | KeyCode::PageUp | KeyCode::PageDown
+                        )
+                    {
+                        return None;
+                    }
+                    match key_event.code {
+                        KeyCode::Char('G' | 'g')
+                            if key_event.modifiers.is_empty()
+                                || key_event.modifiers == KeyModifiers::SHIFT =>
+                        {
+                            if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                            {
+                                return None;
+                            }
+                            if let Some(view) = self.state.transcript_views.get_mut(&pane_id) {
+                                view.scroll = 0;
+                            }
+                            self.render_notify.notify_one();
+                            return None;
+                        }
+                        KeyCode::Char('o')
+                            if key_event.modifiers.is_empty()
+                                && matches!(
+                                    key_event.kind,
+                                    KeyEventKind::Press | KeyEventKind::Repeat
+                                ) =>
+                        {
+                            if let Some(view) = self.state.transcript_views.get_mut(&pane_id) {
+                                view.expand_tools = !view.expand_tools;
+                            }
+                            self.render_notify.notify_one();
+                            return None;
+                        }
+                        KeyCode::PageUp | KeyCode::PageDown
+                            if key_event.modifiers.is_empty()
+                                && matches!(
+                                    key_event.kind,
+                                    KeyEventKind::Press | KeyEventKind::Repeat
+                                ) =>
+                        {
+                            let amount = self
+                                .state
+                                .pane_info_by_id(pane_id)
+                                .map(|info| info.inner_rect.height as usize)
+                                .unwrap_or(10)
+                                .max(1);
+                            if let Some(view) = self.state.transcript_views.get_mut(&pane_id) {
+                                view.scroll = if key_event.code == KeyCode::PageUp {
+                                    view.scroll.saturating_add(amount)
+                                } else {
+                                    view.scroll.saturating_sub(amount)
+                                };
+                            }
+                            self.render_notify.notify_one();
+                            return None;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         if self.handle_status_more_menu_key(key_event, self.state.input_owner())
             || self.handle_window_cycle_menu_key(key_event, self.state.input_owner())
             || self.handle_sidebar_areas_menu_key(key_event, self.state.input_owner())
