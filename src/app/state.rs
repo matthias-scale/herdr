@@ -7908,6 +7908,20 @@ impl AppState {
         self.status_more_open = false;
     }
 
+    pub(crate) fn open_board_view(&mut self, view: crate::board::BoardView) {
+        self.clear_usage_view();
+        self.symphony_detail = None;
+        self.loop_run_history_detail = None;
+        self.aloop_run_detail = None;
+        self.dock_object_preview = None;
+        self.work_view = None;
+        self.home = None;
+        self.inbox = None;
+        self.set_server_mode(Mode::Terminal);
+        self.board_view = Some(view);
+        self.release_sidebar_focus_to_surface();
+    }
+
     /// Open the Focus notepad over the panes, creating its in-memory text on
     /// first use.
     pub(crate) fn open_focus_view(&mut self) {

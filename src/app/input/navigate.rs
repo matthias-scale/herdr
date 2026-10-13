@@ -3789,7 +3789,14 @@ pub(super) fn execute_navigate_action_in_context(
             leave_navigate_mode(state);
         }
         NavigateAction::OpenBoardView => {
-            state.board_view = None;
+            if state.board_view.is_some() {
+                state.board_view = None;
+            } else {
+                match crate::board::BoardView::open() {
+                    Ok(view) => state.open_board_view(view),
+                    Err(error) => state.config_diagnostic = Some(format!("board: {error}")),
+                }
+            }
             leave_navigate_mode(state);
         }
         NavigateAction::OpenScratchView => {
@@ -10017,6 +10024,41 @@ navigate_pane_down = "ctrl+j"
         assert!(!state.creating_new_tab);
         assert!(!state.request_new_tab);
         assert!(state.workspaces.is_empty());
+    }
+
+    #[test]
+    fn board_view_navigate_action_opens_and_closes_board() {
+        let vault = super::super::unique_temp_path("board-vault");
+        std::fs::create_dir_all(vault.join(".obsidian")).expect("create vault marker");
+        std::fs::create_dir_all(vault.join("todos")).expect("create todos directory");
+        let previous_vault = std::env::var_os("OBSIDIAN_VAULT");
+        std::env::set_var("OBSIDIAN_VAULT", &vault);
+
+        let mut state = AppState::test_new();
+        let mut terminal_runtimes = TerminalRuntimeRegistry::new();
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::OpenBoardView,
+            ActionContext::Navigate,
+        );
+        assert!(state.board_view.is_some());
+        assert_ne!(state.top_bar_view(), TopBarView::Orchestration);
+        assert!(state.pane_cycling_suppressed());
+
+        execute_navigate_action_in_context(
+            &mut state,
+            &mut terminal_runtimes,
+            NavigateAction::OpenBoardView,
+            ActionContext::Navigate,
+        );
+        assert!(state.board_view.is_none());
+
+        match previous_vault {
+            Some(value) => std::env::set_var("OBSIDIAN_VAULT", value),
+            None => std::env::remove_var("OBSIDIAN_VAULT"),
+        }
+        std::fs::remove_dir_all(vault).expect("remove temporary vault");
     }
 
     #[test]
