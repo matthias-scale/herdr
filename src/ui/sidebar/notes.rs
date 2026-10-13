@@ -31,6 +31,7 @@ pub(crate) fn areas(app: &AppState, area: Rect) -> Vec<(NotesLine, Rect)> {
         crate::ui::scrollbar::should_show_scrollbar(metrics),
     );
     let rows = super::sidebar_rows(app);
+    let workspace_spacing = super::workspace_group_spacing(app, &rows, body.height);
     let mut y = body.y;
     let mut out = Vec::new();
     for (idx, row) in rows
@@ -47,7 +48,7 @@ pub(crate) fn areas(app: &AppState, area: Rect) -> Vec<(NotesLine, Rect)> {
         }
         y = y
             .saturating_add(height)
-            .saturating_add(super::sidebar_row_gap(app, &rows, idx));
+            .saturating_add(super::sidebar_row_gap(app, &rows, idx, workspace_spacing));
     }
     out
 }
@@ -112,6 +113,10 @@ pub(crate) fn label(app: &AppState, line: &NotesLine, width: usize) -> String {
     }
 }
 pub(crate) fn render(app: &AppState, frame: &mut Frame, line: &NotesLine, rect: Rect) {
+    let rect = super::sidebar_row_content_rect(rect);
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
     let text = label(app, line, usize::from(rect.width));
     frame.render_widget(
         Paragraph::new(text).style(Style::default().fg(app.palette.text).add_modifier(

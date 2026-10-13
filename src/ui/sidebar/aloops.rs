@@ -224,6 +224,7 @@ pub(super) fn areas(app: &AppState, area: Rect) -> Vec<Area> {
     let metrics = super::workspace_list_scroll_metrics(app, ws_area);
     let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
     let rows = sidebar_rows(app);
+    let workspace_spacing = super::workspace_group_spacing(app, &rows, body.height);
     let mut y = body.y;
     let mut out = Vec::new();
     for (idx, row) in rows
@@ -251,9 +252,12 @@ pub(super) fn areas(app: &AppState, area: Rect) -> Vec<Area> {
                 rect: Rect::new(body.x, y, body.width, height),
             });
         }
-        y = y
-            .saturating_add(height)
-            .saturating_add(sidebar_row_gap(app, &rows, idx));
+        y = y.saturating_add(height).saturating_add(sidebar_row_gap(
+            app,
+            &rows,
+            idx,
+            workspace_spacing,
+        ));
     }
     out
 }
@@ -287,7 +291,7 @@ pub(super) fn target_at(app: &AppState, col: u16, row: u16) -> Option<AloopTarge
     let area = areas(app, app.view.sidebar_rect)
         .into_iter()
         .find(|area| row >= area.rect.y && row < area.rect.bottom())?;
-    let left_edge = area.rect.x;
+    let left_edge = super::sidebar_row_content_rect(area.rect).x;
     match area.row {
         SidebarRow::AloopFinding { key, .. } => Some(AloopTarget::Finding { key }),
         SidebarRow::AloopLoop { key, name, .. } => Some(AloopTarget::Loop {
@@ -333,11 +337,14 @@ fn selected_style(app: &AppState, key: &str) -> Style {
 }
 
 pub(super) fn render(app: &AppState, frame: &mut Frame, area: &Area, now: std::time::SystemTime) {
-    if area.rect.width == 0 || area.rect.height == 0 {
+    let row_rect = area.rect;
+    let rect = super::sidebar_row_content_rect(area.rect);
+    if row_rect.width == 0 || row_rect.height == 0 || rect.width == 0 {
         return;
     }
     let p = &app.palette;
-    let width = usize::from(area.rect.width);
+    let width = usize::from(rect.width);
+    let row_width = usize::from(row_rect.width);
     let line = match &area.row {
         SidebarRow::AloopLoop {
             key,
@@ -422,7 +429,7 @@ pub(super) fn render(app: &AppState, frame: &mut Frame, area: &Area, now: std::t
             let age = crate::ui::symphony::age_label_since(Some(finding.created_at.as_str()), now);
             let prefix = 6;
             let tag_width = display_width(&tag);
-            let age_width = if width >= prefix + tag_width + 1 + 8 + SIDEBAR_AGE_FIELD_WIDTH {
+            let age_width = if row_width >= prefix + tag_width + 1 + 8 + SIDEBAR_AGE_FIELD_WIDTH {
                 SIDEBAR_AGE_FIELD_WIDTH
             } else {
                 0
@@ -499,7 +506,7 @@ pub(super) fn render(app: &AppState, frame: &mut Frame, area: &Area, now: std::t
         ))),
         _ => return,
     };
-    frame.render_widget(line, area.rect);
+    frame.render_widget(line, rect);
 }
 
 #[cfg(test)]

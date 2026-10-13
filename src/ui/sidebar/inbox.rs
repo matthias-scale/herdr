@@ -66,6 +66,7 @@ pub(super) fn areas(app: &AppState, area: Rect) -> Vec<Area> {
     let metrics = super::workspace_list_scroll_metrics(app, ws);
     let body = workspace_list_body_rect(app, ws, should_show_scrollbar(metrics));
     let rows = super::sidebar_rows(app);
+    let workspace_spacing = super::workspace_group_spacing(app, &rows, body.height);
     let mut y = body.y;
     let mut out = Vec::new();
     for (idx, row) in rows
@@ -85,12 +86,16 @@ pub(super) fn areas(app: &AppState, area: Rect) -> Vec<Area> {
         }
         y = y
             .saturating_add(height)
-            .saturating_add(super::sidebar_row_gap(app, &rows, idx));
+            .saturating_add(super::sidebar_row_gap(app, &rows, idx, workspace_spacing));
     }
     out
 }
 
 pub(super) fn render(app: &AppState, frame: &mut Frame, area: &Area, now: std::time::SystemTime) {
+    let rect = super::sidebar_row_content_rect(area.rect);
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
     let Some(snapshot) = app.fleet_snapshot.inbox.as_ref() else {
         return;
     };
@@ -194,7 +199,7 @@ pub(super) fn render(app: &AppState, frame: &mut Frame, area: &Area, now: std::t
                 },
             ),
         ]),
-        InboxLine::Columns => spans.push(Span::styled("  src      last    cur  new", dim)),
+        InboxLine::Columns => spans.push(Span::styled("  src     last    cur  new", dim)),
         InboxLine::Source(index) => {
             if let Some(source) = snapshot.data.sources.get(*index) {
                 if source.error.is_some() {
@@ -209,7 +214,7 @@ pub(super) fn render(app: &AppState, frame: &mut Frame, area: &Area, now: std::t
                         if source.enabled { "  ● " } else { "  ○ " },
                         base,
                     ));
-                    spans.push(Span::styled(format!("{:<8}", source.name), base));
+                    spans.push(Span::styled(format!("{:<7}", source.name), base));
                     let last_at = source
                         .last_intake_time
                         .as_deref()
@@ -250,7 +255,7 @@ pub(super) fn render(app: &AppState, frame: &mut Frame, area: &Area, now: std::t
         }
         InboxLine::Fault(fault) => spans.push(Span::styled(format!("  ✗ {fault}"), red)),
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area.rect);
+    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
 }
 
 pub(super) fn hover_detail(
