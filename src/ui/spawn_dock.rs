@@ -25,8 +25,14 @@ pub(crate) fn hit_test(app: &AppState, column: u16, row: u16) -> Option<HitTarge
     let dock = app.spawn_dock.as_ref()?;
     let area = app.view.terminal_area;
     if dock.home.account_picker.active {
-        return super::account_picker::hit_test(&dock.home, area, column, row)
-            .map(HitTarget::Picker);
+        return super::account_picker::hit_test(
+            &dock.home,
+            area,
+            account_picker_anchor(&dock.home, area),
+            column,
+            row,
+        )
+        .map(HitTarget::Picker);
     }
     if area.height < 5 || area.width < 30 {
         return None;
@@ -50,17 +56,7 @@ pub(crate) fn hit_test(app: &AppState, column: u16, row: u16) -> Option<HitTarge
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(2)])
         .split(content_area);
-    let field_areas = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(22),
-            Constraint::Percentage(14),
-            Constraint::Percentage(22),
-            Constraint::Percentage(16),
-            Constraint::Percentage(10),
-            Constraint::Percentage(16),
-        ])
-        .split(rows[0]);
+    let field_areas = field_rects(rows[0]);
     let fields = [
         SpawnDockField::Project,
         SpawnDockField::Host,
@@ -104,6 +100,35 @@ pub(crate) fn hit_test(app: &AppState, column: u16, row: u16) -> Option<HitTarge
     }
 }
 
+fn field_rects(area: Rect) -> [Rect; 6] {
+    Layout::horizontal([
+        Constraint::Percentage(22),
+        Constraint::Percentage(14),
+        Constraint::Percentage(22),
+        Constraint::Percentage(16),
+        Constraint::Percentage(10),
+        Constraint::Percentage(16),
+    ])
+    .areas(area)
+}
+
+pub(crate) fn account_picker_anchor(home: &crate::app::home::HomeState, area: Rect) -> Rect {
+    let height = DOCK_HEIGHT.min(area.height);
+    let content = Rect::new(
+        area.x,
+        area.bottom().saturating_sub(height).saturating_add(1),
+        area.width,
+        height.saturating_sub(1),
+    );
+    let rows = Layout::vertical([Constraint::Length(3), Constraint::Min(2)]).split(content);
+    let fields = field_rects(rows[0]);
+    fields[if home.picker == Some(HomePicker::Agent) {
+        2
+    } else {
+        3
+    }]
+}
+
 fn contains(rect: Rect, column: u16, row: u16) -> bool {
     column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
 }
@@ -143,17 +168,7 @@ pub(super) fn render(app: &AppState, frame: &mut Frame, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(2)])
         .split(content_area);
-    let field_areas = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(22),
-            Constraint::Percentage(14),
-            Constraint::Percentage(22),
-            Constraint::Percentage(16),
-            Constraint::Percentage(10),
-            Constraint::Percentage(16),
-        ])
-        .split(rows[0]);
+    let field_areas = field_rects(rows[0]);
     let fields = [
         SpawnDockField::Project,
         SpawnDockField::Host,
@@ -170,7 +185,13 @@ pub(super) fn render(app: &AppState, frame: &mut Frame, area: Rect) {
     } else {
         render_prompt(app, dock, rows[1], frame);
     }
-    super::account_picker::render(app, &dock.home, frame, area);
+    super::account_picker::render(
+        app,
+        &dock.home,
+        frame,
+        area,
+        account_picker_anchor(&dock.home, area),
+    );
 }
 
 fn render_field(
@@ -493,40 +514,72 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
     #[test]
     fn account_picker_spawn_render_and_actual_hit_test_share_scrolled_rows() {
-        for (width, height) in [(100, 30), (40, 24)] {
-            let mut app = AppState::test_new();
-            app.view.terminal_area = Rect::new(0, 0, width, height);
-            let mut home = HomeState::default();
-            home.refresh_account_rows(&Default::default());
-            home.open_account_picker(HomePicker::Model);
-            let mut dock = SpawnDockState::new(home);
-            dock.picker = Some(HomePicker::Model);
-            app.spawn_dock = Some(dock);
-            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
-            terminal
-                .draw(|frame| render(&app, frame, app.view.terminal_area))
-                .expect("render");
-            let text: String = terminal
-                .backend()
-                .buffer()
-                .content()
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect();
-            assert!(text.contains("provider / account / model"));
-            let g = super::super::account_picker::geometry(app.view.terminal_area);
-            assert_eq!(
-                hit_test(&app, g.accounts.x, g.accounts.y),
-                Some(HitTarget::Picker(
-                    super::super::account_picker::PickerHit::Account(0)
-                ))
-            );
-            assert_eq!(
-                hit_test(&app, g.models.x, g.models.y),
-                Some(HitTarget::Picker(
-                    super::super::account_picker::PickerHit::Model(0)
-                ))
-            );
+        for theme in ["catppuccin", "catppuccin-latte"] {
+            for (width, height) in [(194, 120), (100, 30), (52, 36), (40, 24)] {
+                for picker in [HomePicker::Agent, HomePicker::Model] {
+                    let mut app = AppState::test_new();
+                    app.palette = crate::app::state::Palette::from_name(theme).expect("theme");
+                    let area = Rect::new(0, 0, width, height);
+                    app.view.terminal_area = area;
+                    let mut home = HomeState::default();
+                    home.refresh_account_rows(&Default::default());
+                    home.open_account_picker(picker);
+                    let mut dock = SpawnDockState::new(home);
+                    dock.picker = Some(picker);
+                    app.spawn_dock = Some(dock);
+                    let mut terminal =
+                        Terminal::new(TestBackend::new(width, height)).expect("terminal");
+                    terminal
+                        .draw(|frame| render(&app, frame, area))
+                        .expect("render");
+                    let home = &app.spawn_dock.as_ref().expect("dock").home;
+                    let anchor = account_picker_anchor(home, area);
+                    let g = super::super::account_picker::geometry(home, area, anchor);
+                    assert!(
+                        g.popup.bottom() <= anchor.y,
+                        "Spawn flips above bottom dock"
+                    );
+                    let buffer = terminal.backend().buffer();
+                    assert_eq!(buffer[(g.popup.x, g.popup.y)].bg, app.palette.panel_bg);
+                    assert_eq!(
+                        buffer[(g.accounts.x, g.accounts.y)].bg,
+                        app.palette.selection_bg
+                    );
+                    assert_eq!(
+                        hit_test(&app, g.accounts.x, g.accounts.y),
+                        Some(HitTarget::Picker(
+                            super::super::account_picker::PickerHit::Account(0)
+                        ))
+                    );
+                    let models = home.filtered_account_models();
+                    let start = super::super::account_picker::scroll_start(
+                        home.account_picker.model_cursor,
+                        g.models.height,
+                        models.len(),
+                    );
+                    let expected = home.model_options()[models[start]].short_name();
+                    let rendered: String = (g.models.x..g.models.right())
+                        .map(|x| buffer[(x, g.models.y)].symbol())
+                        .collect();
+                    assert!(
+                        rendered.contains(expected),
+                        "rendered {rendered:?}, expected {expected}"
+                    );
+                    let hit = hit_test(&app, g.models.x, g.models.y);
+                    assert_eq!(
+                        hit,
+                        Some(HitTarget::Picker(
+                            super::super::account_picker::PickerHit::Model(start)
+                        ))
+                    );
+                    let mut clicked = home.clone();
+                    super::super::account_picker::apply_hit(
+                        &mut clicked,
+                        super::super::account_picker::PickerHit::Model(start),
+                    );
+                    assert_eq!(clicked.model, home.model_options()[models[start]].id);
+                }
+            }
         }
     }
 }

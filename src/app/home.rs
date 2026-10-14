@@ -1050,7 +1050,7 @@ impl HomeState {
                     .models
                     .iter()
                     .take(3)
-                    .map(|model| model.display_name.as_str())
+                    .map(|model| model.short_name())
                     .collect::<Vec<_>>()
                     .join(",")
             })
@@ -1089,7 +1089,7 @@ impl HomeState {
         self.catalog
             .provider(self.agent)
             .and_then(|provider| provider.model(&self.model))
-            .map(|model| model.display_name.as_str())
+            .map(|model| model.short_name())
             .unwrap_or(&self.model)
     }
 
@@ -3366,6 +3366,9 @@ mod tests {
             [
                 "default",
                 "claude-fable-5-1",
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5",
                 "claude-opus-5",
                 "claude-sonnet-5",
                 "claude-haiku-4-5-20251001",

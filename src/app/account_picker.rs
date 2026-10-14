@@ -117,7 +117,17 @@ impl HomeState {
         for profile in self.profiles() {
             rows.push(AccountRow {
                 profile: profile.id.clone(),
-                label: format!("{} / inherited", profile.label),
+                label: if profile
+                    .id
+                    .eq_ignore_ascii_case(crate::detect::agent_label(profile.agent))
+                    && profile
+                        .label
+                        .eq_ignore_ascii_case(crate::detect::agent_label(profile.agent))
+                {
+                    "inherited".into()
+                } else {
+                    format!("{} / inherited", profile.label)
+                },
                 selection: None,
             });
             if let Some(quota) = profile.quota {
@@ -128,7 +138,33 @@ impl HomeState {
                 {
                     rows.push(AccountRow {
                         profile: profile.id.clone(),
-                        label: format!("{} / {}", profile.label, account.label),
+                        label: {
+                            let identity = if snapshot
+                                .accounts
+                                .iter()
+                                .filter(|other| {
+                                    other.provider == account.provider
+                                        && other.label == account.label
+                                })
+                                .count()
+                                > 1
+                            {
+                                format!("{} ({})", account.label, account.profile_id)
+                            } else {
+                                account.label.clone()
+                            };
+                            if profile
+                                .id
+                                .eq_ignore_ascii_case(crate::detect::agent_label(profile.agent))
+                                && profile
+                                    .label
+                                    .eq_ignore_ascii_case(crate::detect::agent_label(profile.agent))
+                            {
+                                identity
+                            } else {
+                                format!("{} / {identity}", profile.label)
+                            }
+                        },
                         selection: Some(AccountSelection {
                             profile: profile.id.clone(),
                             provider: account.provider,
@@ -614,6 +650,33 @@ mod tests {
         });
         home.refresh_account_rows(&snapshot);
         home
+    }
+
+    #[test]
+    fn account_picker_short_model_labels_preserve_full_id_and_prior_name_search() {
+        let mut home = HomeState::default();
+        home.open_account_picker(HomePicker::Model);
+        for (id, previous, short) in [
+            ("claude-fable-5-1", "Claude Fable 5.1", "Fable 5.1"),
+            ("claude-opus-5-5", "Claude Opus 5.5", "Opus 5.5"),
+            ("claude-sonnet-5-5", "Claude Sonnet 5.5", "Sonnet 5.5"),
+            ("claude-haiku-5-5", "Claude Haiku 5.5", "Haiku 5.5"),
+            ("claude-opus-5", "Claude Opus 5", "Opus 5"),
+            ("claude-haiku-4-5-20251001", "Claude Haiku 4.5", "Haiku 4.5"),
+        ] {
+            for query in [id, previous, short] {
+                home.account_picker.query = query.into();
+                assert!(
+                    home.filtered_account_models()
+                        .iter()
+                        .any(|index| home.model_options()[*index].id == id),
+                    "query {query}"
+                );
+            }
+            home.set_model(id);
+            assert_eq!(home.model, id, "explicit ID is never silently upgraded");
+            assert_eq!(home.model_display_name(), short);
+        }
     }
 
     #[cfg(unix)]

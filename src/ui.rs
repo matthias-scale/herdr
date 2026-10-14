@@ -23,6 +23,7 @@ pub(crate) mod focus;
 pub(crate) mod focus_room;
 pub(crate) mod goals;
 mod home;
+pub(crate) use home::account_picker_anchor as home_account_picker_anchor;
 pub(crate) mod hyperspace;
 mod icons;
 mod inbox;
@@ -54,7 +55,10 @@ pub(crate) use dock::symphony::dashboard_url as dock_symphony_dashboard_url;
 #[cfg(test)]
 pub(crate) use sidebar::entry_is_blocked;
 mod spawn_dock;
-pub(crate) use spawn_dock::{hit_test as spawn_dock_hit_test, HitTarget as SpawnDockHitTarget};
+pub(crate) use spawn_dock::{
+    account_picker_anchor as spawn_account_picker_anchor, hit_test as spawn_dock_hit_test,
+    HitTarget as SpawnDockHitTarget,
+};
 pub(crate) mod status;
 mod symphony;
 mod tab_surface;

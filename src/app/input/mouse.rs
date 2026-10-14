@@ -525,11 +525,31 @@ impl AppState {
         if owner == InputOwner::Surface(SurfaceInputOwner::Home)
             && self.point_in_rect(self.view.terminal_area, mouse.column, mouse.row)
         {
+            if matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            ) {
+                let anchor = crate::ui::home_account_picker_anchor(self, self.view.terminal_area);
+                if let Some(home) = self.home.as_mut().filter(|home| home.account_picker.active) {
+                    crate::ui::account_picker::scroll(
+                        home,
+                        self.view.terminal_area,
+                        anchor,
+                        mouse.column,
+                        mouse.row,
+                        matches!(mouse.kind, MouseEventKind::ScrollDown),
+                    );
+                    return None;
+                }
+            }
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let picker_anchor =
+                    crate::ui::home_account_picker_anchor(self, self.view.terminal_area);
                 if let Some(home) = self.home.as_mut().filter(|home| home.account_picker.active) {
                     if let Some(hit) = crate::ui::account_picker::hit_test(
                         home,
                         self.view.terminal_area,
+                        picker_anchor,
                         mouse.column,
                         mouse.row,
                     ) {

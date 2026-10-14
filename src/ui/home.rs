@@ -1536,6 +1536,21 @@ pub(super) fn home_hit_areas(
     hits
 }
 
+/// Original opening field remains the anchor while focus moves within the picker.
+pub(crate) fn account_picker_anchor(app: &AppState, area: Rect) -> Rect {
+    let Some(home) = app.home.as_ref() else {
+        return Rect::new(area.x, area.y, 0, 0);
+    };
+    let focus = match home.picker {
+        Some(HomePicker::Agent) => HomeFocus::Agent,
+        _ => HomeFocus::Model,
+    };
+    home_bands(app, &[], area)
+        .composer
+        .and_then(|composer| composer_field_rect(app, home, composer, focus))
+        .unwrap_or(Rect::new(area.x, area.y, 0, 0))
+}
+
 pub(super) fn render_home(
     app: &AppState,
     terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
@@ -1544,6 +1559,14 @@ pub(super) fn render_home(
     area: Rect,
     frame: &mut Frame,
 ) {
+    frame.render_widget(
+        Block::default().style(
+            Style::default()
+                .fg(app.palette.text)
+                .bg(app.palette.panel_bg),
+        ),
+        area,
+    );
     let layout = home_bands(app, queue, area);
     let HomeBands {
         header,
@@ -1854,7 +1877,7 @@ pub(super) fn render_home(
         }
     }
     if let Some(home) = app.home.as_ref() {
-        super::account_picker::render(app, home, frame, area);
+        super::account_picker::render(app, home, frame, area, account_picker_anchor(app, area));
     }
 }
 
@@ -1899,6 +1922,60 @@ mod tests {
             })
             .expect("render home");
         terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn account_picker_home_real_trigger_theme_and_mouse_geometry() {
+        for theme in ["catppuccin", "catppuccin-latte"] {
+            for (width, height) in [(194, 120), (52, 36), (30, 18)] {
+                for picker in [HomePicker::Agent, HomePicker::Model] {
+                    let mut app = AppState::test_new();
+                    app.palette = crate::app::state::Palette::from_name(theme).expect("theme");
+                    app.home = Some(HomeState::default());
+                    app.home_open_picker(picker);
+                    let area = Rect::new(0, 0, width, height);
+                    let anchor = account_picker_anchor(&app, area);
+                    let home = app.home.as_ref().expect("home");
+                    let composer = home_bands(&app, &[], area).composer.expect("composer");
+                    let focus = if picker == HomePicker::Agent {
+                        HomeFocus::Agent
+                    } else {
+                        HomeFocus::Model
+                    };
+                    assert_eq!(
+                        anchor,
+                        composer_field_rect(&app, home, composer, focus).expect("trigger")
+                    );
+                    let g = super::super::account_picker::geometry(home, area, anchor);
+                    let buffer = draw_home(&app, &[], area);
+                    assert_eq!(
+                        buffer[(0, 0)].bg,
+                        app.palette.panel_bg,
+                        "outer Home canvas uses active theme"
+                    );
+                    assert_eq!(buffer[(g.popup.x, g.popup.y)].bg, app.palette.panel_bg);
+                    if height == 120 {
+                        assert_eq!(g.popup.y, anchor.bottom());
+                    }
+                    if g.accounts.height > 0 {
+                        assert_eq!(
+                            super::super::account_picker::hit_test(
+                                home,
+                                area,
+                                anchor,
+                                g.accounts.x,
+                                g.accounts.y
+                            ),
+                            Some(super::super::account_picker::PickerHit::Account(0))
+                        );
+                        assert_eq!(
+                            buffer[(g.accounts.x, g.accounts.y)].bg,
+                            app.palette.selection_bg
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -2458,7 +2535,7 @@ mod tests {
             .all(|pair| pair[0].1.right() + 3 == pair[1].1.x));
         let chip_row = row_text(&buffer, composer.frame, composer.chips.y);
         assert!(
-            chip_row.contains("claude ▾ │ Claude Opus 5 ▾ │ auto ▾ │ bypass ▾ │ 1M ▾"),
+            chip_row.contains("claude ▾ │ Opus 5 ▾ │ auto ▾ │ bypass ▾ │ 1M ▾"),
             "the picker row should read agent │ model │ effort │ access │ context: {chip_row:?}"
         );
         assert!(
@@ -3140,6 +3217,9 @@ mod tests {
             [
                 "default",
                 "Claude Fable 5.1",
+                "Claude Opus 5.5",
+                "Claude Sonnet 5.5",
+                "Claude Haiku 5.5",
                 "Claude Opus 5",
                 "Claude Sonnet 5",
                 "Claude Haiku 4.5",
@@ -3226,7 +3306,7 @@ mod tests {
         assert!(card_row(composer.prompt.y).contains('█'));
         let chips = card_row(composer.chips.y);
         assert!(
-            chips.contains("claude ▾ │ Claude Opus 5 ▾ │ auto ▾ │ bypass ▾ │ 1M ▾"),
+            chips.contains("claude ▾ │ Opus 5 ▾ │ auto ▾ │ bypass ▾ │ 1M ▾"),
             "{chips:?}"
         );
         assert!(chips.ends_with("[ ↵ ]│"), "{chips:?}");

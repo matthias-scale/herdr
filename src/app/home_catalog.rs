@@ -31,6 +31,23 @@ pub(crate) struct HomeModelCatalogEntry {
     pub(crate) supports_large_context: bool,
 }
 
+impl HomeModelCatalogEntry {
+    /// Presentation only: IDs and original names stay intact for dispatch/search.
+    pub(crate) fn short_name(&self) -> &str {
+        match self.id.as_str() {
+            "gpt-6-astra" => "Astra",
+            "gpt-6-luna" => "Luna",
+            "gpt-6.1-sol" => "Sol",
+            "gpt-5.6-terra" => "Terra",
+            _ => self
+                .display_name
+                .strip_prefix("Claude ")
+                .or_else(|| self.display_name.strip_prefix("Codex "))
+                .unwrap_or(&self.display_name),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HomeProviderCatalog {
     pub(crate) agent: Agent,
@@ -128,6 +145,11 @@ fn claude_catalog(help: Option<&str>) -> HomeProviderCatalog {
         models: vec![
             model(DEFAULT_MODEL, DEFAULT_MODEL, false),
             model("Claude Fable 5.1", "claude-fable-5-1", true),
+            // Current IDs verified against the official model reference (2026-10-14).
+            model("Claude Opus 5.5", "claude-opus-5-5", true),
+            model("Claude Sonnet 5.5", "claude-sonnet-5-5", true),
+            model("Claude Haiku 5.5", "claude-haiku-5-5", false),
+            // Preserve pinned historical choices; never relabel their IDs as latest.
             model("Claude Opus 5", "claude-opus-5", true),
             model("Claude Sonnet 5", "claude-sonnet-5", true),
             model("Claude Haiku 4.5", "claude-haiku-4-5-20251001", false),
@@ -492,6 +514,26 @@ mod tests {
     }"#;
 
     #[test]
+    fn account_picker_codex_short_names_preserve_live_and_historical_ids() {
+        for (id, short) in [
+            ("gpt-6-astra", "Astra"),
+            ("gpt-6-luna", "Luna"),
+            ("gpt-6.1-sol", "Sol"),
+            ("gpt-5.6-terra", "Terra"),
+            ("gpt-5.2-codex", "gpt-5.2-codex"),
+        ] {
+            let model = entry(id, &[AUTO_EFFORT]);
+            assert_eq!(model.short_name(), short);
+            assert_eq!(model.id, id);
+        }
+        assert_eq!(
+            default_codex_catalog().models.len(),
+            1,
+            "absent live catalog does not invent availability"
+        );
+    }
+
+    #[test]
     fn parser_keeps_visible_models_in_priority_order_with_model_efforts() {
         let catalog = parse_codex_catalog(MODELS.as_bytes()).expect("catalog");
         assert_eq!(
@@ -548,6 +590,9 @@ mod tests {
             [
                 ("default", "default"),
                 ("Claude Fable 5.1", "claude-fable-5-1"),
+                ("Claude Opus 5.5", "claude-opus-5-5"),
+                ("Claude Sonnet 5.5", "claude-sonnet-5-5"),
+                ("Claude Haiku 5.5", "claude-haiku-5-5"),
                 ("Claude Opus 5", "claude-opus-5"),
                 ("Claude Sonnet 5", "claude-sonnet-5"),
                 ("Claude Haiku 4.5", "claude-haiku-4-5-20251001"),
@@ -564,7 +609,13 @@ mod tests {
                 .filter(|model| model.supports_large_context)
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
-            ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"]
+            [
+                "claude-fable-5-1",
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-opus-5",
+                "claude-sonnet-5"
+            ]
         );
     }
 

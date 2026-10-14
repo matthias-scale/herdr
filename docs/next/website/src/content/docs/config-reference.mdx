@@ -32,7 +32,29 @@ quota source.
 Home and Spawn share a provider/account/model picker. Open the provider or model
 field, use Tab to move between accounts and models, type to search the installed
 model catalog, and use Enter to select or Escape to close. The narrow layout
-stacks the account list above models; arrows scroll each list.
+stacks the account list above models. The popup opens next to the Agent or Model
+field that opened it, flips above when space below is limited, and stays inside
+the viewport. Arrows and the mouse wheel navigate each list using the same
+geometry as the rendered rows and click targets. Home and the popup use the
+active light or dark palette.
+
+Rows reuse sidebar provider icons (plain provider tags without Nerd Fonts),
+short account identities and compact remaining percentages. `?` means unknown,
+`◷` marks stale last-known usage, `⊘` marks an unavailable binding or source,
+`!` marks expired authentication and `■0%` marks exhaustion. The selected-account
+details retain the full reason, windows, reset and freshness information.
+Duplicate account labels include their stable ID, and custom launch lanes keep
+their lane label.
+
+Model labels omit repeated provider names while search still matches the full ID
+and previous display name. Claude fallback choices include Fable 5.1, Opus 5.5,
+Sonnet 5.5 and Haiku 5.5 using their exact IDs from the
+[official model reference](https://platform.claude.com/docs/en/models/overview).
+Historical pinned IDs retain their own version labels and are never silently
+upgraded. Account-specific live catalogs continue to take precedence; the fallback
+list is not proof of subscription availability. Codex catalogs still come from
+native account-specific discovery, with short labels for the known Astra, Luna,
+Sol and Terra IDs; missing catalogs do not invent those models.
 
 The `inherited` row preserves the launch profile and ambient environment. An
 explicit Codex account uses a discovered native profile's per-process `CODEX_HOME`.

@@ -29,15 +29,46 @@ pub(crate) struct PickerGeometry {
     pub(crate) footer: Rect,
 }
 
-pub(crate) fn geometry(area: Rect) -> PickerGeometry {
-    let width = area.width.min(88);
-    let height = area.height.min(24);
-    let popup = Rect::new(
-        area.x + (area.width - width) / 2,
-        area.y + (area.height - height) / 2,
-        width,
-        height,
-    );
+pub(crate) fn geometry(home: &HomeState, area: Rect, anchor: Rect) -> PickerGeometry {
+    let account_rows = home.account_picker.rows.len().clamp(1, 8) as u16;
+    let model_rows = home.filtered_account_models().len().clamp(1, 8) as u16;
+    let rail_width = home
+        .account_picker
+        .rows
+        .iter()
+        .map(|row| row.label.chars().count() as u16 + 12)
+        .max()
+        .unwrap_or(24)
+        .clamp(24, 36);
+    let model_width = home
+        .model_options()
+        .iter()
+        .map(|model| model.short_name().chars().count() as u16 + 4)
+        .max()
+        .unwrap_or(24)
+        .clamp(24, 40);
+    let width = area.width.min((rail_width + model_width + 2).clamp(64, 88));
+    let body_height = if width >= 64 {
+        account_rows.max(model_rows + 1)
+    } else {
+        account_rows + model_rows + 1
+    };
+    let desired_height = (body_height + 8 + 3).min(28);
+    let below = area
+        .bottom()
+        .saturating_sub(anchor.bottom().clamp(area.y, area.bottom()));
+    let above = anchor.y.clamp(area.y, area.bottom()).saturating_sub(area.y);
+    let use_below = below >= desired_height || below >= above;
+    let height = desired_height
+        .min(if use_below { below } else { above })
+        .min(area.height);
+    let x = anchor.x.clamp(area.x, area.right().saturating_sub(width));
+    let y = if use_below {
+        anchor.bottom().clamp(area.y, area.bottom())
+    } else {
+        anchor.y.clamp(area.y, area.bottom()).saturating_sub(height)
+    };
+    let popup = Rect::new(x, y, width, height);
     let inner = Block::default().borders(Borders::ALL).inner(popup);
     let footer = Rect::new(
         inner.x,
@@ -45,7 +76,7 @@ pub(crate) fn geometry(area: Rect) -> PickerGeometry {
         inner.width,
         u16::from(inner.height > 0),
     );
-    let usage_height = inner.height.saturating_sub(4).min(6);
+    let usage_height = inner.height.saturating_sub(5).min(8);
     let usage = Rect::new(
         inner.x,
         footer.y.saturating_sub(usage_height).max(inner.y),
@@ -54,7 +85,7 @@ pub(crate) fn geometry(area: Rect) -> PickerGeometry {
     );
     let body_height = usage.y.saturating_sub(inner.y);
     let (accounts, search, models) = if width >= 64 {
-        let rail_width = (inner.width / 3).min(30);
+        let rail_width = rail_width.min(inner.width.saturating_sub(20));
         let accounts = Rect::new(inner.x, inner.y, rail_width, body_height);
         let model_x = accounts.right().min(inner.right());
         let model_width = inner.right().saturating_sub(model_x);
@@ -69,7 +100,9 @@ pub(crate) fn geometry(area: Rect) -> PickerGeometry {
             ),
         )
     } else {
-        let rail_height = (body_height / 2).max(u16::from(body_height > 0));
+        let rail_height = account_rows
+            .min(body_height.saturating_sub(2))
+            .max(u16::from(body_height > 0));
         let accounts = Rect::new(inner.x, inner.y, inner.width, rail_height);
         let search_height = u16::from(body_height > rail_height);
         let search = Rect::new(inner.x, accounts.bottom(), inner.width, search_height);
@@ -101,11 +134,17 @@ fn contains(rect: Rect, x: u16, y: u16) -> bool {
     x >= rect.x && x < rect.right() && y >= rect.y && y < rect.bottom()
 }
 
-pub(crate) fn hit_test(home: &HomeState, area: Rect, x: u16, y: u16) -> Option<PickerHit> {
+pub(crate) fn hit_test(
+    home: &HomeState,
+    area: Rect,
+    anchor: Rect,
+    x: u16,
+    y: u16,
+) -> Option<PickerHit> {
     if !home.account_picker.active {
         return None;
     }
-    let g = geometry(area);
+    let g = geometry(home, area, anchor);
     if !contains(g.popup, x, y) {
         return Some(PickerHit::Close);
     }
@@ -127,6 +166,26 @@ pub(crate) fn hit_test(home: &HomeState, area: Rect, x: u16, y: u16) -> Option<P
     None
 }
 
+pub(crate) fn scroll(home: &mut HomeState, area: Rect, anchor: Rect, x: u16, y: u16, down: bool) {
+    let g = geometry(home, area, anchor);
+    let focus = if contains(g.accounts, x, y) {
+        PickerFocus::Accounts
+    } else if contains(g.models, x, y) {
+        PickerFocus::Models
+    } else {
+        return;
+    };
+    home.account_picker.focus = focus;
+    home.account_picker_key(crossterm::event::KeyEvent::new(
+        if down {
+            crossterm::event::KeyCode::Down
+        } else {
+            crossterm::event::KeyCode::Up
+        },
+        crossterm::event::KeyModifiers::NONE,
+    ));
+}
+
 pub(crate) fn apply_hit(home: &mut HomeState, hit: PickerHit) {
     match hit {
         PickerHit::Account(index) => {
@@ -140,11 +199,17 @@ pub(crate) fn apply_hit(home: &mut HomeState, hit: PickerHit) {
     }
 }
 
-pub(crate) fn render(app: &AppState, home: &HomeState, frame: &mut Frame, area: Rect) {
+pub(crate) fn render(
+    app: &AppState,
+    home: &HomeState,
+    frame: &mut Frame,
+    area: Rect,
+    anchor: Rect,
+) {
     if !home.account_picker.active {
         return;
     }
-    let g = geometry(area);
+    let g = geometry(home, area, anchor);
     let base = Style::default()
         .fg(app.palette.text)
         .bg(app.palette.panel_bg);
@@ -183,20 +248,25 @@ pub(crate) fn render(app: &AppState, home: &HomeState, frame: &mut Frame, area: 
             })
             .map(|account| &account.usage);
         let unavailable = home.account_row_unavailable(row);
-        let quota = usage
-            .map(|usage| {
-                if usage.unavailable == Some(crate::provider_usage::UsageUnavailable::AuthExpired) {
-                    return "login required".to_string();
+        let quota = compact_quota(usage, unavailable);
+        let profile = home
+            .profiles()
+            .iter()
+            .find(|profile| profile.id == row.profile);
+        let provider = profile
+            .and_then(|profile| {
+                if app.nerd_font {
+                    super::icons::agent_icon(profile.agent)
+                } else {
+                    super::icons::agent_letter_tag(profile.agent)
                 }
-                if usage.stale {
-                    return "stale".to_string();
-                }
-                usage
-                    .peak_percent()
-                    .map(|percent| format!("{}% left", 100u8.saturating_sub(percent)))
-                    .unwrap_or_else(|| "unknown".into())
             })
-            .unwrap_or_default();
+            .unwrap_or("?");
+        let label = format!("{prefix}{provider} {}", row.label);
+        let label_width = g
+            .accounts
+            .width
+            .saturating_sub(super::text::display_width(&quota) as u16 + 1);
         render_row(
             app,
             frame,
@@ -206,11 +276,7 @@ pub(crate) fn render(app: &AppState, home: &HomeState, frame: &mut Frame, area: 
                 g.accounts.width,
                 1,
             ),
-            &format!(
-                "{prefix}{} {}",
-                row.label,
-                if unavailable { "unavailable" } else { &quota }
-            ),
+            &format!("{} {quota}", truncate_end(&label, label_width.into())),
             active,
             home.account_picker.focus == PickerFocus::Accounts,
         );
@@ -253,7 +319,7 @@ pub(crate) fn render(app: &AppState, home: &HomeState, frame: &mut Frame, area: 
             app,
             frame,
             Rect::new(g.models.x, g.models.y + offset as u16, g.models.width, 1),
-            &format!("{marker}{}", model.display_name),
+            &format!("{marker}{}", model.short_name()),
             active,
             home.account_picker.focus == PickerFocus::Models,
         );
@@ -280,12 +346,42 @@ pub(crate) fn render(app: &AppState, home: &HomeState, frame: &mut Frame, area: 
     }
     frame.render_widget(
         Paragraph::new(truncate_end(
-            "tab rail/models · arrows select · type search · enter use · esc close",
+            "tab/arrows · search · enter · esc | ⊘ unavailable ! auth ◷ stale ■ exhausted ? unknown",
             g.footer.width.into(),
         ))
         .style(base),
         g.footer,
     );
+}
+
+fn compact_quota(usage: Option<&crate::provider_usage::AccountUsage>, unavailable: bool) -> String {
+    use crate::provider_usage::UsageUnavailable;
+    let mut status = String::new();
+    if unavailable {
+        status.push('⊘');
+    }
+    if let Some(usage) = usage {
+        if usage.unavailable == Some(UsageUnavailable::AuthExpired) {
+            status.push('!');
+        } else if usage.unavailable.is_some() && !unavailable {
+            status.push('⊘');
+        }
+        if usage.stale {
+            status.push('◷');
+        }
+        match usage.peak_percent() {
+            Some(used) => {
+                if used >= 100 {
+                    status.push('■');
+                }
+                status.push_str(&format!("{}%", 100u8.saturating_sub(used)));
+            }
+            None => status.push('?'),
+        }
+    } else {
+        status.push('?');
+    }
+    status
 }
 
 fn render_row(
@@ -317,6 +413,151 @@ mod tests {
     use crate::app::home::HomePicker;
     use ratatui::{backend::TestBackend, Terminal};
     #[test]
+    fn account_picker_rows_use_sidebar_icons_short_identity_and_each_quota() {
+        use crate::provider_usage::{
+            AccountUsage, ProviderAccountUsage, ProviderUsageSnapshot, QuotaProvider, QuotaWindow,
+        };
+        for nerd_font in [false, true] {
+            let mut app = AppState::test_new();
+            app.nerd_font = nerd_font;
+            let mut snapshot = ProviderUsageSnapshot::default();
+            for (id, used) in [("one", 41), ("two", 73)] {
+                snapshot.accounts.push(ProviderAccountUsage {
+                    provider: QuotaProvider::Claude,
+                    profile_id: id.into(),
+                    label: "team".into(),
+                    usage: AccountUsage {
+                        five_hour: Some(QuotaWindow {
+                            used_percent: used,
+                            resets_at: None,
+                        }),
+                        ..AccountUsage::default()
+                    },
+                });
+            }
+            app.provider_usage = snapshot;
+            let mut home = HomeState::default();
+            home.refresh_account_rows(&app.provider_usage);
+            home.open_account_picker(HomePicker::Agent);
+            let area = Rect::new(0, 0, 100, 40);
+            let anchor = Rect::new(12, 5, 10, 1);
+            let g = geometry(&home, area, anchor);
+            let mut terminal = Terminal::new(TestBackend::new(100, 40)).expect("terminal");
+            terminal
+                .draw(|frame| render(&app, &home, frame, area, anchor))
+                .expect("render");
+            let rail: String = (g.accounts.y..g.accounts.bottom())
+                .flat_map(|y| (g.accounts.x..g.accounts.right()).map(move |x| (x, y)))
+                .map(|point| terminal.backend().buffer()[point].symbol())
+                .collect();
+            let icon = if nerd_font {
+                super::super::icons::agent_icon(crate::detect::Agent::Claude)
+            } else {
+                super::super::icons::agent_letter_tag(crate::detect::Agent::Claude)
+            }
+            .expect("provider token");
+            assert!(rail.contains(icon));
+            for label in ["inherited", "team (one)", "team (two)", "59%", "27%", "⊘"] {
+                assert!(rail.contains(label), "{label}: {rail:?}");
+            }
+            assert!(
+                !rail.contains("Claude /")
+                    && !rail.contains("% left")
+                    && !rail.contains("unavailable")
+            );
+        }
+    }
+
+    #[test]
+    fn account_picker_compact_quota_preserves_unknown_stale_expired_and_exhausted() {
+        use crate::provider_usage::{AccountUsage, QuotaWindow, UsageUnavailable};
+        let mut usage = AccountUsage::default();
+        assert_eq!(compact_quota(None, false), "?");
+        assert_eq!(compact_quota(Some(&usage), true), "⊘?");
+        usage.five_hour = Some(QuotaWindow {
+            used_percent: 41,
+            resets_at: None,
+        });
+        assert_eq!(compact_quota(Some(&usage), false), "59%");
+        assert_eq!(compact_quota(Some(&usage), true), "⊘59%");
+        usage.stale = true;
+        assert_eq!(compact_quota(Some(&usage), false), "◷59%");
+        usage.unavailable = Some(UsageUnavailable::AuthExpired);
+        assert_eq!(compact_quota(Some(&usage), false), "!◷59%");
+        usage.stale = false;
+        usage.unavailable = None;
+        usage.five_hour.as_mut().expect("window").used_percent = 100;
+        assert_eq!(compact_quota(Some(&usage), false), "■0%");
+        usage.unavailable = Some(UsageUnavailable::HelperMissing);
+        assert_eq!(compact_quota(Some(&usage), false), "⊘■0%");
+    }
+
+    #[test]
+    fn account_picker_scroll_hits_rendered_rows_in_offset_narrow_view() {
+        let mut app = AppState::test_new();
+        let mut home = HomeState::default();
+        home.refresh_account_rows(&Default::default());
+        home.open_account_picker(HomePicker::Model);
+        let area = Rect::new(3, 2, 52, 36);
+        let anchor = Rect::new(42, 33, 10, 1);
+        let g = geometry(&home, area, anchor);
+        let original_model = home.model.clone();
+        for _ in 0..20 {
+            scroll(&mut home, area, anchor, g.models.x, g.models.y, true);
+        }
+        assert_eq!(home.model, original_model, "scroll is not model activation");
+        let g = geometry(&home, area, anchor);
+        let matches = home.filtered_account_models();
+        let start = scroll_start(
+            home.account_picker.model_cursor,
+            g.models.height,
+            matches.len(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(60, 40)).expect("terminal");
+        terminal
+            .draw(|frame| render(&app, &home, frame, area, anchor))
+            .expect("render");
+        let expected = home.model_options()[matches[start]].short_name();
+        let row: String = (g.models.x..g.models.right())
+            .map(|x| terminal.backend().buffer()[(x, g.models.y)].symbol())
+            .collect();
+        assert!(row.contains(expected), "{row:?} must show {expected}");
+        assert_eq!(
+            hit_test(&home, area, anchor, g.models.x, g.models.y),
+            Some(PickerHit::Model(start))
+        );
+        let cursor = home.account_picker.model_cursor;
+        scroll(&mut home, area, anchor, g.footer.x, g.footer.y, false);
+        assert_eq!(
+            home.account_picker.model_cursor, cursor,
+            "footer is not a scroll target"
+        );
+        app.home = Some(home);
+    }
+
+    #[test]
+    fn account_picker_anchor_content_bounds_flip_and_clamp() {
+        let home = HomeState::default();
+        let area = Rect::new(0, 0, 194, 120);
+        let anchor = Rect::new(70, 22, 12, 1);
+        let g = geometry(&home, area, anchor);
+        assert_eq!(g.popup.y, anchor.bottom());
+        assert_eq!(g.popup.x, anchor.x);
+        assert!(g.popup.height < 24, "small catalogs must size to content");
+        for area in [
+            Rect::new(5, 7, 52, 36),
+            Rect::new(3, 4, 18, 10),
+            Rect::new(1, 2, 2, 2),
+        ] {
+            let anchor = Rect::new(area.right() - 1, area.bottom() - 1, 1, 1);
+            let g = geometry(&home, area, anchor);
+            assert!(g.popup.x >= area.x && g.popup.y >= area.y);
+            assert!(g.popup.right() <= area.right() && g.popup.bottom() <= area.bottom());
+            assert!(g.popup.bottom() <= anchor.y);
+            assert_eq!(g.accounts.x, g.models.x, "narrow layout remains stacked");
+        }
+    }
+    #[test]
     fn account_picker_normal_and_narrow_render_hit_geometry_and_scroll_match() {
         for (width, height) in [(100, 30), (40, 24), (30, 12), (18, 10), (2, 2)] {
             let mut app = AppState::test_new();
@@ -325,14 +566,15 @@ mod tests {
             home.open_account_picker(HomePicker::Agent);
             let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
             let area = Rect::new(0, 0, width, height);
+            let anchor = Rect::new(0, 0, width.min(12), 1);
             terminal
-                .draw(|frame| render(&app, &home, frame, area))
+                .draw(|frame| render(&app, &home, frame, area, anchor))
                 .expect("render");
-            let g = geometry(area);
+            let g = geometry(&home, area, anchor);
             assert!(g.popup.right() <= area.right() && g.popup.bottom() <= area.bottom());
             if g.accounts.height > 0 && g.accounts.width > 0 {
                 assert_eq!(
-                    hit_test(&home, area, g.accounts.x, g.accounts.y),
+                    hit_test(&home, area, anchor, g.accounts.x, g.accounts.y),
                     Some(PickerHit::Account(0))
                 );
                 apply_hit(&mut home, PickerHit::Account(1));

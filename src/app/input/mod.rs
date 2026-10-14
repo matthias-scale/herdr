@@ -644,6 +644,29 @@ impl App {
     }
 
     fn handle_spawn_dock_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        ) {
+            let area = self.state.view.terminal_area;
+            if let Some(dock) = self
+                .state
+                .spawn_dock
+                .as_mut()
+                .filter(|dock| dock.home.account_picker.active)
+            {
+                let anchor = crate::ui::spawn_account_picker_anchor(&dock.home, area);
+                crate::ui::account_picker::scroll(
+                    &mut dock.home,
+                    area,
+                    anchor,
+                    mouse.column,
+                    mouse.row,
+                    matches!(mouse.kind, MouseEventKind::ScrollDown),
+                );
+                return true;
+            }
+        }
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return false;
         }
