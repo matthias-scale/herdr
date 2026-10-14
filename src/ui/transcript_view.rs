@@ -27,13 +27,35 @@ pub(crate) enum ChatRow {
     },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct TranscriptChat {
-    pub rows: Vec<ChatRow>,
+    rows: Vec<ChatRow>,
     pending_tools: Vec<String>,
     pending_since: Option<SystemTime>,
     pending_prose: String,
+    content_revision: u64,
+    layout: Option<TranscriptLayout>,
 }
+
+#[derive(Clone, Debug)]
+struct TranscriptLayout {
+    content_revision: u64,
+    width: u16,
+    expand_tools: bool,
+    palette: Palette,
+    lines: Vec<Line<'static>>,
+}
+
+impl PartialEq for TranscriptChat {
+    fn eq(&self, other: &Self) -> bool {
+        self.rows == other.rows
+            && self.pending_tools == other.pending_tools
+            && self.pending_since == other.pending_since
+            && self.pending_prose == other.pending_prose
+    }
+}
+
+impl Eq for TranscriptChat {}
 
 impl TranscriptChat {
     fn push_row(&mut self, row: ChatRow) {
@@ -41,6 +63,45 @@ impl TranscriptChat {
         if self.rows.len() > 500 {
             self.rows.drain(..100);
         }
+        self.content_revision = self.content_revision.wrapping_add(1);
+    }
+
+    pub(crate) fn prepare_layout(
+        &mut self,
+        palette: &Palette,
+        width: u16,
+        expand_tools: bool,
+    ) -> bool {
+        if self.layout.as_ref().is_some_and(|layout| {
+            layout.content_revision == self.content_revision
+                && layout.width == width
+                && layout.expand_tools == expand_tools
+                && layout.palette == *palette
+        }) {
+            return false;
+        }
+        let lines = layout_lines(&self.rows, palette, width, expand_tools);
+        self.layout = Some(TranscriptLayout {
+            content_revision: self.content_revision,
+            width,
+            expand_tools,
+            palette: palette.clone(),
+            lines,
+        });
+        true
+    }
+
+    fn layout_lines(&self) -> &[Line<'static>] {
+        self.layout
+            .as_ref()
+            .map_or(&[], |layout| layout.lines.as_slice())
+    }
+
+    pub(crate) fn update_from(&mut self, mut updated: Self) {
+        if self.content_revision == updated.content_revision && self.rows == updated.rows {
+            updated.layout = self.layout.take();
+        }
+        *self = updated;
     }
 
     pub(crate) fn ingest(&mut self, value: &serde_json::Value, at: Option<SystemTime>) {
@@ -165,35 +226,28 @@ fn user_block_metrics(area_width: u16, text_width: usize) -> (usize, usize) {
 }
 
 fn worked_row_lines(duration: &str, tools: &[String], expand: bool) -> Vec<String> {
-    let mut lines = vec![format!("Worked for {duration} · {} tools ›", tools.len())];
+    let tool_count = tools.len();
+    let tool_label = if tool_count == 1 { "tool" } else { "tools" };
+    let mut lines = vec![format!(
+        "Worked for {duration} · {tool_count} {tool_label} ›"
+    )];
     if expand {
         lines.extend(tools.iter().cloned());
     }
     lines
 }
 
-pub(crate) fn render(
-    frame: &mut Frame,
-    area: Rect,
-    chat: &TranscriptChat,
+fn layout_lines(
+    rows: &[ChatRow],
     palette: &Palette,
-    scroll: usize,
+    width: u16,
     expand_tools: bool,
-    return_key: &str,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    frame.render_widget(Clear, area);
-    let footer_height = 1;
-    let body_height = area.height.saturating_sub(footer_height) as usize;
+) -> Vec<Line<'static>> {
     let mut lines = Vec::<Line<'static>>::new();
-    for row in &chat.rows {
+    for row in rows {
         match row {
             ChatRow::User { body, time } => {
-                let max_width = (area.width as usize * 4 / 5)
-                    .max(1)
-                    .min(area.width as usize);
+                let max_width = (width as usize * 4 / 5).max(1).min(width as usize);
                 let inner_width = max_width.saturating_sub(2).max(1);
                 let mut body_lines = crate::ui::markdown::transcript_body_lines(
                     palette,
@@ -203,7 +257,7 @@ pub(crate) fn render(
                 );
                 for line in &mut body_lines {
                     let used = line.width().min(max_width.saturating_sub(2));
-                    let (left, _) = user_block_metrics(area.width, used);
+                    let (left, _) = user_block_metrics(width, used);
                     let bubble = Style::default().fg(palette.text).bg(palette.surface0);
                     let mut padded = vec![Span::raw(" ".repeat(left)), Span::styled(" ", bubble)];
                     padded.extend(
@@ -216,7 +270,7 @@ pub(crate) fn render(
                 }
                 if let Some(time) = time {
                     lines.push(Line::from(Span::styled(
-                        format!("{time:>width$}", width = area.width as usize),
+                        format!("{time:>width$}", width = width as usize),
                         Style::default().fg(palette.overlay0),
                     )));
                 }
@@ -226,7 +280,7 @@ pub(crate) fn render(
                 let mut body_lines = crate::ui::markdown::transcript_body_lines(
                     palette,
                     Some(body),
-                    area.width.saturating_sub(4).min(100) as usize,
+                    width.saturating_sub(4).min(100) as usize,
                     "  ",
                 );
                 lines.append(&mut body_lines);
@@ -243,15 +297,34 @@ pub(crate) fn render(
             }
         }
     }
-    if !lines.is_empty() {
+    if lines.last().is_some_and(|line| line.width() == 0) {
         lines.pop();
     }
+    lines
+}
+
+pub(crate) fn render(
+    frame: &mut Frame,
+    area: Rect,
+    chat: &TranscriptChat,
+    palette: &Palette,
+    scroll: usize,
+    return_key: &str,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(Clear, area);
+    let footer_height = 1;
+    let body_height = area.height.saturating_sub(footer_height) as usize;
+    let lines = chat.layout_lines();
     let max_scroll = lines.len().saturating_sub(body_height);
     let offset = max_scroll.saturating_sub(scroll.min(max_scroll));
     let visible = lines
-        .into_iter()
+        .iter()
         .skip(offset)
         .take(body_height)
+        .cloned()
         .collect::<Vec<_>>();
     let body = Rect::new(
         area.x,
@@ -333,6 +406,58 @@ mod tests {
                 "Read src/main.rs",
                 "Bash cargo check"
             ]
+        );
+    }
+
+    #[test]
+    fn layout_cache_reuses_lines_and_rebuilds_for_content_width_and_tool_expansion() {
+        let palette = Palette::catppuccin();
+        let mut chat = TranscriptChat::default();
+        chat.push_row(ChatRow::Assistant {
+            body: "A long transcript reply that wraps at narrower widths.".into(),
+        });
+        chat.push_row(ChatRow::Worked {
+            duration: "1s".into(),
+            tools: vec!["Read file.rs".into()],
+        });
+
+        assert!(chat.prepare_layout(&palette, 40, false));
+        assert!(!chat.prepare_layout(&palette, 40, false));
+        assert!(chat.prepare_layout(&palette, 30, false));
+        assert!(chat.prepare_layout(&palette, 30, true));
+        assert!(chat
+            .layout_lines()
+            .iter()
+            .any(|line| line.to_string() == "Read file.rs"));
+
+        chat.push_row(ChatRow::Assistant {
+            body: "New content".into(),
+        });
+        assert!(chat.prepare_layout(&palette, 30, true));
+    }
+
+    #[test]
+    fn updating_pending_transcript_state_preserves_layout_for_unchanged_rows() {
+        let palette = Palette::catppuccin();
+        let mut chat = TranscriptChat::default();
+        chat.push_row(ChatRow::Assistant {
+            body: "Already visible".into(),
+        });
+        assert!(chat.prepare_layout(&palette, 80, false));
+
+        let mut updated = chat.clone();
+        updated.layout = None;
+        updated.pending_prose = "More text is still streaming".into();
+        chat.update_from(updated);
+
+        assert!(!chat.prepare_layout(&palette, 80, false));
+    }
+
+    #[test]
+    fn worked_row_uses_singular_tool_label() {
+        assert_eq!(
+            worked_row_lines("1s", &["Read file.rs".into()], false),
+            ["Worked for 1s · 1 tool ›"]
         );
     }
 }

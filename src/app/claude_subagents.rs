@@ -1133,7 +1133,7 @@ impl crate::app::App {
                 if !view.open || view.chat == *chat {
                     return false;
                 }
-                view.chat = chat.clone();
+                view.chat.update_from(chat.clone());
                 true
             });
             chat_changed_any |= chat_changed;
@@ -1418,7 +1418,7 @@ impl crate::app::App {
                 return;
             };
             let view = self.state.transcript_views.entry(pane_id).or_default();
-            view.chat = chat;
+            view.chat.update_from(chat);
             view.scroll = 0;
             view.open = true;
         }

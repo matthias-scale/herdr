@@ -363,7 +363,6 @@ pub(super) fn render_panes(
                     &view.chat,
                     &app.palette,
                     view.scroll,
-                    view.expand_tools,
                     "prefix+t",
                 );
                 continue;

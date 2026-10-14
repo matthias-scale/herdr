@@ -871,6 +871,44 @@ mod tests {
     use crate::{config::Config, events::AppEvent, workspace::Workspace};
 
     #[test]
+    fn transcript_tool_toggle_invalidates_cached_layout() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces.push(Workspace::test_new("transcript"));
+        app.state.active = Some(0);
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        {
+            let palette = app.state.palette.clone();
+            let view = app.state.transcript_views.entry(pane_id).or_default();
+            view.open = true;
+            view.chat.ingest(
+                &serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":"file.rs"}]}}),
+                None,
+            );
+            view.chat.ingest(
+                &serde_json::json!({"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Done"}]}}),
+                None,
+            );
+            assert!(view.chat.prepare_layout(&palette, 80, false));
+            assert!(!view.chat.prepare_layout(&palette, 80, false));
+        }
+
+        app.handle_terminal_key_headless(TerminalKey::new(
+            KeyCode::Char('o'),
+            KeyModifiers::empty(),
+        ));
+
+        let palette = app.state.palette.clone();
+        let view = app
+            .state
+            .transcript_views
+            .get_mut(&pane_id)
+            .expect("transcript view");
+        assert!(view.expand_tools);
+        assert!(view.chat.prepare_layout(&palette, 80, view.expand_tools));
+    }
+
+    #[test]
     fn settled_transcript_scrolling_is_read_only_and_enter_resumes() {
         let mut app = app_for_mouse_test();
         if app.state.workspaces.is_empty() {
