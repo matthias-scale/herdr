@@ -843,6 +843,8 @@ pub struct TerminalState {
     pub(crate) claude_transcript_session_id: Option<String>,
     transcript_turn_state: Option<AgentState>,
     transcript_turn_last_at: Option<SystemTime>,
+    transcript_turn_observed_at: Option<Instant>,
+    pub(crate) transcript_background_outstanding: u32,
     codex_completion_since: Option<Instant>,
     transcript_turn_sequence: u64,
     pub(crate) transcript_turn_flips: Vec<serde_json::Value>,
@@ -874,6 +876,9 @@ pub struct TerminalState {
     /// Live direct sub-agents reported by a provider-owned runtime source.
     /// `None` means unavailable or not yet reconstructed.
     pub active_subagents: Option<u32>,
+    /// Reported subagents are runtime-only and freshness-filtered at projection time.
+    reported_subagents: Option<Vec<crate::agent_state::AgentSubagent>>,
+    reported_subagent_stale_after: Duration,
     /// Runtime-only detail from the same Claude transcript scan as
     /// `active_subagents`. It is not persisted or exposed through the API.
     pub(crate) claude_subagent_observations:
@@ -971,6 +976,8 @@ impl TerminalState {
             claude_transcript_session_id: None,
             transcript_turn_state: None,
             transcript_turn_last_at: None,
+            transcript_turn_observed_at: None,
+            transcript_background_outstanding: 0,
             codex_completion_since: None,
             transcript_turn_sequence: 0,
             transcript_turn_flips: Vec::new(),
@@ -993,6 +1000,8 @@ impl TerminalState {
             holds_shell: false,
             stale_resolution: None,
             active_subagents: None,
+            reported_subagents: None,
+            reported_subagent_stale_after: Duration::from_secs(30 * 60),
             claude_subagent_observations: None,
             claude_subagent_transcript_activity: SubagentTranscriptActivity::Unknown,
             claude_subagent_activity_observed_at: None,
@@ -1795,6 +1804,7 @@ impl TerminalState {
     /// untrustworthy scan) keeps the pane uncertain.
     pub(crate) fn runtime_workers_settled(&self) -> bool {
         self.active_subagents == Some(0)
+            && self.reported_active_subagents().unwrap_or_default() == 0
     }
 
     pub(crate) fn closing_log_tokens(&self) -> ClosingLogTokens {
@@ -1830,7 +1840,8 @@ impl TerminalState {
             && (!self.runtime_workers_settled()
                 && (self.closing_task_reported() && !self.closing_task_complete()
                     || self.closing_report.as_ref().is_some_and(|report| {
-                        report.workers_unknown == Some(true)
+                        (report.workers_unknown == Some(true)
+                            && self.transcript_turn_state.is_none())
                             || report
                                 .closing_report_subagents
                                 .is_some_and(|count| count > 0)
@@ -2421,16 +2432,29 @@ impl TerminalState {
         &mut self,
         state: Option<AgentState>,
         last_at: Option<SystemTime>,
+        background_outstanding: u32,
         sequence: u64,
         now: Instant,
     ) -> Option<TerminalStateMutation> {
         let previous = self.unchanged_effective_state_change_at(now);
-        if sequence != self.transcript_turn_sequence {
+        let last_at_advanced = last_at.is_some_and(|last_at| {
+            self.transcript_turn_last_at
+                .is_none_or(|previous| last_at > previous)
+        });
+        let background_changed = self.transcript_background_outstanding != background_outstanding;
+        let sequence_changed = sequence != self.transcript_turn_sequence;
+        let started_working = state == Some(AgentState::Working)
+            && self.transcript_turn_state != Some(AgentState::Working);
+        if sequence_changed {
             self.transcript_turn_sequence = sequence;
             self.transcript_turn_flips.clear();
         }
         self.transcript_turn_state = state;
         self.transcript_turn_last_at = last_at;
+        if last_at_advanced || started_working || sequence_changed {
+            self.transcript_turn_observed_at = Some(now);
+        }
+        self.transcript_background_outstanding = background_outstanding;
         if state == Some(AgentState::Idle) && last_at.is_none() {
             // An empty-session reset is not a completed model turn.
             self.agent_process_acquisition_pending = true;
@@ -2440,16 +2464,24 @@ impl TerminalState {
         if let Some(at) = last_at.and_then(crate::agent_state::format_rfc3339) {
             self.set_last_turn_at(Some(at));
         }
-        self.recompute_effective_state(
-            previous.agent_label,
-            previous.known_agent,
-            previous.state,
-            previous.presentation,
-            now,
-        )
-        .map(|change| TerminalStateMutation {
-            effective_state_change: Some(change),
-            ..TerminalStateMutation::default()
+        let mutation = self
+            .recompute_effective_state(
+                previous.agent_label,
+                previous.known_agent,
+                previous.state,
+                previous.presentation,
+                now,
+            )
+            .map(|change| TerminalStateMutation {
+                effective_state_change: Some(change),
+                sidebar_projection_changed: background_changed,
+                ..TerminalStateMutation::default()
+            });
+        mutation.or_else(|| {
+            background_changed.then_some(TerminalStateMutation {
+                sidebar_projection_changed: true,
+                ..TerminalStateMutation::default()
+            })
         })
     }
 
@@ -2462,6 +2494,8 @@ impl TerminalState {
             self.clear_claude_subagent_transcript_activity();
             self.transcript_turn_state = None;
             self.transcript_turn_last_at = None;
+            self.transcript_turn_observed_at = None;
+            self.transcript_background_outstanding = 0;
             self.transcript_turn_flips.clear();
             self.transcript_turn_sequence = 0;
             if self
@@ -2840,6 +2874,8 @@ impl TerminalState {
             self.claude_transcript_path = None;
             self.transcript_turn_state = None;
             self.transcript_turn_last_at = None;
+            self.transcript_turn_observed_at = None;
+            self.transcript_background_outstanding = 0;
             self.session_name_write_target = None;
             self.set_active_subagents(None);
             let mut reset_sources = Vec::new();
@@ -3457,8 +3493,43 @@ impl TerminalState {
     }
 
     pub(crate) fn verified_active_subagents(&self) -> Option<u32> {
-        self.active_subagents
-            .or_else(|| self.current_direct_closing_report_subagents())
+        let native = self
+            .active_subagents
+            .or_else(|| self.current_direct_closing_report_subagents());
+        match (native, self.reported_active_subagents()) {
+            (Some(native), Some(reported)) => Some(native.max(reported)),
+            (Some(native), None) => Some(native),
+            (None, Some(reported)) => Some(reported),
+            (None, None) => None,
+        }
+    }
+
+    pub(crate) fn set_reported_subagents(
+        &mut self,
+        subagents: Option<Vec<crate::agent_state::AgentSubagent>>,
+        stale_after: Duration,
+    ) {
+        self.reported_subagents = subagents;
+        self.reported_subagent_stale_after = stale_after;
+    }
+
+    fn reported_active_subagents(&self) -> Option<u32> {
+        let subagents = self.reported_subagents.as_ref()?;
+        let now = SystemTime::now();
+        Some(
+            subagents
+                .iter()
+                .filter(|subagent| {
+                    subagent.status == crate::api::schema::AgentStatus::Working
+                        && subagent
+                            .last_active_at
+                            .as_deref()
+                            .and_then(crate::agent_state::parse_rfc3339)
+                            .and_then(|last_active| now.duration_since(last_active).ok())
+                            .is_some_and(|age| age <= self.reported_subagent_stale_after)
+                })
+                .count() as u32,
+        )
     }
 
     fn current_closing_report_subagents(&self) -> Option<u32> {
@@ -3559,7 +3630,16 @@ impl TerminalState {
             return quiet_since.checked_add(age);
         }
         if let Some(turn_started_at) = self.unreported_turn_started_at {
-            return turn_started_at.checked_add(AGENT_BUSY_STALE_SILENCE);
+            let quiet_since = [
+                Some(turn_started_at),
+                self.transcript_turn_observed_at,
+                pane_activity_at,
+            ]
+            .into_iter()
+            .flatten()
+            .max()
+            .unwrap_or(turn_started_at);
+            return quiet_since.checked_add(AGENT_BUSY_STALE_SILENCE);
         }
         let authority = self.hook_authority.as_ref().filter(|authority| {
             authority.retired_at.is_none() && self.hook_authority_is_effective(authority)
@@ -5850,6 +5930,8 @@ impl TerminalState {
         self.claude_transcript_path = None;
         self.transcript_turn_state = None;
         self.transcript_turn_last_at = None;
+        self.transcript_turn_observed_at = None;
+        self.transcript_background_outstanding = 0;
         self.session_name_write_target = None;
         self.set_active_subagents(None);
         self.agent_metadata.clear();
@@ -6476,6 +6558,87 @@ mod tests {
 
         assert_eq!(terminal.sidebar_projection(false).0, AgentState::Idle);
         assert_eq!(terminal.sidebar_projection_reason(false), "lifecycle");
+    }
+
+    #[test]
+    fn prose_worker_claim_yields_to_a_settled_transcript_turn() {
+        let mut terminal = test_terminal();
+        let now = Instant::now();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Idle),
+            Some(SystemTime::now()),
+            0,
+            1,
+            now,
+        );
+        terminal.apply_closing_task_report(
+            Some(crate::api::schema::ClosingCompletion::Incomplete),
+            None,
+            Some(crate::api::schema::ClosingParseStatus::Ok),
+            Some(true),
+            now,
+        );
+        terminal.set_active_subagents(Some(0));
+
+        assert_eq!(terminal.sidebar_projection(false).0, AgentState::Idle);
+        assert_eq!(terminal.sidebar_projection_reason(false), "lifecycle");
+    }
+
+    #[test]
+    fn reported_working_subagent_projects_working_when_fresh() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal.set_reported_subagents(
+            Some(vec![reported_subagent(
+                crate::api::schema::AgentStatus::Working,
+                Duration::from_secs(60),
+            )]),
+            Duration::from_secs(30 * 60),
+        );
+
+        assert_eq!(terminal.verified_active_subagents(), Some(1));
+        assert_eq!(terminal.sidebar_projection(false).0, AgentState::Working);
+    }
+
+    #[test]
+    fn stale_or_done_reported_subagents_do_not_count_as_active() {
+        for (status, age) in [
+            (
+                crate::api::schema::AgentStatus::Working,
+                Duration::from_secs(31 * 60),
+            ),
+            (
+                crate::api::schema::AgentStatus::Done,
+                Duration::from_secs(60),
+            ),
+        ] {
+            let mut terminal = test_terminal();
+            terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+            terminal.set_reported_subagents(
+                Some(vec![reported_subagent(status, age)]),
+                Duration::from_secs(30 * 60),
+            );
+
+            assert_eq!(terminal.verified_active_subagents(), Some(0));
+            assert_eq!(terminal.sidebar_projection(false).0, AgentState::Idle);
+        }
+    }
+
+    fn reported_subagent(
+        status: crate::api::schema::AgentStatus,
+        age: Duration,
+    ) -> crate::agent_state::AgentSubagent {
+        let last_active_at = SystemTime::now()
+            .checked_sub(age)
+            .and_then(crate::agent_state::format_rfc3339);
+        crate::agent_state::AgentSubagent {
+            name: "reported worker".into(),
+            status,
+            last_active_at,
+            pane_id: None,
+            source: crate::agent_state::AgentSubagentSource::Reported,
+        }
     }
 
     #[test]
@@ -9171,6 +9334,185 @@ mod tests {
             ),
             now.checked_add(AGENT_BUSY_STALE_SILENCE)
         );
+    }
+
+    #[test]
+    fn a_recent_transcript_row_restarts_the_unreported_turn_watchdog_budget() {
+        let now = Instant::now();
+        let turn_started_at = now - Duration::from_secs(25 * 60);
+        let transcript_observed_at = now - Duration::from_secs(60);
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.unreported_turn_started_at = Some(turn_started_at);
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Working),
+            Some(SystemTime::now() - Duration::from_secs(60)),
+            0,
+            1,
+            transcript_observed_at,
+        );
+
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            ),
+            transcript_observed_at.checked_add(AGENT_BUSY_STALE_SILENCE)
+        );
+        assert!(terminal
+            .mark_agent_status_stale_at_with_activity(
+                now,
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn an_old_transcript_row_does_not_restart_the_unreported_turn_watchdog_budget() {
+        let now = Instant::now();
+        let turn_started_at = now - Duration::from_secs(25 * 60);
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.unreported_turn_started_at = Some(turn_started_at);
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Working),
+            Some(SystemTime::now() - Duration::from_secs(25 * 60)),
+            0,
+            1,
+            turn_started_at,
+        );
+
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            ),
+            turn_started_at.checked_add(AGENT_BUSY_STALE_SILENCE)
+        );
+        assert!(terminal
+            .mark_agent_status_stale_at_with_activity(
+                now,
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            )
+            .is_some());
+        assert!(terminal.supervisor_stale);
+    }
+
+    #[test]
+    fn repeated_working_polls_do_not_refresh_a_stale_transcript_anchor() {
+        let now = Instant::now();
+        let turn_started_at = now - Duration::from_secs(25 * 60);
+        let last_at = SystemTime::now() - Duration::from_secs(25 * 60);
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.unreported_turn_started_at = Some(turn_started_at);
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Working),
+            Some(last_at),
+            0,
+            1,
+            turn_started_at,
+        );
+
+        for _ in 0..5 {
+            terminal.set_transcript_turn_state(Some(AgentState::Working), Some(last_at), 0, 1, now);
+        }
+
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            ),
+            turn_started_at.checked_add(AGENT_BUSY_STALE_SILENCE)
+        );
+        assert!(terminal
+            .mark_agent_status_stale_at_with_activity(
+                now,
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            )
+            .is_some());
+        assert!(terminal.supervisor_stale);
+    }
+
+    #[test]
+    fn repeated_working_polls_keep_a_recent_transcript_row_fresh() {
+        let now = Instant::now();
+        let turn_started_at = now - Duration::from_secs(25 * 60);
+        let old_last_at = SystemTime::now() - Duration::from_secs(25 * 60);
+        let recent_last_at = SystemTime::now() - Duration::from_secs(60);
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.unreported_turn_started_at = Some(turn_started_at);
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Working),
+            Some(old_last_at),
+            0,
+            1,
+            turn_started_at,
+        );
+
+        for _ in 0..5 {
+            terminal.set_transcript_turn_state(
+                Some(AgentState::Working),
+                Some(recent_last_at),
+                0,
+                1,
+                now,
+            );
+        }
+
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            ),
+            now.checked_add(AGENT_BUSY_STALE_SILENCE)
+        );
+        assert!(terminal
+            .mark_agent_status_stale_at_with_activity(
+                now,
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn recent_pane_output_restarts_the_unreported_turn_watchdog_budget() {
+        let now = Instant::now();
+        let turn_started_at = now - Duration::from_secs(25 * 60);
+        let activity_at = now - Duration::from_secs(60);
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.unreported_turn_started_at = Some(turn_started_at);
+
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                Some(activity_at),
+            ),
+            activity_at.checked_add(AGENT_BUSY_STALE_SILENCE)
+        );
+        assert!(terminal
+            .mark_agent_status_stale_at_with_activity(
+                now,
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                Some(activity_at),
+            )
+            .is_none());
     }
 
     #[test]
@@ -15379,6 +15721,7 @@ mod transcript_turn_tests {
         terminal.set_transcript_turn_state(
             Some(AgentState::Blocked),
             Some(SystemTime::now()),
+            0,
             1,
             Instant::now(),
         );
@@ -15387,6 +15730,7 @@ mod transcript_turn_tests {
         terminal.set_transcript_turn_state(
             Some(AgentState::Working),
             Some(SystemTime::now()),
+            0,
             2,
             Instant::now(),
         );
@@ -15403,6 +15747,7 @@ mod transcript_turn_tests {
         terminal.set_transcript_turn_state(
             Some(AgentState::Working),
             Some(idle_observed_at - Duration::from_secs(1)),
+            0,
             1,
             now,
         );
@@ -15426,6 +15771,7 @@ mod transcript_turn_tests {
         terminal.set_transcript_turn_state(
             Some(AgentState::Working),
             Some(idle_observed_at + Duration::from_secs(1)),
+            0,
             2,
             now + Duration::from_secs(1),
         );
@@ -15441,12 +15787,14 @@ mod transcript_turn_tests {
         terminal.set_transcript_turn_state(
             Some(AgentState::Blocked),
             Some(SystemTime::now()),
+            3,
             1,
             Instant::now(),
         );
         assert!(terminal.last_turn_at().is_some());
         terminal.set_claude_transcript_target(Some("two".into()), Some("/tmp/two.jsonl".into()));
         assert!(terminal.transcript_turn_state.is_none());
+        assert_eq!(terminal.transcript_background_outstanding, 0);
         assert!(terminal.last_turn_at().is_none());
         assert!(terminal.transcript_turn_flips.is_empty());
     }

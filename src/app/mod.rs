@@ -1137,6 +1137,7 @@ impl App {
             request_home_ref_refresh: None,
             request_tool_probes: false,
             pending_human_drafts: std::collections::HashMap::new(),
+            transcript_views: std::collections::HashMap::new(),
             status_metrics: None,
             status_git_cwd: None,
             status_git_branch: None,
