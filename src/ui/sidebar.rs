@@ -4927,12 +4927,7 @@ fn sidebar_row_render_width(app: &AppState, rows: &[SidebarRow], mobile: bool) -
 
     let list = workspace_list_rect_for_app(app, area);
     let body_height = list.height.saturating_sub(sidebar_header_rows(app));
-    let workspace_spacing = workspace_group_spacing(app, rows, body_height);
-    let content_height = rows.iter().enumerate().fold(0u16, |height, (index, row)| {
-        height
-            .saturating_add(sidebar_row_height(app, row, body_height))
-            .saturating_add(sidebar_row_gap(app, rows, index, workspace_spacing))
-    });
+    let (_, content_height) = workspace_group_spacing_and_content_height(app, rows, body_height);
     let has_scrollbar = body_height > 0 && content_height > body_height;
     usize::from(
         list.width
@@ -8512,16 +8507,7 @@ pub(crate) fn sidebar_space_member_indices(app: &AppState, root_idx: usize) -> V
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
     let ws_area = workspace_list_rect_for_app(app, area);
-    let body = workspace_list_body_rect(app, ws_area, false);
-    if body.height == 0 {
-        return requested;
-    }
-
-    if sidebar_rows(app).is_empty() {
-        0
-    } else {
-        requested.min(workspace_list_bottom_start(app, ws_area))
-    }
+    SidebarListLayout::new(app, ws_area).normalize_scroll(requested)
 }
 
 pub(crate) fn workspace_list_entries(app: &AppState) -> Vec<WorkspaceListEntry> {
@@ -8842,7 +8828,7 @@ fn agent_row_ordinals(rows: &[SidebarRow]) -> Vec<usize> {
 }
 
 #[derive(Clone, Copy)]
-struct WorkspaceGroupSpacing {
+pub(super) struct WorkspaceGroupSpacing {
     spacers_fit: bool,
     first_group_index: Option<usize>,
 }
@@ -8958,6 +8944,14 @@ fn workspace_group_spacing(
     rows: &[SidebarRow],
     body_height: u16,
 ) -> WorkspaceGroupSpacing {
+    workspace_group_spacing_and_content_height(app, rows, body_height).0
+}
+
+fn workspace_group_spacing_and_content_height(
+    app: &AppState,
+    rows: &[SidebarRow],
+    body_height: u16,
+) -> (WorkspaceGroupSpacing, u16) {
     let mut first_group_index = None;
     let mut group_count = 0usize;
     let content_height = rows.iter().enumerate().fold(0u16, |height, (index, row)| {
@@ -8986,11 +8980,155 @@ fn workspace_group_spacing(
             ))
     });
     let spacer_count = group_count.saturating_sub(1);
-    WorkspaceGroupSpacing {
-        spacers_fit: usize::from(content_height).saturating_add(spacer_count)
-            <= usize::from(body_height),
-        first_group_index,
+    let spacers_fit =
+        usize::from(content_height).saturating_add(spacer_count) <= usize::from(body_height);
+    let total_content_height = content_height.saturating_add(if spacers_fit {
+        u16::try_from(spacer_count).unwrap_or(u16::MAX)
+    } else {
+        0
+    });
+    (
+        WorkspaceGroupSpacing {
+            spacers_fit,
+            first_group_index,
+        },
+        total_content_height,
+    )
+}
+
+/// Row measurements shared by every geometry helper in one sidebar pass.
+/// Keeping the rows and spacer decision together avoids repeating the full
+/// height/gap scan in scroll metrics, hit areas, and section helpers.
+pub(crate) struct SidebarListLayout {
+    rows: Vec<SidebarRow>,
+    list_area: Rect,
+    body_height: u16,
+    workspace_spacing: WorkspaceGroupSpacing,
+    max_scroll: usize,
+}
+
+impl SidebarListLayout {
+    pub(crate) fn new(app: &AppState, list_area: Rect) -> Self {
+        Self::from_rows(app, list_area, sidebar_rows(app))
     }
+
+    pub(crate) fn from_rows(app: &AppState, list_area: Rect, rows: Vec<SidebarRow>) -> Self {
+        let body_height = workspace_list_body_rect(app, list_area, false).height;
+        let workspace_spacing = workspace_group_spacing(app, &rows, body_height);
+        let max_scroll =
+            workspace_list_bottom_start_from_rows(app, &rows, body_height, workspace_spacing);
+        Self {
+            rows,
+            list_area,
+            body_height,
+            workspace_spacing,
+            max_scroll,
+        }
+    }
+
+    pub(crate) fn rows(&self) -> &[SidebarRow] {
+        &self.rows
+    }
+
+    pub(crate) fn normalize_scroll(&self, requested: usize) -> usize {
+        if self.body_height == 0 {
+            requested
+        } else if self.rows.is_empty() {
+            0
+        } else {
+            requested.min(self.max_scroll)
+        }
+    }
+
+    pub(crate) fn metrics(&self, app: &AppState) -> crate::pane::ScrollMetrics {
+        self.metrics_for_scroll(app, app.workspace_scroll)
+    }
+
+    fn metrics_for_scroll(
+        &self,
+        app: &AppState,
+        requested_scroll: usize,
+    ) -> crate::pane::ScrollMetrics {
+        let scroll = requested_scroll.min(self.max_scroll);
+        let viewport_rows = if self.body_height == 0
+            || workspace_list_body_rect(app, self.list_area, false).width == 0
+        {
+            0
+        } else {
+            workspace_list_visible_count_from_rows(
+                app,
+                &self.rows,
+                self.body_height,
+                self.workspace_spacing,
+                scroll,
+            )
+        };
+        crate::pane::ScrollMetrics {
+            offset_from_bottom: self.max_scroll.saturating_sub(scroll),
+            max_offset_from_bottom: self.max_scroll,
+            viewport_rows,
+        }
+    }
+
+    pub(crate) fn body(&self, app: &AppState, metrics: crate::pane::ScrollMetrics) -> Rect {
+        workspace_list_body_rect(app, self.list_area, should_show_scrollbar(metrics))
+    }
+
+    pub(super) fn workspace_spacing(&self) -> WorkspaceGroupSpacing {
+        self.workspace_spacing
+    }
+
+    fn visible_count(&self, app: &AppState, scroll: usize) -> usize {
+        workspace_list_visible_count_from_rows(
+            app,
+            &self.rows,
+            self.body_height,
+            self.workspace_spacing,
+            scroll,
+        )
+    }
+}
+
+fn workspace_list_visible_count_from_rows(
+    app: &AppState,
+    entries: &[SidebarRow],
+    body_height: u16,
+    workspace_spacing: WorkspaceGroupSpacing,
+    scroll: usize,
+) -> usize {
+    let mut used_rows = 0u16;
+    let mut visible = 0usize;
+    for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
+        let row_height = sidebar_row_height(app, entry, body_height);
+        let gap = sidebar_row_gap(app, entries, entry_idx, workspace_spacing);
+        if used_rows.saturating_add(row_height) > body_height {
+            break;
+        }
+        used_rows = used_rows.saturating_add(row_height);
+        visible += 1;
+        used_rows = used_rows.saturating_add(gap).min(body_height);
+    }
+    visible
+}
+
+fn workspace_list_bottom_start_from_rows(
+    app: &AppState,
+    entries: &[SidebarRow],
+    body_height: u16,
+    workspace_spacing: WorkspaceGroupSpacing,
+) -> usize {
+    let mut used_rows = 0u16;
+    let mut start = entries.len();
+    for (entry_idx, entry) in entries.iter().enumerate().rev() {
+        let gap = sidebar_row_gap(app, entries, entry_idx, workspace_spacing);
+        let needed = sidebar_row_height(app, entry, body_height).saturating_add(gap);
+        if used_rows.saturating_add(needed) > body_height {
+            break;
+        }
+        used_rows = used_rows.saturating_add(needed);
+        start = entry_idx;
+    }
+    start.min(entries.len().saturating_sub(1))
 }
 
 fn sidebar_row_content_rect(rect: Rect) -> Rect {
@@ -9010,45 +9148,15 @@ fn sidebar_row_content_rect_for_app(app: &AppState, rect: Rect) -> Rect {
     }
 }
 
+#[cfg(test)]
 fn workspace_list_visible_count(app: &AppState, area: Rect, scroll: usize) -> usize {
     let body = workspace_list_body_rect(app, area, false);
     if body.width == 0 || body.height == 0 {
         return 0;
     }
-
-    let mut used_rows = 0u16;
-    let mut visible = 0usize;
-    let entries = sidebar_rows(app);
-    let workspace_spacing = workspace_group_spacing(app, &entries, body.height);
-    for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
-        let row_height = sidebar_row_height(app, entry, body.height);
-        let gap = sidebar_row_gap(app, &entries, entry_idx, workspace_spacing);
-        if used_rows.saturating_add(row_height) > body.height {
-            break;
-        }
-        used_rows = used_rows.saturating_add(row_height);
-        visible += 1;
-        used_rows = used_rows.saturating_add(gap).min(body.height);
-    }
-    visible
-}
-
-fn workspace_list_bottom_start(app: &AppState, area: Rect) -> usize {
-    let body = workspace_list_body_rect(app, area, false);
-    let entries = sidebar_rows(app);
-    let workspace_spacing = workspace_group_spacing(app, &entries, body.height);
-    let mut used_rows = 0u16;
-    let mut start = entries.len();
-    for (entry_idx, entry) in entries.iter().enumerate().rev() {
-        let gap = sidebar_row_gap(app, &entries, entry_idx, workspace_spacing);
-        let needed = sidebar_row_height(app, entry, body.height).saturating_add(gap);
-        if used_rows.saturating_add(needed) > body.height {
-            break;
-        }
-        used_rows = used_rows.saturating_add(needed);
-        start = entry_idx;
-    }
-    start.min(entries.len().saturating_sub(1))
+    let rows = sidebar_rows(app);
+    let spacing = workspace_group_spacing(app, &rows, body.height);
+    workspace_list_visible_count_from_rows(app, &rows, body.height, spacing, scroll)
 }
 
 /// Position of `ws_idx` in the unified sidebar row list, which is the index
@@ -9104,14 +9212,15 @@ pub(crate) fn sidebar_row_scroll_for_target(
     target: usize,
 ) -> usize {
     let ws_area = workspace_list_rect_for_app(app, area);
-    let max_scroll = workspace_list_bottom_start(app, ws_area);
+    let layout = SidebarListLayout::new(app, ws_area);
+    let max_scroll = layout.max_scroll;
     if target < current_scroll {
         return target.min(max_scroll);
     }
 
     let mut scroll = current_scroll.min(max_scroll);
     while scroll < target {
-        let visible = workspace_list_visible_count(app, ws_area, scroll);
+        let visible = layout.visible_count(app, scroll);
         if visible > 0 && target < scroll.saturating_add(visible) {
             break;
         }
@@ -9124,15 +9233,7 @@ pub(crate) fn workspace_list_scroll_metrics(
     app: &AppState,
     area: Rect,
 ) -> crate::pane::ScrollMetrics {
-    let max_scroll = workspace_list_bottom_start(app, area);
-    let scroll = app.workspace_scroll.min(max_scroll);
-    let viewport_rows = workspace_list_visible_count(app, area, scroll);
-
-    crate::pane::ScrollMetrics {
-        offset_from_bottom: max_scroll.saturating_sub(scroll),
-        max_offset_from_bottom: max_scroll,
-        viewport_rows,
-    }
+    SidebarListLayout::new(app, area).metrics(app)
 }
 
 /// Leading sidebar rows hidden by the scroll position. The renderer and the
@@ -9172,8 +9273,24 @@ pub(crate) fn compute_sidebar_row_areas(
         return (Vec::new(), Vec::new());
     }
 
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
+    let layout = SidebarListLayout::new(app, ws_area);
+    compute_sidebar_row_areas_from_layout(app, ws_area, &layout)
+}
+
+pub(crate) fn compute_sidebar_row_areas_from_layout(
+    app: &AppState,
+    ws_area: Rect,
+    layout: &SidebarListLayout,
+) -> (
+    Vec<crate::app::state::WorkspaceCardArea>,
+    Vec<crate::app::state::AgentCardArea>,
+) {
+    if ws_area == Rect::default() {
+        return (Vec::new(), Vec::new());
+    }
+
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
     if body.width == 0 || body.height == 0 {
         return (Vec::new(), Vec::new());
     }
@@ -9184,8 +9301,8 @@ pub(crate) fn compute_sidebar_row_areas(
     let mut cards = Vec::new();
     let mut agent_cards = Vec::new();
 
-    let entries = sidebar_rows(app);
-    let workspace_spacing = workspace_group_spacing(app, &entries, body.height);
+    let entries = layout.rows();
+    let workspace_spacing = layout.workspace_spacing();
     for (entry_idx, entry) in entries.iter().enumerate().skip(scroll) {
         match entry {
             SidebarRow::Workspace {
@@ -9253,7 +9370,7 @@ pub(crate) fn compute_sidebar_row_areas(
         }
         row_y = row_y
             .saturating_add(sidebar_row_height(app, entry, body.height))
-            .saturating_add(sidebar_row_gap(app, &entries, entry_idx, workspace_spacing))
+            .saturating_add(sidebar_row_gap(app, entries, entry_idx, workspace_spacing))
             .min(body_bottom);
     }
 
@@ -9265,6 +9382,14 @@ pub(crate) fn compute_workspace_card_areas(
     area: Rect,
 ) -> Vec<crate::app::state::WorkspaceCardArea> {
     compute_workspace_list_areas(app, area).0
+}
+
+pub(crate) fn compute_workspace_card_areas_from_layout(
+    app: &AppState,
+    ws_area: Rect,
+    layout: &SidebarListLayout,
+) -> Vec<crate::app::state::WorkspaceCardArea> {
+    compute_sidebar_row_areas_from_layout(app, ws_area, layout).0
 }
 
 pub(crate) fn compute_agent_card_areas(
@@ -9279,12 +9404,20 @@ pub(crate) fn compute_tab_card_areas(
     area: Rect,
 ) -> Vec<crate::app::state::TabCardArea> {
     let ws_area = workspace_list_rect_for_app(app, area);
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
+    let layout = SidebarListLayout::new(app, ws_area);
+    compute_tab_card_areas_from_layout(app, &layout)
+}
+
+pub(crate) fn compute_tab_card_areas_from_layout(
+    app: &AppState,
+    layout: &SidebarListLayout,
+) -> Vec<crate::app::state::TabCardArea> {
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
     let mut y = body.y;
     let mut out = Vec::new();
-    let rows = sidebar_rows(app);
-    let workspace_spacing = workspace_group_spacing(app, &rows, body.height);
+    let rows = layout.rows();
+    let workspace_spacing = layout.workspace_spacing();
     for (idx, row) in rows
         .iter()
         .enumerate()
@@ -9309,7 +9442,7 @@ pub(crate) fn compute_tab_card_areas(
         }
         y = y.saturating_add(height).saturating_add(sidebar_row_gap(
             app,
-            &rows,
+            rows,
             idx,
             workspace_spacing,
         ));
@@ -9344,24 +9477,37 @@ struct NestedHeaderArea {
 
 fn compute_sidebar_nested_header_areas(app: &AppState, area: Rect) -> Vec<NestedHeaderArea> {
     let ws_area = workspace_list_rect_for_app(app, area);
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
-    let rows = sidebar_rows(app);
-    let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
-    nested_header_areas_from_rows(app, &rows, body, scroll_skip)
+    let layout = SidebarListLayout::new(app, ws_area);
+    compute_sidebar_nested_header_areas_from_layout(app, ws_area, &layout)
 }
 
-/// Header geometry from rows a caller already walked, so a frame that needs
-/// both the headers and something else from the same rows pays for one build.
-fn nested_header_areas_from_rows(
+fn compute_sidebar_nested_header_areas_from_layout(
+    app: &AppState,
+    _ws_area: Rect,
+    layout: &SidebarListLayout,
+) -> Vec<NestedHeaderArea> {
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
+    let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
+    nested_header_areas_from_rows_with_spacing(
+        app,
+        layout.rows(),
+        body,
+        scroll_skip,
+        layout.workspace_spacing(),
+    )
+}
+
+/// Header geometry using the rows and spacer decision already measured for the pass.
+fn nested_header_areas_from_rows_with_spacing(
     app: &AppState,
     rows: &[SidebarRow],
     body: Rect,
     scroll_skip: usize,
+    workspace_spacing: WorkspaceGroupSpacing,
 ) -> Vec<NestedHeaderArea> {
     let mut y = body.y;
     let mut out = Vec::new();
-    let workspace_spacing = workspace_group_spacing(app, rows, body.height);
     for (idx, row) in rows.iter().enumerate().skip(scroll_skip) {
         let height = sidebar_row_height(app, row, body.height);
         if y.saturating_add(height) > body.bottom() {
@@ -9435,11 +9581,17 @@ pub(crate) fn compute_remote_agent_row_areas(
         return Vec::new();
     }
     let ws_area = workspace_list_rect_for_app(app, area);
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
-    let rows = sidebar_rows(app);
+    let layout = SidebarListLayout::new(app, ws_area);
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
     let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
-    remote_agent_row_areas_from_rows(app, &rows, body, scroll_skip)
+    remote_agent_row_areas_from_rows(
+        app,
+        layout.rows(),
+        body,
+        scroll_skip,
+        layout.workspace_spacing(),
+    )
 }
 
 /// Remote row geometry from rows a caller already walked, so the render pass
@@ -9449,13 +9601,13 @@ fn remote_agent_row_areas_from_rows(
     rows: &[SidebarRow],
     body: Rect,
     scroll_skip: usize,
+    workspace_spacing: WorkspaceGroupSpacing,
 ) -> Vec<RemoteAgentRowArea> {
     if body.width == 0 || body.height == 0 {
         return Vec::new();
     }
     let mut y = body.y;
     let mut out = Vec::new();
-    let workspace_spacing = workspace_group_spacing(app, rows, body.height);
     for (idx, row) in rows.iter().enumerate().skip(scroll_skip) {
         let height = sidebar_row_height(app, row, body.height);
         if y.saturating_add(height) > body.bottom() {
@@ -9496,13 +9648,13 @@ fn needs_you_row_areas_from_rows(
     rows: &[SidebarRow],
     body: Rect,
     scroll_skip: usize,
+    workspace_spacing: WorkspaceGroupSpacing,
 ) -> Vec<(usize, Rect)> {
     if body.width == 0 || body.height == 0 {
         return Vec::new();
     }
     let mut y = body.y;
     let mut out = Vec::new();
-    let workspace_spacing = workspace_group_spacing(app, rows, body.height);
     for (idx, row) in rows.iter().enumerate().skip(scroll_skip) {
         let height = sidebar_row_height(app, row, body.height);
         if y.saturating_add(height) > body.bottom() {
@@ -9529,11 +9681,12 @@ fn needs_you_row_areas_from_rows(
 /// The `Needs you` strip row at this screen row, if any.
 pub(crate) fn needs_you_row_at(app: &AppState, row: u16) -> Option<NeedsYouTarget> {
     let ws_area = workspace_list_rect_for_app(app, app.view.sidebar_rect);
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
-    let rows = sidebar_rows(app);
+    let layout = SidebarListLayout::new(app, ws_area);
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
+    let rows = layout.rows();
     let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
-    needs_you_row_areas_from_rows(app, &rows, body, scroll_skip)
+    needs_you_row_areas_from_rows(app, rows, body, scroll_skip, layout.workspace_spacing())
         .into_iter()
         .find(|(_, rect)| row >= rect.y && row < rect.bottom())
         .and_then(|(idx, _)| match rows.get(idx) {
@@ -9544,11 +9697,12 @@ pub(crate) fn needs_you_row_at(app: &AppState, row: u16) -> Option<NeedsYouTarge
 
 pub(crate) fn needs_you_more_at(app: &AppState, row: u16) -> bool {
     let list = workspace_list_rect_for_app(app, app.view.sidebar_rect);
-    let metrics = workspace_list_scroll_metrics(app, list);
-    let body = workspace_list_body_rect(app, list, should_show_scrollbar(metrics));
-    let rows = sidebar_rows(app);
+    let layout = SidebarListLayout::new(app, list);
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
+    let rows = layout.rows();
     let scroll = workspace_list_scroll_skip(app, &metrics);
-    needs_you_row_areas_from_rows(app, &rows, body, scroll)
+    needs_you_row_areas_from_rows(app, rows, body, scroll, layout.workspace_spacing())
         .into_iter()
         .any(|(index, rect)| {
             rect.y == row && matches!(rows.get(index), Some(SidebarRow::NeedsYouMore { .. }))
@@ -9764,10 +9918,10 @@ fn pod_row_areas_from_rows(
     rows: &[SidebarRow],
     body: Rect,
     scroll_skip: usize,
+    workspace_spacing: WorkspaceGroupSpacing,
 ) -> Vec<(usize, Rect)> {
     let mut y = body.y;
     let mut out = Vec::new();
-    let workspace_spacing = workspace_group_spacing(app, rows, body.height);
     for (idx, row) in rows.iter().enumerate().skip(scroll_skip) {
         let height = sidebar_row_height(app, row, body.height);
         if y.saturating_add(height) > body.bottom() {
@@ -9794,11 +9948,12 @@ pub(crate) fn sidebar_pod_header_at(
     row: u16,
 ) -> Option<(crate::groups::GroupId, bool)> {
     let list = workspace_list_rect_for_app(app, app.view.sidebar_rect);
-    let metrics = workspace_list_scroll_metrics(app, list);
-    let body = workspace_list_body_rect(app, list, should_show_scrollbar(metrics));
-    let rows = sidebar_rows(app);
+    let layout = SidebarListLayout::new(app, list);
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
+    let rows = layout.rows();
     let scroll = workspace_list_scroll_skip(app, &metrics);
-    pod_row_areas_from_rows(app, &rows, body, scroll)
+    pod_row_areas_from_rows(app, rows, body, scroll, layout.workspace_spacing())
         .into_iter()
         .find(|(_, rect)| row >= rect.y && row < rect.bottom())
         .and_then(|(idx, _)| match rows.get(idx) {
@@ -9811,11 +9966,12 @@ pub(crate) fn sidebar_pod_header_at(
 
 pub(crate) fn sidebar_pod_member_at(app: &AppState, row: u16) -> Option<PodTarget> {
     let list = workspace_list_rect_for_app(app, app.view.sidebar_rect);
-    let metrics = workspace_list_scroll_metrics(app, list);
-    let body = workspace_list_body_rect(app, list, should_show_scrollbar(metrics));
-    let rows = sidebar_rows(app);
+    let layout = SidebarListLayout::new(app, list);
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
+    let rows = layout.rows();
     let scroll = workspace_list_scroll_skip(app, &metrics);
-    pod_row_areas_from_rows(app, &rows, body, scroll)
+    pod_row_areas_from_rows(app, rows, body, scroll, layout.workspace_spacing())
         .into_iter()
         .find(|(_, rect)| row >= rect.y && row < rect.bottom())
         .and_then(|(idx, _)| match rows.get(idx) {
@@ -9961,6 +10117,7 @@ fn remote_snooze_control_tooltip(entry: &RemoteAgentPanelEntry) -> String {
 ///
 /// One walk of the visible rows per frame, on the same geometry the row
 /// renderers use, so an anchor cannot drift from what it explains.
+#[cfg(test)]
 pub(crate) fn compute_sidebar_hover_targets(
     app: &AppState,
     area: Rect,
@@ -9969,15 +10126,24 @@ pub(crate) fn compute_sidebar_hover_targets(
     if ws_area == Rect::default() {
         return Vec::new();
     }
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
+    let layout = SidebarListLayout::new(app, ws_area);
+    compute_sidebar_hover_targets_from_layout(app, area, &layout)
+}
+
+pub(crate) fn compute_sidebar_hover_targets_from_layout(
+    app: &AppState,
+    area: Rect,
+    layout: &SidebarListLayout,
+) -> Vec<crate::app::state::SidebarHoverTarget> {
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
     if body.width == 0 || body.height == 0 {
         return Vec::new();
     }
 
-    let rows = sidebar_rows(app);
+    let rows = layout.rows();
     let scroll_skip = app.workspace_scroll.min(metrics.max_offset_from_bottom);
-    let workspace_spacing = workspace_group_spacing(app, &rows, body.height);
+    let workspace_spacing = layout.workspace_spacing();
     let mut visible = Vec::new();
     let mut y = body.y;
     for (idx, row) in rows.iter().enumerate().skip(scroll_skip) {
@@ -9988,7 +10154,7 @@ pub(crate) fn compute_sidebar_hover_targets(
         visible.push((row, y));
         y = y.saturating_add(height).saturating_add(sidebar_row_gap(
             app,
-            &rows,
+            rows,
             idx,
             workspace_spacing,
         ));
@@ -9999,7 +10165,7 @@ pub(crate) fn compute_sidebar_hover_targets(
     let narrow_prefix = visible
         .iter()
         .any(|(row, _)| matches!(row, SidebarRow::Tab { .. }))
-        .then(|| narrow_view_tab_prefix_from_rows(app, &rows, usize::from(body.width)))
+        .then(|| narrow_view_tab_prefix_from_rows(app, rows, usize::from(body.width)))
         .flatten();
 
     let mut targets = Vec::new();
@@ -10513,7 +10679,9 @@ pub(crate) fn compute_sidebar_hover_targets(
         }
     }
 
-    for header in nested_header_areas_from_rows(app, &rows, body, scroll_skip) {
+    for header in
+        nested_header_areas_from_rows_with_spacing(app, rows, body, scroll_skip, workspace_spacing)
+    {
         let spans = nested_header_spans(&header);
         if let (Some(glyph), Some(status)) = (spans.glyph, header.status) {
             if let Some(rect) = clamp_row_cells(
@@ -10698,13 +10866,21 @@ fn compute_symphony_job_areas(app: &AppState, area: Rect) -> Vec<SymphonyJobArea
 /// the two can never disagree about where the section sits.
 fn compute_symphony_areas(app: &AppState, area: Rect) -> (Vec<SymphonyJobArea>, Option<Rect>) {
     let ws_area = workspace_list_rect_for_app(app, area);
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
+    let layout = SidebarListLayout::new(app, ws_area);
+    compute_symphony_areas_from_layout(app, &layout)
+}
+
+fn compute_symphony_areas_from_layout(
+    app: &AppState,
+    layout: &SidebarListLayout,
+) -> (Vec<SymphonyJobArea>, Option<Rect>) {
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
     let mut y = body.y;
     let mut out = Vec::new();
     let mut empty = None;
-    let rows = sidebar_rows(app);
-    let workspace_spacing = workspace_group_spacing(app, &rows, body.height);
+    let rows = layout.rows();
+    let workspace_spacing = layout.workspace_spacing();
     for (idx, row) in rows
         .iter()
         .enumerate()
@@ -10736,7 +10912,7 @@ fn compute_symphony_areas(app: &AppState, area: Rect) -> (Vec<SymphonyJobArea>, 
         }
         y = y.saturating_add(height).saturating_add(sidebar_row_gap(
             app,
-            &rows,
+            rows,
             idx,
             workspace_spacing,
         ));
@@ -11099,12 +11275,20 @@ pub(crate) fn compute_sidebar_section_header_areas(
     area: Rect,
 ) -> Vec<SectionHeaderArea> {
     let ws_area = workspace_list_rect_for_app(app, area);
-    let metrics = workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
+    let layout = SidebarListLayout::new(app, ws_area);
+    compute_sidebar_section_header_areas_from_layout(app, &layout)
+}
+
+fn compute_sidebar_section_header_areas_from_layout(
+    app: &AppState,
+    layout: &SidebarListLayout,
+) -> Vec<SectionHeaderArea> {
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
     let mut y = body.y;
     let mut out = Vec::new();
-    let rows = sidebar_rows(app);
-    let workspace_spacing = workspace_group_spacing(app, &rows, body.height);
+    let rows = layout.rows();
+    let workspace_spacing = layout.workspace_spacing();
     for (idx, row) in rows
         .iter()
         .enumerate()
@@ -11127,7 +11311,7 @@ pub(crate) fn compute_sidebar_section_header_areas(
         }
         y = y.saturating_add(height).saturating_add(sidebar_row_gap(
             app,
-            &rows,
+            rows,
             idx,
             workspace_spacing,
         ));
@@ -11140,11 +11324,11 @@ fn compute_sidebar_divider_areas(
     body: Rect,
     rows: &[SidebarRow],
     metrics: crate::pane::ScrollMetrics,
+    workspace_spacing: WorkspaceGroupSpacing,
 ) -> Vec<(Rect, bool)> {
     let body = workspace_list_body_rect(app, body, should_show_scrollbar(metrics));
     let mut y = body.y;
     let mut out = Vec::new();
-    let workspace_spacing = workspace_group_spacing(app, rows, body.height);
     for (idx, row) in rows
         .iter()
         .enumerate()
@@ -11691,14 +11875,23 @@ pub(crate) fn workspace_drop_slots(
     cards: &[crate::app::state::WorkspaceCardArea],
     area: Rect,
 ) -> Vec<(crate::app::state::WorkspaceDropTarget, u16)> {
+    let layout = SidebarListLayout::new(app, area);
+    workspace_drop_slots_from_layout(app, cards, area, &layout)
+}
+
+fn workspace_drop_slots_from_layout(
+    app: &AppState,
+    cards: &[crate::app::state::WorkspaceCardArea],
+    area: Rect,
+    layout: &SidebarListLayout,
+) -> Vec<(crate::app::state::WorkspaceDropTarget, u16)> {
     if area.height == 0 || cards.is_empty() {
         return Vec::new();
     }
     let list_bottom = area.y + area.height.saturating_sub(1);
     let entries = workspace_list_entries(app);
-    let sidebar_rows = sidebar_rows(app);
-    let body_height = workspace_list_body_rect(app, area, false).height;
-    let workspace_spacing = workspace_group_spacing(app, &sidebar_rows, body_height);
+    let sidebar_rows = layout.rows();
+    let workspace_spacing = layout.workspace_spacing();
     let entry_position = |ws_idx| {
         entries.iter().position(|entry| {
             matches!(
@@ -11814,14 +12007,26 @@ pub(crate) fn workspace_drop_slots(
     slots
 }
 
+#[cfg(test)]
 pub(crate) fn workspace_drop_indicator_row(
     app: &AppState,
     cards: &[crate::app::state::WorkspaceCardArea],
     area: Rect,
     target: crate::app::state::WorkspaceDropTarget,
 ) -> Option<u16> {
+    let layout = SidebarListLayout::new(app, area);
+    workspace_drop_indicator_row_from_layout(app, cards, area, target, &layout)
+}
+
+fn workspace_drop_indicator_row_from_layout(
+    app: &AppState,
+    cards: &[crate::app::state::WorkspaceCardArea],
+    area: Rect,
+    target: crate::app::state::WorkspaceDropTarget,
+    layout: &SidebarListLayout,
+) -> Option<u16> {
     // Flat-list hit-zone aliases precede their canonical spacer positions.
-    workspace_drop_slots(app, cards, area)
+    workspace_drop_slots_from_layout(app, cards, area, layout)
         .into_iter()
         .rev()
         .find_map(|(candidate, row)| (candidate == target).then_some(row))
@@ -13172,6 +13377,10 @@ fn render_workspace_list(
     let sidebar_area = area;
     let list_area = workspace_list_rect_for_app(app, sidebar_area);
     let list_bottom = list_area.y + list_area.height;
+    let layout =
+        SidebarListLayout::from_rows(app, list_area, sidebar_rows_from(app, terminal_runtimes));
+    let metrics = layout.metrics(app);
+    let row_entries = layout.rows();
     let workspace_labels = sidebar_workspace_labels(app, terminal_runtimes);
     let dragged_ws_idx = match app.drag.as_ref().map(|drag| &drag.target) {
         Some(crate::app::state::DragTarget::WorkspaceReorder { source_ws_idx, .. }) => {
@@ -13183,17 +13392,16 @@ fn render_workspace_list(
         Some(crate::app::state::DragTarget::WorkspaceReorder {
             drop_target: Some(drop_target),
             ..
-        }) => workspace_drop_indicator_row(
+        }) => workspace_drop_indicator_row_from_layout(
             app,
             &app.view.workspace_card_areas,
             list_area,
             *drop_target,
+            &layout,
         ),
         _ => None,
     };
 
-    let metrics = workspace_list_scroll_metrics(app, list_area);
-    let row_entries = sidebar_rows_from(app, terminal_runtimes);
     let workspace_headers = row_entries
         .iter()
         .skip(workspace_list_scroll_skip(app, &metrics))
@@ -13219,8 +13427,16 @@ fn render_workspace_list(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let scrollbar_rect = workspace_list_scrollbar_rect(app, sidebar_area);
-    let computed_cards = compute_workspace_card_areas(app, sidebar_area);
+    let scrollbar_body = layout.body(app, metrics);
+    let scrollbar_rect =
+        (should_show_scrollbar(metrics) && scrollbar_body.width > 0 && scrollbar_body.height > 0)
+            .then_some(Rect::new(
+                list_area.x + list_area.width.saturating_sub(1),
+                scrollbar_body.y,
+                1,
+                scrollbar_body.height,
+            ));
+    let computed_cards = compute_workspace_card_areas_from_layout(app, list_area, &layout);
     let cards = &computed_cards;
     for (card_index, card) in cards.iter().enumerate() {
         let i = card.ws_idx;
@@ -13392,7 +13608,7 @@ fn render_workspace_list(
         }
     }
 
-    let section_headers = compute_sidebar_section_header_areas(app, sidebar_area);
+    let section_headers = compute_sidebar_section_header_areas_from_layout(app, &layout);
     let has_matching_rows = row_entries.iter().any(|row| {
         matches!(
             row,
@@ -13407,7 +13623,7 @@ fn render_workspace_list(
     if (!has_matching_rows && !app.sidebar_work_filter.query.is_empty())
         || (row_entries.is_empty() && !app.sidebar_shows_spaces_tree())
     {
-        let body = workspace_list_body_rect(app, list_area, should_show_scrollbar(metrics));
+        let body = layout.body(app, metrics);
         let empty_y = section_headers
             .iter()
             .map(|header| header.rect.bottom())
@@ -13423,7 +13639,7 @@ fn render_workspace_list(
         }
     }
     let agent_cards = if app.view.agent_card_areas.is_empty() {
-        compute_agent_card_areas(app, sidebar_area)
+        compute_sidebar_row_areas_from_layout(app, list_area, &layout).1
     } else {
         app.view.agent_card_areas.clone()
     };
@@ -13441,9 +13657,13 @@ fn render_workspace_list(
         };
         render_section_header(app, frame, &header, count, host_counts, collapsed);
     }
-    let divider_body = workspace_list_rect_for_app(app, sidebar_area);
-    for (divider, shelf) in compute_sidebar_divider_areas(app, divider_body, &row_entries, metrics)
-    {
+    for (divider, shelf) in compute_sidebar_divider_areas(
+        app,
+        list_area,
+        row_entries,
+        metrics,
+        layout.workspace_spacing(),
+    ) {
         let divider = sidebar_row_content_rect(divider);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -13468,13 +13688,15 @@ fn render_workspace_list(
             divider,
         );
     }
-    for header in compute_sidebar_nested_header_areas(app, sidebar_area) {
+    for header in compute_sidebar_nested_header_areas_from_layout(app, list_area, &layout) {
         render_nested_header(app, frame, &header);
     }
     {
-        let body = workspace_list_body_rect(app, list_area, should_show_scrollbar(metrics));
+        let body = layout.body(app, metrics);
         let scroll = workspace_list_scroll_skip(app, &metrics);
-        for (row_idx, rect) in pod_row_areas_from_rows(app, &row_entries, body, scroll) {
+        for (row_idx, rect) in
+            pod_row_areas_from_rows(app, row_entries, body, scroll, layout.workspace_spacing())
+        {
             match row_entries.get(row_idx) {
                 Some(SidebarRow::PodHeader {
                     group_id,
@@ -13510,34 +13732,34 @@ fn render_workspace_list(
             }
         }
     }
-    let tab_cards = compute_tab_card_areas(app, sidebar_area);
-    let narrow_prefix = tab_cards
-        .first()
-        .and_then(|card| narrow_view_tab_prefix(app, usize::from(card.rect.width)));
+    let tab_cards = compute_tab_card_areas_from_layout(app, &layout);
+    let narrow_prefix = tab_cards.first().and_then(|card| {
+        narrow_view_tab_prefix_from_rows(app, row_entries, usize::from(card.rect.width))
+    });
     // One wall clock for the whole section, so two rows drawn in the same
     // frame can never disagree about how old they are.
     let symphony_now = std::time::SystemTime::now();
-    let (symphony_jobs, symphony_empty) = compute_symphony_areas(app, sidebar_area);
+    let (symphony_jobs, symphony_empty) = compute_symphony_areas_from_layout(app, &layout);
     if let Some(rect) = symphony_empty {
         render_symphony_empty(app, frame, rect);
     }
     for job in symphony_jobs {
         render_symphony_job(app, frame, &job, symphony_now);
     }
-    for area in runs::areas(app, sidebar_area) {
+    for area in runs::areas_from_layout(app, &layout) {
         runs::render(app, frame, &area, symphony_now);
     }
-    for area in aloops::areas(app, sidebar_area) {
+    for area in aloops::areas_from_layout(app, &layout) {
         aloops::render(app, frame, &area, symphony_now);
     }
-    for (line, rect) in notes::areas(app, sidebar_area) {
+    for (line, rect) in notes::areas_from_layout(app, &layout) {
         notes::render(app, frame, &line, rect);
     }
-    for area in inbox::areas(app, sidebar_area) {
+    for area in inbox::areas_from_layout(app, &layout) {
         inbox::render(app, frame, &area, symphony_now);
     }
     for card in tab_cards {
-        render_tab_card(app, frame, &card, narrow_prefix, &row_entries);
+        render_tab_card(app, frame, &card, narrow_prefix, row_entries);
     }
     for card in agent_cards {
         let Some((entry, depth)) = row_entries.get(card.row_idx).and_then(|row| match row {
@@ -13549,9 +13771,15 @@ fn render_workspace_list(
         render_agent_card(app, frame, entry, card.rect, depth, narrow_prefix);
     }
     if !app.remote_agent_panel_entries.is_empty() {
-        let body = workspace_list_body_rect(app, list_area, should_show_scrollbar(metrics));
+        let body = layout.body(app, metrics);
         let scroll = workspace_list_scroll_skip(app, &metrics);
-        for row_area in remote_agent_row_areas_from_rows(app, &row_entries, body, scroll) {
+        for row_area in remote_agent_row_areas_from_rows(
+            app,
+            row_entries,
+            body,
+            scroll,
+            layout.workspace_spacing(),
+        ) {
             let Some(SidebarRow::RemoteAgent {
                 entry,
                 depth,
@@ -13584,9 +13812,15 @@ fn render_workspace_list(
     // The Needs-you strip leads the same row list, so its geometry comes from
     // the same walk as the remote rows above it.
     {
-        let body = workspace_list_body_rect(app, list_area, should_show_scrollbar(metrics));
+        let body = layout.body(app, metrics);
         let scroll = workspace_list_scroll_skip(app, &metrics);
-        for (row_idx, rect) in needs_you_row_areas_from_rows(app, &row_entries, body, scroll) {
+        for (row_idx, rect) in needs_you_row_areas_from_rows(
+            app,
+            row_entries,
+            body,
+            scroll,
+            layout.workspace_spacing(),
+        ) {
             match row_entries.get(row_idx) {
                 Some(SidebarRow::NeedsYou {
                     title,
@@ -18595,11 +18829,16 @@ pub(crate) mod tests {
             .iter()
             .position(|row| matches!(row, SidebarRow::BlockersOtherDevices { count: 1 }))
             .expect("other-device blocker row");
-        assert!(
-            needs_you_row_areas_from_rows(&app, &local_rows, Rect::new(0, 0, 40, 12), 0,)
-                .iter()
-                .any(|(row_idx, _)| *row_idx == other_devices_row)
-        );
+        let spacing = workspace_group_spacing(&app, &local_rows, 12);
+        assert!(needs_you_row_areas_from_rows(
+            &app,
+            &local_rows,
+            Rect::new(0, 0, 40, 12),
+            0,
+            spacing,
+        )
+        .iter()
+        .any(|(row_idx, _)| *row_idx == other_devices_row));
     }
 
     #[test]
@@ -30200,11 +30439,15 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let area = Rect::new(0, 0, 48, 24);
         let metrics = workspace_list_scroll_metrics(&app, area);
         let sidebar_area = Rect::new(area.x, area.y, area.width.saturating_add(1), area.height);
+        let body =
+            workspace_list_body_rect(&app, workspace_list_rect_for_app(&app, sidebar_area), false);
+        let spacing = workspace_group_spacing(&app, &rows, body.height);
         let divider_areas = compute_sidebar_divider_areas(
             &app,
             workspace_list_rect_for_app(&app, sidebar_area),
             &rows,
             metrics,
+            spacing,
         );
         assert_eq!(
             divider_areas.len(),

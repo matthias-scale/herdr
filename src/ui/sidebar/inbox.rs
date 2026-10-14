@@ -8,12 +8,10 @@ use ratatui::{
     Frame,
 };
 
-use super::{
-    section_is_collapsed, workspace_list_body_rect, workspace_list_rect_for_app, SidebarRow,
-    INBOX_SECTION_TITLE,
-};
+#[cfg(test)]
+use super::workspace_list_rect_for_app;
+use super::{section_is_collapsed, SidebarRow, INBOX_SECTION_TITLE};
 use crate::app::AppState;
-use crate::ui::scrollbar::should_show_scrollbar;
 
 #[derive(Clone)]
 pub(crate) enum InboxLine {
@@ -61,12 +59,18 @@ pub(super) struct Area {
     pub(super) rect: Rect,
 }
 
+#[cfg(test)]
 pub(super) fn areas(app: &AppState, area: Rect) -> Vec<Area> {
     let ws = workspace_list_rect_for_app(app, area);
-    let metrics = super::workspace_list_scroll_metrics(app, ws);
-    let body = workspace_list_body_rect(app, ws, should_show_scrollbar(metrics));
-    let rows = super::sidebar_rows(app);
-    let workspace_spacing = super::workspace_group_spacing(app, &rows, body.height);
+    let layout = super::SidebarListLayout::new(app, ws);
+    areas_from_layout(app, &layout)
+}
+
+pub(super) fn areas_from_layout(app: &AppState, layout: &super::SidebarListLayout) -> Vec<Area> {
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
+    let rows = layout.rows();
+    let workspace_spacing = layout.workspace_spacing();
     let mut y = body.y;
     let mut out = Vec::new();
     for (idx, row) in rows
@@ -86,7 +90,7 @@ pub(super) fn areas(app: &AppState, area: Rect) -> Vec<Area> {
         }
         y = y
             .saturating_add(height)
-            .saturating_add(super::sidebar_row_gap(app, &rows, idx, workspace_spacing));
+            .saturating_add(super::sidebar_row_gap(app, rows, idx, workspace_spacing));
     }
     out
 }

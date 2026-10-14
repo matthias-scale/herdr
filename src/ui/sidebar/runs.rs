@@ -10,13 +10,12 @@ use ratatui::{
 
 use super::{
     compact_dot_for_state, compact_row_widths, pad_left, pad_right, section_is_collapsed,
-    short_fleet_host_names, sidebar_row_gap, sidebar_row_height, sidebar_rows,
-    workspace_list_body_rect, workspace_list_rect_for_app, SidebarHostCount, SidebarRow,
-    RUNS_SECTION_TITLE, SIDEBAR_AGE_FIELD_WIDTH, SIDEBAR_DOT_FIELD_WIDTH,
+    short_fleet_host_names, sidebar_row_gap, sidebar_row_height, workspace_list_rect_for_app,
+    SidebarHostCount, SidebarRow, RUNS_SECTION_TITLE, SIDEBAR_AGE_FIELD_WIDTH,
+    SIDEBAR_DOT_FIELD_WIDTH,
 };
 use crate::app::AppState;
 use crate::detect::AgentState;
-use crate::ui::scrollbar::should_show_scrollbar;
 use crate::ui::status::state_label_color;
 use crate::ui::text::truncate_end;
 
@@ -132,10 +131,15 @@ pub(super) struct Area {
 
 pub(super) fn areas(app: &AppState, area: Rect) -> Vec<Area> {
     let ws_area = workspace_list_rect_for_app(app, area);
-    let metrics = super::workspace_list_scroll_metrics(app, ws_area);
-    let body = workspace_list_body_rect(app, ws_area, should_show_scrollbar(metrics));
-    let rows = sidebar_rows(app);
-    let workspace_spacing = super::workspace_group_spacing(app, &rows, body.height);
+    let layout = super::SidebarListLayout::new(app, ws_area);
+    areas_from_layout(app, &layout)
+}
+
+pub(super) fn areas_from_layout(app: &AppState, layout: &super::SidebarListLayout) -> Vec<Area> {
+    let metrics = layout.metrics(app);
+    let body = layout.body(app, metrics);
+    let rows = layout.rows();
+    let workspace_spacing = layout.workspace_spacing();
     let mut y = body.y;
     let mut out = Vec::new();
     for (idx, row) in rows
@@ -156,7 +160,7 @@ pub(super) fn areas(app: &AppState, area: Rect) -> Vec<Area> {
         }
         y = y.saturating_add(height).saturating_add(sidebar_row_gap(
             app,
-            &rows,
+            rows,
             idx,
             workspace_spacing,
         ));
