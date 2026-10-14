@@ -3,6 +3,8 @@ mod coverage;
 pub(crate) mod devices;
 pub(crate) mod inbox;
 pub(crate) mod notes;
+#[cfg(test)]
+mod project_list_tests;
 mod runs;
 #[cfg(test)]
 mod tokens;
@@ -25,6 +27,7 @@ use super::status::status_report_age_micro_label;
 use super::text::{display_width, display_width_u16, middle_elide, truncate_end};
 use crate::app::state::{Palette, SidebarGroupMode, SidebarSortMode};
 use crate::app::{AppState, Mode};
+#[cfg(test)]
 use crate::config::StatusIndicatorStyle;
 use crate::detect::{Agent, AgentState};
 use crate::terminal::state::derive_completion_tier;
@@ -410,9 +413,29 @@ fn device_code(host: &str) -> Option<char> {
 /// device is not already named by its surroundings: a local-only sections view
 /// lets the single device group header speak for every row under it.
 fn sidebar_device_code(app: &AppState, host: &str) -> Option<char> {
-    let ambiguous = host != app.agent_host_name
-        || (app.sidebar_sections_layout && !app.remote_agent_panel_entries.is_empty());
-    ambiguous.then(|| device_code(host)).flatten()
+    if !app.sidebar_show_machine_names {
+        return None;
+    }
+    device_code(host)
+}
+
+/// The provider token a compact row shows: empty unless the Provider icon
+/// display option is on. Unknown, mixed, agentless and exited rows already
+/// resolve to no token, so the option never invents one.
+fn sidebar_row_provider(app: &AppState, entry: &AgentPanelEntry) -> String {
+    if app.sidebar_show_provider_icons {
+        compact_provider(entry, app.nerd_font)
+    } else {
+        String::new()
+    }
+}
+
+fn sidebar_remote_row_provider<'a>(app: &AppState, remote: &'a RemoteAgentPanelEntry) -> &'a str {
+    if app.sidebar_show_provider_icons {
+        &remote.render_provider
+    } else {
+        ""
+    }
 }
 
 fn effort_from_launch_argv(argv: &[String]) -> Option<&str> {
@@ -686,9 +709,14 @@ fn compact_row_layout(
     tab: bool,
     nerd_font: bool,
     device: Option<char>,
+    show_provider: bool,
 ) -> TabRowLayout {
     let (age, activity_instant) = compact_age(entry, now);
-    let provider = compact_provider(entry, nerd_font);
+    let provider = if show_provider {
+        compact_provider(entry, nerd_font)
+    } else {
+        String::new()
+    };
     let title = compact_row_title_for_width(
         compact_row_title(entry, tab),
         &provider,
@@ -752,7 +780,7 @@ pub(crate) fn agent_row_cells(
 }
 
 fn compact_provider_field_width(provider: &str, device: bool) -> usize {
-    if provider.is_empty() {
+    if provider.is_empty() && !device {
         0
     } else {
         display_width(provider) + usize::from(device) + SIDEBAR_PROVIDER_GAP_WIDTH
@@ -1244,14 +1272,14 @@ fn render_remote_compact_agent_row_body(
     let device = sidebar_device_code(app, &remote.agent_ref.host);
     let title = compact_row_title_for_width(
         remote_sidebar_title(app, remote),
-        &remote.render_provider,
+        sidebar_remote_row_provider(app, remote),
         device,
         row_width,
         requested_prefix,
     );
     let widths = compact_row_widths(
         title,
-        &remote.render_provider,
+        sidebar_remote_row_provider(app, remote),
         device,
         row_width,
         requested_prefix,
@@ -1373,7 +1401,7 @@ fn render_remote_compact_agent_row_body(
         // icon, in the host tag colour as on local rows; one right-aligned line
         // keeps the tag flush.
         let mut tag = vec![Span::styled(
-            remote.render_provider.as_str(),
+            sidebar_remote_row_provider(app, remote),
             row_style(provider_style),
         )];
         if let Some(code) = device.filter(|_| widths.device) {
@@ -1441,7 +1469,7 @@ fn render_compact_agent_row_body(
     };
     let p = &app.palette;
     let requested_prefix_width = prefix_override.unwrap_or_else(|| usize::from(depth));
-    let provider = compact_provider(entry, app.nerd_font);
+    let provider = sidebar_row_provider(app, entry);
     let machine_host = sidebar_machine_host(app, entry);
     let device_code = sidebar_device_code(app, machine_host);
     let row_title = compact_row_title_for_width(
@@ -1467,6 +1495,7 @@ fn render_compact_agent_row_body(
         tab,
         app.nerd_font,
         device_code,
+        app.sidebar_show_provider_icons,
     );
     let fixed_width = widths.prefix
         + SIDEBAR_DOT_FIELD_WIDTH
@@ -1669,7 +1698,7 @@ fn sidebar_pin_rect(
     if !tab || !entry.pin_allowed || (!entry.pinned && !sidebar_row_is_hovered(app, row.y)) {
         return None;
     }
-    let provider = compact_provider(entry, app.nerd_font);
+    let provider = sidebar_row_provider(app, entry);
     let device = sidebar_device_code(app, sidebar_machine_host(app, entry));
     let title = compact_row_title_for_width(
         compact_row_title(entry, tab),
@@ -1800,7 +1829,7 @@ pub(crate) fn selected_row_control_at(
         });
     }
     let requested_prefix = usize::from(depth);
-    let provider = compact_provider(entry, app.nerd_font);
+    let provider = sidebar_row_provider(app, entry);
     let device = sidebar_device_code(app, sidebar_machine_host(app, entry));
     let title = compact_row_title_for_width(
         compact_row_title(entry, tab),
@@ -1875,14 +1904,14 @@ pub(crate) fn selected_remote_row_control_at(
     let device = sidebar_device_code(app, &entry.agent_ref.host);
     let title = compact_row_title_for_width(
         remote_sidebar_title(app, entry),
-        &entry.render_provider,
+        sidebar_remote_row_provider(app, entry),
         device,
         row_width,
         requested_prefix,
     );
     let widths = compact_row_widths(
         title,
-        &entry.render_provider,
+        sidebar_remote_row_provider(app, entry),
         device,
         row_width,
         requested_prefix,
@@ -1924,6 +1953,7 @@ pub(crate) fn selected_remote_row_control_at(
     }
 }
 
+#[cfg(test)]
 pub(super) fn tab_row_layout(
     entry: &AgentPanelEntry,
     now: std::time::Instant,
@@ -1934,9 +1964,30 @@ pub(super) fn tab_row_layout(
     nerd_font: bool,
 ) -> TabRowLayout {
     let _ = (palette, indicator_style);
-    compact_row_layout(entry, now, width, prefix_width, true, nerd_font, None)
+    compact_row_layout(entry, now, width, prefix_width, true, nerd_font, None, true)
 }
 
+/// A tab row's layout under the operator's display options, for callers that
+/// schedule age refreshes from the same fields the renderer draws.
+pub(super) fn display_tab_row_layout(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    width: usize,
+    prefix_width: usize,
+) -> TabRowLayout {
+    compact_row_layout(
+        entry,
+        app.view_observed_at,
+        width,
+        prefix_width,
+        true,
+        app.nerd_font,
+        None,
+        app.sidebar_show_provider_icons,
+    )
+}
+
+#[cfg(test)]
 pub(super) fn mobile_tab_row_layout(
     entry: &AgentPanelEntry,
     now: std::time::Instant,
@@ -1947,7 +1998,7 @@ pub(super) fn mobile_tab_row_layout(
     nerd_font: bool,
 ) -> TabRowLayout {
     let _ = (palette, indicator_style);
-    compact_row_layout(entry, now, width, prefix_width, true, nerd_font, None)
+    compact_row_layout(entry, now, width, prefix_width, true, nerd_font, None, true)
 }
 
 /// Foreground for the selected Space and the current tab title in the sidebar.
@@ -3575,6 +3626,9 @@ pub(crate) enum SidebarRow {
         /// sort without re-walking the inheritance chain at render time.
         sort_key: Option<String>,
         sort_mode: SidebarSortMode,
+        /// Aggregate status a collapsed shallow project shows in its
+        /// disclosure slot until hover or keyboard focus swaps in the chevron.
+        collapsed_status: Option<SidebarStateCount>,
     },
     Tab {
         entry: Box<AgentPanelEntry>,
@@ -4890,26 +4944,25 @@ fn sidebar_row_render_width(app: &AppState, rows: &[SidebarRow], mobile: bool) -
 }
 
 fn mark_ambiguous_remote_titles(app: &AppState, rows: &mut [SidebarRow], width: usize) {
-    let nerd_font = app.nerd_font;
     let rendered_title = |row: &SidebarRow| -> Option<String> {
         let (title, provider, depth, device, remote) = match row {
             SidebarRow::Agent { entry, depth } => (
                 compact_row_title(entry, false),
-                compact_provider(entry, nerd_font),
+                sidebar_row_provider(app, entry),
                 *depth,
                 sidebar_device_code(app, sidebar_machine_host(app, entry)),
                 false,
             ),
             SidebarRow::Tab { entry, depth } => (
                 compact_row_title(entry, true),
-                compact_provider(entry, nerd_font),
+                sidebar_row_provider(app, entry),
                 *depth,
                 sidebar_device_code(app, sidebar_machine_host(app, entry)),
                 false,
             ),
             SidebarRow::RemoteAgent { entry, depth, .. } => (
                 entry.render_title.as_str(),
-                entry.render_provider.clone(),
+                sidebar_remote_row_provider(app, entry).to_string(),
                 *depth,
                 sidebar_device_code(app, &entry.agent_ref.host),
                 true,
@@ -5362,6 +5415,7 @@ fn append_space_tree_rows_from_iter(
             state_counts: Vec::new(),
             sort_key: space_sort_key,
             sort_mode: space_sort,
+            collapsed_status: None,
         });
         if !app.workspace_agents_expanded(ws_idx) {
             continue;
@@ -5710,12 +5764,135 @@ fn repo_state_counts(entries: &[AgentPanelEntry], palette: &Palette) -> Vec<Side
     counts
 }
 
+/// The Current layout's Repo view is the shallow project list: one header per
+/// project, its tab rows one cell in, and a collapsed project keeps only the
+/// activated tab. Sections, Settled and every other view keep their own rows.
+pub(crate) fn sidebar_shallow_project_list(app: &AppState) -> bool {
+    !app.sidebar_sections_layout && app.sidebar_group_mode == SidebarGroupMode::Repo
+}
+
+/// The activated tab: the selected remote agent while one is selected, else
+/// the active workspace's active tab. A finder result that is only highlighted
+/// is not activated.
+pub(crate) fn sidebar_entry_is_activated(app: &AppState, entry: &AgentPanelEntry) -> bool {
+    if let Some(selected) = app.sidebar_selected_remote_agent.as_ref() {
+        return matches!(&entry.identity, AgentPanelIdentity::Remote(agent_ref) if agent_ref == selected);
+    }
+    entry.local_target().is_some_and(|target| {
+        app.active == Some(target.ws_idx)
+            && app
+                .workspaces
+                .get(target.ws_idx)
+                .is_some_and(|workspace| workspace.active_tab_index() == target.tab_idx)
+    })
+}
+
+/// A collapsed project's rows: the activated tab once when this project owns
+/// it, otherwise nothing.
+fn retain_activated_tab(app: &AppState, entries: &mut Vec<AgentPanelEntry>) {
+    let activated = entries
+        .iter()
+        .position(|entry| sidebar_entry_is_activated(app, entry));
+    match activated {
+        Some(index) => {
+            let entry = entries.swap_remove(index);
+            entries.clear();
+            entries.push(entry);
+        }
+        None => entries.clear(),
+    }
+}
+
+/// The collapsed project's status, picked by the Status sort's priority so
+/// the disclosure slot names whatever waits on the human first.
+fn collapsed_project_status(
+    entries: &[AgentPanelEntry],
+    palette: &Palette,
+) -> Option<SidebarStateCount> {
+    let entry = entries
+        .iter()
+        .min_by_key(|entry| sidebar_sort_status_rank(entry))?;
+    Some(SidebarStateCount {
+        glyph: compact_row_dot(entry),
+        color: compact_row_color(entry, palette),
+        count: entries.len(),
+    })
+}
+
+/// One project in the shallow list. Branch subgroups are not nested here;
+/// tab rows sit one cell inside the header. A collapsed project shows only
+/// the activated tab, and its header carries the aggregate status.
+fn append_shallow_project_rows(
+    app: &AppState,
+    rows: &mut Vec<SidebarRow>,
+    mut group: SidebarWorkGroup,
+    collapse_key: &str,
+    collapsed: bool,
+    group_sort: SidebarSortMode,
+) {
+    let representative = (!group.unlinked)
+        .then(|| group.entries.iter().find_map(AgentPanelEntry::local_target))
+        .flatten();
+    let folded = match representative {
+        Some(representative) => {
+            let folded = collapsed || !app.workspace_agents_expanded(representative.ws_idx);
+            rows.push(SidebarRow::Workspace {
+                ws_idx: representative.ws_idx,
+                indented: false,
+                settled_pane_id: None,
+                title: group.title.clone(),
+                count: Some(group.entries.len()),
+                activity_count: None,
+                shelf_counts: None,
+                state_counts: repo_state_counts(&group.entries, &app.palette),
+                sort_key: Some(group.key.clone()),
+                sort_mode: group_sort,
+                collapsed_status: folded
+                    .then(|| collapsed_project_status(&group.entries, &app.palette))
+                    .flatten(),
+            });
+            folded
+        }
+        None => {
+            rows.push(SidebarRow::NestedHeader {
+                key: collapse_key.to_string(),
+                action_key: None,
+                sort_key: Some(group.key.clone()),
+                sort_mode: group_sort,
+                title: group.title.clone(),
+                count: group.entries.len(),
+                activity_count: None,
+                collapsed,
+                dim: false,
+                status: None,
+                spawn: false,
+            });
+            collapsed
+        }
+    };
+    if folded {
+        retain_activated_tab(app, &mut group.entries);
+        append_tab_rows(rows, group.entries, 1);
+        return;
+    }
+    append_subgrouped_tab_rows(
+        app,
+        rows,
+        group.entries,
+        1,
+        &group.key,
+        collapse_key,
+        group_sort,
+    );
+}
+
 fn append_repo_group_rows(
     app: &AppState,
     rows: &mut Vec<SidebarRow>,
     entries: &[AgentPanelEntry],
     settled: bool,
 ) {
+    let shallow = !settled && sidebar_shallow_project_list(app);
     for mut group in sidebar_repo_groups(app, entries) {
         mark_redundant_space_labels(&mut group.entries, &group.title);
         let group_sort = effective_sidebar_group_sort(app, &group.key, SidebarSortMode::Default);
@@ -5725,6 +5902,10 @@ fn append_repo_group_rows(
             group.key.clone()
         };
         let collapsed = section_is_collapsed(app, &collapse_key);
+        if shallow {
+            append_shallow_project_rows(app, rows, group, &collapse_key, collapsed, group_sort);
+            continue;
+        }
         if !group.unlinked {
             if let Some(representative) =
                 group.entries.iter().find_map(AgentPanelEntry::local_target)
@@ -5740,6 +5921,7 @@ fn append_repo_group_rows(
                     state_counts: repo_state_counts(&group.entries, &app.palette),
                     sort_key: Some(group.key.clone()),
                     sort_mode: group_sort,
+                    collapsed_status: None,
                 });
                 if collapsed || !app.workspace_agents_expanded(representative.ws_idx) {
                     group
@@ -6304,7 +6486,7 @@ fn needs_you_strip_rows(
             dot: compact_row_dot_text(entry),
             dot_color: compact_row_color(entry, &app.palette),
             subtitle: visible_pending_ask(app, entry).map(str::to_owned),
-            provider: compact_provider(entry, app.nerd_font),
+            provider: sidebar_row_provider(app, entry),
             target: NeedsYouTarget::Local(target),
         });
     }
@@ -6330,7 +6512,7 @@ fn needs_you_strip_rows(
             dot: compact_row_dot_text(entry),
             dot_color: compact_row_color(entry, &app.palette),
             subtitle: visible_pending_ask(app, entry).map(str::to_owned),
-            provider: compact_provider(entry, app.nerd_font),
+            provider: sidebar_row_provider(app, entry),
             target: NeedsYouTarget::Remote(remote.agent_ref.clone()),
         });
     }
@@ -6397,7 +6579,7 @@ fn blocker_group_rows(
             dot: compact_row_dot_text(entry),
             dot_color: compact_row_color(entry, &app.palette),
             subtitle: visible_pending_ask(app, entry).map(str::to_owned),
-            provider: compact_provider(entry, app.nerd_font),
+            provider: sidebar_row_provider(app, entry),
             target: NeedsYouTarget::Local(target),
         });
     }
@@ -6423,7 +6605,7 @@ fn blocker_group_rows(
             dot: compact_row_dot_text(entry),
             dot_color: compact_row_color(entry, &app.palette),
             subtitle: visible_pending_ask(app, entry).map(str::to_owned),
-            provider: compact_provider(entry, app.nerd_font),
+            provider: sidebar_row_provider(app, entry),
             target: NeedsYouTarget::Remote(remote.agent_ref.clone()),
         });
     }
@@ -9944,7 +10126,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                 };
                 let tab = matches!(row, SidebarRow::Tab { .. });
                 let requested_prefix = narrow_prefix.unwrap_or_else(|| usize::from(*depth));
-                let provider = compact_provider(entry, app.nerd_font);
+                let provider = sidebar_row_provider(app, entry);
                 let device = sidebar_device_code(app, sidebar_machine_host(app, entry));
                 let title = compact_row_title_for_width(
                     compact_row_title(entry, tab),
@@ -10164,14 +10346,14 @@ pub(crate) fn compute_sidebar_hover_targets(
                 let device = sidebar_device_code(app, &entry.agent_ref.host);
                 let title = compact_row_title_for_width(
                     remote_sidebar_title(app, entry),
-                    &entry.render_provider,
+                    sidebar_remote_row_provider(app, entry),
                     device,
                     row_width,
                     requested_prefix,
                 );
                 let widths = compact_row_widths(
                     title,
-                    &entry.render_provider,
+                    sidebar_remote_row_provider(app, entry),
                     device,
                     row_width,
                     requested_prefix,
@@ -11768,6 +11950,23 @@ fn render_agent_finder_results(app: &AppState, frame: &mut Frame, area: Rect) {
     render_agent_finder_results_in_area(app, frame, body);
 }
 
+/// A finder hit's provider token under the Provider icon display option.
+/// A label that names no known provider stays absent.
+fn finder_provider_token(
+    app: &AppState,
+    agent: &crate::api::schema::AgentInfo,
+) -> Option<&'static str> {
+    if !app.sidebar_show_provider_icons {
+        return None;
+    }
+    let agent = crate::detect::parse_agent_label(agent.agent.as_deref()?)?;
+    if app.nerd_font {
+        crate::ui::icons::agent_icon(agent)
+    } else {
+        crate::ui::icons::agent_letter_tag(agent)
+    }
+}
+
 pub(super) fn render_agent_finder_results_in_area(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.is_empty() {
         return;
@@ -11812,6 +12011,15 @@ pub(super) fn render_agent_finder_results_in_area(app: &AppState, frame: &mut Fr
             format!("{status} "),
             Style::default().fg(status_color).bg(background),
         )];
+        if let Some(provider) = finder_provider_token(app, &hit.agent) {
+            title_spans.push(Span::styled(
+                format!("{provider} "),
+                Style::default()
+                    .fg(app.palette.overlay0)
+                    .bg(background)
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
         title_spans.extend(finder_highlight_spans(
             &hit.title,
             &query,
@@ -11822,13 +12030,17 @@ pub(super) fn render_agent_finder_results_in_area(app: &AppState, frame: &mut Fr
                 .add_modifier(Modifier::BOLD),
         ));
         lines.push(Line::from(title_spans));
-        lines.push(Line::from(vec![
-            Span::styled("  ", style),
-            Span::styled(
-                host,
-                Style::default().fg(app.palette.overlay0).bg(background),
-            ),
-            Span::styled(" · ", style),
+        let mut detail = vec![Span::styled("  ", style)];
+        if app.sidebar_show_machine_names {
+            detail.extend([
+                Span::styled(
+                    host,
+                    Style::default().fg(app.palette.overlay0).bg(background),
+                ),
+                Span::styled(" · ", style),
+            ]);
+        }
+        detail.extend([
             Span::styled(
                 source,
                 Style::default().fg(app.palette.overlay0).bg(background),
@@ -11838,7 +12050,8 @@ pub(super) fn render_agent_finder_results_in_area(app: &AppState, frame: &mut Fr
                 age,
                 Style::default().fg(app.palette.overlay0).bg(background),
             ),
-        ]));
+        ]);
+        lines.push(Line::from(detail));
         let context_lines = if hit.context.is_empty() {
             hit.preview.iter().take(3).collect::<Vec<_>>()
         } else {
@@ -12939,6 +13152,7 @@ fn render_workspace_list(
                 state_counts,
                 sort_key,
                 sort_mode,
+                collapsed_status,
                 ..
             } => Some((
                 title,
@@ -12946,6 +13160,7 @@ fn render_workspace_list(
                 *activity_count,
                 state_counts.as_slice(),
                 *shelf_counts,
+                collapsed_status.as_ref(),
                 sort_key.as_deref(),
                 *sort_mode,
             )),
@@ -13064,12 +13279,15 @@ fn render_workspace_list(
             p.surface1,
             &[p.accent, crate::ui::widgets::panel_contrast_fg(p), p.text],
         );
+        // A shallow project header keeps its slot and title in place under
+        // keyboard focus, so focus shows through the row fill, not a bar.
+        let selection_bar = selected && !(repo_header && sidebar_shallow_project_list(app));
         let fixed_width = display_width(prefix)
             + space_icon_width
             + display_width(&count_label)
             + state_count_width
             + sort_width
-            + usize::from(selected);
+            + usize::from(selection_bar);
         let title = truncate_end(
             &display_label,
             usize::from(card.rect.width).saturating_sub(fixed_width),
@@ -13078,10 +13296,21 @@ fn render_workspace_list(
         if !repo_header {
             spans.push(Span::raw(" "));
         }
-        spans.push(Span::styled(
-            if expanded { "▾" } else { "▸" },
-            Style::default().fg(if selected { selected_accent } else { p.accent }),
-        ));
+        // A collapsed shallow project names its status in the disclosure
+        // slot; hover or keyboard focus swaps in the chevron in the same cell.
+        let slot_status = header
+            .and_then(|(.., status, _, _)| *status)
+            .filter(|_| !expanded && !selected && !sidebar_row_is_hovered(app, row_y));
+        match slot_status {
+            Some(status) => spans.push(Span::styled(
+                status.glyph,
+                Style::default().fg(status.color),
+            )),
+            None => spans.push(Span::styled(
+                if expanded { "▾" } else { "▸" },
+                Style::default().fg(if selected { selected_accent } else { p.accent }),
+            )),
+        }
         spans.push(Span::raw(" "));
         if let Some(icon) = space_icon {
             spans.push(Span::styled(icon, name_style));
@@ -13099,7 +13328,7 @@ fn render_workspace_list(
                 Style::default().fg(count.color),
             ));
         }
-        if selected {
+        if selection_bar {
             spans.insert(0, Span::styled("▎", Style::default().fg(selected_accent)));
         }
         frame.render_widget(
@@ -13111,6 +13340,8 @@ fn render_workspace_list(
                 Rect::new(card.rect.x, row_y, card.rect.width, 1),
                 Style::default().bg(p.surface1),
             );
+        }
+        if selection_bar {
             frame.buffer_mut()[(card.rect.x, row_y)]
                 .set_symbol("▎")
                 .set_style(Style::default().fg(selected_accent).bg(p.surface1));
@@ -13406,7 +13637,6 @@ fn narrow_view_tab_prefix_from_rows(
     rows: &[SidebarRow],
     width: usize,
 ) -> Option<usize> {
-    let nerd_font = app.nerd_font;
     let prefixes = rows
         .iter()
         .filter_map(|row| match row {
@@ -13416,7 +13646,7 @@ fn narrow_view_tab_prefix_from_rows(
         })
         .map(|(entry, depth, tab)| {
             let requested_prefix = usize::from(*depth);
-            let provider = compact_provider(entry, nerd_font);
+            let provider = sidebar_row_provider(app, entry);
             let device = sidebar_device_code(app, sidebar_machine_host(app, entry));
             let title = compact_row_title_for_width(
                 compact_row_title(entry, tab),
@@ -13603,14 +13833,11 @@ pub(crate) fn visible_tab_activity_instants_from(
                 }
                 _ => None,
             })?;
-            let layout = tab_row_layout(
+            let layout = display_tab_row_layout(
+                app,
                 entry,
-                app.view_observed_at,
                 usize::from(card.rect.width),
                 narrow_prefix.unwrap_or_else(|| usize::from(depth) * 3 + 1),
-                &app.palette,
-                app.status_indicators,
-                app.nerd_font,
             );
             layout.activity_age.and(layout.activity_instant)
         })
@@ -14347,6 +14574,11 @@ pub(super) fn render_sidebar_project_menu(app: &AppState, frame: &mut Frame) {
     );
 }
 
+/// The view dropdown lists the views, then the display options.
+pub(crate) fn sidebar_group_menu_item_count() -> usize {
+    SidebarGroupMode::VIEWS.len() + crate::app::state::SidebarDisplayOption::ALL.len()
+}
+
 pub(crate) fn sidebar_group_menu_layout(
     app: &AppState,
     area: Rect,
@@ -14355,10 +14587,10 @@ pub(crate) fn sidebar_group_menu_layout(
     super::dropdown::layout_dropdown(
         &super::dropdown::DropdownSpec {
             anchor,
-            item_count: SidebarGroupMode::VIEWS.len(),
+            item_count: sidebar_group_menu_item_count(),
             selected: app.sidebar_group_menu_selected,
             has_filter: false,
-            max_rows: SidebarGroupMode::VIEWS.len(),
+            max_rows: sidebar_group_menu_item_count(),
             min_width: 22,
         },
         area,
@@ -15296,12 +15528,28 @@ pub(super) fn render_sidebar_group_menu(app: &AppState, frame: &mut Frame) {
         return;
     };
     frame.render_widget(ratatui::widgets::Clear, layout.rect);
-    let lines = SidebarGroupMode::VIEWS
+    let labels = SidebarGroupMode::VIEWS
+        .iter()
+        .map(|mode| mode.view_label().to_string())
+        .chain(
+            crate::app::state::SidebarDisplayOption::ALL
+                .iter()
+                .map(|option| {
+                    let check = if app.sidebar_display_option_enabled(*option) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    };
+                    format!("{check} {}", option.label())
+                }),
+        )
+        .collect::<Vec<_>>();
+    let lines = labels
         .iter()
         .enumerate()
         .skip(layout.first_visible)
         .take(layout.visible_rows)
-        .map(|(index, mode)| {
+        .map(|(index, label)| {
             let selected = index == app.sidebar_group_menu_selected;
             let marker = if selected { "▸" } else { " " };
             let style = if selected {
@@ -15315,10 +15563,7 @@ pub(super) fn render_sidebar_group_menu(app: &AppState, frame: &mut Frame) {
                     .bg(app.palette.panel_bg)
             };
             Line::from(Span::styled(
-                super::dropdown::pad_menu_row(
-                    &format!("{marker} {}", mode.view_label()),
-                    layout.list_rect.width,
-                ),
+                super::dropdown::pad_menu_row(&format!("{marker} {label}"), layout.list_rect.width),
                 style,
             ))
         })
@@ -15925,7 +16170,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn repo_remote_row_needs_no_local_workspace_and_ignores_local_disclosure() {
+    fn repo_remote_row_needs_no_local_workspace_and_folds_with_its_project_header() {
         let mut info = remote_agent_info(
             "pane/remote",
             "remote task",
@@ -15964,10 +16209,18 @@ pub(crate) mod tests {
         );
         app.remote_agent_panel_entries = remote_entries;
         expand_fleet(&mut app);
+        let has_remote = |app: &AppState| {
+            sidebar_rows(app).iter().any(
+                |row| matches!(row, SidebarRow::RemoteAgent { entry, .. } if entry.agent_ref.agent == "pane/remote"),
+            )
+        };
+        assert!(has_remote(&app));
+        // The local workspace header heads the whole shallow project, so
+        // folding it hides the project's unselected remote rows too.
         assert!(app.toggle_workspace_agent_disclosure(0));
-        assert!(sidebar_rows(&app).iter().any(
-            |row| matches!(row, SidebarRow::RemoteAgent { entry, .. } if entry.agent_ref.agent == "pane/remote")
-        ));
+        assert!(!has_remote(&app));
+        assert!(app.toggle_workspace_agent_disclosure(0));
+        assert!(has_remote(&app));
     }
 
     #[test]
@@ -16394,6 +16647,8 @@ pub(crate) mod tests {
     #[test]
     fn a_pane_attached_to_a_fleet_host_shows_machine_after_provider() {
         let mut app = app_with_agents(&["attached"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         app.fleet_snapshot = crate::fleet::Snapshot {
             polled: true,
@@ -16687,6 +16942,8 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
         let mut app = AppState::test_new();
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.sidebar_width = 18;
         app.view.sidebar_rect = Rect::new(0, 0, 18, 20);
         app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
@@ -17622,6 +17879,8 @@ pub(crate) mod tests {
     #[test]
     fn compact_sidebar_row_uses_the_claude_glyph_and_keeps_the_text_fallback() {
         let mut app = app_with_agents(&["claude row"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
@@ -17814,6 +18073,8 @@ pub(crate) mod tests {
     #[test]
     fn working_row_opacity_matches_each_level_for_local_and_remote_at_18_and_60_columns() {
         let mut app = AppState::test_new();
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         let mut working = compact_test_entry("working task", Some(Agent::Claude));
         working.state = AgentState::Working;
@@ -18949,6 +19210,8 @@ pub(crate) mod tests {
     /// Renders one depth-1 Claude row on `ub1`, viewed from `ub2`, at `width`.
     fn compact_width_row(width: u16, nerd_font: bool) -> String {
         let mut app = AppState::test_new();
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.agent_host_name = "ub2".into();
         app.nerd_font = nerd_font;
         let now = app.view_observed_at;
@@ -19038,16 +19301,21 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn compact_tag_uses_the_nerd_glyph_or_a_letter_and_omits_the_local_device() {
+    fn compact_tag_uses_the_nerd_glyph_or_a_letter_and_names_devices_only_when_enabled() {
         let glyph = crate::ui::icons::agent_icon(Agent::Claude).expect("claude glyph");
         let row = compact_width_row(40, true);
         assert!(row.contains(&format!(" {glyph}1  3m")), "{row:?}");
 
-        // A local-only view: the device group header names the single device.
+        // Machine names are opt-in: off hides every device, on names the
+        // local device as well as remote ones.
         let mut app = AppState::test_new();
         app.agent_host_name = "ub2".into();
         app.nerd_font = false;
         assert_eq!(sidebar_device_code(&app, "ub2"), None);
+        assert_eq!(sidebar_device_code(&app, "ub1"), None);
+        app.sidebar_show_machine_names = true;
+        app.sidebar_show_provider_icons = true;
+        assert_eq!(sidebar_device_code(&app, "ub2"), Some('2'));
         assert_eq!(sidebar_device_code(&app, "ub1"), Some('1'));
         assert_eq!(device_code("ub2"), Some('2'));
         assert_eq!(device_code("mbp"), Some('m'));
@@ -19281,6 +19549,8 @@ pub(crate) mod tests {
     #[test]
     fn remote_rows_use_one_machine_cell_with_full_host_tooltips() {
         let mut app = AppState::test_new();
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         let hosts = ["alpha-a1", "alpha-b1"];
         let snapshot = crate::fleet::Snapshot {
@@ -19326,6 +19596,8 @@ pub(crate) mod tests {
     #[test]
     fn remote_rows_with_similar_host_names_share_a_label_but_keep_distinct_tooltips() {
         let mut app = AppState::test_new();
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = true;
         let snapshot = crate::fleet::Snapshot {
             hosts: ["alpha-a1", "alpha-b1"]
@@ -19380,6 +19652,8 @@ pub(crate) mod tests {
             ["alpha-machine", "beta-machine"],
         ] {
             let mut app = AppState::test_new();
+            app.sidebar_show_provider_icons = true;
+            app.sidebar_show_machine_names = true;
             app.nerd_font = false;
             let snapshot = crate::fleet::Snapshot {
                 hosts: hosts
@@ -19938,6 +20212,8 @@ pub(crate) mod tests {
     #[test]
     fn active_subagent_count_is_not_rendered_on_sidebar_rows() {
         let mut app = app_with_agents(&["one"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("render sidebar count".into());
         set_active_subagents(&mut app, 0, Some(3));
@@ -19971,6 +20247,8 @@ pub(crate) mod tests {
     #[test]
     fn narrow_sidebar_row_omits_subagent_count_and_preserves_title() {
         let mut app = app_with_agents(&["one"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("narrow sidebar title".into());
         set_active_subagents(&mut app, 0, Some(3));
@@ -19992,6 +20270,8 @@ pub(crate) mod tests {
     #[test]
     fn blocked_row_keeps_its_dot_without_a_subagent_count() {
         let mut app = app_with_agents(&["one"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("blocked review".into());
         let pane_id = app.workspaces[0].tabs[0].root_pane;
@@ -20913,6 +21193,8 @@ pub(crate) mod tests {
     #[test]
     fn narrow_flagged_tab_budget_truncates_title() {
         let mut app = app_with_agents(&["one"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("a deliberately long tab title".into());
         app.workspaces[0].tabs[0].set_prio(true);
@@ -21379,6 +21661,8 @@ pub(crate) mod tests {
     #[test]
     fn usage_limited_worklist_rows_render_a_non_color_cue_at_supported_widths() {
         let mut app = app_with_agents(&["Wait for plan reset"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("Wait for plan reset".into());
         let pane = app.workspaces[0].tabs[0].root_pane;
@@ -22186,6 +22470,8 @@ row_gap = 1
     #[test]
     fn sidebar_visual_evidence_renders_release_layout() {
         let mut app = AppState::test_new();
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         app.palette = crate::app::state::Palette::one_light();
 
@@ -22331,6 +22617,8 @@ row_gap = 1
     #[test]
     fn default_tab_row_shows_status_and_title_once_without_pane_identity_row() {
         let mut app = crate::app::state::AppState::test_new();
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         app.palette = crate::app::state::Palette::one_light();
         let mut workspace = Workspace::test_new("repo-folder");
@@ -22591,6 +22879,8 @@ row_gap = 1
     #[test]
     fn narrow_tab_rows_keep_status_before_truncated_title() {
         let mut app = app_with_agents(&["one"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("one".into());
         let area = Rect::new(0, 0, 23, 12);
@@ -23116,6 +23406,8 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
     #[test]
     fn sidebar_and_tab_bar_render_the_same_agent_title() {
         let mut app = app_with_agents(&["one"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         let pane_id = app.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
@@ -23237,6 +23529,8 @@ rows = [[{ token = "workspace", bold = false }, { token = "agent", dim = false }
     #[test]
     fn prio_row_appends_the_provider_once_after_the_workspace() {
         let mut app = AppState::test_new();
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         let mut workspace = Workspace::test_new("one");
         let focused_pane = workspace.tabs[0].root_pane;
@@ -23450,6 +23744,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn narrow_agent_rows_preserve_later_tab_tokens() {
         let mut app = crate::app::state::AppState::test_new();
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         let mut workspace = Workspace::test_new("very-long-workspace-name");
         let tab_idx = workspace.test_add_tab(Some("logs"));
@@ -23686,6 +23982,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn agent_rows_end_at_age_and_return_suffix_width_to_title() {
         let mut app = app_with_agents(&["one", "two"]);
+        app.sidebar_show_provider_icons = true;
         app.nerd_font = false;
         app.workspaces[0].custom_name = Some("t3-sample".into());
         app.workspaces[1].custom_name = Some("other-space".into());
@@ -23763,8 +24060,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             wide_with_machine.contains("sample-pr-title-uses-wid"),
             "{wide_with_machine:?}"
         );
-        // The local machine carries no device character, so the provider tag
-        // is the bare letter.
+        // Machine names are off, so the provider tag is the bare letter.
         assert!(wide_with_machine.contains("p "), "{wide_with_machine:?}");
         assert!(!wide_with_machine.contains("p2"), "{wide_with_machine:?}");
         assert!(wide_with_machine.ends_with("2m"), "{wide_with_machine:?}");
@@ -23859,7 +24155,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn space_suffix_header_matching_covers_legacy_unlinked_branch_and_settled_groups() {
+    fn space_suffix_header_matching_covers_legacy_unlinked_shallow_and_settled_groups() {
         let mut legacy = app_with_agents(&["alpha", "beta"]);
         legacy.sidebar_group_mode = SidebarGroupMode::Repo;
         assert!(sidebar_tab_entries(&legacy)
@@ -23883,6 +24179,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .iter()
             .all(|entry| entry.space_label_redundant));
 
+        // The shallow project list has no branch header, so a space named
+        // after the branch is no longer repeated above its row.
         let mut branched = app_with_agents(&["⎇ main", "other"]);
         branched.sidebar_group_mode = SidebarGroupMode::Repo;
         for (ws_idx, branch) in ["main", "other"].into_iter().enumerate() {
@@ -23902,7 +24200,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .into_iter()
             .find(|entry| entry.local_target().unwrap().ws_idx == 0)
             .expect("main branch entry");
-        assert!(branch_entry.space_label_redundant);
+        assert!(!branch_entry.space_label_redundant);
 
         let mut settled =
             space_tag_fixture(SidebarGroupMode::RepoPr, SpaceTagFixture::MatchingHeaders);
@@ -24688,7 +24986,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn a_narrow_row_drops_the_star_rather_than_eating_the_title() {
         let mut entry = compact_test_entry("session", Some(Agent::Claude));
         entry.starred = true;
-        let app = crate::app::state::AppState::test_new();
+        let mut app = crate::app::state::AppState::test_new();
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         let area = Rect::new(0, 0, 11, 1);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
         terminal
@@ -25198,6 +25498,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn repo_group_chevron_and_body_agree_in_both_collapse_states() {
         let mut app = app_with_agents(&["alpha"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         replace_tab_context(
             &mut app,
             0,
@@ -25240,12 +25542,28 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.collapsed_sidebar_groups
             .insert("repo:repo:owner/alpha".into());
 
-        assert!(!has_child_rows(&app));
+        // The collapsed group keeps only its activated tab. Its header has
+        // keyboard focus here, so the slot shows the closed chevron rather
+        // than the folded status.
+        let child_rows = |app: &AppState| {
+            sidebar_rows(app)
+                .iter()
+                .filter(|row| {
+                    matches!(row, SidebarRow::Tab { entry, .. } if entry
+                        .local_target()
+                        .is_some_and(|target| target.ws_idx == 0))
+                })
+                .count()
+        };
+        assert_eq!(child_rows(&app), 1);
         assert!(!workspace_card_expanded(&app, 0, Some("repo:owner/alpha")));
         assert!(
             rendered_chevron(&app).contains('▸'),
-            "a collapsed group shows the closed chevron"
+            "a focused collapsed group shows the closed chevron"
         );
+
+        app.active = None;
+        assert!(!has_child_rows(&app));
     }
 
     #[test]
@@ -27699,7 +28017,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn f19_repo_groups_by_repo_then_branch_with_server_space_suffix() {
+    fn f19_repo_groups_list_tabs_by_repo_with_server_space_suffix() {
         let mut first = Workspace::test_new("first");
         first.custom_name = Some("Server Alpha".into());
         first.test_add_tab(Some("second"));
@@ -27707,6 +28025,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let mut second = Workspace::test_new("second");
         second.custom_name = Some("Server Beta".into());
         let mut app = AppState::test_new();
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.workspaces = vec![first, second];
         app.ensure_test_terminals();
         replace_tab_context(
@@ -27778,11 +28098,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect::<Vec<_>>();
         assert_eq!(
             nested,
-            [
-                ("⎇ main", 1),
-                ("⎇ feature/sidebar", 1),
-                (unlinked_bucket_title().as_str(), 1)
-            ]
+            [(unlinked_bucket_title().as_str(), 1)],
+            "repo tabs list directly under their project; only the unlinked bucket nests"
         );
         let suffixes = rows
             .iter()
@@ -28345,6 +28662,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn nested_rows_keep_title_and_machine_at_minimum_width_and_indent_when_space_allows() {
         let mut app = AppState::test_new();
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.agent_host_name = "ub1".into();
         app.nerd_font = false;
         app.workspaces = vec![Workspace::test_new("repo")];
@@ -28909,6 +29228,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn tab_provider_suffixes_distinguish_codex_and_claude_after_title() {
         let mut app = app_with_agents(&["one"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("Codex task".into());
         let codex_pane = app.workspaces[0].tabs[0].root_pane;
@@ -29008,6 +29329,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn tab_rows_follow_field_priority_at_minimum_and_normal_widths() {
         let started = std::time::Instant::now();
         let mut app = app_with_agents(&["one"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         app.workspaces[0].tabs[0].custom_name = Some("Investigate release regression".into());
         let pane = app.workspaces[0].tabs[0].root_pane;
@@ -30060,6 +30383,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn sidebar_agent_rows_suppress_redundant_identity() {
         let activity_at = std::time::Instant::now();
         let mut app = app_for_real_sidebar_fixtures(&["claude", "gemini"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         app.agent_panel_sort = AgentPanelSort::Priority;
         configure_real_sidebar_agent(
@@ -30140,6 +30465,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn sidebar_real_fixture_rows_are_compact() {
         let activity_at = std::time::Instant::now();
         let mut app = app_for_real_sidebar_fixtures(&["claude-code", "codex"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         configure_real_sidebar_agent(
             &mut app,
@@ -32040,7 +32367,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn branch_groups_inherit_the_repo_sort_until_they_choose_their_own() {
+    fn repo_sort_orders_every_branch_in_the_shallow_project_list() {
         let specs = vec![
             SortTabSpec {
                 name: "zeta",
@@ -32072,47 +32399,18 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             },
         ];
         let mut app = sort_app(&specs);
-        let branch_modes = |app: &AppState| {
-            sidebar_rows(app)
-                .into_iter()
-                .filter_map(|row| match row {
-                    SidebarRow::NestedHeader {
-                        sort_key: Some(key),
-                        sort_mode,
-                        ..
-                    } => Some((key, sort_mode)),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
         assert!(
-            branch_modes(&app)
+            !sidebar_rows(&app)
                 .iter()
-                .all(|(_, mode)| *mode == SidebarSortMode::Default),
-            "no choice anywhere starts at the canonical order"
+                .any(|row| matches!(row, SidebarRow::NestedHeader { .. })),
+            "the shallow project list nests no branch headers"
         );
 
         app.set_sidebar_group_sort("repo:acme/one".to_string(), SidebarSortMode::Name);
         assert_eq!(
             sidebar_tab_order(&app),
-            vec![1, 0, 3, 2],
-            "both branch groups inherit the repo group's name sort"
-        );
-        assert!(
-            branch_modes(&app)
-                .iter()
-                .all(|(_, mode)| *mode == SidebarSortMode::Name),
-            "branch headers report the inherited sort as their effective one"
-        );
-
-        app.set_sidebar_group_sort(
-            "repo:acme/one:branch:main".to_string(),
-            SidebarSortMode::Recent,
-        );
-        assert_eq!(
-            sidebar_tab_order(&app),
-            vec![0, 1, 3, 2],
-            "main overrides with recent (zeta changed last); feature still inherits name"
+            vec![1, 3, 2, 0],
+            "the repo group's name sort orders its tabs across branches"
         );
     }
 
@@ -32134,6 +32432,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 seq: 2,
             },
         ]);
+        // Branches no longer nest in the project list; a tab subgroup is the
+        // nested header that carries its own sort control.
+        app.workspaces[0].tabs[0].set_subgroup(Some("api".to_string()));
         crate::ui::compute_view(&mut app, Rect::new(0, 0, 120, 40));
         let rows = sidebar_rows(&app);
         let workspace_sort = rows.iter().find_map(|row| match row {
@@ -32154,11 +32455,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .collect::<Vec<_>>();
         assert_eq!(
             nested_sorts,
-            vec![
-                Some("repo:acme/one:branch:main".to_string()),
-                Some("repo:acme/one:branch:feature".to_string()),
-            ],
-            "every branch header is sortable too"
+            vec![Some("repo:acme/one:subgroup:api".to_string())],
+            "every nested header is sortable too"
         );
 
         // The workspace header's glyph is its card's rightmost cell; a nested
@@ -32181,12 +32479,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let header = compute_sidebar_nested_header_areas(&app, app.view.sidebar_rect)
             .into_iter()
             .next()
-            .expect("branch header");
+            .expect("subgroup header");
         let glyph_col = nested_header_sort_col(&header).expect("sort glyph column");
         assert_eq!(
             sidebar_group_sort_at(&app, glyph_col, header.rect.y),
-            Some(("repo:acme/one:branch:main".to_string(), glyph_col)),
-            "the branch header's sort glyph is hit-testable where it renders"
+            Some(("repo:acme/one:subgroup:api".to_string(), glyph_col)),
+            "the subgroup header's sort glyph is hit-testable where it renders"
         );
         assert_eq!(
             sidebar_group_sort_at(&app, glyph_col + 1, header.rect.y),
@@ -33291,6 +33589,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn active_subagents_project_idle_parent_as_working_across_sidebar_renderers() {
         let mut app = sort_app(&[sort_tab("parent title", "owner/herdr", AgentState::Idle, 1)]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.sidebar_sections_layout = true;
         app.nerd_font = false;
         set_active_subagents(&mut app, 0, Some(1));
@@ -34937,6 +35237,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn device_char_aligns_for_tabs_and_blockers_at_narrow_and_normal_widths() {
         let mut app = app_with_agents(&["blocked"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.agent_host_name = "ub1".into();
         app.nerd_font = false;
         let pane_id = app.workspaces[0].tabs[0].root_pane;
@@ -35026,6 +35328,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     #[test]
     fn local_device_char_uses_accent_tag_in_sections_layout_with_fleet() {
         let mut app = app_with_two_remote_hosts();
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.agent_host_name = "ub2".into();
         app.sidebar_sections_layout = true;
         app.working_row_opacity_percent = 100;
@@ -35682,6 +35986,8 @@ mod model_letter {
 
     fn app_with_model(agent: Agent, model: Option<&str>, nerd_font: bool) -> AppState {
         let mut app = app_with_agents(&["herdr"]);
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.sidebar_sections_layout = true;
         app.nerd_font = nerd_font;
         let pane_id = app.workspaces[0].tabs[0].root_pane;

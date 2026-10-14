@@ -77,6 +77,8 @@ mod overlays;
 mod selection;
 mod settings;
 mod sidebar;
+#[cfg(test)]
+mod sidebar_display_tests;
 mod terminal;
 
 pub(crate) use self::modal::open_rename_pod;
@@ -351,7 +353,9 @@ impl App {
                 }
                 ClientInputOwner::AgentPicker => self.handle_agent_picker_key(key_event),
                 ClientInputOwner::SidebarGroupMenu => {
-                    self.state.handle_sidebar_group_menu_key(key_event);
+                    if let Some(option) = self.state.handle_sidebar_group_menu_key(key_event) {
+                        self.toggle_sidebar_display_option(option);
+                    }
                 }
                 ClientInputOwner::SidebarFilterMenu => {
                     self.state.handle_sidebar_filter_menu_key(key_event);
@@ -5324,6 +5328,7 @@ impl App {
                 true
             }
             InputOwner::Surface(SurfaceInputOwner::Board) => self.board_insert_text(text),
+            InputOwner::Sidebar => self.state.insert_agent_finder_text(text),
             InputOwner::Server(ServerInputOwner::Navigator) => {
                 if !self.state.navigator.search_focused {
                     return false;
@@ -6047,6 +6052,9 @@ impl App {
                     MouseAction::SidebarObjectMenu { index } => {
                         self.apply_sidebar_object_menu_action(index)
                     }
+                    MouseAction::ToggleSidebarDisplayOption(option) => {
+                        self.toggle_sidebar_display_option(option);
+                    }
                     MouseAction::SettledMenu { index } => {
                         self.apply_sidebar_settled_menu_action(index)
                     }
@@ -6245,6 +6253,9 @@ impl App {
             match action {
                 MouseAction::SidebarObjectMenu { index } => {
                     self.apply_sidebar_object_menu_action(index)
+                }
+                MouseAction::ToggleSidebarDisplayOption(option) => {
+                    self.toggle_sidebar_display_option(option);
                 }
                 MouseAction::SettledMenu { index } => self.apply_sidebar_settled_menu_action(index),
                 MouseAction::SnoozeMenu { action } => self.apply_sidebar_snooze_menu_action(action),

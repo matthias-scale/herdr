@@ -13,11 +13,11 @@ use super::sidebar::render_remote_compact_agent_row_with_identity;
 #[cfg(test)]
 use super::sidebar::AgentPanelEntryData;
 use super::sidebar::{
-    dim_inactive_pane_row, mobile_sidebar_rows, mobile_sidebar_rows_from, mobile_tab_row_layout,
-    render_compact_agent_row, render_remote_compact_agent_row_with_shelf,
-    section_header_glyph_for_app, section_row_style, sidebar_row_belongs_to_workspace,
-    sidebar_space_member_indices, sidebar_thread_entries_from, sidebar_workspace_labels,
-    visible_pending_ask, AgentPanelEntry, SidebarRow, SYMPHONY_SECTION_TITLE,
+    dim_inactive_pane_row, mobile_sidebar_rows, mobile_sidebar_rows_from, render_compact_agent_row,
+    render_remote_compact_agent_row_with_shelf, section_header_glyph_for_app, section_row_style,
+    sidebar_row_belongs_to_workspace, sidebar_space_member_indices, sidebar_thread_entries_from,
+    sidebar_workspace_labels, visible_pending_ask, AgentPanelEntry, SidebarRow,
+    SYMPHONY_SECTION_TITLE,
 };
 use super::status::{state_icon, state_icon_symbol};
 use super::text::{display_width, display_width_u16, truncate_end};
@@ -400,14 +400,11 @@ pub(crate) fn visible_tab_activity_instants_from(
                 return None;
             };
             let indent = " ".repeat(2 + usize::from(*depth) * 3);
-            let layout = mobile_tab_row_layout(
+            let layout = super::sidebar::display_tab_row_layout(
+                app,
                 entry,
-                app.view_observed_at,
                 usize::from(content.width),
                 display_width(&indent),
-                &app.palette,
-                app.status_indicators,
-                app.nerd_font,
             );
             layout.activity_age.and(layout.activity_instant)
         })
@@ -3135,6 +3132,8 @@ mod tests {
     fn mobile_provider_without_subagent_count_is_dimmed_at_supported_widths() {
         for width in [18, 40] {
             let mut app = crate::app::state::AppState::test_new();
+            app.sidebar_show_provider_icons = true;
+            app.sidebar_show_machine_names = true;
             app.nerd_font = false;
             app.workspaces = vec![crate::workspace::Workspace::test_new("mobile-count")];
             app.workspaces[0].tabs[0].custom_name = Some("mobile worker".into());
@@ -3662,6 +3661,8 @@ mod tests {
     #[test]
     fn ac1_ac2_ac3_mobile_tabs_are_status_first_single_line_rows() {
         let mut app = crate::app::state::AppState::test_new();
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         let mut workspace = crate::workspace::Workspace::test_new("mobile-tabs");
         workspace.tabs[0].custom_name = Some("First task".into());
@@ -3739,6 +3740,8 @@ mod tests {
     fn mobile_tab_rows_follow_field_priority_at_minimum_and_normal_widths() {
         let started = std::time::Instant::now();
         let mut app = crate::app::state::AppState::test_new();
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         app.nerd_font = false;
         let mut workspace = crate::workspace::Workspace::test_new("mobile-tabs");
         workspace.tabs[0].custom_name = Some("Investigate release regression".into());

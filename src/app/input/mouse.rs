@@ -39,6 +39,7 @@ pub(super) enum MouseAction {
     SidebarObjectMenu {
         index: usize,
     },
+    ToggleSidebarDisplayOption(crate::app::state::SidebarDisplayOption),
     SettledMenu {
         index: usize,
     },
@@ -2495,6 +2496,12 @@ impl AppState {
                     }
                 } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                     if let Some(index) = self.sidebar_group_menu_item_at(mouse.column, mouse.row) {
+                        if let Some(option) =
+                            crate::app::state::SidebarDisplayOption::at_group_menu_index(index)
+                        {
+                            self.sidebar_group_menu_selected = index;
+                            return Some(MouseAction::ToggleSidebarDisplayOption(option));
+                        }
                         if let Some(mode) = crate::app::state::SidebarGroupMode::VIEWS
                             .get(index)
                             .copied()

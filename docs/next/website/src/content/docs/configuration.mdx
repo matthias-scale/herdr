@@ -377,6 +377,8 @@ Choose the sections layout with a separate layout key. The default `current` val
 [ui.sidebar]
 layout = "sections"
 show_ask_subtitles = false
+show_provider_icons = false
+show_machine_names = false
 # header = "sky"  # optional
 
 [ui.sidebar.areas]
@@ -397,6 +399,11 @@ area is shown by default. The current layout ignores this table.
 `show_ask_subtitles` controls the one-line question shown below blocked agents
 in the sections layout. It defaults to `false` and can also be changed under
 Settings → Sidebar → Show ask subtitles.
+
+`show_provider_icons` and `show_machine_names` add the provider icon (or
+letter) and the one-character machine name to agent rows and agent finder
+results. Both default to `false`. Toggle them from the sidebar view dropdown
+(Provider icon, Machine name); the choice is saved to this table.
 
 Pin or unpin a tab from the CLI with `herdr tab pin <tab_id>` and `herdr tab unpin <tab_id>`. Park or unpark one with `herdr tab park <tab_id>` and `herdr tab unpark <tab_id>`. Parked tabs appear together in the dimmed `Inbox · new` section after Aloops until keyboard input reaches one of their panes. The Needs you rows appear above the Spaces view in both layouts. Up to five show initially; use `▸ N more` to show the rest and `▴ less` to fold them back.
 

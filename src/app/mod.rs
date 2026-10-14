@@ -1519,6 +1519,8 @@ impl App {
             sidebar_sections_layout: config.ui.sidebar.layout
                 == crate::config::SidebarLayoutConfig::Sections,
             sidebar_show_ask_subtitles: config.ui.sidebar.show_ask_subtitles,
+            sidebar_show_provider_icons: config.ui.sidebar.show_provider_icons,
+            sidebar_show_machine_names: config.ui.sidebar.show_machine_names,
             sidebar_header_plain: config.ui.sidebar.header
                 == crate::config::SidebarHeaderConfig::Plain,
             next_agent_state_change_seq: 0,
@@ -3146,6 +3148,9 @@ impl App {
                         != (config.ui.sidebar.layout
                             == crate::config::SidebarLayoutConfig::Sections)
                     || self.state.sidebar_show_ask_subtitles != config.ui.sidebar.show_ask_subtitles
+                    || self.state.sidebar_show_provider_icons
+                        != config.ui.sidebar.show_provider_icons
+                    || self.state.sidebar_show_machine_names != config.ui.sidebar.show_machine_names
                 {
                     sidebar_projection_changed = true;
                 }
@@ -3160,6 +3165,8 @@ impl App {
                 self.state.sidebar_sections_layout =
                     config.ui.sidebar.layout == crate::config::SidebarLayoutConfig::Sections;
                 self.state.sidebar_show_ask_subtitles = config.ui.sidebar.show_ask_subtitles;
+                self.state.sidebar_show_provider_icons = config.ui.sidebar.show_provider_icons;
+                self.state.sidebar_show_machine_names = config.ui.sidebar.show_machine_names;
                 if self.state.sidebar_sections_layout && !self.state.sidebar_areas.notes {
                     self.state.set_notepad_focus(false);
                 }
@@ -4047,7 +4054,9 @@ impl App {
                 }
                 state::ClientInputOwner::AgentPicker => self.handle_agent_picker_key(key_event),
                 state::ClientInputOwner::SidebarGroupMenu => {
-                    self.state.handle_sidebar_group_menu_key(key_event);
+                    if let Some(option) = self.state.handle_sidebar_group_menu_key(key_event) {
+                        self.toggle_sidebar_display_option(option);
+                    }
                 }
                 state::ClientInputOwner::SidebarFilterMenu => {
                     self.state.handle_sidebar_filter_menu_key(key_event);

@@ -417,11 +417,13 @@ impl AppState {
             KeyCode::Char(character)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
-                let mut filter = self.sidebar_work_filter.clone();
-                filter.query.push(character);
-                self.set_sidebar_work_filter(filter);
-                self.agent_finder_history_index = None;
-                self.schedule_agent_finder_search();
+                if !self.insert_agent_finder_text(character.encode_utf8(&mut [0; 4])) {
+                    let mut filter = self.sidebar_work_filter.clone();
+                    filter.query.push(character);
+                    self.set_sidebar_work_filter(filter);
+                    self.agent_finder_history_index = None;
+                    self.schedule_agent_finder_search();
+                }
                 self.sidebar_search_active = true;
             }
             _ => {}
@@ -454,9 +456,20 @@ impl AppState {
         self.schedule_agent_finder_search();
     }
 
+    /// Typed or pasted Search text. In the shallow project list the first
+    /// text opens the finder before it lands, because opening clears the
+    /// query; from then on the finder query is its only owner.
     pub(crate) fn insert_agent_finder_text(&mut self, text: &str) -> bool {
-        if !self.sidebar_search_active || self.agent_finder_saved_query.is_none() {
+        if !self.sidebar_search_active {
             return false;
+        }
+        if self.agent_finder_saved_query.is_none() {
+            if !crate::ui::sidebar_shallow_project_list(self)
+                || !text.chars().any(|character| !character.is_control())
+            {
+                return false;
+            }
+            self.open_agent_finder();
         }
         let mut filter = self.sidebar_work_filter.clone();
         filter
@@ -1084,9 +1097,14 @@ impl AppState {
         }
     }
 
-    pub(crate) fn handle_sidebar_group_menu_key(&mut self, key: KeyEvent) -> bool {
+    /// Drive the view dropdown. Returns the display option the operator
+    /// toggled, which the caller persists through the config file.
+    pub(crate) fn handle_sidebar_group_menu_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> Option<crate::app::state::SidebarDisplayOption> {
         if !self.sidebar_group_menu_open {
-            return false;
+            return None;
         }
         match key.code {
             KeyCode::Esc => self.sidebar_group_menu_open = false,
@@ -1095,24 +1113,29 @@ impl AppState {
                     self.sidebar_group_menu_selected.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.sidebar_group_menu_selected =
-                    self.sidebar_group_menu_selected.saturating_add(1).min(
-                        crate::app::state::SidebarGroupMode::VIEWS
-                            .len()
-                            .saturating_sub(1),
-                    );
+                self.sidebar_group_menu_selected = self
+                    .sidebar_group_menu_selected
+                    .saturating_add(1)
+                    .min(crate::ui::sidebar_group_menu_item_count().saturating_sub(1));
             }
-            KeyCode::Enter => {
-                if let Some(mode) = crate::app::state::SidebarGroupMode::VIEWS
-                    .get(self.sidebar_group_menu_selected)
-                    .copied()
-                {
-                    self.set_sidebar_group_mode(mode);
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Some(option) = crate::app::state::SidebarDisplayOption::at_group_menu_index(
+                    self.sidebar_group_menu_selected,
+                ) {
+                    return Some(option);
+                }
+                if key.code == KeyCode::Enter {
+                    if let Some(mode) = crate::app::state::SidebarGroupMode::VIEWS
+                        .get(self.sidebar_group_menu_selected)
+                        .copied()
+                    {
+                        self.set_sidebar_group_mode(mode);
+                    }
                 }
             }
             _ => {}
         }
-        true
+        None
     }
 
     pub(super) fn workspace_list_rect(&self) -> Rect {

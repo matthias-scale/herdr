@@ -25,6 +25,20 @@ impl App {
         true
     }
 
+    /// Flip one sidebar display option through the config file, so the
+    /// touched key is the only one written and reload applies it. A failed
+    /// write leaves the option as it was and surfaces the config notice.
+    pub(super) fn toggle_sidebar_display_option(
+        &mut self,
+        option: crate::app::state::SidebarDisplayOption,
+    ) -> bool {
+        self.save_config_edit(crate::app::settings_general::ConfigEdit::Bool {
+            section: "ui.sidebar",
+            key: option.config_key(),
+            value: !self.state.sidebar_display_option_enabled(option),
+        })
+    }
+
     /// Persist one UI edit and reload, so the change is live in the same frame
     /// the operator made it.
     pub(super) fn save_config_edit(

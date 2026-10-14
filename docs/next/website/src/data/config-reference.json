@@ -1756,6 +1756,18 @@
           "description": "Show the pending human question under blocked rows in the sections layout. Settings: Sidebar → Show ask subtitles. Default: false."
         },
         {
+          "key": "ui.sidebar.show_provider_icons",
+          "type": "boolean",
+          "default": "false",
+          "description": "Show each agent row's provider icon or letter, and the provider in the agent finder. Toggle from the sidebar view dropdown (Provider icon). Default: false."
+        },
+        {
+          "key": "ui.sidebar.show_machine_names",
+          "type": "boolean",
+          "default": "false",
+          "description": "Show each agent row's machine character, and the host in the agent finder. Toggle from the sidebar view dropdown (Machine name). Default: false."
+        },
+        {
           "key": "ui.accent",
           "type": "color",
           "default": "\"cyan\"",

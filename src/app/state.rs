@@ -1446,6 +1446,39 @@ pub(crate) enum SidebarGroupMode {
     Missive,
 }
 
+/// Optional compact-row metadata the sidebar's view dropdown toggles. Each
+/// option is an independent `ui.sidebar` boolean that defaults to off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarDisplayOption {
+    ProviderIcons,
+    MachineNames,
+}
+
+impl SidebarDisplayOption {
+    pub(crate) const ALL: [Self; 2] = [Self::ProviderIcons, Self::MachineNames];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::ProviderIcons => "Provider icon",
+            Self::MachineNames => "Machine name",
+        }
+    }
+
+    pub(crate) fn config_key(self) -> &'static str {
+        match self {
+            Self::ProviderIcons => "show_provider_icons",
+            Self::MachineNames => "show_machine_names",
+        }
+    }
+
+    /// The option at a view-dropdown row, which lists the views first.
+    pub(crate) fn at_group_menu_index(index: usize) -> Option<Self> {
+        index
+            .checked_sub(SidebarGroupMode::VIEWS.len())
+            .and_then(|index| Self::ALL.get(index).copied())
+    }
+}
+
 impl SidebarGroupMode {
     pub(crate) const ALL: [Self; 6] = [
         Self::Repo,
@@ -5104,6 +5137,8 @@ pub struct AppState {
     pub sidebar_sections_layout: bool,
     /// Whether the sections Spaces tree shows one-line blocked-agent asks.
     pub sidebar_show_ask_subtitles: bool,
+    pub sidebar_show_provider_icons: bool,
+    pub sidebar_show_machine_names: bool,
     pub sidebar_header_plain: bool,
     pub next_agent_state_change_seq: u64,
     /// Capture mouse input for Herdr's own mouse UI. When false, Herdr only
@@ -7715,6 +7750,13 @@ impl AppState {
         self.sidebar_presentation.known_workspace_ids = current_ids;
     }
 
+    pub(crate) fn sidebar_display_option_enabled(&self, option: SidebarDisplayOption) -> bool {
+        match option {
+            SidebarDisplayOption::ProviderIcons => self.sidebar_show_provider_icons,
+            SidebarDisplayOption::MachineNames => self.sidebar_show_machine_names,
+        }
+    }
+
     pub(crate) fn mark_sidebar_projection_changed(&mut self) {
         self.refresh_local_agent_panel_identities();
         self.sidebar_projection_revision = self.sidebar_projection_revision.wrapping_add(1);
@@ -8614,6 +8656,8 @@ impl AppState {
             sidebar_areas: crate::config::SidebarAreasConfig::default(),
             sidebar_sections_layout: false,
             sidebar_show_ask_subtitles: false,
+            sidebar_show_provider_icons: false,
+            sidebar_show_machine_names: false,
             sidebar_header_plain: false,
             next_agent_state_change_seq: 0,
             mouse_capture: true,

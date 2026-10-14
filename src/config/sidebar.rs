@@ -444,6 +444,10 @@ pub struct SidebarConfig {
     /// Show the pending human question under blocked rows in the sections
     /// layout. Settings: Sidebar → Show ask subtitles. Default: false.
     pub show_ask_subtitles: bool,
+    /// Show the provider icon on compact agent rows. Defaults to false.
+    pub show_provider_icons: bool,
+    /// Show the machine name on compact agent rows. Defaults to false.
+    pub show_machine_names: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -588,6 +592,8 @@ mod tests {
         // ac3: distinct Space groups get one compact blank row by default.
         assert_eq!(config.spaces.row_gap, 1);
         assert!(!config.show_ask_subtitles);
+        assert!(!config.show_provider_icons);
+        assert!(!config.show_machine_names);
     }
 
     #[test]
@@ -603,6 +609,20 @@ mod tests {
         let sky: SidebarConfig =
             toml::from_str("layout = \"sections\"\nheader = \"sky\"\n").unwrap();
         assert_eq!(sky.header, SidebarHeaderConfig::Sky);
+    }
+
+    #[test]
+    fn display_options_are_independent_optional_booleans() {
+        let defaults: SidebarConfig = toml::from_str("").unwrap();
+        assert!(!defaults.show_provider_icons);
+        assert!(!defaults.show_machine_names);
+        let icons: SidebarConfig = toml::from_str("show_provider_icons = true").unwrap();
+        assert!(icons.show_provider_icons);
+        assert!(!icons.show_machine_names);
+        let hosts: SidebarConfig = toml::from_str("show_machine_names = true").unwrap();
+        assert!(!hosts.show_provider_icons);
+        assert!(hosts.show_machine_names);
+        assert!(toml::from_str::<SidebarConfig>("show_provider_icons = \"yes\"").is_err());
     }
 
     #[test]
