@@ -693,7 +693,9 @@ mod tests {
                 span.content.contains("Assistant prose") && span.style.fg == Some(palette.text)
             }));
             assert!(spans.iter().any(|span| {
-                span.content.contains("inline code") && span.style.fg == Some(palette.mauve)
+                span.content.contains("inline code")
+                    && span.style.fg == Some(palette.text)
+                    && span.style.bg == Some(palette.surface0)
             }));
         }
     }
@@ -767,11 +769,22 @@ mod tests {
                 assert_eq!(buffer[(0, 1)].symbol(), "›");
                 assert_eq!(buffer[(2, 1)].symbol(), "R");
                 assert_eq!(lines[user_lines.len()].width(), 0);
-                let assistant = lines
+                let assistant = lines[user_lines.len() + 1..]
                     .iter()
-                    .find(|line| line.to_string().contains("Assistant prose"))
-                    .expect("assistant prose is rendered");
-                assert!(assistant.to_string().starts_with("  Assistant prose"));
+                    .filter(|line| line.width() > 0)
+                    .collect::<Vec<_>>();
+                assert!(!assistant.is_empty(), "assistant prose is rendered");
+                assert!(assistant
+                    .iter()
+                    .all(|line| line.to_string().starts_with("  ")));
+                assert_eq!(
+                    assistant
+                        .iter()
+                        .map(|line| line.to_string().trim().to_owned())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    "Assistant prose"
+                );
             }
         }
     }
