@@ -679,8 +679,15 @@ impl PaneWorkContextState {
         repo: &str,
     ) -> Result<GitObservationRepoUpdate, String> {
         let repo = normalize_repo_slug(repo)?;
-        if let Some(manual_repo) = self.manual.repo.as_deref() {
-            return Ok(if repo_slugs_match(manual_repo, &repo) {
+        // Both declaration tiers outrank Git evidence. Report their effective
+        // binding without mutating fields that cannot make this request win.
+        if let Some(declared_repo) = self
+            .manual
+            .repo
+            .as_deref()
+            .or(self.hook_turn.repo.as_deref())
+        {
+            return Ok(if repo_slugs_match(declared_repo, &repo) {
                 GitObservationRepoUpdate::AlreadyBound
             } else {
                 GitObservationRepoUpdate::ManualConflict
@@ -1409,6 +1416,30 @@ pub fn linear_ticket_url(ticket: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_repo_binding_reports_higher_tier_conflict_even_when_git_already_matches() {
+        for already_matches in [false, true] {
+            let mut state = PaneWorkContextState::default();
+            if already_matches {
+                state.set_git_observation_repo("owner/task").unwrap();
+            }
+            state
+                .replace_hook_turn(PaneWorkContext {
+                    repo: Some("owner/hook".into()),
+                    branch: Some("hook-branch".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let before = state.snapshot_tiers();
+            assert_eq!(
+                state.set_git_observation_repo("owner/task"),
+                Ok(GitObservationRepoUpdate::ManualConflict)
+            );
+            assert_eq!(state.snapshot_tiers(), before);
+            assert_eq!(state.effective().repo.as_deref(), Some("owner/hook"));
+        }
+    }
 
     #[test]
     fn task_repo_binding_changes_only_git_repo_and_respects_manual_repo() {

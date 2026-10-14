@@ -26,6 +26,13 @@ pub(crate) struct GitWorkContextRefreshInFlight {
     pub(crate) deadline: Instant,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct TaskRepoRefreshHandoff {
+    pub(crate) cwd: PathBuf,
+    pub(crate) lagging_cwd: Option<PathBuf>,
+    pub(crate) minimum_generation: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct GitWorkContextCacheKey {
     pub(crate) repo_root: PathBuf,
@@ -211,17 +218,15 @@ impl App {
 
         let mut changed = false;
         for observation in observations {
-            if let Some((cwd, minimum_generation)) = self
+            let handoff = self
                 .task_repo_refresh_floors
                 .get(&observation.pane_id)
-                .cloned()
+                .cloned();
+            if handoff
+                .as_ref()
+                .is_some_and(|handoff| generation < handoff.minimum_generation)
             {
-                if cwd == observation.input.cwd && generation < minimum_generation {
-                    continue;
-                }
-                if generation >= minimum_generation {
-                    self.task_repo_refresh_floors.remove(&observation.pane_id);
-                }
+                continue;
             }
             let Some((ws_idx, terminal_id)) =
                 self.state
@@ -252,6 +257,17 @@ impl App {
                 });
             if current_cwd.as_ref() != Some(&observation.input.cwd) {
                 continue;
+            }
+            if let Some(handoff) = handoff {
+                // Native cwd reporting can lag the verified task checkout across
+                // several refreshes. Release only after a matching fresh result
+                // catches up, or the human moves to a different cwd.
+                if observation.input.cwd != handoff.cwd
+                    && handoff.lagging_cwd.as_ref() == Some(&observation.input.cwd)
+                {
+                    continue;
+                }
+                self.task_repo_refresh_floors.remove(&observation.pane_id);
             }
 
             // Record the repository root for this cwd before any early exit:
@@ -1827,8 +1843,14 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
             .cloned()
             .expect("test pane terminal");
         let cwd = app.state.terminals[&terminal_id].cwd.clone();
-        app.task_repo_refresh_floors
-            .insert(pane_id, (cwd.clone(), 2));
+        app.task_repo_refresh_floors.insert(
+            pane_id,
+            TaskRepoRefreshHandoff {
+                cwd: cwd.clone(),
+                lagging_cwd: Some(cwd.clone()),
+                minimum_generation: 2,
+            },
+        );
 
         app.test_begin_git_work_context_refresh(1);
         app.handle_git_work_context_refreshed(

@@ -159,9 +159,11 @@ fn task_repo_discovery_handles_common_worktree_origin_and_missing_origin() {
 fn task_repo_binding_response(
     id: String,
     status: PaneTaskRepoBindingStatus,
-    repo: Option<String>,
     pane: Option<PaneInfo>,
 ) -> String {
+    let repo = pane
+        .as_ref()
+        .and_then(|pane| pane.work_context.repo.clone());
     encode_success(
         id,
         ResponseResult::PaneTaskRepoBinding {
@@ -1651,23 +1653,23 @@ impl App {
             else {
                 return false;
             };
-            let Some(pane) = app.pane_info(ws_idx, pane_id) else {
+            let Some(terminal) = app.state.terminals.get(current_terminal_id) else {
                 return false;
             };
             current_terminal_id == &terminal_id
                 && current_terminal_id.to_string() == params.expected_terminal_id
                 && task_repo_hosts_match(&app.state.agent_host_name, &params.expected_host)
-                && pane.agent_session.is_some_and(|session| {
-                    session.agent.eq_ignore_ascii_case("claude")
-                        && session.kind == crate::agent_resume::AgentSessionRefKind::Id
-                        && session.value == params.expected_session_id
-                })
+                && terminal
+                    .effective_non_retired_hook_session_id()
+                    .is_some_and(|(agent, session)| {
+                        agent.eq_ignore_ascii_case("claude")
+                            && session == params.expected_session_id
+                    })
         };
         if !identity_matches(self) {
             return task_repo_binding_response(
                 id,
                 PaneTaskRepoBindingStatus::IdentityMismatch,
-                None,
                 self.pane_info(ws_idx, pane_id),
             );
         }
@@ -1678,7 +1680,6 @@ impl App {
                 return task_repo_binding_response(
                     id,
                     PaneTaskRepoBindingStatus::RepoMismatch,
-                    None,
                     self.pane_info(ws_idx, pane_id),
                 );
             }
@@ -1688,7 +1689,6 @@ impl App {
             return task_repo_binding_response(
                 id,
                 PaneTaskRepoBindingStatus::Unavailable,
-                None,
                 self.pane_info(ws_idx, pane_id),
             );
         };
@@ -1696,7 +1696,6 @@ impl App {
             return task_repo_binding_response(
                 id,
                 PaneTaskRepoBindingStatus::RepoMismatch,
-                None,
                 self.pane_info(ws_idx, pane_id),
             );
         }
@@ -1705,7 +1704,6 @@ impl App {
             return task_repo_binding_response(
                 id,
                 PaneTaskRepoBindingStatus::IdentityMismatch,
-                None,
                 self.pane_info(ws_idx, pane_id),
             );
         }
@@ -1720,22 +1718,39 @@ impl App {
                 return task_repo_binding_response(
                     id,
                     PaneTaskRepoBindingStatus::Unavailable,
-                    None,
                     self.pane_info(ws_idx, pane_id),
                 );
             }
         };
+        if matches!(
+            update,
+            crate::work_context::GitObservationRepoUpdate::Changed
+                | crate::work_context::GitObservationRepoUpdate::AlreadyBound
+        ) {
+            let lagging_cwd = self
+                .terminal_runtimes
+                .get(&terminal_id)
+                .and_then(|runtime| runtime.cwd())
+                .or_else(|| {
+                    self.state
+                        .terminals
+                        .get(&terminal_id)
+                        .map(|terminal| terminal.cwd.clone())
+                });
+            self.task_repo_refresh_floors.insert(
+                pane_id,
+                crate::app::work_context_git::TaskRepoRefreshHandoff {
+                    cwd: Path::new(&params.cwd).to_path_buf(),
+                    lagging_cwd,
+                    minimum_generation: self
+                        .last_git_work_context_refresh_generation
+                        .saturating_add(1),
+                },
+            );
+            self.request_git_work_context_refresh(Instant::now());
+        }
         let status = match update {
             crate::work_context::GitObservationRepoUpdate::Changed => {
-                self.task_repo_refresh_floors.insert(
-                    pane_id,
-                    (
-                        Path::new(&params.cwd).to_path_buf(),
-                        self.last_git_work_context_refresh_generation
-                            .saturating_add(1),
-                    ),
-                );
-                self.request_git_work_context_refresh(Instant::now());
                 self.state.mark_session_dirty();
                 self.emit_pane_updated(ws_idx, pane_id);
                 self.route_pane_to_bound_workspace(ws_idx, pane_id);
@@ -1750,10 +1765,7 @@ impl App {
         };
         let final_ws_idx = self.workspace_index_for_pane(pane_id).unwrap_or(ws_idx);
         let pane = self.pane_info(final_ws_idx, pane_id);
-        let effective_repo = pane
-            .as_ref()
-            .and_then(|pane| pane.work_context.repo.clone());
-        task_repo_binding_response(id, status, effective_repo, pane)
+        task_repo_binding_response(id, status, pane)
     }
 
     pub(super) fn handle_pane_read(&mut self, id: String, params: PaneReadParams) -> String {
@@ -4875,9 +4887,187 @@ mod tests {
     }
 
     #[test]
+    fn bind_task_repo_rejects_restored_or_retired_authority() {
+        for case in [
+            "restored",
+            "retired",
+            "ended",
+            "other-agent",
+            "path-session",
+        ] {
+            let (mut app, pane_id) = app_with_test_workspace();
+            let terminal_id = if case != "restored" {
+                bind_test_live_agent_session(
+                    &mut app,
+                    &pane_id,
+                    "herdr:claude",
+                    "claude",
+                    "session-1",
+                )
+            } else {
+                bind_test_agent_session(&mut app, &pane_id, "herdr:claude", "claude", "session-1")
+            };
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            match case {
+                "retired" => {
+                    terminal.hook_authority.as_mut().unwrap().retired_at = Some(Instant::now())
+                }
+                "ended" => {
+                    terminal.set_detected_state_with_visible_blocker(
+                        Some(crate::detect::Agent::Claude),
+                        AgentState::Idle,
+                        false,
+                        false,
+                        true,
+                    );
+                }
+                "other-agent" => {
+                    terminal
+                        .set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Working);
+                }
+                "path-session" => {
+                    terminal.hook_authority.as_mut().unwrap().session_ref =
+                        crate::agent_resume::AgentSessionRef::path("session-1")
+                }
+                _ => {}
+            }
+            terminal
+                .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                    repo: Some("owner/current".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let response = app.handle_pane_bind_task_repo(
+                "identity".into(),
+                PaneBindTaskRepoParams {
+                    pane_id,
+                    expected_terminal_id: terminal_id.to_string(),
+                    expected_session_id: "session-1".into(),
+                    expected_host: app.state.agent_host_name.clone(),
+                    cwd: "/missing".into(),
+                    repo: "owner/repo".into(),
+                },
+            );
+            let response: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::PaneTaskRepoBinding { binding, .. } = response.result else {
+                panic!("binding result")
+            };
+            assert_eq!(
+                binding.status,
+                PaneTaskRepoBindingStatus::IdentityMismatch,
+                "case={case}"
+            );
+            assert_eq!(binding.repo.as_deref(), Some("owner/current"));
+        }
+    }
+
+    #[test]
+    fn bind_task_repo_handoff_rejects_lagging_cwd_refreshes() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let terminal_id =
+            bind_test_live_agent_session(&mut app, &pane_id, "herdr:claude", "claude", "session-1");
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let old_cwd = app.state.terminals[&terminal_id].cwd.clone();
+        let cwd = session_name_temp_dir("binding-handoff");
+        assert!(std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&cwd)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "config",
+                "remote.origin.url",
+                "https://github.com/owner/task.git"
+            ])
+            .current_dir(&cwd)
+            .status()
+            .unwrap()
+            .success());
+        app.test_begin_git_work_context_refresh(1);
+        let response = app.handle_pane_bind_task_repo(
+            "handoff".into(),
+            PaneBindTaskRepoParams {
+                pane_id,
+                expected_terminal_id: terminal_id.to_string(),
+                expected_session_id: "session-1".into(),
+                expected_host: app.state.agent_host_name.clone(),
+                cwd: cwd.to_string_lossy().into_owned(),
+                repo: "owner/task".into(),
+            },
+        );
+        let response: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneTaskRepoBinding { binding, .. } = response.result else {
+            panic!("binding result")
+        };
+        assert_eq!(binding.status, PaneTaskRepoBindingStatus::Bound);
+        for generation in 1..=3 {
+            app.test_begin_git_work_context_refresh(generation);
+            app.handle_git_work_context_refreshed(
+                generation,
+                vec![crate::app::work_context_git::GitWorkContextObservation {
+                    pane_id: internal_pane_id,
+                    input: crate::app::work_context_git::GitWorkContextInput {
+                        cwd: old_cwd.clone(),
+                        repo_root: Some(old_cwd.clone()),
+                        branch: None,
+                        repo: Some("owner/old".into()),
+                        origin_unparsed: false,
+                    },
+                    context: crate::work_context::PaneWorkContext {
+                        repo: Some("owner/old".into()),
+                        ..Default::default()
+                    },
+                }],
+                Vec::new(),
+            );
+            assert_eq!(
+                app.state.terminals[&terminal_id]
+                    .effective_work_context()
+                    .repo
+                    .as_deref(),
+                Some("owner/task"),
+                "generation={generation}"
+            );
+        }
+        // A subsequent human cwd change must supersede the handoff.
+        let human_cwd = cwd.join("human-checkout");
+        app.state.terminals.get_mut(&terminal_id).unwrap().cwd = human_cwd.clone();
+        app.test_begin_git_work_context_refresh(4);
+        app.handle_git_work_context_refreshed(
+            4,
+            vec![crate::app::work_context_git::GitWorkContextObservation {
+                pane_id: internal_pane_id,
+                input: crate::app::work_context_git::GitWorkContextInput {
+                    cwd: human_cwd.clone(),
+                    repo_root: Some(human_cwd),
+                    branch: None,
+                    repo: Some("owner/human".into()),
+                    origin_unparsed: false,
+                },
+                context: crate::work_context::PaneWorkContext {
+                    repo: Some("owner/human".into()),
+                    ..Default::default()
+                },
+            }],
+            Vec::new(),
+        );
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .effective_work_context()
+                .repo
+                .as_deref(),
+            Some("owner/human")
+        );
+        assert!(!app.task_repo_refresh_floors.contains_key(&internal_pane_id));
+        std::fs::remove_dir_all(cwd).unwrap();
+    }
+
+    #[test]
     fn bind_task_repo_handler_returns_effective_repo_to_existing_routing_consumer() {
         let (mut app, public_pane_id) = app_with_test_workspace();
-        let terminal_id = bind_test_agent_session(
+        let terminal_id = bind_test_live_agent_session(
             &mut app,
             &public_pane_id,
             "herdr:claude",
@@ -5022,6 +5212,149 @@ mod tests {
             Some("other/repo")
         );
         std::fs::remove_dir_all(cwd).expect("temporary git repository removed");
+    }
+
+    // The socket is an isolated fixture, but every request and response runs
+    // through the real CLI, JSON schema, App handler, and grouping consumer.
+    #[cfg(unix)]
+    #[test]
+    fn bind_task_repo_cli_json_handler_roundtrip() {
+        use std::io::{BufRead, Write};
+        use std::os::unix::net::UnixListener;
+        use std::process::{Command, Stdio};
+
+        let (mut app, pane_id) = app_with_test_workspace();
+        let terminal_id = bind_test_live_agent_session(
+            &mut app,
+            &pane_id,
+            "herdr:claude",
+            "claude",
+            "roundtrip-session",
+        );
+        let mut target = Workspace::test_new("owner/roundtrip");
+        target.repo_binding = Some("owner/roundtrip".into());
+        let target_idx = app.state.workspaces.len();
+        app.state.workspaces.push(target);
+        app.state.ensure_test_terminals();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = session_name_temp_dir(&format!("brt-{nonce}"));
+        assert!(Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "config",
+                "remote.origin.url",
+                "https://github.com/owner/roundtrip.git"
+            ])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        let socket = root.join("api.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let executable = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("herdr");
+        let mut child = Command::new(executable)
+            .args([
+                "pane",
+                "work-context",
+                "bind-task-repo",
+                &pane_id,
+                "--expected-terminal",
+                &terminal_id.to_string(),
+                "--expected-session",
+                "roundtrip-session",
+                "--expected-host",
+                &app.state.agent_host_name,
+                "--cwd",
+                root.to_str().unwrap(),
+                "--repo",
+                "owner/roundtrip",
+            ])
+            .env_remove("HERDR_SESSION")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_CLIENT_SOCKET_PATH")
+            .env_remove("HERDR_SOCKET_PATH")
+            .env("HERDR_SOCKET_PATH", &socket)
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env_remove("HERDR_CONFIG_PATH")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if child.try_wait().unwrap().is_some() {
+                        let output = child.wait_with_output().unwrap();
+                        panic!(
+                            "CLI exited before request: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                    }
+                    assert!(Instant::now() < deadline, "CLI request deadline");
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(error) => panic!("{error}"),
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: crate::api::schema::Request = serde_json::from_str(&line).unwrap();
+            let binding = matches!(
+                &request.method,
+                crate::api::schema::Method::PaneBindTaskRepo(_)
+            );
+            let response = if matches!(&request.method, crate::api::schema::Method::Ping(_)) {
+                // Ping belongs to the server transport rather than App.
+                serde_json::json!({"id": request.id, "result": {"type": "pong", "version": env!("CARGO_PKG_VERSION"), "protocol": crate::protocol::PROTOCOL_VERSION}}).to_string()
+            } else {
+                app.handle_api_request(request)
+            };
+            writeln!(stream, "{response}").unwrap();
+            if binding {
+                break;
+            }
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let response: SuccessResponse = serde_json::from_slice(&output.stdout).unwrap();
+        let ResponseResult::PaneTaskRepoBinding { binding, pane } = response.result else {
+            panic!("binding result")
+        };
+        assert_eq!(binding.status, PaneTaskRepoBindingStatus::Bound);
+        assert_eq!(binding.repo.as_deref(), Some("owner/roundtrip"));
+        assert_eq!(pane.unwrap().work_context.repo, binding.repo);
+        assert_eq!(
+            app.workspace_bound_to_repo(binding.repo.as_deref().unwrap()),
+            Some(target_idx)
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn bind_test_live_agent_session(
