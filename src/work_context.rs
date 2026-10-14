@@ -353,6 +353,13 @@ pub struct PaneWorkContextTiers {
     pub restored_fallback: PaneWorkContext,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GitObservationRepoUpdate {
+    Changed,
+    AlreadyBound,
+    ManualConflict,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PaneWorkContextField {
@@ -665,6 +672,26 @@ impl PaneWorkContextState {
         self.git_observation = context;
         self.recompute();
         Ok(true)
+    }
+
+    pub(crate) fn set_git_observation_repo(
+        &mut self,
+        repo: &str,
+    ) -> Result<GitObservationRepoUpdate, String> {
+        let repo = normalize_repo_slug(repo)?;
+        if let Some(manual_repo) = self.manual.repo.as_deref() {
+            return Ok(if repo_slugs_match(manual_repo, &repo) {
+                GitObservationRepoUpdate::AlreadyBound
+            } else {
+                GitObservationRepoUpdate::ManualConflict
+            });
+        }
+        if self.git_observation.repo.as_deref() == Some(repo.as_str()) {
+            return Ok(GitObservationRepoUpdate::AlreadyBound);
+        }
+        self.git_observation.repo = Some(repo);
+        self.recompute();
+        Ok(GitObservationRepoUpdate::Changed)
     }
 
     fn recompute(&mut self) {
@@ -1382,6 +1409,44 @@ pub fn linear_ticket_url(ticket: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_repo_binding_changes_only_git_repo_and_respects_manual_repo() {
+        let mut state = PaneWorkContextState::default();
+        state
+            .replace_git_observation(PaneWorkContext {
+                branch: Some("task-branch".into()),
+                ..Default::default()
+            })
+            .expect("valid observation");
+        assert_eq!(
+            state.set_git_observation_repo("owner/repo"),
+            Ok(GitObservationRepoUpdate::Changed)
+        );
+        let git = state.snapshot_tiers().git_observation;
+        assert_eq!(git.repo.as_deref(), Some("owner/repo"));
+        assert_eq!(git.branch.as_deref(), Some("task-branch"));
+        assert_eq!(
+            state.set_git_observation_repo("owner/repo"),
+            Ok(GitObservationRepoUpdate::AlreadyBound)
+        );
+
+        state
+            .apply_manual_patch(PaneWorkContextPatch {
+                repo: Some("owner/repo".into()),
+                ..Default::default()
+            })
+            .expect("valid manual binding");
+        assert_eq!(
+            state.set_git_observation_repo("owner/repo"),
+            Ok(GitObservationRepoUpdate::AlreadyBound)
+        );
+        assert_eq!(
+            state.set_git_observation_repo("other/repo"),
+            Ok(GitObservationRepoUpdate::ManualConflict)
+        );
+        assert_eq!(state.snapshot_tiers().git_observation, git);
+    }
 
     #[test]
     fn work_item_extraction_orders_unique_values_by_their_last_occurrence() {

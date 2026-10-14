@@ -926,7 +926,17 @@ fn pane_command() -> Command {
                         )
                         .arg(flag("active-owner").requires("role"))
                         .arg(repeatable_option("clear", "FIELD")),
-                ),
+                )
+                .subcommand(
+                    Command::new("bind-task-repo")
+                        .about("Bind a verified Claude task repository")
+                        .arg(required("pane_id", "PANE_ID"))
+                        .arg(option("expected-terminal", "TERMINAL_ID").required(true))
+                        .arg(option("expected-session", "CLAUDE_SESSION_ID").required(true))
+                        .arg(option("expected-host", "HOSTNAME").required(true))
+                        .arg(option("cwd", "ABSOLUTE_NATIVE_ROOT").required(true))
+                        .arg(option("repo", "OWNER/REPO").required(true)),
+                )
         )
         .subcommand(
             Command::new("input")

@@ -1,12 +1,13 @@
 use crate::api::schema::{
-    AgentSessionInfo, Method, OutputMatch, PaneCurrentParams, PaneDirection, PaneEdgesParams,
-    PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams, PaneListParams,
-    PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams, PaneReadParams,
-    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
-    PaneReportMetadataParams, PaneResizeParams, PaneRightClickTarget, PaneSendInputParams,
-    PaneSendKeysParams, PaneSendTextCondition, PaneSendTextIfParams, PaneSendTextParams,
-    PaneSplitParams, PaneSwapParams, PaneTarget, PaneWaitForOutputParams, PaneWorkContextSetParams,
-    PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request, SplitDirection,
+    AgentSessionInfo, Method, OutputMatch, PaneBindTaskRepoParams, PaneCurrentParams,
+    PaneDirection, PaneEdgesParams, PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams,
+    PaneListParams, PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams,
+    PaneReadParams, PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams,
+    PaneReportAgentSessionParams, PaneReportMetadataParams, PaneResizeParams, PaneRightClickTarget,
+    PaneSendInputParams, PaneSendKeysParams, PaneSendTextCondition, PaneSendTextIfParams,
+    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneWaitForOutputParams,
+    PaneWorkContextSetParams, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request,
+    SplitDirection,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -134,11 +135,64 @@ fn pane_work_context(args: &[String]) -> std::io::Result<i32> {
     match args.first().map(String::as_str) {
         Some("get") => pane_work_context_get(&args[1..]),
         Some("set") => pane_work_context_set(&args[1..]),
+        Some("bind-task-repo") => pane_bind_task_repo(&args[1..]),
         _ => {
-            eprintln!("usage: herdr pane work-context get|set ...");
+            eprintln!("usage: herdr pane work-context get|set|bind-task-repo ...");
             Ok(2)
         }
     }
+}
+
+fn pane_bind_task_repo(args: &[String]) -> std::io::Result<i32> {
+    let params = match parse_pane_bind_task_repo_args(args) {
+        Ok(params) => params,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+    super::print_response(&super::send_request(&Request {
+        id: "cli:pane:work_context:bind_task_repo".into(),
+        method: Method::PaneBindTaskRepo(params),
+    })?)
+}
+
+fn parse_pane_bind_task_repo_args(args: &[String]) -> Result<PaneBindTaskRepoParams, String> {
+    let Some(pane_id) = args.first() else {
+        return Err("usage: herdr pane work-context bind-task-repo <pane_id> --expected-terminal <terminal_id> --expected-session <claude_session_id> --expected-host <hostname> --cwd <absolute_native_root> --repo <owner/repo>".into());
+    };
+    let mut expected_terminal_id = None;
+    let mut expected_session_id = None;
+    let mut expected_host = None;
+    let mut cwd = None;
+    let mut repo = None;
+    let mut index = 1;
+    while index < args.len() {
+        let field = match args[index].as_str() {
+            "--expected-terminal" => &mut expected_terminal_id,
+            "--expected-session" => &mut expected_session_id,
+            "--expected-host" => &mut expected_host,
+            "--cwd" => &mut cwd,
+            "--repo" => &mut repo,
+            flag => return Err(format!("unknown option for bind-task-repo: {flag}")),
+        };
+        let flag = args[index].as_str();
+        let Some(value) = args.get(index + 1) else {
+            return Err(format!("missing value for {flag}"));
+        };
+        if field.replace(value.clone()).is_some() {
+            return Err(format!("repeated option for bind-task-repo: {flag}"));
+        }
+        index += 2;
+    }
+    Ok(PaneBindTaskRepoParams {
+        pane_id: super::normalize_pane_id(pane_id),
+        expected_terminal_id: expected_terminal_id.ok_or("missing --expected-terminal")?,
+        expected_session_id: expected_session_id.ok_or("missing --expected-session")?,
+        expected_host: expected_host.ok_or("missing --expected-host")?,
+        cwd: cwd.ok_or("missing --cwd")?,
+        repo: repo.ok_or("missing --repo")?,
+    })
 }
 
 fn pane_work_context_get(args: &[String]) -> std::io::Result<i32> {
@@ -2046,6 +2100,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane rename <pane_id> <label>|--clear");
     eprintln!("  herdr pane work-context get <pane_id>");
     eprintln!("  herdr pane work-context set <pane_id> [--ticket ID]... [--pr URL]... [--branch BRANCH] [--repo OWNER/REPO] [--title TITLE] [--role ROLE [--active-owner]] [--clear FIELD]...");
+    eprintln!("  herdr pane work-context bind-task-repo <pane_id> --expected-terminal <terminal_id> --expected-session <claude_session_id> --expected-host <hostname> --cwd <absolute_native_root> --repo <owner/repo>");
     eprintln!("  herdr pane read <pane_id> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!("  herdr pane input [<pane_id>|--pane ID|--current] --right-click herdr|pane");
     eprintln!(
@@ -2077,6 +2132,42 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn bind_task_repo_cli_builds_the_conditional_api_request() {
+        let params = parse_pane_bind_task_repo_args(&args(&[
+            "pane-1",
+            "--expected-terminal",
+            "terminal-1",
+            "--expected-session",
+            "claude-session-1",
+            "--expected-host",
+            "devbox.example.test",
+            "--cwd",
+            "/tmp/repo",
+            "--repo",
+            "owner/repo",
+        ]))
+        .expect("valid binding arguments");
+        let request = Request {
+            id: "cli:test".into(),
+            method: Method::PaneBindTaskRepo(params.clone()),
+        };
+        let json = serde_json::to_value(&request).expect("request serializes");
+        assert_eq!(json["method"], "pane.bind_task_repo");
+        assert_eq!(json["params"]["expected_session_id"], "claude-session-1");
+        assert_eq!(
+            serde_json::from_value::<Request>(json).expect("request deserializes"),
+            request
+        );
+        assert_eq!(params.pane_id, "pane-1");
+        assert!(parse_pane_bind_task_repo_args(&args(&[
+            "pane-1",
+            "--expected-terminal",
+            "terminal-1",
+        ]))
+        .is_err());
     }
 
     #[test]

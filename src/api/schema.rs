@@ -253,6 +253,8 @@ pub enum Method {
     PaneGroupSet(PaneGroupSetParams),
     #[serde(rename = "pane.work_context.set")]
     PaneWorkContextSet(PaneWorkContextSetParams),
+    #[serde(rename = "pane.bind_task_repo")]
+    PaneBindTaskRepo(PaneBindTaskRepoParams),
     #[serde(rename = "pane.send_text")]
     PaneSendText(PaneSendTextParams),
     #[serde(rename = "pane.send_text_if")]

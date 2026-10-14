@@ -204,6 +204,10 @@ pub enum ResponseResult {
     PaneInfo {
         pane: PaneInfo,
     },
+    PaneTaskRepoBinding {
+        binding: super::panes::PaneTaskRepoBinding,
+        pane: Option<PaneInfo>,
+    },
     PaneList {
         panes: Vec<PaneInfo>,
     },

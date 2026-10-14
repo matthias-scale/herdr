@@ -483,6 +483,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::PaneRename(_) => "pane.rename",
         Method::PaneGroupSet(_) => "pane.group.set",
         Method::PaneWorkContextSet(_) => "pane.work_context.set",
+        Method::PaneBindTaskRepo(_) => "pane.bind_task_repo",
         Method::PaneSendText(_) => "pane.send_text",
         Method::PaneSendTextIf(_) => "pane.send_text_if",
         Method::PaneSendKeys(_) => "pane.send_keys",

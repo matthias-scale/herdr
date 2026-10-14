@@ -211,6 +211,18 @@ impl App {
 
         let mut changed = false;
         for observation in observations {
+            if let Some((cwd, minimum_generation)) = self
+                .task_repo_refresh_floors
+                .get(&observation.pane_id)
+                .cloned()
+            {
+                if cwd == observation.input.cwd && generation < minimum_generation {
+                    continue;
+                }
+                if generation >= minimum_generation {
+                    self.task_repo_refresh_floors.remove(&observation.pane_id);
+                }
+            }
             let Some((ws_idx, terminal_id)) =
                 self.state
                     .workspaces
@@ -329,6 +341,8 @@ impl App {
             .map(|target| target.pane_id)
             .collect();
         self.git_work_context_inputs
+            .retain(|pane_id, _| active_panes.contains(pane_id));
+        self.task_repo_refresh_floors
             .retain(|pane_id, _| active_panes.contains(pane_id));
 
         let active_cwds: HashSet<_> = self
@@ -1793,6 +1807,56 @@ printf '%s\n' '[{"url":"https://github.com/o/r/pull/27","statusCheckRollup":[]}]
                 ..crate::work_context::PaneWorkContext::default()
             },
         }
+    }
+
+    #[test]
+    fn pre_binding_git_refresh_cannot_overwrite_verified_task_repo() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces = vec![crate::workspace::Workspace::test_new("binding-floor")];
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0]
+            .terminal_id(pane_id)
+            .cloned()
+            .expect("test pane terminal");
+        let cwd = app.state.terminals[&terminal_id].cwd.clone();
+        app.task_repo_refresh_floors
+            .insert(pane_id, (cwd.clone(), 2));
+
+        app.test_begin_git_work_context_refresh(1);
+        app.handle_git_work_context_refreshed(
+            1,
+            vec![repo_observation(pane_id, cwd.clone(), "owner/stale", "old")],
+            Vec::new(),
+        );
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .effective_work_context()
+                .repo,
+            None
+        );
+
+        app.test_begin_git_work_context_refresh(2);
+        app.handle_git_work_context_refreshed(
+            2,
+            vec![repo_observation(pane_id, cwd, "owner/fresh", "new")],
+            Vec::new(),
+        );
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .effective_work_context()
+                .repo
+                .as_deref(),
+            Some("owner/fresh")
+        );
+        assert!(!app.task_repo_refresh_floors.contains_key(&pane_id));
     }
 
     #[test]

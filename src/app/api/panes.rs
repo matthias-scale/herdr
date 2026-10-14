@@ -1,8 +1,10 @@
 use bytes::Bytes;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::api::schema::{
-    EventData, EventEnvelope, EventKind, PaneClearAgentAuthorityParams, PaneCurrentParams,
-    PaneDirection, PaneEdgesParams, PaneEdgesResult, PaneFocusDirectionParams,
+    EventData, EventEnvelope, EventKind, PaneBindTaskRepoParams, PaneClearAgentAuthorityParams,
+    PaneCurrentParams, PaneDirection, PaneEdgesParams, PaneEdgesResult, PaneFocusDirectionParams,
     PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo, PaneInputSetParams,
     PaneLayoutPane, PaneLayoutParams, PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit,
     PaneListParams, PaneMoveDestination, PaneMoveParams, PaneMoveReason, PaneMoveResult,
@@ -12,8 +14,9 @@ use crate::api::schema::{
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
     PaneSendInputParams, PaneSendKeysParams, PaneSendTextIfOutcome, PaneSendTextIfParams,
     PaneSendTextParams, PaneSnoozeParams, PaneSplitParams, PaneSwapParams, PaneSwapReason,
-    PaneSwapResult, PaneTarget, PaneWorkContextSetParams, PaneZoomMode, PaneZoomParams,
-    PaneZoomReason, PaneZoomResult, ResponseResult,
+    PaneSwapResult, PaneTarget, PaneTaskRepoBinding, PaneTaskRepoBindingStatus,
+    PaneWorkContextSetParams, PaneZoomMode, PaneZoomParams, PaneZoomReason, PaneZoomResult,
+    ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -29,6 +32,144 @@ use super::super::api_helpers::{
 #[cfg(test)]
 use super::super::api_helpers::{METADATA_SOURCE_MAX_CHARS, METADATA_TTL_MAX_MS};
 use super::responses::{encode_error, encode_success};
+
+fn task_repo_hosts_match(current: &str, expected: &str) -> bool {
+    let current = current.trim_end_matches('.').to_ascii_lowercase();
+    let expected = expected.trim_end_matches('.').to_ascii_lowercase();
+    if current == expected {
+        return true;
+    }
+    match (current.split_once('.'), expected.split_once('.')) {
+        (None, Some((expected_short, _))) => current == expected_short,
+        (Some((current_short, _)), None) => current_short == expected,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn task_repo_host_comparison_allows_only_short_and_fully_qualified_equivalence() {
+    assert!(task_repo_hosts_match("devbox", "devbox.example.test"));
+    assert!(task_repo_hosts_match("devbox.example.test", "devbox"));
+    assert!(!task_repo_hosts_match("devbox.one.test", "devbox.two.test"));
+    assert!(!task_repo_hosts_match("devbox", "devbox-2.example.test"));
+}
+
+fn discover_task_repo(cwd: &Path) -> Option<String> {
+    if !cwd.is_absolute() {
+        return None;
+    }
+    let cwd = std::fs::canonicalize(cwd).ok()?;
+    if !cwd.is_dir() {
+        return None;
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut root_command = crate::noninteractive_process::command("git");
+    root_command
+        .arg("-C")
+        .arg(&cwd)
+        .args(["rev-parse", "--show-toplevel"]);
+    let root_output =
+        crate::noninteractive_process::output_with_deadline(root_command, deadline).ok()?;
+    if !root_output.status.success() {
+        return None;
+    }
+    let root = std::str::from_utf8(&root_output.stdout).ok()?.trim();
+    let root = std::fs::canonicalize(root).ok()?;
+    if !cwd.starts_with(&root) {
+        return None;
+    }
+    let mut origin_command = crate::noninteractive_process::command("git");
+    origin_command
+        .arg("-C")
+        .arg(&cwd)
+        .args(["config", "--local", "--get", "remote.origin.url"]);
+    let origin_output =
+        crate::noninteractive_process::output_with_deadline(origin_command, deadline).ok()?;
+    if !origin_output.status.success() {
+        return None;
+    }
+    let origin = std::str::from_utf8(&origin_output.stdout).ok()?.trim();
+    crate::work_context::normalize_repo_slug(origin).ok()
+}
+
+#[cfg(test)]
+#[test]
+fn task_repo_discovery_handles_common_worktree_origin_and_missing_origin() {
+    let root = std::env::temp_dir().join(format!(
+        "herdr-task-repo-discovery-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).expect("temp root created");
+    let repository = root.join("repository");
+    let worktree = root.join("worktree");
+    std::fs::create_dir(&repository).expect("repository directory created");
+    let run_git = |directory: &Path, args: &[&str]| {
+        let result = std::process::Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .status()
+            .expect("git command starts");
+        assert!(result.success(), "git command failed: {args:?}");
+    };
+    run_git(&repository, &["init", "--quiet"]);
+    run_git(
+        &repository,
+        &["config", "user.email", "test@example.invalid"],
+    );
+    run_git(&repository, &["config", "user.name", "Test"]);
+    std::fs::write(repository.join("README"), "task\n").expect("file written");
+    run_git(&repository, &["add", "README"]);
+    run_git(&repository, &["commit", "--quiet", "-m", "initial"]);
+    run_git(
+        &repository,
+        &[
+            "config",
+            "remote.origin.url",
+            "https://github.com/owner/repo.git",
+        ],
+    );
+    run_git(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "task",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        discover_task_repo(&repository).as_deref(),
+        Some("owner/repo")
+    );
+    assert_eq!(discover_task_repo(&worktree).as_deref(), Some("owner/repo"));
+    let missing = root.join("missing-origin");
+    std::fs::create_dir(&missing).expect("missing-origin directory created");
+    run_git(&missing, &["init", "--quiet"]);
+    assert_eq!(discover_task_repo(&missing), None);
+    std::fs::remove_dir_all(root).expect("temporary git repositories removed");
+}
+
+fn task_repo_binding_response(
+    id: String,
+    status: PaneTaskRepoBindingStatus,
+    repo: Option<String>,
+    pane: Option<PaneInfo>,
+) -> String {
+    encode_success(
+        id,
+        ResponseResult::PaneTaskRepoBinding {
+            binding: PaneTaskRepoBinding { status, repo },
+            pane,
+        },
+    )
+}
 
 #[derive(Debug)]
 pub(crate) enum PaneSendError {
@@ -1481,6 +1622,138 @@ impl App {
             return pane_not_found(id, &params.pane_id);
         };
         encode_success(id, ResponseResult::PaneInfo { pane })
+    }
+
+    pub(super) fn handle_pane_bind_task_repo(
+        &mut self,
+        id: String,
+        params: PaneBindTaskRepoParams,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(terminal_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.terminal_id(pane_id))
+            .cloned()
+        else {
+            return pane_not_found(id, &params.pane_id);
+        };
+
+        let identity_matches = |app: &App| {
+            let Some(current_terminal_id) = app
+                .state
+                .workspaces
+                .get(ws_idx)
+                .and_then(|workspace| workspace.terminal_id(pane_id))
+            else {
+                return false;
+            };
+            let Some(pane) = app.pane_info(ws_idx, pane_id) else {
+                return false;
+            };
+            current_terminal_id == &terminal_id
+                && current_terminal_id.to_string() == params.expected_terminal_id
+                && task_repo_hosts_match(&app.state.agent_host_name, &params.expected_host)
+                && pane.agent_session.is_some_and(|session| {
+                    session.agent.eq_ignore_ascii_case("claude")
+                        && session.kind == crate::agent_resume::AgentSessionRefKind::Id
+                        && session.value == params.expected_session_id
+                })
+        };
+        if !identity_matches(self) {
+            return task_repo_binding_response(
+                id,
+                PaneTaskRepoBindingStatus::IdentityMismatch,
+                None,
+                self.pane_info(ws_idx, pane_id),
+            );
+        }
+
+        let requested_repo = match crate::work_context::normalize_repo_slug(&params.repo) {
+            Ok(repo) => repo,
+            Err(_) => {
+                return task_repo_binding_response(
+                    id,
+                    PaneTaskRepoBindingStatus::RepoMismatch,
+                    None,
+                    self.pane_info(ws_idx, pane_id),
+                );
+            }
+        };
+        let cwd = std::path::Path::new(&params.cwd);
+        let Some(discovered_repo) = discover_task_repo(cwd) else {
+            return task_repo_binding_response(
+                id,
+                PaneTaskRepoBindingStatus::Unavailable,
+                None,
+                self.pane_info(ws_idx, pane_id),
+            );
+        };
+        if !crate::work_context::repo_slugs_match(&requested_repo, &discovered_repo) {
+            return task_repo_binding_response(
+                id,
+                PaneTaskRepoBindingStatus::RepoMismatch,
+                None,
+                self.pane_info(ws_idx, pane_id),
+            );
+        }
+
+        if !identity_matches(self) {
+            return task_repo_binding_response(
+                id,
+                PaneTaskRepoBindingStatus::IdentityMismatch,
+                None,
+                self.pane_info(ws_idx, pane_id),
+            );
+        }
+        let update = match self
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .map(|terminal| terminal.bind_git_observed_repo(&discovered_repo))
+        {
+            Some(Ok(update)) => update,
+            _ => {
+                return task_repo_binding_response(
+                    id,
+                    PaneTaskRepoBindingStatus::Unavailable,
+                    None,
+                    self.pane_info(ws_idx, pane_id),
+                );
+            }
+        };
+        let status = match update {
+            crate::work_context::GitObservationRepoUpdate::Changed => {
+                self.task_repo_refresh_floors.insert(
+                    pane_id,
+                    (
+                        Path::new(&params.cwd).to_path_buf(),
+                        self.last_git_work_context_refresh_generation
+                            .saturating_add(1),
+                    ),
+                );
+                self.request_git_work_context_refresh(Instant::now());
+                self.state.mark_session_dirty();
+                self.emit_pane_updated(ws_idx, pane_id);
+                self.route_pane_to_bound_workspace(ws_idx, pane_id);
+                PaneTaskRepoBindingStatus::Bound
+            }
+            crate::work_context::GitObservationRepoUpdate::AlreadyBound => {
+                PaneTaskRepoBindingStatus::AlreadyBound
+            }
+            crate::work_context::GitObservationRepoUpdate::ManualConflict => {
+                PaneTaskRepoBindingStatus::ManualConflict
+            }
+        };
+        let final_ws_idx = self.workspace_index_for_pane(pane_id).unwrap_or(ws_idx);
+        let pane = self.pane_info(final_ws_idx, pane_id);
+        let effective_repo = pane
+            .as_ref()
+            .and_then(|pane| pane.work_context.repo.clone());
+        task_repo_binding_response(id, status, effective_repo, pane)
     }
 
     pub(super) fn handle_pane_read(&mut self, id: String, params: PaneReadParams) -> String {
@@ -4599,6 +4872,156 @@ mod tests {
                 session_ref: crate::agent_resume::AgentSessionRef::id(session_id).unwrap(),
             });
         terminal_id
+    }
+
+    #[test]
+    fn bind_task_repo_handler_returns_effective_repo_to_existing_routing_consumer() {
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        let terminal_id = bind_test_agent_session(
+            &mut app,
+            &public_pane_id,
+            "herdr:claude",
+            "claude",
+            "session-1",
+        );
+        let target_idx = app.state.workspaces.len();
+        let mut target = Workspace::test_new("owner/repo");
+        target.repo_binding = Some("owner/repo".into());
+        app.state.workspaces.push(target);
+        app.state.ensure_test_terminals();
+
+        let cwd = session_name_temp_dir("task-repo-binding");
+        let init = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&cwd)
+            .status()
+            .expect("git init starts");
+        assert!(init.success());
+        let origin = std::process::Command::new("git")
+            .args([
+                "config",
+                "remote.origin.url",
+                "https://github.com/owner/repo.git",
+            ])
+            .current_dir(&cwd)
+            .status()
+            .expect("git config starts");
+        assert!(origin.success());
+
+        let expected_host = app.state.agent_host_name.clone();
+        let binding_params =
+            |expected_terminal_id: String, expected_session_id: &str, repo: &str| {
+                PaneBindTaskRepoParams {
+                    pane_id: public_pane_id.clone(),
+                    expected_terminal_id,
+                    expected_session_id: expected_session_id.into(),
+                    expected_host: expected_host.clone(),
+                    cwd: cwd.to_string_lossy().into_owned(),
+                    repo: repo.into(),
+                }
+            };
+        let send_binding = |app: &mut App, id: &str, params: PaneBindTaskRepoParams| {
+            app.handle_api_request(crate::api::schema::Request {
+                id: id.into(),
+                method: crate::api::schema::Method::PaneBindTaskRepo(params),
+            })
+        };
+        let mismatched = send_binding(
+            &mut app,
+            "stale",
+            binding_params("stale-terminal".into(), "session-1", "owner/repo"),
+        );
+        let mismatched: SuccessResponse = serde_json::from_str(&mismatched).unwrap();
+        let ResponseResult::PaneTaskRepoBinding { binding, .. } = mismatched.result else {
+            panic!("expected task-repo binding result");
+        };
+        assert_eq!(binding.status, PaneTaskRepoBindingStatus::IdentityMismatch);
+        let mut wrong_host = binding_params(terminal_id.to_string(), "session-1", "owner/repo");
+        wrong_host.expected_host = "other-host.example.test".into();
+        let wrong_host = send_binding(&mut app, "wrong-host", wrong_host);
+        let wrong_host: SuccessResponse = serde_json::from_str(&wrong_host).unwrap();
+        let ResponseResult::PaneTaskRepoBinding { binding, .. } = wrong_host.result else {
+            panic!("expected task-repo binding result");
+        };
+        assert_eq!(binding.status, PaneTaskRepoBindingStatus::IdentityMismatch);
+        let wrong_session = send_binding(
+            &mut app,
+            "stale-session",
+            binding_params(terminal_id.to_string(), "missing-session", "owner/repo"),
+        );
+        let wrong_session: SuccessResponse = serde_json::from_str(&wrong_session).unwrap();
+        let ResponseResult::PaneTaskRepoBinding { binding, .. } = wrong_session.result else {
+            panic!("expected task-repo binding result");
+        };
+        assert_eq!(binding.status, PaneTaskRepoBindingStatus::IdentityMismatch);
+
+        let response = send_binding(
+            &mut app,
+            "binding",
+            binding_params(terminal_id.to_string(), "session-1", "other/repo"),
+        );
+        let mismatch: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneTaskRepoBinding { binding, .. } = mismatch.result else {
+            panic!("expected task-repo binding result");
+        };
+        assert_eq!(binding.status, PaneTaskRepoBindingStatus::RepoMismatch);
+
+        let response = send_binding(
+            &mut app,
+            "binding",
+            binding_params(terminal_id.to_string(), "session-1", "owner/repo"),
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).expect("handler succeeds");
+        let ResponseResult::PaneTaskRepoBinding { binding, pane } = success.result else {
+            panic!("expected task-repo binding result");
+        };
+        assert_eq!(binding.status, PaneTaskRepoBindingStatus::Bound);
+        assert_eq!(binding.repo.as_deref(), Some("owner/repo"));
+        assert_eq!(
+            pane.expect("pane returned").work_context.repo.as_deref(),
+            Some("owner/repo")
+        );
+        assert_eq!(
+            app.workspace_bound_to_repo(binding.repo.as_deref().unwrap()),
+            Some(target_idx)
+        );
+        let replay = send_binding(
+            &mut app,
+            "replay",
+            binding_params(terminal_id.to_string(), "session-1", "owner/repo"),
+        );
+        let replay: SuccessResponse = serde_json::from_str(&replay).unwrap();
+        let ResponseResult::PaneTaskRepoBinding { binding, .. } = replay.result else {
+            panic!("expected task-repo binding result");
+        };
+        assert_eq!(binding.status, PaneTaskRepoBindingStatus::AlreadyBound);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .apply_manual_work_context_patch(crate::work_context::PaneWorkContextPatch {
+                repo: Some("other/repo".into()),
+                ..Default::default()
+            })
+            .expect("manual repo binding applies");
+        let conflict = send_binding(
+            &mut app,
+            "conflict",
+            binding_params(terminal_id.to_string(), "session-1", "owner/repo"),
+        );
+        let conflict: SuccessResponse = serde_json::from_str(&conflict).unwrap();
+        let ResponseResult::PaneTaskRepoBinding { binding, .. } = conflict.result else {
+            panic!("expected task-repo binding result");
+        };
+        assert_eq!(binding.status, PaneTaskRepoBindingStatus::ManualConflict);
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .effective_work_context()
+                .repo
+                .as_deref(),
+            Some("other/repo")
+        );
+        std::fs::remove_dir_all(cwd).expect("temporary git repository removed");
     }
 
     fn bind_test_live_agent_session(

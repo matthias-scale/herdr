@@ -42,6 +42,7 @@ The socket API can:
 - list, inspect, split, swap, focus, resize, rename, read, close, and send input to panes
 - list, inspect, read, prompt, wait on, rename, focus, start, and attach agents through CLI helpers
 - report custom agent state from hooks and plugins
+- bind a Claude pane to a task repository after verifying pane, terminal, session, host, cwd, and GitHub origin
 - subscribe to events and wait for output or state changes
 - install and uninstall built-in integrations
 - stop the server and reload config
@@ -103,7 +104,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.work_context.set`, `pane.bind_task_repo`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.state`, `agent.report`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.focus.status`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -115,6 +116,14 @@ Raw socket method names use dot notation:
 `agent.wait` is server-owned and event-driven. It pins the resolved pane occupant so a replacement cannot satisfy the wait. `agent.prompt` accepts an optional `wait` object with `until` and `timeout_ms`; this submits the prompt and starts the wait in one request, avoiding a race between separate calls. If the resolved agent is already `blocked`, `agent.prompt` returns `agent_blocked` without sending input or starting the wait.
 
 `workspace.move_block` atomically moves the ordered `workspace_ids` before `before_workspace_id`; omit the anchor to move the block to the end. The ids must be unique and the anchor cannot be part of the block. The response contains the authoritative ordered workspace list.
+
+`pane.bind_task_repo` is a conditional Git observation, not a manual work-context edit. It requires the expected terminal, current Claude session id, host, absolute native cwd, and `owner/repo`. The server checks the pane identity before and after bounded Git discovery, verifies the canonical `origin`, and writes only the low-priority Git observation tier. A differing manual repository remains authoritative. The result is `result.binding.status` (`bound`, `already_bound`, `manual_conflict`, `identity_mismatch`, `repo_mismatch`, or `unavailable`), the effective `result.binding.repo`, and the current pane when available. An older server that does not recognize this method returns an error; callers must not fall back to `pane.work_context.set`.
+
+The CLI equivalent is:
+
+```bash
+herdr pane work-context bind-task-repo <pane_id> --expected-terminal <terminal_id> --expected-session <claude_session_id> --expected-host <hostname> --cwd <absolute_native_root> --repo <owner/repo>
+```
 
 `session.snapshot` returns a one-time bootstrap snapshot for clients that keep
 their own local runtime cache. The response includes version/protocol metadata,

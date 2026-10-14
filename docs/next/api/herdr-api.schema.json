@@ -4157,6 +4157,37 @@
           ],
           "type": "string"
         },
+        "PaneBindTaskRepoParams": {
+          "properties": {
+            "cwd": {
+              "type": "string"
+            },
+            "expected_host": {
+              "type": "string"
+            },
+            "expected_session_id": {
+              "type": "string"
+            },
+            "expected_terminal_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "expected_terminal_id",
+            "expected_session_id",
+            "expected_host",
+            "cwd",
+            "repo"
+          ],
+          "type": "object"
+        },
         "PaneClearAgentAuthorityParams": {
           "properties": {
             "pane_id": {
@@ -8509,6 +8540,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneWorkContextSetParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.bind_task_repo",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneBindTaskRepoParams"
             }
           },
           "required": [
@@ -13885,6 +13932,34 @@
           ],
           "type": "object"
         },
+        "PaneTaskRepoBinding": {
+          "properties": {
+            "repo": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/PaneTaskRepoBindingStatus"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        "PaneTaskRepoBindingStatus": {
+          "enum": [
+            "bound",
+            "already_bound",
+            "manual_conflict",
+            "identity_mismatch",
+            "repo_mismatch",
+            "unavailable"
+          ],
+          "type": "string"
+        },
         "PaneTextPoint": {
           "properties": {
             "col": {
@@ -15609,6 +15684,32 @@
               "required": [
                 "type",
                 "pane"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "binding": {
+                  "$ref": "#/schemas/success_response/$defs/PaneTaskRepoBinding"
+                },
+                "pane": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/PaneInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": {
+                  "const": "pane_task_repo_binding",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "binding"
               ],
               "type": "object"
             },

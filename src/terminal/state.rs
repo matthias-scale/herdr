@@ -2110,6 +2110,17 @@ impl TerminalState {
         Ok(changed)
     }
 
+    pub(crate) fn bind_git_observed_repo(
+        &mut self,
+        repo: &str,
+    ) -> Result<crate::work_context::GitObservationRepoUpdate, String> {
+        let outcome = self.work_context.set_git_observation_repo(repo)?;
+        if outcome == crate::work_context::GitObservationRepoUpdate::Changed {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        Ok(outcome)
+    }
+
     pub(crate) fn set_inferred_pr_url(&mut self, url: String) -> Result<bool, String> {
         let mut context = self.work_context.snapshot_tiers().git_observation;
         context.set_inferred_pr_url(url)?;

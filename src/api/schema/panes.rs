@@ -275,6 +275,33 @@ pub struct PaneWorkContextSetParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneBindTaskRepoParams {
+    pub pane_id: String,
+    pub expected_terminal_id: String,
+    pub expected_session_id: String,
+    pub expected_host: String,
+    pub cwd: String,
+    pub repo: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneTaskRepoBindingStatus {
+    Bound,
+    AlreadyBound,
+    ManualConflict,
+    IdentityMismatch,
+    RepoMismatch,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneTaskRepoBinding {
+    pub status: PaneTaskRepoBindingStatus,
+    pub repo: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneSendTextParams {
     pub pane_id: String,
     pub text: String,

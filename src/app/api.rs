@@ -92,6 +92,7 @@ impl App {
             Method::PaneRename(params) => Some(params.pane_id.as_str()),
             Method::PaneGroupSet(params) => Some(params.pane_id.as_str()),
             Method::PaneWorkContextSet(params) => Some(params.pane_id.as_str()),
+            Method::PaneBindTaskRepo(params) => Some(params.pane_id.as_str()),
             Method::PaneSnooze(params) => Some(params.pane_id.as_str()),
             Method::PaneSplit(params) | Method::PaneSplitCompanion(params) => {
                 params.target_pane_id.as_deref()
@@ -2592,6 +2593,9 @@ impl App {
             Method::PaneGroupSet(params) => return self.handle_pane_group_set(request.id, params),
             Method::PaneWorkContextSet(params) => {
                 return self.handle_pane_work_context_set(request.id, params);
+            }
+            Method::PaneBindTaskRepo(params) => {
+                return self.handle_pane_bind_task_repo(request.id, params);
             }
             Method::PaneRead(params) => return self.handle_pane_read(request.id, params),
             Method::PaneGraphicsSet(params) => {

@@ -304,6 +304,7 @@ pub struct App {
     >,
     pub(crate) git_work_context_inputs:
         HashMap<crate::layout::PaneId, work_context_git::GitWorkContextInput>,
+    pub(crate) task_repo_refresh_floors: HashMap<crate::layout::PaneId, (std::path::PathBuf, u64)>,
     pub(crate) work_index_config: crate::config::WorkIndexConfig,
     pub(crate) missive_config: crate::config::MissiveConfig,
     pub(crate) work_index_refresh_in_flight: Option<crate::work_index::WorkIndexRefreshInFlight>,
@@ -1834,6 +1835,7 @@ impl App {
             next_git_work_context_refresh: Instant::now(),
             git_work_context_cache: HashMap::new(),
             git_work_context_inputs: HashMap::new(),
+            task_repo_refresh_floors: HashMap::new(),
             work_index_config: config.work_index.clone(),
             missive_config: config.missive.clone(),
             work_index_refresh_in_flight: None,
