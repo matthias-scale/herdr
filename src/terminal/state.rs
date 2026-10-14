@@ -2431,13 +2431,16 @@ impl TerminalState {
             self.transcript_turn_last_at
                 .is_none_or(|previous| last_at > previous)
         });
-        if sequence != self.transcript_turn_sequence {
+        let sequence_changed = sequence != self.transcript_turn_sequence;
+        let started_working = state == Some(AgentState::Working)
+            && self.transcript_turn_state != Some(AgentState::Working);
+        if sequence_changed {
             self.transcript_turn_sequence = sequence;
             self.transcript_turn_flips.clear();
         }
         self.transcript_turn_state = state;
         self.transcript_turn_last_at = last_at;
-        if state == Some(AgentState::Working) || last_at_advanced {
+        if last_at_advanced || started_working || sequence_changed {
             self.transcript_turn_observed_at = Some(now);
         }
         if state == Some(AgentState::Idle) && last_at.is_none() {
@@ -9258,6 +9261,87 @@ mod tests {
             )
             .is_some());
         assert!(terminal.supervisor_stale);
+    }
+
+    #[test]
+    fn repeated_working_polls_do_not_refresh_a_stale_transcript_anchor() {
+        let now = Instant::now();
+        let turn_started_at = now - Duration::from_secs(25 * 60);
+        let last_at = SystemTime::now() - Duration::from_secs(25 * 60);
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.unreported_turn_started_at = Some(turn_started_at);
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Working),
+            Some(last_at),
+            1,
+            turn_started_at,
+        );
+
+        for _ in 0..5 {
+            terminal.set_transcript_turn_state(Some(AgentState::Working), Some(last_at), 1, now);
+        }
+
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            ),
+            turn_started_at.checked_add(AGENT_BUSY_STALE_SILENCE)
+        );
+        assert!(terminal
+            .mark_agent_status_stale_at_with_activity(
+                now,
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            )
+            .is_some());
+        assert!(terminal.supervisor_stale);
+    }
+
+    #[test]
+    fn repeated_working_polls_keep_a_recent_transcript_row_fresh() {
+        let now = Instant::now();
+        let turn_started_at = now - Duration::from_secs(25 * 60);
+        let old_last_at = SystemTime::now() - Duration::from_secs(25 * 60);
+        let recent_last_at = SystemTime::now() - Duration::from_secs(60);
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.unreported_turn_started_at = Some(turn_started_at);
+        terminal.set_transcript_turn_state(
+            Some(AgentState::Working),
+            Some(old_last_at),
+            1,
+            turn_started_at,
+        );
+
+        for _ in 0..5 {
+            terminal.set_transcript_turn_state(
+                Some(AgentState::Working),
+                Some(recent_last_at),
+                1,
+                now,
+            );
+        }
+
+        assert_eq!(
+            terminal.agent_status_watchdog_deadline_with_activity(
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            ),
+            now.checked_add(AGENT_BUSY_STALE_SILENCE)
+        );
+        assert!(terminal
+            .mark_agent_status_stale_at_with_activity(
+                now,
+                TEST_AGENT_STALE_AFTER,
+                TEST_SUBAGENT_STALE_AFTER,
+                None,
+            )
+            .is_none());
     }
 
     #[test]
