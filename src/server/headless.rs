@@ -24662,4 +24662,72 @@ next_tab = ""
             bypass_lines.join("\n  ")
         );
     }
+
+    #[test]
+    fn process_bound_headless_requests_clear_peer_between_reports_and_early_returns() {
+        let mut server = test_headless_server();
+        server.app.state.workspaces = vec![
+            crate::workspace::Workspace::test_new("a"),
+            crate::workspace::Workspace::test_new("b"),
+        ];
+        server.app.state.ensure_test_terminals();
+        let (inspector, peer) = crate::app::task_identity::tests::fixture();
+        server.app.task_process_identity.inspector = inspector;
+        let mut ids = Vec::new();
+        for index in 0..2 {
+            let pane = server.app.state.workspaces[index].tabs[0].root_pane;
+            let id = server.app.state.workspaces[index]
+                .terminal_id(pane)
+                .unwrap()
+                .clone();
+            server
+                .app
+                .state
+                .terminals
+                .get_mut(&id)
+                .unwrap()
+                .set_detected_state(
+                    Some(crate::detect::Agent::Claude),
+                    crate::detect::AgentState::Working,
+                );
+            ids.push((server.app.public_pane_id(index, pane).unwrap(), id));
+        }
+        for (index, (pane, _)) in ids.iter().enumerate() {
+            let (respond_to, response) = std::sync::mpsc::channel();
+            server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                peer_process: (index == 0).then(|| peer.clone()),
+                request: serde_json::from_value(serde_json::json!({
+                    "id":"startup", "method":"pane.report_agent_session", "params":{
+                        "pane_id":pane, "source":"herdr:claude", "agent":"claude",
+                        "agent_session_id":format!("native-{index}"), "session_start_source":"startup", "seq":1
+                    }
+                })).unwrap(),
+                respond_to,
+                response_write_complete: None,
+                stream_active: None,
+            });
+            let _: api::schema::SuccessResponse =
+                serde_json::from_str(&response.recv().unwrap()).unwrap();
+            assert!(server.app.api_peer_process.is_none());
+        }
+        assert!(server
+            .app
+            .task_session_identity_matches(&ids[0].1, "native-0"));
+        assert!(!server
+            .app
+            .task_session_identity_matches(&ids[1].1, "native-1"));
+        let (respond_to, response) = std::sync::mpsc::channel();
+        server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            peer_process: Some(peer),
+            request: api::schema::Request {
+                id: "early".into(),
+                method: api::schema::Method::ClientWindowTitleClear(Default::default()),
+            },
+            respond_to,
+            response_write_complete: None,
+            stream_active: None,
+        });
+        response.recv().unwrap();
+        assert!(server.app.api_peer_process.is_none());
+    }
 }

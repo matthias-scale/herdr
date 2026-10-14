@@ -1073,6 +1073,63 @@ mod tests {
         (client, server, path)
     }
 
+    #[test]
+    fn process_bound_native_socket_captures_kernel_peer_not_json_pid() {
+        static NEXT_SOCKET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "hp-{}-{}.sock",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        ));
+        let listener = bind_local_listener(&path).unwrap();
+        let mut client = crate::ipc::connect_local_stream(&path).unwrap();
+        let server_stream = listener.accept().unwrap();
+        set_local_stream_polling(&mut client, true).unwrap();
+        let (api_tx, mut api_rx) = mpsc::unbounded_channel();
+        let event_hub = EventHub::default();
+        let running = Arc::new(AtomicBool::new(true));
+        let worker = std::thread::spawn({
+            let running = Arc::clone(&running);
+            move || handle_connection(server_stream, &api_tx, &event_hub, &running, None)
+        });
+
+        writeln!(
+            client,
+            r#"{{"id":"peer","method":"pane.get","params":{{"pane_id":"w1:p1","pid":1}}}}"#
+        )
+        .unwrap();
+        let request = api_rx.blocking_recv().expect("app request");
+        let peer = request
+            .peer_process
+            .as_ref()
+            .expect("kernel peer identity must be captured");
+        let current = crate::platform::process_identity(std::process::id())
+            .expect("current process identity must be available");
+        assert_eq!(peer.pid, current.pid);
+        assert_eq!(peer.birth, current.birth);
+        assert_ne!(peer.pid, 1, "JSON pid must not become peer identity");
+        request
+            .respond_to
+            .send(
+                serde_json::to_string(&SuccessResponse {
+                    id: request.request.id,
+                    result: ResponseResult::Ok {},
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let response = read_json_line_until(
+            &mut client,
+            &mut Vec::new(),
+            Instant::now() + Duration::from_secs(2),
+        );
+        assert_eq!(response["id"], "peer");
+        running.store(false, Ordering::Relaxed);
+        drop(client);
+        worker.join().unwrap().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
     fn pane_info(
         pane_id: &str,
         agent_status: crate::api::schema::AgentStatus,
