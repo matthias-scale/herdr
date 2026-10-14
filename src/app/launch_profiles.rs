@@ -40,6 +40,16 @@ impl QuotaSource {
         snapshot.primary_usage(provider)
     }
 
+    pub(crate) fn provider(self) -> crate::provider_usage::QuotaProvider {
+        use crate::provider_usage::QuotaProvider;
+        match self {
+            Self::Claude => QuotaProvider::Claude,
+            Self::Codex => QuotaProvider::Codex,
+            Self::Kimi => QuotaProvider::Kimi,
+            Self::Agy => QuotaProvider::Agy,
+        }
+    }
+
     fn parse(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "claude" | "claude_code" | "claude-code" => Some(Self::Claude),

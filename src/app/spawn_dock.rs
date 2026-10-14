@@ -110,6 +110,7 @@ impl SpawnDockState {
         {
             home.set_profile(&draft.profile);
         }
+        home.restore_account_selection(draft.account_selection);
         if home
             .model_options()
             .iter()
@@ -165,6 +166,7 @@ impl SpawnDockState {
                     .unwrap_or_default()
             },
             profile: self.home.profile_id().to_string(),
+            account_selection: self.home.account_selection.clone(),
             model: self.home.model.clone(),
             effort: self.home.effort.clone(),
             worktree,
@@ -174,6 +176,13 @@ impl SpawnDockState {
     }
 
     pub(crate) fn insert_text(&mut self, text: &str) {
+        if self.home.account_picker.active {
+            for ch in text.chars().filter(|ch| !ch.is_control()) {
+                self.home
+                    .account_picker_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+            }
+            return;
+        }
         if self.picker.is_some() {
             let text: String = text
                 .chars()
@@ -202,6 +211,11 @@ impl SpawnDockState {
         event: KeyEvent,
         _auto_host: Option<&str>,
     ) -> SpawnDockAction {
+        if self.home.account_picker.active {
+            self.home.account_picker_key(event);
+            self.picker = self.home.picker;
+            return SpawnDockAction::Consumed;
+        }
         let shift = event.modifiers.contains(KeyModifiers::SHIFT);
         if event.code == KeyCode::Backspace && event.modifiers == KeyModifiers::CONTROL {
             return SpawnDockAction::Clear;
@@ -229,6 +243,9 @@ impl SpawnDockState {
             KeyCode::Enter => {
                 if let Some(picker) = self.focus.picker() {
                     self.picker = Some(picker);
+                    if matches!(picker, HomePicker::Agent | HomePicker::Model) {
+                        self.home.open_account_picker(picker);
+                    }
                     self.filter.clear();
                     self.home.picker_selected = 0;
                 }
@@ -277,6 +294,15 @@ impl SpawnDockState {
                 SpawnDockAction::Consumed
             }
             _ => SpawnDockAction::Consumed,
+        }
+    }
+
+    pub(crate) fn open_picker_for_focus(&mut self) {
+        if let Some(picker) = self.focus.picker() {
+            self.picker = Some(picker);
+            if matches!(picker, HomePicker::Agent | HomePicker::Model) {
+                self.home.open_account_picker(picker);
+            }
         }
     }
 
@@ -614,7 +640,98 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::detect::Agent;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn account_picker_spawn_draft_preserves_explicit_identity_and_refuses_missing_binding() {
+        let mut home = HomeState::default();
+        home.set_profiles(vec![super::super::launch_profiles::LaunchProfile::builtin(
+            Agent::Codex,
+        )]);
+        home.set_profile("codex");
+        home.prompt = "task".into();
+        home.account_picker.bindings = vec![(
+            crate::provider_usage::QuotaProvider::Codex,
+            "id".into(),
+            "/fixture/account".into(),
+        )];
+        home.account_selection = Some(super::super::account_picker::AccountSelection {
+            profile: "codex".into(),
+            provider: crate::provider_usage::QuotaProvider::Codex,
+            account: "id".into(),
+        });
+        let saved = SpawnDockState::new(home.clone()).draft();
+        let encoded = serde_json::to_string(&saved).expect("local draft");
+        let restored = SpawnDockState::from_draft(
+            home.clone(),
+            serde_json::from_str(&encoded).expect("decode"),
+        );
+        assert_eq!(restored.home.account_selection, home.account_selection);
+        assert_eq!(
+            restored.home.dispatch_plan().expect("restored").env,
+            home.dispatch_plan().expect("original").env
+        );
+        home.account_picker.bindings.clear();
+        let restored = SpawnDockState::from_draft(home, saved);
+        assert!(restored
+            .home
+            .dispatch_plan()
+            .expect_err("never fallback")
+            .contains("no discovered"));
+    }
+
+    #[test]
+    fn account_picker_spawn_uses_shared_search_selection_and_dispatch_identity() {
+        let mut home = HomeState::default();
+        home.set_profiles(vec![super::super::launch_profiles::LaunchProfile::builtin(
+            Agent::Codex,
+        )]);
+        home.set_profile("codex");
+        home.prompt = "task".into();
+        home.account_picker.bindings = vec![(
+            crate::provider_usage::QuotaProvider::Codex,
+            "id".into(),
+            "/fixture/account".into(),
+        )];
+        let mut snapshot = crate::provider_usage::ProviderUsageSnapshot::default();
+        snapshot
+            .accounts
+            .push(crate::provider_usage::ProviderAccountUsage {
+                provider: crate::provider_usage::QuotaProvider::Codex,
+                profile_id: "id".into(),
+                label: "display only".into(),
+                usage: Default::default(),
+            });
+        home.refresh_account_rows(&snapshot);
+        let mut dock = SpawnDockState::new(home);
+        dock.focus = SpawnDockField::Profile;
+        dock.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), None);
+        assert!(dock.home.account_picker.active);
+        dock.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), None);
+        assert_eq!(
+            dock.home
+                .account_selection
+                .as_ref()
+                .expect("account")
+                .account,
+            "id"
+        );
+        dock.insert_text("no-such-model");
+        assert!(dock.home.filtered_account_models().is_empty());
+        dock.home.account_picker.query.clear();
+        dock.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), None);
+        assert!(!dock.home.account_picker.active);
+        assert_eq!(
+            dock.home.dispatch_plan().expect("exact launch").env,
+            [("CODEX_HOME".into(), "/fixture/account".into())]
+        );
+        dock.focus = SpawnDockField::Model;
+        dock.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), None);
+        assert!(dock.home.account_picker.active);
+        dock.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), None);
+        assert!(!dock.home.account_picker.active && dock.picker.is_none());
+    }
 
     #[test]
     fn dock_open_preserves_pane_surface_and_uses_home_dispatch_settings() {

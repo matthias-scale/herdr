@@ -575,7 +575,9 @@ impl AccountUsage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) enum QuotaProvider {
     Claude,
     Codex,
@@ -1238,6 +1240,46 @@ fn named_profile_dirs(root: &Path, marker_files: &[&str]) -> Vec<(String, PathBu
     profiles.sort_by(|left, right| left.0.cmp(&right.0));
     profiles.truncate(MAX_PROVIDER_PROFILES);
     profiles
+}
+
+/// Only Codex discovery uses native CLI roots (`CODEX_HOME`). Claude quota
+/// profiles are capture archives, not native config roots; even a native-looking
+/// directory does not verify its keychain identity. Never use them for launch.
+/// This checks file existence only and never reads authentication contents.
+pub(crate) fn account_launch_bindings() -> Vec<(QuotaProvider, String, PathBuf)> {
+    home_path("")
+        .map(|root| native_account_launch_bindings(&root))
+        .unwrap_or_default()
+}
+
+fn native_account_launch_bindings(home: &Path) -> Vec<(QuotaProvider, String, PathBuf)> {
+    named_profile_dirs(&home.join(".codex-profiles"), &["config.toml", "auth.json"])
+        .into_iter()
+        .map(|(id, path)| (QuotaProvider::Codex, id, path))
+        .collect()
+}
+
+/// An inherited launch may use an external profile absent from quota collection.
+/// Keep that case unknown instead of displaying the default account's quota.
+pub(crate) fn inherited_account_id(
+    provider: QuotaProvider,
+    bindings: &[(QuotaProvider, String, PathBuf)],
+) -> Option<String> {
+    let (variable, default_directory) = match provider {
+        QuotaProvider::Claude => ("CLAUDE_CONFIG_DIR", ".claude"),
+        QuotaProvider::Codex => ("CODEX_HOME", ".codex"),
+        _ => return None,
+    };
+    let Some(path) = std::env::var_os(variable).map(PathBuf::from) else {
+        return Some("default".into());
+    };
+    if home_path(default_directory).as_ref() == Some(&path) {
+        return Some("default".into());
+    }
+    bindings
+        .iter()
+        .find(|(p, _, root)| *p == provider && root == &path)
+        .map(|(_, id, _)| id.clone())
 }
 
 fn active_profile_id(env_var: &str, profiles: &[(String, PathBuf)]) -> String {
@@ -2002,6 +2044,62 @@ pub(crate) fn now_unix() -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn account_picker_native_discovery_excludes_claude_captures_and_native_looking_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-account-picker-contract-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for (directory, markers) in [
+            (
+                ".claude-profiles/capture",
+                &["meta.env", "credentials.json", "oauthAccount.json"][..],
+            ),
+            (
+                ".claude-profiles/native-looking",
+                &["meta.env", ".credentials.json"][..],
+            ),
+            (".codex-profiles/config-root", &["config.toml"][..]),
+            (".codex-profiles/auth-root", &["auth.json"][..]),
+            (
+                ".codex-profiles/capture-only",
+                &["meta.env", "credentials.json"][..],
+            ),
+        ] {
+            let path = root.join(directory);
+            fs::create_dir_all(&path).unwrap();
+            for marker in markers {
+                // Empty synthetic markers: discovery must never read auth contents.
+                fs::write(path.join(marker), "").unwrap();
+            }
+        }
+        assert_eq!(
+            named_profile_dirs(&root.join(".claude-profiles"), &["meta.env"]).len(),
+            2,
+            "Claude capture rows remain discoverable for quota"
+        );
+        assert_eq!(
+            native_account_launch_bindings(&root),
+            vec![
+                (
+                    QuotaProvider::Codex,
+                    "auth-root".into(),
+                    root.join(".codex-profiles/auth-root")
+                ),
+                (
+                    QuotaProvider::Codex,
+                    "config-root".into(),
+                    root.join(".codex-profiles/config-root")
+                ),
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn usage_claude_auth_signals_are_bounded_and_do_not_expose_tokens() {
         let root = std::env::temp_dir().join(format!(

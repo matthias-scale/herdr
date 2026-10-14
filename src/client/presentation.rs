@@ -13,6 +13,8 @@ pub(crate) struct SpawnDockDraft {
     pub(crate) project: String,
     pub(crate) host: String,
     pub(crate) profile: String,
+    #[serde(default)]
+    pub(crate) account_selection: Option<crate::app::account_picker::AccountSelection>,
     pub(crate) model: String,
     pub(crate) effort: Option<String>,
     pub(crate) worktree: String,

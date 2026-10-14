@@ -526,6 +526,17 @@ impl AppState {
             && self.point_in_rect(self.view.terminal_area, mouse.column, mouse.row)
         {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if let Some(home) = self.home.as_mut().filter(|home| home.account_picker.active) {
+                    if let Some(hit) = crate::ui::account_picker::hit_test(
+                        home,
+                        self.view.terminal_area,
+                        mouse.column,
+                        mouse.row,
+                    ) {
+                        crate::ui::account_picker::apply_hit(home, hit);
+                    }
+                    return None;
+                }
                 if let Some(target) = self.home_hit_at(mouse.column, mouse.row) {
                     match target {
                         HomeHitTarget::QueueRow(index) => {

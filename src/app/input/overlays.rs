@@ -216,8 +216,7 @@ impl App {
                         .state
                         .command_palette_popup_contains(mouse.column, mouse.row)
                     {
-                        leave_modal(&mut self.state);
-                        self.state.command_palette = Default::default();
+                        self.state.close_command_palette();
                     }
                 }
                 MouseEventKind::ScrollUp => {

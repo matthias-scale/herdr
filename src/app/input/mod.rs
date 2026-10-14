@@ -652,9 +652,23 @@ impl App {
             return false;
         };
         match target {
+            crate::ui::SpawnDockHitTarget::Picker(hit) => {
+                if let Some(dock) = self.state.spawn_dock.as_mut() {
+                    crate::ui::account_picker::apply_hit(&mut dock.home, hit);
+                    dock.picker = dock.home.picker;
+                }
+            }
             crate::ui::SpawnDockHitTarget::Field(field) => {
                 if let Some(dock) = self.state.spawn_dock.as_mut() {
                     dock.focus = field;
+                    if matches!(
+                        field,
+                        crate::app::spawn_dock::SpawnDockField::Profile
+                            | crate::app::spawn_dock::SpawnDockField::Model
+                    ) {
+                        dock.home.refresh_account_rows(&self.state.provider_usage);
+                        dock.open_picker_for_focus();
+                    }
                     self.state
                         .sidebar_presentation
                         .save_spawn_dock_draft(Some(dock.draft()));
@@ -1129,6 +1143,12 @@ impl App {
         let Some(home) = self.state.home.as_mut() else {
             return false;
         };
+        if home.account_picker.active {
+            for ch in text.chars().filter(|ch| !ch.is_control()) {
+                home.account_picker_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+            }
+            return true;
+        }
         if let Some(project) = home.add_project.as_mut() {
             project.push_text(text);
             self.start_home_github_refresh_if_requested();
@@ -1175,6 +1195,16 @@ impl App {
         if self.state.add_project_active() {
             self.state.handle_add_project_key(event);
             self.start_home_github_refresh_if_requested();
+            return true;
+        }
+
+        if let Some(home) = self
+            .state
+            .home
+            .as_mut()
+            .filter(|home| home.account_picker.active)
+        {
+            home.account_picker_key(event);
             return true;
         }
 
@@ -7610,6 +7640,42 @@ sidebar_visible = true
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),
         )
+    }
+
+    #[tokio::test]
+    async fn account_picker_home_keyboard_and_paste_stay_in_picker_and_escape_restores_field() {
+        let mut app = test_app();
+        app.state.home = Some(crate::app::home::HomeState::default());
+        app.state
+            .home_open_picker(crate::app::home::HomePicker::Model);
+        assert!(app.handle_home_text_commit("no-such-model"));
+        assert!(app
+            .state
+            .home
+            .as_ref()
+            .expect("home")
+            .filtered_account_models()
+            .is_empty());
+        assert!(app.handle_home_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.state.home.as_ref().expect("home").account_picker.active);
+        let focus = app.state.home.as_ref().expect("home").focus;
+        assert!(app.handle_home_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(app.state.home.as_ref().expect("home").focus, focus);
+        assert!(!app.state.home.as_ref().expect("home").account_picker.active);
+    }
+
+    #[tokio::test]
+    async fn account_picker_palette_enter_dispatches_existing_action_and_escape_restores_navigation(
+    ) {
+        let mut app = test_app();
+        app.state.set_server_mode(Mode::Navigate);
+        app.state.open_command_palette();
+        app.handle_command_palette_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.state.server_mode(), Mode::Navigate);
+        app.state.open_command_palette();
+        app.state.command_palette.query = "keybinds".into();
+        app.handle_command_palette_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.state.effective_interaction_mode(), Mode::KeybindHelp);
     }
 
     #[tokio::test]

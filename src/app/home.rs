@@ -837,6 +837,8 @@ pub(crate) fn dispatchable_agents() -> &'static [Agent] {
 pub(crate) struct HomeState {
     catalog: HomeCatalog,
     agent_choices: Vec<HomeAgentChoice>,
+    pub(crate) account_selection: Option<super::account_picker::AccountSelection>,
+    pub(crate) account_picker: super::account_picker::AccountPickerState,
     selected: usize,
     pub(crate) focus: Option<HomeFocus>,
     pub(crate) prompt: String,
@@ -903,6 +905,8 @@ impl Default for HomeState {
         let mut home = Self {
             catalog: HomeCatalog::fallback(),
             agent_choices: Vec::new(),
+            account_selection: None,
+            account_picker: Default::default(),
             selected: 0,
             focus: Some(HomeFocus::Prompt),
             prompt: String::new(),
@@ -1345,17 +1349,31 @@ impl HomeState {
         if profiles.is_empty() {
             return;
         }
+        let selection = self.account_selection.clone();
         self.profiles = profiles;
         let id = self.profile().id.clone();
         self.set_profile(&id);
+        self.restore_account_selection(selection);
     }
 
     pub(crate) fn set_profile(&mut self, id: &str) {
         let Some(profile) = self.profiles.iter().find(|profile| profile.id == id) else {
             return;
         };
-        self.profile = profile.id.clone();
+        let profile_id = profile.id.clone();
         let agent = profile.agent;
+        if self.account_selection.take().is_some() {
+            if let Some(catalog) = self
+                .account_picker
+                .inherited_catalog
+                .as_ref()
+                .and_then(|catalog| catalog.provider(self.agent))
+                .cloned()
+            {
+                self.catalog.replace(catalog);
+            }
+        }
+        self.profile = profile_id;
         self.set_agent(agent);
     }
 
@@ -1542,13 +1560,14 @@ impl HomeState {
             return Err("enter a prompt before dispatching".into());
         }
         let profile = self.profile();
+        let launch_env = self.account_launch_env()?;
         if profile.owns_its_flags() {
             // The lane supplies its own model, effort and permission flags, so
             // there is nothing here to validate against the probed catalog and
             // nothing of Herdr's to append but the prompt itself.
             let mut argv = profile.command.clone();
             argv.push(prompt.into());
-            return Ok(self.plan_with(argv, profile.env.clone(), prompt));
+            return Ok(self.plan_with(argv, launch_env.clone(), prompt));
         }
         let Some(catalog) = self.catalog.provider(self.agent) else {
             return Err("that agent cannot be dispatched from home".into());
@@ -1589,7 +1608,8 @@ impl HomeState {
         argv.extend(flags);
         argv.push(prompt.into());
 
-        Ok(self.plan_with(argv, self.profile().env.clone(), prompt))
+        let argv = self.account_launch_argv(argv)?;
+        Ok(self.plan_with(argv, launch_env, prompt))
     }
 
     /// The plan shared by both dispatch paths: everything that does not depend
@@ -1887,6 +1907,11 @@ impl crate::app::state::AppState {
             self.home_agent_choices.clone(),
         );
         home.set_profiles(self.launch_profiles.clone());
+        home.account_picker.inherited_catalog = Some(home.catalog.clone());
+        home.account_picker.bindings = crate::provider_usage::account_launch_bindings();
+        home.prepare_account_environment();
+        home.prepare_account_catalogs();
+        home.refresh_account_rows(&self.provider_usage);
         home.set_projects(self.projects.clone());
         home.set_machines(self.machines.clone());
         if let Some(profile) = self.next_home_profile.as_deref() {
@@ -2504,6 +2529,13 @@ impl crate::app::state::AppState {
     }
 
     pub(crate) fn home_open_picker(&mut self, picker: HomePicker) {
+        if matches!(picker, HomePicker::Agent | HomePicker::Model) {
+            if let Some(home) = self.home.as_mut() {
+                home.refresh_account_rows(&self.provider_usage);
+                home.open_account_picker(picker);
+            }
+            return;
+        }
         if picker == HomePicker::Workspace {
             self.refresh_home_workspace_options();
         }
@@ -2600,6 +2632,15 @@ impl crate::app::state::AppState {
     }
 
     pub(crate) fn home_move_picker(&mut self, delta: i32) {
+        if let Some(home) = self.home.as_mut().filter(|home| home.account_picker.active) {
+            let code = if delta < 0 {
+                KeyCode::Up
+            } else {
+                KeyCode::Down
+            };
+            home.account_picker_key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE));
+            return;
+        }
         let Some(picker) = self.home.as_ref().and_then(|home| home.picker) else {
             return;
         };
@@ -2722,6 +2763,13 @@ impl crate::app::state::AppState {
     }
 
     pub(crate) fn home_accept_picker(&mut self) {
+        if let Some(home) = self.home.as_mut().filter(|home| home.account_picker.active) {
+            home.account_picker_key(crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ));
+            return;
+        }
         let Some((picker, selected)) = self.home.as_ref().and_then(|home| {
             home.picker.map(|picker| {
                 let selected = match picker {

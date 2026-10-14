@@ -18,6 +18,7 @@ pub(crate) use api_helpers::{pane_agent_status_with_stale, read_terminal_snapsho
 pub(crate) mod claude_subagents;
 mod command_palette;
 pub(crate) use command_palette::PaletteEntry;
+pub(crate) mod account_picker;
 mod config_io;
 mod creation;
 pub(crate) mod diff;

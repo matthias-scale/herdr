@@ -548,7 +548,7 @@ fn chip_specs(
     composer: ComposerBands,
 ) -> Vec<(HomeFocus, String)> {
     let mut specs = vec![
-        (HomeFocus::Agent, format!("{} ▾", home.profile().label)),
+        (HomeFocus::Agent, format!("{} ▾", home.account_label())),
         (HomeFocus::Model, format!("{} ▾", home.model_display_name())),
     ];
     if let Some(effort) = &home.effort {
@@ -1321,6 +1321,9 @@ fn picker_layout(
     composer: ComposerBands,
     area: Rect,
 ) -> Option<DropdownLayout> {
+    if home.account_picker.active {
+        return None;
+    }
     let picker = home.picker?;
     let field = composer_field_rect(app, home, composer, home.focus?)?;
     let labels = picker_labels(app, home, picker);
@@ -1432,6 +1435,9 @@ pub(super) fn home_hit_areas(
         return Vec::new();
     };
     let layout = home_bands(app, queue, area);
+    if home.account_picker.active {
+        return Vec::new();
+    }
     let mut hits = Vec::new();
     if let Some(composer) = layout.composer {
         if let Some(dropdown) = picker_viewport(app, home, composer, area) {
@@ -1790,7 +1796,7 @@ pub(super) fn render_home(
                     dropdown.list_rect,
                 );
             }
-        } else if let Some(picker) = home.picker {
+        } else if let Some(picker) = home.picker.filter(|_| !home.account_picker.active) {
             if !picker_labels(app, home, picker).is_empty() {
                 if let Some(field) = home
                     .focus
@@ -1847,6 +1853,9 @@ pub(super) fn render_home(
             );
         }
     }
+    if let Some(home) = app.home.as_ref() {
+        super::account_picker::render(app, home, frame, area);
+    }
 }
 
 #[cfg(test)]
@@ -1890,6 +1899,25 @@ mod tests {
             })
             .expect("render home");
         terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn account_picker_home_render_uses_shared_popup_in_normal_and_narrow_views() {
+        for (width, height) in [(100, 30), (40, 24)] {
+            let mut app = AppState::test_new();
+            app.home = Some(HomeState::default());
+            app.home_open_picker(HomePicker::Model);
+            let area = Rect::new(0, 0, width, height);
+            let buffer = draw_home(&app, &[], area);
+            let text: String = (0..height).map(|y| row_text(&buffer, area, y)).collect();
+            assert!(text.contains("provider / account / model"));
+            assert!(text.contains("inherited"));
+            assert!(text.contains("usage unknown"));
+            assert!(
+                home_hit_areas(&app, &[], area).is_empty(),
+                "background fields cannot steal modal clicks"
+            );
+        }
     }
 
     #[test]

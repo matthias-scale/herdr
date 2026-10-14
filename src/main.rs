@@ -64,6 +64,7 @@ mod app;
 mod board;
 mod build_info;
 mod checksum;
+mod claude_account_launch;
 mod cli;
 mod client;
 mod config;
@@ -821,6 +822,9 @@ fn main() -> io::Result<()> {
             std::process::exit(2);
         }
     };
+    if raw_args.get(1).map(String::as_str) == Some(claude_account_launch::CHILD_COMMAND) {
+        std::process::exit(claude_account_launch::run_child(&raw_args[2..]));
+    }
     if let Some(outcome) = cli::maybe_run_machine(&raw_args) {
         return finish_cli(outcome);
     }

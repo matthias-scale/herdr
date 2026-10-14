@@ -13,6 +13,7 @@ pub(crate) enum PaletteCommand {
     ToggleNotifications,
     UserAction(usize),
     CustomCommand(usize),
+    Destination { workspace: usize, tab: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,6 +306,28 @@ impl AppState {
             });
         }
 
+        for (ws_index, workspace) in self.workspaces.iter().enumerate() {
+            let workspace_label = workspace.display_name_from_terminals(&self.terminals);
+            for (tab_index, _) in workspace.tabs.iter().enumerate() {
+                let tab_label = workspace
+                    .tab_display_name_from(&self.terminals, tab_index)
+                    .unwrap_or_else(|| (tab_index + 1).to_string());
+                let label = format!("{workspace_label} / {tab_label}");
+                if let Some(score) = score_entry("tabs", &label, query) {
+                    entries.push(PaletteEntry {
+                        group: "tabs".into(),
+                        label,
+                        key: String::new(),
+                        command: PaletteCommand::Destination {
+                            workspace: ws_index,
+                            tab: tab_index,
+                        },
+                        score,
+                    });
+                }
+            }
+        }
+
         if !query.is_empty() {
             entries.sort_by_key(|entry| std::cmp::Reverse(entry.score));
         }
@@ -312,8 +335,26 @@ impl AppState {
     }
 
     pub(crate) fn open_command_palette(&mut self) {
-        self.command_palette = CommandPaletteState::default();
+        let return_mode = match self.effective_interaction_mode() {
+            Mode::Onboarding | Mode::Prefix | Mode::CommandPalette => Mode::Terminal,
+            mode => mode,
+        };
+        self.command_palette = CommandPaletteState {
+            return_mode: Some(return_mode),
+            return_focus: Some(self.client_focus_intent),
+            ..Default::default()
+        };
         self.set_server_mode(Mode::CommandPalette);
+    }
+
+    pub(crate) fn close_command_palette(&mut self) {
+        let state = std::mem::take(&mut self.command_palette);
+        self.restore_server_mode_preserving_client_focus(
+            state.return_mode.unwrap_or(Mode::Terminal),
+        );
+        if let Some(focus) = state.return_focus {
+            self.client_focus_intent = focus;
+        }
     }
 
     pub(crate) fn command_palette_visible_rows(&self) -> usize {
@@ -400,8 +441,7 @@ impl App {
     pub(crate) fn handle_command_palette_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.state.command_palette = CommandPaletteState::default();
-                self.state.set_server_mode(Mode::Terminal);
+                self.state.close_command_palette();
             }
             KeyCode::Enter => self.accept_command_palette_selection(),
             KeyCode::Backspace => {
@@ -459,12 +499,18 @@ impl App {
             return;
         };
 
-        self.state.set_server_mode(Mode::Terminal);
-        self.state.command_palette = CommandPaletteState::default();
+        self.state.close_command_palette();
 
         match command {
             PaletteCommand::BuiltIn(action) => {
                 self.execute_tui_navigate_action(action, ActionContext::Prefix);
+            }
+            PaletteCommand::Destination { workspace, tab } => {
+                if let Some(tab_id) = self.public_tab_id(workspace, tab) {
+                    self.state.sidebar_selected_remote_agent = None;
+                    self.runtime_tab_focus("tui.tab.focus", tab_id);
+                    self.state.set_server_mode(Mode::Terminal);
+                }
             }
             PaletteCommand::ToggleNotifications => self.toggle_notifications(),
             PaletteCommand::UserAction(index) => {
@@ -491,6 +537,27 @@ mod tests {
         config::ActionKeybinds,
         input::TerminalKey,
     };
+
+    #[test]
+    fn palette_destinations_search_real_tabs_and_close_restores_focus() {
+        let mut state = AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("repo-fixture");
+        workspace.test_add_tab(Some("review-fixture"));
+        state.workspaces.push(workspace);
+        state.command_palette.query = "review-fixture".into();
+        assert!(state.command_palette_entries().iter().any(|entry| matches!(
+            entry.command,
+            PaletteCommand::Destination { .. }
+        ) && entry
+            .label
+            .contains("review-fixture")));
+        state.set_server_mode(Mode::Navigate);
+        let focus = state.client_focus_intent;
+        state.open_command_palette();
+        state.close_command_palette();
+        assert_eq!(state.server_mode(), Mode::Navigate);
+        assert_eq!(state.client_focus_intent, focus);
+    }
 
     #[test]
     fn fuzzy_score_requires_an_ordered_subsequence() {
@@ -777,7 +844,14 @@ mod tests {
         state.command_palette.selected = 3;
         state.open_command_palette();
         assert_eq!(state.server_mode(), Mode::CommandPalette);
-        assert_eq!(state.command_palette, CommandPaletteState::default());
+        assert_eq!(
+            state.command_palette,
+            CommandPaletteState {
+                return_mode: Some(Mode::Navigate),
+                return_focus: Some(state.client_focus_intent),
+                ..Default::default()
+            }
+        );
     }
 
     #[test]

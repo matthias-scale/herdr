@@ -5,6 +5,7 @@ use ratatui::{
     Frame,
 };
 
+pub(crate) mod account_picker;
 pub(crate) mod add_project;
 mod aloop_run;
 pub(crate) mod capture;

@@ -133,17 +133,31 @@ fn render_rows(
         );
         let left_width = row.width.saturating_sub(key_width);
         let left_area = Rect::new(row.x, row.y, left_width, 1);
-        let group = format!("  {}", entry.group);
-        let group_style = if selected {
-            base
-        } else {
-            Style::default()
-                .bg(app.palette.panel_bg)
-                .fg(app.palette.overlay0)
+        let group = entry.group.to_ascii_lowercase();
+        let icon = match group.as_str() {
+            "tabs" => "▣",
+            "workspace" | "workspaces" => "▤",
+            "git" => "⑂",
+            "pane" | "panes" => "▥",
+            "settings" => "⚙",
+            _ => "›",
         };
+        let icon = if app.nerd_font {
+            icon
+        } else {
+            match group.as_str() {
+                "tabs" => "t",
+                "workspace" | "workspaces" => "w",
+                "git" => "g",
+                "pane" | "panes" => "p",
+                "settings" => "s",
+                _ => ">",
+            }
+        };
+        let prefix = format!(" {icon} ");
         let label_budget = left_width
             .saturating_sub(1)
-            .saturating_sub(display_width_u16(&group)) as usize;
+            .saturating_sub(display_width_u16(&prefix)) as usize;
         let label = truncate_end(&entry.label, label_budget);
         let label_style = if selected {
             base.add_modifier(Modifier::BOLD)
@@ -154,9 +168,8 @@ fn render_rows(
         };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::raw(" "),
+                Span::styled(prefix, label_style),
                 Span::styled(label, label_style),
-                Span::styled(group, group_style),
             ]))
             .style(base),
             left_area,
@@ -211,4 +224,47 @@ fn render_command_palette_scrollbar(
         app.palette.overlay0,
         "▕",
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+    #[test]
+    fn account_picker_palette_compact_rows_shortcuts_and_no_match_render_with_mouse_geometry() {
+        for width in [100, 40] {
+            let mut app = AppState::test_new();
+            app.view.terminal_area = Rect::new(0, 0, width, 24);
+            app.command_palette.query = "keybinds".into();
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).expect("terminal");
+            terminal
+                .draw(|frame| render_command_palette(&app, frame))
+                .expect("render");
+            let body = app.command_palette_body_rect().expect("body");
+            assert_eq!(app.command_palette_row_index_at(body.x, body.y), Some(0));
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains("keybinds"));
+            let key = app.command_palette_entries()[0].key.clone();
+            assert!(text.contains(&key));
+            app.command_palette.query = "no-such-action-xyz".into();
+            terminal
+                .draw(|frame| render_command_palette(&app, frame))
+                .expect("empty render");
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains("no matching command"));
+            assert_eq!(app.command_palette_row_index_at(body.x, body.y), None);
+        }
+    }
 }

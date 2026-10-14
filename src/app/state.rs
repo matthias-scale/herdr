@@ -3233,6 +3233,8 @@ pub(crate) struct NavigatorState {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CommandPaletteState {
+    pub(crate) return_mode: Option<Mode>,
+    pub(crate) return_focus: Option<ClientFocusIntent>,
     pub query: String,
     pub selected: usize,
     pub scroll: usize,

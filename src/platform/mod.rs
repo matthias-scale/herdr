@@ -56,6 +56,34 @@ pub(crate) fn launch_executable() -> std::io::Result<std::path::PathBuf> {
     std::env::current_exe()
 }
 
+/// Subscription helper deployment is verified only on Unix. Windows refuses
+/// explicitly until a native secret-get contract is available (no shell fallback).
+pub(crate) const fn claude_account_launch_supported() -> bool {
+    cfg!(unix)
+}
+
+#[cfg(unix)]
+pub(crate) use unix_common::{
+    configure_private_account_helper, exec_private_account_command,
+    terminate_private_account_helper,
+};
+
+#[cfg(not(unix))]
+pub(crate) fn configure_private_account_helper(_command: &mut std::process::Command) {}
+#[cfg(not(unix))]
+pub(crate) fn terminate_private_account_helper(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+#[cfg(not(unix))]
+pub(crate) fn exec_private_account_command(
+    _command: &mut std::process::Command,
+) -> std::io::Result<i32> {
+    Err(std::io::Error::other(
+        "subscription-token launcher unsupported",
+    ))
+}
+
 pub(crate) fn detached_custom_command_process(command: &str) -> std::process::Command {
     let mut process = detached_custom_command_process_platform(command);
     configure_background_command(&mut process);

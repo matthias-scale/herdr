@@ -29,6 +29,32 @@ listed per key here. Each launch profile names one way to start an agent from
 the Home composer, including its agent type, command, environment, and optional
 quota source.
 
+Home and Spawn share a provider/account/model picker. Open the provider or model
+field, use Tab to move between accounts and models, type to search the installed
+model catalog, and use Enter to select or Escape to close. The narrow layout
+stacks the account list above models; arrows scroll each list.
+
+The `inherited` row preserves the launch profile and ambient environment. An
+explicit Codex account uses a discovered native profile's per-process `CODEX_HOME`.
+Claude capture archives remain visible for quota information, but are never used
+as native config directories. On Unix, a known Claude subscription account with
+metadata and a unique verified token-name mapping uses a private Herdr child
+launcher. Only that child retrieves the selected name through `secret-get`, sets
+`CLAUDE_CODE_OAUTH_TOKEN`, and executes the original native model/effort arguments.
+Token values never enter the picker, saved drafts or launch request. The picker
+marks subscription authentication as checked at launch; metadata alone does not
+prove token availability. Retrieval failure refuses before Claude starts and
+never falls back to the inherited account. Native Claude Code 2.1.299 or newer
+and the canonical local `secret-get` helper are required. Windows explicit
+Claude token launches remain unavailable until a native helper contract exists.
+Labels and cached default rows do not establish launch bindings. Unverified
+accounts, colliding token names, authentication/provider/config overrides,
+wrapper commands and remote account bindings refuse an explicit selection.
+Inherited Claude launches remain unchanged.
+Quota windows belong to the selected account and show remaining usage, reset
+and freshness; missing data stays unknown, stale data is last-known, and login
+or helper failures remain visible. No global account switch is performed.
+
 `[[projects]]` is likewise a user-defined array of tables. Each project groups
 checkouts for the Home composer's project and repo selectors through `roots`
 and `repos`; see [Projects](/docs/configuration/#projects).

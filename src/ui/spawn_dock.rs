@@ -18,11 +18,16 @@ const DOCK_HEIGHT: u16 = 14;
 pub(crate) enum HitTarget {
     Field(SpawnDockField),
     Spawn,
+    Picker(super::account_picker::PickerHit),
 }
 
 pub(crate) fn hit_test(app: &AppState, column: u16, row: u16) -> Option<HitTarget> {
     let dock = app.spawn_dock.as_ref()?;
     let area = app.view.terminal_area;
+    if dock.home.account_picker.active {
+        return super::account_picker::hit_test(&dock.home, area, column, row)
+            .map(HitTarget::Picker);
+    }
     if area.height < 5 || area.width < 30 {
         return None;
     }
@@ -160,11 +165,12 @@ pub(super) fn render(app: &AppState, frame: &mut Frame, area: Rect) {
     for (field, rect) in fields.into_iter().zip(field_areas.iter()) {
         render_field(app, dock, field, *rect, frame);
     }
-    if let Some(picker) = dock.picker {
+    if let Some(picker) = dock.picker.filter(|_| !dock.home.account_picker.active) {
         render_picker(app, dock, picker, rows[1], frame);
     } else {
         render_prompt(app, dock, rows[1], frame);
     }
+    super::account_picker::render(app, &dock.home, frame, area);
 }
 
 fn render_field(
@@ -237,25 +243,10 @@ fn render_field(
             Style::default().fg(app.palette.subtext0),
         ));
     let content = if field == SpawnDockField::Profile {
-        let profile = dock
-            .home
-            .profiles()
-            .iter()
-            .find(|p| p.id == dock.home.profile_id());
-        let icon = profile
-            .and_then(|p| crate::ui::icons::agent_label(p.agent, app.nerd_font))
-            .unwrap_or("agent");
-        let summary = profile.and_then(|p| p.quota.map(|quota| quota.usage(&app.provider_usage)));
-        let (left, reset) = usage_summary(summary);
-        let account = summary
-            .and_then(|usage| usage.account.as_deref())
-            .unwrap_or("default");
-        format!(
-            "{icon} {value}/{account}  {} {}%{}",
-            usage_bar(left),
-            left,
-            reset.map(|r| format!(" · {r}")).unwrap_or_default()
-        )
+        let usage = dock.home.selected_account_usage(&app.provider_usage);
+        let lines =
+            crate::app::account_picker::quota_lines(usage, app.provider_usage.collected_unix);
+        format!("{} · {}", dock.home.account_label(), lines.join(" · "))
     } else {
         value.to_string()
     };
@@ -319,11 +310,32 @@ fn render_prompt(app: &AppState, dock: &SpawnDockState, rect: Rect, frame: &mut 
             ),
         button_area,
     );
+    let error = dock
+        .home
+        .account_launch_env()
+        .err()
+        .or_else(|| dock.home.dispatch_error.clone());
+    let error_height = u16::from(error.is_some() && prompt_area.height > 0);
+    if let Some(error) = error {
+        frame.render_widget(
+            Paragraph::new(crate::ui::text::truncate_end(
+                &error,
+                prompt_area.width.saturating_sub(width) as usize,
+            ))
+            .style(Style::default().fg(app.palette.red)),
+            Rect::new(
+                prompt_area.x,
+                prompt_area.y,
+                prompt_area.width.saturating_sub(width),
+                error_height,
+            ),
+        );
+    }
     let text_area = Rect::new(
         prompt_area.x,
-        prompt_area.y,
+        prompt_area.y.saturating_add(error_height),
         prompt_area.width.saturating_sub(width),
-        prompt_area.height.saturating_sub(2),
+        prompt_area.height.saturating_sub(2 + error_height),
     );
     let text = if dock.home.prompt.is_empty() {
         vec![Line::from(Span::styled(
@@ -380,16 +392,11 @@ fn render_picker(
                 .iter()
                 .map(|p| {
                     let summary = p.quota.map(|q| q.usage(&app.provider_usage));
-                    let (left, reset) = usage_summary(summary);
-                    let account = summary
-                        .and_then(|usage| usage.account.as_deref())
-                        .unwrap_or("default");
-                    let usage = format!(
-                        "/{account}  {} {}%{}",
-                        usage_bar(left),
-                        left,
-                        reset.map(|r| format!(" · {r}")).unwrap_or_default()
-                    );
+                    let usage = crate::app::account_picker::quota_lines(
+                        summary,
+                        app.provider_usage.collected_unix,
+                    )
+                    .join(" · ");
                     picker_row(format!(
                         "{}  {}{}  models:{}",
                         match p.agent {
@@ -479,28 +486,47 @@ fn picker_row(label: String) -> (String, Line<'static>) {
     (label.clone(), Line::from(label))
 }
 
-fn usage_summary(usage: Option<&crate::provider_usage::AccountUsage>) -> (u8, Option<String>) {
-    let Some(usage) = usage else {
-        return (0, None);
-    };
-    let window = [usage.five_hour, usage.seven_day]
-        .into_iter()
-        .flatten()
-        .max_by_key(|w| w.used_percent);
-    let remaining = window
-        .map(|w| 100u8.saturating_sub(w.used_percent))
-        .unwrap_or(0);
-    let reset = window
-        .and_then(|w| w.resets_at)
-        .and_then(|at| crate::provider_usage::reset_label(at, app_now()));
-    (remaining, reset)
-}
-
-fn app_now() -> i64 {
-    crate::provider_usage::now_unix().unwrap_or_default()
-}
-
-fn usage_bar(left: u8) -> String {
-    let filled = usize::from(left.saturating_add(9) / 10).min(10);
-    format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled))
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::home::HomeState;
+    use ratatui::{backend::TestBackend, Terminal};
+    #[test]
+    fn account_picker_spawn_render_and_actual_hit_test_share_scrolled_rows() {
+        for (width, height) in [(100, 30), (40, 24)] {
+            let mut app = AppState::test_new();
+            app.view.terminal_area = Rect::new(0, 0, width, height);
+            let mut home = HomeState::default();
+            home.refresh_account_rows(&Default::default());
+            home.open_account_picker(HomePicker::Model);
+            let mut dock = SpawnDockState::new(home);
+            dock.picker = Some(HomePicker::Model);
+            app.spawn_dock = Some(dock);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal
+                .draw(|frame| render(&app, frame, app.view.terminal_area))
+                .expect("render");
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains("provider / account / model"));
+            let g = super::super::account_picker::geometry(app.view.terminal_area);
+            assert_eq!(
+                hit_test(&app, g.accounts.x, g.accounts.y),
+                Some(HitTarget::Picker(
+                    super::super::account_picker::PickerHit::Account(0)
+                ))
+            );
+            assert_eq!(
+                hit_test(&app, g.models.x, g.models.y),
+                Some(HitTarget::Picker(
+                    super::super::account_picker::PickerHit::Model(0)
+                ))
+            );
+        }
+    }
 }

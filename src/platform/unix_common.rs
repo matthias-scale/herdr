@@ -459,3 +459,25 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }
+
+pub(crate) fn configure_private_account_helper(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+pub(crate) fn terminate_private_account_helper(child: &mut std::process::Child) {
+    // SAFETY: only the helper we just spawned owns this process group. Do not
+    // signal inherited/user groups; the child remains owned until wait reaps it.
+    unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+pub(crate) fn exec_private_account_command(
+    command: &mut std::process::Command,
+) -> std::io::Result<i32> {
+    use std::os::unix::process::CommandExt;
+    Err(command.exec())
+}
