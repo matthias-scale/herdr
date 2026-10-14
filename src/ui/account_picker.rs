@@ -199,6 +199,59 @@ pub(crate) fn apply_hit(home: &mut HomeState, hit: PickerHit) {
     }
 }
 
+fn provider_token(app: &AppState, agent: crate::detect::Agent) -> &'static str {
+    if app.nerd_font {
+        super::icons::agent_icon(agent)
+    } else {
+        super::icons::agent_letter_tag(agent)
+    }
+    .unwrap_or("?")
+}
+
+fn row_label(
+    app: &AppState,
+    home: &HomeState,
+    row: &crate::app::account_picker::AccountRow,
+) -> String {
+    let agent = home
+        .profiles()
+        .iter()
+        .find(|profile| profile.id == row.profile)
+        .map(|profile| profile.agent)
+        .unwrap_or(home.agent);
+    format!("{} {}", provider_token(app, agent), row.label)
+}
+
+/// Shared presentation for popup rows and chosen-provider triggers; no semantic IDs change.
+pub(crate) fn selected_label(app: &AppState, home: &HomeState) -> String {
+    if let Some(row) = home
+        .account_picker
+        .rows
+        .iter()
+        .find(|row| row.profile == home.profile_id() && row.selection == home.account_selection)
+    {
+        return row_label(app, home, row);
+    }
+    let profile = home.profile();
+    let account = home
+        .account_selection
+        .as_ref()
+        .map(|selection| selection.account.as_str())
+        .unwrap_or("inherited");
+    let builtin = profile
+        .id
+        .eq_ignore_ascii_case(crate::detect::agent_label(profile.agent))
+        && profile
+            .label
+            .eq_ignore_ascii_case(crate::detect::agent_label(profile.agent));
+    let identity = if builtin {
+        account.to_string()
+    } else {
+        format!("{} / {account}", profile.label)
+    };
+    format!("{} {identity}", provider_token(app, profile.agent))
+}
+
 pub(crate) fn render(
     app: &AppState,
     home: &HomeState,
@@ -249,20 +302,7 @@ pub(crate) fn render(
             .map(|account| &account.usage);
         let unavailable = home.account_row_unavailable(row);
         let quota = compact_quota(usage, unavailable);
-        let profile = home
-            .profiles()
-            .iter()
-            .find(|profile| profile.id == row.profile);
-        let provider = profile
-            .and_then(|profile| {
-                if app.nerd_font {
-                    super::icons::agent_icon(profile.agent)
-                } else {
-                    super::icons::agent_letter_tag(profile.agent)
-                }
-            })
-            .unwrap_or("?");
-        let label = format!("{prefix}{provider} {}", row.label);
+        let label = format!("{prefix}{}", row_label(app, home, row));
         let label_width = g
             .accounts
             .width
@@ -412,6 +452,69 @@ mod tests {
     use super::*;
     use crate::app::home::HomePicker;
     use ratatui::{backend::TestBackend, Terminal};
+    #[test]
+    fn account_picker_selected_labels_share_sidebar_tokens_and_short_lane_identity() {
+        use crate::app::launch_profiles::LaunchProfile;
+        use crate::provider_usage::{ProviderAccountUsage, ProviderUsageSnapshot, QuotaProvider};
+        for nerd_font in [false, true] {
+            let mut app = AppState::test_new();
+            app.nerd_font = nerd_font;
+            for agent in [crate::detect::Agent::Claude, crate::detect::Agent::Codex] {
+                let token = if nerd_font {
+                    super::super::icons::agent_icon(agent)
+                } else {
+                    super::super::icons::agent_letter_tag(agent)
+                }
+                .expect("sidebar token");
+                for custom in [false, true] {
+                    let mut profile = LaunchProfile::builtin(agent);
+                    if custom {
+                        profile.id = "lab".into();
+                        profile.label = "Lab".into();
+                    }
+                    let mut home = HomeState::default();
+                    home.set_profiles(vec![profile]);
+                    let lane = if custom { "Lab / " } else { "" };
+                    assert_eq!(
+                        selected_label(&app, &home),
+                        format!("{token} {lane}inherited"),
+                        "fallback before rows exist"
+                    );
+                    let mut snapshot = ProviderUsageSnapshot::default();
+                    snapshot.accounts.push(ProviderAccountUsage {
+                        provider: if agent == crate::detect::Agent::Claude {
+                            QuotaProvider::Claude
+                        } else {
+                            QuotaProvider::Codex
+                        },
+                        profile_id: "scalablehq".into(),
+                        label: "SHQ".into(),
+                        usage: Default::default(),
+                    });
+                    home.refresh_account_rows(&snapshot);
+                    assert_eq!(
+                        selected_label(&app, &home),
+                        format!("{token} {lane}inherited")
+                    );
+                    home.select_account_row(1);
+                    assert_eq!(selected_label(&app, &home), format!("{token} {lane}SHQ"));
+                    assert_eq!(
+                        home.account_selection.as_ref().expect("selection").account,
+                        "scalablehq"
+                    );
+                    assert_eq!(
+                        selected_label(&app, &home),
+                        row_label(&app, &home, &home.account_picker.rows[1])
+                    );
+                    assert!(
+                        !selected_label(&app, &home).contains('%'),
+                        "unknown never fabricates quota"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn account_picker_rows_use_sidebar_icons_short_identity_and_each_quota() {
         use crate::provider_usage::{

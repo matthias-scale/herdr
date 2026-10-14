@@ -548,7 +548,10 @@ fn chip_specs(
     composer: ComposerBands,
 ) -> Vec<(HomeFocus, String)> {
     let mut specs = vec![
-        (HomeFocus::Agent, format!("{} ▾", home.account_label())),
+        (
+            HomeFocus::Agent,
+            format!("{} ▾", super::account_picker::selected_label(app, home)),
+        ),
         (HomeFocus::Model, format!("{} ▾", home.model_display_name())),
     ];
     if let Some(effort) = &home.effort {
@@ -1925,6 +1928,66 @@ mod tests {
     }
 
     #[test]
+    fn account_picker_selected_home_chip_icon_identity_and_exact_hit_width() {
+        use crate::provider_usage::{ProviderAccountUsage, QuotaProvider};
+        for nerd_font in [false, true] {
+            for (width, height) in [(100, 30), (52, 36)] {
+                let mut app = AppState::test_new();
+                app.nerd_font = nerd_font;
+                app.provider_usage.accounts.push(ProviderAccountUsage {
+                    provider: QuotaProvider::Claude,
+                    profile_id: "scalablehq".into(),
+                    label: "SHQ".into(),
+                    usage: Default::default(),
+                });
+                let mut home = HomeState::default();
+                home.refresh_account_rows(&app.provider_usage);
+                home.select_account_row(1);
+                app.home = Some(home);
+                let home = app.home.as_ref().expect("home");
+                let area = Rect::new(0, 0, width, height);
+                let composer = home_bands(&app, &[], area).composer.expect("composer");
+                let expected = format!(
+                    "{} ▾",
+                    super::super::account_picker::selected_label(&app, home)
+                );
+                let specs = chip_specs(&app, home, composer);
+                assert_eq!(
+                    specs
+                        .iter()
+                        .find(|(focus, _)| *focus == HomeFocus::Agent)
+                        .expect("chip")
+                        .1,
+                    expected
+                );
+                let rect =
+                    composer_field_rect(&app, home, composer, HomeFocus::Agent).expect("trigger");
+                let hits = home_hit_areas(&app, &[], area);
+                assert!(hits
+                    .iter()
+                    .any(|hit| hit.target == HomeHitTarget::Agent && hit.rect == rect));
+                let buffer = draw_home(&app, &[], area);
+                let rendered: String = (rect.x..rect.right())
+                    .map(|x| buffer[(x, rect.y)].symbol())
+                    .collect();
+                assert!(rendered.contains("SHQ"), "{rendered:?}");
+                let token = if nerd_font {
+                    super::super::icons::agent_icon(crate::detect::Agent::Claude)
+                } else {
+                    super::super::icons::agent_letter_tag(crate::detect::Agent::Claude)
+                }
+                .expect("provider token");
+                assert!(rendered.contains(token), "{rendered:?}");
+                assert!(!rendered.to_ascii_lowercase().contains("claude"));
+                assert_eq!(
+                    home.account_selection.as_ref().expect("selection").account,
+                    "scalablehq"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn account_picker_home_real_trigger_theme_and_mouse_geometry() {
         for theme in ["catppuccin", "catppuccin-latte"] {
             for (width, height) in [(194, 120), (52, 36), (30, 18)] {
@@ -2535,7 +2598,13 @@ mod tests {
             .all(|pair| pair[0].1.right() + 3 == pair[1].1.x));
         let chip_row = row_text(&buffer, composer.frame, composer.chips.y);
         assert!(
-            chip_row.contains("claude ▾ │ Opus 5 ▾ │ auto ▾ │ bypass ▾ │ 1M ▾"),
+            chip_row.contains(&format!(
+                "{} ▾ │ Opus 5 ▾ │ auto ▾ │ bypass ▾ │ 1M ▾",
+                super::super::account_picker::selected_label(
+                    &app,
+                    app.home.as_ref().expect("home")
+                )
+            )),
             "the picker row should read agent │ model │ effort │ access │ context: {chip_row:?}"
         );
         assert!(
@@ -3306,7 +3375,13 @@ mod tests {
         assert!(card_row(composer.prompt.y).contains('█'));
         let chips = card_row(composer.chips.y);
         assert!(
-            chips.contains("claude ▾ │ Opus 5 ▾ │ auto ▾ │ bypass ▾ │ 1M ▾"),
+            chips.contains(&format!(
+                "{} ▾ │ Opus 5 ▾ │ auto ▾ │ bypass ▾ │ 1M ▾",
+                super::super::account_picker::selected_label(
+                    &app,
+                    app.home.as_ref().expect("home")
+                )
+            )),
             "{chips:?}"
         );
         assert!(chips.ends_with("[ ↵ ]│"), "{chips:?}");

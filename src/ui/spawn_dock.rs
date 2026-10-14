@@ -202,6 +202,8 @@ fn render_field(
     frame: &mut Frame,
 ) {
     let focused = dock.focus == field;
+    let profile_label = (field == SpawnDockField::Profile)
+        .then(|| super::account_picker::selected_label(app, &dock.home));
     let value = match field {
         SpawnDockField::Project => dock
             .home
@@ -218,13 +220,7 @@ fn render_field(
                     .unwrap_or("auto")
             }
         }
-        SpawnDockField::Profile => dock
-            .home
-            .profiles()
-            .iter()
-            .find(|p| p.id == dock.home.profile_id())
-            .map(|p| p.label.as_str())
-            .unwrap_or("claude"),
+        SpawnDockField::Profile => profile_label.as_deref().unwrap_or_default(),
         SpawnDockField::Model => dock.home.model_display_name(),
         SpawnDockField::Effort => dock.home.effort.as_deref().unwrap_or("auto"),
         SpawnDockField::Worktree => match &dock.home.workspace {
@@ -267,7 +263,7 @@ fn render_field(
         let usage = dock.home.selected_account_usage(&app.provider_usage);
         let lines =
             crate::app::account_picker::quota_lines(usage, app.provider_usage.collected_unix);
-        format!("{} · {}", dock.home.account_label(), lines.join(" · "))
+        format!("{value} · {}", lines.join(" · "))
     } else {
         value.to_string()
     };
@@ -512,6 +508,60 @@ mod tests {
     use super::*;
     use crate::app::home::HomeState;
     use ratatui::{backend::TestBackend, Terminal};
+    #[test]
+    fn account_picker_selected_spawn_profile_summary_uses_same_icon_and_account() {
+        use crate::provider_usage::{ProviderAccountUsage, QuotaProvider};
+        for nerd_font in [false, true] {
+            for (width, height) in [(194, 120), (52, 36)] {
+                let mut app = AppState::test_new();
+                app.nerd_font = nerd_font;
+                app.provider_usage.accounts.push(ProviderAccountUsage {
+                    provider: QuotaProvider::Claude,
+                    profile_id: "scalablehq".into(),
+                    label: "SHQ".into(),
+                    usage: Default::default(),
+                });
+                let mut home = HomeState::default();
+                home.refresh_account_rows(&app.provider_usage);
+                home.select_account_row(1);
+                app.spawn_dock = Some(SpawnDockState::new(home));
+                let area = Rect::new(0, 0, width, height);
+                app.view.terminal_area = area;
+                let dock = app.spawn_dock.as_ref().expect("dock");
+                let mut original = dock.home.clone();
+                original.picker = Some(HomePicker::Agent);
+                let rect = account_picker_anchor(&original, area);
+                let expected = super::super::account_picker::selected_label(&app, &dock.home);
+                let mut terminal =
+                    Terminal::new(TestBackend::new(width, height)).expect("terminal");
+                terminal
+                    .draw(|frame| render(&app, frame, area))
+                    .expect("render");
+                let inner = Block::default().borders(Borders::ALL).inner(rect);
+                let rendered: String = (inner.x..inner.right())
+                    .map(|x| terminal.backend().buffer()[(x, inner.y)].symbol())
+                    .collect();
+                assert!(
+                    rendered.contains(&expected),
+                    "{rendered:?} must show {expected}"
+                );
+                assert!(!rendered.to_ascii_lowercase().contains("claude"));
+                assert_eq!(
+                    hit_test(&app, rect.x, rect.y),
+                    Some(HitTarget::Field(SpawnDockField::Profile))
+                );
+                assert_eq!(
+                    dock.home
+                        .account_selection
+                        .as_ref()
+                        .expect("selection")
+                        .account,
+                    "scalablehq"
+                );
+            }
+        }
+    }
+
     #[test]
     fn account_picker_spawn_render_and_actual_hit_test_share_scrolled_rows() {
         for theme in ["catppuccin", "catppuccin-latte"] {
