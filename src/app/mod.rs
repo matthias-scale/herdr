@@ -11,6 +11,7 @@ pub(crate) mod agent_resume;
 pub(crate) mod agent_view;
 mod agents;
 pub(crate) mod auto_nudge;
+pub(crate) mod task_identity;
 pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
 mod api;
 mod api_helpers;
@@ -304,6 +305,8 @@ pub struct App {
     >,
     pub(crate) git_work_context_inputs:
         HashMap<crate::layout::PaneId, work_context_git::GitWorkContextInput>,
+    pub(crate) task_process_identity: task_identity::TaskProcessIdentity,
+    pub(crate) api_peer_process: Option<crate::platform::ProcessIdentity>,
     pub(crate) task_repo_refresh_floors:
         HashMap<crate::layout::PaneId, work_context_git::TaskRepoRefreshHandoff>,
     pub(crate) work_index_config: crate::config::WorkIndexConfig,
@@ -1837,6 +1840,8 @@ impl App {
             git_work_context_cache: HashMap::new(),
             git_work_context_inputs: HashMap::new(),
             task_repo_refresh_floors: HashMap::new(),
+            task_process_identity: task_identity::TaskProcessIdentity::default(),
+            api_peer_process: None,
             work_index_config: config.work_index.clone(),
             missive_config: config.missive.clone(),
             work_index_refresh_in_flight: None,

@@ -1118,6 +1118,7 @@ mod tests {
         let (mut app, _dir, _) = app_with_groups("api-redraw");
         let (tx, rx) = std::sync::mpsc::channel();
         let changed = app.handle_api_request_message(crate::api::ApiRequestMessage {
+            peer_process: None,
             request: Request {
                 id: "create".into(),
                 method: Method::GroupCreate(GroupCreateParams {
@@ -2304,6 +2305,7 @@ mod tests {
         let (respond_to, response_rx) = std::sync::mpsc::channel();
 
         app.handle_api_request_message(crate::api::ApiRequestMessage {
+            peer_process: None,
             request: Request {
                 id: "move".into(),
                 method: Method::PaneGroupSet(PaneGroupSetParams {
@@ -2486,6 +2488,7 @@ mod tests {
         let (respond_to, response_rx) = std::sync::mpsc::channel();
 
         app.handle_api_request_message(crate::api::ApiRequestMessage {
+            peer_process: None,
             request: Request {
                 id: "move".into(),
                 method: Method::PaneGroupSet(PaneGroupSetParams {
@@ -2532,6 +2535,7 @@ mod tests {
         let (respond_to, response_rx) = std::sync::mpsc::channel();
 
         app.handle_api_request_message(crate::api::ApiRequestMessage {
+            peer_process: None,
             request: Request {
                 id: "move".into(),
                 method: Method::PaneGroupSet(PaneGroupSetParams {
@@ -2606,6 +2610,7 @@ mod tests {
             .observe_snapshot(&app.state.fleet_snapshot);
         let (mutation_tx, mutation_rx) = std::sync::mpsc::channel();
         app.handle_api_request_message(crate::api::ApiRequestMessage {
+            peer_process: None,
             request: Request {
                 id: "mutation".into(),
                 method: Method::GroupDelete(GroupDeleteParams {
@@ -2631,6 +2636,7 @@ mod tests {
 
         let (status_tx, status_rx) = std::sync::mpsc::channel();
         app.handle_api_request_message(crate::api::ApiRequestMessage {
+            peer_process: None,
             request: Request {
                 id: "status".into(),
                 method: Method::ThemeStatus(Default::default()),
@@ -2718,6 +2724,7 @@ mod tests {
         let enqueue = |app: &mut App, id: &str| {
             let (respond_to, response_rx) = std::sync::mpsc::channel();
             app.handle_api_request_message(crate::api::ApiRequestMessage {
+                peer_process: None,
                 request: Request {
                     id: id.into(),
                     method: Method::GroupDelete(GroupDeleteParams {
@@ -2833,6 +2840,7 @@ mod tests {
 
         let (first_tx, first_rx) = std::sync::mpsc::channel();
         app.handle_api_request_message(crate::api::ApiRequestMessage {
+            peer_process: None,
             request: Request {
                 id: "blocker".into(),
                 method: Method::GroupDelete(GroupDeleteParams {
@@ -2846,6 +2854,7 @@ mod tests {
         });
         let (second_tx, second_rx) = std::sync::mpsc::channel();
         app.handle_api_request_message(crate::api::ApiRequestMessage {
+            peer_process: None,
             request: Request {
                 id: "pane-assignment".into(),
                 method: Method::PaneGroupSet(PaneGroupSetParams {
@@ -3001,6 +3010,7 @@ mod tests {
         let enqueue = |app: &mut App, id: &str| {
             let (respond_to, response_rx) = std::sync::mpsc::channel();
             app.handle_api_request_message(crate::api::ApiRequestMessage {
+                peer_process: None,
                 request: Request {
                     id: id.into(),
                     method: Method::GroupDelete(GroupDeleteParams {

@@ -1532,6 +1532,42 @@ pub fn process_exists(pid: u32) -> bool {
     super::unix_common::process_exists_after_kill(result, errno)
 }
 
+pub(crate) fn process_identity(pid: u32) -> Option<super::ProcessIdentity> {
+    let info = process_bsdinfo(pid)?;
+    if info.pbi_status == libc::SZOMB {
+        return None;
+    }
+    Some(super::ProcessIdentity {
+        pid,
+        parent_pid: info.pbi_ppid,
+        birth: (info.pbi_start_tvsec, info.pbi_start_tvusec),
+        tty: u64::from(info.e_tdev),
+        name: super::canonical_process_name(pid, comm_from_bsdinfo(&info)?, process_argv(pid)?),
+    })
+}
+
+/// getpeereid (used by interprocess) has no PID on macOS; LOCAL_PEERPID does.
+pub(crate) fn local_stream_peer_pid(stream: &interprocess::local_socket::Stream) -> Option<u32> {
+    use std::os::fd::{AsFd, AsRawFd};
+    let interprocess::local_socket::Stream::UdSocket(socket) = stream;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of_val(&pid) as libc::socklen_t;
+    // The socket and output buffer remain live for the complete kernel call.
+    let result = unsafe {
+        libc::getsockopt(
+            socket.as_fd().as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&mut pid as *mut libc::pid_t).cast(),
+            &mut len,
+        )
+    };
+    if result != 0 || len as usize != std::mem::size_of_val(&pid) {
+        return None;
+    }
+    u32::try_from(pid).ok().filter(|pid| *pid > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

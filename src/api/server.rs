@@ -170,6 +170,8 @@ fn handle_connection_with_stop(
     capabilities: Option<ServerCapabilities>,
     server_stop: Option<&Arc<AtomicBool>>,
 ) -> std::io::Result<()> {
+    let peer_process =
+        crate::platform::local_stream_peer_pid(&stream).and_then(crate::platform::process_identity);
     if let Err(err) = stream.set_send_timeout(Some(STREAM_WRITE_TIMEOUT)) {
         debug!(err = %err, "api connection write timeout unavailable");
     }
@@ -284,7 +286,7 @@ fn handle_connection_with_stop(
         }
         method_body => {
             let (response_write_tx, response_write_rx) = std::sync::mpsc::channel();
-            let response = handle_request(
+            let response = handle_request_with_peer(
                 Request {
                     id: request_id.clone(),
                     method: method_body,
@@ -293,6 +295,7 @@ fn handle_connection_with_stop(
                 capabilities,
                 server_stop,
                 Some(response_write_rx),
+                peer_process,
             );
             let result = write_text_line_allow_disconnect(&mut stream, &response);
             let _ = response_write_tx.send(());
@@ -341,12 +344,31 @@ fn finish_wait_response(
     result
 }
 
+#[cfg(test)]
 fn handle_request(
     request: Request,
     api_tx: &ApiRequestSender,
     capabilities: Option<ServerCapabilities>,
     server_stop: Option<&Arc<AtomicBool>>,
     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
+) -> String {
+    handle_request_with_peer(
+        request,
+        api_tx,
+        capabilities,
+        server_stop,
+        response_write_complete,
+        None,
+    )
+}
+
+fn handle_request_with_peer(
+    request: Request,
+    api_tx: &ApiRequestSender,
+    capabilities: Option<ServerCapabilities>,
+    server_stop: Option<&Arc<AtomicBool>>,
+    response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
+    peer_process: Option<crate::platform::ProcessIdentity>,
 ) -> String {
     if matches!(&request.method, Method::Ping(_)) {
         return serde_json::to_string(&SuccessResponse {
@@ -380,7 +402,14 @@ fn handle_request(
         );
     }
 
-    dispatch_to_app(request, api_tx, None, response_write_complete, None)
+    dispatch_to_app_with_peer(
+        request,
+        api_tx,
+        None,
+        response_write_complete,
+        None,
+        peer_process,
+    )
 }
 
 fn api_method_name(method: &Method) -> &'static str {
@@ -884,6 +913,24 @@ fn dispatch_to_app(
     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
     stream_active: Option<Arc<AtomicBool>>,
 ) -> String {
+    dispatch_to_app_with_peer(
+        request,
+        api_tx,
+        timeout,
+        response_write_complete,
+        stream_active,
+        None,
+    )
+}
+
+fn dispatch_to_app_with_peer(
+    request: Request,
+    api_tx: &ApiRequestSender,
+    timeout: Option<Duration>,
+    response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
+    stream_active: Option<Arc<AtomicBool>>,
+    peer_process: Option<crate::platform::ProcessIdentity>,
+) -> String {
     let agent_search = matches!(&request.method, Method::AgentSearch(_));
     let timeout = timeout.or_else(|| agent_search.then_some(AGENT_SEARCH_TIMEOUT));
     let stream_active =
@@ -892,6 +939,7 @@ fn dispatch_to_app(
     let request_active = stream_active.clone();
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     if let Err(err) = api_tx.send(ApiRequestMessage {
+        peer_process,
         request,
         respond_to,
         response_write_complete,

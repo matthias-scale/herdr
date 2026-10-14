@@ -1644,7 +1644,7 @@ impl App {
             return pane_not_found(id, &params.pane_id);
         };
 
-        let identity_matches = |app: &App| {
+        let identity_matches = |app: &mut App| {
             let Some(current_terminal_id) = app
                 .state
                 .workspaces
@@ -1653,18 +1653,13 @@ impl App {
             else {
                 return false;
             };
-            let Some(terminal) = app.state.terminals.get(current_terminal_id) else {
+            let Some(_) = app.state.terminals.get(current_terminal_id) else {
                 return false;
             };
             current_terminal_id == &terminal_id
                 && current_terminal_id.to_string() == params.expected_terminal_id
                 && task_repo_hosts_match(&app.state.agent_host_name, &params.expected_host)
-                && terminal
-                    .effective_non_retired_hook_session_id()
-                    .is_some_and(|(agent, session)| {
-                        agent.eq_ignore_ascii_case("claude")
-                            && session == params.expected_session_id
-                    })
+                && app.task_session_identity_matches(&terminal_id, &params.expected_session_id)
         };
         if !identity_matches(self) {
             return task_repo_binding_response(
@@ -1685,7 +1680,15 @@ impl App {
             }
         };
         let cwd = std::path::Path::new(&params.cwd);
-        let Some(discovered_repo) = discover_task_repo(cwd) else {
+        let discovered_repo = discover_task_repo(cwd);
+        if !identity_matches(self) {
+            return task_repo_binding_response(
+                id,
+                PaneTaskRepoBindingStatus::IdentityMismatch,
+                self.pane_info(ws_idx, pane_id),
+            );
+        }
+        let Some(discovered_repo) = discovered_repo else {
             return task_repo_binding_response(
                 id,
                 PaneTaskRepoBindingStatus::Unavailable,
@@ -1700,13 +1703,6 @@ impl App {
             );
         }
 
-        if !identity_matches(self) {
-            return task_repo_binding_response(
-                id,
-                PaneTaskRepoBindingStatus::IdentityMismatch,
-                self.pane_info(ws_idx, pane_id),
-            );
-        }
         let update = match self
             .state
             .terminals
@@ -2166,6 +2162,17 @@ impl App {
             }
             None => false,
         };
+        let terminal_id = self.state.workspaces[ws_idx].terminal_id(pane_id).cloned();
+        let revision_before = terminal_id
+            .as_ref()
+            .and_then(|id| self.state.terminals.get(id))
+            .map(|t| t.native_report_revision);
+        let report_source = params.source.clone();
+        let report_agent = agent_label.clone();
+        let report_session = session_ref.clone();
+        let report_start = crate::agent_resume::normalize_session_start_source(
+            params.session_start_source.clone(),
+        );
         self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
             pane_id,
             session_ref,
@@ -2188,6 +2195,21 @@ impl App {
                 legacy_guard.1,
                 legacy_guard.2,
                 legacy_guard.3,
+            );
+        }
+        if let Some(terminal_id) = terminal_id {
+            let accepted = self
+                .state
+                .terminals
+                .get(&terminal_id)
+                .is_some_and(|t| Some(t.native_report_revision) != revision_before);
+            self.observe_task_session_report(
+                &terminal_id,
+                &report_source,
+                &report_agent,
+                report_session.as_ref(),
+                report_start.as_deref(),
+                accepted,
             );
         }
         let _ = self.sync_terminal_titles();
@@ -4886,6 +4908,485 @@ mod tests {
         terminal_id
     }
 
+    fn process_bound_setup() -> (
+        App,
+        String,
+        crate::terminal::TerminalId,
+        std::sync::Arc<crate::app::task_identity::tests::FakeInspector>,
+        crate::platform::ProcessIdentity,
+    ) {
+        let (mut app, pane) = app_with_test_workspace();
+        let (ws, internal) = app.parse_pane_id(&pane).unwrap();
+        let id = app.state.workspaces[ws]
+            .terminal_id(internal)
+            .unwrap()
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let (inspector, peer) = crate::app::task_identity::tests::fixture();
+        app.task_process_identity.inspector = inspector.clone();
+        (app, pane, id, inspector, peer)
+    }
+
+    fn process_bound_report(
+        app: &mut App,
+        pane: &str,
+        session: Option<&str>,
+        start: Option<&str>,
+        source: &str,
+        seq: u64,
+        peer: Option<crate::platform::ProcessIdentity>,
+    ) {
+        let request = serde_json::from_value(serde_json::json!({
+            "id": format!("report-{seq}"), "method": "pane.report_agent_session", "params": {
+                "pane_id": pane, "source": source, "agent": "claude",
+                "agent_session_id": session, "session_start_source": start, "seq": seq,
+            }
+        }))
+        .unwrap();
+        let (response, _) = app.handle_api_request_with_peer(request, peer);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(
+            app.api_peer_process.is_none(),
+            "provenance must be request-scoped"
+        );
+    }
+
+    fn process_bound_params(
+        app: &App,
+        pane: &str,
+        id: &crate::terminal::TerminalId,
+    ) -> PaneBindTaskRepoParams {
+        PaneBindTaskRepoParams {
+            pane_id: pane.into(),
+            expected_terminal_id: id.to_string(),
+            expected_session_id: "native-a".into(),
+            expected_host: app.state.agent_host_name.clone(),
+            cwd: "/missing".into(),
+            repo: "owner/repo".into(),
+        }
+    }
+
+    fn process_bound_status(
+        app: &mut App,
+        params: PaneBindTaskRepoParams,
+    ) -> PaneTaskRepoBindingStatus {
+        let response = app.handle_pane_bind_task_repo("probe".into(), params);
+        let response: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneTaskRepoBinding { binding, .. } = response.result else {
+            panic!("binding result");
+        };
+        binding.status
+    }
+
+    #[test]
+    fn process_bound_report_handler_rejects_untrusted_startup_and_restored_state() {
+        for case in [
+            "missing-peer",
+            "nonancestor",
+            "nested-agent",
+            "reused-peer",
+            "inspector-error",
+            "wrong-source",
+            "path",
+            "restored",
+            "missing-start",
+            "missing-session",
+            "wrong-pane",
+        ] {
+            let (mut app, pane, id, inspector, peer) = process_bound_setup();
+            let mut reported_peer = Some(peer.clone());
+            match case {
+                "missing-peer" => reported_peer = None,
+                "nonancestor" => {
+                    inspector
+                        .processes
+                        .lock()
+                        .unwrap()
+                        .get_mut(&101)
+                        .unwrap()
+                        .parent_pid = 1
+                }
+                "nested-agent" => {
+                    inspector
+                        .processes
+                        .lock()
+                        .unwrap()
+                        .get_mut(&101)
+                        .unwrap()
+                        .name = "codex".into()
+                }
+                "reused-peer" => {
+                    inspector
+                        .processes
+                        .lock()
+                        .unwrap()
+                        .get_mut(&peer.pid)
+                        .unwrap()
+                        .birth
+                        .0 += 1
+                }
+                "inspector-error" => {
+                    inspector.processes.lock().unwrap().remove(&101);
+                }
+                _ => {}
+            }
+            if case == "restored" {
+                bind_test_agent_session(&mut app, &pane, "herdr:claude", "claude", "native-a");
+            } else if case == "path" {
+                app.handle_api_request_with_peer(serde_json::from_value(serde_json::json!({
+                    "id":"path", "method":"pane.report_agent_session", "params": {
+                        "pane_id":pane, "source":"herdr:claude", "agent":"claude",
+                        "agent_session_path":"/tmp/fake-path", "session_start_source":"startup", "seq":1
+                    }
+                })).unwrap(), reported_peer);
+            } else if case == "wrong-pane" {
+                let request = serde_json::from_value(serde_json::json!({
+                    "id":"wrong-pane", "method":"pane.report_agent_session", "params": {
+                        "pane_id":"w99:p99", "source":"herdr:claude", "agent":"claude",
+                        "agent_session_id":"native-a", "session_start_source":"startup", "seq":1
+                    }
+                }))
+                .unwrap();
+                app.handle_api_request_with_peer(request, reported_peer);
+                assert!(
+                    app.api_peer_process.is_none(),
+                    "even errors clear provenance"
+                );
+            } else {
+                process_bound_report(
+                    &mut app,
+                    &pane,
+                    if case == "missing-session" {
+                        None
+                    } else {
+                        Some("native-a")
+                    },
+                    if case == "missing-start" {
+                        None
+                    } else {
+                        Some("startup")
+                    },
+                    if case == "wrong-source" {
+                        "herdr:fake"
+                    } else {
+                        "herdr:claude"
+                    },
+                    1,
+                    reported_peer,
+                );
+            }
+            let params = process_bound_params(&app, &pane, &id);
+            assert_eq!(
+                process_bound_status(&mut app, params),
+                PaneTaskRepoBindingStatus::IdentityMismatch,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn process_bound_report_handler_burns_changed_lifecycle_and_same_process_replay() {
+        for transition in [
+            "resume",
+            "clear",
+            "compact",
+            "fork",
+            "missing-session",
+            "hook-clear",
+            "exit",
+        ] {
+            let (mut app, pane, id, _, peer) = process_bound_setup();
+            process_bound_report(
+                &mut app,
+                &pane,
+                Some("native-a"),
+                Some("startup"),
+                "herdr:claude",
+                1,
+                Some(peer.clone()),
+            );
+            assert!(app.task_session_identity_matches(&id, "native-a"));
+            if transition == "hook-clear" {
+                app.state
+                    .terminals
+                    .get_mut(&id)
+                    .unwrap()
+                    .clear_hook_authority_with_mutation(None, None);
+            } else if transition == "exit" {
+                let terminal = app.state.terminals.get_mut(&id).unwrap();
+                terminal.set_detected_state(None, AgentState::Idle);
+                terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+            } else {
+                process_bound_report(
+                    &mut app,
+                    &pane,
+                    if transition == "missing-session" {
+                        None
+                    } else {
+                        Some("native-a")
+                    },
+                    Some(transition),
+                    "herdr:claude",
+                    2,
+                    Some(peer.clone()),
+                );
+            }
+            process_bound_report(
+                &mut app,
+                &pane,
+                Some("native-a"),
+                Some("startup"),
+                "herdr:claude",
+                3,
+                Some(peer),
+            );
+            assert!(
+                !app.task_session_identity_matches(&id, "native-a"),
+                "{transition}"
+            );
+        }
+    }
+
+    #[test]
+    fn process_bound_report_handler_rejects_replacement_without_shell_gap_and_delayed_reports() {
+        for replacement in [
+            "missing-hook",
+            "rejected-hook",
+            "reused-pid",
+            "delayed-a",
+            "replayed-a-by-b",
+        ] {
+            let (mut app, pane, id, inspector, peer) = process_bound_setup();
+            process_bound_report(
+                &mut app,
+                &pane,
+                Some("native-a"),
+                Some("startup"),
+                "herdr:claude",
+                1,
+                Some(peer.clone()),
+            );
+            let mut next = inspector.foreground.lock().unwrap().clone().unwrap();
+            if replacement != "reused-pid" {
+                next.pid += 100;
+            }
+            next.birth.0 += 100;
+            *inspector.foreground.lock().unwrap() = Some(next.clone());
+            inspector.processes.lock().unwrap().insert(next.pid, next);
+            if replacement == "rejected-hook" {
+                // Old session ownership may reject B. B still cannot bind as A.
+                let mut new_peer = peer.clone();
+                new_peer.pid += 100;
+                new_peer.parent_pid = 200;
+                new_peer.birth.0 += 100;
+                inspector
+                    .processes
+                    .lock()
+                    .unwrap()
+                    .insert(new_peer.pid, new_peer.clone());
+                process_bound_report(
+                    &mut app,
+                    &pane,
+                    Some("native-b"),
+                    Some("startup"),
+                    "herdr:claude",
+                    2,
+                    Some(new_peer),
+                );
+            }
+            if replacement == "replayed-a-by-b" {
+                let mut new_peer = peer.clone();
+                new_peer.pid += 100;
+                new_peer.parent_pid = 200;
+                new_peer.birth.0 += 100;
+                inspector
+                    .processes
+                    .lock()
+                    .unwrap()
+                    .insert(new_peer.pid, new_peer.clone());
+                process_bound_report(
+                    &mut app,
+                    &pane,
+                    Some("native-a"),
+                    Some("startup"),
+                    "herdr:claude",
+                    3,
+                    Some(new_peer),
+                );
+            }
+            if replacement == "delayed-a" {
+                process_bound_report(
+                    &mut app,
+                    &pane,
+                    Some("native-a"),
+                    Some("startup"),
+                    "herdr:claude",
+                    3,
+                    Some(peer),
+                );
+            }
+            assert!(
+                !app.task_session_identity_matches(&id, "native-a"),
+                "{replacement}"
+            );
+            assert!(
+                !app.task_session_identity_matches(&id, "native-b"),
+                "{replacement}"
+            );
+        }
+    }
+
+    #[test]
+    fn process_bound_binding_typos_and_repo_failures_remain_retryable() {
+        let (mut app, pane, id, _, peer) = process_bound_setup();
+        process_bound_report(
+            &mut app,
+            &pane,
+            Some("native-a"),
+            Some("startup"),
+            "herdr:claude",
+            1,
+            Some(peer),
+        );
+        for field in ["session", "terminal", "host"] {
+            let mut params = process_bound_params(&app, &pane, &id);
+            match field {
+                "session" => params.expected_session_id = "wrong".into(),
+                "terminal" => params.expected_terminal_id = "wrong".into(),
+                _ => params.expected_host = "wrong".into(),
+            }
+            assert_eq!(
+                process_bound_status(&mut app, params),
+                PaneTaskRepoBindingStatus::IdentityMismatch
+            );
+            assert!(app.task_session_identity_matches(&id, "native-a"));
+        }
+        let mut params = process_bound_params(&app, &pane, &id);
+        params.repo = "invalid-slug".into();
+        assert_eq!(
+            process_bound_status(&mut app, params),
+            PaneTaskRepoBindingStatus::RepoMismatch
+        );
+        let params = process_bound_params(&app, &pane, &id);
+        assert_eq!(
+            process_bound_status(&mut app, params),
+            PaneTaskRepoBindingStatus::Unavailable
+        );
+        assert!(app.task_session_identity_matches(&id, "native-a"));
+        // Ordinary state reports preserve the native lifetime; only lifecycle changes burn it.
+        app.state
+            .terminals
+            .get_mut(&id)
+            .unwrap()
+            .set_agent_session_ref(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRef::id("native-a"),
+                Some(2),
+            );
+        assert!(app.task_session_identity_matches(&id, "native-a"));
+    }
+
+    #[test]
+    fn process_bound_binding_rechecks_even_failed_git_discovery() {
+        let (mut app, pane, id, inspector, peer) = process_bound_setup();
+        process_bound_report(
+            &mut app,
+            &pane,
+            Some("native-a"),
+            Some("startup"),
+            "herdr:claude",
+            1,
+            Some(peer),
+        );
+        let reads = inspector
+            .foreground_reads
+            .load(std::sync::atomic::Ordering::SeqCst);
+        *inspector.fail_foreground_from.lock().unwrap() = Some(reads + 2);
+        let params = process_bound_params(&app, &pane, &id);
+        assert_eq!(
+            process_bound_status(&mut app, params),
+            PaneTaskRepoBindingStatus::IdentityMismatch
+        );
+    }
+
+    #[test]
+    fn process_bound_tui_requests_clear_peer_between_reports() {
+        let (mut app, pane, id, _, peer) = process_bound_setup();
+        let next_pane = add_test_workspace(&mut app, "second");
+        let (ws, internal) = app.parse_pane_id(&next_pane).unwrap();
+        let next_id = app.state.workspaces[ws]
+            .terminal_id(internal)
+            .unwrap()
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&next_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+        for (index, target) in [&pane, &next_pane].into_iter().enumerate() {
+            let (respond_to, response) = std::sync::mpsc::channel();
+            app.handle_api_request_message(crate::api::ApiRequestMessage {
+                peer_process: (index == 0).then(|| peer.clone()),
+                request: serde_json::from_value(serde_json::json!({
+                    "id":"startup", "method":"pane.report_agent_session", "params": {
+                        "pane_id":target, "source":"herdr:claude", "agent":"claude",
+                        "agent_session_id":format!("native-{index}"), "session_start_source":"startup", "seq":1
+                    }
+                })).unwrap(), respond_to, response_write_complete: None, stream_active: None,
+            });
+            let _: SuccessResponse = serde_json::from_str(&response.recv().unwrap()).unwrap();
+            assert!(app.api_peer_process.is_none());
+        }
+        assert!(app.task_session_identity_matches(&id, "native-0"));
+        assert!(!app.task_session_identity_matches(&next_id, "native-1"));
+    }
+
+    #[test]
+    fn process_bound_native_startup_report_can_bind_without_hook_authority() {
+        let (mut app, _) = app_with_test_workspace();
+        let terminal_id =
+            bind_test_agent_session(&mut app, "w1:p1", "herdr:claude", "claude", "native-a");
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(crate::detect::Agent::Claude), AgentState::Working);
+        let (inspector, peer) = crate::app::task_identity::tests::fixture();
+        app.task_process_identity.inspector = inspector;
+        app.api_peer_process = Some(peer);
+        app.handle_pane_report_agent_session(
+            "startup".into(),
+            serde_json::from_value(serde_json::json!({
+                "pane_id": "w1:p1", "source": "herdr:claude", "agent": "claude",
+                "agent_session_id": "native-a", "session_start_source": "startup", "seq": 2
+            }))
+            .unwrap(),
+        );
+        assert!(app
+            .state
+            .terminals
+            .get(&terminal_id)
+            .unwrap()
+            .hook_authority
+            .is_none());
+
+        let response = app.handle_pane_bind_task_repo(
+            "bind".into(),
+            PaneBindTaskRepoParams {
+                pane_id: "w1:p1".into(),
+                expected_terminal_id: terminal_id.to_string(),
+                expected_session_id: "native-a".into(),
+                expected_host: app.state.agent_host_name.clone(),
+                cwd: "/nonexistent".into(),
+                repo: "owner/repo".into(),
+            },
+        );
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["result"]["binding"]["status"], "unavailable");
+    }
+
     #[test]
     fn bind_task_repo_rejects_restored_or_retired_authority() {
         for case in [
@@ -4897,20 +5398,14 @@ mod tests {
         ] {
             let (mut app, pane_id) = app_with_test_workspace();
             let terminal_id = if case != "restored" {
-                bind_test_live_agent_session(
-                    &mut app,
-                    &pane_id,
-                    "herdr:claude",
-                    "claude",
-                    "session-1",
-                )
+                bind_test_task_session(&mut app, &pane_id, "herdr:claude", "claude", "session-1")
             } else {
                 bind_test_agent_session(&mut app, &pane_id, "herdr:claude", "claude", "session-1")
             };
             let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
             match case {
                 "retired" => {
-                    terminal.hook_authority.as_mut().unwrap().retired_at = Some(Instant::now())
+                    terminal.clear_hook_authority_with_mutation(None, None);
                 }
                 "ended" => {
                     terminal.set_detected_state_with_visible_blocker(
@@ -4926,8 +5421,12 @@ mod tests {
                         .set_detected_state(Some(crate::detect::Agent::Codex), AgentState::Working);
                 }
                 "path-session" => {
-                    terminal.hook_authority.as_mut().unwrap().session_ref =
-                        crate::agent_resume::AgentSessionRef::path("session-1")
+                    terminal
+                        .persisted_agent_session
+                        .as_mut()
+                        .unwrap()
+                        .session_ref =
+                        crate::agent_resume::AgentSessionRef::path("/tmp/session-1").unwrap()
                 }
                 _ => {}
             }
@@ -4965,7 +5464,7 @@ mod tests {
     fn bind_task_repo_handoff_rejects_lagging_cwd_refreshes() {
         let (mut app, pane_id) = app_with_test_workspace();
         let terminal_id =
-            bind_test_live_agent_session(&mut app, &pane_id, "herdr:claude", "claude", "session-1");
+            bind_test_task_session(&mut app, &pane_id, "herdr:claude", "claude", "session-1");
         let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
         let old_cwd = app.state.terminals[&terminal_id].cwd.clone();
         let cwd = session_name_temp_dir("binding-handoff");
@@ -5067,7 +5566,7 @@ mod tests {
     #[test]
     fn bind_task_repo_handler_returns_effective_repo_to_existing_routing_consumer() {
         let (mut app, public_pane_id) = app_with_test_workspace();
-        let terminal_id = bind_test_live_agent_session(
+        let terminal_id = bind_test_task_session(
             &mut app,
             &public_pane_id,
             "herdr:claude",
@@ -5224,7 +5723,7 @@ mod tests {
         use std::process::{Command, Stdio};
 
         let (mut app, pane_id) = app_with_test_workspace();
-        let terminal_id = bind_test_live_agent_session(
+        let terminal_id = bind_test_task_session(
             &mut app,
             &pane_id,
             "herdr:claude",
@@ -5355,6 +5854,36 @@ mod tests {
             Some(target_idx)
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn bind_test_task_session(
+        app: &mut App,
+        pane_id: &str,
+        source: &str,
+        agent: &str,
+        session: &str,
+    ) -> crate::terminal::TerminalId {
+        let (ws, pane) = app.parse_pane_id(pane_id).unwrap();
+        let id = app.state.workspaces[ws].terminal_id(pane).unwrap().clone();
+        app.state
+            .terminals
+            .get_mut(&id)
+            .unwrap()
+            .set_detected_state(crate::detect::parse_agent_label(agent), AgentState::Working);
+        let (inspector, peer) = crate::app::task_identity::tests::fixture();
+        app.task_process_identity.inspector = inspector;
+        app.handle_api_request_with_peer(
+            serde_json::from_value(serde_json::json!({
+                "id": "native-startup", "method": "pane.report_agent_session", "params": {
+                    "pane_id": pane_id, "source": source, "agent": agent,
+                    "agent_session_id": session, "session_start_source": "startup", "seq": 1
+                }
+            }))
+            .unwrap(),
+            Some(peer),
+        );
+        assert!(app.api_peer_process.is_none());
+        id
     }
 
     fn bind_test_live_agent_session(

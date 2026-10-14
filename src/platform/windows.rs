@@ -3268,6 +3268,14 @@ impl Drop for InputSourceRestore {
     }
 }
 
+// No supported kernel lifetime/terminal contract on this platform: fail closed.
+pub(crate) fn process_identity(_pid: u32) -> Option<super::ProcessIdentity> {
+    None
+}
+pub(crate) fn local_stream_peer_pid(_stream: &interprocess::local_socket::Stream) -> Option<u32> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use std::{

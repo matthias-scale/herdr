@@ -354,3 +354,15 @@ fn lagging_subscription_closes_without_interrupting_other_clients() {
     assert_eq!(response["id"], "ordinary");
     assert_eq!(response["result"]["type"], "workspace_list");
 }
+
+#[test]
+fn process_bound_native_socket_captures_kernel_peer_not_json_pid() {
+    let mut server = SocketTest::new();
+    let mut client = server.connect();
+    client.send(json!({"id":"peer", "method":"pane.get", "params":{"pane_id":"w1:p1", "pid":1}}));
+    let request = server.app_request();
+    let current = crate::platform::process_identity(std::process::id());
+    assert_eq!(request.peer_process, current);
+    reply(request, ResponseResult::Ok {});
+    assert_eq!(client.response()["id"], "peer");
+}

@@ -2305,6 +2305,27 @@ impl App {
         }
     }
 
+    pub(crate) fn with_api_peer<T>(
+        &mut self,
+        peer: Option<crate::platform::ProcessIdentity>,
+        handle: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.api_peer_process = peer;
+        let response = handle(self);
+        self.api_peer_process = None;
+        response
+    }
+
+    pub(crate) fn handle_api_request_with_peer(
+        &mut self,
+        request: crate::api::schema::Request,
+        peer: Option<crate::platform::ProcessIdentity>,
+    ) -> (String, Vec<crate::app::actions::PaneStateUpdate>) {
+        self.with_api_peer(peer, |app| {
+            app.handle_api_request_after_internal_events_drained_with_pane_updates(request)
+        })
+    }
+
     pub(crate) fn handle_api_request(&mut self, request: crate::api::schema::Request) -> String {
         self.drain_all_internal_events();
         self.handle_api_request_after_internal_events_drained(request)

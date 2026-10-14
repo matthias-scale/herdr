@@ -136,6 +136,7 @@ fn stream_set_message(
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     (
         api::ApiRequestMessage {
+            peer_process: None,
             request: api::schema::Request {
                 id: id.into(),
                 method: api::schema::Method::PaneGraphicsStreamSet(
@@ -199,6 +200,7 @@ fn direct_stream_message(
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     (
         api::ApiRequestMessage {
+            peer_process: None,
             request: api::schema::Request {
                 id: id.into(),
                 method: api::schema::Method::PaneGraphicsStreamDirect(
@@ -1065,6 +1067,7 @@ fn stream_open_gate_is_owned_by_the_layer_and_cancels_on_removal() {
     let (respond_to, response_rx) = std::sync::mpsc::channel();
 
     server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        peer_process: None,
         request: api::schema::Request {
             id: "open-gated".into(),
             method: api::schema::Method::PaneGraphicsStreamOpen(
@@ -1170,6 +1173,7 @@ fn stream_set_has_graphics_only_render_impact() {
     server.app.pane_graphics.clear();
     let (respond_to, _response_rx) = std::sync::mpsc::channel();
     let impact = server.handle_api_request_with_render_impact(api::ApiRequestMessage {
+        peer_process: None,
         request: api::schema::Request {
             id: "direct-frame".into(),
             method: api::schema::Method::PaneGraphicsSet(api::schema::PaneGraphicsSetParams {
@@ -1204,6 +1208,7 @@ fn rejected_or_stale_requests_do_not_schedule_rendering() {
 
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+        peer_process: None,
         request: api::schema::Request {
             id: "disabled-set".into(),
             method: api::schema::Method::PaneGraphicsSet(api::schema::PaneGraphicsSetParams {
@@ -1239,6 +1244,7 @@ fn rejected_or_stale_requests_do_not_schedule_rendering() {
     set_stream_owner(&mut server, pane_id, "current-owner");
     let (respond_to, response_rx) = std::sync::mpsc::channel();
     let impact = server.handle_api_request_with_render_impact(api::ApiRequestMessage {
+        peer_process: None,
         request: api::schema::Request {
             id: "stale-close".into(),
             method: api::schema::Method::PaneGraphicsStreamClose(

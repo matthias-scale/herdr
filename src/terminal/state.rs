@@ -838,6 +838,9 @@ pub struct TerminalState {
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
     closing_report: Option<ClosingReport>,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
+    // Runtime-only counters; deliberately absent from snapshot and handoff types.
+    pub(crate) native_report_revision: u64,
+    pub(crate) native_binding_epoch: u64,
     /// Runtime-only Claude JSONL source. Never persisted or exposed through the
     /// API; the accepted session id remains the resume identity.
     pub(crate) claude_transcript_session_id: Option<String>,
@@ -968,6 +971,8 @@ impl TerminalState {
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             closing_report: Some(ClosingReport::default()),
             persisted_agent_session: None,
+            native_report_revision: 0,
+            native_binding_epoch: 0,
             claude_transcript_session_id: None,
             transcript_turn_state: None,
             transcript_turn_last_at: None,
@@ -2698,6 +2703,9 @@ impl TerminalState {
         process_exited: bool,
         now: Instant,
     ) -> TerminalStateMutation {
+        if process_exited || agent != self.detected_agent {
+            self.native_binding_epoch = self.native_binding_epoch.saturating_add(1);
+        }
         self.usage_limited = usage_limited;
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
@@ -4522,6 +4530,7 @@ impl TerminalState {
         &mut self,
         session: crate::agent_resume::PersistedAgentSession,
     ) {
+        self.native_binding_epoch = self.native_binding_epoch.saturating_add(1);
         self.persisted_agent_session = Some(session);
     }
 
@@ -4536,6 +4545,37 @@ impl TerminalState {
     }
 
     pub fn set_agent_session_ref_for_session_start(
+        &mut self,
+        source: String,
+        agent_label: String,
+        session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        seq: Option<u64>,
+        session_start_source: Option<String>,
+    ) -> Option<TerminalStateMutation> {
+        if session_start_source
+            .as_deref()
+            .is_some_and(|start| start != "startup")
+            || session_ref.is_none()
+        {
+            self.native_binding_epoch = self.native_binding_epoch.saturating_add(1);
+        }
+        let mutation = self.set_agent_session_ref_for_session_start_inner(
+            source,
+            agent_label,
+            session_ref,
+            seq,
+            session_start_source,
+        );
+        if mutation.is_some() {
+            self.native_report_revision = self.native_report_revision.saturating_add(1);
+            if mutation.as_ref().is_some_and(|m| m.session_ref_changed) {
+                self.native_binding_epoch = self.native_binding_epoch.saturating_add(1);
+            }
+        }
+        mutation
+    }
+
+    fn set_agent_session_ref_for_session_start_inner(
         &mut self,
         source: String,
         agent_label: String,
@@ -4875,6 +4915,7 @@ impl TerminalState {
         source: Option<&str>,
         seq: Option<u64>,
     ) -> Option<TerminalStateMutation> {
+        self.native_binding_epoch = self.native_binding_epoch.saturating_add(1);
         let sequence_source = source.map(str::to_string).or_else(|| {
             self.hook_authority
                 .as_ref()
@@ -5840,6 +5881,7 @@ impl TerminalState {
     }
 
     pub fn clear_agent_runtime_identity_after_respawn(&mut self) -> bool {
+        self.native_binding_epoch = self.native_binding_epoch.saturating_add(1);
         let hook_work_context_changed = self.clear_hook_work_context();
         self.blocked_state_hold = None;
         if let Some(report) = self.closing_report.as_mut() {

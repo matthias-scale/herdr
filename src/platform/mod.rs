@@ -960,3 +960,37 @@ mod tests {
         );
     }
 }
+
+/// Kernel-observed process lifetime. Never accepted from API parameters or persisted.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ProcessIdentity {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub birth: (u64, u64),
+    pub tty: u64,
+    pub name: String,
+}
+
+impl ProcessIdentity {
+    pub(crate) fn agent(&self) -> Option<crate::detect::Agent> {
+        crate::detect::identify_agent(&self.name)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn canonical_process_name(pid: u32, name: String, argv: Vec<String>) -> String {
+    let process = ForegroundProcess {
+        pid,
+        name: name.clone(),
+        argv0: argv.first().cloned(),
+        cmdline: None,
+        argv: Some(argv),
+    };
+    let job = ForegroundJob {
+        process_group_id: pid,
+        processes: vec![process],
+    };
+    crate::detect::identify_agent_in_job(&job)
+        .map(|(agent, _)| crate::detect::agent_label(agent).to_string())
+        .unwrap_or(name)
+}

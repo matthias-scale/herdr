@@ -1754,6 +1754,31 @@ fn process_session_id(pid: u32) -> Option<i32> {
     fields.get(3)?.parse().ok()
 }
 
+/// Read all lifetime facts from one kernel stat record, rejecting dead processes.
+pub(crate) fn process_identity(pid: u32) -> Option<super::ProcessIdentity> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close = stat.rfind(')')?;
+    let name = stat.get(stat.find('(')? + 1..close)?.to_string();
+    let fields: Vec<_> = stat.get(close + 2..)?.split_whitespace().collect();
+    if matches!(*fields.first()?, "Z" | "X" | "x") {
+        return None;
+    }
+    Some(super::ProcessIdentity {
+        pid,
+        parent_pid: fields.get(1)?.parse().ok()?,
+        birth: (fields.get(19)?.parse().ok()?, 0),
+        tty: fields.get(4)?.parse::<i64>().ok()? as u64,
+        name: super::canonical_process_name(pid, name, process_argv(pid)?),
+    })
+}
+
+pub(crate) fn local_stream_peer_pid(stream: &interprocess::local_socket::Stream) -> Option<u32> {
+    use interprocess::local_socket::traits::StreamCommon;
+    u32::try_from(stream.peer_creds().ok()?.pid()?)
+        .ok()
+        .filter(|pid| *pid > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

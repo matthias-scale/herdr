@@ -1586,6 +1586,7 @@ impl HeadlessServer {
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         self.handle_api_request_with_shutdown_check_inner(
             api::ApiRequestMessage {
+                peer_process: None,
                 request: api::schema::Request {
                     id: id.to_string(),
                     method,
@@ -6270,7 +6271,7 @@ impl HeadlessServer {
             (response, Vec::new())
         } else {
             self.app
-                .handle_api_request_after_internal_events_drained_with_pane_updates(msg.request)
+                .handle_api_request_with_peer(msg.request, msg.peer_process)
         };
         changed |= self.finish_pending_client_pane_focus();
         if let (Some(params), Some(active)) = (stream_open.as_ref(), stream_active) {
@@ -10518,6 +10519,7 @@ esac
     fn headless_pane_list(server: &mut HeadlessServer) -> Vec<api::schema::PaneInfo> {
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            peer_process: None,
             request: api::schema::Request {
                 id: "list-titles".into(),
                 method: api::schema::Method::PaneList(api::schema::PaneListParams::default()),
@@ -10576,6 +10578,7 @@ esac
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         assert!(
             server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                peer_process: None,
                 request: api::schema::Request {
                     id: "headless_stop_after_events".into(),
                     method: api::schema::Method::ServerStop(api::schema::EmptyParams::default()),
@@ -13628,6 +13631,7 @@ next_tab = ""
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         assert!(
             server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                peer_process: None,
                 request: api::schema::Request {
                     id: "rename-unrelated".into(),
                     method: api::schema::Method::PaneRename(api::schema::PaneRenameParams {
@@ -13929,6 +13933,7 @@ next_tab = ""
 
                 let (baseline_tx, baseline_rx) = std::sync::mpsc::channel();
                 server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                    peer_process: None,
                     request: api::schema::Request {
                         id: "baseline".into(),
                         method: api::schema::Method::PaneRead(api::schema::PaneReadParams {
@@ -13992,6 +13997,7 @@ next_tab = ""
 
                 let (read_tx, read_rx) = std::sync::mpsc::channel();
                 server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                    peer_process: None,
                     request: api::schema::Request {
                         id: "live".into(),
                         method: api::schema::Method::PaneRead(api::schema::PaneReadParams {
@@ -16420,6 +16426,7 @@ next_tab = ""
 
         assert!(
             server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                peer_process: None,
                 request: api::schema::Request {
                     id: "focus-from-prefix".into(),
                     method: api::schema::Method::PaneFocus(api::schema::PaneTarget {
@@ -22924,6 +22931,7 @@ next_tab = ""
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         assert!(
             server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                peer_process: None,
                 request: api::schema::Request {
                     id: "notify-after-reconnect".into(),
                     method: api::schema::Method::NotificationShow(
@@ -23504,6 +23512,7 @@ next_tab = ""
 
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            peer_process: None,
             request: api::schema::Request {
                 id: "notify".into(),
                 method: api::schema::Method::NotificationShow(
@@ -23591,6 +23600,7 @@ next_tab = ""
 
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            peer_process: None,
             request: api::schema::Request {
                 id: "notify".into(),
                 method: api::schema::Method::NotificationShow(
@@ -23644,6 +23654,7 @@ next_tab = ""
 
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            peer_process: None,
             request: api::schema::Request {
                 id: "notify".into(),
                 method: api::schema::Method::NotificationShow(
@@ -23677,6 +23688,7 @@ next_tab = ""
 
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            peer_process: None,
             request: api::schema::Request {
                 id: "notify".into(),
                 method: api::schema::Method::NotificationShow(
@@ -23715,6 +23727,7 @@ next_tab = ""
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         assert!(
             server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                peer_process: None,
                 request: api::schema::Request {
                     id: "notify".into(),
                     method: api::schema::Method::NotificationShow(
@@ -23772,6 +23785,7 @@ next_tab = ""
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         assert!(
             server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                peer_process: None,
                 request: api::schema::Request {
                     id: "notify".into(),
                     method: api::schema::Method::NotificationShow(
@@ -23940,6 +23954,7 @@ next_tab = ""
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         assert!(
             server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                peer_process: None,
                 request: api::schema::Request {
                     id: "prompt".into(),
                     method: api::schema::Method::AgentPrompt(api::schema::AgentPromptParams {
@@ -24061,6 +24076,7 @@ next_tab = ""
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         assert!(
             server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                peer_process: None,
                 request: api::schema::Request {
                     id: "complete".into(),
                     method: api::schema::Method::PaneReportAgent(
@@ -24392,6 +24408,7 @@ next_tab = ""
 
         let (respond_to, response_rx) = std::sync::mpsc::channel();
         let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            peer_process: None,
             request: api::schema::Request {
                 id: "stale".into(),
                 method: api::schema::Method::PaneReportAgent(api::schema::PaneReportAgentParams {
@@ -24522,6 +24539,7 @@ next_tab = ""
             let (respond_to, response_rx) = std::sync::mpsc::channel();
             assert!(
                 server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                    peer_process: None,
                     request: api::schema::Request {
                         id: "work-title".into(),
                         method,
