@@ -23003,8 +23003,9 @@ row_gap = 1
         let mut busy = Terminal::new(TestBackend::new(50, 12)).unwrap();
         busy.draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
-        let busy_text = row_text(busy.backend().buffer(), tab_row, 49);
+        let tab_rect = compute_tab_card_areas(&app, area)[0].rect;
+        let tab_row = tab_rect.y;
+        let busy_text = row_text(busy.backend().buffer(), tab_row, tab_rect.right());
         assert!(busy_text.contains("●"), "{busy_text:?}");
         assert!(
             !busy_text.contains("42s"),
@@ -23040,7 +23041,9 @@ row_gap = 1
         let mut idle = Terminal::new(TestBackend::new(50, 12)).unwrap();
         idle.draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let idle_text = row_text(idle.backend().buffer(), tab_row, 49);
+        let tab_rect = compute_tab_card_areas(&app, area)[0].rect;
+        let tab_row = tab_rect.y;
+        let idle_text = row_text(idle.backend().buffer(), tab_row, tab_rect.right());
         assert!(idle_text.contains("●"), "{idle_text:?}");
         assert!(
             idle_text.contains('✓'),
@@ -23112,8 +23115,8 @@ row_gap = 1
         terminal
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
-        let tab_row = compute_tab_card_areas(&app, area)[0].rect.y;
-        let rendered = row_text(terminal.backend().buffer(), tab_row, 49);
+        let tab_rect = compute_tab_card_areas(&app, area)[0].rect;
+        let rendered = row_text(terminal.backend().buffer(), tab_rect.y, tab_rect.right());
 
         assert!(rendered.contains("Review release"), "{rendered:?}");
         assert!(rendered.ends_with("1m"), "{rendered:?}");
@@ -23168,7 +23171,7 @@ row_gap = 1
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .unwrap();
         let card = &compute_tab_card_areas(&app, area)[0];
-        let rendered = row_text(terminal.backend().buffer(), card.rect.y, 49);
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, card.rect.right());
 
         assert!(rendered.ends_with("5m"), "{rendered:?}");
         assert!(!rendered.contains(" · one"), "{rendered:?}");
@@ -24265,7 +24268,9 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
             .expect("sidebar should render");
 
-        let rendered = row_text(terminal.backend().buffer(), card.rect.y, area.width - 1);
+        // Group spacers can make this short sidebar scroll. Inspect the card's
+        // measured edge so the scrollbar is not mistaken for row content.
+        let rendered = row_text(terminal.backend().buffer(), card.rect.y, card.rect.right());
         assert!(rendered.contains("Review blocked thread"), "{rendered:?}");
         assert!(rendered.ends_with('—'), "{rendered:?}");
         assert!(!rendered.contains(" · ws0"), "{rendered:?}");
@@ -29673,8 +29678,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             terminal
                 .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
                 .unwrap();
-            let row = compute_tab_card_areas(&app, area)[0].rect.y;
-            let rendered = row_text(terminal.backend().buffer(), row, area.width - 1);
+            let rect = compute_tab_card_areas(&app, area)[0].rect;
+            let rendered = row_text(terminal.backend().buffer(), rect.y, rect.right());
 
             assert!(rendered.contains("●"), "{width}: {rendered:?}");
             assert!(has_tag(&rendered, "x"), "{width}: {rendered:?}");
