@@ -238,8 +238,6 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
-const USER_BUBBLE_INDENT: usize = 5;
-
 fn worked_row_lines(duration: &str, tools: &[String], expand: bool, width: usize) -> Vec<String> {
     let tool_count = tools.len();
     let tool_label = if tool_count == 1 { "tool" } else { "tools" };
@@ -266,26 +264,31 @@ fn layout_lines(
     for row in rows {
         match row {
             ChatRow::User { body } => {
-                let left = USER_BUBBLE_INDENT.min(width.saturating_sub(3) as usize);
-                let max_width = (width as usize * 4 / 5).max(1).min(width as usize - left);
-                let inner_width = max_width.saturating_sub(2).max(1);
-                let mut body_lines = crate::ui::markdown::transcript_body_lines(
+                let inner_width = width.saturating_sub(3).max(1) as usize;
+                let body_lines = crate::ui::markdown::transcript_body_lines(
                     palette,
                     Some(body),
                     inner_width,
                     "",
                 );
-                for line in &mut body_lines {
-                    let bubble = Style::default().fg(palette.text).bg(palette.surface0);
-                    let mut padded = vec![Span::raw(" ".repeat(left)), Span::styled(" ", bubble)];
-                    padded.extend(
-                        std::mem::take(&mut line.spans)
+                let fill = Style::default().fg(palette.text).bg(palette.surface0);
+                let padding = Line::from(Span::styled(" ".repeat(width as usize), fill));
+                lines.push(padding.clone());
+                for (index, line) in body_lines.into_iter().enumerate() {
+                    let remaining = (width as usize).saturating_sub(2 + line.width());
+                    let mut spans = vec![Span::styled(
+                        if index == 0 { "› " } else { "  " },
+                        fill.fg(palette.overlay1),
+                    )];
+                    spans.extend(
+                        line.spans
                             .into_iter()
-                            .map(|span| Span::styled(span.content.to_string(), bubble)),
+                            .map(|span| Span::styled(span.content, fill)),
                     );
-                    padded.push(Span::styled(" ", bubble));
-                    lines.push(Line::from(padded));
+                    spans.push(Span::styled(" ".repeat(remaining), fill));
+                    lines.push(Line::from(spans));
                 }
+                lines.push(padding);
                 lines.push(Line::default());
             }
             ChatRow::Assistant { body } => {
@@ -660,8 +663,10 @@ mod tests {
             .iter()
             .filter(|line| line.width() > 0)
             .collect::<Vec<_>>();
-        assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].to_string().trim(), "hello");
+        assert_eq!(visible.len(), 3);
+        assert_eq!(visible[0].to_string().trim(), "");
+        assert_eq!(visible[1].to_string().trim(), "› hello");
+        assert_eq!(visible[2].to_string().trim(), "");
     }
 
     #[test]
@@ -711,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn user_blocks_stay_within_eighty_percent_and_left_align() {
+    fn user_blocks_fill_width_with_padding_and_hanging_prompt() {
         for palette in [
             Palette::github_light_high_contrast(),
             Palette::github_dark_high_contrast(),
@@ -735,15 +740,33 @@ mod tests {
                     })
                     .collect::<Vec<_>>();
                 assert!(user_lines.len() > 1);
-                for line in user_lines {
-                    assert_eq!(line.spans[0].width(), 5);
-                    assert_eq!(line.spans[1].width(), 1);
-                    assert_eq!(line.spans[1].style.bg, Some(palette.surface0));
-                    assert!(!line.spans[2].content.starts_with(' '));
-                    assert_eq!(line.spans[2].style.bg, Some(palette.surface0));
-                    assert!(line.width() - 5 <= width as usize * 4 / 5);
-                    assert!(line.width() <= width as usize);
+                assert_eq!(user_lines[0].to_string(), " ".repeat(width as usize));
+                assert_eq!(
+                    user_lines.last().expect("bottom padding").to_string(),
+                    " ".repeat(width as usize)
+                );
+                for (index, line) in user_lines.iter().enumerate() {
+                    assert_eq!(line.width(), width as usize);
+                    for span in &line.spans {
+                        assert_eq!(span.style.bg, Some(palette.surface0));
+                    }
+                    if index > 0 && index < user_lines.len() - 1 {
+                        assert_eq!(line.spans[0].content, if index == 1 { "› " } else { "  " });
+                        assert_eq!(line.spans[0].style.fg, Some(palette.overlay1));
+                        assert!(!line.spans[1].content.starts_with(' '));
+                        assert_eq!(line.spans[1].style.fg, Some(palette.text));
+                    }
                 }
+                let mut buffer = Buffer::empty(Rect::new(0, 0, width, user_lines.len() as u16));
+                for (y, line) in user_lines.iter().enumerate() {
+                    buffer.set_line(0, y as u16, line, width);
+                    for x in 0..width {
+                        assert_eq!(buffer[(x, y as u16)].bg, palette.surface0);
+                    }
+                }
+                assert_eq!(buffer[(0, 1)].symbol(), "›");
+                assert_eq!(buffer[(2, 1)].symbol(), "R");
+                assert_eq!(lines[user_lines.len()].width(), 0);
                 let assistant = lines
                     .iter()
                     .find(|line| line.to_string().contains("Assistant prose"))
