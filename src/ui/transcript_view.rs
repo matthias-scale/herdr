@@ -367,19 +367,10 @@ pub(crate) fn render(
     let lines = chat.layout_lines();
     let max_scroll = lines.len().saturating_sub(body_height);
     let offset = max_scroll.saturating_sub(scroll.min(max_scroll));
-    let visible = lines
-        .iter()
-        .skip(offset)
-        .take(body_height)
-        .cloned()
-        .collect::<Vec<_>>();
-    let body = Rect::new(
-        area.x,
-        area.y,
-        area.width,
-        area.height.saturating_sub(footer_height),
-    );
-    frame.render_widget(Paragraph::new(visible), body);
+    // Render borrowed cached lines directly; the layout already contains wrapped rows.
+    for (row, line) in lines.iter().skip(offset).take(body_height).enumerate() {
+        frame.render_widget(line, Rect::new(area.x, area.y + row as u16, area.width, 1));
+    }
     let footer = Rect::new(area.x, area.bottom() - footer_height, area.width, 1);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -494,6 +485,54 @@ mod tests {
                     .expect("cursor"),
                 (9, 16).into()
             );
+        }
+    }
+
+    #[test]
+    fn transcript_render_visible_window_matches_paragraph_at_scroll_offsets() {
+        use ratatui::{backend::TestBackend, widgets::Widget, Terminal};
+
+        for palette in [Palette::catppuccin(), Palette::catppuccin_latte()] {
+            for expand_tools in [false, true] {
+                let area = Rect::new(3, 2, 32, 20);
+                let mut chat = TranscriptChat::default();
+                for index in 0..8 {
+                    chat.push_row(ChatRow::User {
+                        body: format!("Question {index}: wide 界 and wrapping text"),
+                    });
+                    chat.push_row(ChatRow::Worked {
+                        duration: "2s".into(),
+                        tools: vec!["Read src/main.rs".into(), "Bash cargo test".into()],
+                    });
+                    chat.push_row(ChatRow::Assistant {
+                        body: format!("Answer {index}\nAnother row"),
+                    });
+                }
+                chat.prepare_layout(&palette, area.width, expand_tools);
+                let body = Rect::new(area.x, area.y, area.width, 14);
+                let lines = chat.layout_lines();
+                let max_scroll = lines.len().saturating_sub(body.height as usize);
+                for scroll in [0, 1, 7, max_scroll, usize::MAX] {
+                    let offset = max_scroll.saturating_sub(scroll.min(max_scroll));
+                    let visible = lines
+                        .iter()
+                        .skip(offset)
+                        .take(body.height as usize)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let mut expected = Buffer::empty(Rect::new(0, 0, 40, 24));
+                    Paragraph::new(visible).render(body, &mut expected);
+                    let mut terminal = Terminal::new(TestBackend::new(40, 24)).expect("terminal");
+                    terminal
+                        .draw(|frame| render(frame, area, &chat, &palette, scroll, "prefix+t"))
+                        .expect("draw");
+                    for y in body.y..body.bottom() {
+                        for x in body.x..body.right() {
+                            assert_eq!(terminal.backend().buffer()[(x, y)], expected[(x, y)]);
+                        }
+                    }
+                }
+            }
         }
     }
 
