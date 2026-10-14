@@ -1121,9 +1121,12 @@ fn claude_osc_title_static_prefix_is_idle() {
 #[test]
 fn claude_current_spinner_lines_are_working_even_with_idle_osc_title() {
     for screen in [
+        "✻ Thinking…\n",
+        "✻ Thinking… (12s · ↓ 1.2k tok\n",
         "● Photosynthesizing… (1m 52s · ↓ 3.3k tokens)\n",
         "● Contemplating… (running PostToolUse hooks… 2/3 · 6m 45s · ↓ 10.5k tokens · thought for 1s)\n",
         "● Choreographing… (12m 53s · ↓ 16.6k tokens)\n",
+        "● Choreographing… (12m 53s\n",
     ] {
         let result = osc_explain(Agent::Claude, screen, "✳ Claude Code", "");
         assert_eq!(result.state, AgentState::Working, "{screen:?}");
@@ -1134,6 +1137,22 @@ fn claude_current_spinner_lines_are_working_even_with_idle_osc_title() {
         );
         assert!(result.visible_working, "{screen:?}");
         assert!(!result.visible_idle, "{screen:?}");
+    }
+}
+
+#[test]
+fn claude_assistant_bullet_rows_remain_idle() {
+    for screen in [
+        "● I'll check the logs…\n──────────\n❯\n──────────\n",
+        "● Bash(ls -la)\n──────────\n❯\n──────────\n",
+    ] {
+        let result = osc_explain(Agent::Claude, screen, "", "");
+        assert_eq!(result.state, AgentState::Idle, "{screen:?}");
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("live_prompt_box"),
+            "{screen:?}"
+        );
     }
 }
 
