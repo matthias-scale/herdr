@@ -3,6 +3,7 @@
 use std::time::{Duration, SystemTime};
 
 use ratatui::{
+    buffer::Buffer,
     layout::Rect,
     style::Style,
     text::{Line, Span},
@@ -314,6 +315,32 @@ fn layout_lines(
     lines
 }
 
+/// Inspect only the terminal's bottom rows, without copying or restyling cells.
+/// The buffer is populated by the normal terminal renderer before this overlay.
+fn composer_height(buffer: &Buffer, area: Rect) -> u16 {
+    let cap = (u32::from(area.height) * 2 / 5) as u16;
+    if area.width == 0 || cap == 0 {
+        return 0;
+    }
+    let bottom = area.bottom();
+    let scan_top = bottom.saturating_sub(area.height.min(64));
+    let mut found_prompt = false;
+    for y in (scan_top..bottom).rev() {
+        if !found_prompt {
+            // Claude indents its prompt; require it to be the first nonblank cell.
+            found_prompt = (area.x..area.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .find(|symbol| !symbol.trim().is_empty())
+                .is_some_and(|symbol| symbol == "❯");
+        } else if (area.x..area.right())
+            .all(|x| matches!(buffer[(x, y)].symbol(), "─" | "━" | "⎯" | "-"))
+        {
+            return (bottom - y).min(cap);
+        }
+    }
+    4.min(cap)
+}
+
 pub(crate) fn render(
     frame: &mut Frame,
     area: Rect,
@@ -325,8 +352,17 @@ pub(crate) fn render(
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let composer_height = composer_height(frame.buffer_mut(), area);
+    // Leave the live terminal cells and its cursor at their original coordinates.
+    // The final cleared row is the blank separator beneath the transcript footer.
+    let area = Rect::new(
+        area.x,
+        area.y,
+        area.width,
+        area.height.saturating_sub(composer_height),
+    );
     frame.render_widget(Clear, area);
-    let footer_height = 1;
+    let footer_height = 2.min(area.height);
     let body_height = area.height.saturating_sub(footer_height) as usize;
     let lines = chat.layout_lines();
     let max_scroll = lines.len().saturating_sub(body_height);
@@ -344,7 +380,7 @@ pub(crate) fn render(
         area.height.saturating_sub(footer_height),
     );
     frame.render_widget(Paragraph::new(visible), body);
-    let footer = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+    let footer = Rect::new(area.x, area.bottom() - footer_height, area.width, 1);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!("chat view · {return_key} to return"),
@@ -358,6 +394,108 @@ pub(crate) fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn terminal_rows(area: Rect, rule: Option<u16>, prompt: u16) -> Buffer {
+        let mut buffer = Buffer::empty(area);
+        if let Some(y) = rule {
+            for x in area.x..area.right() {
+                buffer[(x, y)].set_symbol("─");
+            }
+        }
+        buffer[(area.x + 1, prompt)].set_symbol("❯");
+        buffer
+    }
+
+    #[test]
+    fn transcript_composer_uses_rule_above_bottom_prompt_and_caps_height() {
+        let area = Rect::new(3, 2, 40, 20);
+        let mut buffer = terminal_rows(area, Some(16), 18);
+        // A lower rule belongs beneath the input, and must not start the region.
+        for x in area.x..area.right() {
+            buffer[(x, 19)].set_symbol("─");
+        }
+        assert_eq!(composer_height(&buffer, area), 6);
+        let oversized = terminal_rows(area, Some(10), 14);
+        assert_eq!(composer_height(&oversized, area), 8);
+    }
+
+    #[test]
+    fn transcript_composer_falls_back_without_rule_or_prompt() {
+        let area = Rect::new(0, 0, 40, 20);
+        assert_eq!(composer_height(&terminal_rows(area, None, 17), area), 4);
+        assert_eq!(composer_height(&Buffer::empty(area), area), 4);
+        let small = Rect::new(0, 0, 40, 5);
+        assert_eq!(composer_height(&Buffer::empty(small), small), 2);
+        assert_eq!(composer_height(&Buffer::empty(Rect::ZERO), Rect::ZERO), 0);
+    }
+
+    #[test]
+    #[ignore = "manual composer scan scaling profile"]
+    fn transcript_composer_scan_profile() {
+        use std::{hint::black_box, time::Instant};
+
+        let area = Rect::new(0, 0, 120, 40);
+        let buffer = terminal_rows(area, Some(34), 36);
+        let fallback = Buffer::filled(area, ratatui::buffer::Cell::new("x"));
+        for (label, buffer) in [("composer", buffer), ("fallback", fallback)] {
+            for count in [1, 15] {
+                let start = Instant::now();
+                for _ in 0..10_000 {
+                    for _ in 0..count {
+                        black_box(composer_height(black_box(&buffer), area));
+                    }
+                }
+                println!(
+                    "{label}: {count} panes, {:.2} us/frame",
+                    start.elapsed().as_secs_f64() * 100.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transcript_render_preserves_composer_colours_cursor_and_footer_placement() {
+        use ratatui::{backend::Backend, backend::TestBackend, Terminal};
+
+        for palette in [Palette::catppuccin(), Palette::catppuccin_latte()] {
+            let mut terminal = Terminal::new(TestBackend::new(40, 20)).expect("terminal");
+            let area = Rect::new(0, 0, 40, 20);
+            let mut live = terminal_rows(area, Some(14), 16);
+            let style = Style::default().fg(palette.green).bg(palette.panel_bg);
+            live.set_style(Rect::new(0, 14, 40, 6), style);
+            live.set_string(2, 16, " typing", style);
+            live.set_string(0, 19, "mode line", style);
+            let mut chat = TranscriptChat::default();
+            chat.push_row(ChatRow::Assistant {
+                body: "Transcript above input".into(),
+            });
+            chat.prepare_layout(&palette, 40, false);
+            terminal
+                .draw(|frame| {
+                    *frame.buffer_mut() = live.clone();
+                    frame.set_cursor_position((9, 16));
+                    render(frame, area, &chat, &palette, 0, "prefix+t");
+                })
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            for y in 14..20 {
+                for x in 0..40 {
+                    assert_eq!(buffer[(x, y)], live[(x, y)]);
+                }
+            }
+            let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+            assert!(row(0).contains("Transcript above input"));
+            assert!(row(12).contains("chat view · prefix+t to return"));
+            assert!(row(13).trim().is_empty());
+            assert_eq!(
+                terminal
+                    .backend_mut()
+                    .get_cursor_position()
+                    .expect("cursor"),
+                (9, 16).into()
+            );
+        }
+    }
 
     #[test]
     fn ingest_keeps_prose_and_collapses_tool_calls() {
