@@ -17843,6 +17843,117 @@ next_tab = ""
         crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(code, modifiers))
     }
 
+    async fn assert_attached_sidebar_search_input(
+        bytes: &[u8],
+        expected: &str,
+        unclosed_mouse_paste: bool,
+    ) {
+        let mut server = test_headless_server();
+        let mut pane_input = install_focused_test_runtime(&mut server, b"");
+        server.app.state.sidebar_sections_layout = false;
+        server.app.state.sidebar_collapsed = false;
+        server.app.state.sidebar_width = 32;
+        let (writer, _control_rx, render_rx) = test_client_writer();
+        let mut client = ClientConnection::new(
+            (100, 30),
+            crate::kitty_graphics::HostCellSize::default(),
+            crate::terminal_theme::TerminalTheme::default(),
+            Some(true),
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(writer),
+        );
+        client.sidebar_presentation.group_mode = crate::app::state::SidebarGroupMode::Repo;
+        server.clients.insert(1, client);
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.render_and_stream();
+        let _ = read_server_frame(render_rx.recv().expect("initial frame"));
+        acknowledge_latest_test_render(&mut server, 1);
+        let search = crate::ui::sidebar_header_search_rect_for_app(
+            &server.app.state,
+            server.app.state.view.sidebar_rect,
+        );
+        assert!(search.width > 0);
+        let click = format!(
+            "\x1b[<0;{};{}M\x1b[<0;{};{}m",
+            search.x + 1,
+            search.y + 1,
+            search.x + 1,
+            search.y + 1,
+        );
+        // pane send-text writes raw bytes. A paste break/restore around the
+        // mouse report leaves subsequent text buffered until a paste end.
+        let click = if unclosed_mouse_paste {
+            format!("\x1b[201~{click}\x1b[200~")
+        } else {
+            click
+        };
+        server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: click.into_bytes(),
+        });
+        server.render_and_stream();
+        let _ = read_server_frame(render_rx.recv().expect("focused search frame"));
+        acknowledge_latest_test_render(&mut server, 1);
+        assert!(server.clients[&1].sidebar_presentation.search_active);
+        assert!(server.clients[&1].sidebar_presentation.focused);
+        let active = server.app.state.active;
+        let tab = server.app.state.workspaces[0].active_tab;
+        server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: bytes.to_vec(),
+        });
+        if unclosed_mouse_paste {
+            let client = &server.clients[&1];
+            assert!(client.raw_input.has_pending_bracketed_paste());
+            assert!(client
+                .sidebar_presentation
+                .agent_finder_saved_query
+                .is_none());
+            assert!(client.sidebar_presentation.work_filter.query.is_empty());
+            assert!(pane_input.try_recv().is_err());
+            server.handle_server_event(ServerEvent::ClientInput {
+                client_id: 1,
+                data: b"\x1b[201~".to_vec(),
+            });
+        }
+        let presentation = &server.clients[&1].sidebar_presentation;
+        assert!(
+            presentation.agent_finder_saved_query.is_some(),
+            "finder must open"
+        );
+        assert_eq!(presentation.work_filter.query, expected);
+        assert!(presentation.search_active);
+        assert!(presentation.agent_finder_deadline.is_some());
+        assert_eq!(server.app.state.active, active);
+        assert_eq!(server.app.state.workspaces[0].active_tab, tab);
+        assert!(pane_input.try_recv().is_err(), "search text reached PTY");
+        server.render_and_stream();
+        let frame = read_server_frame(render_rx.recv().expect("finder frame"));
+        assert!(frame_text(&frame).contains(expected), "query must render");
+    }
+
+    #[tokio::test]
+    async fn attached_sidebar_search_first_key_opens_finder() {
+        assert_attached_sidebar_search_input(b"s", "s", false).await;
+    }
+
+    #[tokio::test]
+    async fn attached_sidebar_search_first_paste_opens_finder() {
+        assert_attached_sidebar_search_input(b"\x1b[200~sidebar\x1b[201~", "sidebar", false).await;
+    }
+
+    #[tokio::test]
+    async fn attached_sidebar_search_unclosed_mouse_paste_buffers_first_key() {
+        assert_attached_sidebar_search_input(b"s", "s", true).await;
+    }
+
+    #[tokio::test]
+    async fn attached_sidebar_search_unclosed_mouse_paste_buffers_sent_text() {
+        assert_attached_sidebar_search_input(b"sidebar", "sidebar", true).await;
+    }
+
     #[tokio::test]
     async fn clipboard_image_with_client_overlay_never_reaches_pane() {
         let mut server = test_headless_server();
@@ -19419,6 +19530,229 @@ next_tab = ""
             drop(listener);
             let _ = std::fs::remove_file(socket_path);
             shutdown_test_runtimes(&mut server);
+        }
+    }
+
+    #[tokio::test]
+    async fn collapsed_project_header_raw_client_motion_swaps_status_and_restores() {
+        use crate::app::state::SidebarGroupMode;
+        use crate::app::Mode;
+        use crate::detect::{Agent, AgentState};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        for (active, settled, nerd_font) in [
+            (0, false, false),
+            (1, false, false),
+            (0, true, false),
+            (0, false, true),
+            (1, false, true),
+            (0, true, true),
+        ] {
+            let mut server = test_headless_server();
+            let mut alpha = crate::workspace::Workspace::test_new("alpha");
+            alpha.test_add_tab(Some("alpha-live"));
+            server.app.state.workspaces =
+                vec![alpha, crate::workspace::Workspace::test_new("beta")];
+            server.app.state.ensure_test_terminals();
+            for ws_idx in 0..2 {
+                for tab_idx in 0..server.app.state.workspaces[ws_idx].tabs.len() {
+                    let pane = server.app.state.workspaces[ws_idx].tabs[tab_idx].root_pane;
+                    let terminal_id = server.app.state.workspaces[ws_idx].tabs[tab_idx].panes
+                        [&pane]
+                        .attached_terminal_id
+                        .clone();
+                    let terminal = server
+                        .app
+                        .state
+                        .terminals
+                        .get_mut(&terminal_id)
+                        .expect("terminal");
+                    terminal.detected_agent = Some(Agent::Codex);
+                    terminal.set_raw_agent_state_for_test(AgentState::Working);
+                    terminal.replace_prevalidated_manual_work_context(
+                        crate::work_context::PaneWorkContext {
+                            repo: Some(
+                                if ws_idx == 0 {
+                                    "owner/alpha"
+                                } else {
+                                    "owner/beta"
+                                }
+                                .into(),
+                            ),
+                            branch: Some("main".into()),
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+            if settled {
+                let pane = server.app.state.workspaces[0].tabs[0].root_pane;
+                let terminal_id = server.app.state.workspaces[0].tabs[0].panes[&pane]
+                    .attached_terminal_id
+                    .clone();
+                let terminal = server
+                    .app
+                    .state
+                    .terminals
+                    .get_mut(&terminal_id)
+                    .expect("settled terminal");
+                terminal.detected_agent = Some(Agent::Claude);
+                terminal.set_raw_agent_state_for_test(AgentState::Idle);
+                server.app.state.workspaces[0].tabs[0]
+                    .panes
+                    .get_mut(&pane)
+                    .expect("settled pane")
+                    .settled_at = Some(1);
+            }
+            server.app.state.refresh_local_agent_panel_identities();
+            server.app.state.sidebar_group_mode = SidebarGroupMode::Repo;
+            server.app.state.sidebar_collapsed = false;
+            server.app.state.nerd_font = nerd_font;
+            server.app.state.active = Some(active);
+            server.app.state.selected = 0;
+            server
+                .app
+                .state
+                .collapsed_sidebar_groups
+                .insert("repo:repo:owner/alpha".into());
+            server.app.state.set_server_mode(Mode::Terminal);
+            server.app.state.reconcile_sidebar_presentation();
+            let mut client = test_app_client(Some(true), 1);
+            let mut sidebar = crate::app::state::SidebarPresentationState::default();
+            server.app.state.swap_sidebar_presentation(&mut sidebar);
+            client.sidebar_presentation = sidebar.clone();
+            server.app.state.swap_sidebar_presentation(&mut sidebar);
+            let mut observer = test_app_client(Some(true), 2);
+            observer.sidebar_presentation = client.sidebar_presentation.clone();
+            server.clients.insert(2, observer);
+            server.clients.insert(1, client);
+            server.foreground_client_id = Some(1);
+            server.sync_foreground_client_state();
+            crate::ui::compute_view(
+                &mut server.app.state,
+                ratatui::layout::Rect::new(0, 0, 80, 24),
+            );
+
+            let render = |server: &mut HeadlessServer, client_id| {
+                let mut presentation = ClientInputPresentation::take(
+                    server.clients.get_mut(&client_id).expect("client"),
+                    &server.app.state,
+                );
+                presentation.install(&mut server.app.state);
+                crate::ui::compute_view(
+                    &mut server.app.state,
+                    ratatui::layout::Rect::new(0, 0, 80, 24),
+                );
+                let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+                terminal
+                    .draw(|frame| {
+                        crate::ui::render_with_runtime_registry(
+                            &server.app.state,
+                            &server.app.terminal_runtimes,
+                            frame,
+                        )
+                    })
+                    .expect("render");
+                let buffer = terminal.backend().buffer().clone();
+                presentation.uninstall(&mut server.app.state);
+                presentation.store(
+                    server.clients.get_mut(&client_id).expect("client"),
+                    &server.app.state,
+                );
+                buffer
+            };
+            let rest = render(&mut server, 1);
+            let y = (0..24)
+                .find(|y| {
+                    (0..32)
+                        .map(|x| rest[(x, *y)].symbol())
+                        .collect::<String>()
+                        .contains("owner/alpha")
+                })
+                .expect("collapsed project header");
+            let x = (0..32)
+                .find(|x| rest[(*x, y)].symbol() == "●")
+                .expect("aggregate status glyph");
+            for pointer_x in [x + 6, x] {
+                let repaint = server.handle_server_event(ServerEvent::ClientInput {
+                    client_id: 1,
+                    data: format!("\x1b[<35;{};{}M", pointer_x + 1, y + 1).into_bytes(),
+                });
+                let hovered = render(&mut server, 1);
+                assert_eq!(
+                    hovered[(x, y)].symbol(),
+                    "▸",
+                    "active={active}, settled={settled}, pointer_x={pointer_x}"
+                );
+                assert!(repaint, "hover must request a client frame");
+                let title_start = (x + 1..30)
+                    .find(|title_x| {
+                        rest[(*title_x, y)].symbol() == "o"
+                            && rest[(*title_x + 1, y)].symbol() == "w"
+                    })
+                    .expect("title start");
+                for title_x in x + 2..title_start + 11 {
+                    assert_eq!(
+                        hovered[(title_x, y)].symbol(),
+                        rest[(title_x, y)].symbol(),
+                        "header title must not shift"
+                    );
+                }
+                assert!(server.handle_server_event(ServerEvent::ClientInput {
+                    client_id: 1,
+                    data: b"\x1b[<35;45;20M".to_vec(),
+                }));
+                assert_eq!(
+                    render(&mut server, 1)[(x, y)].symbol(),
+                    "●",
+                    "leaving restores aggregate"
+                );
+            }
+            let config: crate::config::Config =
+                toml::from_str("[keys]\nfocus_sidebar = \"f6\"\n").expect("key config");
+            server.server_keybindings = config.live_keybinds().expect("live keybinds");
+            server.handle_server_event(ServerEvent::ClientInput {
+                client_id: 1,
+                data: b"\x1b[17~".to_vec(),
+            });
+            assert!(
+                server.clients[&1].sidebar_presentation.focused,
+                "raw keyboard shortcut focuses sidebar"
+            );
+            assert_eq!(server.app.state.server_mode(), Mode::Terminal);
+            let focused = render(&mut server, 1);
+            assert_eq!(
+                focused[(x, y)].symbol(),
+                "▸",
+                "keyboard focus shows chevron"
+            );
+            for title_x in x + 2..30 {
+                assert_eq!(
+                    focused[(title_x, y)].symbol(),
+                    rest[(title_x, y)].symbol(),
+                    "keyboard focus must not shift icon or title"
+                );
+            }
+            assert!(!server.clients[&2].sidebar_presentation.focused);
+            assert_eq!(
+                render(&mut server, 2)[(x, y)].symbol(),
+                "●",
+                "keyboard focus stays client-local"
+            );
+            assert_eq!(render(&mut server, 1)[(x, y)].symbol(), "▸");
+            // Clicking the pane returns keyboard ownership to it. Escape only
+            // dismisses sidebar sub-surfaces; it does not release sidebar focus.
+            server.handle_server_event(ServerEvent::ClientInput {
+                client_id: 1,
+                data: b"\x1b[<0;45;20M\x1b[<0;45;20m".to_vec(),
+            });
+            assert_eq!(
+                render(&mut server, 1)[(x, y)].symbol(),
+                "●",
+                "leaving keyboard focus restores status"
+            );
+            assert!(!server.clients[&1].sidebar_presentation.focused);
+            assert_eq!(render(&mut server, 2)[(x, y)].symbol(), "●");
         }
     }
 

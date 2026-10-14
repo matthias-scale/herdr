@@ -10025,6 +10025,10 @@ pub(crate) fn compute_sidebar_hover_targets(
     for (row, row_y) in &visible {
         let (label, row_hover) = match row {
             SidebarRow::Workspace {
+                collapsed_status: Some(_),
+                ..
+            } => (String::new(), true),
+            SidebarRow::Workspace {
                 activity_count: Some((working, total)),
                 ..
             } => (format!("{working} of {total} agents working"), false),
@@ -13316,9 +13320,11 @@ fn render_workspace_list(
         }
         // A collapsed shallow project names its status in the disclosure
         // slot; hover or keyboard focus swaps in the chevron in the same cell.
+        let header_focused =
+            selected || (app.sidebar_focused && member_indices.contains(&app.selected));
         let slot_status = header
             .and_then(|(.., status, _, _)| *status)
-            .filter(|_| !expanded && !selected && !sidebar_row_is_hovered(app, row_y));
+            .filter(|_| !expanded && !header_focused && !sidebar_row_is_hovered(app, row_y));
         match slot_status {
             Some(status) => spans.push(Span::styled(
                 status.glyph,
