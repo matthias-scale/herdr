@@ -387,8 +387,9 @@ impl HomeState {
             // Configured roots/tool lookup or secret-get controls could redirect
             // the child away from the independently verified local secret owner.
             matches!(name.as_str(), "HOME" | "USERPROFILE" | "PATH")
-                || name.starts_with("SECRET_GET_")
-                || name.starts_with("DOPPLER_")
+                || crate::claude_account_launch::HELPER_CONTROL_PREFIXES
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
                 || crate::claude_account_launch::AUTH_OVERRIDES.contains(&name.as_str())
         }) {
             return Err(

@@ -200,6 +200,8 @@ fn account_picker_claude_child_refuses_ambient_auth_provider_config_and_old_cli_
         "CLAUDE_CODE_USE_VERTEX",
         "CLAUDE_CODE_USE_FOUNDRY",
         "CLAUDE_CONFIG_DIR",
+        "SECRET_GET_COMMAND",
+        "DOPPLER_TOKEN",
     ] {
         let fixture = Fixture::new(GOOD_HELPER);
         let output = fixture

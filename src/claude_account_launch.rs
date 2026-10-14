@@ -34,6 +34,9 @@ pub(crate) const AUTH_OVERRIDES: &[&str] = &[
     "ANTHROPIC_FOUNDRY_BASE_URL",
     "ANTHROPIC_FOUNDRY_RESOURCE",
 ];
+/// These variables control the canonical helper's lookup source. Presence alone
+/// makes an explicit account launch unsafe, even though the child scrubs them.
+pub(crate) const HELPER_CONTROL_PREFIXES: &[&str] = &["SECRET_GET_", "DOPPLER_"];
 const SHELL_INPUTS: &[&str] = &[
     "BASH_ENV",
     "ENV",
@@ -198,6 +201,13 @@ pub(crate) fn run_child(args: &[String]) -> i32 {
         if AUTH_OVERRIDES
             .iter()
             .any(|key| std::env::var_os(key).is_some())
+            || std::env::vars_os().any(|(name, _)| {
+                name.to_str().is_some_and(|name| {
+                    HELPER_CONTROL_PREFIXES
+                        .iter()
+                        .any(|prefix| name.starts_with(prefix))
+                })
+            })
         {
             return Err(
                 "Claude unavailable: ambient authentication/provider/config override".into(),
