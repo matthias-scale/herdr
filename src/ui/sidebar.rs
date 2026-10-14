@@ -625,8 +625,8 @@ fn compact_row_title_for_app<'a>(
     )
 }
 
-fn sidebar_row_left_padding(app: &AppState) -> usize {
-    usize::from(app.view.layout != crate::app::state::ViewLayout::Mobile)
+fn sidebar_row_left_padding(_app: &AppState) -> usize {
+    1
 }
 
 fn compact_row_title_for_width_with_padding<'a>(
@@ -9140,12 +9140,8 @@ fn sidebar_row_content_rect(rect: Rect) -> Rect {
     )
 }
 
-fn sidebar_row_content_rect_for_app(app: &AppState, rect: Rect) -> Rect {
-    if sidebar_row_left_padding(app) == 0 {
-        rect
-    } else {
-        sidebar_row_content_rect(rect)
-    }
+fn sidebar_row_content_rect_for_app(_app: &AppState, rect: Rect) -> Rect {
+    sidebar_row_content_rect(rect)
 }
 
 #[cfg(test)]
@@ -15884,14 +15880,16 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn mobile_compact_title_budget_does_not_reserve_desktop_padding() {
+    fn mobile_compact_title_budget_reserves_one_left_padding_cell() {
+        let mut app = AppState::test_new();
+        app.view.layout = crate::app::state::ViewLayout::Mobile;
         let title = "#1 · 12345678";
         assert_eq!(
-            compact_row_title_for_width_with_padding(title, "c", None, 18, 1, 0),
-            title
+            super::sidebar_row_content_rect_for_app(&app, Rect::new(0, 0, 18, 1)),
+            Rect::new(1, 0, 17, 1)
         );
         assert_eq!(
-            compact_row_title_for_width_with_padding(title, "c", None, 18, 1, 1),
+            super::compact_row_title_for_app(&app, title, "c", None, 18, 1),
             "12345678"
         );
     }
