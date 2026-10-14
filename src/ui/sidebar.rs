@@ -248,7 +248,7 @@ pub(super) struct TabRowLayout {
     pub dot: String,
     pub title: String,
     pub provider: String,
-    pub device: Option<char>,
+    pub device: Option<String>,
     pub provider_field: usize,
     pub age_field: usize,
     pub done_marker: String,
@@ -417,6 +417,11 @@ fn sidebar_device_code(app: &AppState, host: &str) -> Option<char> {
         return None;
     }
     device_code(host)
+}
+
+/// Compact rows show the existing machine label, without inventing metadata.
+fn sidebar_machine_label<'a>(app: &AppState, host: &'a str) -> Option<&'a str> {
+    (app.sidebar_show_machine_names && !host.trim().is_empty()).then_some(host)
 }
 
 /// The provider token a compact row shows: empty unless the Provider icon
@@ -633,7 +638,7 @@ pub(crate) fn title_without_object_identifier(title: &str) -> Option<&str> {
 fn compact_row_title_for_width<'a>(
     title: &'a str,
     provider: &str,
-    device: Option<char>,
+    device: Option<&str>,
     width: usize,
     requested_prefix: usize,
 ) -> &'a str {
@@ -708,7 +713,7 @@ fn compact_row_layout(
     prefix_width: usize,
     tab: bool,
     nerd_font: bool,
-    device: Option<char>,
+    device: Option<&str>,
     show_provider: bool,
 ) -> TabRowLayout {
     let (age, activity_instant) = compact_age(entry, now);
@@ -745,7 +750,8 @@ fn compact_row_layout(
         },
         device: (widths.provider > 0 && widths.device)
             .then_some(device)
-            .flatten(),
+            .flatten()
+            .map(str::to_string),
         provider_field: widths.provider,
         age_field: widths.age,
         done_marker: done_marker.to_string(),
@@ -779,11 +785,14 @@ pub(crate) fn agent_row_cells(
     }
 }
 
-fn compact_provider_field_width(provider: &str, device: bool) -> usize {
-    if provider.is_empty() && !device {
+fn compact_provider_field_width(provider: &str, device: Option<&str>) -> usize {
+    if provider.is_empty() && device.is_none() {
         0
     } else {
-        display_width(provider) + usize::from(device) + SIDEBAR_PROVIDER_GAP_WIDTH
+        display_width(provider)
+            + device.map_or(0, display_width)
+            + usize::from(!provider.is_empty() && device.is_some())
+            + SIDEBAR_PROVIDER_GAP_WIDTH
     }
 }
 
@@ -799,7 +808,7 @@ struct CompactRowWidths {
 fn compact_row_prefix_width(
     title: &str,
     provider: &str,
-    device: Option<char>,
+    device: Option<&str>,
     width: usize,
     requested_prefix: usize,
 ) -> usize {
@@ -808,12 +817,12 @@ fn compact_row_prefix_width(
 }
 
 /// Fields yield in a fixed order as the row narrows so the title never drops
-/// below its readable minimum: age first, then the device character, then the
+/// below its readable minimum: age first, then the machine label, then the
 /// provider icon.
 fn compact_row_widths(
     title: &str,
     provider: &str,
-    device: Option<char>,
+    device: Option<&str>,
     width: usize,
     requested_prefix: usize,
 ) -> CompactRowWidths {
@@ -830,18 +839,16 @@ fn compact_row_widths(
     };
     let age = if width >= SIDEBAR_AGE_MIN_ROW_WIDTH
         && fits(
-            compact_provider_field_width(provider, device.is_some()),
+            compact_provider_field_width(provider, device),
             SIDEBAR_AGE_FIELD_WIDTH,
         ) {
         SIDEBAR_AGE_FIELD_WIDTH
     } else {
         0
     };
-    let device = device.is_some()
-        && compact_provider_field_width(provider, true) > 0
-        && fits(compact_provider_field_width(provider, true), age);
+    let show_device = device.is_some() && fits(compact_provider_field_width(provider, device), age);
     let provider = {
-        let field = compact_provider_field_width(provider, device);
+        let field = compact_provider_field_width(provider, device.filter(|_| show_device));
         if field > 0 && !fits(field, age) {
             0
         } else {
@@ -861,7 +868,7 @@ fn compact_row_widths(
     CompactRowWidths {
         prefix,
         provider,
-        device,
+        device: show_device,
         age,
     }
 }
@@ -1228,10 +1235,10 @@ pub(super) fn render_remote_compact_agent_row_with_shelf(
     );
 }
 
-/// Device sections already name the host; retain the full cached title for
-/// other surfaces and layouts, including remote pane/tab titles.
+/// Device sections name the host; project rows use the optional metadata field.
+/// Other surfaces retain the full cached title, including remote pane/tab titles.
 fn remote_sidebar_title<'a>(app: &AppState, remote: &'a RemoteAgentPanelEntry) -> &'a str {
-    if app.sidebar_sections_layout {
+    if app.sidebar_sections_layout || sidebar_shallow_project_list(app) {
         remote.render_title.rsplit_once(" · ").map_or(
             remote.render_title.as_str(),
             |(title, host)| {
@@ -1269,7 +1276,7 @@ fn render_remote_compact_agent_row_body(
     let render_age = remote_compact_age(remote, app.view_observed_at);
     let requested_prefix = prefix_override.unwrap_or_else(|| usize::from(depth));
     let row_width = usize::from(rect.width);
-    let device = sidebar_device_code(app, &remote.agent_ref.host);
+    let device = sidebar_machine_label(app, &remote.agent_ref.host);
     let title = compact_row_title_for_width(
         remote_sidebar_title(app, remote),
         sidebar_remote_row_provider(app, remote),
@@ -1397,14 +1404,15 @@ fn render_remote_compact_agent_row_body(
         }
     }
     if provider_width > 0 {
-        // The device character rides inside the provider field, glued to the
-        // icon, in the host tag colour as on local rows; one right-aligned line
-        // keeps the tag flush.
+        // The machine label follows the provider with its own host tag colour.
         let mut tag = vec![Span::styled(
             sidebar_remote_row_provider(app, remote),
             row_style(provider_style),
         )];
         if let Some(code) = device.filter(|_| widths.device) {
+            if !sidebar_remote_row_provider(app, remote).is_empty() {
+                tag.push(Span::styled(" ", row_style(Style::default())));
+            }
             tag.push(Span::styled(
                 code.to_string(),
                 row_style(Style::default().fg(sidebar_host_tag_color(
@@ -1471,7 +1479,7 @@ fn render_compact_agent_row_body(
     let requested_prefix_width = prefix_override.unwrap_or_else(|| usize::from(depth));
     let provider = sidebar_row_provider(app, entry);
     let machine_host = sidebar_machine_host(app, entry);
-    let device_code = sidebar_device_code(app, machine_host);
+    let device_code = sidebar_machine_label(app, machine_host);
     let row_title = compact_row_title_for_width(
         compact_row_title(entry, tab),
         &provider,
@@ -1530,13 +1538,15 @@ fn render_compact_agent_row_body(
     let title_text = truncate_end(&layout.title, title_text_width);
     let title_pad = " ".repeat(title_text_width.saturating_sub(display_width(&title_text)));
     let dot = pad_right(&layout.dot, SIDEBAR_DOT_FIELD_WIDTH);
-    // The device character gets the host tag colour, so it stays a separate
-    // span from the provider icon it is glued to.
+    // Keep the machine label separate from the provider icon and its colour.
     let provider = pad_left(
         &layout.provider,
         layout
             .provider_field
-            .saturating_sub(usize::from(layout.device.is_some())),
+            .saturating_sub(layout.device.as_deref().map_or(0, display_width))
+            .saturating_sub(usize::from(
+                !layout.provider.is_empty() && layout.device.is_some(),
+            )),
     );
     let age = layout
         .activity_age
@@ -1636,8 +1646,11 @@ fn render_compact_agent_row_body(
         None => spans.push(Span::styled(provider, provider_style)),
     }
     if let Some(code) = layout.device {
+        if !layout.provider.is_empty() {
+            spans.push(Span::styled(" ", row_style(Style::default())));
+        }
         spans.push(Span::styled(
-            code.to_string(),
+            code,
             row_style(Style::default().fg(sidebar_host_tag_color(app, machine_host, p))),
         ));
     }
@@ -1699,7 +1712,7 @@ fn sidebar_pin_rect(
         return None;
     }
     let provider = sidebar_row_provider(app, entry);
-    let device = sidebar_device_code(app, sidebar_machine_host(app, entry));
+    let device = sidebar_machine_label(app, sidebar_machine_host(app, entry));
     let title = compact_row_title_for_width(
         compact_row_title(entry, tab),
         &provider,
@@ -1830,7 +1843,7 @@ pub(crate) fn selected_row_control_at(
     }
     let requested_prefix = usize::from(depth);
     let provider = sidebar_row_provider(app, entry);
-    let device = sidebar_device_code(app, sidebar_machine_host(app, entry));
+    let device = sidebar_machine_label(app, sidebar_machine_host(app, entry));
     let title = compact_row_title_for_width(
         compact_row_title(entry, tab),
         &provider,
@@ -1901,7 +1914,7 @@ pub(crate) fn selected_remote_row_control_at(
 ) -> Option<crate::app::state::SidebarHoverAction> {
     let requested_prefix = usize::from(depth);
     let row_width = usize::from(rect.width);
-    let device = sidebar_device_code(app, &entry.agent_ref.host);
+    let device = sidebar_machine_label(app, &entry.agent_ref.host);
     let title = compact_row_title_for_width(
         remote_sidebar_title(app, entry),
         sidebar_remote_row_provider(app, entry),
@@ -4950,21 +4963,21 @@ fn mark_ambiguous_remote_titles(app: &AppState, rows: &mut [SidebarRow], width: 
                 compact_row_title(entry, false),
                 sidebar_row_provider(app, entry),
                 *depth,
-                sidebar_device_code(app, sidebar_machine_host(app, entry)),
+                sidebar_machine_label(app, sidebar_machine_host(app, entry)),
                 false,
             ),
             SidebarRow::Tab { entry, depth } => (
                 compact_row_title(entry, true),
                 sidebar_row_provider(app, entry),
                 *depth,
-                sidebar_device_code(app, sidebar_machine_host(app, entry)),
+                sidebar_machine_label(app, sidebar_machine_host(app, entry)),
                 false,
             ),
             SidebarRow::RemoteAgent { entry, depth, .. } => (
-                entry.render_title.as_str(),
+                remote_sidebar_title(app, entry),
                 sidebar_remote_row_provider(app, entry).to_string(),
                 *depth,
-                sidebar_device_code(app, &entry.agent_ref.host),
+                sidebar_machine_label(app, &entry.agent_ref.host),
                 true,
             ),
             _ => return None,
@@ -9611,7 +9624,7 @@ pub(super) fn render_needs_you_row(
     let prefix = compact_row_prefix_width(
         title,
         provider,
-        sidebar_device_code(app, host),
+        device.strip_prefix(' '),
         usize::from(rect.width),
         NEEDS_YOU_REQUESTED_PREFIX_WIDTH,
     );
@@ -10127,7 +10140,7 @@ pub(crate) fn compute_sidebar_hover_targets(
                 let tab = matches!(row, SidebarRow::Tab { .. });
                 let requested_prefix = narrow_prefix.unwrap_or_else(|| usize::from(*depth));
                 let provider = sidebar_row_provider(app, entry);
-                let device = sidebar_device_code(app, sidebar_machine_host(app, entry));
+                let device = sidebar_machine_label(app, sidebar_machine_host(app, entry));
                 let title = compact_row_title_for_width(
                     compact_row_title(entry, tab),
                     &provider,
@@ -10165,13 +10178,15 @@ pub(crate) fn compute_sidebar_hover_targets(
                     + widths.provider
                     + widths.age
                     + done_width;
-                // The device character is the last cell of the provider field.
+                // The machine label occupies the end of the metadata field.
                 if widths.device {
                     if let Some(rect) = clamp_row_cells(
                         body,
                         row_y,
-                        usize::from(body.width).saturating_sub(widths.age + done_width + 1),
-                        1,
+                        usize::from(body.width).saturating_sub(
+                            widths.age + done_width + device.map_or(0, display_width),
+                        ),
+                        device.map_or(0, display_width),
                     ) {
                         targets.push(crate::app::state::SidebarHoverTarget {
                             rect,
@@ -10343,7 +10358,7 @@ pub(crate) fn compute_sidebar_hover_targets(
             } => {
                 let requested_prefix = usize::from(*depth);
                 let row_width = usize::from(body.width);
-                let device = sidebar_device_code(app, &entry.agent_ref.host);
+                let device = sidebar_machine_label(app, &entry.agent_ref.host);
                 let title = compact_row_title_for_width(
                     remote_sidebar_title(app, entry),
                     sidebar_remote_row_provider(app, entry),
@@ -10381,13 +10396,15 @@ pub(crate) fn compute_sidebar_hover_targets(
                     + widths.provider
                     + age_width
                     + done_width;
-                // The device character is the last cell of the provider field.
+                // Cover the full machine label with its host tooltip.
                 if widths.device {
                     if let Some(rect) = clamp_row_cells(
                         body,
                         row_y,
-                        row_width.saturating_sub(age_width + done_width + 1),
-                        1,
+                        row_width.saturating_sub(
+                            age_width + done_width + device.map_or(0, display_width),
+                        ),
+                        device.map_or(0, display_width),
                     ) {
                         targets.push(crate::app::state::SidebarHoverTarget {
                             rect,
@@ -11994,8 +12011,7 @@ pub(super) fn render_agent_finder_results_in_area(app: &AppState, frame: &mut Fr
             .agent
             .agent_ref
             .as_ref()
-            .map(|host| host.host.as_str())
-            .unwrap_or("local");
+            .and_then(|host| sidebar_machine_label(app, &host.host));
         let source = match hit.source {
             crate::api::schema::AgentSearchSource::Title => "title".to_owned(),
             crate::api::schema::AgentSearchSource::Tail => "tail".to_owned(),
@@ -12006,7 +12022,9 @@ pub(super) fn render_agent_finder_results_in_area(app: &AppState, frame: &mut Fr
         let host_width = usize::from(area.width).saturating_sub(
             8 + crate::ui::text::display_width(&source) + crate::ui::text::display_width(&age),
         );
-        let host = finder_host_label(host, host_width);
+        let host = host
+            .map(|host| finder_host_label(host, host_width))
+            .filter(|host| !host.is_empty());
         let mut title_spans = vec![Span::styled(
             format!("{status} "),
             Style::default().fg(status_color).bg(background),
@@ -12031,7 +12049,7 @@ pub(super) fn render_agent_finder_results_in_area(app: &AppState, frame: &mut Fr
         ));
         lines.push(Line::from(title_spans));
         let mut detail = vec![Span::styled("  ", style)];
-        if app.sidebar_show_machine_names {
+        if let Some(host) = host {
             detail.extend([
                 Span::styled(
                     host,
@@ -13647,7 +13665,7 @@ fn narrow_view_tab_prefix_from_rows(
         .map(|(entry, depth, tab)| {
             let requested_prefix = usize::from(*depth);
             let provider = sidebar_row_provider(app, entry);
-            let device = sidebar_device_code(app, sidebar_machine_host(app, entry));
+            let device = sidebar_machine_label(app, sidebar_machine_host(app, entry));
             let title = compact_row_title_for_width(
                 compact_row_title(entry, tab),
                 &provider,
@@ -15963,6 +15981,8 @@ pub(crate) mod tests {
             "other surfaces retain the host suffix"
         );
         app.sidebar_sections_layout = false;
+        assert_eq!(remote_sidebar_title(&app, remote), "first");
+        app.sidebar_group_mode = SidebarGroupMode::Spaces;
         assert_eq!(remote_sidebar_title(&app, remote), original_title);
     }
 
@@ -16267,7 +16287,11 @@ pub(crate) mod tests {
             })
             .expect("remote collision row");
         assert_eq!(remote.agent_ref.agent, local_agent);
-        assert!(!show_host_identity);
+        assert!(
+            show_host_identity,
+            "projected local and remote titles collide"
+        );
+        assert_eq!(remote_sidebar_title(&app, &remote), local_title);
         assert!(remote.render_title.ends_with(" · remote"));
     }
 
@@ -16693,9 +16717,12 @@ pub(crate) mod tests {
             })
             .unwrap();
         let rendered = row_text(terminal.backend().buffer(), 0, width);
-        assert!(has_tag(&rendered, "c1"), "{rendered:?}");
+        assert!(
+            has_tag(&rendered, "c") && rendered.contains("ub1"),
+            "{rendered:?}"
+        );
 
-        // Search still matches the host even though its row shows only a short label.
+        // Search still matches the host shown beside the title.
         app.sidebar_work_filter.query = "ub1".into();
         assert_eq!(sidebar_filtered_agent_entries_from(&app, None).len(), 1);
         app.sidebar_work_filter.query = "ub9".into();
@@ -16748,7 +16775,9 @@ pub(crate) mod tests {
             ..crate::fleet::Snapshot::default()
         };
         let entries = remote_agent_panel_entries(&snapshot, false);
-        let app = AppState::test_new();
+        let mut app = AppState::test_new();
+        // Structural host titles remain intact outside Current + Repo.
+        app.sidebar_group_mode = SidebarGroupMode::Spaces;
         assert_eq!(
             snapshot.hosts[0].entries[0].title.as_deref(),
             Some("Scalable V2 cost levers handoff")
@@ -16843,7 +16872,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn narrow_nested_remote_rows_show_machine_icons() {
+    fn narrow_nested_remote_rows_yield_long_machine_labels_before_the_title() {
         let snapshot = crate::fleet::Snapshot {
             hosts: vec![
                 fleet_host_snapshot(
@@ -16880,28 +16909,37 @@ pub(crate) mod tests {
         let entries = remote_agent_panel_entries(&snapshot, false);
         let mut app = AppState::test_new();
         app.nerd_font = false;
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         for entry in &entries {
-            let mut terminal = Terminal::new(TestBackend::new(18, 1)).unwrap();
-            terminal
-                .draw(|frame| {
-                    render_remote_compact_agent_row_with_identity(
-                        &app,
-                        frame,
-                        entry,
-                        Rect::new(0, 0, 18, 1),
-                        1,
-                        None,
-                        true,
-                    )
-                })
-                .unwrap();
-            let rendered = row_text(terminal.backend().buffer(), 0, 18);
-            assert!(rendered.contains('x'), "{rendered:?}");
-            assert!(
-                rendered.contains("alp") || rendered.contains("bet"),
-                "{rendered:?}"
-            );
-            assert!(display_width(&rendered) <= 18, "{rendered:?}");
+            for width in [18, 80] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_remote_compact_agent_row_with_identity(
+                            &app,
+                            frame,
+                            entry,
+                            Rect::new(0, 0, width, 1),
+                            1,
+                            None,
+                            true,
+                        )
+                    })
+                    .unwrap();
+                let rendered = row_text(terminal.backend().buffer(), 0, width);
+                assert!(rendered.contains('●'), "{rendered:?}");
+                assert!(rendered.contains('x'), "{rendered:?}");
+                assert!(
+                    display_width(&rendered) <= usize::from(width),
+                    "{rendered:?}"
+                );
+                assert_eq!(
+                    rendered.matches(&entry.agent_ref.host).count(),
+                    usize::from(width == 80),
+                    "{rendered:?}"
+                );
+            }
         }
     }
 
@@ -17007,6 +17045,8 @@ pub(crate) mod tests {
         };
         let mut app = AppState::test_new();
         app.sidebar_width = 26;
+        // Preserve the structural suffix that makes these titles collide.
+        app.sidebar_group_mode = SidebarGroupMode::Spaces;
         app.view.sidebar_rect = Rect::new(0, 0, 26, 8);
         app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
         expand_fleet(&mut app);
@@ -17063,6 +17103,8 @@ pub(crate) mod tests {
         };
         let mut app = AppState::test_new();
         app.view.layout = crate::app::state::ViewLayout::Mobile;
+        // This width contract exercises the structural non-Repo projection.
+        app.sidebar_group_mode = SidebarGroupMode::Spaces;
         app.view.mobile_header_rect = Rect::new(0, 0, 20, 2);
         app.view.terminal_area = Rect::new(0, 2, 20, 16);
         app.remote_agent_panel_entries = remote_agent_panel_entries(&snapshot, false);
@@ -18073,6 +18115,7 @@ pub(crate) mod tests {
     #[test]
     fn working_row_opacity_matches_each_level_for_local_and_remote_at_18_and_60_columns() {
         let mut app = AppState::test_new();
+        app.agent_host_name = "ub1".into();
         app.sidebar_show_provider_icons = true;
         app.sidebar_show_machine_names = true;
         app.nerd_font = false;
@@ -18118,37 +18161,34 @@ pub(crate) mod tests {
                     assert!(dot_x < title_x, "{rendered:?}");
                     assert_eq!(buffer[(dot_x, 0)].style().fg, Some(expected_dot));
                     assert_eq!(buffer[(title_x, 0)].style().fg, Some(expected_title));
-                    if !is_remote {
-                        // The local machine label is blank.
-                        assert!(!rendered.contains("· ub2"), "{rendered:?}");
-                        assert!(!rendered.contains("loc"), "{rendered:?}");
-                        continue;
-                    }
-                    assert!(rendered.contains("· ub2"), "{rendered:?}");
+                    let host = if is_remote { "ub2" } else { "ub1" };
+                    assert_eq!(rendered.matches(host).count(), 1, "{rendered:?}");
+                    assert!(!rendered.contains(" · "), "{rendered:?}");
                     let machine_x = (0..width)
                         .rev()
                         .find(|x| buffer[(*x, 0)].symbol() == "u")
                         .expect("machine host token");
-                    // The host identity in the title keeps the title colour.
+                    // The full metadata label keeps the host tag colour.
                     assert_eq!(
                         buffer[(machine_x, 0)].style().fg,
-                        Some(expected_title),
+                        Some(expected_remote_suffix),
                         "{width} {opacity}: {rendered:?}"
                     );
                     if width == 60 {
-                        // `c2`: provider letter, then the device code in the
+                        // `c ub2`: provider letter, then the machine name in the
                         // host tag colour.
                         let provider_x = (0..width)
                             .rev()
                             .find(|x| buffer[(*x, 0)].symbol() == "c")
                             .expect("provider tag");
                         assert_eq!(buffer[(provider_x, 0)].style().fg, Some(expected_provider));
-                        assert_eq!(buffer[(provider_x + 1, 0)].symbol(), "2", "{rendered:?}");
+                        assert_eq!(buffer[(provider_x + 1, 0)].symbol(), " ", "{rendered:?}");
+                        assert_eq!(buffer[(provider_x + 2, 0)].symbol(), "u", "{rendered:?}");
                         assert_eq!(
-                            buffer[(provider_x + 1, 0)].style().fg,
+                            buffer[(provider_x + 2, 0)].style().fg,
                             Some(expected_remote_suffix)
                         );
-                        assert!(machine_x < provider_x, "{rendered:?}");
+                        assert!(machine_x > provider_x, "{rendered:?}");
                     }
                 }
             }
@@ -19239,13 +19279,13 @@ pub(crate) mod tests {
 
     #[test]
     fn compact_rows_render_the_proposed_layout_at_40_32_26_and_22_columns() {
-        // indent 1 + dot 2 + title + gap 1 + provider letter + device code +
+        // indent 1 + dot 2 + title + gap 1 + provider letter + machine label +
         // gap 1 + 3-column right-aligned age.
         for (width, expected) in [
-            (40, " ● mat-310 contract tests         c1  3m"),
-            (32, " ● mat-310 contract tests c1  3m"),
-            (26, " ● mat-310 contrac… c1  3m"),
-            (22, " ● mat-310 con… c1  3m"),
+            (40, " ● mat-310 contract tests      c ub1  3m"),
+            (32, " ● mat-310 contract t… c ub1  3m"),
+            (26, " ● mat-310 cont… c ub1  3m"),
+            (22, " ● mat-310 … c ub1  3m"),
         ] {
             let row = compact_width_row(width, false);
             assert_eq!(row, expected, "width {width}");
@@ -19260,8 +19300,8 @@ pub(crate) mod tests {
             .map(|width| (width, compact_width_row(width, false)))
             .collect::<Vec<_>>();
         let has_age = |row: &str| row.ends_with("3m");
-        let has_device = |row: &str| has_tag(row, "c1");
-        let has_provider = |row: &str| has_tag(row, "c") || has_tag(row, "c1");
+        let has_device = |row: &str| row.contains("ub1");
+        let has_provider = |row: &str| has_tag(row, "c");
         for (width, row) in &rows {
             // Age goes first: it only survives at 22 columns and up.
             assert_eq!(has_age(row), *width >= 22, "width {width}: {row:?}");
@@ -19304,7 +19344,7 @@ pub(crate) mod tests {
     fn compact_tag_uses_the_nerd_glyph_or_a_letter_and_names_devices_only_when_enabled() {
         let glyph = crate::ui::icons::agent_icon(Agent::Claude).expect("claude glyph");
         let row = compact_width_row(40, true);
-        assert!(row.contains(&format!(" {glyph}1  3m")), "{row:?}");
+        assert!(row.contains(&format!(" {glyph} ub1  3m")), "{row:?}");
 
         // Machine names are opt-in: off hides every device, on names the
         // local device as well as remote ones.
@@ -19467,6 +19507,8 @@ pub(crate) mod tests {
     fn unified_fleet_ambiguous_row_keeps_dot_title_and_machine_at_eighteen_columns() {
         let mut app = AppState::test_new();
         app.nerd_font = false;
+        app.sidebar_show_provider_icons = true;
+        app.sidebar_show_machine_names = true;
         let snapshot = crate::fleet::Snapshot {
             hosts: ["ub1", "ub2"]
                 .into_iter()
@@ -19522,8 +19564,7 @@ pub(crate) mod tests {
             rendered.contains("same"),
             "missing readable title: {rendered:?}"
         );
-        assert!(rendered.contains('1'), "missing machine icon: {rendered:?}");
-        assert!(rendered.contains("· ub1"), "{rendered:?}");
+        assert_eq!(rendered.matches("ub1").count(), 1, "{rendered:?}");
     }
 
     fn assert_remote_machine_icons_and_tooltips(
@@ -35185,7 +35226,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                             prefixes.push(compact_row_prefix_width(
                                 title,
                                 provider,
-                                sidebar_device_code(&app, host),
+                                sidebar_machine_label(&app, host),
                                 usize::from(width),
                                 NEEDS_YOU_REQUESTED_PREFIX_WIDTH,
                             ));

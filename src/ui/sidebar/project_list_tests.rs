@@ -2,7 +2,6 @@
 //! retention of the activated tab, the disclosure-slot status, and the
 //! Provider icon / Machine name display options.
 
-use super::tests::row_text;
 use super::*;
 use crate::app::state::{ControlId, Mode};
 use crate::workspace::Workspace;
@@ -10,6 +9,18 @@ use ratatui::{backend::TestBackend, Terminal};
 
 const ALPHA_KEY: &str = "repo:repo:owner/alpha";
 const BETA_KEY: &str = "repo:repo:owner/beta";
+
+// Wide glyphs own their continuation cells; those cells are not extra spaces.
+fn row_text(buffer: &ratatui::buffer::Buffer, y: u16, width: u16) -> String {
+    let mut text = String::new();
+    let mut x = 0;
+    while x < width {
+        let symbol = buffer[(x, y)].symbol();
+        text.push_str(symbol);
+        x = x.saturating_add(display_width(symbol).max(1) as u16);
+    }
+    text.trim_end().to_owned()
+}
 
 fn set_repo(app: &mut AppState, ws_idx: usize, tab_idx: usize, repo: &str, branch: &str) {
     let pane_id = app.workspaces[ws_idx].tabs[tab_idx].root_pane;
@@ -422,15 +433,15 @@ fn sidebar_display_all_four_combinations_are_independent() {
         let entry = tab_entry(&app);
         assert_eq!(!sidebar_row_provider(&app, &entry).is_empty(), icons);
         assert_eq!(
-            sidebar_device_code(&app, sidebar_machine_host(&app, &entry)),
-            machines.then_some('1')
+            sidebar_machine_label(&app, sidebar_machine_host(&app, &entry)),
+            machines.then_some("ub1")
         );
         for mobile in [false, true] {
             let row = display_row(&mut app, 40, mobile);
             let case = format!("icons={icons} machines={machines} mobile={mobile}: {row:?}");
             assert!(row.contains("Sidebar polish"), "{case}");
             assert_eq!(row.contains('x'), icons, "{case}");
-            assert_eq!(row.contains('1'), machines, "{case}");
+            assert_eq!(row.contains("ub1"), machines, "{case}");
         }
     }
 }
@@ -459,6 +470,138 @@ fn sidebar_display_provider_stays_absent_without_a_known_provider() {
 }
 
 #[test]
+fn sidebar_display_full_machine_labels_survive_retained_local_and_remote_rows() {
+    for mobile in [false, true] {
+        for collapsed in [false, true] {
+            for (icons, machines) in [(false, false), (true, false), (false, true), (true, true)] {
+                let mut app = project_app(2);
+                app.agent_host_name = "mbpro".into();
+                app.sidebar_show_provider_icons = icons;
+                app.sidebar_show_machine_names = machines;
+                if mobile {
+                    app.view.layout = crate::app::state::ViewLayout::Mobile;
+                }
+                if collapsed {
+                    app.collapsed_sidebar_groups.insert(ALPHA_KEY.into());
+                }
+                let local = display_row(&mut app, 48, mobile);
+                assert_eq!(local.contains("mbpro"), machines, "{local:?}");
+                assert_eq!(has_tag(&local, "x"), icons, "{local:?}");
+                remote_fixture(&mut app, "owner/alpha");
+                app.sidebar_selected_remote_agent =
+                    Some(app.remote_agent_panel_entries[0].agent_ref.clone());
+                let remote = sidebar_rows(&app)
+                    .into_iter()
+                    .find_map(|row| match row {
+                        SidebarRow::RemoteAgent { entry, depth, .. } => Some((entry, depth)),
+                        _ => None,
+                    })
+                    .expect("selected remote row retained");
+                let mut terminal = Terminal::new(TestBackend::new(48, 1)).expect("terminal");
+                terminal
+                    .draw(|frame| {
+                        render_remote_compact_agent_row(
+                            &app,
+                            frame,
+                            &remote.0,
+                            Rect::new(0, 0, 48, 1),
+                            remote.1,
+                            None,
+                        )
+                    })
+                    .expect("remote row");
+                let row = row_text(terminal.backend().buffer(), 0, 48);
+                assert_eq!(row.matches("ub2").count(), usize::from(machines), "{row:?}");
+                assert_eq!(has_tag(&row, "x"), icons, "{row:?}");
+                assert!(
+                    !row.contains("mbpro"),
+                    "remote label must come from remote: {row:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn sidebar_display_long_unicode_machine_labels_yield_at_narrow_widths() {
+    let mut app = project_app(1);
+    app.sidebar_show_machine_names = true;
+    for host in [
+        "very-long-machine-name-for-this-session",
+        "開発機器の非常に長い名前",
+        "e\u{301}quipe",
+    ] {
+        app.agent_host_name = host.into();
+        for icons in [false, true] {
+            app.sidebar_show_provider_icons = icons;
+            for mobile in [false, true] {
+                let row = display_row(&mut app, 18, mobile);
+                assert!(display_width(&row) <= 18, "{row:?}");
+                assert!(row.contains("Sidebar"), "{row:?}");
+                let wide = display_row(&mut app, 100, mobile);
+                assert!(wide.contains(host), "{wide:?}");
+            }
+        }
+    }
+    for host in ["", "   "] {
+        app.agent_host_name = host.into();
+        assert_eq!(sidebar_machine_label(&app, host), None);
+        let row = display_row(&mut app, 40, false);
+        assert!(!row.contains("ub1") && !row.contains("mbpro"), "{row:?}");
+    }
+}
+
+#[test]
+fn sidebar_display_remote_long_or_absent_machine_metadata_is_bounded() {
+    let mut app = project_app(1);
+    remote_fixture(&mut app, "owner/alpha");
+    app.sidebar_show_machine_names = true;
+    for host in [
+        "a-very-long-remote-machine-name",
+        "遠隔開発環境の長い名前",
+        "",
+    ] {
+        let mut remote = app.remote_agent_panel_entries[0].as_ref().clone();
+        remote.agent_ref.host = host.into();
+        remote.render_title = "Remote session title".into();
+        for icons in [false, true] {
+            app.sidebar_show_provider_icons = icons;
+            for mobile in [false, true] {
+                app.view.layout = if mobile {
+                    crate::app::state::ViewLayout::Mobile
+                } else {
+                    crate::app::state::ViewLayout::Desktop
+                };
+                for width in [18, 100] {
+                    let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
+                    terminal
+                        .draw(|frame| {
+                            render_remote_compact_agent_row(
+                                &app,
+                                frame,
+                                &remote,
+                                Rect::new(0, 0, width, 1),
+                                1,
+                                None,
+                            )
+                        })
+                        .expect("remote row");
+                    let row = row_text(terminal.backend().buffer(), 0, width);
+                    assert!(display_width(&row) <= usize::from(width), "{row:?}");
+                    assert!(row.contains("Remote"), "{row:?}");
+                    if width == 100 && !host.is_empty() {
+                        assert!(row.contains(host), "{row:?}");
+                    }
+                    if host.is_empty() {
+                        assert!(!row.contains("ub2") && !row.contains("ub1"), "{row:?}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn sidebar_display_metadata_yields_before_status_and_title_at_18_columns() {
     let mut app = project_app(1);
     app.sidebar_show_provider_icons = true;
@@ -473,7 +616,7 @@ fn sidebar_display_metadata_yields_before_status_and_title_at_18_columns() {
         );
         let wide = display_row(&mut app, 40, mobile);
         assert!(
-            wide.contains("Sidebar polish") && wide.contains("x1"),
+            wide.contains("Sidebar polish") && wide.contains("x ub1"),
             "{wide:?}"
         );
     }
@@ -511,6 +654,28 @@ fn sidebar_display_toggles_finder_result_host_and_provider() {
     let (title, detail) = lines(&app);
     assert!(title.contains(" x Result title"), "{title:?}");
     assert!(detail.contains("ub2 · title"), "{detail:?}");
+    for mobile in [false, true] {
+        app.view.layout = if mobile {
+            crate::app::state::ViewLayout::Mobile
+        } else {
+            crate::app::state::ViewLayout::Desktop
+        };
+        for (icons, machines) in [(false, false), (true, false), (false, true), (true, true)] {
+            app.sidebar_show_provider_icons = icons;
+            app.sidebar_show_machine_names = machines;
+            let (title, detail) = lines(&app);
+            assert_eq!(title.contains(" x Result title"), icons, "{title:?}");
+            assert_eq!(detail.contains("ub2"), machines, "{detail:?}");
+        }
+    }
+    app.sidebar_show_machine_names = true;
+    app.agent_finder_results[0].agent.agent_ref = None;
+    let (_, detail) = lines(&app);
+    assert!(
+        !detail.contains("local") && !detail.contains("ub2"),
+        "{detail:?}"
+    );
+    assert!(detail.trim_start().starts_with("title"), "{detail:?}");
 }
 
 #[test]

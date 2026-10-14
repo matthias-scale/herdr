@@ -3740,6 +3740,7 @@ mod tests {
     fn mobile_tab_rows_follow_field_priority_at_minimum_and_normal_widths() {
         let started = std::time::Instant::now();
         let mut app = crate::app::state::AppState::test_new();
+        app.agent_host_name = "mbpro".into();
         app.sidebar_show_provider_icons = true;
         app.sidebar_show_machine_names = true;
         app.nerd_font = false;
@@ -3791,6 +3792,12 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing provider row at {width}: {rows:?}"));
 
             assert!(rendered.contains('●'), "{width}: {rendered:?}");
+            if width == 40 {
+                assert!(
+                    rendered.contains("mbpro"),
+                    "full machine label: {rendered:?}"
+                );
+            }
             let dot = rendered.find('●').unwrap();
             let suffix = rendered.rfind(" x").unwrap() + 1;
             assert!(suffix > dot + '●'.len_utf8() + 1, "{width}: {rendered:?}");

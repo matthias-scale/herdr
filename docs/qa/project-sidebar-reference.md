@@ -29,8 +29,8 @@ contracts; no live-agent or screenshot evidence has been captured yet.
    collapsed, it no longer shows its old tab.
 5. Open the view dropdown and toggle Provider icon and Machine name
    independently through all four states, by both keyboard and mouse. Expected:
-   rows and finder results show or hide the provider token and machine
-   character. `[ui.sidebar] show_provider_icons` / `show_machine_names` in the
+   rows and finder results show or hide the provider token and full machine
+   name (for example `mbpro`, `ub1`, or `ub2`). `[ui.sidebar] show_provider_icons` / `show_machine_names` in the
    isolated config match the toggles, and survive a restart.
 6. Capture desktop and mobile at 18 columns and at a normal width, in dark and
    light themes, with Nerd Font on and off.
