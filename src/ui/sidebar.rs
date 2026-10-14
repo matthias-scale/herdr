@@ -8845,13 +8845,13 @@ fn sidebar_row_gap(
     let Some(next) = rows.get(row_idx + 1) else {
         return 0;
     };
-    if matches!(
-        next,
-        SidebarRow::Workspace {
-            indented: false,
-            ..
-        }
-    ) {
+    if matches!(next, SidebarRow::Workspace { indented, .. } if !indented || !matches!(
+        row,
+        SidebarRow::NestedHeader { .. }
+            | SidebarRow::SectionHeader { .. }
+            | SidebarRow::Divider
+            | SidebarRow::ShelfDivider
+    )) {
         return u16::from(
             workspace_spacing.spacers_fit
                 && workspace_spacing
@@ -8868,9 +8868,7 @@ fn sidebar_row_gap(
         (SidebarRow::NestedHeader { .. }, SidebarRow::Agent { .. }) => 0,
         (SidebarRow::NestedHeader { .. }, SidebarRow::NestedHeader { .. }) => 0,
         (_, SidebarRow::NestedHeader { .. }) => 0,
-        (SidebarRow::NestedHeader { .. }, SidebarRow::Workspace { .. }) => {
-            app.sidebar_spaces.row_gap
-        }
+        (SidebarRow::NestedHeader { .. }, SidebarRow::Workspace { .. }) => 0,
         (SidebarRow::Tab { .. }, SidebarRow::Agent { .. }) => 0,
         (SidebarRow::Workspace { .. }, SidebarRow::Agent { .. }) => 0,
         (_, SidebarRow::Workspace { indented: true, .. }) => 0,
@@ -8953,33 +8951,34 @@ fn workspace_group_spacing_and_content_height(
     body_height: u16,
 ) -> (WorkspaceGroupSpacing, u16) {
     let mut first_group_index = None;
-    let mut group_count = 0usize;
+    let mut spacer_count = 0usize;
     let content_height = rows.iter().enumerate().fold(0u16, |height, (index, row)| {
-        if matches!(
-            row,
-            SidebarRow::Workspace {
-                indented: false,
-                ..
-            }
-        ) {
-            if first_group_index.is_none() {
-                first_group_index = Some(index);
-            }
-            group_count = group_count.saturating_add(1);
+        if matches!(row, SidebarRow::Workspace { .. }) && first_group_index.is_none() {
+            first_group_index = Some(index);
         }
+        let gap = sidebar_row_gap(
+            app,
+            rows,
+            index,
+            WorkspaceGroupSpacing {
+                spacers_fit: false,
+                first_group_index,
+            },
+        );
+        let spaced_gap = sidebar_row_gap(
+            app,
+            rows,
+            index,
+            WorkspaceGroupSpacing {
+                spacers_fit: true,
+                first_group_index,
+            },
+        );
+        spacer_count = spacer_count.saturating_add(usize::from(spaced_gap.saturating_sub(gap)));
         height
             .saturating_add(sidebar_row_height(app, row, body_height))
-            .saturating_add(sidebar_row_gap(
-                app,
-                rows,
-                index,
-                WorkspaceGroupSpacing {
-                    spacers_fit: false,
-                    first_group_index: None,
-                },
-            ))
+            .saturating_add(gap)
     });
-    let spacer_count = group_count.saturating_sub(1);
     let spacers_fit =
         usize::from(content_height).saturating_add(spacer_count) <= usize::from(body_height);
     let total_content_height = content_height.saturating_add(if spacers_fit {
@@ -15940,6 +15939,125 @@ pub(crate) mod tests {
         assert_eq!(sidebar_row_gap(&app, &rows, 2, fitted), 1);
         assert_eq!(sidebar_row_gap(&app, &rows, 2, dropped), 0);
         assert_eq!(sidebar_row_gap(&app, &rows, 3, fitted), 0);
+    }
+
+    fn repo_grouped_spacing_fixture() -> (AppState, Vec<SidebarRow>) {
+        let mut app = app_with_agents(&["first", "second", "third", "other"]);
+        app.sidebar_sections_layout = true;
+        app.sidebar_group_mode = SidebarGroupMode::Repo;
+        app.sidebar_spaces.row_gap = 3;
+        for terminal in app.terminals.values_mut() {
+            terminal.set_raw_agent_state_for_test(AgentState::Idle);
+        }
+        let source_rows = sidebar_rows(&app);
+        let mut rows = Vec::new();
+        for ws_idx in 0..4 {
+            if ws_idx == 0 || ws_idx == 3 {
+                rows.push(SidebarRow::NestedHeader {
+                    key: format!("repo:{ws_idx}"),
+                    action_key: None,
+                    sort_key: None,
+                    sort_mode: SidebarSortMode::Default,
+                    title: if ws_idx == 0 { "herdr" } else { "other" }.into(),
+                    count: if ws_idx == 0 { 3 } else { 1 },
+                    activity_count: None,
+                    collapsed: false,
+                    dim: false,
+                    status: None,
+                    spawn: false,
+                });
+            }
+            let mut workspace = source_rows
+                .iter()
+                .find(|row| matches!(row, SidebarRow::Workspace { ws_idx: index, .. } if *index == ws_idx))
+                .unwrap()
+                .clone();
+            if let SidebarRow::Workspace { indented, .. } = &mut workspace {
+                *indented = true;
+            }
+            rows.push(workspace);
+            rows.push(source_rows
+                .iter()
+                .find(|row| matches!(row, SidebarRow::Tab { entry, .. } if entry.local_target().is_some_and(|target| target.ws_idx == ws_idx)))
+                .unwrap()
+                .clone());
+        }
+        rows.push(SidebarRow::Divider);
+        (app, rows)
+    }
+
+    #[test]
+    fn repo_workspace_gap_counts_only_indented_groups_between_headers() {
+        let (app, rows) = repo_grouped_spacing_fixture();
+        let groups: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| match row {
+                SidebarRow::Workspace {
+                    ws_idx,
+                    indented: true,
+                    ..
+                } => Some((*ws_idx, index)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(groups.len(), 4);
+        let (fitted, content_height) =
+            workspace_group_spacing_and_content_height(&app, &rows, u16::MAX);
+        assert_eq!(fitted.first_group_index, Some(groups[0].1));
+        let baseline_height = content_height - 2;
+        let exact = workspace_group_spacing(&app, &rows, content_height);
+        let (dropped, dropped_height) =
+            workspace_group_spacing_and_content_height(&app, &rows, content_height - 1);
+        assert!(exact.spacers_fit);
+        assert!(!dropped.spacers_fit);
+        assert_eq!(dropped_height, baseline_height);
+        for (index, row) in rows.iter().enumerate() {
+            let expected_gap =
+                u16::from(groups.iter().any(|(ws_idx, group_index)| {
+                    matches!(ws_idx, 1 | 2) && *group_index == index + 1
+                }));
+            assert_eq!(sidebar_row_gap(&app, &rows, index, fitted), expected_gap);
+            assert_eq!(sidebar_row_gap(&app, &rows, index, dropped), 0);
+            if matches!(row, SidebarRow::NestedHeader { .. }) {
+                assert_eq!(expected_gap, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn repo_workspace_gap_keeps_tab_hit_areas_aligned() {
+        let (mut app, rows) = repo_grouped_spacing_fixture();
+        for view_layout in [
+            crate::app::state::ViewLayout::Desktop,
+            crate::app::state::ViewLayout::Mobile,
+        ] {
+            app.view.layout = view_layout;
+            for width in [18, 30] {
+                let area = Rect::new(0, 0, width, 60);
+                let layout = SidebarListLayout::from_rows(&app, area, rows.clone());
+                let tabs = compute_tab_card_areas_from_layout(&app, &layout);
+                let (spaces, _) = compute_sidebar_row_areas_from_layout(&app, area, &layout);
+                assert_eq!(tabs.len(), 4);
+                for ws_idx in [1, 2] {
+                    let previous_tab = tabs.iter().find(|tab| tab.ws_idx == ws_idx - 1).unwrap();
+                    let space = spaces.iter().find(|space| space.ws_idx == ws_idx).unwrap();
+                    let tab = tabs.iter().find(|tab| tab.ws_idx == ws_idx).unwrap();
+                    let spacer_y = previous_tab.rect.bottom();
+                    assert_eq!(space.rect.y, spacer_y + 1);
+                    assert_eq!(tab.rect.y, space.rect.bottom());
+                    assert!(!tabs
+                        .iter()
+                        .any(|tab| tab.rect.contains((1, spacer_y).into())));
+                    let hit = tabs
+                        .iter()
+                        .find(|candidate| candidate.rect.contains((1, tab.rect.y).into()))
+                        .unwrap();
+                    assert_eq!((hit.ws_idx, hit.tab_idx), (ws_idx, 0));
+                    assert_eq!(hit.pane_id, app.workspaces[ws_idx].tabs[0].root_pane);
+                }
+            }
+        }
     }
 
     fn sidebar_rows(app: &super::AppState) -> Vec<super::SidebarRow> {
