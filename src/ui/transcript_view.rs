@@ -16,7 +16,6 @@ use crate::app::state::Palette;
 pub(crate) enum ChatRow {
     User {
         body: String,
-        time: Option<String>,
     },
     Assistant {
         body: String,
@@ -113,12 +112,7 @@ impl TranscriptChat {
             self.pending_tools.clear();
             self.pending_since = at;
             self.pending_prose.clear();
-            self.push_row(ChatRow::User {
-                body,
-                time: at
-                    .and_then(crate::agent_state::format_rfc3339)
-                    .and_then(|v| v.get(11..16).map(str::to_owned)),
-            });
+            self.push_row(ChatRow::User { body });
             return;
         }
         if value["type"] != "assistant" || value["isSidechain"] == true || value["isMeta"] == true {
@@ -132,12 +126,8 @@ impl TranscriptChat {
             match item["type"].as_str() {
                 Some("tool_use") => {
                     let name = item["name"].as_str().unwrap_or("tool");
-                    let input = compact_input(&item["input"]);
-                    self.pending_tools.push(if input.is_empty() {
-                        name.to_owned()
-                    } else {
-                        format!("{name} {input}")
-                    });
+                    self.pending_tools
+                        .push(summarize_tool(name, &item["input"]));
                     if self.pending_tools.len() > 500 {
                         self.pending_tools.drain(..100);
                     }
@@ -180,18 +170,49 @@ impl TranscriptChat {
     }
 }
 
-fn compact_input(value: &serde_json::Value) -> String {
-    let text = match value {
-        serde_json::Value::String(text) => text.clone(),
-        serde_json::Value::Object(_) | serde_json::Value::Array(_) => value.to_string(),
-        _ => String::new(),
-    };
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(60)
-        .collect()
+fn summarize_tool(name: &str, input: &serde_json::Value) -> String {
+    let argument = match name {
+        "Bash" => string_field(input, &["command"]).map(str::to_owned),
+        "Read" | "Edit" | "Write" => string_field(input, &["file_path", "path", "file"])
+            .map(|path| path.rsplit(['/', '\\']).next().unwrap_or(path).to_owned()),
+        "Grep" => string_field(input, &["pattern"]).map(str::to_owned),
+        "WebFetch" => string_field(input, &["url"]).map(web_fetch_target),
+        _ => first_string_argument(input).map(str::to_owned),
+    }
+    .or_else(|| first_string_argument(input).map(str::to_owned))
+    .map(|argument| compact_text(&argument))
+    .filter(|argument| !argument.is_empty());
+
+    argument.map_or_else(|| name.to_owned(), |argument| format!("{name} {argument}"))
+}
+
+fn string_field<'a>(value: &'a serde_json::Value, fields: &[&str]) -> Option<&'a str> {
+    fields
+        .iter()
+        .find_map(|field| value.get(*field).and_then(serde_json::Value::as_str))
+}
+
+fn first_string_argument(value: &serde_json::Value) -> Option<&str> {
+    match value {
+        serde_json::Value::String(text) => Some(text),
+        serde_json::Value::Array(values) => values.iter().find_map(serde_json::Value::as_str),
+        serde_json::Value::Object(values) => values.values().find_map(serde_json::Value::as_str),
+        _ => None,
+    }
+}
+
+fn compact_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn web_fetch_target(url: &str) -> String {
+    let target = url.split_once("://").map_or(url, |(_, target)| target);
+    target
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(target)
+        .trim_end_matches('/')
+        .to_owned()
 }
 
 fn hidden_assistant_text(text: &str) -> bool {
@@ -225,14 +246,18 @@ fn user_block_metrics(area_width: u16, text_width: usize) -> (usize, usize) {
     (area_width as usize - block, block)
 }
 
-fn worked_row_lines(duration: &str, tools: &[String], expand: bool) -> Vec<String> {
+fn worked_row_lines(duration: &str, tools: &[String], expand: bool, width: usize) -> Vec<String> {
     let tool_count = tools.len();
     let tool_label = if tool_count == 1 { "tool" } else { "tools" };
     let mut lines = vec![format!(
         "Worked for {duration} · {tool_count} {tool_label} ›"
     )];
     if expand {
-        lines.extend(tools.iter().cloned());
+        lines.extend(
+            tools
+                .iter()
+                .map(|tool| crate::ui::text::truncate_end(tool, width)),
+        );
     }
     lines
 }
@@ -246,7 +271,7 @@ fn layout_lines(
     let mut lines = Vec::<Line<'static>>::new();
     for row in rows {
         match row {
-            ChatRow::User { body, time } => {
+            ChatRow::User { body } => {
                 let max_width = (width as usize * 4 / 5).max(1).min(width as usize);
                 let inner_width = max_width.saturating_sub(2).max(1);
                 let mut body_lines = crate::ui::markdown::transcript_body_lines(
@@ -268,16 +293,10 @@ fn layout_lines(
                     padded.push(Span::styled(" ", bubble));
                     lines.push(Line::from(padded));
                 }
-                if let Some(time) = time {
-                    lines.push(Line::from(Span::styled(
-                        format!("{time:>width$}", width = width as usize),
-                        Style::default().fg(palette.overlay0),
-                    )));
-                }
                 lines.push(Line::default());
             }
             ChatRow::Assistant { body } => {
-                let mut body_lines = crate::ui::markdown::transcript_body_lines(
+                let mut body_lines = crate::ui::markdown::transcript_chat_body_lines(
                     palette,
                     Some(body),
                     width.saturating_sub(4).min(100) as usize,
@@ -288,7 +307,7 @@ fn layout_lines(
                 lines.push(Line::default());
             }
             ChatRow::Worked { duration, tools } => {
-                for row in worked_row_lines(duration, tools, expand_tools) {
+                for row in worked_row_lines(duration, tools, expand_tools, width as usize) {
                     lines.push(Line::from(Span::styled(
                         row,
                         Style::default().fg(palette.overlay0),
@@ -360,9 +379,149 @@ mod tests {
         chat.ingest(&serde_json::json!({"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Done."}]}}), None);
         assert_eq!(chat.rows.len(), 3);
         assert!(
-            matches!(&chat.rows[1], ChatRow::Worked { tools, .. } if tools == &["Read {\"file\":\"src/main.rs\"}".to_owned()])
+            matches!(&chat.rows[1], ChatRow::Worked { tools, .. } if tools == &["Read main.rs".to_owned()])
         );
         assert!(!format!("{:?}", chat.rows).contains("secret"));
+    }
+
+    #[test]
+    fn tool_summaries_use_short_arguments() {
+        assert_eq!(
+            summarize_tool(
+                "Bash",
+                &serde_json::json!({"command":"ls -la /private/var/tmp/repro-586"})
+            ),
+            "Bash ls -la /private/var/tmp/repro-586"
+        );
+        assert_eq!(
+            summarize_tool(
+                "Read",
+                &serde_json::json!({"file_path":"/private/var/tmp/notes.md"})
+            ),
+            "Read notes.md"
+        );
+        assert_eq!(
+            summarize_tool("Edit", &serde_json::json!({"file_path":"src/register.tsx"})),
+            "Edit register.tsx"
+        );
+        assert_eq!(
+            summarize_tool("Grep", &serde_json::json!({"pattern":"TODO|FIXME"})),
+            "Grep TODO|FIXME"
+        );
+        assert_eq!(
+            summarize_tool(
+                "WebFetch",
+                &serde_json::json!({"url":"https://example.com/docs/page?q=1"})
+            ),
+            "WebFetch example.com/docs/page"
+        );
+        assert_eq!(
+            summarize_tool(
+                "Mystery",
+                &serde_json::json!({"first":"first argument","second":"ignored"})
+            ),
+            "Mystery first argument"
+        );
+    }
+
+    #[test]
+    fn tool_rows_stay_hidden_until_expanded_and_truncate_to_width() {
+        let mut chat = TranscriptChat::default();
+        chat.ingest(
+            &serde_json::json!({"type":"assistant","message":{"content":[
+                {"type":"tool_use","name":"Bash","input":{"command":"ls -la /private/var/tmp/repro-586"}},
+                {"type":"tool_use","name":"Read","input":{"file_path":"/private/var/tmp/notes.md"}},
+                {"type":"tool_use","name":"Mystery","input":{"first":"first argument"}}
+            ]}}),
+            None,
+        );
+        chat.ingest(
+            &serde_json::json!({"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Done."}]}}),
+            None,
+        );
+
+        let palette = Palette::catppuccin();
+        chat.prepare_layout(&palette, 32, false);
+        let collapsed = chat
+            .layout_lines()
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>();
+        assert!(collapsed
+            .iter()
+            .any(|line| line == "Worked for 0s · 3 tools ›"));
+        assert!(collapsed.iter().all(|line| {
+            !line.starts_with("Bash") && !line.starts_with("Read") && !line.starts_with("Mystery")
+        }));
+
+        chat.prepare_layout(&palette, 32, true);
+        let expanded = chat.layout_lines();
+        let rows = expanded.iter().map(Line::to_string).collect::<Vec<_>>();
+        assert!(rows.iter().any(|line| line == "Read notes.md"));
+        assert!(rows.iter().any(|line| line == "Mystery first argument"));
+        let bash_index = rows
+            .iter()
+            .position(|line| line.starts_with("Bash"))
+            .expect("expanded Bash row");
+        let bash = &expanded[bash_index];
+        assert_eq!(crate::ui::text::display_width(&bash.to_string()), 32);
+        assert!(bash.to_string().ends_with('…'));
+        assert!(bash
+            .spans
+            .iter()
+            .all(|span| span.style.fg == Some(palette.overlay0)));
+        assert!(bash.spans.iter().all(|span| !span
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD)));
+    }
+
+    #[test]
+    fn user_message_has_no_timestamp_row() {
+        let mut chat = TranscriptChat::default();
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(12 * 60 * 60 + 34 * 60);
+        chat.ingest(
+            &serde_json::json!({"type":"user","message":{"content":"hello"}}),
+            Some(at),
+        );
+        chat.prepare_layout(&Palette::catppuccin(), 80, false);
+
+        let visible = chat
+            .layout_lines()
+            .iter()
+            .filter(|line| line.width() > 0)
+            .collect::<Vec<_>>();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].to_string().trim(), "hello");
+    }
+
+    #[test]
+    fn assistant_prose_uses_text_colour_for_light_and_dark_palettes() {
+        for palette in [
+            Palette::github_light_high_contrast(),
+            Palette::github_dark_high_contrast(),
+        ] {
+            let mut chat = TranscriptChat::default();
+            chat.push_row(ChatRow::Assistant {
+                body: "## Heading\nAssistant prose with `inline code`.".into(),
+            });
+            chat.prepare_layout(&palette, 80, false);
+            let spans = chat
+                .layout_lines()
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .collect::<Vec<_>>();
+
+            assert!(spans.iter().any(|span| {
+                span.content.contains("Heading") && span.style.fg == Some(palette.text)
+            }));
+            assert!(spans.iter().any(|span| {
+                span.content.contains("Assistant prose") && span.style.fg == Some(palette.text)
+            }));
+            assert!(spans.iter().any(|span| {
+                span.content.contains("inline code") && span.style.fg == Some(palette.mauve)
+            }));
+        }
     }
 
     #[test]
@@ -396,11 +555,11 @@ mod tests {
         let duration = "29s";
         let tools = vec!["Read src/main.rs".to_owned(), "Bash cargo check".to_owned()];
         assert_eq!(
-            worked_row_lines(duration, &tools, false),
+            worked_row_lines(duration, &tools, false, 80),
             ["Worked for 29s · 2 tools ›"]
         );
         assert_eq!(
-            worked_row_lines(duration, &tools, true),
+            worked_row_lines(duration, &tools, true, 80),
             [
                 "Worked for 29s · 2 tools ›",
                 "Read src/main.rs",
@@ -456,7 +615,7 @@ mod tests {
     #[test]
     fn worked_row_uses_singular_tool_label() {
         assert_eq!(
-            worked_row_lines("1s", &["Read file.rs".into()], false),
+            worked_row_lines("1s", &["Read file.rs".into()], false, 80),
             ["Worked for 1s · 1 tool ›"]
         );
     }

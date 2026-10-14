@@ -45,7 +45,7 @@ pub(crate) fn body_lines(
     width: usize,
     indent: &str,
 ) -> Vec<Line<'static>> {
-    body_lines_with_list_style(palette, body, width, indent, false)
+    body_lines_with_list_style(palette, body, width, indent, false, true)
 }
 
 /// Settled transcripts use Claude's literal markers and hanging list rows.
@@ -55,7 +55,17 @@ pub(crate) fn transcript_body_lines(
     width: usize,
     indent: &str,
 ) -> Vec<Line<'static>> {
-    body_lines_with_list_style(palette, body, width, indent, true)
+    body_lines_with_list_style(palette, body, width, indent, true, true)
+}
+
+/// Chat prose keeps normal text contrast while retaining inline code styling.
+pub(crate) fn transcript_chat_body_lines(
+    palette: &Palette,
+    body: Option<&str>,
+    width: usize,
+    indent: &str,
+) -> Vec<Line<'static>> {
+    body_lines_with_list_style(palette, body, width, indent, true, false)
 }
 
 fn body_lines_with_list_style(
@@ -64,6 +74,7 @@ fn body_lines_with_list_style(
     width: usize,
     indent: &str,
     hanging_lists: bool,
+    accent_headings: bool,
 ) -> Vec<Line<'static>> {
     let dash = || {
         vec![Line::from(Span::styled(
@@ -86,7 +97,13 @@ fn body_lines_with_list_style(
         if fenced {
             let words = split_wide_words(parse_words(source_line.trim_end(), Block::Code), width);
             for line in wrap_words(&words, width) {
-                lines.push(styled_line(palette, Block::Code, indent, line));
+                lines.push(styled_line(
+                    palette,
+                    Block::Code,
+                    indent,
+                    line,
+                    accent_headings,
+                ));
             }
             continue;
         }
@@ -132,9 +149,10 @@ fn body_lines_with_list_style(
                     block,
                     &format!("{indent}{}", " ".repeat(hanging_width)),
                     line,
+                    accent_headings,
                 ));
             } else {
-                lines.push(styled_line(palette, block, indent, line));
+                lines.push(styled_line(palette, block, indent, line, accent_headings));
             }
         }
     }
@@ -381,7 +399,13 @@ fn wrap_words(words: &[Word], width: usize) -> Vec<Vec<&Word>> {
 
 /// Turn one packed row into a `Line`, merging neighbouring words that share
 /// emphasis so the span count stays proportional to the styling, not the text.
-fn styled_line(palette: &Palette, block: Block, indent: &str, row: Vec<&Word>) -> Line<'static> {
+fn styled_line(
+    palette: &Palette,
+    block: Block,
+    indent: &str,
+    row: Vec<&Word>,
+    accent_headings: bool,
+) -> Line<'static> {
     let mut spans = Vec::new();
     if !indent.is_empty() {
         spans.push(Span::raw(indent.to_string()));
@@ -397,11 +421,14 @@ fn styled_line(palette: &Palette, block: Block, indent: &str, row: Vec<&Word>) -
             }
             Some(_) => {
                 let (text, emphasis) = pending.take().expect("pending run");
-                spans.push(Span::styled(text, style_for(palette, block, emphasis)));
+                spans.push(Span::styled(
+                    text,
+                    style_for(palette, block, emphasis, accent_headings),
+                ));
                 if word.space_before {
                     spans.push(Span::styled(
                         " ".to_string(),
-                        style_for(palette, block, Emphasis::default()),
+                        style_for(palette, block, Emphasis::default(), accent_headings),
                     ));
                 }
                 pending = Some((word.text.clone(), word.emphasis));
@@ -413,15 +440,18 @@ fn styled_line(palette: &Palette, block: Block, indent: &str, row: Vec<&Word>) -
         }
     }
     if let Some((text, emphasis)) = pending {
-        spans.push(Span::styled(text, style_for(palette, block, emphasis)));
+        spans.push(Span::styled(
+            text,
+            style_for(palette, block, emphasis, accent_headings),
+        ));
     }
     Line::from(spans)
 }
 
-fn style_for(palette: &Palette, block: Block, emphasis: Emphasis) -> Style {
+fn style_for(palette: &Palette, block: Block, emphasis: Emphasis, accent_headings: bool) -> Style {
     let colour = if emphasis.code {
         palette.mauve
-    } else if block == Block::Heading {
+    } else if block == Block::Heading && accent_headings {
         palette.accent
     } else {
         palette.text
