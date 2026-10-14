@@ -10284,6 +10284,7 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                 let Some(target) = entry.local_target() else {
                     continue;
                 };
+                let content_body = sidebar_row_content_rect_for_app(app, body);
                 let tab = matches!(row, SidebarRow::Tab { .. });
                 let requested_prefix = narrow_prefix.unwrap_or_else(|| usize::from(*depth));
                 let provider = compact_provider(entry, app.nerd_font);
@@ -10304,7 +10305,7 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                     requested_prefix,
                 );
                 let prefix = widths.prefix;
-                let Some(rect) = clamp_row_cells(body, row_y, prefix + 1, 1) else {
+                let Some(rect) = clamp_row_cells(content_body, row_y, prefix, 1) else {
                     continue;
                 };
                 if !entry.working_shelf {
@@ -10328,9 +10329,9 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                 // The device character is the last cell of the provider field.
                 if widths.device {
                     if let Some(rect) = clamp_row_cells(
-                        body,
+                        content_body,
                         row_y,
-                        usize::from(body.width).saturating_sub(widths.age + done_width + 1),
+                        usize::from(content_body.width).saturating_sub(widths.age + done_width + 1),
                         1,
                     ) {
                         targets.push(crate::app::state::SidebarHoverTarget {
@@ -10343,9 +10344,9 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                 }
                 if widths.age > 0 {
                     if let Some(rect) = clamp_row_cells(
-                        body,
+                        content_body,
                         row_y,
-                        usize::from(body.width).saturating_sub(widths.age),
+                        usize::from(content_body.width).saturating_sub(widths.age),
                         widths.age,
                     ) {
                         targets.push(crate::app::state::SidebarHoverTarget {
@@ -10360,10 +10361,10 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                         });
                     }
                 }
-                let title_width = usize::from(body.width).saturating_sub(fixed_width);
+                let title_width = usize::from(content_body.width).saturating_sub(fixed_width);
                 if widths.provider > 0 {
                     if let Some(rect) = clamp_row_cells(
-                        body,
+                        content_body,
                         row_y,
                         prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width,
                         widths.provider,
@@ -10395,13 +10396,13 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                 let pin_width = sidebar_pin_width(
                     app,
                     entry,
-                    Rect::new(body.x, row_y, body.width, 1),
+                    Rect::new(content_body.x, row_y, content_body.width, 1),
                     title_width,
                     tab,
                 );
                 if pin_width > 0 {
                     if let Some(rect) = clamp_row_cells(
-                        body,
+                        content_body,
                         row_y,
                         prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - pin_width,
                         pin_width,
@@ -10419,8 +10420,11 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                 }
                 let title_width = title_width.saturating_sub(pin_width);
                 let control_pane = row_control_pane(app, entry, tab);
-                let available_width =
-                    selected_row_controls_width(control_pane.as_ref(), title_width, body.width);
+                let available_width = selected_row_controls_width(
+                    control_pane.as_ref(),
+                    title_width,
+                    content_body.width,
+                );
                 let controls_visible = control_pane.as_ref().is_some_and(|control| control.snoozed)
                     || selected_local_row_pane(app, entry, tab).is_some()
                     || sidebar_row_is_hovered(app, row_y);
@@ -10430,9 +10434,12 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                         if controls_width > 0 {
                             let start =
                                 prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width - controls_width;
-                            if let Some(rect) =
-                                clamp_row_cells(body, row_y, start, SIDEBAR_SNOOZE_CONTROL_WIDTH)
-                            {
+                            if let Some(rect) = clamp_row_cells(
+                                content_body,
+                                row_y,
+                                start,
+                                SIDEBAR_SNOOZE_CONTROL_WIDTH,
+                            ) {
                                 targets.push(crate::app::state::SidebarHoverTarget {
                                     rect,
                                     label: if control.show_unsettle {
@@ -10465,7 +10472,7 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                             }
                             if control.show_settle {
                                 if let Some(rect) = clamp_row_cells(
-                                    body,
+                                    content_body,
                                     row_y,
                                     start + SIDEBAR_SNOOZE_CONTROL_WIDTH,
                                     SIDEBAR_SETTLE_CONTROL_WIDTH,
@@ -10483,7 +10490,8 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                                 }
                             }
                         }
-                        if let Some(rect) = clamp_row_cells(body, row_y, 0, usize::from(body.width))
+                        if let Some(rect) =
+                            clamp_row_cells(content_body, row_y, 0, usize::from(content_body.width))
                         {
                             targets.push(crate::app::state::SidebarHoverTarget {
                                 rect,
@@ -10501,6 +10509,7 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                 working_shelf,
                 ..
             } => {
+                let content_body = sidebar_row_content_rect_for_app(app, body);
                 let requested_prefix = usize::from(*depth);
                 let row_width = usize::from(body.width);
                 let device = sidebar_device_code(app, &entry.agent_ref.host);
@@ -10520,7 +10529,7 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                     requested_prefix,
                 );
                 if !working_shelf {
-                    if let Some(rect) = clamp_row_cells(body, row_y, widths.prefix + 1, 1) {
+                    if let Some(rect) = clamp_row_cells(content_body, row_y, widths.prefix, 1) {
                         targets.push(crate::app::state::SidebarHoverTarget {
                             rect,
                             label: agent_dot_tooltip(entry),
@@ -10543,9 +10552,9 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                 // The device character is the last cell of the provider field.
                 if widths.device {
                     if let Some(rect) = clamp_row_cells(
-                        body,
+                        content_body,
                         row_y,
-                        row_width.saturating_sub(age_width + done_width + 1),
+                        usize::from(content_body.width).saturating_sub(age_width + done_width + 1),
                         1,
                     ) {
                         targets.push(crate::app::state::SidebarHoverTarget {
@@ -10557,9 +10566,12 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                     }
                 }
                 if age_width > 0 && entry.snoozed_until.is_none() {
-                    if let Some(rect) =
-                        clamp_row_cells(body, row_y, row_width.saturating_sub(age_width), age_width)
-                    {
+                    if let Some(rect) = clamp_row_cells(
+                        content_body,
+                        row_y,
+                        usize::from(content_body.width).saturating_sub(age_width),
+                        age_width,
+                    ) {
                         targets.push(crate::app::state::SidebarHoverTarget {
                             rect,
                             label: age_tooltip(
@@ -10572,10 +10584,10 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                         });
                     }
                 }
-                let title_width = row_width.saturating_sub(fixed_width);
+                let title_width = usize::from(content_body.width).saturating_sub(fixed_width);
                 if widths.provider > 0 {
                     if let Some(rect) = clamp_row_cells(
-                        body,
+                        content_body,
                         row_y,
                         widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width,
                         widths.provider,
@@ -10595,7 +10607,7 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                 }
                 let control = remote_row_control(entry);
                 let available_width =
-                    selected_row_controls_width(control.as_ref(), title_width, body.width);
+                    selected_row_controls_width(control.as_ref(), title_width, content_body.width);
                 let selected = app
                     .sidebar_selected_remote_agent
                     .as_ref()
@@ -10609,9 +10621,12 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                         if controls_width > 0 {
                             let start = widths.prefix + SIDEBAR_DOT_FIELD_WIDTH + title_width
                                 - controls_width;
-                            if let Some(rect) =
-                                clamp_row_cells(body, row_y, start, SIDEBAR_SNOOZE_CONTROL_WIDTH)
-                            {
+                            if let Some(rect) = clamp_row_cells(
+                                content_body,
+                                row_y,
+                                start,
+                                SIDEBAR_SNOOZE_CONTROL_WIDTH,
+                            ) {
                                 targets.push(crate::app::state::SidebarHoverTarget {
                                     rect,
                                     label: if control.show_unsettle {
@@ -10633,7 +10648,7 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                             }
                             if control.show_settle {
                                 if let Some(rect) = clamp_row_cells(
-                                    body,
+                                    content_body,
                                     row_y,
                                     start + SIDEBAR_SNOOZE_CONTROL_WIDTH,
                                     SIDEBAR_SETTLE_CONTROL_WIDTH,
@@ -10651,7 +10666,8 @@ pub(crate) fn compute_sidebar_hover_targets_from_layout(
                                 }
                             }
                         }
-                        if let Some(rect) = clamp_row_cells(body, row_y, 0, usize::from(body.width))
+                        if let Some(rect) =
+                            clamp_row_cells(content_body, row_y, 0, usize::from(content_body.width))
                         {
                             targets.push(crate::app::state::SidebarHoverTarget {
                                 rect,
@@ -32134,28 +32150,36 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
     #[test]
     fn hover_targets_anchor_on_the_agent_dot_a_row_actually_drew() {
-        let app = app_with_agents(&["alpha"]);
+        let mut app = app_with_agents(&["alpha"]);
         let area = Rect::new(0, 0, 32, 20);
-        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
-        terminal
-            .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
-            .unwrap();
+        for layout in [
+            crate::app::state::ViewLayout::Desktop,
+            crate::app::state::ViewLayout::Mobile,
+        ] {
+            app.view.layout = layout;
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal
+                .draw(|frame| render_sidebar(&app, &TerminalRuntimeRegistry::new(), frame, area))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
 
-        let card = compute_tab_card_areas(&app, area)[0].clone();
-        let target = compute_sidebar_hover_targets(&app, area)
-            .into_iter()
-            .find(|target| target.rect.y == card.rect.y)
-            .expect("dot target on the agent row");
+            let card = compute_tab_card_areas(&app, area)[0].clone();
+            let target = compute_sidebar_hover_targets(&app, area)
+                .into_iter()
+                .find(|target| target.rect.y == card.rect.y)
+                .expect("dot target on the agent row");
 
-        assert_eq!(target.label, "Working");
-        assert_eq!(target.rect.height, 1);
-        // The anchor sits on the dot the row drew, not on its left edge.
-        let rendered = row_text(terminal.backend().buffer(), card.rect.y, card.rect.width);
-        assert_eq!(
-            rendered.chars().nth(usize::from(target.rect.x)),
-            Some('\u{25cf}'),
-            "{rendered:?}"
-        );
+            assert_eq!(target.label, "Working", "{layout:?}");
+            assert_eq!(target.rect.height, 1, "{layout:?}");
+            // The anchor sits on the cell the row drew its dot in, read by
+            // screen cell so wide glyphs earlier in the row cannot shift it.
+            assert_eq!(
+                buffer[(target.rect.x, card.rect.y)].symbol(),
+                "\u{25cf}",
+                "{layout:?}: {:?}",
+                row_text(buffer, card.rect.y, card.rect.width)
+            );
+        }
     }
 
     #[test]
