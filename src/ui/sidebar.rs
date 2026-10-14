@@ -8833,6 +8833,19 @@ pub(super) struct WorkspaceGroupSpacing {
     first_group_index: Option<usize>,
 }
 
+/// Sortable nested headers name tab/workspace groups. Device and other
+/// structural headers have no sort key and must not acquire group spacers.
+fn is_workspace_group_header(row: &SidebarRow) -> bool {
+    matches!(
+        row,
+        SidebarRow::Workspace { .. }
+            | SidebarRow::NestedHeader {
+                sort_key: Some(_),
+                ..
+            }
+    )
+}
+
 fn sidebar_row_gap(
     app: &AppState,
     rows: &[SidebarRow],
@@ -8845,13 +8858,16 @@ fn sidebar_row_gap(
     let Some(next) = rows.get(row_idx + 1) else {
         return 0;
     };
-    if matches!(next, SidebarRow::Workspace { indented, .. } if !indented || !matches!(
-        row,
-        SidebarRow::NestedHeader { .. }
-            | SidebarRow::SectionHeader { .. }
-            | SidebarRow::Divider
-            | SidebarRow::ShelfDivider
-    )) {
+    if is_workspace_group_header(next)
+        && !matches!(
+            row,
+            SidebarRow::Workspace { .. }
+                | SidebarRow::NestedHeader { .. }
+                | SidebarRow::SectionHeader { .. }
+                | SidebarRow::Divider
+                | SidebarRow::ShelfDivider
+        )
+    {
         return u16::from(
             workspace_spacing.spacers_fit
                 && workspace_spacing
@@ -8953,7 +8969,7 @@ fn workspace_group_spacing_and_content_height(
     let mut first_group_index = None;
     let mut spacer_count = 0usize;
     let content_height = rows.iter().enumerate().fold(0u16, |height, (index, row)| {
-        if matches!(row, SidebarRow::Workspace { .. }) && first_group_index.is_none() {
+        if is_workspace_group_header(row) && first_group_index.is_none() {
             first_group_index = Some(index);
         }
         let gap = sidebar_row_gap(
@@ -11945,34 +11961,30 @@ fn workspace_drop_slots_from_layout(
         if let Some(row) = card.rect.y.checked_sub(1).filter(|row| *row < list_bottom) {
             let target = crate::app::state::WorkspaceDropTarget::Before(root_idx);
 
-            let preceded_by_workspace = sidebar_rows
+            let previous_row_index = sidebar_rows
                 .iter()
                 .position(|entry| {
-                    matches!(
-                        entry,
-                        SidebarRow::Workspace {
-                            ws_idx,
-                            indented: false,
-                            ..
-                        } if *ws_idx == root_idx
-                    )
+                    matches!(entry, SidebarRow::Workspace { ws_idx, indented: false, .. } if *ws_idx == root_idx)
                 })
-                .and_then(|row_idx| row_idx.checked_sub(1))
-                .is_some_and(|row_idx| {
-                    matches!(
-                        sidebar_rows[row_idx],
-                        SidebarRow::Workspace {
-                            indented: false,
-                            ..
-                        }
-                    )
-                });
+                .and_then(|row_idx| row_idx.checked_sub(1));
+            let preceded_by_workspace = previous_row_index.is_some_and(|row_idx| {
+                matches!(
+                    sidebar_rows[row_idx],
+                    SidebarRow::Workspace {
+                        indented: false,
+                        ..
+                    }
+                )
+            });
+            let has_spacer = previous_row_index.is_some_and(|row_idx| {
+                sidebar_row_gap(app, sidebar_rows, row_idx, workspace_spacing) > 0
+            });
             let prior_group_is_compact = prior_root
                 .is_some_and(|prior_root| sidebar_space_member_indices(app, prior_root).len() > 1);
             if prior_root.is_some()
                 && preceded_by_workspace
                 && !prior_group_is_compact
-                && workspace_spacing.spacers_fit
+                && has_spacer
             {
                 // Keep the preceding flat workspace row as a drop hit zone;
                 // the insertion marker itself stays on the spacer below it.
@@ -11981,6 +11993,13 @@ fn workspace_drop_slots_from_layout(
                     slots.push((target, alias_row));
                 }
             }
+            // Adjacent collapsed headers have no blank row. Keep a compact
+            // group's own header out of the following group's drop target.
+            let row = if preceded_by_workspace && prior_group_is_compact && !has_spacer {
+                card.rect.y
+            } else {
+                row
+            };
             slots.push((target, row));
         }
     }
@@ -15894,7 +15913,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn workspace_gap_is_between_group_rows_and_drops_under_height_pressure() {
+    fn workspace_headers_hug_dividers_under_height_pressure() {
         let mut app = AppState::test_new();
         app.workspaces = vec![
             crate::workspace::Workspace::test_new("first"),
@@ -15932,13 +15951,166 @@ pub(crate) mod tests {
             },
         ];
         let fitted = workspace_group_spacing(&app, &rows, 5);
-        let dropped = workspace_group_spacing(&app, &rows, 4);
+        let dropped = workspace_group_spacing(&app, &rows, 3);
         assert!(fitted.spacers_fit);
         assert!(!dropped.spacers_fit);
         assert_eq!(sidebar_row_gap(&app, &rows, 0, fitted), 0);
-        assert_eq!(sidebar_row_gap(&app, &rows, 2, fitted), 1);
+        assert_eq!(sidebar_row_gap(&app, &rows, 2, fitted), 0);
         assert_eq!(sidebar_row_gap(&app, &rows, 2, dropped), 0);
         assert_eq!(sidebar_row_gap(&app, &rows, 3, fitted), 0);
+    }
+
+    fn repo_directory_spacing_fixture(sections: bool) -> (AppState, Vec<SidebarRow>) {
+        let mut app = AppState::test_new();
+        app.sidebar_sections_layout = sections;
+        app.sidebar_group_mode = SidebarGroupMode::Repo;
+        let mut workspace = crate::workspace::Workspace::test_new("repo");
+        workspace.repo_binding = Some("owner/herdr".into());
+        workspace.test_add_tab(Some("first"));
+        workspace.test_add_tab(Some("second"));
+        workspace.test_add_tab(Some("third"));
+        app.workspaces = vec![workspace];
+        app.active = Some(0);
+        app.ensure_test_terminals();
+        replace_tab_context(
+            &mut app,
+            0,
+            0,
+            crate::work_context::PaneWorkContext {
+                repo: Some("owner/herdr".into()),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        for (index, dir) in ["repro-586", "qa-a", "qa-b"].iter().enumerate() {
+            let tab_idx = index + 1;
+            // Sections layout uses the subgroup saved on the tab; the Repo
+            // directory view derives the same labels from the terminal cwd.
+            if sections {
+                app.workspaces[0].tabs[tab_idx].set_subgroup(Some(format!("▫ {dir}")));
+            }
+            let tab = &app.workspaces[0].tabs[tab_idx];
+            let terminal_id = &tab.panes[&tab.root_pane].attached_terminal_id;
+            app.terminals.get_mut(terminal_id).unwrap().cwd =
+                std::path::PathBuf::from(format!("/non-git/{dir}"));
+        }
+        let rows = super::sidebar_rows(&app);
+        (app, rows)
+    }
+
+    #[test]
+    fn repo_directory_groups_have_spacers_and_drop_them_under_height_pressure() {
+        for sections in [false, true] {
+            let (app, rows) = repo_directory_spacing_fixture(sections);
+            let groups: Vec<_> = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(index, row)| match row {
+                    SidebarRow::NestedHeader { title, .. }
+                        if ["▫ repro-586", "▫ qa-a", "▫ qa-b"].contains(&title.as_str()) =>
+                    {
+                        Some(index)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(groups.len(), 3);
+            let (fitted, height) =
+                workspace_group_spacing_and_content_height(&app, &rows, u16::MAX);
+            for (index, _) in rows.iter().enumerate() {
+                let expected = u16::from(groups.contains(&(index + 1)));
+                assert_eq!(
+                    sidebar_row_gap(&app, &rows, index, fitted),
+                    expected,
+                    "row {index}"
+                );
+            }
+            let (dropped, dropped_height) =
+                workspace_group_spacing_and_content_height(&app, &rows, height - 1);
+            assert!(!dropped.spacers_fit);
+            assert_eq!(dropped_height, height - 3);
+            for index in 0..rows.len() {
+                assert_eq!(sidebar_row_gap(&app, &rows, index, dropped), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn repo_directory_groups_keep_desktop_and_mobile_hit_areas_aligned() {
+        for sections in [false, true] {
+            let (mut app, rows) = repo_directory_spacing_fixture(sections);
+            for view in [
+                crate::app::state::ViewLayout::Desktop,
+                crate::app::state::ViewLayout::Mobile,
+            ] {
+                app.view.layout = view;
+                for width in [18, 30] {
+                    let area = Rect::new(0, 0, width, 60);
+                    let layout = SidebarListLayout::from_rows(&app, area, rows.clone());
+                    let tabs = compute_tab_card_areas_from_layout(&app, &layout);
+                    let headers =
+                        compute_sidebar_nested_header_areas_from_layout(&app, area, &layout);
+                    assert_eq!(tabs.len(), 4);
+                    for (tab_idx, title) in [(1, "▫ repro-586"), (2, "▫ qa-a"), (3, "▫ qa-b")]
+                    {
+                        let previous = tabs.iter().find(|tab| tab.tab_idx == tab_idx - 1).unwrap();
+                        let header = headers.iter().find(|header| header.title == title).unwrap();
+                        let tab = tabs.iter().find(|tab| tab.tab_idx == tab_idx).unwrap();
+                        let blank_y = previous.rect.bottom();
+                        assert_eq!(header.rect.y, blank_y + 1);
+                        assert_eq!(tab.rect.y, header.rect.bottom());
+                        assert!(!tabs
+                            .iter()
+                            .any(|tab| tab.rect.contains((1, blank_y).into())));
+                        assert!(!headers
+                            .iter()
+                            .any(|header| header.rect.contains((1, blank_y).into())));
+                        assert_eq!(tab.pane_id, app.workspaces[0].tabs[tab_idx].root_pane);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn repo_directory_groups_hug_parent_headers_and_exclude_device_headers() {
+        let (mut app, _) = repo_directory_spacing_fixture(true);
+        app.workspaces[0].tabs.remove(0);
+        let rows = super::sidebar_rows(&app);
+        let (spacing, height) = workspace_group_spacing_and_content_height(&app, &rows, u16::MAX);
+        let groups: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                matches!(
+                    row,
+                    SidebarRow::NestedHeader {
+                        sort_key: Some(_),
+                        ..
+                    }
+                )
+                .then_some(index)
+            })
+            .collect();
+        assert_eq!(groups.len(), 3);
+        assert_eq!(sidebar_row_gap(&app, &rows, groups[0] - 1, spacing), 0);
+        assert_eq!(sidebar_row_gap(&app, &rows, groups[1] - 1, spacing), 1);
+        assert_eq!(sidebar_row_gap(&app, &rows, groups[2] - 1, spacing), 1);
+        assert!(workspace_group_spacing(&app, &rows, height).spacers_fit);
+        let (dropped, baseline) =
+            workspace_group_spacing_and_content_height(&app, &rows, height - 1);
+        assert!(!dropped.spacers_fit);
+        assert_eq!(baseline, height - 2);
+        // Device headers use the same variant, but have no group sort metadata.
+        let mut device_rows = rows.clone();
+        if let SidebarRow::NestedHeader { sort_key, .. } = &mut device_rows[groups[1]] {
+            *sort_key = None;
+        }
+        let devices = workspace_group_spacing(&app, &device_rows, u16::MAX);
+        assert_eq!(
+            sidebar_row_gap(&app, &device_rows, groups[1] - 1, devices),
+            0
+        );
     }
 
     fn repo_grouped_spacing_fixture() -> (AppState, Vec<SidebarRow>) {
@@ -30028,7 +30200,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn space_row_gap_separates_flattened_groups() {
+    fn flattened_workspace_headers_hug_without_content_rows() {
         let mut app = AppState::test_new();
         app.workspaces = vec![
             workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
@@ -30041,18 +30213,12 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
         let (spacious, _) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 30));
         assert_eq!(spacious.len(), 2);
-        assert_eq!(
-            spacious[1].rect.y,
-            spacious[0].rect.y + spacious[0].rect.height + 1
-        );
+        assert_eq!(spacious[1].rect.y, spacious[0].rect.bottom());
         let spacious_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 6));
 
         app.sidebar_spaces.row_gap = 0;
         let (packed, _) = compute_workspace_list_areas(&app, Rect::new(0, 0, 30, 30));
-        assert_eq!(
-            packed[1].rect.y,
-            packed[0].rect.y + packed[0].rect.height + 1
-        );
+        assert_eq!(packed[1].rect.y, packed[0].rect.bottom());
         let packed_metrics = workspace_list_scroll_metrics(&app, Rect::new(0, 0, 30, 6));
         assert_eq!(packed_metrics.viewport_rows, spacious_metrics.viewport_rows);
         assert_eq!(
@@ -30086,7 +30252,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     }
 
     #[test]
-    fn workspace_drag_indicator_targets_the_spacer_between_groups() {
+    fn workspace_drag_indicator_targets_the_packed_group_boundary() {
         let mut app = AppState::test_new();
         app.workspaces = vec![
             Workspace::test_new("a"),
@@ -30105,10 +30271,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             crate::app::state::WorkspaceDropTarget::Before(2),
         )
         .unwrap();
-        assert_eq!(
-            indicator_row,
-            app.view.workspace_card_areas[1].rect.bottom()
-        );
+        assert_eq!(indicator_row, app.view.workspace_card_areas[2].rect.y - 1);
         app.drag = Some(crate::app::state::DragState {
             target: crate::app::state::DragTarget::WorkspaceReorder {
                 source_id: 0,
