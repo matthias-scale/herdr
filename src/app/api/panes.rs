@@ -5461,9 +5461,9 @@ mod tests {
 
     #[test]
     fn process_bound_native_startup_report_can_bind_without_hook_authority() {
-        let (mut app, _) = app_with_test_workspace();
+        let (mut app, pane_id) = app_with_test_workspace();
         let terminal_id =
-            bind_test_agent_session(&mut app, "w1:p1", "herdr:claude", "claude", "native-a");
+            bind_test_agent_session(&mut app, &pane_id, "herdr:claude", "claude", "native-a");
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_detected_state(Some(crate::detect::Agent::Claude), AgentState::Working);
         let (inspector, peer) = crate::app::task_identity::tests::fixture();
@@ -5472,7 +5472,7 @@ mod tests {
         app.handle_pane_report_agent_session(
             "startup".into(),
             serde_json::from_value(serde_json::json!({
-                "pane_id": "w1:p1", "source": "herdr:claude", "agent": "claude",
+                "pane_id": pane_id, "source": "herdr:claude", "agent": "claude",
                 "agent_session_id": "native-a", "session_start_source": "startup", "seq": 2
             }))
             .unwrap(),
@@ -5488,7 +5488,7 @@ mod tests {
         let response = app.handle_pane_bind_task_repo(
             "bind".into(),
             PaneBindTaskRepoParams {
-                pane_id: "w1:p1".into(),
+                pane_id,
                 expected_terminal_id: terminal_id.to_string(),
                 expected_session_id: "native-a".into(),
                 expected_host: app.state.agent_host_name.clone(),
@@ -5852,7 +5852,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = session_name_temp_dir(&format!("brt-{nonce}"));
+        let root = std::env::temp_dir().join(format!("brt-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
         assert!(Command::new("git")
             .args(["init", "--quiet"])
             .current_dir(&root)
