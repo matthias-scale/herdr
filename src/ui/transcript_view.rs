@@ -237,14 +237,7 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
-fn user_block_metrics(area_width: u16, text_width: usize) -> (usize, usize) {
-    let max_width = (area_width as usize * 4 / 5)
-        .max(1)
-        .min(area_width as usize);
-    let content = text_width.min(max_width.saturating_sub(2));
-    let block = (content + 2).min(area_width as usize);
-    (area_width as usize - block, block)
-}
+const USER_BUBBLE_INDENT: usize = 5;
 
 fn worked_row_lines(duration: &str, tools: &[String], expand: bool, width: usize) -> Vec<String> {
     let tool_count = tools.len();
@@ -272,7 +265,8 @@ fn layout_lines(
     for row in rows {
         match row {
             ChatRow::User { body } => {
-                let max_width = (width as usize * 4 / 5).max(1).min(width as usize);
+                let left = USER_BUBBLE_INDENT.min(width.saturating_sub(3) as usize);
+                let max_width = (width as usize * 4 / 5).max(1).min(width as usize - left);
                 let inner_width = max_width.saturating_sub(2).max(1);
                 let mut body_lines = crate::ui::markdown::transcript_body_lines(
                     palette,
@@ -281,8 +275,6 @@ fn layout_lines(
                     "",
                 );
                 for line in &mut body_lines {
-                    let used = line.width().min(max_width.saturating_sub(2));
-                    let (left, _) = user_block_metrics(width, used);
                     let bubble = Style::default().fg(palette.text).bg(palette.surface0);
                     let mut padded = vec![Span::raw(" ".repeat(left)), Span::styled(" ", bubble)];
                     padded.extend(
@@ -542,11 +534,45 @@ mod tests {
     }
 
     #[test]
-    fn user_blocks_stay_within_eighty_percent_and_right_align() {
-        for width in [60, 100, 160] {
-            let (left, block) = user_block_metrics(width, usize::MAX);
-            assert_eq!(left + block, width as usize);
-            assert!(block <= width as usize * 4 / 5);
+    fn user_blocks_stay_within_eighty_percent_and_left_align() {
+        for palette in [
+            Palette::github_light_high_contrast(),
+            Palette::github_dark_high_contrast(),
+        ] {
+            for width in [20, 60, 100, 160] {
+                let rows = vec![
+                    ChatRow::User {
+                        body: "Readable user message with enough words to wrap. ".repeat(12),
+                    },
+                    ChatRow::Assistant {
+                        body: "Assistant prose".into(),
+                    },
+                ];
+                let lines = layout_lines(&rows, &palette, width, false);
+                let user_lines = lines
+                    .iter()
+                    .filter(|line| {
+                        line.spans
+                            .iter()
+                            .any(|span| span.style.bg == Some(palette.surface0))
+                    })
+                    .collect::<Vec<_>>();
+                assert!(user_lines.len() > 1);
+                for line in user_lines {
+                    assert_eq!(line.spans[0].width(), 5);
+                    assert_eq!(line.spans[1].width(), 1);
+                    assert_eq!(line.spans[1].style.bg, Some(palette.surface0));
+                    assert!(!line.spans[2].content.starts_with(' '));
+                    assert_eq!(line.spans[2].style.bg, Some(palette.surface0));
+                    assert!(line.width() - 5 <= width as usize * 4 / 5);
+                    assert!(line.width() <= width as usize);
+                }
+                let assistant = lines
+                    .iter()
+                    .find(|line| line.to_string().contains("Assistant prose"))
+                    .expect("assistant prose is rendered");
+                assert!(assistant.to_string().starts_with("  Assistant prose"));
+            }
         }
     }
 
