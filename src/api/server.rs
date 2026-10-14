@@ -344,7 +344,7 @@ fn finish_wait_response(
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn handle_request(
     request: Request,
     api_tx: &ApiRequestSender,
