@@ -5347,6 +5347,119 @@ mod tests {
     }
 
     #[test]
+    fn process_bound_lifecycle_burn_survives_same_process_reparenting() {
+        let (mut app, pane, id, inspector, peer) = process_bound_setup();
+        process_bound_report(
+            &mut app,
+            &pane,
+            Some("native-a"),
+            Some("startup"),
+            "herdr:claude",
+            1,
+            Some(peer.clone()),
+        );
+        process_bound_report(
+            &mut app,
+            &pane,
+            Some("native-b"),
+            Some("resume"),
+            "herdr:claude",
+            2,
+            Some(peer.clone()),
+        );
+        assert_eq!(
+            app.state.terminals[&id]
+                .persisted_agent_session
+                .as_ref()
+                .unwrap()
+                .session_ref
+                .value,
+            "native-b"
+        );
+        inspector
+            .processes
+            .lock()
+            .unwrap()
+            .get_mut(&100)
+            .unwrap()
+            .parent_pid = 7;
+        inspector
+            .foreground
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .parent_pid = 7;
+        process_bound_report(
+            &mut app,
+            &pane,
+            Some("native-b"),
+            Some("startup"),
+            "herdr:claude",
+            3,
+            Some(peer),
+        );
+        assert!(!app.task_session_identity_matches(&id, "native-b"));
+    }
+
+    #[test]
+    fn process_bound_startup_accepts_kernel_evidence_before_detector_catches_up() {
+        let (mut app, pane) = app_with_test_workspace();
+        let (ws, internal) = app.parse_pane_id(&pane).unwrap();
+        let id = app.state.workspaces[ws]
+            .terminal_id(internal)
+            .unwrap()
+            .clone();
+        let (inspector, peer) = crate::app::task_identity::tests::fixture();
+        app.task_process_identity.inspector = inspector;
+        process_bound_report(
+            &mut app,
+            &pane,
+            Some("native-a"),
+            Some("startup"),
+            "herdr:claude",
+            1,
+            Some(peer),
+        );
+        assert!(app.task_session_identity_matches(&id, "native-a"));
+        app.state
+            .terminals
+            .get_mut(&id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+        assert!(app.task_session_identity_matches(&id, "native-a"));
+    }
+
+    #[test]
+    fn process_bound_current_authority_survives_target_reparenting() {
+        let (mut app, pane, id, inspector, peer) = process_bound_setup();
+        process_bound_report(
+            &mut app,
+            &pane,
+            Some("native-a"),
+            Some("startup"),
+            "herdr:claude",
+            1,
+            Some(peer),
+        );
+        inspector
+            .processes
+            .lock()
+            .unwrap()
+            .get_mut(&100)
+            .unwrap()
+            .parent_pid = 7;
+        inspector
+            .foreground
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .parent_pid = 7;
+        assert!(app.task_session_identity_matches(&id, "native-a"));
+    }
+
+    #[test]
     fn process_bound_native_startup_report_can_bind_without_hook_authority() {
         let (mut app, _) = app_with_test_workspace();
         let terminal_id =

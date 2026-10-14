@@ -681,6 +681,22 @@ fn child_exit_classification_only_checkpoints_interruptions() {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn process_bound_shell_command_strings_are_not_kernel_agent_identity() {
+        for argv in [vec!["bash", "-lc", "claude"], vec!["sh", "/tmp/claude"]] {
+            let name = argv[0].to_string();
+            assert_eq!(
+                super::canonical_process_name(
+                    1,
+                    name.clone(),
+                    argv.into_iter().map(String::from).collect()
+                ),
+                name
+            );
+        }
+    }
+
     use super::*;
 
     fn symlink_scratch_dir() -> PathBuf {
@@ -966,6 +982,7 @@ mod tests {
 pub(crate) struct ProcessIdentity {
     pub pid: u32,
     pub parent_pid: u32,
+    pub process_group_id: u32,
     pub birth: (u64, u64),
     pub tty: u64,
     pub name: String,
@@ -979,6 +996,14 @@ impl ProcessIdentity {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn canonical_process_name(pid: u32, name: String, argv: Vec<String>) -> String {
+    if let Some(agent) = crate::detect::identify_agent(&name) {
+        return crate::detect::agent_label(agent).to_string();
+    }
+    if !matches!(name.as_str(), "node" | "bun" | "python" | "python3") {
+        return name;
+    }
+    // Only interpreter entrypoint argv can identify a wrapped agent. Never
+    // promote shells, SSH launchers or their command/script strings to agents.
     let process = ForegroundProcess {
         pid,
         name: name.clone(),

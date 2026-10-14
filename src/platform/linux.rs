@@ -1766,6 +1766,7 @@ pub(crate) fn process_identity(pid: u32) -> Option<super::ProcessIdentity> {
     Some(super::ProcessIdentity {
         pid,
         parent_pid: fields.get(1)?.parse().ok()?,
+        process_group_id: fields.get(2)?.parse().ok()?,
         birth: (fields.get(19)?.parse().ok()?, 0),
         tty: fields.get(4)?.parse::<i64>().ok()? as u64,
         name: super::canonical_process_name(pid, name, process_argv(pid)?),

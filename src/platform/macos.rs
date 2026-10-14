@@ -1540,6 +1540,7 @@ pub(crate) fn process_identity(pid: u32) -> Option<super::ProcessIdentity> {
     Some(super::ProcessIdentity {
         pid,
         parent_pid: info.pbi_ppid,
+        process_group_id: info.pbi_pgid,
         birth: (info.pbi_start_tvsec, info.pbi_start_tvusec),
         tty: u64::from(info.e_tdev),
         name: super::canonical_process_name(pid, comm_from_bsdinfo(&info)?, process_argv(pid)?),

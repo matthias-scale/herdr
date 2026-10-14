@@ -23,17 +23,16 @@ impl ProcessInspector for KernelInspector {
         let job = crate::platform::foreground_job(child_pid)?;
         let mut agent = None;
         for process in &job.processes {
-            // Reuse agent identification, including supported runtime wrappers.
-            let single = crate::platform::ForegroundJob {
-                process_group_id: process.pid,
-                processes: vec![process.clone()],
-            };
-            if let Some((identified, _)) = crate::detect::identify_agent_in_job(&single) {
+            let identity = self.process(process.pid)?;
+            // Shell command strings are presentation hints, not process authority.
+            if let Some(identified) = identity.agent() {
                 if identified != crate::detect::Agent::Claude || agent.is_some() {
                     return None;
                 }
-                let identity = self.process(process.pid)?;
-                if identity.tty == 0 || identity.tty != shell.tty {
+                if identity.tty == 0
+                    || identity.tty != shell.tty
+                    || identity.process_group_id != job.process_group_id
+                {
                     return None;
                 }
                 agent = Some(identity);
@@ -51,6 +50,19 @@ impl ProcessInspector for KernelInspector {
     }
 }
 
+type ProcessLifetime = (u32, (u64, u64));
+
+fn lifetime(process: &ProcessIdentity) -> ProcessLifetime {
+    (process.pid, process.birth)
+}
+
+fn same_binding_process(left: &ProcessIdentity, right: &ProcessIdentity) -> bool {
+    lifetime(left) == lifetime(right)
+        && left.tty == right.tty
+        && left.agent() == Some(crate::detect::Agent::Claude)
+        && right.agent() == Some(crate::detect::Agent::Claude)
+}
+
 #[derive(Clone)]
 struct Attestation {
     session: String,
@@ -61,7 +73,7 @@ struct Attestation {
 pub(crate) struct TaskProcessIdentity {
     pub(crate) inspector: Arc<dyn ProcessInspector>,
     attestations: HashMap<TerminalId, Attestation>,
-    burned: HashMap<TerminalId, HashSet<ProcessIdentity>>,
+    burned: HashMap<TerminalId, HashSet<ProcessLifetime>>,
     retired_sessions: HashMap<TerminalId, HashSet<String>>,
 }
 
@@ -86,7 +98,7 @@ impl TaskProcessIdentity {
             self.burned
                 .entry(id.clone())
                 .or_default()
-                .insert(previous.process);
+                .insert(lifetime(&previous.process));
         }
     }
 
@@ -144,7 +156,9 @@ impl super::App {
             .attestations
             .get(id)
             .is_some_and(|a| {
-                foreground.as_ref() != Some(&a.process)
+                foreground
+                    .as_ref()
+                    .is_none_or(|process| !same_binding_process(process, &a.process))
                     || self
                         .state
                         .terminals
@@ -166,7 +180,7 @@ impl super::App {
                 .burned
                 .entry(id.clone())
                 .or_default()
-                .insert(process);
+                .insert(lifetime(&process));
             return;
         }
         let Some(terminal) = self.state.terminals.get(id) else {
@@ -196,7 +210,7 @@ impl super::App {
                 .task_process_identity
                 .burned
                 .get(id)
-                .is_some_and(|set| set.contains(&process))
+                .is_some_and(|set| set.contains(&lifetime(&process)))
         {
             return;
         }
@@ -217,7 +231,10 @@ impl super::App {
         let valid = self.state.terminals.get(id).is_some_and(|terminal| {
             native_matches(terminal, &attestation.session)
                 && terminal.native_binding_epoch == attestation.epoch
-        }) && self.task_foreground(id).as_ref() == Some(&attestation.process);
+        }) && self
+            .task_foreground(id)
+            .as_ref()
+            .is_some_and(|process| same_binding_process(process, &attestation.process));
         if !valid {
             self.task_process_identity.invalidate(id);
             return false;
@@ -228,16 +245,15 @@ impl super::App {
 }
 
 fn native_matches(terminal: &crate::terminal::TerminalState, session: &str) -> bool {
-    terminal.detected_agent == Some(crate::detect::Agent::Claude)
-        && terminal
-            .persisted_agent_session
-            .as_ref()
-            .is_some_and(|native| {
-                native.source == "herdr:claude"
-                    && native.agent == "claude"
-                    && native.session_ref.kind == AgentSessionRefKind::Id
-                    && native.session_ref.value == session
-            })
+    terminal
+        .persisted_agent_session
+        .as_ref()
+        .is_some_and(|native| {
+            native.source == "herdr:claude"
+                && native.agent == "claude"
+                && native.session_ref.kind == AgentSessionRefKind::Id
+                && native.session_ref.value == session
+        })
 }
 
 #[cfg(test)]
@@ -276,6 +292,7 @@ pub(crate) mod tests {
         let claude = ProcessIdentity {
             pid: 100,
             parent_pid: 1,
+            process_group_id: 100,
             birth: (10, 0),
             tty: 42,
             name: "claude".into(),
@@ -283,6 +300,7 @@ pub(crate) mod tests {
         let peer = ProcessIdentity {
             pid: 102,
             parent_pid: 101,
+            process_group_id: 100,
             birth: (12, 0),
             tty: 42,
             name: "python3".into(),
@@ -290,6 +308,7 @@ pub(crate) mod tests {
         let shell = ProcessIdentity {
             pid: 101,
             parent_pid: 100,
+            process_group_id: 100,
             birth: (11, 0),
             tty: 42,
             name: "sh".into(),

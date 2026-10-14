@@ -2703,7 +2703,7 @@ impl TerminalState {
         process_exited: bool,
         now: Instant,
     ) -> TerminalStateMutation {
-        if process_exited || agent != self.detected_agent {
+        if process_exited || (self.detected_agent.is_some() && agent != self.detected_agent) {
             self.native_binding_epoch = self.native_binding_epoch.saturating_add(1);
         }
         self.usage_limited = usage_limited;
