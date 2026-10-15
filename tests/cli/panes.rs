@@ -136,7 +136,7 @@ fn pane_send_text_if_sends_only_to_the_observed_idle_shell() {
                 &["pane", "read", &pane_id, "--source", "detection", "--json"],
             );
             let token = read["result"]["read"]["input_observation"]["token"].as_str();
-            if token.is_some_and(|token| previous.map_or(true, |previous| token != previous)) {
+            if token.is_some_and(|token| previous != Some(token)) {
                 return read;
             }
             std::thread::sleep(Duration::from_millis(50));
