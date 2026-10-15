@@ -44,6 +44,14 @@ type ParsedRemoteOutput = (
 pub(crate) fn run_fleet_command(args: &[String]) -> std::io::Result<i32> {
     match args.first().map(String::as_str) {
         Some("status") => fleet_status(&args[1..]),
+        Some("observation") => {
+            let observation = HostObservation::collect();
+            println!(
+                "{}",
+                serde_json::to_string(&observation).map_err(std::io::Error::other)?
+            );
+            Ok(0)
+        }
         Some("help" | "--help" | "-h") => {
             print_fleet_help();
             Ok(0)
@@ -371,7 +379,7 @@ pub(crate) struct HostSessionSection {
     pub(crate) pane_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub(crate) struct Snapshot {
     pub(crate) polled: bool,
     #[serde(skip)]
@@ -391,10 +399,130 @@ pub(crate) struct Snapshot {
     pub(crate) inbox: Option<Arc<crate::inbox::ProducerSnapshot>>,
     pub(crate) configured_hosts: Vec<String>,
     pub(crate) hosts: Vec<HostSnapshot>,
+    /// Read-only host resources and provider quota observations. Older hosts
+    /// simply omit this optional surface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) observations: Vec<HostObservation>,
     /// Complete owner catalogs observed by the periodic fleet poll. Admission
     /// happens once when the refresh reaches the app event loop.
     #[serde(skip)]
     pub(crate) group_catalogs: Vec<GroupCatalog>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct HostObservation {
+    pub(crate) host: String,
+    pub(crate) sampled_unix: i64,
+    pub(crate) metrics: crate::platform::status_metrics::StatusMetrics,
+    pub(crate) usage: crate::provider_usage::ProviderUsageSnapshot,
+}
+
+impl HostObservation {
+    fn collect() -> Self {
+        let mut sampler = crate::platform::status_metrics::StatusMetricSampler::new();
+        // CPU is a delta of two samples. The short delay is bounded and this
+        // command only runs from the fleet background collector.
+        let _ = crate::platform::sample_status_metrics(&mut sampler);
+        std::thread::sleep(Duration::from_millis(100));
+        let metrics = crate::platform::sample_status_metrics(&mut sampler);
+        let sampled_unix = crate::provider_usage::now_unix().unwrap_or_default();
+        let usage = crate::provider_usage::collect_fleet(Some(sampled_unix), Instant::now());
+        Self {
+            host: String::new(),
+            sampled_unix,
+            metrics,
+            usage,
+        }
+    }
+}
+
+/// Fleet observations have their own minute cadence. The ordinary agent poll
+/// can run every five seconds without launching provider helpers each time.
+fn collect_observations(hosts: &[FleetHostConfig], timeout: Duration) -> Vec<HostObservation> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, (Instant, Option<HostObservation>)>>,
+    > = std::sync::OnceLock::new();
+    const INTERVAL: Duration = Duration::from_secs(60);
+    let cache = CACHE.get_or_init(Default::default);
+    let now = Instant::now();
+    let pending = {
+        let guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        hosts
+            .iter()
+            .filter(|host| {
+                !guard
+                    .get(&observation_cache_key(host))
+                    .is_some_and(|(sampled, _)| now.duration_since(*sampled) < INTERVAL)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let mut fresh = Vec::new();
+    // Bounded to four host reads at once. A large inventory must never spawn
+    // one blocking SSH process and thread for every configured machine.
+    for batch in pending.chunks(4) {
+        let batch_result = std::thread::scope(|scope| {
+            let workers = batch
+                .iter()
+                .cloned()
+                .map(|host| {
+                    scope.spawn(move || {
+                        let mut observation = if host.local {
+                            Some(HostObservation::collect())
+                        } else {
+                            run_ssh_with_timeout(
+                                &host.target,
+                                "herdr fleet observation --json",
+                                timeout,
+                            )
+                            .ok()
+                            .and_then(|bytes| {
+                                serde_json::from_slice::<HostObservation>(&bytes).ok()
+                            })
+                        };
+                        if let Some(sample) = observation.as_mut() {
+                            sample.host = host.name.clone();
+                        }
+                        (observation_cache_key(&host), observation)
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .filter_map(|worker| worker.join().ok())
+                .collect::<Vec<_>>()
+        });
+        fresh.extend(batch_result);
+    }
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (key, observation) in fresh {
+        let retained =
+            observation.or_else(|| guard.get(&key).and_then(|(_, previous)| previous.clone()));
+        guard.insert(key, (now, retained));
+    }
+    hosts
+        .iter()
+        .filter_map(|host| {
+            guard
+                .get(&observation_cache_key(host))
+                .and_then(|(_, observation)| observation.clone())
+        })
+        .collect()
+}
+
+fn observation_cache_key(host: &FleetHostConfig) -> String {
+    format!(
+        "{}\0{}\0{}\0{}\0{}",
+        host.name,
+        host.target,
+        host.local,
+        host.session.as_deref().unwrap_or_default(),
+        host.socket.as_deref().unwrap_or_default()
+    )
 }
 
 /// Remote devices that need attention in the status row.
@@ -1726,6 +1854,18 @@ impl Snapshot {
                 .filter(|inbox| inbox.host == fleet.resolved_inbox_host()),
             configured_hosts: fleet.hosts.iter().map(|host| host.name.clone()).collect(),
             hosts,
+            observations: self
+                .observations
+                .iter()
+                .filter(|observation| {
+                    fleet.hosts.iter().any(|host| {
+                        previous_hosts
+                            .get(observation.host.as_str())
+                            .is_some_and(|previous| previous.matches_config(host))
+                    })
+                })
+                .cloned()
+                .collect(),
             group_catalogs,
         }
     }
@@ -1964,12 +2104,19 @@ fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
         );
     }
     match select_hosts(&polling_fleet, None) {
-        Ok(hosts) => collect_snapshot_with_implicit_local(
-            &SystemHostReader,
-            &hosts,
-            &polling_fleet,
-            implicit_local.then(|| polling_fleet.resolved_self_name()),
-        ),
+        Ok(hosts) => {
+            let mut snapshot = collect_snapshot_with_implicit_local(
+                &SystemHostReader,
+                &hosts,
+                &polling_fleet,
+                implicit_local.then(|| polling_fleet.resolved_self_name()),
+            );
+            if !cfg!(test) {
+                snapshot.observations =
+                    collect_observations(&hosts, Duration::from_millis(polling_fleet.timeout_ms));
+            }
+            snapshot
+        }
         Err(error) => {
             let refreshed_at = SystemTime::now();
             Snapshot {
@@ -2013,6 +2160,7 @@ fn poll_without_generation(fleet: &FleetConfig) -> Snapshot {
                         entries: Vec::new(),
                     })
                     .collect(),
+                observations: Vec::new(),
                 group_catalogs: Vec::new(),
             }
         }
@@ -3007,6 +3155,7 @@ fn snapshot_from_evidence(
             .map(|host| host.name.clone())
             .collect(),
         hosts,
+        observations: Vec::new(),
         group_catalogs,
     }
 }

@@ -155,6 +155,7 @@ mod tests {
                 entries,
             }],
             group_catalogs: Vec::new(),
+            observations: Vec::new(),
         };
         app
     }
@@ -220,6 +221,7 @@ mod tests {
                 })
                 .collect(),
             group_catalogs: Vec::new(),
+            observations: Vec::new(),
         };
 
         let value: serde_json::Value =

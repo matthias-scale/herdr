@@ -1416,6 +1416,14 @@ impl AppState {
 
                 if in_sidebar {
                     self.sidebar_selected_settled = None;
+                    if !self.sidebar_collapsed {
+                        if let Some(index) =
+                            crate::ui::sidebar::fleet_panels::row_at(self, mouse.column, mouse.row)
+                        {
+                            crate::ui::sidebar::fleet_panels::toggle(self, index);
+                            return None;
+                        }
+                    }
                     if self.on_sidebar_toggle(mouse.column, mouse.row) {
                         self.toggle_sidebar_collapsed();
                         return None;

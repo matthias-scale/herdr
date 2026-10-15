@@ -59,6 +59,84 @@ fn active_session_machine_suffix(app: &AppState) -> Option<String> {
     Some(format!(" · {machine}"))
 }
 
+/// The tab's existing lifecycle aggregation is the authority for its small
+/// activity mark. Unknown panes stay gray, including before detection.
+fn tab_activity(tab: &crate::workspace::Tab, app: &AppState) -> (char, ratatui::style::Color) {
+    let (state, seen, attention) = tab.aggregate_state_and_attention(&app.terminals);
+    let p = &app.palette;
+    match (state, seen) {
+        (crate::detect::AgentState::Blocked, _) => ('●', p.red),
+        (crate::detect::AgentState::Idle, false) => ('●', p.green),
+        (crate::detect::AgentState::Working, _) => (
+            '●',
+            if attention == crate::terminal::state::AttentionTier::None {
+                p.blue
+            } else {
+                p.red
+            },
+        ),
+        (crate::detect::AgentState::Idle, true) => ('○', p.overlay0),
+        (crate::detect::AgentState::Unknown, _) => ('○', p.overlay0),
+    }
+}
+
+pub(crate) fn tab_activity_tooltip(app: &AppState, index: usize) -> String {
+    let Some(workspace) = app.active.and_then(|ws| app.workspaces.get(ws)) else {
+        return "Session activity unknown".into();
+    };
+    let Some(tab) = workspace.tabs.get(index) else {
+        return "Session activity unknown".into();
+    };
+    let mut working = 0;
+    let mut waiting = 0;
+    let mut idle = 0;
+    let mut unknown = 0;
+    for detail in workspace
+        .pane_details(&app.terminals)
+        .into_iter()
+        .filter(|detail| detail.tab_idx == index)
+    {
+        match detail.state {
+            crate::detect::AgentState::Working => working += 1,
+            crate::detect::AgentState::Blocked => waiting += 1,
+            crate::detect::AgentState::Idle => idle += 1,
+            crate::detect::AgentState::Unknown => unknown += 1,
+        }
+    }
+    let (state, _, _) = tab.aggregate_state_and_attention(&app.terminals);
+    format!("Session activity: {state:?}\n{working} working · {waiting} waiting · {idle} idle/completed · {unknown} unknown")
+}
+
+pub(crate) fn tab_activity_column(app: &AppState, index: usize, rect: Rect) -> Option<u16> {
+    let workspace = app.active.and_then(|ws| app.workspaces.get(ws))?;
+    if workspace.active_tab != index || rect.width < 3 {
+        return None;
+    }
+    let base_width = rect.width as usize - 3;
+    let suffix = active_session_machine_suffix(app);
+    let plain_name =
+        tab_chrome_label_with_icons(workspace, &app.terminals, index, base_width, app.nerd_font);
+    let suffix_width = suffix.as_deref().map(display_width).unwrap_or(0);
+    let name = if display_width(&plain_name) + suffix_width <= base_width {
+        let mut label = tab_chrome_label_with_icons(
+            workspace,
+            &app.terminals,
+            index,
+            base_width - suffix_width,
+            app.nerd_font,
+        );
+        if let Some(suffix) = suffix {
+            label.push_str(&suffix);
+        }
+        label
+    } else {
+        plain_name
+    };
+    let name = truncate_end(&name, base_width);
+    let padding = base_width.saturating_sub(display_width(&name));
+    Some(rect.x + 1 + (padding / 2) as u16)
+}
+
 pub(crate) fn visible_user_actions(app: &AppState) -> Vec<(usize, String)> {
     let repo = app.focused_repo_slug();
     app.keybinds
@@ -1277,7 +1355,8 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
             Style::default().fg(p.overlay1).bg(p.surface0)
         };
         let width = rect.width as usize;
-        let base_width = width.saturating_sub(1);
+        let activity_width = if active { 2 } else { 0 };
+        let base_width = width.saturating_sub(1 + activity_width);
         let session_suffix = if active {
             active_session_machine_suffix(app)
         } else {
@@ -1313,14 +1392,23 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         } else {
             'P'
         };
-        let padding = width.saturating_sub(1).saturating_sub(display_width(&name));
+        let padding = width
+            .saturating_sub(1 + activity_width)
+            .saturating_sub(display_width(&name));
         let left = padding / 2;
         let text = format!(
-            "{pin}{left_pad}{name}{right_pad}",
+            "{pin}{left_pad}{activity}{name}{right_pad}",
+            activity = if active { "  " } else { "" },
             left_pad = " ".repeat(left),
             right_pad = " ".repeat(padding - left),
         );
         frame.render_widget(Paragraph::new(text).style(style), rect);
+        if active && rect.width > 1 {
+            let (glyph, color) = tab_activity(tab, app);
+            let x = rect.x + 1 + left as u16;
+            frame.buffer_mut()[(x, rect.y)].set_symbol(if glyph == '●' { "●" } else { "○" });
+            frame.buffer_mut()[(x, rect.y)].set_fg(color);
+        }
     }
 
     if let Some(crate::app::state::DragState {
@@ -1438,6 +1526,41 @@ mod tests {
             active_session_machine_label(&app).as_deref(),
             Some("remote session · ub1")
         );
+    }
+
+    #[test]
+    fn active_tab_activity_precedes_existing_session_label_and_keeps_pin() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("session")];
+        app.active = Some(0);
+        app.view.tab_bar_rect = Rect::new(0, 0, 60, 1);
+        let view = compute_tab_bar_view(
+            &app.workspaces[0],
+            &app.terminals,
+            app.view.tab_bar_rect,
+            0,
+            true,
+            false,
+            &[],
+            all_tab_actions_visible(),
+        );
+        app.view.tab_hit_areas = view.tab_hit_areas;
+        let rect = app.view.tab_hit_areas[0];
+        let column = tab_activity_column(&app, 0, rect).expect("active tab marker");
+        assert!(column > rect.x);
+        let backend = TestBackend::new(60, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_tab_bar(&app, frame, app.view.tab_bar_rect))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(matches!(buffer[(column, rect.y)].symbol(), "●" | "○"));
+        assert_eq!(buffer[(column + 1, rect.y)].symbol(), " ");
+        assert_ne!(
+            buffer[(rect.x, rect.y)].symbol(),
+            buffer[(column, rect.y)].symbol()
+        );
+        assert!(tab_activity_tooltip(&app, 0).contains("Session activity:"));
     }
 
     use super::*;

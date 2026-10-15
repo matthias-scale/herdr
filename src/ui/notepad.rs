@@ -25,6 +25,12 @@ const MIN_NOTEPAD_ROWS: u16 = 2;
 /// no tab is visible, the sidebar is collapsed, or the list would be squeezed
 /// below its header and three-row content floor.
 pub(crate) fn notepad_height(app: &AppState, content: Rect) -> u16 {
+    // The fleet usage shelf supersedes the legacy host-local Usage tab. Keep
+    // stored tab preferences intact so notes, context and agent tabs retain
+    // their behavior when selected.
+    if app.notepad.active_tab_target() == Some(crate::notepad::NotepadTabTarget::Usage) {
+        return 0;
+    }
     if !app.notepad.has_visible_tabs() || app.sidebar_collapsed || content.width == 0 {
         return 0;
     }
@@ -34,13 +40,7 @@ pub(crate) fn notepad_height(app: &AppState, content: Rect) -> u16 {
     if spare < MIN_NOTEPAD_ROWS {
         return 0;
     }
-    if app.notepad.active_tab_target() == Some(crate::notepad::NotepadTabTarget::Usage) {
-        u16::try_from(app.view.notepad_usage_content_rows.max(1).saturating_add(1))
-            .unwrap_or(u16::MAX)
-            .min(spare)
-    } else {
-        app.notepad.height.min(spare)
-    }
+    app.notepad.height.min(spare)
 }
 
 /// The panel itself, at the bottom of the sidebar's content area.
@@ -471,13 +471,13 @@ mod tests {
     }
 
     #[test]
-    fn the_default_usage_tab_reserves_rows_without_note_editing() {
+    fn the_legacy_usage_tab_reserves_no_rows_beside_fleet_usage() {
         let mut app = AppState::test_new();
         app.notepad =
             crate::notepad::NotepadState::from_config(&crate::config::NotepadConfig::default());
         assert!(!app.notepad.enabled);
         assert_eq!(app.notepad.visible_tabs, vec!["usage".to_string()]);
-        assert_eq!(notepad_height(&app, Rect::new(0, 0, 26, 40)), 2);
+        assert_eq!(notepad_height(&app, Rect::new(0, 0, 26, 40)), 0);
     }
 
     #[test]
