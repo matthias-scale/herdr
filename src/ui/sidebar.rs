@@ -876,20 +876,21 @@ fn compact_row_widths(
     requested_prefix: usize,
     left_padding: usize,
 ) -> CompactRowWidths {
-    // Metadata must fit inside the inset content area, keeping the title
-    // readable when a full machine label is wider than the old device code.
+    // A full machine label must fit inside the inset content area, keeping the
+    // title readable; provider and age keep the row-width budget.
     let content_width = width.saturating_sub(if device.is_some() { left_padding } else { 0 });
     let title_width = display_width(title);
     let readable_title_width = title_width.min(SIDEBAR_MIN_NESTED_TITLE_WIDTH);
     let minimum_prefix_width = requested_prefix.min(SIDEBAR_MIN_NESTED_PREFIX_WIDTH);
-    let fits = |provider: usize, age: usize| {
-        content_width
+    let fits_within = |available: usize, provider: usize, age: usize| {
+        available
             >= SIDEBAR_DOT_FIELD_WIDTH
                 + provider
                 + age
                 + readable_title_width
                 + minimum_prefix_width
     };
+    let fits = |provider: usize, age: usize| fits_within(width, provider, age);
     let age = if width >= SIDEBAR_AGE_MIN_ROW_WIDTH
         && fits(
             compact_provider_field_width(provider, device),
@@ -899,7 +900,12 @@ fn compact_row_widths(
     } else {
         0
     };
-    let show_device = device.is_some() && fits(compact_provider_field_width(provider, device), age);
+    let show_device = device.is_some()
+        && fits_within(
+            content_width,
+            compact_provider_field_width(provider, device),
+            age,
+        );
     let provider = {
         let field = compact_provider_field_width(provider, device.filter(|_| show_device));
         if field > 0 && !fits(field, age) {
@@ -909,7 +915,7 @@ fn compact_row_widths(
         }
     };
     let target_title_width = title_width.min(SIDEBAR_TITLE_TARGET_WIDTH);
-    let prefix_budget = content_width
+    let prefix_budget = if show_device { content_width } else { width }
         .saturating_sub(SIDEBAR_DOT_FIELD_WIDTH + provider + age)
         .saturating_sub(target_title_width);
     let preserve_nested_prefix = requested_prefix > 0 && fits(provider, age);
