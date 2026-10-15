@@ -251,7 +251,13 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
         .into_iter()
         .find_map(|(control, rect)| rect_contains(rect, col, row).then_some(control))
         .or_else(|| {
-            super::sidebar::fleet_panels::row_at(app, col, row).map(ControlId::SidebarFleetRow)
+            let index = super::sidebar::fleet_panels::row_at(app, col, row)?;
+            Some(
+                super::sidebar::fleet_panels::token_at(app, index, col)
+                    .map_or(ControlId::SidebarFleetRow(index), |token| {
+                        ControlId::SidebarFleetToken(index, token)
+                    }),
+            )
         })
         .or_else(|| {
             view.tab_hit_areas
@@ -321,7 +327,7 @@ pub(crate) fn hovered_control_at(app: &AppState, col: u16, row: u16) -> Option<C
         })
 }
 
-fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> {
+pub(crate) fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> {
     let view = &app.view;
     let target = match control {
         ControlId::FocusBoardNewCard
@@ -481,6 +487,9 @@ fn tooltip_target(app: &AppState, control: ControlId) -> Option<(Rect, String)> 
             (target.rect, target.label.clone())
         }
         ControlId::SidebarFleetRow(index) => super::sidebar::fleet_panels::row_target(app, index)?,
+        ControlId::SidebarFleetToken(row, token) => {
+            super::sidebar::fleet_panels::token_target(app, row, token)?
+        }
         ControlId::TopBarTabActivity(index) => {
             let tab = view.tab_hit_areas.get(index)?;
             (

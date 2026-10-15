@@ -1420,7 +1420,11 @@ impl AppState {
                         if let Some(index) =
                             crate::ui::sidebar::fleet_panels::row_at(self, mouse.column, mouse.row)
                         {
-                            crate::ui::sidebar::fleet_panels::toggle(self, index);
+                            if crate::ui::sidebar::fleet_panels::token_at(self, index, mouse.column)
+                                .is_none()
+                            {
+                                crate::ui::sidebar::fleet_panels::toggle(self, index);
+                            }
                             return None;
                         }
                     }

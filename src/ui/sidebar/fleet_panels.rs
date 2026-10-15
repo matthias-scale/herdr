@@ -38,6 +38,8 @@ pub(crate) struct Row {
     pub(crate) color: Color,
     pub(crate) spans: Vec<(String, Color)>,
     pub(crate) tooltip: String,
+    /// Relative columns of compact account/machine tokens and their details.
+    targets: Vec<(u16, u16, String)>,
 }
 
 impl Row {
@@ -48,6 +50,7 @@ impl Row {
             color,
             spans: Vec::new(),
             tooltip: tooltip.into(),
+            targets: Vec::new(),
         }
     }
     fn styled(parts: Vec<(String, Color)>, tooltip: impl Into<String>) -> Self {
@@ -58,6 +61,7 @@ impl Row {
             color: Color::Reset,
             spans: parts,
             tooltip: tooltip.into(),
+            targets: Vec::new(),
         }
     }
 }
@@ -546,10 +550,15 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
             {
                 compact.push(Row::styled(
                     vec![("  ".into(), app.palette.overlay1)],
-                    account_tip(account, now),
+                    "Fleet usage · hover an account for details",
                 ));
             }
             let line = compact.last_mut().unwrap();
+            line.targets.push((
+                display_width(&line.text) as u16,
+                display_width(&token) as u16,
+                account_tip(account, now),
+            ));
             line.spans.push((
                 format!(
                     " {}",
@@ -560,8 +569,6 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
             line.spans
                 .push((severity_dot(value).into(), severity_color(value, app)));
             line.text.push_str(&token);
-            line.tooltip
-                .push_str(&format!("\n{}", account_tip(account, now)));
         }
         rows.extend(compact);
     } else {
@@ -734,17 +741,18 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
             let line = compact_resource_rows
                 .last_mut()
                 .unwrap_or(&mut resource_header);
-            line.spans.push((token.clone(), color));
-            line.text.push_str(&token);
-            line.tooltip.push_str(&format!(
-                "\n{}",
+            line.targets.push((
+                display_width(&line.text) as u16,
+                display_width(&token) as u16,
                 resource_tip(
                     &host.name,
                     observation,
                     now,
-                    host.state != HostState::Unreachable
-                )
+                    host.state != HostState::Unreachable,
+                ),
             ));
+            line.spans.push((token.clone(), color));
+            line.text.push_str(&token);
         } else {
             resource_rows.push(Row::styled(
                 vec![
@@ -922,6 +930,33 @@ pub(crate) fn row_at(app: &AppState, col: u16, row: u16) -> Option<usize> {
     let area = area(app, app.view.sidebar_rect);
     (col >= area.x && col < area.right() && row >= area.y && row < area.bottom())
         .then_some((row - area.y) as usize)
+}
+
+pub(crate) fn token_at(app: &AppState, row_index: usize, col: u16) -> Option<usize> {
+    let area = area(app, app.view.sidebar_rect);
+    let relative = col.checked_sub(area.x)?;
+    rows(app, area.width)
+        .get(row_index)?
+        .targets
+        .iter()
+        .position(|(start, width, _)| relative >= *start && relative < start.saturating_add(*width))
+}
+
+pub(crate) fn token_target(
+    app: &AppState,
+    row_index: usize,
+    token_index: usize,
+) -> Option<(Rect, String)> {
+    let area = area(app, app.view.sidebar_rect);
+    if row_index >= area.height as usize {
+        return None;
+    }
+    let row = rows(app, area.width).into_iter().nth(row_index)?;
+    let (start, width, tooltip) = row.targets.get(token_index)?;
+    Some((
+        Rect::new(area.x + *start, area.y + row_index as u16, *width, 1),
+        tooltip.clone(),
+    ))
 }
 
 pub(crate) fn row_target(app: &AppState, index: usize) -> Option<(Rect, String)> {
@@ -1291,16 +1326,84 @@ mod tests {
         assert!(compact.len() > 2);
         assert_eq!(compact.len(), row_count(&app, 17));
         assert!(compact.iter().all(|row| display_width(&row.text) <= 17));
-        assert!(
+        assert_eq!(
             compact
                 .iter()
-                .filter(|row| row.tooltip.contains("Profile: profile"))
-                .count()
-                > 1
+                .flat_map(|row| &row.targets)
+                .filter(|(_, _, tip)| tip.contains("Profile: profile"))
+                .count(),
+            9
         );
         assert!(compact
             .iter()
-            .any(|row| row.tooltip.contains("ub8 · reachable")));
+            .flat_map(|row| &row.targets)
+            .any(|(_, _, tip)| tip.contains("ub8 · reachable")));
+    }
+
+    #[test]
+    fn collapsed_tokens_render_and_hover_individually_in_terminal_viewport() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let now = 1_000_000;
+        let mut app = AppState::test_new();
+        app.status_now_unix = Some(now);
+        app.view.sidebar_rect = Rect::new(0, 0, 25, 40);
+        app.collapsed_sidebar_groups.insert(USAGE_KEY.into());
+        app.collapsed_sidebar_groups.insert(RESOURCES_KEY.into());
+        app.provider_usage.accounts = (0..7)
+            .map(|index| {
+                account(
+                    QuotaProvider::Claude,
+                    &format!("profile{index}"),
+                    usage(20, now),
+                )
+            })
+            .collect();
+        app.provider_usage.collected_unix = Some(now);
+        for index in 0..7 {
+            let name = format!("ub{index}");
+            app.fleet_snapshot
+                .hosts
+                .push(host(&name, HostState::Reachable));
+            app.fleet_snapshot
+                .observations
+                .push(observation(&name, now, Vec::new()));
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal
+            .draw(|frame| render(&app, frame, app.view.sidebar_rect))
+            .unwrap();
+        let panel_rows = rows(&app, area(&app, app.view.sidebar_rect).width);
+        let mut account_count = 0;
+        let mut machine_count = 0;
+        for (row_index, row) in panel_rows.iter().enumerate() {
+            for (token_index, _) in row.targets.iter().enumerate() {
+                let (anchor, expected) = token_target(&app, row_index, token_index).unwrap();
+                let control =
+                    crate::ui::tooltip::hovered_control_at(&app, anchor.x, anchor.y).unwrap();
+                assert_eq!(
+                    control,
+                    crate::app::state::ControlId::SidebarFleetToken(row_index, token_index)
+                );
+                let (hit, tip) = crate::ui::tooltip::tooltip_target(&app, control).unwrap();
+                assert_eq!(hit, anchor);
+                assert_eq!(tip, expected);
+                assert!(
+                    crate::ui::tooltip::tooltip_rect(hit, &tip, Rect::new(0, 0, 100, 40)).is_some(),
+                    "tooltip did not fit: {tip}"
+                );
+                if tip.contains("Profile: profile") {
+                    account_count += 1;
+                }
+                if tip.contains("CPU:") {
+                    machine_count += 1;
+                }
+            }
+        }
+        assert_eq!(account_count, 7);
+        assert_eq!(machine_count, 7);
+        assert!(row_target(&app, 0).unwrap().1.len() < 100);
     }
 
     #[test]

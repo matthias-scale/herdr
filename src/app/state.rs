@@ -5685,6 +5685,7 @@ pub(crate) enum ControlId {
     SidebarFooter(SidebarFooterItem),
     SidebarHover(usize),
     SidebarFleetRow(usize),
+    SidebarFleetToken(usize, usize),
     SidebarRowHover(u16),
     NotepadUsageRow(usize),
     NotepadUsageToggle,
