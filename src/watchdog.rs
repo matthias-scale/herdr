@@ -1824,10 +1824,9 @@ mod tests {
     }
 
     #[test]
-    fn expected_to_continue_requires_active_now_work_without_human_or_background_wait() {
-        assert!(evidence::expected_to_continue(
-            "Now: continuing implementation\n────────────────\n❯ cont\n────────────────\n0 shells"
-        ));
+    fn expected_to_continue_requires_a_record_with_active_work() {
+        let working_record = r#"<!-- closing-state {"v":3,"state":"working","completion":"incomplete","items":[],"decisions":[],"workers":[{"name":"Codex","activity":"implementation"}],"wait":null,"now":{"kind":"worker"}} -->"#;
+        assert!(evidence::expected_to_continue(working_record));
         assert!(!evidence::expected_to_continue(
             "Done here.\n────────────────\n❯ \n────────────────\n0 shells"
         ));
@@ -1838,7 +1837,7 @@ mod tests {
             "Now: stopped — waiting\n────────────────\n❯ \n────────────────\n0 shells"
         ));
         let prose_only = "**Needs you (1)**\n1. **Approve** release\nNow: continuing work\n────────────────\n❯ \n────────────────\n0 shells";
-        assert!(evidence::expected_to_continue(prose_only));
+        assert!(!evidence::expected_to_continue(prose_only));
         let record = closing_wait_record(serde_json::json!([{
             "n": 1, "kind": "Approve", "text": "Release", "options": []
         }]));

@@ -160,31 +160,13 @@ fn is_done_now_status(value: &str) -> bool {
 }
 
 pub(crate) fn expected_to_continue(text: &str) -> bool {
-    if closing_block_open(text)
-        || background_shell_count(text) > 0
-        || background_agent_count(text) > 0
-        || background_task_count(text) > 0
-    {
-        return false;
-    }
-    let reply = reply_text(text);
-    reply
-        .lines()
-        .rev()
-        .find_map(|line| {
-            let trimmed = line.trim();
-            let captures = NOW_LINE.captures(trimmed)?;
-            let work = captures[1].trim().trim_matches('*').trim();
-            Some(
-                !work.is_empty()
-                    && !DONE_HERE.is_match(work)
-                    && !is_done_now_status(work)
-                    && !work.to_ascii_lowercase().starts_with("waiting on you")
-                    && !work.to_ascii_lowercase().starts_with("stopped —")
-                    && !work.to_ascii_lowercase().starts_with("stopped -"),
-            )
-        })
-        .unwrap_or(false)
+    closing_record(text).is_some_and(|record| {
+        matches!(record["now"]["kind"].as_str(), Some("worker" | "wait"))
+            || record["workers"]
+                .as_array()
+                .is_some_and(|workers| !workers.is_empty())
+            || !record["wait"].is_null()
+    })
 }
 
 pub(crate) fn background_task_count(text: &str) -> usize {
@@ -232,14 +214,20 @@ pub(crate) fn background_agent_count(text: &str) -> usize {
 }
 
 pub(crate) fn closing_block_waiting(text: &str) -> bool {
-    closing_record_waiting(text).unwrap_or(false)
+    closing_record_waiting(&closing_record(text))
 }
 
-pub(crate) fn closing_block_open(text: &str) -> bool {
-    closing_record_waiting(text).unwrap_or(false)
+fn closing_record_waiting(record: &Option<serde_json::Value>) -> bool {
+    let Some(record) = record else {
+        return false;
+    };
+    record["items"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty())
+        || record["now"]["kind"] == "waiting_on_you"
 }
 
-fn closing_record_waiting(text: &str) -> Option<bool> {
+fn closing_record(text: &str) -> Option<serde_json::Value> {
     let captures = CLOSING_RECORD.captures(text)?;
     let raw = captures
         .name("comment")
@@ -351,7 +339,7 @@ fn closing_record_waiting(text: &str) -> Option<bool> {
     {
         return None;
     }
-    Some(!items.is_empty() || now["kind"] == "waiting_on_you")
+    Some(record)
 }
 
 pub(crate) fn finished_reply(text: &str) -> bool {
@@ -845,13 +833,20 @@ mod tests {
     fn closing_block_detection_uses_structure_not_heading_copy() {
         let blocked = r#"<!-- closing-state {"v":3,"state":"blocked","completion":"incomplete","items":[{"n":1,"kind":"Approve","text":"Continue?","options":[]}],"decisions":[],"workers":[],"wait":null,"now":{"kind":"waiting_on_you"}} -->"#;
         assert!(closing_block_waiting(blocked));
-        assert!(closing_block_open(blocked));
         assert!(!closing_block_waiting(
             "**Needs you (1)**\n1. Approve — Continue?"
         ));
-        assert!(!closing_block_open("Now: waiting on you"));
         let done = r#"<!-- closing-state {"v":3,"state":"idle","completion":"complete","items":[],"decisions":[],"workers":[],"wait":null,"now":{"kind":"done_here"}} -->"#;
         assert!(!closing_block_waiting(done));
+    }
+
+    #[test]
+    fn closing_block_waiting_requires_a_valid_record() {
+        let record = r#"<!-- closing-state {"v":3,"state":"blocked","completion":"incomplete","items":[{"n":1,"kind":"Approve","text":"Continue?","options":[]}],"decisions":[],"workers":[],"wait":null,"now":{"kind":"waiting_on_you"}} -->"#;
+        assert!(closing_block_waiting(record));
+        assert!(!closing_block_waiting(
+            "**Needs you (1)**\n1. Approve Continue?"
+        ));
     }
 
     #[test]
@@ -877,8 +872,11 @@ mod tests {
             "Now: done-here-check worker — running",
         ] {
             assert!(promised_work(line).is_some(), "{line}");
-            assert!(expected_to_continue(line), "{line}");
+            assert!(!expected_to_continue(line), "{line}");
         }
+        assert!(expected_to_continue(
+            r#"<!-- closing-state {"v":3,"state":"working","completion":"incomplete","items":[],"decisions":[],"workers":[{"name":"Codex","activity":"finishing X"}],"wait":null,"now":{"kind":"worker"}} -->"#
+        ));
     }
 
     #[test]
@@ -958,18 +956,18 @@ mod tests {
             "Now: awaiting approval",
             "Now: awaiting review",
         ] {
-            assert!(!closing_block_open(line), "{line}");
+            assert!(!closing_block_waiting(line), "{line}");
         }
 
         for line in ["Now: waiting on CI", "Now: waiting for the build"] {
-            assert!(!closing_block_open(line), "{line}");
+            assert!(!closing_block_waiting(line), "{line}");
             assert!(promised_work(line).is_some(), "{line}");
         }
     }
 
     #[test]
     fn canonical_numbered_approval_with_record_is_waiting() {
-        assert!(closing_block_open(
+        assert!(closing_block_waiting(
             "<!-- closing-state {\"v\":3,\"state\":\"blocked\",\"completion\":\"incomplete\",\"items\":[{\"n\":1,\"kind\":\"Approve\",\"text\":\"X?\",\"options\":[]}],\"decisions\":[],\"workers\":[],\"wait\":null,\"now\":{\"kind\":\"waiting_on_you\"}} -->"
         ));
     }
@@ -1034,7 +1032,10 @@ mod tests {
             assert!(!expected_to_continue(reply), "{reply}");
             assert_eq!(promised_work(reply), None, "{reply}");
         }
-        assert!(expected_to_continue("**Now:** Codex — running tests"));
+        assert!(!expected_to_continue("**Now:** Codex — running tests"));
+        assert!(expected_to_continue(
+            r#"<!-- closing-state {"v":3,"state":"working","completion":"incomplete","items":[],"decisions":[],"workers":[],"wait":{"event":"tests"},"now":{"kind":"wait"}} -->"#
+        ));
     }
 
     #[test]

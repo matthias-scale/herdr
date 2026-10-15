@@ -107,15 +107,7 @@ fn replay_observations(inputs: &[ReplayObservation]) -> Vec<ReplayDecision> {
         .map(|input| {
             let mem = memory.entry(input.pane_id.clone()).or_default();
             let hash = watchdog::evidence::semantic_hash(&input.tail);
-            let expected = watchdog::evidence::expected_to_continue(&input.tail)
-                && matches!(input.status, AgentStatus::Idle | AgentStatus::Done);
-            let track_quiet = expected
-                || (watchdog::evidence::promised_work(&input.tail).is_some()
-                    && matches!(input.status, AgentStatus::Working | AgentStatus::Unknown)
-                    && !watchdog::evidence::closing_block_open(&input.tail)
-                    && watchdog::evidence::background_shell_count(&input.tail) == 0
-                    && watchdog::evidence::background_agent_count(&input.tail) == 0
-                    && watchdog::evidence::background_task_count(&input.tail) == 0);
+            let track_quiet = watchdog::evidence::expected_to_continue(&input.tail);
             let rebound = (mem.terminal_id.is_some()
                 && mem.terminal_id.as_deref() != Some(input.pane_id.as_str()))
                 || (mem.agent_session.is_some()
@@ -415,15 +407,8 @@ fn run_scan(options: &WatchdogOptions) -> io::Result<i32> {
     let mut promised = Vec::with_capacity(observations.len());
     for o in &observations {
         let mem = memory.entry(o.pane_id.clone()).or_default();
-        let expected = watchdog::evidence::expected_to_continue(&o.tail)
-            && matches!(o.status, AgentStatus::Idle | AgentStatus::Done);
-        let track_quiet = expected
-            || (watchdog::evidence::promised_work(&o.tail).is_some()
-                && matches!(o.status, AgentStatus::Working | AgentStatus::Unknown)
-                && !watchdog::evidence::closing_block_open(&o.tail)
-                && watchdog::evidence::background_shell_count(&o.tail) == 0
-                && watchdog::evidence::background_agent_count(&o.tail) == 0
-                && watchdog::evidence::background_task_count(&o.tail) == 0);
+        let expected = watchdog::evidence::expected_to_continue(&o.tail);
+        let track_quiet = expected;
         let hash = watchdog::evidence::semantic_hash(&o.tail);
         let rebound = (mem.terminal_id.is_some()
             && mem.terminal_id.as_ref() != o.terminal_id.as_ref())

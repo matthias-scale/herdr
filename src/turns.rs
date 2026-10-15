@@ -32,30 +32,41 @@ struct ParsedClosing {
 
 /// Uses the same bundled parser as the closing-block integration, off the UI thread.
 fn parse_closing(text: &str) -> Closing {
-    let program = format!(
-        concat!(
-            "import json, sys, types\n",
-            "record = types.ModuleType('closing_block_record')\n",
-            "exec(compile({record_source:?}, '<closing_block_record>', 'exec'), record.__dict__)\n",
-            "sys.modules['closing_block_record'] = record\n",
-            "parser = types.ModuleType('closing_block')\n",
-            "sys.modules['closing_block'] = parser\n",
-            "exec(compile({parser_source:?}, '<closing_block>', 'exec'), parser.__dict__)\n",
-            "b = parser.parse(sys.stdin.read())\n",
-            "print(json.dumps({{'needs_you': b.blocking, 'item_kinds': [i.label for i in b.items], 'parse_ok': b.parse_status == 'ok', 'state': b.herdr_state}}))\n"
-        ),
-        record_source = include_str!("integration/assets/closing-block/closing_block_record.py"),
-        parser_source = include_str!("integration/assets/closing-block/closing_block.py"),
+    parse_closing_with_source_paths(
+        text,
+        "src/integration/assets/closing-block/closing_block_record.py",
+        "src/integration/assets/closing-block/closing_block.py",
+    )
+}
+
+fn parse_closing_with_source_paths(text: &str, record_path: &str, parser_path: &str) -> Closing {
+    const PROGRAM: &str = concat!(
+        "import json, sys, types\n",
+        "data = json.load(sys.stdin)\n",
+        "record = types.ModuleType('closing_block_record')\n",
+        "exec(compile(data['record_source'], sys.argv[1], 'exec'), record.__dict__)\n",
+        "sys.modules['closing_block_record'] = record\n",
+        "parser = types.ModuleType('closing_block')\n",
+        "sys.modules['closing_block'] = parser\n",
+        "exec(compile(data['parser_source'], sys.argv[2], 'exec'), parser.__dict__)\n",
+        "b = parser.parse(data['text'])\n",
+        "print(json.dumps({'needs_you': b.blocking, 'item_kinds': [i.label for i in b.items], 'parse_ok': b.parse_status == 'ok', 'state': b.herdr_state}))\n"
     );
     let result = (|| -> io::Result<Closing> {
+        let encoded_input = serde_json::to_vec(&serde_json::json!({
+            "record_source": include_str!("integration/assets/closing-block/closing_block_record.py"),
+            "parser_source": include_str!("integration/assets/closing-block/closing_block.py"),
+            "text": text,
+        }))
+        .map_err(io::Error::other)?;
         let mut child = Command::new("python3")
-            .args(["-c", &program])
+            .args(["-c", PROGRAM, record_path, parser_path])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
-        if let Some(mut input) = child.stdin.take() {
-            input.write_all(text.as_bytes())?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(&encoded_input)?;
         }
         let output = child.wait_with_output()?;
         if !output.status.success() {
@@ -208,8 +219,12 @@ impl Turn {
                 "at": crate::agent_state::format_rfc3339(at),
                 "latency_seconds": at.duration_since(end).unwrap_or_default().as_secs_f64(),
                 "answer_like": answer_like(&text),
-                "state_at_next_action": if self.blocked { "blocked" } else { "idle" },
-                "state_at_settle": crate::detect::manifest::agent_state_label(self.state_at_settle.unwrap_or(if self.blocked { AgentState::Blocked } else { AgentState::Idle })),
+                "state_at_next_action": crate::detect::manifest::agent_state_label(
+                    self.state_at_settle.unwrap_or(AgentState::Unknown)
+                ),
+                "state_at_settle": crate::detect::manifest::agent_state_label(
+                    self.state_at_settle.unwrap_or(AgentState::Unknown)
+                ),
             }));
             let sequence = self.sequence.saturating_add(1);
             *self = Self {
@@ -318,16 +333,12 @@ impl Turn {
             && (self.final_reply && self.pending_tools.is_empty() || !self.ask_tools.is_empty())
         {
             let closing = parse_closing(&self.text);
-            self.blocked = !self.ask_tools.is_empty() || closing.state == "blocked";
-            let state = if !self.ask_tools.is_empty() {
-                AgentState::Blocked
-            } else {
-                match closing.state.as_str() {
-                    "blocked" => AgentState::Blocked,
-                    "working" => AgentState::Working,
-                    "idle" => AgentState::Idle,
-                    _ => AgentState::Unknown,
-                }
+            self.blocked = closing.state == "blocked";
+            let state = match closing.state.as_str() {
+                "blocked" => AgentState::Blocked,
+                "working" => AgentState::Working,
+                "idle" => AgentState::Idle,
+                _ => AgentState::Unknown,
             };
             self.closing = Some(closing);
             self.settled = true;
@@ -577,6 +588,16 @@ mod tests {
         turn.state(BASE + Duration::from_secs(second))
     }
     #[test]
+    fn closing_parser_accepts_non_ascii_source_paths() {
+        let closing = parse_closing_with_source_paths(
+            "<!-- closing-state {\"v\":3,\"state\":\"idle\",\"completion\":\"complete\",\"items\":[],\"decisions\":[],\"workers\":[],\"wait\":null,\"now\":{\"kind\":\"done_here\"}} -->",
+            "fixtures/🧪/closing_block_record.py",
+            "fixtures/🧪/closing_block.py",
+        );
+        assert_eq!(closing.state, "idle");
+    }
+
+    #[test]
     fn finished_turn_state_comes_only_from_a_valid_closing_record() {
         let cases = [
             (
@@ -587,6 +608,10 @@ mod tests {
             (
                 "**Needs you (2)**\n**Now:** waiting on you\n<!-- closing-state {\"v\":3,\"state\":\"idle\",\"completion\":\"complete\",\"items\":[],\"decisions\":[],\"workers\":[],\"wait\":null,\"now\":{\"kind\":\"done_here\"}} -->",
                 AgentState::Idle,
+            ),
+            (
+                "**Now:** worker — tests\n<!-- closing-state {\"v\":3,\"state\":\"working\",\"completion\":\"incomplete\",\"items\":[],\"decisions\":[],\"workers\":[{\"name\":\"Codex\",\"activity\":\"tests\"}],\"wait\":null,\"now\":{\"kind\":\"worker\"}} -->",
+                AgentState::Working,
             ),
         ];
         for (reply, expected) in cases {
@@ -664,7 +689,7 @@ mod tests {
         assert_eq!(turn.record().unwrap()["stop_hook_rejections"], 1);
     }
     #[test]
-    fn pending_question_and_interrupted_turn() {
+    fn pending_question_without_a_record_is_unknown_and_interrupted_turn() {
         let mut turn = Turn::default();
         feed(&mut turn, user("choose"), 0);
         feed(
@@ -672,7 +697,7 @@ mod tests {
             json!({"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"ask1","name":"AskUserQuestion"}]}}),
             1,
         );
-        assert_eq!(state(&mut turn, 4), Some(AgentState::Blocked));
+        assert_eq!(state(&mut turn, 4), Some(AgentState::Unknown));
         feed(&mut turn, user("new prompt"), 10);
         assert_eq!(state(&mut turn, 100), Some(AgentState::Working));
         assert!(turn.record().is_none());
@@ -744,7 +769,7 @@ mod tests {
             json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"ask1","name":"AskUserQuestion"}]}}),
             1,
         );
-        assert_eq!(state(&mut turn, 4), Some(AgentState::Blocked));
+        assert_eq!(state(&mut turn, 4), Some(AgentState::Unknown));
         feed(
             &mut turn,
             json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"ask1","content":"option one"}]}}),
@@ -752,6 +777,14 @@ mod tests {
         );
         assert_eq!(state(&mut turn, 9), Some(AgentState::Working));
         assert!(turn.next_action.is_some());
+        assert_eq!(
+            turn.next_action.as_ref().unwrap()["state_at_settle"],
+            "unknown"
+        );
+        assert_eq!(
+            turn.next_action.as_ref().unwrap()["state_at_next_action"],
+            "unknown"
+        );
         turn.background.insert("abc".into());
         feed(
             &mut turn,
