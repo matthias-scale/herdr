@@ -1520,6 +1520,7 @@ impl App {
             sidebar_sections_layout: config.ui.sidebar.layout
                 == crate::config::SidebarLayoutConfig::Sections,
             sidebar_show_ask_subtitles: config.ui.sidebar.show_ask_subtitles,
+            sidebar_collapse_finished: config.ui.sidebar.collapse_finished,
             sidebar_header_plain: config.ui.sidebar.header
                 == crate::config::SidebarHeaderConfig::Plain,
             next_agent_state_change_seq: 0,
@@ -3170,6 +3171,7 @@ impl App {
                         != (config.ui.sidebar.layout
                             == crate::config::SidebarLayoutConfig::Sections)
                     || self.state.sidebar_show_ask_subtitles != config.ui.sidebar.show_ask_subtitles
+                    || self.state.sidebar_collapse_finished != config.ui.sidebar.collapse_finished
                 {
                     sidebar_projection_changed = true;
                 }
@@ -3184,6 +3186,7 @@ impl App {
                 self.state.sidebar_sections_layout =
                     config.ui.sidebar.layout == crate::config::SidebarLayoutConfig::Sections;
                 self.state.sidebar_show_ask_subtitles = config.ui.sidebar.show_ask_subtitles;
+                self.state.sidebar_collapse_finished = config.ui.sidebar.collapse_finished;
                 if self.state.sidebar_sections_layout && !self.state.sidebar_areas.notes {
                     self.state.set_notepad_focus(false);
                 }

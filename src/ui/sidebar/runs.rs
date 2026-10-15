@@ -75,6 +75,20 @@ pub(super) fn append_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
         collapsed,
     });
     if collapsed {
+        if app.sidebar_collapse_finished {
+            // Blocked worker runs never fold into the count row.
+            rows.extend(groups.iter().flat_map(|group| {
+                group.items.iter().flat_map(|host| {
+                    host.runs
+                        .iter()
+                        .filter(|summary| summary.state == crate::agent_runs::DisplayState::Blocked)
+                        .map(|summary| SidebarRow::AgentRun {
+                            host: host.name.clone(),
+                            summary: Some(Arc::clone(summary)),
+                        })
+                })
+            }));
+        }
         return;
     }
     for group in groups {

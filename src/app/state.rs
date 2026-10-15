@@ -5106,6 +5106,9 @@ pub struct AppState {
     pub sidebar_sections_layout: bool,
     /// Whether the sections Spaces tree shows one-line blocked-agent asks.
     pub sidebar_show_ask_subtitles: bool,
+    /// `[ui.sidebar] collapse_finished`: fold workers, settled and parked
+    /// sessions into count rows.
+    pub sidebar_collapse_finished: bool,
     pub sidebar_header_plain: bool,
     pub next_agent_state_change_seq: u64,
     /// Capture mouse input for Herdr's own mouse UI. When false, Herdr only
@@ -8625,6 +8628,7 @@ impl AppState {
             sidebar_areas: crate::config::SidebarAreasConfig::default(),
             sidebar_sections_layout: false,
             sidebar_show_ask_subtitles: false,
+            sidebar_collapse_finished: false,
             sidebar_header_plain: false,
             next_agent_state_change_seq: 0,
             mouse_capture: true,

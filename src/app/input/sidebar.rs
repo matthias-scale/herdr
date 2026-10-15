@@ -1380,6 +1380,18 @@ impl AppState {
             );
             return;
         }
+        if self.sidebar_collapse_finished && crate::ui::sidebar::count_row_noun(title).is_some() {
+            let key = crate::ui::sidebar::count_row_expanded_key(title);
+            if !self.collapsed_sidebar_groups.remove(&key) {
+                self.collapsed_sidebar_groups.insert(key);
+            }
+            self.workspace_scroll = crate::ui::normalized_workspace_scroll(
+                self,
+                self.view.sidebar_rect,
+                self.workspace_scroll,
+            );
+            return;
+        }
         if self.sidebar_sections_layout {
             let key = format!("sections:{title}");
             if title == crate::ui::sidebar::SETTLED_SECTION_TITLE

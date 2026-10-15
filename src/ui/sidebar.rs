@@ -1,4 +1,6 @@
 pub(crate) mod aloops;
+#[cfg(test)]
+mod collapse_finished_tests;
 mod coverage;
 pub(crate) mod devices;
 pub(crate) mod inbox;
@@ -3951,7 +3953,38 @@ pub(super) fn section_header_glyph_for_app(app: &AppState, title: &str) -> &'sta
 /// Groups collapse by title rather than by index: the set of groups changes
 /// every time an agent blocks or unblocks, and a collapse the user asked for
 /// must survive that churn.
+/// Sections that `[ui.sidebar] collapse_finished` folds into one count row,
+/// with the noun the row uses: `3 workers`, `2 settled`, `1 parked`.
+pub(crate) fn count_row_noun(title: &str) -> Option<&'static str> {
+    match title {
+        RUNS_SECTION_TITLE => Some("workers"),
+        SETTLED_SECTION_TITLE => Some("settled"),
+        INBOX_NEW_SECTION_TITLE => Some("parked"),
+        _ => None,
+    }
+}
+
+/// Membership marks a count row the human expanded. Folding is the default,
+/// so this is independent of the persisted section collapse state.
+pub(crate) fn count_row_expanded_key(title: &str) -> String {
+    format!("count-row:{title}")
+}
+
+/// Label of a folded count row, or `None` when the row renders as a header.
+pub(crate) fn count_row_label(app: &AppState, title: &str, count: usize) -> Option<String> {
+    if !app.sidebar_collapse_finished {
+        return None;
+    }
+    let noun = count_row_noun(title)?;
+    section_is_collapsed(app, title).then(|| format!("{count} {noun}"))
+}
+
 pub(crate) fn section_is_collapsed(app: &AppState, title: &str) -> bool {
+    if app.sidebar_collapse_finished && count_row_noun(title).is_some() {
+        return !app
+            .collapsed_sidebar_groups
+            .contains(&count_row_expanded_key(title));
+    }
     if app.sidebar_sections_layout {
         let key = format!("sections:{title}");
         return if section_title_defaults_to_collapsed(title) {
@@ -4376,6 +4409,12 @@ fn sidebar_entry_filter_reason(
     }
 }
 
+/// A blocked session never folds into a count row, so with
+/// `collapse_finished` a blocked parked tab stays with the live sessions.
+fn entry_is_parked_for_sidebar(app: &AppState, entry: &AgentPanelEntry) -> bool {
+    entry.parked && !(app.sidebar_collapse_finished && entry_is_blocked(entry))
+}
+
 fn compact_sidebar_rows_inner(
     app: &AppState,
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
@@ -4404,14 +4443,14 @@ fn compact_sidebar_rows_inner(
         app,
         &entries
             .iter()
-            .filter(|entry| entry.parked)
+            .filter(|entry| entry_is_parked_for_sidebar(app, entry))
             .cloned()
             .collect::<Vec<_>>(),
     );
     for entry in &mut inbox_new_entries {
         entry.working_shelf = true;
     }
-    entries.retain(|entry| !entry.parked);
+    entries.retain(|entry| !entry_is_parked_for_sidebar(app, entry));
     if sidebar_rows_are_filtered(app) {
         let scope = sidebar_project_scope(app);
         let visible_tabs = entries
@@ -13061,6 +13100,17 @@ fn render_section_header(
     }
     let rect = sidebar_row_content_rect(header.rect);
     let p = &app.palette;
+    if let Some(label) = count_row_label(app, header.title, count) {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled("▸ ", Style::default().fg(p.subtext0)),
+                Span::styled(label, Style::default().fg(p.overlay0)),
+            ])),
+            rect,
+        );
+        return;
+    }
     if app.sidebar_sections_layout
         && matches!(
             header.title,

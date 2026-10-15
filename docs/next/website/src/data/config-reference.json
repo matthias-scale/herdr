@@ -1756,6 +1756,12 @@
           "description": "Show the pending human question under blocked rows in the sections layout. Settings: Sidebar → Show ask subtitles. Default: false."
         },
         {
+          "key": "ui.sidebar.collapse_finished",
+          "type": "boolean",
+          "default": "true",
+          "description": "Collapse worker runs, settled sessions and parked sessions into one expandable count row each. Blocked sessions stay visible. Default: true."
+        },
+        {
           "key": "ui.accent",
           "type": "color",
           "default": "\"cyan\"",
