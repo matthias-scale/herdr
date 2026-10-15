@@ -1352,9 +1352,10 @@ mod tests {
         ));
         let notices = login_rows(&app, now);
         assert_eq!(notices.len(), 3);
-        assert!(notices
-            .iter()
-            .any(|row| row.text.contains('!') && row.tooltip.contains("fallback has quota")));
+        assert!(notices.iter().any(|row| row.text.contains('!')
+            && row
+                .tooltip
+                .contains("Another profile has quota and no recorded auth failure")));
         assert!(notices
             .iter()
             .any(|row| row.text.contains('⛔') && row.tooltip.contains("Login required")));
