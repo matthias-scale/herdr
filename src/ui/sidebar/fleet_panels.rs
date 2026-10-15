@@ -102,6 +102,8 @@ struct Account {
     hosts: Vec<String>,
     fresh: bool,
     host_states: Vec<String>,
+    five_source: Option<(QuotaWindow, String, i64)>,
+    weekly_source: Option<(QuotaWindow, String, i64)>,
 }
 
 /// Only a provider-reported email is a cross-machine account identity. A
@@ -184,6 +186,8 @@ fn accounts(app: &AppState, now: i64) -> Vec<Account> {
                 hosts: Vec::new(),
                 fresh: source_fresh,
                 host_states: Vec::new(),
+                five_source: None,
+                weekly_source: None,
             });
             if !entry.hosts.contains(&observation.host) {
                 entry.hosts.push(observation.host.clone());
@@ -204,9 +208,28 @@ fn accounts(app: &AppState, now: i64) -> Vec<Account> {
                 .push(format!("{}: {auth}", observation.host));
             let old_valid = entry.fresh
                 && account_has_valid_quota(&entry.account.usage)
-                && !entry.account.usage.stale;
-            let new_valid =
-                source_fresh && account_has_valid_quota(&item.usage) && !item.usage.stale;
+                && !entry.account.usage.stale
+                && entry.account.usage.unavailable.is_none();
+            let new_valid = source_fresh
+                && account_has_valid_quota(&item.usage)
+                && !item.usage.stale
+                && item.usage.unavailable.is_none();
+            if new_valid {
+                for (window, selected) in [
+                    (item.usage.five_hour, &mut entry.five_source),
+                    (item.usage.seven_day, &mut entry.weekly_source),
+                ] {
+                    if let Some(window) = window {
+                        if selected
+                            .as_ref()
+                            .is_none_or(|(_, _, sampled)| observation.sampled_unix > *sampled)
+                        {
+                            *selected =
+                                Some((window, observation.host.clone(), observation.sampled_unix));
+                        }
+                    }
+                }
+            }
             if (new_valid && !old_valid)
                 || (new_valid == old_valid && observation.sampled_unix > entry.source_time)
             {
@@ -215,6 +238,14 @@ fn accounts(app: &AppState, now: i64) -> Vec<Account> {
                 entry.source_time = observation.sampled_unix;
                 entry.fresh = source_fresh;
             }
+        }
+    }
+    for entry in by_identity.values_mut() {
+        if let Some((window, _, _)) = &entry.five_source {
+            entry.account.usage.five_hour = Some(*window);
+        }
+        if let Some((window, _, _)) = &entry.weekly_source {
+            entry.account.usage.seven_day = Some(*window);
         }
     }
     by_identity.into_values().collect()
@@ -339,10 +370,19 @@ fn account_tip(account: &Account, now: i64) -> String {
     if let Some(email) = &usage.email {
         lines.push(format!("Account: {email}"));
     }
-    for (name, window) in [("5h", usage.five_hour), ("weekly", usage.seven_day)] {
+    for (name, window, source) in [
+        ("5h", usage.five_hour, &account.five_source),
+        ("weekly", usage.seven_day, &account.weekly_source),
+    ] {
         if let Some(window) = window {
+            let provenance = source.as_ref().map_or_else(
+                || account.source_host.clone(),
+                |(_, host, sampled)| {
+                    format!("{host}, sampled {}s ago", now.saturating_sub(*sampled))
+                },
+            );
             lines.push(format!(
-                "{name}: {}% used · {}% remaining · reset {}",
+                "{name}: {}% used · {}% remaining · reset {} · {provenance}",
                 window.used_percent,
                 100_u8.saturating_sub(window.used_percent),
                 window
@@ -994,6 +1034,53 @@ mod tests {
         let mut same = shared.clone();
         same.usage.email = Some("a@example.com".into());
         assert_eq!(account_key("ub1", &shared), account_key("ub2", &same));
+    }
+
+    #[test]
+    fn shared_account_merges_fresh_windows_independently_with_sources() {
+        let now = 1_000_000;
+        let mut app = AppState::test_new();
+        app.status_now_unix = Some(now);
+        for name in ["ub1", "ub2"] {
+            app.fleet_snapshot
+                .hosts
+                .push(host(name, HostState::Reachable));
+        }
+        let mut five = AccountUsage {
+            email: Some("shared@example.test".into()),
+            ..Default::default()
+        };
+        five.five_hour = Some(QuotaWindow {
+            used_percent: 84,
+            resets_at: Some(now + 3_600),
+        });
+        let mut weekly = AccountUsage {
+            email: Some("shared@example.test".into()),
+            ..Default::default()
+        };
+        weekly.seven_day = Some(QuotaWindow {
+            used_percent: 22,
+            resets_at: Some(now + 86_400),
+        });
+        app.fleet_snapshot.observations.push(observation(
+            "ub1",
+            now - 20,
+            vec![account(QuotaProvider::Claude, "one", five)],
+        ));
+        app.fleet_snapshot.observations.push(observation(
+            "ub2",
+            now - 10,
+            vec![account(QuotaProvider::Claude, "two", weekly)],
+        ));
+        let merged = accounts(&app, now);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].account.usage.five_hour.unwrap().used_percent, 84);
+        assert_eq!(merged[0].account.usage.seven_day.unwrap().used_percent, 22);
+        let tip = account_tip(&merged[0], now);
+        assert!(tip.contains("5h: 84% used"));
+        assert!(tip.contains("weekly: 22% used"));
+        assert!(tip.contains("ub1, sampled 20s ago"));
+        assert!(tip.contains("ub2, sampled 10s ago"));
     }
 
     #[test]
