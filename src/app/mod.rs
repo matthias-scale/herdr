@@ -1258,6 +1258,7 @@ impl App {
             sidebar_projection_revision: 0,
             workspace_picker_forces_spaces_tree: false,
             workspace_scroll: 0,
+            fleet_usage_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,

@@ -1,13 +1,13 @@
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph},
     Frame,
 };
 
 use super::text::{display_width, display_width_u16, truncate_end};
-use super::widgets::{panel_contrast_fg, readable_fg_on};
+use super::widgets::{contrast_ratio, panel_contrast_fg, readable_fg_on};
 use crate::app::AppState;
 
 /// The pin lives in the leading pad column every tab cell already renders, so
@@ -1406,8 +1406,19 @@ pub(super) fn render_tab_bar(app: &AppState, frame: &mut Frame, area: Rect) {
         if active && rect.width > 1 {
             let (glyph, color) = tab_activity(tab, app);
             let x = rect.x + 1 + left as u16;
+            let marker_bg = [
+                p.surface0,
+                p.surface_dim,
+                panel_contrast_fg(p),
+                Color::Black,
+                Color::White,
+            ]
+            .into_iter()
+            .find(|bg| contrast_ratio(color, *bg).is_some_and(|ratio| ratio >= 4.5))
+            .unwrap_or(p.surface0);
             frame.buffer_mut()[(x, rect.y)].set_symbol(if glyph == '●' { "●" } else { "○" });
             frame.buffer_mut()[(x, rect.y)].set_fg(color);
+            frame.buffer_mut()[(x, rect.y)].set_bg(marker_bg);
         }
     }
 
@@ -1844,15 +1855,14 @@ mod tests {
             .draw(|frame| render_tab_bar(&app, frame, app.view.tab_bar_rect))
             .unwrap();
 
-        // 17 display columns + 4 padding: two columns each side, wide glyphs
-        // starting right after the left padding.
+        // The activity mark occupies two columns before the 17-column label.
         let rect = app.view.tab_hit_areas[0];
         assert_eq!(rect.width, 21);
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(rect.x, rect.y)].symbol(), "P");
-        assert_eq!(buffer[(rect.x + 1, rect.y)].symbol(), " ");
-        assert_eq!(buffer[(rect.x + 2, rect.y)].symbol(), "提");
-        assert_eq!(buffer[(rect.x + rect.width - 2, rect.y)].symbol(), " ");
+        assert_eq!(buffer[(rect.x + 1, rect.y)].symbol(), "○");
+        assert_eq!(buffer[(rect.x + 2, rect.y)].symbol(), " ");
+        assert_eq!(buffer[(rect.x + 3, rect.y)].symbol(), "提");
         assert_eq!(buffer[(rect.x + rect.width - 1, rect.y)].symbol(), " ");
     }
 
@@ -1889,7 +1899,11 @@ mod tests {
         let cell: String = (rect.x..rect.x + rect.width)
             .map(|x| buffer[(x, rect.y)].symbol())
             .collect();
-        assert_eq!(cell, "P omarchy  ");
+        assert!(cell.starts_with("P○ "));
+        let name_start = cell.find("omarchy").unwrap();
+        let left_padding = name_start - 3;
+        let right_padding = cell.chars().rev().take_while(|ch| *ch == ' ').count();
+        assert!(left_padding.abs_diff(right_padding) <= 1, "{cell:?}");
     }
 
     #[test]

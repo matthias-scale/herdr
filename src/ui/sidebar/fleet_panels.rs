@@ -25,6 +25,10 @@ pub(crate) const USAGE_KEY: &str = "fleet-panel:usage";
 pub(crate) const RESOURCES_KEY: &str = "fleet-panel:resources";
 const FRESH_SECONDS: i64 = 120;
 
+pub(crate) fn available(app: &AppState) -> bool {
+    !app.fleet_snapshot.hosts.is_empty()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Section {
     Usage,
@@ -38,6 +42,8 @@ pub(crate) struct Row {
     pub(crate) color: Color,
     pub(crate) spans: Vec<(String, Color)>,
     pub(crate) tooltip: String,
+    /// Account rows alone may scroll; notices and resource warnings stay visible.
+    pinned: bool,
     /// Relative columns of compact account/machine tokens and their details.
     targets: Vec<(u16, u16, String)>,
 }
@@ -50,6 +56,7 @@ impl Row {
             color,
             spans: Vec::new(),
             tooltip: tooltip.into(),
+            pinned: false,
             targets: Vec::new(),
         }
     }
@@ -61,6 +68,7 @@ impl Row {
             color: Color::Reset,
             spans: parts,
             tooltip: tooltip.into(),
+            pinned: false,
             targets: Vec::new(),
         }
     }
@@ -201,9 +209,9 @@ fn accounts(app: &AppState, now: i64) -> Vec<Account> {
             } else if item.usage.unavailable == Some(UsageUnavailable::AuthExpired) {
                 "expired"
             } else if account_ready(&item.usage) {
-                "ready with quota"
+                "quota available; no recorded auth failure"
             } else if account_exhausted(&item.usage) {
-                "authenticated; quota exhausted"
+                "quota exhausted; auth not independently verified"
             } else {
                 "unknown"
             };
@@ -374,6 +382,11 @@ fn account_tip(account: &Account, now: i64) -> String {
     if let Some(email) = &usage.email {
         lines.push(format!("Account: {email}"));
     }
+    if account.account.provider == QuotaProvider::Codex
+        && usage.unavailable != Some(UsageUnavailable::AuthExpired)
+    {
+        lines.push("Login expiry: not reported by current Codex collector".into());
+    }
     for (name, window, source) in [
         ("5h", usage.five_hour, &account.five_source),
         ("weekly", usage.seven_day, &account.weekly_source),
@@ -464,7 +477,7 @@ fn login_rows(app: &AppState, now: i64) -> Vec<Row> {
                 app.palette.yellow
             };
             rows.push(Row::styled(vec![(format!(" {icon}"), provider_color(provider, app)), (format!(" {mark} {}", observation.host), color)],
-                format!("{} · {}\n{} expired · {} ready · {} quota-exhausted profile(s)\n{}", provider_name(provider), observation.host, expired, ready, exhausted, if stop { "Login required".into() } else if expired > 0 && ready > 0 { "An authenticated fallback has quota; expired login needs attention".into() } else if expired > 0 { "Expired login needs attention; authenticated profiles resume after quota reset".into() } else { format!("Quota exhausted; earliest account usable after {}", blocked_until.map_or("unknown reset".into(), |at| reset_label(Some(QuotaWindow { used_percent: 100, resets_at: Some(at) }), now))) })));
+                format!("{} · {}\n{} expired · {} quota-available · {} quota-exhausted profile(s)\n{}", provider_name(provider), observation.host, expired, ready, exhausted, if stop { "Login required".into() } else if expired > 0 && ready > 0 { "Another profile has quota and no recorded auth failure; expired login needs attention".into() } else if expired > 0 { "Expired login needs attention; exhausted profiles may resume after quota reset".into() } else { format!("Quota exhausted; earliest reported reset {}", blocked_until.map_or("unknown".into(), |at| reset_label(Some(QuotaWindow { used_percent: 100, resets_at: Some(at) }), now))) })));
         }
     }
     rows
@@ -537,6 +550,7 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
         ),
     );
     usage_header.section = Some(Section::Usage);
+    usage_header.pinned = true;
     if usage_collapsed {
         let mut compact = vec![usage_header];
         for account in &accounts {
@@ -650,7 +664,10 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
             ));
         }
     }
-    rows.extend(login_rows(app, now));
+    rows.extend(login_rows(app, now).into_iter().map(|mut row| {
+        row.pinned = true;
+        row
+    }));
     let hosts = &app.fleet_snapshot.hosts;
     let mut resource_header = Row::styled(
         vec![(
@@ -784,9 +801,16 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
             .spans
             .push((" Resources".into(), app.palette.overlay1));
     }
+    resource_header.pinned = true;
     rows.push(resource_header);
-    rows.extend(compact_resource_rows);
-    rows.extend(resource_rows);
+    rows.extend(compact_resource_rows.into_iter().map(|mut row| {
+        row.pinned = true;
+        row
+    }));
+    rows.extend(resource_rows.into_iter().map(|mut row| {
+        row.pinned = true;
+        row
+    }));
     rows
 }
 
@@ -854,7 +878,11 @@ fn row_count(app: &AppState, width: u16) -> usize {
     } else {
         identities.len().max(1)
     };
-    let resource_extra = if app.collapsed_sidebar_groups.contains(RESOURCES_KEY) {
+    2 + notices + usage_extra + resource_extra(app, width)
+}
+
+fn resource_extra(app: &AppState, width: u16) -> usize {
+    if app.collapsed_sidebar_groups.contains(RESOURCES_KEY) {
         let mut lines = 0;
         let mut used = display_width(if app.nerd_font {
             "▸ 󰍛"
@@ -871,12 +899,90 @@ fn row_count(app: &AppState, width: u16) -> usize {
         lines
     } else {
         app.fleet_snapshot.hosts.len()
+    }
+}
+
+pub(crate) fn resources_visible(app: &AppState, sidebar: Rect) -> bool {
+    if !available(app) {
+        return false;
+    }
+    let panel = area(app, sidebar);
+    usize::from(panel.height) >= 2 + resource_extra(app, panel.width)
+}
+
+fn visible_rows(app: &AppState, width: u16, height: u16) -> Vec<Row> {
+    let all = rows(app, width);
+    let height = usize::from(height);
+    if height == 0 {
+        return Vec::new();
+    }
+    if all.len() <= height {
+        return all;
+    }
+    let pinned = all.iter().filter(|row| row.pinned).count();
+    if pinned >= height {
+        // Very small terminals cannot hold every section. Keep the fleet
+        // header and the trailing resource rows rather than hiding resources
+        // behind account rows.
+        let mut fixed = all.into_iter().filter(|row| row.pinned).collect::<Vec<_>>();
+        let first = fixed.remove(0);
+        let tail = height.saturating_sub(1);
+        return std::iter::once(first)
+            .chain(
+                fixed
+                    .into_iter()
+                    .rev()
+                    .take(tail)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev(),
+            )
+            .collect();
+    }
+    let account_slots = height - pinned;
+    let account_count = all.len() - pinned;
+    let scroll = app.fleet_usage_scroll.min(account_count - account_slots);
+    let mut account_index = 0;
+    let mut visible = all
+        .into_iter()
+        .filter(|row| {
+            if row.pinned {
+                true
+            } else {
+                let visible = (scroll..scroll + account_slots).contains(&account_index);
+                account_index += 1;
+                visible
+            }
+        })
+        .collect::<Vec<_>>();
+    if let Some(header) = visible.first_mut() {
+        header.tooltip.push_str(&format!(
+            "\nWheel over this panel to view all {account_count} account row(s)"
+        ));
+    }
+    visible
+}
+
+pub(crate) fn scroll(app: &mut AppState, col: u16, row: u16, delta: i8) -> bool {
+    if row_at(app, col, row).is_none() {
+        return false;
+    }
+    let area = area(app, app.view.sidebar_rect);
+    let all = rows(app, area.width);
+    let pinned = all.iter().filter(|item| item.pinned).count();
+    let account_slots = usize::from(area.height).saturating_sub(pinned);
+    let account_count = all.len().saturating_sub(pinned);
+    let max_scroll = account_count.saturating_sub(account_slots);
+    app.fleet_usage_scroll = if delta < 0 {
+        app.fleet_usage_scroll.saturating_sub(1)
+    } else {
+        app.fleet_usage_scroll.saturating_add(1).min(max_scroll)
     };
-    2 + notices + usage_extra + resource_extra
+    true
 }
 
 pub(crate) fn area(app: &AppState, sidebar: Rect) -> Rect {
-    if app.sidebar_collapsed {
+    if app.sidebar_collapsed || !available(app) {
         return Rect::default();
     }
     let content = super::expanded_sidebar_content(sidebar);
@@ -898,7 +1004,7 @@ pub(crate) fn area(app: &AppState, sidebar: Rect) -> Rect {
 
 pub(crate) fn render(app: &AppState, frame: &mut Frame, sidebar: Rect) {
     let area = area(app, sidebar);
-    for (index, row) in rows(app, area.width)
+    for (index, row) in visible_rows(app, area.width, area.height)
         .into_iter()
         .take(area.height as usize)
         .enumerate()
@@ -928,14 +1034,17 @@ pub(crate) fn render(app: &AppState, frame: &mut Frame, sidebar: Rect) {
 
 pub(crate) fn row_at(app: &AppState, col: u16, row: u16) -> Option<usize> {
     let area = area(app, app.view.sidebar_rect);
-    (col >= area.x && col < area.right() && row >= area.y && row < area.bottom())
-        .then_some((row - area.y) as usize)
+    if col >= area.x && col < area.right() && row >= area.y && row < area.bottom() {
+        Some(usize::from(row - area.y))
+    } else {
+        None
+    }
 }
 
 pub(crate) fn token_at(app: &AppState, row_index: usize, col: u16) -> Option<usize> {
     let area = area(app, app.view.sidebar_rect);
     let relative = col.checked_sub(area.x)?;
-    rows(app, area.width)
+    visible_rows(app, area.width, area.height)
         .get(row_index)?
         .targets
         .iter()
@@ -951,7 +1060,9 @@ pub(crate) fn token_target(
     if row_index >= area.height as usize {
         return None;
     }
-    let row = rows(app, area.width).into_iter().nth(row_index)?;
+    let row = visible_rows(app, area.width, area.height)
+        .into_iter()
+        .nth(row_index)?;
     let (start, width, tooltip) = row.targets.get(token_index)?;
     Some((
         Rect::new(area.x + *start, area.y + row_index as u16, *width, 1),
@@ -964,7 +1075,9 @@ pub(crate) fn row_target(app: &AppState, index: usize) -> Option<(Rect, String)>
     if index >= area.height as usize {
         return None;
     }
-    let row = rows(app, area.width).into_iter().nth(index)?;
+    let row = visible_rows(app, area.width, area.height)
+        .into_iter()
+        .nth(index)?;
     Some((
         Rect::new(area.x, area.y + index as u16, area.width, 1),
         row.tooltip,
@@ -972,7 +1085,8 @@ pub(crate) fn row_target(app: &AppState, index: usize) -> Option<(Rect, String)>
 }
 
 pub(crate) fn toggle(app: &mut AppState, index: usize) -> bool {
-    let key = match rows(app, area(app, app.view.sidebar_rect).width)
+    let panel = area(app, app.view.sidebar_rect);
+    let key = match visible_rows(app, panel.width, panel.height)
         .get(index)
         .and_then(|row| row.section)
     {
@@ -1285,12 +1399,17 @@ mod tests {
     #[test]
     fn section_hit_targets_and_persisted_folds_fit_eighteen_columns() {
         let mut app = AppState::test_new();
+        app.fleet_snapshot
+            .hosts
+            .push(host("ub1", HostState::Reachable));
         app.view.sidebar_rect = Rect::new(0, 0, 18, 30);
         app.collapsed_sidebar_groups.insert(USAGE_KEY.into());
         app.collapsed_sidebar_groups.insert(RESOURCES_KEY.into());
         let panel = area(&app, app.view.sidebar_rect);
         assert_eq!(panel.height, 2);
         assert_eq!(row_at(&app, 2, panel.y), Some(0));
+        assert_eq!(row_at(&app, 2, panel.y.saturating_sub(1)), None);
+        assert_eq!(row_at(&app, 2, panel.bottom()), None);
         assert!(row_target(&app, 0).unwrap().1.contains("Fleet usage"));
         assert!(toggle(&mut app, 0));
         assert_eq!(
@@ -1338,6 +1457,75 @@ mod tests {
             .iter()
             .flat_map(|row| &row.targets)
             .any(|(_, _, tip)| tip.contains("ub8 · reachable")));
+    }
+
+    #[test]
+    fn short_viewport_scrolls_accounts_while_notices_and_machine_warnings_stay_visible() {
+        let now = 1_000_000;
+        let mut app = AppState::test_new();
+        app.status_now_unix = Some(now);
+        app.view.sidebar_rect = Rect::new(0, 0, 80, 24);
+        app.fleet_snapshot
+            .hosts
+            .push(host("ub1", HostState::Reachable));
+        app.fleet_snapshot
+            .hosts
+            .push(host("ub2", HostState::Reachable));
+        let mut accounts = (0..17)
+            .map(|index| {
+                account(
+                    QuotaProvider::Claude,
+                    &format!("profile{index:02}"),
+                    usage(20, now),
+                )
+            })
+            .collect::<Vec<_>>();
+        accounts[0].usage.unavailable = Some(UsageUnavailable::AuthExpired);
+        app.fleet_snapshot
+            .observations
+            .push(observation("ub1", now, accounts));
+        let mut remote = observation("ub2", now, Vec::new());
+        remote.metrics.cpu_percent = Some(82);
+        app.fleet_snapshot.observations.push(remote);
+
+        let panel = area(&app, app.view.sidebar_rect);
+        let before = visible_rows(&app, panel.width, panel.height);
+        assert!(before.len() <= usize::from(panel.height));
+        assert!(before[0].tooltip.contains("Wheel over this panel"));
+        assert!(before
+            .iter()
+            .any(|row| row.tooltip.contains("Profile: profile00")));
+        assert!(!before
+            .iter()
+            .any(|row| row.tooltip.contains("Profile: profile16")));
+        assert!(before.iter().any(|row| row.text.contains("! ub1")));
+        assert!(before
+            .iter()
+            .any(|row| row.tooltip.contains("ub2 · reachable") && row.text.contains("82%")));
+        for _ in 0..20 {
+            assert!(scroll(&mut app, panel.x, panel.y, 1));
+        }
+        let after = visible_rows(&app, panel.width, panel.height);
+        assert!(after
+            .iter()
+            .any(|row| row.tooltip.contains("Profile: profile16")));
+        assert!(after.iter().any(|row| row.text.contains("! ub1")));
+        assert!(after
+            .iter()
+            .any(|row| row.tooltip.contains("ub2 · reachable") && row.text.contains("82%")));
+        let last = after
+            .iter()
+            .position(|row| row.tooltip.contains("Profile: profile16"))
+            .unwrap();
+        let (hit, tip) = row_target(&app, last).unwrap();
+        assert_eq!(hit.y, panel.y + last as u16);
+        assert!(tip.contains("Profile: profile16"));
+        let control = crate::ui::tooltip::hovered_control_at(&app, hit.x, hit.y).unwrap();
+        assert_eq!(control, crate::app::state::ControlId::SidebarFleetRow(last));
+        assert_eq!(
+            crate::ui::tooltip::tooltip_target(&app, control).unwrap().1,
+            tip
+        );
     }
 
     #[test]
@@ -1409,6 +1597,9 @@ mod tests {
     #[test]
     fn legacy_usage_notepad_does_not_duplicate_fleet_panel() {
         let mut app = AppState::test_new();
+        app.fleet_snapshot
+            .hosts
+            .push(host("ub1", HostState::Reachable));
         app.notepad.usage_tab = true;
         app.notepad.visible_tabs = vec!["usage".into()];
         let sidebar = Rect::new(0, 0, 25, 30);

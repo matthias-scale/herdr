@@ -1572,6 +1572,7 @@ pub(crate) struct SidebarPresentationState {
     /// renders and scrolls itself instead of relying on the mutating path.
     pub(crate) revealed_workspace_id: Option<String>,
     pub(crate) workspace_scroll: usize,
+    pub(crate) fleet_usage_scroll: usize,
     pub(crate) mobile_switcher_scroll: usize,
     pub(crate) collapsed_groups: std::collections::HashSet<String>,
     /// Global projection revision last reconciled into this attach.
@@ -4869,6 +4870,7 @@ pub struct AppState {
     pub(crate) sidebar_projection_revision: u64,
     pub(crate) workspace_picker_forces_spaces_tree: bool,
     pub workspace_scroll: usize,
+    pub(crate) fleet_usage_scroll: usize,
     pub tab_scroll: usize,
     pub tab_scroll_follow_active: bool,
     pub mobile_switcher_scroll: usize,
@@ -6630,6 +6632,7 @@ impl AppState {
             &mut other.revealed_workspace_id,
         );
         std::mem::swap(&mut self.workspace_scroll, &mut other.workspace_scroll);
+        std::mem::swap(&mut self.fleet_usage_scroll, &mut other.fleet_usage_scroll);
         std::mem::swap(
             &mut self.mobile_switcher_scroll,
             &mut other.mobile_switcher_scroll,
@@ -8381,6 +8384,7 @@ impl AppState {
             sidebar_projection_revision: 0,
             workspace_picker_forces_spaces_tree: false,
             workspace_scroll: 0,
+            fleet_usage_scroll: 0,
             tab_scroll: 0,
             tab_scroll_follow_active: true,
             mobile_switcher_scroll: 0,

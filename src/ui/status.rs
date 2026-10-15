@@ -410,7 +410,11 @@ pub(crate) fn minimum_required_status_width(app: &AppState) -> usize {
 }
 
 fn fleet_resources_available(app: &AppState) -> bool {
-    !app.sidebar_collapsed && app.view.sidebar_rect.width >= 18 && app.view.sidebar_rect.height >= 8
+    crate::ui::sidebar::fleet_panels::available(app)
+        && !app.sidebar_collapsed
+        && app.view.sidebar_rect.width >= 18
+        && app.view.sidebar_rect.height >= 8
+        && crate::ui::sidebar::fleet_panels::resources_visible(app, app.view.sidebar_rect)
 }
 
 const WARN_PERCENT: u8 = 80;
@@ -1787,6 +1791,11 @@ mod tests {
     fn fleet_resources_replace_top_metric_dots_only_while_sidebar_is_available() {
         let mut app = AppState::test_new();
         app.view.sidebar_rect = Rect::new(0, 1, 25, 30);
+        assert_eq!(
+            status_segments(&app, &StatusMetrics::default(), &app.palette).len(),
+            4
+        );
+        app.fleet_snapshot.hosts.push(fleet_host_fixture());
         let visible = status_segments(&app, &StatusMetrics::default(), &app.palette);
         assert_eq!(
             visible
@@ -1803,6 +1812,17 @@ mod tests {
         assert_eq!(
             status_segments(&app, &StatusMetrics::default(), &app.palette).len(),
             4
+        );
+        app.view.sidebar_rect = Rect::new(0, 1, 25, 8);
+        for index in 0..4 {
+            let mut host = fleet_host_fixture();
+            host.name = format!("workbox-{index}");
+            app.fleet_snapshot.hosts.push(host);
+        }
+        assert_eq!(
+            status_segments(&app, &StatusMetrics::default(), &app.palette).len(),
+            4,
+            "the top dots stay until every machine row fits below"
         );
     }
 

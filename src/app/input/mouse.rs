@@ -2180,6 +2180,19 @@ impl AppState {
                 }
             }
 
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if in_sidebar
+                    && crate::ui::sidebar::fleet_panels::scroll(
+                        self,
+                        mouse.column,
+                        mouse.row,
+                        if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                            -1
+                        } else {
+                            1
+                        },
+                    ) => {}
+
             MouseEventKind::ScrollUp if in_sidebar => {
                 if !self.scroll_collapsed_sidebar(-1) {
                     if crate::ui::should_show_scrollbar(crate::ui::workspace_list_scroll_metrics(
