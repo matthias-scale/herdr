@@ -3176,8 +3176,8 @@ fn collect_sidebar_thread_entries_with_coverage(
     if let Some(coverage) = coverage.as_deref_mut() {
         coverage.bind_entries_with_fallbacks(app, &entries);
     }
-    // Evaluate detection once per tab. Sidebar projection, hit testing, and
-    // navigation all consume this list, so filtered panes cannot leave gaps.
+    // Check for a live agent row once per tab. Sidebar projection, hit testing,
+    // and navigation all consume this list, so filtered panes cannot leave gaps.
     let mut checked_tab = None;
     let mut tab_has_agent = false;
     entries.retain(|entry| {
@@ -3191,7 +3191,7 @@ fn collect_sidebar_thread_entries_with_coverage(
                     tab.panes.values().any(|pane| {
                         app.terminals
                             .get(&pane.attached_terminal_id)
-                            .is_some_and(|terminal| terminal.detected_agent.is_some())
+                            .is_some_and(|terminal| terminal.effective_known_agent().is_some())
                     })
                 });
         }
@@ -3199,7 +3199,7 @@ fn collect_sidebar_thread_entries_with_coverage(
         let hidden_reason =
             if target.is_some_and(|target| app.hidden_fleet_workspace(target.ws_idx)) {
                 Some("fleet_workspace")
-            } else if tab_has_agent && !entry.has_agent {
+            } else if tab_has_agent && entry.agent.is_none() {
                 Some("agentless_terminal_in_agent_tab")
             } else {
                 None
@@ -19865,20 +19865,25 @@ pub(crate) mod tests {
     fn sidebar_thread_entries_hide_agentless_panes_only_in_tabs_with_agents() {
         let mut app = AppState::test_new();
         let mut workspace = Workspace::test_new("sidebar panes");
+        let one_shell_tab = workspace.test_add_tab(Some("one shell + agent"));
+        workspace.active_tab = one_shell_tab;
         let one_shell = workspace.test_split(Direction::Horizontal);
-        let two_shell = workspace.test_split(Direction::Vertical);
         let two_shell_tab = workspace.test_add_tab(Some("two shells"));
         workspace.active_tab = two_shell_tab;
-        let _two_shell_agent = workspace.test_split(Direction::Horizontal);
+        let two_shell_first = workspace.test_split(Direction::Horizontal);
         let two_shell_plain = workspace.test_split(Direction::Vertical);
         let shells_only_tab = workspace.test_add_tab(Some("shells only"));
         workspace.active_tab = shells_only_tab;
+        let shells_only_first = workspace.test_split(Direction::Horizontal);
         let shells_only_plain = workspace.test_split(Direction::Horizontal);
         app.workspaces = vec![workspace];
         app.ensure_test_terminals();
 
         for (tab_idx, pane_id) in [
-            (0, app.workspaces[0].tabs[0].root_pane),
+            (
+                one_shell_tab,
+                app.workspaces[0].tabs[one_shell_tab].root_pane,
+            ),
             (
                 two_shell_tab,
                 app.workspaces[0].tabs[two_shell_tab].root_pane,
@@ -19898,15 +19903,27 @@ pub(crate) mod tests {
             .iter()
             .filter_map(AgentPanelEntry::local_target)
             .collect::<Vec<_>>();
+        assert!(targets.iter().any(|target| {
+            target.tab_idx == one_shell_tab
+                && target.pane_id == app.workspaces[0].tabs[one_shell_tab].root_pane
+        }));
         assert!(!targets
             .iter()
-            .any(|target| target.tab_idx == 0 && target.pane_id == one_shell));
-        assert!(!targets
-            .iter()
-            .any(|target| target.tab_idx == 0 && target.pane_id == two_shell));
-        assert!(!targets
-            .iter()
-            .any(|target| target.tab_idx == two_shell_tab && target.pane_id == two_shell_plain));
+            .any(|target| target.tab_idx == one_shell_tab && target.pane_id == one_shell));
+        assert!(targets.iter().any(|target| {
+            target.tab_idx == two_shell_tab
+                && target.pane_id == app.workspaces[0].tabs[two_shell_tab].root_pane
+        }));
+        assert!(!targets.iter().any(|target| {
+            target.tab_idx == two_shell_tab
+                && (target.pane_id == two_shell_first || target.pane_id == two_shell_plain)
+        }));
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.tab_idx == shells_only_tab
+                    && target.pane_id == shells_only_first)
+        );
         assert!(
             targets
                 .iter()
@@ -19915,7 +19932,19 @@ pub(crate) mod tests {
         );
         assert_sidebar_coverage_complete(&app);
 
-        for tab_idx in [0, two_shell_tab] {
+        let navigation_targets = all_agent_navigation_entries(&app)
+            .iter()
+            .filter_map(AgentPanelEntry::local_target)
+            .collect::<Vec<_>>();
+        assert!(!navigation_targets
+            .iter()
+            .any(|target| { target.tab_idx == one_shell_tab && target.pane_id == one_shell }));
+        assert!(!navigation_targets.iter().any(|target| {
+            target.tab_idx == two_shell_tab
+                && (target.pane_id == two_shell_first || target.pane_id == two_shell_plain)
+        }));
+
+        for tab_idx in [one_shell_tab, two_shell_tab] {
             let pane_id = app.workspaces[0].tabs[tab_idx].root_pane;
             let terminal_id = app.workspaces[0].tabs[tab_idx].panes[&pane_id]
                 .attached_terminal_id
@@ -19923,22 +19952,38 @@ pub(crate) mod tests {
             app.terminals
                 .get_mut(&terminal_id)
                 .expect("agent terminal")
-                .detected_agent = None;
+                .set_detected_state_with_screen_signals_at(
+                    Some(Agent::Claude),
+                    AgentState::Idle,
+                    false,
+                    false,
+                    false,
+                    false,
+                    true,
+                    std::time::Instant::now(),
+                );
         }
         let entries = sidebar_thread_entries(&app);
+        assert!(entries.iter().any(|entry| {
+            entry.local_target().is_some_and(|target| {
+                target.tab_idx == one_shell_tab
+                    && target.pane_id == app.workspaces[0].tabs[one_shell_tab].root_pane
+            }) && entry.agent.is_none()
+                && entry.has_agent
+        }));
         let targets = entries
             .iter()
             .filter_map(AgentPanelEntry::local_target)
             .collect::<Vec<_>>();
         assert!(targets
             .iter()
-            .any(|target| target.tab_idx == 0 && target.pane_id == one_shell));
-        assert!(targets
-            .iter()
-            .any(|target| target.tab_idx == 0 && target.pane_id == two_shell));
-        assert!(targets
-            .iter()
-            .any(|target| target.tab_idx == two_shell_tab && target.pane_id == two_shell_plain));
+            .any(|target| { target.tab_idx == one_shell_tab && target.pane_id == one_shell }));
+        assert!(targets.iter().any(|target| {
+            target.tab_idx == two_shell_tab && target.pane_id == two_shell_first
+        }));
+        assert!(targets.iter().any(|target| {
+            target.tab_idx == two_shell_tab && target.pane_id == two_shell_plain
+        }));
     }
 
     /// Renders one depth-1 Claude row on `ub1`, viewed from `ub2`, at `width`.
