@@ -5241,6 +5241,123 @@ mod tests {
     }
 
     #[test]
+    fn process_bound_ordinary_reports_preserve_only_the_same_session_process_lifetime() {
+        let (mut app, pane, id, _inspector, peer) = process_bound_setup();
+        process_bound_report(
+            &mut app,
+            &pane,
+            Some("native-a"),
+            Some("startup"),
+            "herdr:claude",
+            1,
+            Some(peer.clone()),
+        );
+        process_bound_report(
+            &mut app,
+            &pane,
+            Some("native-a"),
+            None,
+            "herdr:claude",
+            2,
+            Some(peer.clone()),
+        );
+        assert!(app.task_session_identity_matches(&id, "native-a"));
+
+        let (mut resumed, pane, id, _, peer) = process_bound_setup();
+        process_bound_report(
+            &mut resumed,
+            &pane,
+            Some("native-a"),
+            Some("startup"),
+            "herdr:claude",
+            1,
+            Some(peer.clone()),
+        );
+        process_bound_report(
+            &mut resumed,
+            &pane,
+            Some("native-a"),
+            Some("resume"),
+            "herdr:claude",
+            2,
+            Some(peer),
+        );
+        assert!(!resumed.task_session_identity_matches(&id, "native-a"));
+
+        let (mut cleared, pane, id, _, peer) = process_bound_setup();
+        process_bound_report(
+            &mut cleared,
+            &pane,
+            Some("native-a"),
+            Some("startup"),
+            "herdr:claude",
+            1,
+            Some(peer.clone()),
+        );
+        process_bound_report(
+            &mut cleared,
+            &pane,
+            Some("native-b"),
+            Some("clear"),
+            "herdr:claude",
+            2,
+            Some(peer),
+        );
+        assert!(!cleared.task_session_identity_matches(&id, "native-b"));
+
+        let (mut changed, pane, id, _, peer) = process_bound_setup();
+        process_bound_report(
+            &mut changed,
+            &pane,
+            Some("native-a"),
+            Some("startup"),
+            "herdr:claude",
+            1,
+            Some(peer.clone()),
+        );
+        process_bound_report(
+            &mut changed,
+            &pane,
+            Some("native-b"),
+            None,
+            "herdr:claude",
+            2,
+            Some(peer),
+        );
+        assert!(!changed.task_session_identity_matches(&id, "native-b"));
+
+        let (mut replaced, pane, id, inspector, peer) = process_bound_setup();
+        process_bound_report(
+            &mut replaced,
+            &pane,
+            Some("native-a"),
+            Some("startup"),
+            "herdr:claude",
+            1,
+            Some(peer.clone()),
+        );
+        let mut replacement = inspector.foreground.lock().unwrap().clone().unwrap();
+        replacement.pid += 100;
+        replacement.birth.0 += 100;
+        inspector
+            .processes
+            .lock()
+            .unwrap()
+            .insert(replacement.pid, replacement.clone());
+        *inspector.foreground.lock().unwrap() = Some(replacement);
+        process_bound_report(
+            &mut replaced,
+            &pane,
+            Some("native-a"),
+            None,
+            "herdr:claude",
+            2,
+            Some(peer),
+        );
+        assert!(!replaced.task_session_identity_matches(&id, "native-a"));
+    }
+
+    #[test]
     fn process_bound_binding_typos_and_repo_failures_remain_retryable() {
         let (mut app, pane, id, _, peer) = process_bound_setup();
         process_bound_report(

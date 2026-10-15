@@ -1,5 +1,11 @@
 //! Runtime-only first-task authority. All process probes happen on API events,
 //! never while rendering, computing layout, or reading pane-scaled snapshots.
+//!
+//! Threat model: ordinary Claude hook reports may preserve an existing
+//! attestation only when the foreground process lifetime and session ID both
+//! match. Such a report carries no authority to transfer identity to another
+//! process or session; startup remains the sole attestation event, while
+//! lifecycle sources and mismatches burn the process lifetime fail-closed.
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -171,9 +177,34 @@ impl super::App {
         let Some(process) = foreground else {
             return;
         };
+        if source == "herdr:claude" && agent == "claude" && start != Some("startup") {
+            let preserves_attestation = start.is_none()
+                && session.is_some_and(|reported| reported.kind == AgentSessionRefKind::Id)
+                && self
+                    .task_process_identity
+                    .attestations
+                    .get(id)
+                    .is_some_and(|attestation| {
+                        session.is_some_and(|reported| reported.value == attestation.session)
+                            && same_binding_process(&process, &attestation.process)
+                            && self.state.terminals.get(id).is_some_and(|terminal| {
+                                terminal.native_binding_epoch == attestation.epoch
+                            })
+                    });
+            if preserves_attestation {
+                return;
+            }
+            self.task_process_identity.invalidate(id);
+            self.task_process_identity
+                .burned
+                .entry(id.clone())
+                .or_default()
+                .insert(lifetime(&process));
+            return;
+        }
         if source == "herdr:claude"
             && agent == "claude"
-            && (start != Some("startup") || session.is_none())
+            && !session.is_some_and(|reported| reported.kind == AgentSessionRefKind::Id)
         {
             self.task_process_identity.invalidate(id);
             self.task_process_identity
