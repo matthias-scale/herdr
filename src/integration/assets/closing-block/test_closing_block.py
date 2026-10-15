@@ -3686,6 +3686,9 @@ class ClosingBlockRecordTests(unittest.TestCase):
         self.assertEqual(block.parse_status, "missing")
         self.assertEqual(block.blocking, 0)
         self.assertEqual(block.herdr_state, "unknown")
+        self.assertFalse(closing_block.settle_ready(
+            "**Needs you (1)**\n1. **Approve** — Continue?\n"
+        ))
         outcome = herdr_status.report(
             agent="claude",
             blocking=block.blocking,
