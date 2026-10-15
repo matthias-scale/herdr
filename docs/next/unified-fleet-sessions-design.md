@@ -45,8 +45,10 @@ accepts WAN latency on that hop), process migration between servers.
 - Remote agent streams: alongside the poller, `supervise_remote_agent_streams`
   (`src/fleet.rs`) runs one long-lived `ssh` process per remote host that subscribes
   to `FleetAgentsChanged` and, when the server supports it, `SessionChanged`, seeding
-  session inventory from the stream. A dropped stream retries after 3 s, 10 s or 30 s
-  depending on the failure. The 5 s poll keeps running as well.
+  session inventory from the stream. The worker retries 3 s after a stream ends, 10 s
+  after a failed capability probe, and 30 s when the host offers neither event. The
+  poller keeps running at its configured interval (default 5 s) the whole time,
+  including while a stream reconnects.
 - `herdr --remote` keeps a private per-attach SSH control socket; saved fleet hosts do
   not.
 
@@ -75,7 +77,7 @@ that host — inventory, event subscription, pane attach, dispatch — goes thro
 
 The per-host event stream already exists (see "What exists"). This step moves it onto
 the warm channel instead of its own `ssh` process, aligns its reconnect with the
-supervisor's backoff (250 ms → 10 s instead of fixed 3/10/30 s retries), and demotes the
+supervisor's backoff (250 ms → 10 s instead of today's fixed per-case delays), and demotes the
 5 s poll to a slow fallback (60 s) that runs only while the stream is absent or reports
 it fell behind. It also checks that the stream's subscriptions cover every state the
 sidebar shows, adding pane lifecycle coverage only if a gap is found.
@@ -107,7 +109,7 @@ name, to keep rows single-line at the current sidebar width.
 
 | Action | Local today | Remote today | Remote after | Within 2× |
 | --- | --- | --- | --- | --- |
-| Status change visible | ~50 ms | stream event when connected; 0–5 000 ms + 240 ms poll, or 3–30 s while reconnecting | ~5–20 ms; reconnect 1–3 s | yes |
+| Status change visible | ~50 ms | stream event plus a cold-ssh stream; while a stream is down, the next poll (0–5 000 ms + 240 ms) | ~5–20 ms over the warm channel | yes |
 | Open pane, first time | ~30 ms | ~400–700 ms | ~30–60 ms | yes |
 | Open pane, already attached | ~30 ms | ~30 ms | ~30 ms | yes (already) |
 | Keystroke echo | < 1 ms | ~1–2 ms | ~1–2 ms | yes (unchanged) |
