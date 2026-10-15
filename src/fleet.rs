@@ -438,10 +438,10 @@ impl HostObservation {
 
 /// Fleet observations have their own minute cadence. The ordinary agent poll
 /// can run every five seconds without launching provider helpers each time.
+type ObservationCache = std::sync::Mutex<HashMap<String, (Instant, Option<HostObservation>)>>;
+
 fn collect_observations(hosts: &[FleetHostConfig], timeout: Duration) -> Vec<HostObservation> {
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<String, (Instant, Option<HostObservation>)>>,
-    > = std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<ObservationCache> = std::sync::OnceLock::new();
     const INTERVAL: Duration = Duration::from_secs(60);
     let cache = CACHE.get_or_init(Default::default);
     let now = Instant::now();
@@ -452,9 +452,9 @@ fn collect_observations(hosts: &[FleetHostConfig], timeout: Duration) -> Vec<Hos
         hosts
             .iter()
             .filter(|host| {
-                !guard
+                guard
                     .get(&observation_cache_key(host))
-                    .is_some_and(|(sampled, _)| now.duration_since(*sampled) < INTERVAL)
+                    .is_none_or(|(sampled, _)| now.duration_since(*sampled) >= INTERVAL)
             })
             .cloned()
             .collect::<Vec<_>>()

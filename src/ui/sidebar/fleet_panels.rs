@@ -627,10 +627,7 @@ pub(crate) fn rows(app: &AppState, width: u16) -> Vec<Row> {
                     provider_color(account.account.provider, app),
                 ),
                 (severity_dot(value).into(), severity_color(value, app)),
-                (
-                    format!("{}", truncate_end(&label, label_budget)),
-                    app.palette.text,
-                ),
+                (truncate_end(&label, label_budget), app.palette.text),
             ];
             parts.push(five);
             if let Some(weekly) = weekly {
