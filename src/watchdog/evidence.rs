@@ -360,10 +360,7 @@ fn closing_record(text: &str) -> Option<serde_json::Value> {
             if let Some(prs) = refs.get("pr") {
                 for pr in prs.as_array()? {
                     let pr = pr.as_object()?;
-                    if pr
-                        .keys()
-                        .any(|key| !["repo", "number", "url"].contains(&key.as_str()))
-                        || pr.get("repo")?.as_str().is_none()
+                    if pr.get("repo")?.as_str().is_none()
                         || pr.get("number")?.as_i64().is_none()
                         || pr.get("url").is_some_and(|v| !v.is_string())
                     {
@@ -436,7 +433,7 @@ fn closing_record(text: &str) -> Option<serde_json::Value> {
     } else if !record["wait"].is_null() {
         return None;
     }
-    if let Some(verified) = record.get("verified") {
+    if let Some(verified) = record.get("verified").filter(|value| !value.is_null()) {
         let verified = verified.as_object()?;
         if verified.len() != 1 || verified.get("text")?.as_str().is_none_or(str::is_empty) {
             return None;
@@ -989,6 +986,23 @@ mod tests {
         assert!(!closing_block_waiting(
             "**Needs you (1)**\n1. Approve Continue?"
         ));
+    }
+
+    #[test]
+    fn nullable_verified_record_with_worker_is_valid_and_continuable() {
+        let record: serde_json::Value = serde_json::from_str(include_str!(
+            "../integration/assets/closing-block/valid-nullable.json"
+        ))
+        .expect("fixture JSON");
+        let text = format!("<!-- closing-state {} -->", record);
+        assert!(expected_to_continue(&text));
+        assert!(!closing_block_waiting(&text));
+
+        let mut blocked = record;
+        blocked["state"] = serde_json::json!("blocked");
+        blocked["now"]["kind"] = serde_json::json!("waiting_on_you");
+        let text = format!("<!-- closing-state {} -->", blocked);
+        assert!(closing_block_waiting(&text));
     }
 
     #[test]

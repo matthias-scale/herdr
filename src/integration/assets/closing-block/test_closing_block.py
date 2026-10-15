@@ -3624,6 +3624,12 @@ class SectionWordFallbackTests(unittest.TestCase):
 
 
 class ClosingBlockRecordTests(unittest.TestCase):
+    def test_shared_nullable_verified_record_is_valid(self):
+        import json
+        from pathlib import Path
+        record = json.loads((Path(__file__).parent / "valid-nullable.json").read_text(encoding="utf-8"))
+        self.assertEqual(closing_block_record.validate(record), [])
+
     def test_shared_malformed_options_are_rejected_by_record_validator(self):
         import json
         from pathlib import Path
