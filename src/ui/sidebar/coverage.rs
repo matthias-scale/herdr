@@ -363,6 +363,7 @@ impl SidebarCoverageRecorder {
                 rows.insert(
                     index,
                     SidebarRow::NestedHeader {
+                        collapsed_project: None,
                         key: main_key,
                         action_key: None,
                         sort_key: None,
@@ -393,6 +394,7 @@ impl SidebarCoverageRecorder {
         rows.insert(
             insert_at,
             SidebarRow::NestedHeader {
+                collapsed_project: None,
                 key: coverage_key,
                 action_key: None,
                 sort_key: None,

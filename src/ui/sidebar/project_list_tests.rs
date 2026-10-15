@@ -308,6 +308,120 @@ fn collapsed_group_retains_the_selected_remote_tab_by_identity() {
 }
 
 #[test]
+fn collapsed_remote_only_project_disclosure_restores_status() {
+    const KEY: &str = "repo:owner/remote-only";
+    for nerd_font in [false, true] {
+        for width in [18, 40] {
+            for blocked in [false, true] {
+                let mut app = project_app(1);
+                app.nerd_font = nerd_font;
+                app.set_server_mode(Mode::Terminal);
+                remote_fixture(&mut app, "owner/remote-only");
+                let working = app.remote_agent_panel_entries[0].clone();
+                let mut sibling = working.as_ref().clone();
+                sibling.agent_ref.agent = "pane/10".into();
+                if blocked {
+                    sibling.entry.state = AgentState::Blocked;
+                    sibling.entry.attention_tier = None;
+                }
+                let expected = if blocked {
+                    &sibling.entry
+                } else {
+                    &working.entry
+                };
+                let glyph = compact_row_dot(expected);
+                let color = compact_row_color(expected, &app.palette);
+                if blocked {
+                    assert_eq!(color, app.palette.red);
+                }
+                app.remote_agent_panel_entries
+                    .push(std::sync::Arc::new(sibling));
+                app.collapsed_sidebar_groups.insert(format!("repo:{KEY}"));
+                let area = Rect::new(0, 0, width, 24);
+                let header = compute_sidebar_nested_header_areas(&app, area)
+                    .into_iter()
+                    .find(|header| header.key == KEY)
+                    .expect("remote-only header");
+                let slot = (header.rect.x + 2, header.rect.y);
+                let title_start = header.rect.x + 4;
+                let read = |app: &AppState| {
+                    let terminal = render(app, area.width, area.height);
+                    let buffer = terminal.backend().buffer();
+                    (
+                        buffer[slot].symbol().to_owned(),
+                        buffer[slot].fg,
+                        (title_start..header.rect.right())
+                            .map(|x| buffer[(x, header.rect.y)].symbol())
+                            .collect::<String>(),
+                    )
+                };
+                let rest = read(&app);
+                assert_eq!(rest.0, glyph, "remote-only collapsed header aggregate");
+                assert_eq!(rest.1, color);
+                assert!(rest.2.starts_with('o'), "title cell stays in place");
+                assert!(remote_rows(&sidebar_rows(&app)).is_empty());
+                let status = header
+                    .collapsed_project
+                    .as_ref()
+                    .expect("aggregate projection");
+                assert_eq!(status.status.count, 2);
+                assert!(compute_sidebar_hover_targets(&app, area)
+                    .iter()
+                    .any(|target| target.row_hover && target.rect.y == header.rect.y));
+                app.hovered_control = Some(ControlId::SidebarRowHover(header.rect.y));
+                let hovered = read(&app);
+                assert_eq!(hovered.0, "▸");
+                // Hover adds a trailing sort glyph; the project title cells stay fixed.
+                assert_eq!(&hovered.2[..5], &rest.2[..5]);
+                app.hovered_control = None;
+                assert_eq!(read(&app), rest, "leave restores status and geometry");
+
+                app.sidebar_focused = true;
+                app.sidebar_selected_work_group = Some(KEY.into());
+                assert_eq!(read(&app).0, "▸", "group keyboard focus");
+                app.sidebar_selected_work_group = None;
+                app.sidebar_selected_remote_agent = Some(working.agent_ref.clone());
+                assert_eq!(remote_rows(&sidebar_rows(&app)), ["pane/9"]);
+                assert_eq!(
+                    read(&app).0,
+                    "▸",
+                    "activated remote's group has keyboard focus"
+                );
+                app.sidebar_focused = false;
+                assert_eq!(
+                    read(&app),
+                    rest,
+                    "blur restores aggregate while retaining remote"
+                );
+                app.sidebar_focused = true;
+
+                let mut client_a = crate::app::state::SidebarPresentationState::default();
+                let mut client_b = crate::app::state::SidebarPresentationState::default();
+                app.swap_sidebar_presentation(&mut client_a);
+                client_b.collapsed_groups = client_a.collapsed_groups.clone();
+                client_b.group_mode = client_a.group_mode;
+                client_b.expanded_workspace_ids = client_a.expanded_workspace_ids.clone();
+                client_b.known_workspace_ids = client_a.known_workspace_ids.clone();
+                app.swap_sidebar_presentation(&mut client_b);
+                assert_eq!(
+                    read(&app),
+                    rest,
+                    "another client has no remote selection or focus"
+                );
+                assert!(remote_rows(&sidebar_rows(&app)).is_empty());
+                app.swap_sidebar_presentation(&mut client_b);
+                app.swap_sidebar_presentation(&mut client_a);
+                assert_eq!(read(&app).0, "▸", "first client's focus restored");
+                assert_eq!(remote_rows(&sidebar_rows(&app)), ["pane/9"]);
+                app.collapsed_sidebar_groups.remove(&format!("repo:{KEY}"));
+                assert_eq!(read(&app).0, "▾");
+                assert_eq!(remote_rows(&sidebar_rows(&app)).len(), 2);
+            }
+        }
+    }
+}
+
+#[test]
 fn collapsed_group_expand_restores_rows_and_show_more_state() {
     let mut app = project_app(3);
     app.sidebar_unassigned_expanded_views

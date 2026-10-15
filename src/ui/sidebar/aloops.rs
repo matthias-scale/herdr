@@ -72,6 +72,7 @@ pub(super) fn append_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
     );
     if show_device_header {
         rows.push(SidebarRow::NestedHeader {
+            collapsed_project: None,
             key: super::devices::group_key("loops", &projection.host),
             action_key: None,
             sort_key: None,
@@ -185,6 +186,7 @@ fn append_remote_inventory_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
         let collapsed =
             super::devices::group_is_collapsed(app, "loops", &group.host, false, group.reachable);
         rows.push(SidebarRow::NestedHeader {
+            collapsed_project: None,
             key: super::devices::group_key("loops", &group.host),
             action_key: None,
             sort_key: None,

@@ -1765,7 +1765,7 @@
           "key": "ui.sidebar.show_machine_names",
           "type": "boolean",
           "default": "false",
-          "description": "Show each agent row's machine character, and the host in the agent finder. Toggle from the sidebar view dropdown (Machine name). Default: false."
+          "description": "Show each agent row's full machine label, and the host in the agent finder. Toggle from the sidebar view dropdown (Machine name). Default: false."
         },
         {
           "key": "ui.accent",

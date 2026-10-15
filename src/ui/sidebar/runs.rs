@@ -88,6 +88,7 @@ pub(super) fn append_rows(app: &AppState, rows: &mut Vec<SidebarRow>) {
             && super::devices::group_is_collapsed(app, "runs", &host.name, group.local, reachable);
         if show_device_headers {
             rows.push(SidebarRow::NestedHeader {
+                collapsed_project: None,
                 key,
                 action_key: None,
                 sort_key: None,

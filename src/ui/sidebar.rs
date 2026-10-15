@@ -3607,7 +3607,14 @@ pub(crate) struct PodToken {
     pub(crate) fresh: bool,
 }
 
-#[derive(Clone)]
+/// Client presentation for the remote-only shallow project's disclosure cell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CollapsedProjectHeader {
+    status: SidebarStateCount,
+    focused: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SidebarStateCount {
     pub(super) glyph: &'static str,
     pub(super) color: Color,
@@ -3718,6 +3725,7 @@ pub(crate) enum SidebarRow {
     Divider,
     ShelfDivider,
     NestedHeader {
+        collapsed_project: Option<CollapsedProjectHeader>,
         key: String,
         /// Canonical provider object key for the trailing action menu.
         /// Unlike `key`, this never includes workspace or settled prefixes.
@@ -4697,6 +4705,7 @@ fn compact_sidebar_rows_inner(
             let collapsed =
                 devices::group_is_collapsed(app, "main", &app.agent_host_name, true, true);
             rows.push(SidebarRow::NestedHeader {
+                collapsed_project: None,
                 key,
                 action_key: None,
                 sort_key: None,
@@ -4747,6 +4756,7 @@ fn compact_sidebar_rows_inner(
             };
             if !local_working.is_empty() {
                 rows.push(SidebarRow::NestedHeader {
+                    collapsed_project: None,
                     key: devices::group_key("working", &app.agent_host_name),
                     action_key: None,
                     sort_key: None,
@@ -5234,6 +5244,7 @@ fn append_shelf_space_rows(
             });
             let key = devices::group_key(section, &app.agent_host_name);
             rows.push(SidebarRow::NestedHeader {
+                collapsed_project: None,
                 key,
                 action_key: None,
                 sort_key: None,
@@ -5456,6 +5467,7 @@ fn append_space_tree_rows_from_iter(
                     .map(|key| effective_sidebar_group_sort(app, key, space_sort))
                     .unwrap_or(space_sort);
                 rows.push(SidebarRow::NestedHeader {
+                    collapsed_project: None,
                     key: key.clone(),
                     action_key: None,
                     sort_key: sort_key.clone(),
@@ -5512,6 +5524,7 @@ fn append_space_tree_rows_from_iter(
             title
         };
         rows.push(SidebarRow::NestedHeader {
+            collapsed_project: None,
             key: key.clone(),
             action_key: None,
             sort_key: Some(key.clone()),
@@ -5732,6 +5745,7 @@ fn append_subgrouped_tab_rows(
         let sort = effective_sidebar_group_sort(app, &sort_key, parent_sort);
         apply_sidebar_group_sort(&mut sub_entries, sort);
         rows.push(SidebarRow::NestedHeader {
+            collapsed_project: None,
             key: collapse_key,
             action_key: None,
             sort_key: Some(sort_key),
@@ -5868,6 +5882,18 @@ fn append_shallow_project_rows(
         }
         None => {
             rows.push(SidebarRow::NestedHeader {
+                collapsed_project: (collapsed && !group.unlinked)
+                    .then(|| collapsed_project_status(&group.entries, &app.palette))
+                    .flatten()
+                    .map(|status| CollapsedProjectHeader {
+                        status,
+                        focused: app.sidebar_focused
+                            && (app.sidebar_selected_work_group.as_deref() == Some(collapse_key)
+                                || group
+                                    .entries
+                                    .iter()
+                                    .any(|entry| sidebar_entry_is_activated(app, entry))),
+                    }),
                 key: collapse_key.to_string(),
                 action_key: None,
                 sort_key: Some(group.key.clone()),
@@ -5946,6 +5972,7 @@ fn append_repo_group_rows(
                 }
             } else {
                 rows.push(SidebarRow::NestedHeader {
+                    collapsed_project: None,
                     key: collapse_key.clone(),
                     action_key: None,
                     sort_key: Some(group.key.clone()),
@@ -5965,6 +5992,7 @@ fn append_repo_group_rows(
         }
         if group.unlinked {
             rows.push(SidebarRow::NestedHeader {
+                collapsed_project: None,
                 key: collapse_key.clone(),
                 action_key: None,
                 sort_key: Some(group.key.clone()),
@@ -6034,6 +6062,7 @@ fn append_repo_group_rows(
             mark_redundant_space_labels(&mut entries, &title);
             let branch_sort = effective_sidebar_group_sort(app, &key, group_sort);
             rows.push(SidebarRow::NestedHeader {
+                collapsed_project: None,
                 key: collapse_key.clone(),
                 action_key: None,
                 sort_key: Some(key.clone()),
@@ -6079,6 +6108,7 @@ fn append_object_group_rows(
         mark_redundant_space_labels(&mut group.entries, &group.title);
         let group_sort = effective_sidebar_group_sort(app, &group.key, SidebarSortMode::Default);
         rows.push(SidebarRow::NestedHeader {
+            collapsed_project: None,
             key: collapse_key.clone(),
             action_key,
             sort_key: Some(group.key.clone()),
@@ -6700,6 +6730,7 @@ fn append_snoozed_rows(
         if !entries.is_empty() && !remote.is_empty() {
             let key = devices::group_key("snoozed", &app.agent_host_name);
             rows.push(SidebarRow::NestedHeader {
+                collapsed_project: None,
                 key,
                 action_key: None,
                 sort_key: None,
@@ -6763,6 +6794,7 @@ fn append_settled_rows(
     if !entries.is_empty() && !remote.is_empty() {
         let key = devices::group_key("settled", &app.agent_host_name);
         rows.push(SidebarRow::NestedHeader {
+            collapsed_project: None,
             key,
             action_key: None,
             sort_key: None,
@@ -8284,6 +8316,7 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
     }
     if objects.is_empty() {
         rows.push(SidebarRow::NestedHeader {
+            collapsed_project: None,
             key: format!(
                 "unassigned-empty:{}",
                 app.sidebar_group_mode.collapse_namespace()
@@ -8315,6 +8348,7 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
             || object.key.starts_with("missive:"))
         .then(|| object.key.clone());
         rows.push(SidebarRow::NestedHeader {
+            collapsed_project: None,
             key: object.key.clone(),
             action_key,
             sort_key: None,
@@ -8331,6 +8365,7 @@ fn append_unassigned_rows(app: &AppState, rows: &mut Vec<SidebarRow>, entries: &
     let remaining = objects.len().saturating_sub(shown);
     if remaining > 0 {
         rows.push(SidebarRow::NestedHeader {
+            collapsed_project: None,
             key: sidebar_show_more_key(app.sidebar_group_mode),
             action_key: None,
             sort_key: None,
@@ -9381,6 +9416,7 @@ pub(crate) struct SectionHeaderArea {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NestedHeaderArea {
+    collapsed_project: Option<CollapsedProjectHeader>,
     key: String,
     action_key: Option<String>,
     sort_key: Option<String>,
@@ -9420,6 +9456,7 @@ fn nested_header_areas_from_rows(
             break;
         }
         if let SidebarRow::NestedHeader {
+            collapsed_project,
             key,
             action_key,
             sort_key,
@@ -9434,6 +9471,7 @@ fn nested_header_areas_from_rows(
         } = row
         {
             out.push(NestedHeaderArea {
+                collapsed_project: collapsed_project.clone(),
                 key: key.clone(),
                 action_key: action_key.clone(),
                 sort_key: sort_key.clone(),
@@ -10026,6 +10064,10 @@ pub(crate) fn compute_sidebar_hover_targets(
         let (label, row_hover) = match row {
             SidebarRow::Workspace {
                 collapsed_status: Some(_),
+                ..
+            }
+            | SidebarRow::NestedHeader {
+                collapsed_project: Some(_),
                 ..
             } => (String::new(), true),
             SidebarRow::Workspace {
@@ -13050,7 +13092,21 @@ fn render_nested_header(app: &AppState, frame: &mut Frame, header: &NestedHeader
     let NestedHeaderSpans { glyph, title, .. } = nested_header_spans(header);
     // A dim header carries no live state colour: nothing is running under it.
     let color = if header.dim { p.overlay0 } else { p.subtext0 };
-    let mut spans = vec![Span::raw(nested_header_prefix(header))];
+    // Follow the local Workspace header's status/chevron swap in the same cell.
+    let slot_status = header.collapsed_project.as_ref().filter(|project| {
+        header.collapsed && !project.focused && !sidebar_row_is_hovered(app, header.rect.y)
+    });
+    let mut spans = match slot_status {
+        Some(project) => vec![
+            Span::raw("  "),
+            Span::styled(
+                project.status.glyph,
+                Style::default().fg(project.status.color),
+            ),
+            Span::raw(" "),
+        ],
+        None => vec![Span::raw(nested_header_prefix(header))],
+    };
     if let Some(glyph) = glyph {
         let status_color = header
             .status
@@ -31645,6 +31701,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         width: u16,
     ) -> NestedHeaderArea {
         NestedHeaderArea {
+            collapsed_project: None,
             key: "key".into(),
             action_key: Some("key".into()),
             sort_key: None,
@@ -34454,6 +34511,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         for (key, dim, has_disclosure) in nested_cases {
             let mut app = AppState::test_new();
             let header = NestedHeaderArea {
+                collapsed_project: None,
                 key: key.to_string(),
                 action_key: None,
                 sort_key: None,
@@ -34538,6 +34596,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let key = "repo:owner/herdr".to_string();
         app.sidebar_selected_work_group = Some(key.clone());
         let header = NestedHeaderArea {
+            collapsed_project: None,
             key: key.clone(),
             action_key: Some(key.clone()),
             sort_key: None,

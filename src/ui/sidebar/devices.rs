@@ -235,6 +235,7 @@ fn append_device_group<T>(
     });
     let key = group_key(section, &group.host);
     rows.push(super::SidebarRow::NestedHeader {
+        collapsed_project: None,
         key,
         action_key: None,
         sort_key: None,
