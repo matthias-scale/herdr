@@ -1040,6 +1040,7 @@ pub struct SidebarHoverTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarHoverAction {
+    FilterHost { host: std::sync::Arc<str> },
     Pin { ws_idx: usize, tab_idx: usize },
     Snooze { target: SidebarPaneLifecycleTarget },
     Settle { target: SidebarPaneLifecycleTarget },
@@ -1529,13 +1530,6 @@ pub(crate) enum BlockerScope {
 
 impl BlockerScope {
     pub(crate) const ALL: [Self; 2] = [Self::ThisDevice, Self::Fleet];
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::ThisDevice => "This device",
-            Self::Fleet => "Fleet",
-        }
-    }
 }
 
 impl SidebarSortMode {
@@ -1582,6 +1576,8 @@ pub(crate) struct SidebarPresentationState {
     pub(crate) work_filter: SidebarWorkFilter,
     pub(crate) filter_menu_open: bool,
     pub(crate) filter_menu_selected: usize,
+    /// Attach-local host filter for the unified agent list.
+    pub(crate) host_filter: Option<String>,
     pub(crate) blocker_scope: BlockerScope,
     pub(crate) blocker_scope_menu_open: bool,
     pub(crate) blocker_scope_menu_selected: usize,
@@ -6541,21 +6537,6 @@ impl AppState {
         self.sidebar_work_filter_persistence_request.take()
     }
 
-    pub(crate) fn set_sidebar_blocker_scope(&mut self, scope: BlockerScope) {
-        self.sidebar_blocker_scope_menu_open = false;
-        if self.sidebar_blocker_scope == scope {
-            return;
-        }
-        self.sidebar_blocker_scope = scope;
-        self.sidebar_blocker_scope_menu_selected = BlockerScope::ALL
-            .iter()
-            .position(|candidate| *candidate == scope)
-            .unwrap_or(1);
-        self.sidebar_blocker_scope_persistence_request = Some(scope);
-        self.workspace_scroll = 0;
-        self.mark_sidebar_projection_changed();
-    }
-
     pub(crate) fn take_sidebar_blocker_scope_persistence_request(
         &mut self,
     ) -> Option<BlockerScope> {
@@ -6608,6 +6589,10 @@ impl AppState {
     }
 
     pub(crate) fn swap_sidebar_presentation(&mut self, other: &mut SidebarPresentationState) {
+        std::mem::swap(
+            &mut self.sidebar_presentation.host_filter,
+            &mut other.host_filter,
+        );
         std::mem::swap(&mut self.sidebar_focused, &mut other.focused);
         std::mem::swap(&mut self.client_focus_intent, &mut other.focus_intent);
         std::mem::swap(

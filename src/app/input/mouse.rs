@@ -968,6 +968,10 @@ impl AppState {
                 .and_then(|target| target.action.clone())
             {
                 return Some(match action {
+                    crate::app::state::SidebarHoverAction::FilterHost { host } => {
+                        self.toggle_sidebar_host_filter(host.to_string());
+                        return None;
+                    }
                     crate::app::state::SidebarHoverAction::Pin { ws_idx, tab_idx } => {
                         self.request_pin_toggle = Some((ws_idx, tab_idx));
                         return None;
@@ -7100,9 +7104,10 @@ mod tests {
         app.state.reconcile_sidebar_presentation();
         let deadline = crate::app::settled::unix_seconds(std::time::SystemTime::now()) + 900;
         assert!(app.state.snooze_pane_at(0, snoozed_pane, deadline));
-        app.state
-            .collapsed_sidebar_groups
-            .insert("sections:Snoozed".into());
+        app.state.collapsed_sidebar_groups.insert(format!(
+            "sections:{}",
+            crate::ui::sidebar::DONE_IDLE_SECTION_TITLE
+        ));
         let sidebar = Rect::new(0, 0, 44, 40);
         app.state.view.sidebar_rect = sidebar;
         let tab_cards = crate::ui::compute_tab_card_areas(&app.state, sidebar);

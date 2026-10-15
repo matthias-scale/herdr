@@ -792,12 +792,13 @@ mod render_scale_benchmark {
         app.remote_agent_panel_entries = crate::ui::remote_agent_panel_entries(&snapshot, false);
         app.remote_agent_device_groups = Some(crate::ui::sidebar::remote_agent_device_groups(&app));
         app.sidebar_sections_layout = true;
+        app.toggle_sidebar_group(crate::ui::sidebar::DONE_IDLE_SECTION_TITLE);
         app.collapsed_sidebar_groups.remove("repo:Fleet");
         assert_eq!(app.remote_agent_panel_entries.len(), remote_count);
         assert!(crate::ui::sidebar_rows(&app).iter().any(|row| matches!(
             row,
             crate::ui::SidebarRow::NestedHeader { key, count, .. }
-                if key.starts_with("device:main/") && *count == remote_count
+                if key.starts_with("fleet:") && *count == remote_count
         )));
         app
     }
