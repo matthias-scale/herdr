@@ -1197,7 +1197,7 @@ resume_agents_on_restore = true
         let defaults = Config::default();
         assert_eq!(
             defaults.keys.capture,
-            super::super::BindingConfig::one("alt+t")
+            super::super::BindingConfig::one("ctrl+alt+r")
         );
         assert!(defaults.collect_diagnostics().is_empty());
         assert_eq!(

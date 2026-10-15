@@ -1134,8 +1134,8 @@ mod tests {
             }
 
             assert!(app.handle_focus_room_key(crate::input::TerminalKey::new(
-                KeyCode::Char('t'),
-                KeyModifiers::ALT,
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
             )));
 
             assert!(app.state.capture.is_some());
